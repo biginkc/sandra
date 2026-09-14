@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createInboxWorksetHandler } from "./workset-handler";
+const report = vi.hoisted(() => vi.fn());
+vi.mock("./report-failure", () => ({ reportInboxFailure: report }));
 import type { DurableInboxScope, InboxWorksetRepository } from "./sync-gateway";
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 function fixture() {
@@ -42,6 +44,7 @@ describe("bounded workset HTTP boundary", () => {
   it("does not disclose database errors or return false success", async () => {
     const f = fixture(); f.repo.createScope = async () => { throw Error("private SQL"); };
     const response = await f.make()(f.request()); expect(response.status).toBe(503); expect(await response.text()).not.toContain("private SQL");
+    expect(report).toHaveBeenCalledWith("inbox_workset", "unexpected_failure");
   });
   it("rejects a mutated scope reference after creation", async () => {
     const f = fixture(); f.repo.getAccess = async () => { f.scope.targets = []; return { sessionActive: true, activeMembershipCount: 1, status: "active" as const, epoch: "1", expiresAt: null, deletionPrepared: false }; };

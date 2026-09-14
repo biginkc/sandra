@@ -142,6 +142,25 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
     expect(after!.status).toBe("running");
   });
 
+  it("observes business nonprogress even when polling refreshed the heartbeat", async () => {
+    const { jobId } = await seedRunningSkipTraceJob({
+      queueId: "pending", startedMinutesAgo: 30,
+    });
+    await supabase.from("jobs").update({
+      provider_run_id: "provider-still-pending",
+      worker_heartbeat_at: new Date().toISOString(),
+    }).eq("id", jobId);
+
+    const result = await runSweep(supabase);
+    expect(result.long_running).toBe(1);
+    expect(result.still_pending).toBe(1);
+    expect(result.finalized).toBe(0);
+    const { data: after } = await supabase.from("jobs")
+      .select("status,provider_run_id").eq("id", jobId).single();
+    expect(after?.status).toBe("running");
+    expect(after?.provider_run_id).toBe("provider-still-pending");
+  });
+
   it("reclaims stale skip_trace jobs without a provider_run_id", async () => {
     const orgId = await getOrgId();
     const { data: prop } = await supabase
@@ -216,7 +235,7 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
 
   it("does not reclaim a stale job at the ambiguous paid-call boundary", async () => {
     const orgId = await getOrgId();
-    const startedAt = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const startedAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
     await supabase.from("jobs").insert({
       org_id: orgId,
       type: "skip_trace",
@@ -224,7 +243,9 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
       total_items: 1,
       provider_run_id: null,
       started_at: startedAt,
-      worker_heartbeat_at: startedAt,
+      // A fresh heartbeat must not conceal an old paid-boundary ambiguity.
+      worker_heartbeat_at: new Date().toISOString(),
+      created_at: startedAt,
       input_params: { property_ids: ["placeholder"] },
       result_summary: { submit_phase: "submitting" },
     });
@@ -232,6 +253,7 @@ describe("runSweep — sweep-stuck-skip-trace cron", () => {
     const result = await runSweep(supabase);
 
     expect(result.unsubmitted_reclaimed).toBe(0);
+    expect(result.ambiguous_submissions).toBe(1);
     expect(start).not.toHaveBeenCalled();
   });
 

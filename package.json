@@ -49,6 +49,7 @@
     "@dropbox/sign": "^1.11.0",
     "@electric-sql/client": "1.5.28",
     "@sandra/tokens": "github:biginkc/sandra-design-system#main",
+    "@sentry/nextjs": "^10.74.0",
     "@slack/web-api": "^7.15.2",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.104.0",

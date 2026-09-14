@@ -2,8 +2,9 @@ import { createClient } from "@supabase/supabase-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "@/lib/supabase/types";
 
-const mocks = vi.hoisted(() => ({ admin: vi.fn(), provider: vi.fn(), report: vi.fn() }));
+const mocks = vi.hoisted(() => ({ admin: vi.fn(), provider: vi.fn(), report: vi.fn(), terminal: vi.fn() }));
 vi.mock("@/lib/errors/report", () => ({ reportError: mocks.report }));
+vi.mock("./terminal-telemetry", () => ({ reportTerminalWorkflowFailure: mocks.terminal }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: mocks.admin }));
 vi.mock("@/lib/skip-trace/registry", () => ({ getSkipTraceProvider: mocks.provider }));
 vi.mock("@/lib/skip-trace/eligibility", async (original) => ({
@@ -108,6 +109,13 @@ describe("skip-trace submit claim gap", () => {
     expect(job.status).toBe("failed");
     expect(job.error_message).toContain("injected claim failure");
     expect(job.input_params.submission_attempt_token).toBeUndefined();
+    expect(mocks.terminal).toHaveBeenCalledExactlyOnceWith("skip_trace_submit");
+  });
+  it("retains the original failure when terminal reporting itself fails", async () => {
+    const { job } = fixture(2, false, "claim");
+    mocks.terminal.mockRejectedValueOnce(new Error("Sentry unavailable"));
+    await expect(skipTraceSubmitWorkflow({ jobId: job.id, orgId: job.org_id })).rejects.toThrow("injected claim failure");
+    expect(job.status).toBe("failed");
   });
   it("does not overwrite a newer prepared owner on a stale step failure", async () => {
     const { job, transport } = fixture(2);

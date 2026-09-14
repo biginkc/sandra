@@ -1,5 +1,6 @@
 import "server-only";
 import { InboxHttpError } from "./http-error";
+import { reportInboxFailure } from "./report-failure";
 import { workspaceId } from "@/components/inbox-workspace/selection";
 import { parseInboxWorksetRequest } from "./workset-request";
 import type { DurableInboxScope, InboxWorksetRepository } from "./sync-gateway";
@@ -71,6 +72,8 @@ export function createInboxWorksetHandler(repository: InboxWorksetRepository, no
         orderedIds: scope.targets.map(target => workspaceId(target.kind === "known_conversation" ? { kind: "conversation", orgId: scope.orgId, conversationId: target.id } : { kind: "unknown_sender_group", orgId: scope.orgId, senderGroupId: target.id })),
       }, { status: 201, headers });
     } catch (failure) {
+      if (!request.signal.aborted && !(failure instanceof InboxHttpError))
+        reportInboxFailure("inbox_workset", controller.signal.aborted ? "timeout" : "unexpected_failure");
       controller.abort();
       void reader?.cancel().catch(() => {});
       return error(failure instanceof InboxHttpError ? failure.status : 503);

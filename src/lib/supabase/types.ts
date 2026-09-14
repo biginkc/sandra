@@ -14,6 +14,45 @@ export type Database = {
   }
   public: {
     Tables: {
+      sentry_anomaly_ledger: {
+        Row: {
+          signal_kind: string
+          source_id: string
+          is_active: boolean
+          claim_token: string | null
+          claim_kind: string | null
+          claim_expires_at: string | null
+          first_detected_at: string
+          last_observed_at: string
+          last_emit_at: string | null
+          recovered_at: string | null
+        }
+        Insert: {
+          signal_kind: string
+          source_id: string
+          is_active: boolean
+          claim_token?: string | null
+          claim_kind?: string | null
+          claim_expires_at?: string | null
+          first_detected_at: string
+          last_observed_at: string
+          last_emit_at?: string | null
+          recovered_at?: string | null
+        }
+        Update: {
+          signal_kind?: string
+          source_id?: string
+          is_active?: boolean
+          claim_token?: string | null
+          claim_kind?: string | null
+          claim_expires_at?: string | null
+          first_detected_at?: string
+          last_observed_at?: string
+          last_emit_at?: string | null
+          recovered_at?: string | null
+        }
+        Relationships: []
+      }
       acquisition_assignment_episodes: {
         Row: {
           assignee_user_id: string
@@ -4120,6 +4159,7 @@ export type Database = {
           created_at: string
           created_by: string
           delivery_state: Database["public"]["Enums"]["esign_delivery_state"]
+          delivery_state_entered_at: string
           details_url: string | null
           error_message: string | null
           id: string
@@ -4150,6 +4190,7 @@ export type Database = {
           created_at?: string
           created_by: string
           delivery_state?: Database["public"]["Enums"]["esign_delivery_state"]
+          delivery_state_entered_at?: string
           details_url?: string | null
           error_message?: string | null
           id?: string
@@ -4180,6 +4221,7 @@ export type Database = {
           created_at?: string
           created_by?: string
           delivery_state?: Database["public"]["Enums"]["esign_delivery_state"]
+          delivery_state_entered_at?: string
           details_url?: string | null
           error_message?: string | null
           id?: string
@@ -5321,9 +5363,34 @@ export type Database = {
       }
     }
     Functions: {
+      ack_sentry_anomaly: {
+        Args: {
+          p_signal_kind: string
+          p_source_id: string
+          p_claim_token: string
+          p_delivered: boolean
+        }
+        Returns: boolean
+      }
       allow_esign_canary_provider_dispatch: {
         Args: { p_org_id: string; p_request_id: string }
         Returns: boolean
+      }
+      list_unobserved_esign_sentry_anomalies: {
+        Args: { p_limit?: number }
+        Returns: {
+          request_id: string
+          state: Database["public"]["Enums"]["esign_delivery_state"]
+        }[]
+      }
+      observe_sentry_anomaly: {
+        Args: {
+          p_signal_kind: string
+          p_source_id: string
+          p_is_active: boolean
+          p_observed_at?: string
+        }
+        Returns: Json
       }
       fn_set_acquisition_designation: {
         Args: {

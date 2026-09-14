@@ -1,5 +1,6 @@
 import { createCollection } from "@tanstack/db";
 import { electricCollectionOptions } from "@tanstack/electric-db-collection";
+import { reportError } from "@/lib/errors/report";
 import type { WorkspaceRow } from "@/components/inbox-workspace/inbox-workspace";
 import { workspaceId, type WorkspaceId } from "@/components/inbox-workspace/selection";
 
@@ -103,6 +104,14 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
       return true;
     };
     const partitions: { data: () => WorkspaceSummary[]; ready: () => boolean; cleanup: () => void }[] = [];
+    let reported = false;
+    const reportSyncFailure = (kind: "invalid_wire" | "transport_failure") => {
+      if (reported || !active() || controller.signal.aborted) return;
+      reported = true;
+      const diagnostic = new Error("Inbox synchronization failed");
+      diagnostic.name = "InboxSyncFailure";
+      reportError(diagnostic, { errorClass: "transient", tags: { surface: "client", operation: "inbox_sync", kind } });
+    };
     const publish = () => {
       if (!authorizedNow()) return;
       try {
@@ -112,7 +121,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
         if (indexed.size !== data.length) throw Error("Duplicate partition membership");
         const complete = partitions.length === Math.max(1, Math.ceil(scope.orderedIds.length / 100));
         emit({ state: complete && partitions.every(part => part.ready()) ? "live" : "loading", rows: scope.orderedIds.flatMap(id => indexed.has(id) ? [indexed.get(id)!] : []) });
-      } catch { fail("resync_required"); }
+      } catch { reportSyncFailure("invalid_wire"); fail("resync_required"); }
     };
     const expiry = setTimeout(() => fail("resync_required"), localDeadline - Date.now());
     dispose = () => { controller.abort(); clearTimeout(expiry); for (const part of partitions) part.cleanup(); };
@@ -153,7 +162,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
     const collection = createCollection(electricCollectionOptions<WorkspaceSummary>({
       id: `inbox-${scope.scopeId}-${token}-${partition}`, getKey: key, syncMode: "eager",
       shapeOptions: { url: `${origin}/api/inbox/sync/${scope.scopeId}?partition=${partition}`, signal: controller.signal, fetchClient: transport,
-        onError: () => { fail("resync_required"); return undefined; } },
+        onError: () => { reportSyncFailure("transport_failure"); fail("resync_required"); return undefined; } },
     }));
     const subscription = collection.subscribeChanges(publish);
     partitions.push({ data: () => {
@@ -162,7 +171,7 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
       for (const row of rows) key(row);
       return rows;
     }, ready: () => collection.status === "ready", cleanup: () => { subscription.unsubscribe(); void collection.cleanup(); } });
-    void collection.preload().then(publish).catch(() => fail("resync_required"));
+    void collection.preload().then(publish).catch(() => { reportSyncFailure("transport_failure"); fail("resync_required"); });
     }
 
   }

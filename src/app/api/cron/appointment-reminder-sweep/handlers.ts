@@ -1,7 +1,10 @@
 import { after, NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import * as Sentry from "@sentry/nextjs";
 
 import { reportError } from "@/lib/errors/report";
+import { ensureSentryServerClient } from "@/lib/errors/sentry-server-client";
+import { cronResponseFailed, runMonitoredCron } from "@/lib/errors/cron-monitor";
 import {
   deliverAppointmentReminder,
   markReminderDeliveryTimedOut,
@@ -307,8 +310,13 @@ async function handle(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  return runMonitoredCron(
+    "sandra-appointment-reminder-sweep",
+    { schedule: { type: "crontab", value: "2-59/5 * * * *" }, checkinMargin: 2, maxRuntime: 1 },
+    async () => {
   try {
     const supabase = createServiceRoleClient();
+    const startedAt = Date.now();
     const summary = await runAppointmentReminderSweep(supabase);
     // Codex round 7 (finding 1), item 4: kept OUTSIDE
     // `runAppointmentReminderSweep` deliberately — that function's own unit
@@ -321,6 +329,15 @@ async function handle(request: Request) {
     // sweep unrelated to the claim/delivery loop's own contract, never lets
     // a telemetry/sweep failure fail the route's own response.
     await sweepStaleDispatchingReminders(supabase);
+    // This observer is read-only with respect to reminder delivery. Keep it
+    // behind the business sweep and within the route's 60-second lifetime.
+    try {
+      await observeExhaustedReminders(supabase, startedAt);
+    } catch (observerError) {
+      reportError(observerError, {
+        tags: { surface: "cron_appointment_reminder_exhaustion_observer_failure" },
+      });
+    }
     return NextResponse.json({ ok: true, ...summary });
   } catch (e) {
     reportError(e, { tags: { surface: "cron_appointment_reminder_sweep" } });
@@ -328,6 +345,111 @@ async function handle(request: Request) {
       { error: e instanceof Error ? e.message : "unknown" },
       { status: 500 },
     );
+  }
+    },
+    cronResponseFailed,
+  );
+}
+
+const EXHAUSTED_REMINDER_SIGNAL = "reminder_retry_exhausted";
+const REMINDER_OBSERVER_PAGE = 4;
+const REMINDER_OBSERVER_STOP_MS = 55_000;
+
+type ReminderLedgerQuery = {
+  eq(column: string, value: unknown): ReminderLedgerQuery;
+  order(column: string, options: { ascending: boolean }): {
+    limit(count: number): PromiseLike<{
+      data: { source_id: string }[] | null;
+      error: { message: string } | null;
+    }>;
+  };
+};
+type ReminderObserverClient = {
+  rpc(functionName: string, args?: Record<string, unknown>): PromiseLike<{
+    data: unknown;
+    error: { message: string } | null;
+  }>;
+  from(table: string): {
+    select(columns: string): ReminderLedgerQuery;
+  };
+};
+
+/** Durable, per-delivery monitoring with hourly repeats and one recovery.
+ * The scan RPC maintains a keyset cursor; active ledger rows are separately
+ * point-verified so rows that leave the failed/exhausted state can recover.
+ * No source id, task id, org id, contact data, or provider error enters Sentry.
+ */
+export async function observeExhaustedReminders(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  startedAt: number = Date.now(),
+): Promise<void> {
+  const observer = supabase as unknown as ReminderObserverClient;
+  const { data: activeLedger, error: ledgerError } = await observer
+    .from("sentry_anomaly_ledger")
+    .select("source_id")
+    .eq("signal_kind", EXHAUSTED_REMINDER_SIGNAL)
+    .eq("is_active", true)
+    .order("last_observed_at", { ascending: true })
+    .limit(REMINDER_OBSERVER_PAGE);
+  if (ledgerError) throw new Error(`reminder observer ledger query failed: ${ledgerError.message}`);
+
+  const { data: candidateIds, error: scanError } = await observer.rpc(
+    "scan_exhausted_reminder_deliveries", { p_limit: REMINDER_OBSERVER_PAGE },
+  );
+  if (scanError) throw new Error(`reminder exhaustion scan failed: ${scanError.message}`);
+  if (!Array.isArray(candidateIds)) throw new Error("reminder exhaustion scan returned invalid rows");
+
+  // Oldest active incidents get recovery checks first; the keyset scan then
+  // advances discovery fairly across all exhausted rows, including backlog.
+  const ids = new Set<string>([
+    ...(activeLedger ?? []).map((row) => row.source_id),
+    ...candidateIds.filter((id): id is string => typeof id === "string"),
+  ]);
+  for (const id of ids) {
+    if (Date.now() - startedAt >= REMINDER_OBSERVER_STOP_MS) break;
+    const { data: row, error: rowError } = await (supabase as unknown as {
+      from(table: string): { select(columns: string): {
+        eq(column: string, value: string): {
+          maybeSingle(): PromiseLike<{ data: { status: string; attempts: number } | null; error: { message: string } | null }>;
+        };
+      } };
+    }).from("task_reminder_deliveries")
+      .select("status,attempts").eq("id", id).maybeSingle();
+    if (rowError) throw new Error(`reminder observer point verification failed: ${rowError.message}`);
+    const active = row?.status === "failed" && row.attempts >= 3;
+    const { data: observation, error: observeError } = await observer.rpc("observe_sentry_anomaly", {
+      p_signal_kind: EXHAUSTED_REMINDER_SIGNAL,
+      p_source_id: id,
+      p_is_active: active,
+    });
+    if (observeError) throw new Error(`reminder observer claim failed: ${observeError.message}`);
+    const claim = observation && typeof observation === "object" && !Array.isArray(observation)
+      ? observation as { decision?: unknown; claim_token?: unknown } : null;
+    if (!claim || typeof claim.claim_token !== "string") continue;
+    if (!["new", "repeat", "recovered"].includes(String(claim.decision))) {
+      throw new Error("reminder observer returned an invalid claim decision");
+    }
+    let delivered = false;
+    try {
+      if (ensureSentryServerClient()) {
+        const outcome = claim.decision === "recovered" ? "recovered" : "active";
+        reportError(new Error(`Sandra operational state: ${EXHAUSTED_REMINDER_SIGNAL} ${outcome}`), {
+          tags: {
+            surface: "cron_appointment_reminder_exhaustion_observer",
+            kind: "state", operation: EXHAUSTED_REMINDER_SIGNAL, outcome,
+          },
+        });
+        delivered = await Sentry.flush(2_000);
+      }
+    } finally {
+      const { error: ackError } = await observer.rpc("ack_sentry_anomaly", {
+        p_signal_kind: EXHAUSTED_REMINDER_SIGNAL,
+        p_source_id: id,
+        p_claim_token: claim.claim_token,
+        p_delivered: delivered,
+      });
+      if (ackError) throw new Error(`reminder observer ack failed: ${ackError.message}`);
+    }
   }
 }
 

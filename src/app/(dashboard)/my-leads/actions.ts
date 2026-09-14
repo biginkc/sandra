@@ -1,5 +1,6 @@
 'use server';
 import { revalidatePath } from 'next/cache';
+import { reportError } from '@/lib/errors/report';
 import type { Json } from '@/lib/supabase/types';
 import { getAcquisitionQueue,getAcquisitionKpis,getAcquisitionDetail,myLeadsViewer,type DetailGroup } from '@/lib/my-leads/queries';
 import { setAcquisitionDesignation,setAcquisitionSettings } from '@/lib/my-leads/settings';
@@ -10,15 +11,20 @@ export async function loadMyLeads(input:{memberId:string;search:string;period:'t
   try {
     const [snapshot,kpis]=await Promise.all([getAcquisitionQueue(input),getAcquisitionKpis({memberId:input.memberId,period:'today'})]);
     return {ok:true as const,snapshot,kpis};
-  } catch(error) {return {ok:false as const,message:error instanceof Error?error.message:'Could not load My Leads.'};}
+  } catch(error) {reportMyLeadsReadFailure('my_leads_queue');return {ok:false as const,message:error instanceof Error?error.message:'Could not load My Leads.'};}
 }
 export async function loadMyLeadsStage(input:{memberId:string;search:string;stage:QueueStage;cursor:string}) {
   try {return {ok:true as const,snapshot:await getAcquisitionQueue(input)};}
-  catch(error){return {ok:false as const,message:error instanceof Error?error.message:'Could not load this section.'};}
+  catch(error){reportMyLeadsReadFailure('my_leads_stage');return {ok:false as const,message:error instanceof Error?error.message:'Could not load this section.'};}
 }
 export async function loadMyLeadDetail(input:{memberId:string;propertyId:string;group?:DetailGroup;cursor?:string|null}) {
   try {return {ok:true as const,detail:await getAcquisitionDetail(input)};}
-  catch(error){return {ok:false as const,message:error instanceof Error?error.message:'Could not load lead details.'};}
+  catch(error){reportMyLeadsReadFailure('my_leads_detail');return {ok:false as const,message:error instanceof Error?error.message:'Could not load lead details.'};}
+}
+function reportMyLeadsReadFailure(operation:string) {
+  const diagnostic=new Error('My Leads read failed');
+  diagnostic.name='MyLeadsReadFailure';
+  reportError(diagnostic,{errorClass:'database',tags:{surface:'server',operation,kind:'read_failure'}});
 }
 const commands={
   'log-attempt':'fn_log_acquisition_attempt','ready-for-offer':'fn_ready_acquisition_offer','log-offer':'fn_log_acquisition_offer',

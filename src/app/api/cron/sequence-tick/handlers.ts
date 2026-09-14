@@ -150,6 +150,18 @@ export async function runSequenceTick(
     supabase,
     Date.now(),
   );
+  if (stalePendingFailed > 0) {
+    // The provider outcome is unknown, so recovery deliberately never
+    // re-sends. Report only rows actually transitioned by this sweep;
+    // repeat runs cannot alert again for the same message.
+    reportError(new Error("SMS provider attempts expired with unknown outcome"), {
+      tags: {
+        surface: "cron_sequence_tick_provider_attempt_recovery",
+        kind: "stale_pending_terminal",
+      },
+      extra: { count: stalePendingFailed },
+    });
+  }
 
   // Drain scheduled queued messages — release any row where
   // scheduled_for <= now. Consent + quiet-hours are re-checked at

@@ -1,5 +1,6 @@
 import "server-only";
 import { InboxHttpError } from "./http-error";
+import { reportInboxFailure } from "./report-failure";
 
 export type InboxSyncTarget = { kind: "known_conversation" | "unknown_sender"; id: string };
 export type InboxSession = { userId: string; sessionId: string; expiresAt: number };
@@ -174,7 +175,7 @@ export function createInboxSyncGateway(options: InboxGatewayOptions) {
       const body=new Uint8Array(bytes);let position=0;for(const chunk of chunks){body.set(chunk,position);position+=chunk.length;}
       guard();if(now()>=deadline)throw new Denied(403);
       return new Response(upstreamResponse.status===204?null:body,{status:upstreamResponse.status,headers});
-    } catch(error) {leaseController.abort();void reader?.cancel().catch(()=>{});return Response.json({error:"Inbox synchronization unavailable"},{status:error instanceof Denied || error instanceof InboxHttpError ? error.status : 503,headers:noStore});}
+    } catch(error) {if(!request.signal.aborted&&!(error instanceof InboxHttpError)&&(!(error instanceof Denied)||error.status===503))reportInboxFailure("inbox_sync",leaseController.signal.aborted?"timeout":"unexpected_failure");leaseController.abort();void reader?.cancel().catch(()=>{});return Response.json({error:"Inbox synchronization unavailable"},{status:error instanceof Denied || error instanceof InboxHttpError ? error.status : 503,headers:noStore});}
     finally {clearTimeout(timer);reader?.releaseLock();}
   };
 }

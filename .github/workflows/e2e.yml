@@ -85,9 +85,9 @@ jobs:
           # Webpack: GitHub's Turbopack dev runtime returns valid RSC payloads
           # for these clicks but intermittently never commits them in Chrome.
           # The larger timeout covers Webpack's cold compilation of 11 routes;
-          # the click and URL assertions remain unchanged.
+          # the click and exact-URL predicates still must succeed.
           npm run test:e2e -- --grep 'Leads board v2 foundation is usable at desktop and narrow widths'
-          PLAYWRIGHT_WEBPACK_DEV_SERVER=1 npm run test:e2e -- --grep 'switching tabs preserves URL state|sidebar nav links all route correctly' --timeout=120000
+          PLAYWRIGHT_WEBPACK_DEV_SERVER=1 npm run test:e2e -- --grep 'switching tabs preserves URL state|sidebar nav links all route correctly' --timeout=240000
 
       - name: Clean up exact-run E2E identities and verify browser-QA isolation
         if: always()

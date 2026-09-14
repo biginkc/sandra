@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SandraRecordingPlayer } from "@/app/(dashboard)/leads/[id]/sandra-recording-player";
 import { Button } from "@/components/ui/button";
+import { reportError } from "@/lib/errors/report";
 
 type Artifacts = {
   recordingStatus: string; durationSeconds: number | null;
@@ -12,6 +13,7 @@ type Artifacts = {
 
 /** Only mounted for expanded lead details. Refresh metadata without replacing a playing audio element. */
 export function MyLeadCallArtifacts({ callActivityId }: { callActivityId: string }) {
+  const reported = useRef(new Set<string>());
   const [artifacts, setArtifacts] = useState<Artifacts | null>(null);
   const [error, setError] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -26,7 +28,16 @@ export function MyLeadCallArtifacts({ callActivityId }: { callActivityId: string
         const response = await fetch(`/api/leads/calls/${encodeURIComponent(callActivityId)}/artifacts`, { cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]) });
         if (!response.ok) throw new Error("Artifact lookup failed");
         const data: Artifacts = await response.json();
-        if (!disposed) { setArtifacts(data); setError(false); }
+        if (!disposed) {
+          for (const [kind, status] of [["recording", data.recordingStatus], ["transcript", data.transcriptStatus], ["summary", data.summaryStatus]] as const) {
+            if (status !== "failed" || reported.current.has(kind)) continue;
+            reported.current.add(kind);
+            const diagnostic = new Error("Call artifact processing failed");
+            diagnostic.name = "CallArtifactFailure";
+            reportError(diagnostic, { errorClass: "provider", tags: { surface: "client", operation: "call_artifacts", kind } });
+          }
+          setArtifacts(data); setError(false);
+        }
       } catch {
         if (!disposed) setError(true);
       } finally { inFlight = false; }

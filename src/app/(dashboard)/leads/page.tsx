@@ -8,6 +8,7 @@ import { getCallerMemberships } from "@/lib/auth/memberships";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
 import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
+import { reportError } from "@/lib/errors/report";
 import {
   loadOrgTeamMembers,
   loadTeamMembersForOrgs,
@@ -86,7 +87,10 @@ export default async function LeadsPage({
       name: orgNames.get(orgId)!,
       teamMembers,
     }));
-  } catch {
+  } catch (error) {
+    reportError(error, {
+      tags: { operation: "leads_roster_load", surface: "leads_page" },
+    });
     rosterLoadError = true;
   }
   const inboundFilters = resolveInboundLeadFilters(params, {
@@ -130,7 +134,10 @@ export default async function LeadsPage({
       dayEnd: dayEnd.toISOString(),
       orgIds,
     });
-  } catch {
+  } catch (error) {
+    reportError(error, {
+      tags: { operation: "leads_board_load", surface: "leads_page" },
+    });
     loadFailed = true;
   }
 
