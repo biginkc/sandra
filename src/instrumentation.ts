@@ -6,15 +6,18 @@ export async function register() {
   if (process.env.NEXT_RUNTIME === "edge") await import("./sentry.edge.config");
 }
 
-export const onRequestError: typeof Sentry.captureRequestError = (error, request, context) => {
+export const onRequestError = async (error: unknown, _request: unknown, context: { routePath: string; routeType: string }) => {
+  const active = ensureSentryServerClient();
   if (context.routePath === "/api/internal/sentry-canary") {
-    console.info("[sentry-canary] onRequestError invoked", context.routeType);
+    console.info("[sentry-canary] onRequestError invoked", context.routeType, active);
   }
-  if (!ensureSentryServerClient()) return;
+  if (!active) return;
   Sentry.withScope((scope) => {
     scope.setTag("surface", "server_request");
+    scope.setTag("errorClass", "unexpected");
     scope.setTag("routePattern", context.routePath);
     scope.setTag("routeType", context.routeType);
-    Sentry.captureRequestError(error, request, context);
+    Sentry.captureException(error);
   });
+  await Sentry.flush(2_000);
 };
