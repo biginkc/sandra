@@ -387,6 +387,56 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(result.reason, "incomplete")
         self.assertEqual(len([request for request in calls if request.method == "POST"]), 0)
 
+    def test_repeated_page_issue_id_cannot_satisfy_total_count_or_create(self):
+        self.enqueue()
+        responses = iter(
+            [
+                search_response([{"number": 8}], total_count=2),
+                Response(valid_issue(8, body="unrelated")),
+                # A mutable search can repeat page-one's id while omitting a
+                # marker-bearing issue that should have appeared on page two.
+                search_response([{"number": 8}], total_count=2),
+            ]
+        )
+        calls = []
+
+        def opener(request, *, timeout):
+            calls.append(request)
+            if request.method == "POST":
+                raise AssertionError("unstable pagination must not POST")
+            return next(responses)
+
+        result = GitHubPublisher(
+            self.store, GitHubClient(opener=opener), owner="publisher"
+        ).publish_one(now=101)
+        self.assertEqual(result.action, "failed")
+        self.assertEqual(result.reason, "incomplete")
+        self.assertEqual(len([request for request in calls if request.method == "POST"]), 0)
+
+    def test_search_total_count_churn_between_pages_fails_closed(self):
+        self.enqueue()
+        responses = iter(
+            [
+                search_response([{"number": 8}], total_count=2),
+                Response(valid_issue(8, body="unrelated")),
+                search_response([{"number": 9}], total_count=3),
+            ]
+        )
+        calls = []
+
+        def opener(request, *, timeout):
+            calls.append(request)
+            if request.method == "POST":
+                raise AssertionError("total-count churn must not POST")
+            return next(responses)
+
+        result = GitHubPublisher(
+            self.store, GitHubClient(opener=opener), owner="publisher"
+        ).publish_one(now=101)
+        self.assertEqual(result.action, "failed")
+        self.assertEqual(result.reason, "incomplete")
+        self.assertEqual(len([request for request in calls if request.method == "POST"]), 0)
+
     def test_sanitized_payload_excludes_pii_and_untrusted_telemetry(self):
         row = self.store.get_issue("bmh-group", "sandra", "vercel-production", 100)
         payload = github_payload(row)

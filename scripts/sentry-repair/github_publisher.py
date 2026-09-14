@@ -294,7 +294,7 @@ class GitHubClient:
         if not isinstance(marker, str) or not marker.startswith("<!-- sentry-sync:v") or len(marker) > 500:
             raise ValueError("invalid Sentry marker")
         matches: list[GitHubIssue] = []
-        inspected = 0
+        inspected_ids: set[int] = set()
         expected_total: int | None = None
         for page in range(1, _SEARCH_PAGE_LIMIT + 1):
             query = urllib.parse.urlencode(
@@ -330,6 +330,14 @@ class GitHubClient:
                 number = item.get("number")
                 if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
                     raise GitHubError("GitHub search issue number is invalid", kind="malformed")
+                if number in inspected_ids:
+                    # Search pages are mutable. A repeated id means the
+                    # pagination window changed while it was being read; raw
+                    # item counts must never be allowed to claim completeness
+                    # in that case, because a marker-bearing id may have been
+                    # displaced from a later page.
+                    raise GitHubError("GitHub search pagination repeated an issue", kind="incomplete")
+                inspected_ids.add(number)
                 issue = self.read_issue(number)
                 if marker in issue.body:
                     # Marker identity is stronger than mutable labels.
@@ -337,8 +345,9 @@ class GitHubClient:
                     # publisher mark reconciliation-required; returning None
                     # would incorrectly permit a duplicate POST.
                     matches.append(issue)
-            inspected += len(items)
-            if expected_total <= inspected:
+            if expected_total < len(inspected_ids):
+                raise GitHubError("GitHub search unique count exceeds total count", kind="incomplete")
+            if expected_total == len(inspected_ids):
                 break
             if not items or page == _SEARCH_PAGE_LIMIT:
                 # A search that cannot account for all reported results must
