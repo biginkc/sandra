@@ -1,0 +1,28 @@
+{
+  "sources": {
+    "inbox-reply-boundary/context.sql": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+    "inbox-reply-preparation/recipient.sql": "3740a1b620901bbf1d67f76926666d96884d62f1aa3c56c82e0a3ecff3cfd255",
+    "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
+    "inbox-reply-review/setup.sql": "a0ad0f7b863b1f60ed6df10b4a08556e942d97efb40670cf1114c28079e70724",
+    "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772"
+  },
+  "runner_sha256": "5e15dfb41748b6dfd7bb9a89bc31fd783cbdb7d1db63a5aeaa5c820aae64acb5",
+  "checks": [
+    "authenticated public capture/freeze derives canonical personalized literal body and route; default admission closed",
+    "same pair returns exact immutable snapshot after read update",
+    "same key/same template with a different draft body still returns the original frozen view; same key with a changed TEMPLATE (real intent change) is rejected",
+    "stored review cannot be updated",
+    "changed inbound blocks stale rendered content",
+    "same-key replay after real dependency drift (known_reply revision bumped) still returns the original frozen view \u2014 idempotency keys on client intent, not server-rendered deps",
+    "whitespace and UTF16 1601+ bodies rejected; 1600 accepted",
+    "current canonical opt-out retained as review exclusion",
+    "suspended actor cannot retrieve old review",
+    "private functions/schema unavailable to external roles; public RPC denied to anon/service_role",
+    "freeze-level recipient_limit blocker fires at recipient_limit()+1 distinct eligible recipients",
+    "freeze-level duplicate_destination blocker fires and marks every affected item when two conversations share a destination; whole test rolled back"
+  ],
+  "limits": [
+    "Trusted SQL JWT claims; HTTP signature proof separate",
+    "No acceptance, worker dispatch or provider call"
+  ]
+}

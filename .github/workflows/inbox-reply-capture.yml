@@ -1,0 +1,28 @@
+name: Inbox reply capture evidence
+on:
+  pull_request:
+    paths:
+      - "experiments/inbox-reply-preparation/**"
+      - "experiments/inbox-reply-boundary/context.sql"
+      - "src/lib/messaging/quiet-hours.ts"
+      - ".github/workflows/inbox-reply-capture.yml"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/inbox-reply-preparation/**"
+      - "experiments/inbox-reply-boundary/context.sql"
+      - "src/lib/messaging/quiet-hours.ts"
+      - ".github/workflows/inbox-reply-capture.yml"
+permissions:
+  contents: read
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 experiments/inbox-reply-preparation/verify.py
+      # Integrity only; this does not claim to rerun the owned database proof.
