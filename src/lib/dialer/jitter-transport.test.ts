@@ -11,6 +11,7 @@ import type {
   JitterProxyResult,
 } from "./jitter-contract";
 import type { CaptureStore } from "./reliability-capture-store";
+import type { BrowserCaptureOptions } from "./reliability-browser-capture";
 import { createReliabilityTimingSession } from "./reliability-timing";
 
 const CALL_TOKEN = "11111111-1111-4111-8111-111111111111";
@@ -278,6 +279,60 @@ describe("JitterCallTransport", () => {
     await internals.startQaBrowserCapture(call, "call-1", secondAudio);
     expect(openStore).toHaveBeenCalledTimes(2);
     expect(startCapture).toHaveBeenCalledTimes(1);
+    expect(secondStore.close).not.toHaveBeenCalled();
+  });
+
+  it("resegments capture when the same playback element receives a new srcObject", async () => {
+    const firstStore: CaptureStore = {
+      writeChunk: vi.fn(async () => undefined),
+      writeEvent: vi.fn(async () => undefined),
+      writeTiming: vi.fn(async () => undefined),
+      close: vi.fn(),
+    };
+    const secondStore: CaptureStore = {
+      writeChunk: vi.fn(async () => undefined),
+      writeEvent: vi.fn(async () => undefined),
+      writeTiming: vi.fn(async () => undefined),
+      close: vi.fn(),
+    };
+    let openCount = 0;
+    const openStore = vi.fn(async () => {
+      openCount += 1;
+      return openCount === 1 ? firstStore : secondStore;
+    });
+    const captures: Array<{ onSourceChange?: () => void; stop: ReturnType<typeof vi.fn> }> = [];
+    const startCapture = vi.fn((options: BrowserCaptureOptions) => {
+      const stop = vi.fn(async () => undefined);
+      captures.push({ onSourceChange: options.onSourceChange, stop });
+      return { stop };
+    });
+    const harness = transportHarness({
+      openReliabilityCaptureStore: openStore,
+      startBrowserPlaybackCapture: startCapture,
+    });
+    const call = new FakeCall();
+    const audio = { srcObject: {} } as HTMLAudioElement;
+    const internals = harness.transport as unknown as {
+      qaCaptureConfig: { runId: string };
+      currentCall: FakeCall;
+      callId: string;
+      remoteAudio: HTMLAudioElement;
+      startQaBrowserCapture(call: FakeCall, callId: string, audio: HTMLAudioElement): Promise<void>;
+    };
+    internals.qaCaptureConfig = { runId: "qa_run_123" };
+    internals.currentCall = call;
+    internals.callId = "call-1";
+    internals.remoteAudio = audio;
+
+    await internals.startQaBrowserCapture(call, "call-1", audio);
+    captures[0]?.onSourceChange?.();
+    await flush();
+    await flush();
+
+    expect(captures).toHaveLength(2);
+    expect(captures[0].stop).toHaveBeenCalledTimes(1);
+    expect(openStore).toHaveBeenCalledTimes(2);
+    expect(firstStore.close).toHaveBeenCalledTimes(1);
     expect(secondStore.close).not.toHaveBeenCalled();
   });
 

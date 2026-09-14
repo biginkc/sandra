@@ -106,6 +106,39 @@ describe("browser playback capture", () => {
     expect(events.find((event) => event.kind === "error")?.detail).toBe("MediaRecorder error");
   });
 
+  it("notifies the owner when the playback element swaps srcObject", async () => {
+    vi.useFakeTimers();
+    try {
+      const recorder = new FakeRecorder();
+      const onSourceChange = vi.fn();
+      const events: BrowserCaptureEvent[] = [];
+      const firstSource = {} as MediaStream;
+      const audioState = Object.assign(new EventTarget(), {
+        paused: false, muted: false, volume: 1, srcObject: firstSource,
+        captureStream: () => ({ getAudioTracks: () => [{}] }),
+      });
+      const audio = audioState as unknown as HTMLAudioElement;
+      const handle = startBrowserPlaybackCapture({
+        audio,
+        recorderFactory: () => recorder as unknown as MediaRecorder,
+        onChunk: () => {},
+        onEvent: (event) => events.push(event),
+        onSourceChange,
+      });
+
+      audioState.srcObject = {} as MediaStream;
+      audioState.paused = true;
+      audio.dispatchEvent(new Event("pause"));
+      vi.advanceTimersByTime(250);
+
+      expect(onSourceChange).toHaveBeenCalledTimes(1);
+      expect(events.some((event) => event.detail === "remote playback paused")).toBe(false);
+      await handle?.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("timestamps and delivers chunks, including sink failures as visible errors", async () => {
     const recorder = new FakeRecorder();
     const events: BrowserCaptureEvent[] = [];

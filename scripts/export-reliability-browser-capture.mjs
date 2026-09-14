@@ -36,6 +36,10 @@ try {
   const capture = await page.evaluate(async ({ runId, callId }) => {
     const database = await new Promise((ok, fail) => {
       const request = indexedDB.open('sandra-reliability-capture-v2', 3);
+      // This exporter is read-only. Aborting an upgrade prevents an empty
+      // version-3 database from being created before the app has initialized
+      // its stores; the app can then perform the real upgrade later.
+      request.onupgradeneeded = () => request.transaction?.abort();
       request.onerror = () => fail(request.error ?? new Error('IndexedDB open failed'));
       request.onblocked = () => fail(new Error('IndexedDB open blocked'));
       request.onsuccess = () => ok(request.result);

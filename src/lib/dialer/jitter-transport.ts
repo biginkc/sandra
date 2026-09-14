@@ -1622,9 +1622,10 @@ export class JitterCallTransport implements CallTransport {
     call: TelnyxCallLike,
     callId: string,
     audio: HTMLAudioElement,
+    force = false,
   ): Promise<void> {
     const config = this.qaCaptureConfig;
-    if (!config || this.qaCaptureAudio === audio) return;
+    if (!config || (!force && this.qaCaptureAudio === audio)) return;
     this.stopQaBrowserCapture();
     const captureGeneration = ++this.qaCaptureGeneration;
     this.qaCaptureAudio = audio;
@@ -1639,7 +1640,8 @@ export class JitterCallTransport implements CallTransport {
       this.callId === callId &&
       this.remoteAudio === audio &&
       this.qaCaptureAudio === audio &&
-      !this.terminal;
+      !this.terminal &&
+      !this.hangupRequested;
     try {
       const openStore = this.dependencies.openReliabilityCaptureStore ?? openReliabilityCaptureStore;
       const store = await openStore(config.runId, callId, segment);
@@ -1668,6 +1670,9 @@ export class JitterCallTransport implements CallTransport {
           pendingEvents.add(write);
           void write.finally(() => pendingEvents.delete(write));
         },
+        onSourceChange: () => {
+          if (isCurrent()) this.resegmentQaBrowserCapture(call, callId, audio, captureGeneration);
+        },
       });
       if (capture) {
         if (!isCurrent()) {
@@ -1694,6 +1699,47 @@ export class JitterCallTransport implements CallTransport {
     } catch (error) {
       fail(error instanceof Error ? error.message : "capture database unavailable");
     }
+  }
+
+  private resegmentQaBrowserCapture(
+    call: TelnyxCallLike,
+    callId: string,
+    audio: HTMLAudioElement,
+    captureGeneration: number,
+  ): void {
+    if (
+      this.qaCaptureGeneration !== captureGeneration ||
+      this.currentCall !== call ||
+      this.callId !== callId ||
+      this.remoteAudio !== audio ||
+      this.qaCaptureAudio !== audio ||
+      this.terminal
+    ) return;
+    const capture = this.qaCaptureHandle;
+    if (!capture) return;
+    this.qaCaptureHandle = null;
+    this.qaCaptureAudio = null;
+    this.qaCaptureGeneration += 1;
+    this.reliabilityTiming?.detach();
+    void capture.stop().then(() => {
+      if (
+        this.currentCall === call &&
+        this.callId === callId &&
+        this.remoteAudio === audio &&
+        !this.terminal &&
+        !this.hangupRequested &&
+        this.qaCaptureConfig
+      ) void this.startQaBrowserCapture(call, callId, audio, true);
+    }).catch((error) => {
+      const config = this.qaCaptureConfig;
+      if (!config) return;
+      try {
+        sessionStorage.setItem(
+          `sandra:reliability-capture-error:${config.runId}:${callId}`,
+          error instanceof Error ? error.message : "capture source-change stop failed",
+        );
+      } catch { /* storage may be unavailable */ }
+    });
   }
 
   private stopQaBrowserCapture(): void {
