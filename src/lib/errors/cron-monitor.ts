@@ -1,4 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
+import { ensureSentryServerClient } from "./sentry-server-client";
 
 type MonitorConfig = NonNullable<Parameters<typeof Sentry.captureCheckIn>[1]>;
 
@@ -10,7 +11,7 @@ export async function runMonitoredCron<T>(
   failed: (result: T) => boolean | Promise<boolean>,
 ): Promise<T> {
   let checkInId: string | undefined;
-  if (Sentry.getClient()) {
+  if (ensureSentryServerClient()) {
     try {
       checkInId = Sentry.captureCheckIn(
         { monitorSlug: slug, status: "in_progress" },

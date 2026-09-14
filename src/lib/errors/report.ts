@@ -1,6 +1,7 @@
 import type { ErrorClass } from "./classes";
 import * as Sentry from "@sentry/nextjs";
 import { safeDiagnosticToken, safeSentryTags } from "./sentry-privacy";
+import { ensureSentryServerClient } from "./sentry-server-client";
 
 export type ReportContext = {
   errorClass?: ErrorClass;
@@ -20,7 +21,7 @@ export function reportError(err: unknown, context: ReportContext = {}): void {
     extra: context.extra,
   };
   console.error("[reportError]", payload);
-  if (Sentry.getClient()) {
+  if (ensureSentryServerClient()) {
     const fields = err !== null && typeof err === "object" ? err as Record<string, unknown> : {};
     const code = safeDiagnosticToken(fields.code, true)
       ?? safeDiagnosticToken(fields.name)

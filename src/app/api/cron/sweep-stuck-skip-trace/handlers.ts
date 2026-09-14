@@ -11,6 +11,7 @@ import * as Sentry from "@sentry/nextjs";
 // next re-claim finishes the remainder.
 
 import { reportError } from "@/lib/errors/report";
+import { ensureSentryServerClient } from "@/lib/errors/sentry-server-client";
 import { getSkipTraceProvider } from "@/lib/skip-trace/registry";
 import { finalizeSkipTraceFromBatch } from "@/lib/skip-trace/skip-trace-job";
 import type { Database } from "@/lib/supabase/types";
@@ -164,7 +165,7 @@ async function observeSignal(
   if (!claim || typeof claim.claim_token !== "string") return;
   let delivered = false;
   try {
-    if (Sentry.getClient()) {
+    if (ensureSentryServerClient()) {
       if (claim.decision === "new" || claim.decision === "repeat") {
         reportError(new Error(`Sandra operational state: ${kind}`), {
           tags: { surface: "cron_skiptrace_state_observer", kind: "state", operation: kind, outcome: "active" },

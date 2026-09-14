@@ -3,6 +3,7 @@ import * as Sentry from "@sentry/nextjs";
 import { start } from "workflow/api";
 import { sentryPreviewCanaryWorkflow } from "@/workflows/sentry-preview-canary";
 import { CANARY_COOKIE, canaryCookieValue } from "@/lib/errors/preview-canary-access";
+import { ensureSentryServerClient } from "@/lib/errors/sentry-server-client";
 
 export const runtime = "nodejs";
 
@@ -26,7 +27,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ runId: run.runId });
   }
   if (mode !== "server") return NextResponse.json({ error: "Invalid canary mode" }, { status: 400 });
-  if (!Sentry.getClient()) return NextResponse.json({ error: "Sentry client inactive" }, { status: 503 });
+  if (!ensureSentryServerClient()) return NextResponse.json({ error: "Sentry client inactive" }, { status: 503 });
   let eventId = "";
   Sentry.withScope((scope) => {
     scope.setTag("surface", "preview_canary");

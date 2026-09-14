@@ -3,6 +3,7 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import * as Sentry from "@sentry/nextjs";
 
 import { reportError } from "@/lib/errors/report";
+import { ensureSentryServerClient } from "@/lib/errors/sentry-server-client";
 import { cronResponseFailed, runMonitoredCron } from "@/lib/errors/cron-monitor";
 import {
   deliverAppointmentReminder,
@@ -430,7 +431,7 @@ export async function observeExhaustedReminders(
     }
     let delivered = false;
     try {
-      if (Sentry.getClient()) {
+      if (ensureSentryServerClient()) {
         const outcome = claim.decision === "recovered" ? "recovered" : "active";
         reportError(new Error(`Sandra operational state: ${EXHAUSTED_REMINDER_SIGNAL} ${outcome}`), {
           tags: {

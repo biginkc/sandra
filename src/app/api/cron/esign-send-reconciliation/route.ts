@@ -12,6 +12,7 @@ import {
   type StuckEsignSend,
 } from "@/lib/esign/stuck-send-reconciliation";
 import { reportError } from "@/lib/errors/report";
+import { ensureSentryServerClient } from "@/lib/errors/sentry-server-client";
 import { cronResponseFailed, runMonitoredCron } from "@/lib/errors/cron-monitor";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types";
@@ -39,7 +40,7 @@ async function observeEsignSignal(
   if (!claim || typeof claim.claim_token !== "string") return;
   let delivered = false;
   try {
-    if (Sentry.getClient()) {
+    if (ensureSentryServerClient()) {
       if (claim.decision === "recovered") {
         reportError(new Error(`Sandra operational state recovered: ${kind}`), {
           tags: { surface: "cron_esign_state_observer", kind: "state", operation: kind, outcome: "recovered" },

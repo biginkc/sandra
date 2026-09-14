@@ -1,4 +1,5 @@
 import * as Sentry from "@sentry/nextjs";
+import { ensureSentryServerClient } from "@/lib/errors/sentry-server-client";
 
 /** Run only from a Node step after the business step has exhausted retries. */
 export async function reportTerminalWorkflowFailure(
@@ -6,7 +7,7 @@ export async function reportTerminalWorkflowFailure(
 ): Promise<void> {
   "use step";
 
-  if (!Sentry.getClient()) return;
+  if (!ensureSentryServerClient()) return;
   try {
     Sentry.withScope((scope) => {
       scope.setTag("surface", "workflow");
