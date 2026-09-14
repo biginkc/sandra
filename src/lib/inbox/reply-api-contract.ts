@@ -19,7 +19,26 @@ export type InboxReplyExclusion =
   | "no_consent"
   | "sender_unavailable" | "context_unavailable" | "conversation_window_expired"
   | "unknown_state" | "outside_window" | "missing_variable" | "invalid_template"
-  | "invalid_body";
+  | "invalid_body"
+  /** destination_policy() step 3 (recipient.sql): the canonical contact id
+   * resolved from the conversation no longer matches a contact row in this
+   * org (deleted, or foreign) — fails closed instead of falling through
+   * eligible for lack of evidence. */
+  | "contact_unavailable";
+/** Runtime mirror of the InboxReplyExclusion union, sourced from the same
+ * literals recipient.sql/batch.sql/setup.sql emit. Kept in parity by
+ * reply-api-contract.test.ts, which extracts every 'exclusion','<name>'
+ * literal from those SQL files and asserts it is a member of this set. */
+export const INBOX_REPLY_EXCLUSIONS: ReadonlySet<InboxReplyExclusion> = new Set([
+  "unsupported_target", "conversation_unavailable", "property_unavailable",
+  "property_suppressed", "contact_mapping_unavailable", "contact_suppressed",
+  "inbound_unavailable", "conversation_changed", "inbound_mapping_changed",
+  "reply_route_unavailable", "phone_not_saved", "landline",
+  "unclassified_phone", "sms_suppressed", "no_consent",
+  "sender_unavailable", "context_unavailable", "conversation_window_expired",
+  "unknown_state", "outside_window", "missing_variable", "invalid_template",
+  "invalid_body", "contact_unavailable",
+]);
 /** Single source of truth for the D5 bulk-reply recipient cap. Must stay in
  * parity with inbox_reply_preparation.recipient_limit() in
  * experiments/inbox-reply-preparation/recipient.sql — checked by

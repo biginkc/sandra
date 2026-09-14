@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { compareInboxActionIdentity, InvalidInboxActionError, parseInboxActionDefinition, parseInboxActionIntent, parseReviewedInboxReply } from "./action-definition";
+import { compareInboxActionIdentity, INBOX_ACTION_LIMITS, InvalidInboxActionError, parseInboxActionDefinition, parseInboxActionIntent, parseInboxReplyPrepareRequest, parseReviewedInboxReply } from "./action-definition";
+import { INBOX_REPLY_RECIPIENT_LIMIT } from "./reply-api-contract";
 const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const context = { organizationId: id(1), requesterId: id(2) };
 const target = (n: number) => ({ kind: "conversation", id: id(n) });
@@ -100,4 +101,56 @@ describe("unambiguous persistable JSON", () => {
     const text = " \n" + "😀".repeat(800) + " ";
     expect(parseInboxActionDefinition(JSON.stringify({ version: 1, steps: [{ type: "review_reply", text }] })).steps[0]).toEqual({ type: "review_reply", text: "😀".repeat(800) });
   });
+});
+
+describe("PR-C: parseInboxReplyPrepareRequest (bulk-reply prepare intent, obligation 3)", () => {
+  const replyTarget = (n: number) => ({ kind: "conversation" as const, id: id(n) });
+  const replyRequest = () => ({ idempotencyKey: id(4), targets: [replyTarget(5), replyTarget(6)], template: "Hi {{first_name}}" });
+  it("parses targets/template independently of parseReviewedInboxReply's own shape", () => {
+    const result = parseInboxReplyPrepareRequest(JSON.stringify(replyRequest()));
+    expect(result.idempotencyKey).toBe(id(4));
+    expect(result.targets).toHaveLength(2);
+    expect(result.template).toBe("Hi {{first_name}}");
+  });
+  it.each([
+    // duplicate top-level JSON member
+    `{"idempotencyKey":"${id(4)}","idempotencyKey":"${id(4)}","targets":[{"kind":"conversation","id":"${id(5)}"}],"template":"hi"}`,
+    // missing key
+    JSON.stringify({ idempotencyKey: id(4), targets: [replyTarget(5)] }),
+    // extra/unexpected key
+    JSON.stringify({ ...replyRequest(), extra: true }),
+    // over-limit targets (501)
+    JSON.stringify({ ...replyRequest(), targets: Array.from({ length: 501 }, (_, i) => replyTarget(i)) }),
+    // empty targets
+    JSON.stringify({ ...replyRequest(), targets: [] }),
+    // duplicate target
+    JSON.stringify({ ...replyRequest(), targets: [replyTarget(5), replyTarget(5)] }),
+    // template not a string
+    JSON.stringify({ ...replyRequest(), template: 12 }),
+    // malformed JSON
+    "{",
+  ])("rejects malformed prepare input: %s", (raw) => {
+    expect(() => parseInboxReplyPrepareRequest(raw)).toThrow(InvalidInboxActionError);
+  });
+  it("accepts exactly 500 targets and a mix of conversation/unknown_sender_group kinds", () => {
+    const targets = Array.from({ length: 500 }, (_, i) => replyTarget(i));
+    expect(parseInboxReplyPrepareRequest(JSON.stringify({ ...replyRequest(), targets })).targets).toHaveLength(500);
+    const mixed = [replyTarget(5), { kind: "unknown_sender_group", id: id(6) }];
+    expect(parseInboxReplyPrepareRequest(JSON.stringify({ ...replyRequest(), targets: mixed })).targets).toHaveLength(2);
+  });
+  it("bounds raw bytes like every other action-definition parser", () => {
+    expect(() => parseInboxReplyPrepareRequest(" ".repeat(131073))).toThrow(InvalidInboxActionError);
+  });
+});
+
+describe("D5: single TS source of truth for the bulk-reply recipient cap (obligation 13)", () => {
+  it("keeps INBOX_ACTION_LIMITS.replyRecipients identical to INBOX_REPLY_RECIPIENT_LIMIT", () => {
+    expect(INBOX_ACTION_LIMITS.replyRecipients).toBe(INBOX_REPLY_RECIPIENT_LIMIT);
+  });
+  // MUTATION: hardcoding INBOX_ACTION_LIMITS.replyRecipients back to a
+  // literal 50 instead of importing INBOX_REPLY_RECIPIENT_LIMIT still passes
+  // today (both are 50), but reintroduces the duplicate-constant drift risk
+  // D5 exists to close — verified by hand: changing INBOX_REPLY_RECIPIENT_LIMIT
+  // to 51 while leaving a hardcoded 50 here fails this assertion, confirming
+  // it actually checks identity rather than two independently-correct values.
 });

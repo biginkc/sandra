@@ -1,0 +1,243 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createInboxReplyRepository, type InboxReplyClient } from "./reply-api";
+
+const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const signal = () => new AbortController().signal;
+const template = "Hi {{first_name}}, I'm {{my_first_name}}.";
+const target = (n: number) => ({ kind: "conversation" as const, id: id(n) });
+const request = () => ({ idempotencyKey: id(4), targets: [target(5)], template });
+const baseVars = { first_name: "Ada", last_name: "Lovelace", property_address: "12 Main", city: "KC", state: "MO", property_zip: "64101", market: "KC Metro", company_name: "BMH" };
+const captureItem = (n: number, overrides: Record<string, unknown> = {}) => ({
+  conversation_id: id(n), exclusion: null, property_id: id(100 + n), contact_id: id(200 + n),
+  from: "+18165550001", to: "+18165550002", state: "MO", inbound_id: id(300 + n),
+  inbound_created_at: "2026-09-01T00:00:00Z", valid_until: "2099-01-01T00:00:00Z",
+  variables: baseVars, dependencies: { head: "1" }, duplicate_destination: false,
+  quiet_hours: { ok: true }, ...overrides,
+});
+const freezeItemFor = (n: number, renderedBody: string) => ({
+  id: id(900 + n), target: target(n), exclusion: null,
+  recipient: { contactName: "Ada Lovelace", propertyAddress: "12 Main", propertyId: id(100 + n), contactId: id(200 + n), from: "+18165550001", to: "+18165550002", renderedBody },
+  duplicateDestination: false,
+});
+const excludedFreezeItem = (n: number, exclusion: string, kind: "conversation" | "unknown_sender_group" = "conversation") => ({
+  id: id(900 + n), target: { kind, id: id(n) }, exclusion, recipient: null, duplicateDestination: false,
+});
+const freezeResult = (items: unknown[], overrides: Record<string, unknown> = {}) => ({
+  preparationId: id(999), idempotencyKey: id(4), inputHash: "a".repeat(64), expiresAt: "2026-09-14T00:05:00Z",
+  items, recipientCount: items.filter((i) => (i as { exclusion: unknown }).exclusion === null).length, blockers: [], ...overrides,
+});
+const ok = (data: unknown) => ({ data, error: null });
+function client(results: unknown[]) {
+  const seenSignals: AbortSignal[] = [];
+  const rpc = vi.fn((_name: string, _args?: Record<string, unknown>) => ({
+    abortSignal: vi.fn((s: AbortSignal) => {
+      seenSignals.push(s);
+      const r = results.shift();
+      if (r instanceof Error) return Promise.reject(r);
+      return Promise.resolve(r);
+    }),
+  }));
+  return { rpc, seenSignals, repository: createInboxReplyRepository({ rpc } as unknown as InboxReplyClient) };
+}
+afterEach(() => vi.unstubAllEnvs());
+
+describe("malformed prepare intent is rejected before any RPC (obligation 3)", () => {
+  const cases: [string, string][] = [
+    ["duplicate top-level member", `{"idempotencyKey":"${id(4)}","idempotencyKey":"${id(4)}","targets":[{"kind":"conversation","id":"${id(5)}"}],"template":"hi"}`],
+    ["over-limit targets (501)", JSON.stringify({ idempotencyKey: id(4), targets: Array.from({ length: 501 }, (_, i) => target(1000 + i)), template: "hi" })],
+    ["duplicate target", JSON.stringify({ idempotencyKey: id(4), targets: [target(5), target(5)], template: "hi" })],
+    ["missing template key", JSON.stringify({ idempotencyKey: id(4), targets: [target(5)] })],
+  ];
+  it.each(cases)("%s -> 400, no RPC", async (_label, raw) => {
+    const c = client([]);
+    await expect(c.repository.prepare(raw, signal())).rejects.toMatchObject({ status: 400 });
+    expect(c.rpc).not.toHaveBeenCalled();
+  });
+  // MUTATION: bypassing wire()'s duplicate-member scan (e.g. parsing with a
+  // plain JSON.parse that silently last-value-wins) makes the first case pass
+  // through to a 200/RPC call instead of 400.
+});
+
+describe("template-wide probe render rejects before capture RPC (obligation 4, C3)", () => {
+  it.each(["Hi {{unknown_var}}", "Hi {{first_name", "{{#if x}}bad", ""])("rejects %s as invalid_template with no capture RPC", async (badTemplate) => {
+    const c = client([]);
+    const raw = JSON.stringify({ ...request(), template: badTemplate || "  " });
+    await expect(c.repository.prepare(raw, signal())).rejects.toMatchObject({ status: 400, code: "invalid_template" });
+    expect(c.rpc).not.toHaveBeenCalled();
+  });
+  // MUTATION: removing the probe-render try/catch (calling renderReviewedReply
+  // without the full-placeholder PROBE_VARS map, or not calling it at all)
+  // makes an unknown-variable template reach the capture RPC instead of 400.
+});
+
+describe("freeze DTO validation is fail-closed (obligation 5, C8)", () => {
+  it("rejects an altered renderedBody that doesn't equal what the coordinator sent", async () => {
+    const capture = { items: [captureItem(5)] };
+    const freeze = freezeResult([freezeItemFor(5, "ALTERED TEXT THE SERVER NEVER SENT")]);
+    const c = client([ok(capture), ok(freeze)]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+  // MUTATION: dropping the `expected === renderedBody` equality check lets a
+  // tampered/mismatched server body pass straight through as a 200.
+  it("rejects an extra item beyond target count", async () => {
+    const capture = { items: [captureItem(5)] };
+    const freeze = freezeResult([freezeItemFor(5, "Hi Ada, I'm Mel."), excludedFreezeItem(6, "conversation_unavailable")]);
+    const c = client([ok(capture), ok(freeze)]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+  it("rejects a missing item (fewer items than targets)", async () => {
+    const capture = { items: [captureItem(5)] };
+    const freeze = freezeResult([]);
+    const c = client([ok(capture), ok(freeze)]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+  it("rejects a non-null recipient on an excluded item", async () => {
+    const capture = { items: [captureItem(5, { exclusion: "property_unavailable" })] };
+    const bogus = { ...excludedFreezeItem(5, "property_unavailable"), recipient: { contactName: "x", propertyAddress: "x", propertyId: id(1), contactId: id(2), from: "+18165550001", to: "+18165550002", renderedBody: "x" } };
+    const freeze = freezeResult([bogus]);
+    const c = client([ok(capture), ok(freeze)]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+  it("rejects an exclusion string outside INBOX_REPLY_EXCLUSIONS", async () => {
+    const capture = { items: [captureItem(5)] };
+    const freeze = freezeResult([excludedFreezeItem(5, "not_a_real_exclusion_code")]);
+    const c = client([ok(capture), ok(freeze)]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe("canonical envelope drafts (obligation 7, C5)", () => {
+  it("includes a draft only for eligible conversation capture items, exactly four keys, dependencies unmodified", async () => {
+    const targets = [target(5), target(6), { kind: "unknown_sender_group" as const, id: id(50) }];
+    const req = JSON.stringify({ idempotencyKey: id(4), targets, template });
+    const dependencies = { head: "3", generation: id(77) };
+    const capture = { items: [captureItem(5, { dependencies }), captureItem(6, { exclusion: "property_unavailable" })] };
+    const freeze = freezeResult([freezeItemFor(5, "Hi Ada, I'm Mel."), excludedFreezeItem(6, "property_unavailable"), excludedFreezeItem(50, "unsupported_target", "unknown_sender_group")]);
+    const c = client([ok(capture), ok(freeze)]);
+    await c.repository.prepare(req, signal());
+    expect(c.rpc.mock.calls[0][1]).toEqual({ conversation_ids: [id(5), id(6)] });
+    const canonicalInput = JSON.parse((c.rpc.mock.calls[1][1] as { canonical_input: string }).canonical_input);
+    expect(canonicalInput.drafts).toHaveLength(1);
+    expect(Object.keys(canonicalInput.drafts[0]).sort()).toEqual(["body", "conversationId", "dependencies", "exclusion"]);
+    expect(canonicalInput.drafts[0].dependencies).toEqual(dependencies);
+    expect(canonicalInput.drafts[0].conversationId).toBe(id(5));
+  });
+  // MUTATION: adding an extra key to the draft object, or passing
+  // `capture.dependencies` through JSON.stringify/parse instead of the raw
+  // value, fails the key-set or deep-equality assertion above.
+});
+
+describe("C7 error mapping table (obligation 8)", () => {
+  const rows: [string, string | undefined, number, string][] = [
+    ["PGRST301", undefined, 401, "authentication_required"],
+    ["PGRST303", undefined, 401, "authentication_required"],
+    ["42501", "INBOX_AUTH_REQUIRED", 401, "authentication_required"],
+    ["42501", "INBOX_SESSION_EXPIRED", 401, "authentication_required"],
+    ["42501", "INBOX_SESSION_REVOKED", 401, "authentication_required"],
+    ["42501", "INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", 403, "access_unavailable"],
+    ["42501", "INBOX_ORG_DENIED", 403, "access_unavailable"],
+    ["42501", "INBOX_ACTION_FORBIDDEN", 403, "access_unavailable"],
+    ["55000", undefined, 404, "Not found"],
+    ["P0001", "INBOX_REPLY_PREPARATION_CHANGED", 409, "preparation_changed"],
+    ["P0001", "INBOX_REPLY_IDEMPOTENCY_MISMATCH", 409, "idempotency_mismatch"],
+    ["P0001", "INBOX_REPLY_PREPARATION_EXPIRED", 409, "preparation_expired"],
+    ["P0001", "Invalid reply envelope", 503, "action_unavailable"],
+    ["23505", "unique_violation", 503, "action_unavailable"],
+  ];
+  it.each(rows)("%s/%s -> %d %s", async (code, message, status, expectedCode) => {
+    const c = client([{ data: null, error: { code, message } }]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status, code: expectedCode });
+  });
+  // MUTATION: the 55000 row must map to code "Not found" byte-identical to
+  // the flag-off route body (C1) — see reply-route.test.ts for the body
+  // equality assertion at the route layer.
+
+  it("retries an aborted capture transaction and renders drafts from the SECOND (fresh) capture, never the stale one", async () => {
+    const freshCapture = { items: [captureItem(5, { variables: { ...baseVars, first_name: "Fresh" } })] };
+    const freeze = freezeResult([freezeItemFor(5, "Hi Fresh, I'm Mel.")]);
+    const c = client([{ data: null, error: { code: "40P01" } }, ok(freshCapture), ok(freeze)]);
+    await c.repository.prepare(JSON.stringify(request()), signal());
+    expect(c.rpc).toHaveBeenCalledTimes(3);
+    const canonicalInput = JSON.parse((c.rpc.mock.calls[2][1] as { canonical_input: string }).canonical_input);
+    expect(canonicalInput.drafts[0].body).toBe("Hi Fresh, I'm Mel.");
+  });
+  // MUTATION: hoisting draft-building above/outside the retry (reading a
+  // captured `captureResult` from before the retry resolved) would render
+  // "Stale" instead of "Fresh" here.
+});
+
+describe("my_first_name sender persona (obligation 9, C4)", () => {
+  it("uses OUTBOUND_SENDER_NAME when set, and falls back to Mel when unset", async () => {
+    const capture = { items: [captureItem(5)] };
+    vi.stubEnv("OUTBOUND_SENDER_NAME", "");
+    const c1 = client([ok(capture), ok(freezeResult([freezeItemFor(5, "Hi Ada, I'm Mel.")]))]);
+    await c1.repository.prepare(JSON.stringify(request()), signal());
+    expect(JSON.parse((c1.rpc.mock.calls[1][1] as { canonical_input: string }).canonical_input).drafts[0].body).toBe("Hi Ada, I'm Mel.");
+    vi.stubEnv("OUTBOUND_SENDER_NAME", "Skyler");
+    const c2 = client([ok(capture), ok(freezeResult([freezeItemFor(5, "Hi Ada, I'm Skyler.")]))]);
+    await c2.repository.prepare(JSON.stringify(request()), signal());
+    expect(JSON.parse((c2.rpc.mock.calls[1][1] as { canonical_input: string }).canonical_input).drafts[0].body).toBe("Hi Ada, I'm Skyler.");
+  });
+});
+
+describe("UTF-16 template/body boundaries propagate through the coordinator (obligation 10)", () => {
+  const astral = "\u{1D555}"; // 2 UTF-16 units
+  it("accepts a template at exactly 1600 UTF-16 units (including astral chars) and rejects one unit over", async () => {
+    const atLimit = astral.repeat(800); // 1600 units
+    const overLimit = astral.repeat(801); // 1602 units
+    const req = (t: string) => JSON.stringify({ idempotencyKey: id(4), targets: [{ kind: "unknown_sender_group", id: id(50) }], template: t });
+    const c1 = client([ok(freezeResult([excludedFreezeItem(50, "unsupported_target", "unknown_sender_group")]))]);
+    await expect(c1.repository.prepare(req(atLimit), signal())).resolves.toBeDefined();
+    const c2 = client([]);
+    await expect(c2.repository.prepare(req(overLimit), signal())).rejects.toMatchObject({ status: 400, code: "invalid_template" });
+    expect(c2.rpc).not.toHaveBeenCalled();
+  });
+  it("treats a per-recipient render that collapses to whitespace-only (U+3000/U+FEFF) as an invalid_body draft exclusion, not a template-wide 400", async () => {
+    // Probe (first_name="x", non-empty) renders the conditional block, so the
+    // template itself is valid. A real recipient with a missing first_name
+    // silently skips the conditional (no throw), leaving only the trailing
+    // U+3000/U+FEFF static text — which trims to empty, so THIS recipient's
+    // real render throws invalid_body although the probe never did.
+    const templateWithConditional = "{{#if first_name}}{{first_name}}{{/if}}　﻿";
+    const capture = { items: [captureItem(5, { variables: { ...baseVars, first_name: null } })] };
+    const freeze = freezeResult([excludedFreezeItem(5, "invalid_body")]);
+    const c = client([ok(capture), ok(freeze)]);
+    const result = await c.repository.prepare(JSON.stringify({ idempotencyKey: id(4), targets: [target(5)], template: templateWithConditional }), signal());
+    expect(result.items[0].exclusion).toBe("invalid_body");
+    const canonicalInput = JSON.parse((c.rpc.mock.calls[1][1] as { canonical_input: string }).canonical_input);
+    expect(canonicalInput.drafts[0]).toEqual({ conversationId: id(5), body: null, dependencies: { head: "1" }, exclusion: "invalid_body" });
+  });
+  // MUTATION: catching only "missing_variable" (not "invalid_body") in
+  // draftFor's per-recipient try/catch lets this whitespace-only render throw
+  // uncaught instead of becoming a draft exclusion.
+});
+
+describe("abort handling (obligation 11)", () => {
+  it("passes the same abort signal to both the capture and freeze rpc calls", async () => {
+    const capture = { items: [captureItem(5)] };
+    const freeze = freezeResult([freezeItemFor(5, "Hi Ada, I'm Mel.")]);
+    const c = client([ok(capture), ok(freeze)]);
+    const s = signal();
+    await c.repository.prepare(JSON.stringify(request()), s);
+    expect(c.seenSignals).toEqual([s, s]);
+  });
+  it("never calls freeze once the signal aborts right after capture resolves", async () => {
+    const capture = { items: [captureItem(5)] };
+    const controller = new AbortController();
+    const rpc = vi.fn((name: string) => ({
+      abortSignal: vi.fn(async () => {
+        if (name === "inbox_capture_reply_recipients") {
+          const result = ok(capture);
+          controller.abort();
+          return result;
+        }
+        return ok(freezeResult([]));
+      }),
+    }));
+    const repository = createInboxReplyRepository({ rpc } as unknown as InboxReplyClient);
+    await expect(repository.prepare(JSON.stringify(request()), controller.signal)).rejects.toThrow();
+    expect(rpc).toHaveBeenCalledTimes(1);
+  });
+  // MUTATION: dropping the `signal.throwIfAborted()` call immediately after
+  // the capture RPC resolves lets freeze run even though the caller aborted.
+});
