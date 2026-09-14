@@ -9,6 +9,7 @@ import { resolveDialpadAssignment, type DialpadCallerIdentity } from './assignme
 
 type CallerOption = Readonly<{
   provider: 'dialpad'; grantId: string; grantRevision: number; bindingRevision: number;
+  connectionVersion: number;
   phoneE164: string; identity: DialpadCallerIdentity;
 }>;
 
@@ -68,7 +69,8 @@ export async function loadMyDialpadCallerOptions(): Promise<
       // A provider-revoked identity is omitted; no substitution by another
       // context sharing the same E.164 number is allowed.
       if (resolved.ok) options.push(Object.freeze({ provider: 'dialpad', grantId: grant.id, grantRevision: grant.revision,
-        bindingRevision: binding.revision, phoneE164: resolved.snapshot.callerId, identity: resolved.snapshot.identity }));
+        bindingRevision: binding.revision, connectionVersion: connection.config_version,
+        phoneE164: resolved.snapshot.callerId, identity: resolved.snapshot.identity }));
     }
     return { ok: true, options };
   } catch { return { ok: false, error: 'dialpad_numbers_unavailable' }; }

@@ -29,7 +29,7 @@ describe('current rep Dialpad caller options',()=>{
  });
  it('scopes even an owner to their own member grants and exposes only dropdown fields',async()=>{
   const result=await loadMyDialpadCallerOptions();
-  expect(result).toEqual({ok:true,options:[{provider:'dialpad',grantId:'grant-301',grantRevision:4,bindingRevision:3,phoneE164:'+12025550101',identity:{type:'office',id:'301'}}]});
+  expect(result).toEqual({ok:true,options:[{provider:'dialpad',grantId:'grant-301',grantRevision:4,bindingRevision:3,connectionVersion:2,phoneE164:'+12025550101',identity:{type:'office',id:'301'}}]});
   expect(m.eq).toHaveBeenCalledWith('dialpad_member_bindings','member_user_id',actor);
   expect(m.eq).toHaveBeenCalledWith('dialpad_org_connections','org_id',org);
   expect(m.eq).toHaveBeenCalledWith('dialpad_number_grants','binding_id','binding');
