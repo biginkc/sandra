@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   const secret = process.env.SENTRY_CANARY_SECRET;
   const supplied = request.headers.get("x-sandra-canary-secret");
-  if (process.env.VERCEL_ENV !== "preview" || !secret
+  if (!(["preview", "production"].includes(process.env.VERCEL_ENV ?? "")) || !secret
     || !supplied || supplied.length > 256
     || !timingSafeEqual(createHash("sha256").update(supplied).digest(),
       createHash("sha256").update(secret).digest())) {
@@ -32,6 +32,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ runId: run.runId });
   }
   if (mode === "cron_ok" || mode === "cron_error") {
+    if (process.env.VERCEL_ENV !== "preview") return new Response(null, { status: 404 });
     return runMonitoredCron(
       "sandra-sentry-preview-canary",
       { schedule: { type: "crontab", value: "* * * * *" }, checkinMargin: 1, maxRuntime: 1 },
@@ -46,7 +47,7 @@ export async function POST(request: Request) {
     scope.setTag("surface", "preview_canary");
     scope.setTag("operation", "server_capture");
     scope.setTag("kind", "controlled");
-    eventId = Sentry.captureException(new Error("Controlled Sentry preview server failure"));
+    eventId = Sentry.captureException(new Error("Controlled Sentry canary server failure"));
   });
   const delivered = await Sentry.flush(2_000);
   return NextResponse.json({ eventId, delivered });

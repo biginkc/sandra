@@ -19,7 +19,7 @@ function request(mode: string, secret?: string) {
   });
 }
 
-describe("preview-only Sentry canary", () => {
+describe("secret-gated Sentry canary", () => {
   const priorEnv = process.env.VERCEL_ENV;
   const priorSecret = process.env.SENTRY_CANARY_SECRET;
   beforeEach(() => {
@@ -38,17 +38,23 @@ describe("preview-only Sentry canary", () => {
 
   it("never starts a Workflow or captures an event without preview and the exact secret", async () => {
     expect((await POST(request("workflow"))).status).toBe(404);
-    process.env.VERCEL_ENV = "production";
+    process.env.VERCEL_ENV = "development";
     expect((await POST(request("server", "owned-canary-secret"))).status).toBe(404);
     expect(mocks.start).not.toHaveBeenCalled();
     expect(mocks.capture).not.toHaveBeenCalled();
+  });
+  it("permits a separately secret-gated production canary but no production Cron test", async () => {
+    process.env.VERCEL_ENV = "production";
+    expect((await POST(request("server", "wrong-secret"))).status).toBe(404);
+    expect((await POST(request("cron_error", "owned-canary-secret"))).status).toBe(404);
+    expect((await POST(request("server", "owned-canary-secret"))).status).toBe(200);
   });
 
   it("captures a controlled server event and reports transport outcome", async () => {
     const response = await POST(request("server", "owned-canary-secret"));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ eventId: "safe-event-id", delivered: true });
-    expect(mocks.capture).toHaveBeenCalledWith(expect.objectContaining({ message: "Controlled Sentry preview server failure" }));
+    expect(mocks.capture).toHaveBeenCalledWith(expect.objectContaining({ message: "Controlled Sentry canary server failure" }));
     expect(mocks.flush).toHaveBeenCalledWith(2_000);
   });
 

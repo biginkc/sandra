@@ -2,7 +2,7 @@ import { reportTerminalWorkflowFailure } from "./terminal-telemetry";
 
 async function failCanaryStep(): Promise<void> {
   "use step";
-  throw new Error("Controlled Sentry preview Workflow failure");
+  throw new Error("Controlled Sentry canary Workflow failure");
 }
 Object.assign(failCanaryStep, { maxRetries: 0 });
 
