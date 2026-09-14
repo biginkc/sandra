@@ -31,6 +31,7 @@ const DEFAULT_MIN_INTERVAL_MS = 10_000;
  */
 export function useThrottledRefresh(
   minIntervalMs: number = DEFAULT_MIN_INTERVAL_MS,
+  refreshResource?: () => void,
 ): () => void {
   const router = useRouter();
   const lastRefreshAt = useRef(0);
@@ -39,10 +40,12 @@ export function useThrottledRefresh(
 
   const intervalRef = useRef(minIntervalMs);
   const routerRef = useRef(router);
+  const refreshRef = useRef(refreshResource);
   useEffect(() => {
     intervalRef.current = minIntervalMs;
     routerRef.current = router;
-  }, [minIntervalMs, router]);
+    refreshRef.current = refreshResource;
+  }, [minIntervalMs, router, refreshResource]);
 
   const clearTrailing = useCallback(() => {
     if (trailingTimer.current !== null) {
@@ -63,7 +66,8 @@ export function useThrottledRefresh(
     // it) identity-stable even if the router object itself is not, so a
     // re-render can never tear down an armed trailing timer or churn
     // subscriber effects.
-    routerRef.current.refresh();
+    if (refreshRef.current) refreshRef.current();
+    else routerRef.current.refresh();
   }, []);
 
   const requestRefresh = useCallback(() => {
