@@ -12,24 +12,49 @@ afterEach(() => vi.unstubAllEnvs());
 describe("disabled-by-default bulk-reply prepare route (obligation 1)", () => {
   it("does not construct a client or read a body when disabled", async () => {
     vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
-    const response = await prepare(request("{}"));
+    const req = request("{}");
+    const response = await prepare(req);
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "Not found" });
     expect(mocks.createClient).not.toHaveBeenCalled();
     expect(mocks.prepare).not.toHaveBeenCalled();
+    // Not just an inference from createClient/prepare never being called —
+    // the request's own body stream must never have been touched either.
+    expect(req.bodyUsed).toBe(false);
   });
   // MUTATION: deleting the flag check (returning past it unconditionally)
-  // makes this fail — createClient/prepare would be called while disabled.
+  // makes this fail — createClient/prepare would be called while disabled,
+  // and req.bodyUsed would flip to true once the route starts reading it.
 });
 
 describe("half-enabled DB admission is indistinguishable from flag-off (C1, obligation 8)", () => {
-  it("maps INBOX_REPLIES_NOT_ENABLED (55000) to a byte-identical 404 body", async () => {
+  it("maps INBOX_REPLIES_NOT_ENABLED (55000) to a byte-identical 404 response", async () => {
     mocks.prepare.mockRejectedValue(new InboxReplyApiError(404, "Not found"));
     const enabledResponse = await prepare(request("{}"));
     vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
     const disabledResponse = await prepare(request("{}"));
+    // C1 requires the byte-identical response, not merely equal *parsed*
+    // JSON (which would miss whitespace/key-order differences a naive
+    // Response.json() call could introduce). Compare raw response bytes,
+    // status, and headers.
     expect(enabledResponse.status).toBe(disabledResponse.status);
-    expect(await enabledResponse.json()).toEqual(await disabledResponse.json());
+    expect(await enabledResponse.text()).toBe(await disabledResponse.text());
+    expect([...enabledResponse.headers.entries()]).toEqual([...disabledResponse.headers.entries()]);
+  });
+  it("returns the byte-identical 404 for an authenticated well-formed request under admission-closed (C1 restated as enablement-safety)", async () => {
+    // C1 is an enablement-SAFETY property, not obscurity: with the server
+    // flag ON but DB admission CLOSED, an authenticated, well-formed request
+    // must get the byte-identical flag-off 404 AND run no capture/render/
+    // freeze — require_admission() is the first statement of both SECURITY
+    // DEFINER wrappers, so nothing executes before that gate.
+    mocks.prepare.mockRejectedValue(new InboxReplyApiError(404, "Not found"));
+    const wellFormedBody = JSON.stringify({ idempotencyKey: id, targets: [{ kind: "conversation", id }], template: "Hi {{first_name}}" });
+    const admissionClosedResponse = await prepare(request(wellFormedBody));
+    vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
+    const flagOffResponse = await prepare(request(wellFormedBody));
+    expect(admissionClosedResponse.status).toBe(flagOffResponse.status);
+    expect(await admissionClosedResponse.text()).toBe(await flagOffResponse.text());
+    expect([...admissionClosedResponse.headers.entries()]).toEqual([...flagOffResponse.headers.entries()]);
   });
 });
 

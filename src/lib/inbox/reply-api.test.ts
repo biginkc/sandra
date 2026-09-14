@@ -24,7 +24,8 @@ const excludedFreezeItem = (n: number, exclusion: string, kind: "conversation" |
 });
 const freezeResult = (items: unknown[], overrides: Record<string, unknown> = {}) => ({
   preparationId: id(999), idempotencyKey: id(4), inputHash: "a".repeat(64), expiresAt: "2026-09-14T00:05:00Z",
-  items, recipientCount: items.filter((i) => (i as { exclusion: unknown }).exclusion === null).length, blockers: [], ...overrides,
+  items, recipientCount: items.filter((i) => (i as { exclusion: unknown }).exclusion === null).length, blockers: [],
+  replayed: false, ...overrides,
 });
 const ok = (data: unknown) => ({ data, error: null });
 function client(results: unknown[]) {
@@ -104,6 +105,78 @@ describe("freeze DTO validation is fail-closed (obligation 5, C8)", () => {
     const c = client([ok(capture), ok(freeze)]);
     await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
   });
+  it("rejects a mismatched idempotencyKey echoed back by freeze", async () => {
+    const capture = { items: [captureItem(5)] };
+    const freeze = freezeResult([freezeItemFor(5, "Hi Ada, I'm Mel.")], { idempotencyKey: id(7) });
+    const c = client([ok(capture), ok(freeze)]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+  // B1-1 total fail-closed validation: an eligible item (exclusion === null)
+  // can only ever be a "conversation" target — freeze() marks every other
+  // target kind unsupported_target (setup.sql:95), so an eligible
+  // unknown_sender_group item can only be forged/broken. This is the case a
+  // partial (kind-guarded) body-equality check let through: a forged item
+  // whose target.kind !== "conversation" carrying a recipient never has its
+  // body checked against anything, and previously wasn't rejected for its
+  // kind either.
+  it("rejects an eligible (non-excluded) item whose target is not a conversation", async () => {
+    const capture = { items: [] };
+    const forged = {
+      id: id(900), target: { kind: "unknown_sender_group", id: id(50) }, exclusion: null,
+      recipient: { contactName: "Ada", propertyAddress: "12 Main", propertyId: id(101), contactId: id(201), from: "+18165550001", to: "+18165550002", renderedBody: "Forged body" },
+      duplicateDestination: false,
+    };
+    const freeze = freezeResult([forged], { recipientCount: 1 });
+    const c = client([ok(freeze)]);
+    const req = JSON.stringify({ idempotencyKey: id(4), targets: [{ kind: "unknown_sender_group", id: id(50) }], template });
+    await expect(c.repository.prepare(req, signal())).rejects.toMatchObject({ status: 503 });
+  });
+  // MUTATION: reverting the kind-guard deletion (i.e. re-adding `if
+  // (target.kind === "conversation")` around the eligible-item checks/body
+  // equality, or dropping the `need(target.kind === "conversation")` guard
+  // entirely) lets this forged unknown_sender_group item pass straight
+  // through as an eligible recipient instead of a 503.
+  it("rejects mismatched blockers, recipientCount, or duplicateDestination cross-item invariants", async () => {
+    const capture = { items: [captureItem(5), captureItem(6, { conversation_id: id(6) })] };
+    const dupItem = (n: number) => ({ ...freezeItemFor(n, "Hi Ada, I'm Mel."), duplicateDestination: true });
+    // two eligible items share `to`, but the server lies and reports no
+    // duplicate_destination blocker (and an under-counted recipientCount).
+    const freeze = freezeResult([dupItem(5), dupItem(6)], { blockers: [], recipientCount: 1 });
+    const c = client([ok(capture), ok(freeze)]);
+    const req = JSON.stringify({ idempotencyKey: id(4), targets: [target(5), target(6)], template });
+    await expect(c.repository.prepare(req, signal())).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe("freeze replayed flag controls body equality (B2, obligation 5)", () => {
+  it("trusts an immutable replayed row structurally and never re-compares it against a fresh render", async () => {
+    // Dependency drift between the fresh capture (used to build this
+    // request's own draft) and what the SERVER's immutable replayed row
+    // actually contains is exactly the scenario a legitimate idempotent
+    // replay after drift produces. The fresh render below ("Hi Ada, I'm
+    // Mel.") intentionally does NOT match the replayed row's body — proving
+    // the coordinator never runs the fresh-body-equality check on replay.
+    const capture = { items: [captureItem(5)] };
+    const freeze = freezeResult([freezeItemFor(5, "Hi Ada, drifted body from the ORIGINAL frozen row.")], { replayed: true });
+    const c = client([ok(capture), ok(freeze)]);
+    const result = await c.repository.prepare(JSON.stringify(request()), signal());
+    expect(result.items[0].recipient?.renderedBody).toBe("Hi Ada, drifted body from the ORIGINAL frozen row.");
+  });
+  // MUTATION: dropping the `replayed` append in setup.sql's freeze() existing-row
+  // branch (so the RPC response has no `replayed` field, or always reports
+  // `false`) makes `bool(row.replayed)` throw or makes this legitimate replay
+  // wrongly run fresh-body-equality against the drifted immutable row —
+  // either way this test fails.
+  it("applies fresh-render body equality when replayed is false, rejecting a mismatch", async () => {
+    const capture = { items: [captureItem(5)] };
+    const freeze = freezeResult([freezeItemFor(5, "ALTERED TEXT THE SERVER NEVER SENT")], { replayed: false });
+    const c = client([ok(capture), ok(freeze)]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+  // MUTATION: applying fresh-render body equality unconditionally on
+  // replayed:true (i.e. never branching on the flag) makes the legitimate
+  // replay-after-drift test above fail — it would incorrectly 503 instead of
+  // returning 200 with the original frozen body.
 });
 
 describe("canonical envelope drafts (obligation 7, C5)", () => {
@@ -114,17 +187,38 @@ describe("canonical envelope drafts (obligation 7, C5)", () => {
     const capture = { items: [captureItem(5, { dependencies }), captureItem(6, { exclusion: "property_unavailable" })] };
     const freeze = freezeResult([freezeItemFor(5, "Hi Ada, I'm Mel."), excludedFreezeItem(6, "property_unavailable"), excludedFreezeItem(50, "unsupported_target", "unknown_sender_group")]);
     const c = client([ok(capture), ok(freeze)]);
+    const stringifySpy = vi.spyOn(JSON, "stringify");
     await c.repository.prepare(req, signal());
     expect(c.rpc.mock.calls[0][1]).toEqual({ conversation_ids: [id(5), id(6)] });
-    const canonicalInput = JSON.parse((c.rpc.mock.calls[1][1] as { canonical_input: string }).canonical_input);
+    // Reference identity: capture.dependencies flows into the draft object
+    // passed to JSON.stringify() UNCHANGED — draftFor() assigns
+    // `capture.dependencies` directly (`as Json`), never cloning or
+    // reconstructing it, so the exact same object reference reaches the
+    // envelope call.
+    const envelopeCall = stringifySpy.mock.calls.find(([value]) => value !== null && typeof value === "object" && "drafts" in (value as object));
+    expect(envelopeCall).toBeDefined();
+    const envelope = envelopeCall![0] as { drafts: { dependencies: unknown }[] };
+    expect(envelope.drafts[0].dependencies).toBe(dependencies);
+    stringifySpy.mockRestore();
+    const rawCanonicalInput = (c.rpc.mock.calls[1][1] as { canonical_input: string }).canonical_input;
+    // Verbatim serialization: the exact same key order/content JSON.stringify
+    // would produce for `dependencies` alone appears unchanged inside the
+    // full envelope string — proof nothing re-derived or reordered it.
+    expect(rawCanonicalInput).toContain(JSON.stringify(dependencies));
+    const canonicalInput = JSON.parse(rawCanonicalInput);
     expect(canonicalInput.drafts).toHaveLength(1);
     expect(Object.keys(canonicalInput.drafts[0]).sort()).toEqual(["body", "conversationId", "dependencies", "exclusion"]);
     expect(canonicalInput.drafts[0].dependencies).toEqual(dependencies);
     expect(canonicalInput.drafts[0].conversationId).toBe(id(5));
   });
-  // MUTATION: adding an extra key to the draft object, or passing
-  // `capture.dependencies` through JSON.stringify/parse instead of the raw
-  // value, fails the key-set or deep-equality assertion above.
+  // MUTATION: adding an extra key to the draft object fails the key-set
+  // assertion above. Reconstructing `dependencies` via JSON.parse(JSON.
+  // stringify(capture.dependencies)) instead of assigning the raw reference
+  // would still pass the `toEqual`/`toContain` checks here (jsonb IS
+  // DISTINCT FROM in setup.sql's freeze() compares semantically, so a
+  // round-tripped-but-content-identical object is not a correctness bug) —
+  // but it WOULD fail the `toBe` reference-identity assertion above, which
+  // exists to catch an unnecessary clone/reconstruction, not a safety gap.
 });
 
 describe("C7 error mapping table (obligation 8)", () => {
@@ -186,7 +280,7 @@ describe("UTF-16 template/body boundaries propagate through the coordinator (obl
     const atLimit = astral.repeat(800); // 1600 units
     const overLimit = astral.repeat(801); // 1602 units
     const req = (t: string) => JSON.stringify({ idempotencyKey: id(4), targets: [{ kind: "unknown_sender_group", id: id(50) }], template: t });
-    const c1 = client([ok(freezeResult([excludedFreezeItem(50, "unsupported_target", "unknown_sender_group")]))]);
+    const c1 = client([ok(freezeResult([excludedFreezeItem(50, "unsupported_target", "unknown_sender_group")], { blockers: ["empty"] }))]);
     await expect(c1.repository.prepare(req(atLimit), signal())).resolves.toBeDefined();
     const c2 = client([]);
     await expect(c2.repository.prepare(req(overLimit), signal())).rejects.toMatchObject({ status: 400, code: "invalid_template" });
@@ -200,7 +294,7 @@ describe("UTF-16 template/body boundaries propagate through the coordinator (obl
     // real render throws invalid_body although the probe never did.
     const templateWithConditional = "{{#if first_name}}{{first_name}}{{/if}}　﻿";
     const capture = { items: [captureItem(5, { variables: { ...baseVars, first_name: null } })] };
-    const freeze = freezeResult([excludedFreezeItem(5, "invalid_body")]);
+    const freeze = freezeResult([excludedFreezeItem(5, "invalid_body")], { blockers: ["empty"] });
     const c = client([ok(capture), ok(freeze)]);
     const result = await c.repository.prepare(JSON.stringify({ idempotencyKey: id(4), targets: [target(5)], template: templateWithConditional }), signal());
     expect(result.items[0].exclusion).toBe("invalid_body");
@@ -224,19 +318,22 @@ describe("abort handling (obligation 11)", () => {
   it("never calls freeze once the signal aborts right after capture resolves", async () => {
     const capture = { items: [captureItem(5)] };
     const controller = new AbortController();
+    const captureAbortSignal = vi.fn(async () => {
+      const result = ok(capture);
+      controller.abort();
+      return result;
+    });
+    const freezeAbortSignal = vi.fn(async () => ok(freezeResult([])));
     const rpc = vi.fn((name: string) => ({
-      abortSignal: vi.fn(async () => {
-        if (name === "inbox_capture_reply_recipients") {
-          const result = ok(capture);
-          controller.abort();
-          return result;
-        }
-        return ok(freezeResult([]));
-      }),
+      abortSignal: name === "inbox_capture_reply_recipients" ? captureAbortSignal : freezeAbortSignal,
     }));
     const repository = createInboxReplyRepository({ rpc } as unknown as InboxReplyClient);
     await expect(repository.prepare(JSON.stringify(request()), controller.signal)).rejects.toThrow();
-    expect(rpc).toHaveBeenCalledTimes(1);
+    // The freeze mock itself — not just an inference from total call count —
+    // must never have been invoked.
+    expect(freezeAbortSignal).not.toHaveBeenCalled();
+    expect(captureAbortSignal).toHaveBeenCalledTimes(1);
+    expect(rpc).not.toHaveBeenCalledWith("inbox_freeze_reply_review", expect.anything());
   });
   // MUTATION: dropping the `signal.throwIfAborted()` call immediately after
   // the capture RPC resolves lets freeze run even though the caller aborted.

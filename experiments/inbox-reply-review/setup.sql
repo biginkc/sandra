@@ -72,7 +72,9 @@ BEGIN
  IF FOUND THEN
   IF existing.input_hash<>hash THEN RAISE EXCEPTION 'INBOX_REPLY_IDEMPOTENCY_MISMATCH';END IF;
   PERFORM inbox_action_api.authorize(o,u);
-  RETURN inbox_reply_review.view(existing);
+  -- B2: mark this a replay so the coordinator never compares the immutable
+  -- frozen items against a fresh render of a possibly-drifted dependency.
+  RETURN inbox_reply_review.view(existing)||jsonb_build_object('replayed',true);
  END IF;
  FOR target IN SELECT value FROM jsonb_array_elements(input->'targets') LOOP
   IF jsonb_typeof(target) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(target))<>2 OR NOT(target ?& ARRAY['kind','id']) OR target->>'kind' NOT IN ('conversation','unknown_sender_group') OR target->>'kind' IS NULL OR target->>'id' IS NULL THEN RAISE EXCEPTION 'Invalid reply target';END IF;
@@ -121,7 +123,7 @@ BEGIN
  -- drafts + template) for audit/debugging only; it is never read by the
  -- replay gate above, which compares input_hash (client intent) alone.
  INSERT INTO inbox_reply_review.preparations(id,org_id,requester_id,request_key,input_hash,canonical_input,items,expires_at) VALUES(gen_random_uuid(),o,u,k,hash,raw_input,items,expires) RETURNING * INTO prep;
- RETURN inbox_reply_review.view(prep);
+ RETURN inbox_reply_review.view(prep)||jsonb_build_object('replayed',false);
 END $$;
 REVOKE ALL ON ALL TABLES IN SCHEMA inbox_reply_review FROM PUBLIC,anon,authenticated,service_role;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_reply_review FROM PUBLIC,anon,authenticated,service_role;

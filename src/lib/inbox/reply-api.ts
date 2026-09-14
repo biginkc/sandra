@@ -6,7 +6,7 @@ import { InvalidInboxActionError } from "./action-definition";
 import { renderReviewedReply, ReplyTemplateError } from "./reply-template";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
-import { INBOX_REPLY_EXCLUSIONS, type InboxReplyExclusion, type InboxReplyTarget, type PreparedInboxReply, type PreparedInboxReplyItem } from "./reply-api-contract";
+import { INBOX_REPLY_EXCLUSIONS, INBOX_REPLY_RECIPIENT_LIMIT, type InboxReplyExclusion, type InboxReplyTarget, type PreparedInboxReply, type PreparedInboxReplyItem } from "./reply-api-contract";
 
 type ReplyDatabase = Omit<Database, "public"> & {
     public: Omit<Database["public"], "Functions"> & {
@@ -99,7 +99,14 @@ function draftFor(conversationId: string, template: string, capture: Record<stri
     }
 }
 
-function item(value: unknown, expectedBody: Map<string, string>): PreparedInboxReplyItem {
+function nonEmptyString(value: unknown): string { need(typeof value === "string" && value.length > 0); return value as string; }
+
+// B1-1: validation is TOTAL — every field below is checked, and any failure
+// (missing/malformed field, an impossible exclusion/recipient combination, a
+// non-conversation target claiming eligibility) is a fail-closed 503. There is
+// no partial-trust path: a forged or broken freeze response can never produce
+// a partially-valid DTO.
+function item(value: unknown, expectedBody: Map<string, string>, replayed: boolean): PreparedInboxReplyItem {
     const row = record(value);
     need(row.target !== null && typeof row.target === "object");
     const target = record(row.target);
@@ -107,13 +114,27 @@ function item(value: unknown, expectedBody: Map<string, string>): PreparedInboxR
     need(row.exclusion === null || (typeof row.exclusion === "string" && INBOX_REPLY_EXCLUSIONS.has(row.exclusion as InboxReplyExclusion)));
     const duplicateDestination = bool(row.duplicateDestination);
     if (row.exclusion !== null) {
-        need(row.recipient === null || row.recipient === undefined);
+        // recipient must be JSON null STRICTLY — view() always emits an
+        // explicit `null` for an excluded item's recipient, never omits the
+        // key, so `undefined` here is never legitimate.
+        need(row.recipient === null);
+        need(duplicateDestination === false);
         return { id: id(row.id), target: { kind: target.kind, id: target.id }, exclusion: row.exclusion as InboxReplyExclusion, recipient: null, duplicateDestination };
     }
+    // An eligible item (exclusion === null) can only ever be a "conversation"
+    // target: freeze() marks every non-conversation target 'unsupported_target'
+    // (setup.sql:95), so an eligible non-conversation item can only be a
+    // forged or broken response. Fail closed rather than special-case it.
+    need(target.kind === "conversation");
     const recipient = record(row.recipient);
     const renderedBody = recipient.renderedBody;
-    need(typeof renderedBody === "string");
-    if (target.kind === "conversation") {
+    need(typeof renderedBody === "string" && renderedBody.trim().length > 0 && renderedBody.length <= 1600);
+    // Fresh-render body equality (B2) applies only when this is NOT a replay
+    // of an already-frozen preparation. On replay we trust the immutable row
+    // structurally (every other check in this function still applies) but
+    // never compare it against a fresh render, which is discarded before it
+    // ever reaches here — see prepare() below.
+    if (!replayed) {
         const expected = expectedBody.get(target.id);
         need(expected !== undefined && expected === renderedBody);
     }
@@ -122,7 +143,7 @@ function item(value: unknown, expectedBody: Map<string, string>): PreparedInboxR
         target: { kind: target.kind, id: target.id },
         exclusion: null,
         recipient: {
-            contactName: (() => { need(typeof recipient.contactName === "string"); return recipient.contactName; })(),
+            contactName: nonEmptyString(recipient.contactName),
             propertyAddress: (() => { need(typeof recipient.propertyAddress === "string"); return recipient.propertyAddress; })(),
             propertyId: id(recipient.propertyId),
             contactId: id(recipient.contactId),
@@ -208,12 +229,19 @@ export function createInboxReplyRepository(client: InboxReplyClient) {
             signal.throwIfAborted();
             failure(freezeResult.error);
             const row = record(freezeResult.data);
+            // B1-1: the idempotencyKey the server echoes back must match what
+            // this request actually sent — never trusted implicitly.
+            need(typeof row.idempotencyKey === "string" && row.idempotencyKey === parsed.idempotencyKey);
+            // B2: freeze() tells us whether this is a fresh freeze or a replay
+            // of an already-immutable row. Fresh-render body equality (below,
+            // via item()) applies ONLY to a fresh freeze.
+            const replayed = bool(row.replayed);
             need(Array.isArray(row.items));
             need(row.items.length === parsed.targets.length);
             const seenTargets = new Set<string>();
             const seenIds = new Set<string>();
             const items = row.items.map((raw: unknown) => {
-                const decoded = item(raw, renderedBodyByConversation);
+                const decoded = item(raw, renderedBodyByConversation, replayed);
                 const key = `${decoded.target.kind}:${decoded.target.id}`;
                 need(!seenTargets.has(key));
                 seenTargets.add(key);
@@ -227,8 +255,26 @@ export function createInboxReplyRepository(client: InboxReplyClient) {
             const distinctDestinations = new Set(eligible.map(i => i.recipient?.to));
             const recipientCount = count(row.recipientCount, 500);
             need(recipientCount === distinctDestinations.size);
+            // Cross-item duplicateDestination invariants: an eligible item's
+            // duplicateDestination is true iff >=2 eligible items share its
+            // `to`, and the eligible/distinct-count relationship holds exactly
+            // (equal count iff nothing is flagged duplicate).
+            const destinationCounts = new Map<string, number>();
+            for (const i of eligible) destinationCounts.set(i.recipient!.to, (destinationCounts.get(i.recipient!.to) ?? 0) + 1);
+            let anyDuplicate = false;
+            for (const i of eligible) {
+                const isDuplicate = (destinationCounts.get(i.recipient!.to) ?? 0) >= 2;
+                need(i.duplicateDestination === isDuplicate);
+                if (isDuplicate) anyDuplicate = true;
+            }
+            need(eligible.length >= recipientCount);
+            need(anyDuplicate ? eligible.length > recipientCount : eligible.length === recipientCount);
             need(Array.isArray(row.blockers) && row.blockers.every((b: unknown) => b === "empty" || b === "recipient_limit" || b === "duplicate_destination"));
             const blockers = row.blockers as readonly ("empty" | "recipient_limit" | "duplicate_destination")[];
+            need(new Set(blockers).size === blockers.length);
+            need(blockers.includes("empty") === (recipientCount === 0));
+            need(blockers.includes("recipient_limit") === (recipientCount > INBOX_REPLY_RECIPIENT_LIMIT));
+            need(blockers.includes("duplicate_destination") === anyDuplicate);
             return {
                 preparationId: id(row.preparationId),
                 idempotencyKey: parsed.idempotencyKey,
