@@ -13,7 +13,11 @@ export interface DurableInboxScope {
  * getAccess must revalidate current session revocation as well as membership.
  * Every method must honor signal and fail if its authorization/storage check is unavailable.
  */
+export interface AuthorizedInboxScope { session: InboxSession; access: InboxAccess; scope: DurableInboxScope; proof: unknown }
 export interface InboxSyncRepository {
+  /** Optional atomic pair; production adapter uses verified JWT authority, never cached actor input. */
+  loadAuthorizedScope?(id: string, signal: AbortSignal): Promise<AuthorizedInboxScope | null>;
+  finalizeAuthorizedScope?(expected: AuthorizedInboxScope, partition: number, expectedHandle: string | null, nextHandle: string | null, signal: AbortSignal): Promise<AuthorizedInboxScope | { conflict: true } | null>;
   authenticate(request: Request, signal: AbortSignal): Promise<InboxSession | null>;
   /** Resolve global active membership count with current expiration/deletion/status semantics.
    * Exactly one active org must exist and equal orgId; unknown epoch or ambiguous membership denies.
@@ -86,28 +90,33 @@ export function createInboxSyncGateway(options: InboxGatewayOptions) {
     const guard=()=>{if(signal.aborted||now()>=started+15_000)throw new Denied(503);};
     try {
       if(request.method!=="GET"||!uuid.test(scopeId))throw new Denied(400);
-      const authenticated=await repository.authenticate(request,signal);guard();
+      const atomic=!!repository.loadAuthorizedScope && !!repository.finalizeAuthorizedScope;
+      if(!!repository.loadAuthorizedScope!==!!repository.finalizeAuthorizedScope)throw new Denied(503);
+      const initial=atomic?await repository.loadAuthorizedScope!(scopeId,signal):null;guard();
+      if(atomic&&!initial)throw new Denied(403);
+      const authenticated=atomic?initial?.session:await repository.authenticate(request,signal);guard();
       const session=authenticated?{...authenticated}:null;
       if(!session||!uuid.test(session.userId)||!session.sessionId||!Number.isFinite(session.expiresAt)||session.expiresAt<=now())throw new Denied(401);
-      const stored=await repository.getScope(scopeId,signal);guard();
+      const stored=atomic?initial?.scope:await repository.getScope(scopeId,signal);guard();
       const scope=stored ? {...stored,handles:Array.isArray(stored.handles)?[...stored.handles]:stored.handles,targets:Array.isArray(stored.targets)?stored.targets.map(target=>({...target})):stored.targets} : null;
       if(!scope||scope.id!==scopeId||!uuid.test(scope.orgId)||scope.userId!==session.userId||scope.sessionId!==session.sessionId)throw new Denied(403);
       if(!scope.generation||!scope.accessEpoch||!Number.isFinite(scope.expiresAt)||scope.expiresAt<=now() || (scope.createdAt!==undefined && (!Number.isFinite(scope.createdAt) || scope.expiresAt<scope.createdAt || scope.expiresAt-scope.createdAt>900000)))throw new Denied(410);
       if(!validTargets(scope.targets) || !Array.isArray(scope.handles) || scope.handles.length !== Math.max(1,Math.ceil(scope.targets.length/100)) || scope.handles.some(handle=>handle!==null && (typeof handle!=="string" || handle.length>256)))throw new Denied(503);
       // Copy repository-owned membership so an adapter cannot mutate the predicate during awaits.
       const targets=scope.targets.map(target=>({...target}));
-      const authorize=async()=> {
+      const authorize=async(snapshot?:AuthorizedInboxScope)=> {
         guard();
-        const currentScope=await repository.getScope(scope.id,signal);guard();
+        const currentScope=snapshot?snapshot.scope:await repository.getScope(scope.id,signal);guard();
         if(!currentScope || ["id","orgId","userId","sessionId","accessEpoch","generation","expiresAt","createdAt"].some(key=>currentScope[key as keyof DurableInboxScope]!==scope[key as keyof DurableInboxScope]) || JSON.stringify(currentScope.targets)!==JSON.stringify(targets))throw new Denied(403);
         if(session.expiresAt<=now())throw new Denied(401);
         if(scope.expiresAt<=now())throw new Denied(410);
-        const access=await repository.getAccess(session,scope.orgId,signal);guard();
+        if(snapshot && (snapshot.session.userId!==session.userId || snapshot.session.sessionId!==session.sessionId || snapshot.session.expiresAt<=now()))throw new Denied(401);
+        const access=snapshot?snapshot.access:await repository.getAccess(session,scope.orgId,signal);guard();
         if(!access||!access.sessionActive||access.activeMembershipCount!==1||access.status!=="active"||access.deletionPrepared||access.epoch!==scope.accessEpoch||
           (access.expiresAt!==null&&(!Number.isFinite(access.expiresAt)||access.expiresAt<=now())))throw new Denied(403);
         return Math.min(started+15000,session.expiresAt,scope.expiresAt,access.expiresAt??Infinity);
       };
-      const deadline=await authorize();
+      let deadline=await authorize(initial??undefined);
       clearTimeout(timer);timer=setTimeout(()=>leaseController.abort(),Math.max(0,deadline-now()));
       const url=new URL(request.url), allowed=new Set(["offset","handle","live","cursor","log","partition"]);
       for(const key of url.searchParams.keys())if(!allowed.has(key)||url.searchParams.getAll(key).length!==1)throw new Denied(400);
@@ -140,11 +149,19 @@ export function createInboxSyncGateway(options: InboxGatewayOptions) {
       const upstreamResponse=await (options.fetch??fetch)(upstream,{signal,headers:options.upstreamHeaders,redirect:"error",cache:"no-store"});
       reader=upstreamResponse.body?.getReader();const chunks:Uint8Array[]=[];let bytes=0;
       if(reader)for(;;) {guard();if(now()>=deadline)throw new Denied(403);const part=await reader.read();if(part.done)break;bytes+=part.value.byteLength;if(bytes>maxBytes)throw new Denied(413);chunks.push(part.value);}
-      await authorize();if(now()>=deadline)throw new Denied(403);
       const next=upstreamResponse.headers.get("electric-handle");
+      if(next && next.length>256)throw new Denied(503);
+      if(atomic) {
+        const finalized=await repository.finalizeAuthorizedScope!(initial!,partition,expectedHandle,next,signal);guard();
+        if(!finalized)throw new Denied(403);
+        if("conflict" in finalized)throw new Denied(409);
+        deadline=Math.min(deadline,await authorize(finalized));if(now()>=deadline)throw new Denied(403);
+      } else {
+      await authorize();if(now()>=deadline)throw new Denied(403);
       if(next) {
         if(next.length>256||!await repository.bindHandle(scope,partition,expectedHandle,next,signal))throw new Denied(409);
         await authorize();if(now()>=deadline)throw new Denied(403);
+      }
       }
       // Never forward arbitrary upstream headers or diagnostic/error bodies.
       if(!upstreamResponse.ok&&upstreamResponse.status!==409)throw new Denied(503);

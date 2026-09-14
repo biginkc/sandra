@@ -60,3 +60,10 @@ describe("cookie client durable Inbox RPC repository", () => {
     }
   });
 });
+it("preserves exact SQL timestamp precision in atomic finalization proof",async()=>{
+  const precise={...record,created_at:"2029-12-31T23:45:00.000123Z",expires_at:"2030-01-01T00:00:00.000123Z"};
+  const rpc=vi.fn(()=>({abortSignal:()=>Promise.resolve({data:{authority,scope:precise},error:null})}));
+  const repo=createSupabaseInboxRepository({rpc} as unknown as InboxRpcClient),signal=new AbortController().signal;
+  const snapshot=await repo.loadAuthorizedScope!(id,signal);expect(snapshot).not.toBeNull();await repo.finalizeAuthorizedScope!(snapshot!,0,null,"handle",signal);
+  expect(rpc.mock.calls).toEqual([["inbox_sync_snapshot_v1",{scope_id:id}],["inbox_sync_finalize_v1",{scope_id:id,expected_scope:precise,partition_index:0,expected_handle:null,next_handle:"handle"}]]);
+});

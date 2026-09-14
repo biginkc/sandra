@@ -20,6 +20,7 @@ describe("sync deployment boundary", () => {
     vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); vi.stubEnv("INBOX_ELECTRIC_SHAPE_URL", "http://127.0.0.1:58783/v1/shape"); vi.stubEnv("INBOX_ELECTRIC_PROJECTION_TABLE", "inbox_t2_bridge.summary_rows");
     mocks.rpc.mockReturnValue({ abortSignal: () => Promise.resolve({ data: null, error: { code: "PGRST202", message: "private" } }) });
     const result = await GET(request(), params()); expect(result.status).toBe(503); expect(await result.text()).not.toContain("private");
-    expect(mocks.rpc).toHaveBeenCalledWith("inbox_authorize_sync", { org_id: null });
+    expect(mocks.rpc).toHaveBeenCalledWith("inbox_sync_snapshot_v1", { scope_id: id });
+    expect(mocks.rpc).toHaveBeenCalledTimes(1);
   });
 });
