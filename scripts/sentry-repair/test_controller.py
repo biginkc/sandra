@@ -29,6 +29,7 @@ from dispatch import (  # noqa: E402
     _review_record,
     SubprocessExecutor,
 )
+from github import github_dry_run  # noqa: E402
 from cli import parser as cli_parser  # noqa: E402
 from prompts import build_investigation_prompt, build_review_prompt  # noqa: E402
 from schedule import CHICAGO, cadence_minutes, due_slot, iter_slots, slot_identity  # noqa: E402
@@ -411,6 +412,38 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("project=sandra", url)
         self.assertIn("environment=vercel-production", url)
         self.assertNotIn("/api/0/projects/", url)
+
+    def test_github_dry_run_is_sanitized_and_non_mutating(self):
+        self.store.ingest_issues(
+            "bmh-group", "sandra", "vercel-production",
+            [IssueInput(501, title="customer@example.com should never reach GitHub", release="release-1", payload={
+                "count": "12", "userCount": "2", "culprit": "private-value",
+                "tags": [
+                    {"key": "surface", "value": "cron_sweep"},
+                    {"key": "email", "value": "customer@example.com"},
+                ],
+            })],
+            cursor=None,
+        )
+        before = self.store.db.execute("SELECT COUNT(*) FROM github_links").fetchone()[0]
+        report = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 501)
+        after = self.store.db.execute("SELECT COUNT(*) FROM github_links").fetchone()[0]
+        self.assertEqual(report.action, "would_create")
+        self.assertEqual(before, after)
+        self.assertIn("issue_id=501", report.body)
+        self.assertIn("surface=cron_sweep", report.body)
+        self.assertNotIn("customer@example.com", report.body)
+        self.assertNotIn("private-value", report.body)
+
+    def test_github_dry_run_suppresses_only_explicit_controlled_canary(self):
+        self.store.ingest_issues(
+            "bmh-group", "sandra", "vercel-production",
+            [IssueInput(502, payload={"tags": [{"key": "kind", "value": "controlled"}]})],
+            cursor=None,
+        )
+        report = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 502)
+        self.assertEqual(report.action, "suppress")
+        self.assertIn("controlled canary", report.reason)
 
     def test_sentry_success_commits_terminal_cursor(self):
         client = PagingClient([

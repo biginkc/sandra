@@ -248,6 +248,26 @@ class RepairStore:
                 created_at REAL NOT NULL,
                 sent_at REAL
             );
+            CREATE TABLE IF NOT EXISTS github_links (
+                organization TEXT NOT NULL,
+                project TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                issue_number INTEGER NOT NULL,
+                generation INTEGER NOT NULL,
+                repository TEXT NOT NULL,
+                github_issue_number INTEGER,
+                node_id TEXT,
+                html_url TEXT,
+                marker_version INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL CHECK(status IN (
+                    'pending_create','create_unknown','created','readback_failed','closed_pending_sentry_verification'
+                )),
+                last_error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (organization,project,environment,issue_number,generation),
+                UNIQUE(repository, github_issue_number)
+            );
             CREATE TABLE IF NOT EXISTS scheduler_slots (
                 slot_id TEXT PRIMARY KEY,
                 scheduled_at REAL NOT NULL,
@@ -482,6 +502,20 @@ class RepairStore:
         if not isinstance(issue_number, int) or isinstance(issue_number, bool) or issue_number <= 0:
             raise ValueError("issue_number must be a positive numeric Sentry issue id")
         return organization, project, environment, issue_number
+
+    def get_github_link(
+        self, organization: str, project: str, environment: str, issue_number: int
+    ) -> sqlite3.Row | None:
+        """Return the current-generation GitHub link without changing state."""
+
+        self._issue_key(organization, project, environment, issue_number)
+        return self.db.execute(
+            """SELECT links.* FROM github_links AS links
+               JOIN issues USING (organization,project,environment,issue_number)
+               WHERE links.organization=? AND links.project=? AND links.environment=?
+                 AND links.issue_number=? AND links.generation=issues.generation""",
+            (organization, project, environment, issue_number),
+        ).fetchone()
 
     def get_cursor(self, organization: str, project: str, environment: str) -> str | None:
         row = self.db.execute(
