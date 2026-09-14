@@ -1,0 +1,13 @@
+{
+  "source_sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+  "runner_sha256": "2fb5d56b6f64040889b6b50afe31bdb421a75874a1b0758ba9b010547c99f5c6",
+  "checks": [
+    "property_market: observed database lock wait; returned committed current value and revision",
+    "sender_inventory: observed database lock wait; returned committed current value and revision"
+  ],
+  "owned_org_id": "04e33f22-868f-4026-b64d-2aee1ca8d0a3",
+  "cleanup": "New schema and its canonical triggers removed. Small uniquely marked synthetic source rows retained in owned fixture.",
+  "limitations": [
+    "Owned PostgreSQL proof only; no production activation or provider sends"
+  ]
+}
