@@ -1000,6 +1000,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
             muted={muted}
             held={held}
             holdPending={holdPending}
+            endingCall={endingCall}
             onDigit={sendLiveDigit}
             onMute={() => { void toggleMute(); }}
             onHold={() => { void toggleHold(); }}

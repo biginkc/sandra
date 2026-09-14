@@ -1295,6 +1295,48 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument();
   });
 
+  it("shows pending feedback and ignores duplicate hangup clicks in the full-screen coach view", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+    let resolveHangup!: (result: { durationSeconds: number; outcome: "connected_human" }) => void;
+    const hangup = vi.fn(() => new Promise<{ durationSeconds: number; outcome: "connected_human" }>((resolve) => {
+      resolveHangup = resolve;
+    }));
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "connecting" | "live" | "ended") => void) | null = null;
+      return {
+        onStateChange: vi.fn((cb) => { listener = cb; }),
+        start: vi.fn(async () => {
+          listener?.("connecting");
+          listener?.("live");
+          return { id: "deferred-coach-session" };
+        }),
+        mute: vi.fn(),
+        hold: vi.fn(async () => true),
+        sendDigit: vi.fn(async () => true),
+        hangup,
+      };
+    });
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={COACH_LEAD} />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+
+    await user.click(screen.getByTestId("coach-hangup"));
+    expect(screen.getByTestId("coach-hangup")).toBeDisabled();
+    expect(screen.getByTestId("coach-hangup")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByTestId("coach-hangup")).toHaveTextContent("Ending call…");
+    await user.click(screen.getByTestId("coach-hangup"));
+    expect(hangup).toHaveBeenCalledTimes(1);
+
+    act(() => resolveHangup({ durationSeconds: 2, outcome: "connected_human" }));
+    await waitFor(() => expect(screen.getByTestId("dispo-notes")).toBeInTheDocument());
+  });
+
   it("keeps the prepared homeowner and address in the script when live context loading fails", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
