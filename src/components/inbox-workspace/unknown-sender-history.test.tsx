@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { UnknownSenderHistory, type UnknownSenderHistoryProps } from "./unknown-sender-history";
 const org = "11111111-1111-1111-1111-111111111111", group = "22222222-2222-2222-2222-222222222222";
 function props(): UnknownSenderHistoryProps {
-  return { orgId: org, senderGroupId: group, requestGeneration: 1, visible: true, onRefresh: vi.fn(), onAccessLost: vi.fn(), fetch: vi.fn<typeof fetch>(),
+  return { orgId: org, senderGroupId: group, requestGeneration: 1, visible: true, onRefresh: vi.fn(), onAccessLost: vi.fn(), onUnavailable: vi.fn(), fetch: vi.fn<typeof fetch>(),
     snapshot: { requestGeneration: 1, data: { requesterId: org, orgId: org, senderGroupId: group, rawSender: "+1 raw", expiresAt: "2030-01-01T00:00:00Z", nextCursor: org,
       history: [{ id: org, createdAtRaw: "2026-09-13T12:00:00Z", body: "Latest sender message", direction: "inbound", dismissedAtRaw: null }] } } };
 }
@@ -29,11 +29,11 @@ it("clears the pane on access denial and rejects foreign page identity", async (
   fireEvent.click(screen.getByText("Load older messages")); await waitFor(() => expect(p.onAccessLost).toHaveBeenCalledOnce());
   expect(screen.queryByText("Latest sender message")).not.toBeInTheDocument();
 });
-it("clears the pane on a 404 org-access denial from an older-page load", async () => {
+it("signals a benign item-scoped 404 as onUnavailable, not a workspace-wide access loss", async () => {
   const p = props(); p.fetch = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 404 }));
   render(<UnknownSenderHistory {...p} />); fireEvent.click(screen.getByText("Load older messages"));
-  await waitFor(() => expect(p.onAccessLost).toHaveBeenCalledOnce());
-  expect(screen.queryByText("Latest sender message")).not.toBeInTheDocument();
+  await waitFor(() => expect(p.onUnavailable).toHaveBeenCalledExactlyOnceWith(group));
+  expect(p.onAccessLost).not.toHaveBeenCalled();
 });
 it("ignores a late older page after navigation", async () => {
   const p = props(); let resolve!: (response: Response) => void;

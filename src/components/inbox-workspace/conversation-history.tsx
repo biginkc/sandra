@@ -20,7 +20,7 @@ export interface ConversationHistoryProps {
   onUnavailable: (conversationId: string) => void;
   fetch?: typeof fetch;
 }
-type ReadState = { boundary: string; status: "pending" | "complete" | "error" | "expired" | "permission_lost" };
+type ReadState = { boundary: string; status: "pending" | "complete" | "error" | "expired" | "permission_lost" | "unavailable" };
 
 /** Mount only inside the opened detail pane. Prefetch belongs to the Query cache,
  * not this rendered component. SQL receipts make Strict Mode/retry replay safe.
@@ -65,7 +65,7 @@ export function ConversationHistory(props: ConversationHistoryProps) {
       // just this pane instead of latching the entire workspace as access-denied.
       if (response.status === 404) {
         if (progress.current?.boundary === boundary) progress.current.revoked = true;
-        setReadState({ boundary, status: "error" }); controller.abort(); readRequest.current?.abort(); onUnavailable(conversationId); return;
+        setReadState({ boundary, status: "unavailable" }); controller.abort(); readRequest.current?.abort(); onUnavailable(conversationId); return;
       }
       if (response.status === 410) throw Error("Refresh messages to continue through older history.");
       if (!response.ok) throw Error("Older messages could not load. Try again.");
@@ -127,7 +127,7 @@ export function ConversationHistory(props: ConversationHistoryProps) {
               if (response.status === 404) {
                 current.revoked = true;
                 pagingRequest.current?.abort();
-                setReadState({ boundary, status: "error" });
+                setReadState({ boundary, status: "unavailable" });
                 controller.abort();
                 onUnavailable(conversationId);
                 return;
@@ -173,6 +173,7 @@ export function ConversationHistory(props: ConversationHistoryProps) {
       {status === "pending" && "Updating read status…"}
       {status === "error" && <><span>Read status could not finish updating. </span><button type="button" className="underline" onClick={() => setRetry(value => value + 1)}>Retry</button></>}
       {status === "expired" && <><span>Refresh this conversation to update its read status. </span><button type="button" className="underline" onClick={props.onRefresh}>Refresh messages</button></>}
+      {status === "unavailable" && <span>This conversation is no longer available.</span>}
     </div>
   </section>;
 }

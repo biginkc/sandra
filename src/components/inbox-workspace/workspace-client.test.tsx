@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InboxWorkspaceClient } from "./workspace-client";
 import { workspaceId } from "./selection";
 import type { WorkspaceRow } from "./inbox-workspace";
-const state = vi.hoisted(() => ({ callbacks: null as null | { onChange: (value: unknown) => void; onAccessBoundary: () => void; onInvalidated: (ids: readonly string[]) => void }, replacements: [] as unknown[], deny: false, itemUnavailable: false }));
+const state = vi.hoisted(() => ({ callbacks: null as null | { onChange: (value: unknown) => void; onAccessBoundary: () => void; onInvalidated: (ids: readonly string[]) => void }, replacements: [] as unknown[], deny: false, itemUnavailable: false, detailUnavailable: false }));
 vi.mock("@/lib/inbox/workspace-sync", () => ({ createWorkspaceSync: (callbacks: typeof state.callbacks) => {
   state.callbacks = callbacks;
   return { replace: (value: unknown) => { state.replacements.push(value); }, reset: () => callbacks?.onChange({ state: "resync_required", rows: [] }), revoke: () => callbacks?.onChange({ state: "permission_lost", rows: [] }) };
@@ -17,10 +17,10 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ x: 0, y: 0, left: 0, top: 0, width: 900, height: 600, right: 900, bottom: 600, toJSON: () => ({}) }));
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 600 });
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 900 });
-  calls = []; state.replacements = []; state.deny = false; state.itemUnavailable = false;
+  calls = []; state.replacements = []; state.deny = false; state.itemUnavailable = false; state.detailUnavailable = false;
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     calls.push(url);
-    if (url.includes("/detail")) return Response.json({ orgId, requesterId: userId, conversationId, history: [{ id: "message", direction: "inbound", body: "Hello from history", createdAtRaw: new Date().toISOString(), readAtRaw: null, inboundRevision: "1" }], readBoundary: "boundary", boundaryExpiresAt: new Date(Date.now() + 60000).toISOString(), captureGeneration: "capture", headRevision: "1" });
+    if (url.includes("/detail")) return state.detailUnavailable ? Response.json({}, { status: 404 }) : Response.json({ orgId, requesterId: userId, conversationId, history: [{ id: "message", direction: "inbound", body: "Hello from history", createdAtRaw: new Date().toISOString(), readAtRaw: null, inboundRevision: "1" }], readBoundary: "boundary", boundaryExpiresAt: new Date(Date.now() + 60000).toISOString(), captureGeneration: "capture", headRevision: "1" });
     if (url.includes("/counts")) return Response.json({ accessEpoch: "1", asOf: new Date().toISOString(), counts: { all: 1000, unread: 10 } });
     if (url.includes("read-acknowledgments")) return state.itemUnavailable ? Response.json({}, { status: 404 }) : Response.json({ boundaryId: "boundary", batch: 0, changed: 1, completed: true });
     if (state.deny) return Response.json({}, { status: 403 });
@@ -90,6 +90,15 @@ it("closes and invalidates just this conversation on a benign item-scoped 404, w
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(screen.queryByText(/Your access has changed/)).not.toBeInTheDocument();
   expect(screen.queryByRole("checkbox", { name: "Select Ada" })).not.toBeInTheDocument();
+});
+it("removes a row on a benign 404 from the INITIAL detail load, instead of a generic pane error", async () => {
+  await loaded();
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select Ada" }));
+  state.detailUnavailable = true;
+  fireEvent.click(screen.getByRole("button", { name: "Open Ada" }));
+  await waitFor(() => expect(screen.queryByRole("checkbox", { name: "Select Ada" })).not.toBeInTheDocument());
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Your access has changed/)).not.toBeInTheDocument();
 });
 it("removes an authoritative tombstone from selection, detail and its revisit cache", async () => {
   await loaded();

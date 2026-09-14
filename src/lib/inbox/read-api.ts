@@ -34,8 +34,10 @@ function fail(error: { code?: string; message?: string } | null): void {
   if (error.code === "42501" && ["INBOX_AUTH_REQUIRED", "INBOX_SESSION_EXPIRED", "INBOX_SESSION_REVOKED"].includes(message ?? "")) throw new InboxReadError(401);
   // Org/membership-scoped denials are access-loss (whole workspace latches permission_lost);
   // item-scoped "not found" denials are benign for a single conversation and must not be
-  // conflated with them — see http-error.ts:11-12 for the same 401/403 split.
-  if (error.code === "42501" && ["INBOX_ORG_DENIED", "INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", "INBOX_ACCESS_BASELINE_MISSING"].includes(message ?? "")) throw new InboxReadError(403);
+  // conflated with them — matches the same 401/403 split in http-error.ts:11-12 once
+  // INBOX_ACCESS_BASELINE_MISSING (a provisioning/backfill gap for an authorized user,
+  // not a denial) is excluded and left to fall through to 503 below, same as list/counts.
+  if (error.code === "42501" && ["INBOX_ORG_DENIED", "INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING"].includes(message ?? "")) throw new InboxReadError(403);
   if (error.code === "42501" && ["INBOX_READ_NOT_FOUND", "INBOX_ACCESS_DENIED"].includes(message ?? "")) throw new InboxReadError(404);
   if (error.code === "55000" && message === "INBOX_READ_EXPIRED") throw new InboxReadError(410);
   if (error.code === "55000" && ["INBOX_READ_BATCH_CONFLICT", "INBOX_READ_COVERAGE_CHANGED"].includes(message ?? "")) throw new InboxReadError(409);

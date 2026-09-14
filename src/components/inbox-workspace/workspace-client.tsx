@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { InboxWorkspace, type WorkspaceRow } from "./inbox-workspace";
-import { workspaceId, type WorkspaceId } from "./selection";
+import { workspaceId, type WorkspaceId, type WorkspaceTarget } from "./selection";
 import { createWorkspaceSync, type SyncSnapshot, type WorkspaceScope } from "@/lib/inbox/workspace-sync";
 import { createInboxQueryCache, type InboxQueryIdentity } from "@/lib/inbox/workspace-query";
 import { inboxViews, type InboxFilter, type InboxCounts } from "@/lib/inbox/filter-contract";
@@ -42,17 +42,27 @@ export function InboxWorkspaceClient({ identity, initialFilter }: { identity: In
     setSelectionNames(new Map()); setSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setReview(false);
     sync.current?.revoke(); setSnapshot({ state: "permission_lost", rows: [] }); setBusy(false);
   }, [cache]);
-  /** A single item-scoped denial (404): only this conversation is affected. Invalidate
-   * its cached detail and close its pane if it is the one currently open — do not
-   * touch the rest of the workspace or latch permission_lost. */
-  const unavailable = useCallback((id: WorkspaceId) => {
+  /** A single item-scoped denial (404): only this target is affected. Invalidate its
+   * cached detail and close its pane if it is the one currently open — do not touch
+   * the rest of the workspace or latch permission_lost. Stable across renders (a
+   * child effect keys off this reference — see conversation-history.tsx). */
+  const invalidateTarget = useCallback((target: WorkspaceTarget) => {
+    const id = workspaceId(target);
     cache.invalidate("detail", id);
     setInvalidatedIds(previous => (previous.includes(id) ? previous : [...previous, id]));
     if (activeOpen.current === id) { sequence.current++; activeOpen.current = null; setOpened(null); }
   }, [cache]);
-  async function json<T>(url: string, init: RequestInit, signal: AbortSignal): Promise<T> {
+  const unavailable = useCallback((conversationId: string) =>
+    invalidateTarget({ kind: "conversation", orgId: identity.orgId, conversationId }), [invalidateTarget, identity.orgId]);
+  const unavailableSenderGroup = useCallback((senderGroupId: string) =>
+    invalidateTarget({ kind: "unknown_sender_group", orgId: identity.orgId, senderGroupId }), [invalidateTarget, identity.orgId]);
+  async function json<T>(url: string, init: RequestInit, signal: AbortSignal, notFound?: () => void): Promise<T> {
     const response = await fetch(url, { ...init, signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]), credentials: "same-origin", cache: "no-store", redirect: "error" });
     if (response.status === 401 || response.status === 403) { accessLost(); throw Error("Your access has changed. Reload the workspace."); }
+    // A 404 here is item-scoped (see read-api.ts's fail()): only the caller-identified
+    // target is unavailable, not the whole workspace. Only routes that resolve a single
+    // item pass notFound; worksets/counts have no such case and fall through as before.
+    if (response.status === 404 && notFound) { notFound(); throw new DOMException("This item is unavailable.", "AbortError"); }
     if (!response.ok) throw Error(response.status === 429 ? "Please wait before refreshing this view." : "The request could not be completed. Try again.");
     const value = await response.json(); signal.throwIfAborted();
     if (denied.current) throw new DOMException("Access ended", "AbortError");
@@ -126,9 +136,13 @@ export function InboxWorkspaceClient({ identity, initialFilter }: { identity: In
     if (!Array.isArray(parts) || parts[0] !== identity.orgId || parts[1] !== "conversation") {
       setOpened({ id, generation, row, error: "Unknown sender details are not connected to this preview yet." }); return;
     }
+    const conversationId = parts[2] as string;
     try {
-      const value = await cache.read<InboxDetailSnapshot>("detail", id, signal => json(`/api/inbox/conversations/${parts[2]}/detail?orgId=${identity.orgId}`, {}, signal), fresh);
-      if (value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.conversationId !== parts[2] || !Array.isArray(value.history) || value.history.length > 50) throw Error("Conversation response did not match the request.");
+      // A 404 here means this conversation became item-inaccessible between workset
+      // capture and Open (dismissed, purged cursor, etc.) — remove it from the row/
+      // selection via unavailable() instead of leaving a generic error under a stale row.
+      const value = await cache.read<InboxDetailSnapshot>("detail", id, signal => json(`/api/inbox/conversations/${conversationId}/detail?orgId=${identity.orgId}`, {}, signal, () => unavailable(conversationId)), fresh);
+      if (value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.conversationId !== conversationId || !Array.isArray(value.history) || value.history.length > 50) throw Error("Conversation response did not match the request.");
       if (sequence.current === generation && !denied.current) setOpened({ id, generation, row, data: value });
     } catch (failure) { if (sequence.current === generation && !denied.current) setOpened({ id, generation, row, error: failure instanceof Error ? failure.message : "Conversation unavailable." }); }
   }
@@ -143,7 +157,7 @@ export function InboxWorkspaceClient({ identity, initialFilter }: { identity: In
         <label><input type="checkbox" checked={filter.hide_noise ?? true} disabled={busy} onChange={event => void load({ ...filter, hide_noise: event.target.checked })} /> Hide DNC and test conversations</label>
         <span role="status">{counts ? `${counts.counts[filter.view === "active" ? "all" : filter.view]} matching · counted ${new Date(counts.asOf).toLocaleTimeString()}` : countsError ? "Counts unavailable" : "Loading counts…"}</span>{countsError && <button type="button" onClick={() => void loadCounts(filter, true)}>Retry counts</button>}</>}
       pageControl={<><span>{snapshot.rows.length} loaded</span><button disabled={busy} onClick={() => void load(filter)}>Refresh view</button><button disabled={busy || !nextCursor} onClick={() => void load(filter, nextCursor)}>Next 500</button></>}
-      detail={opened ? { targetId: opened.id, title: opened.row?.name ?? "Conversation", context: opened.row?.context, state: opened.error ? "error" : opened.data ? "ready" : "loading", error: opened.error, onRetry: () => void open(opened.id, true), content: opened.data ? <ConversationHistory orgId={identity.orgId} conversationId={opened.data.conversationId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.data }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={() => unavailable(opened.id)} /> : undefined } : undefined}
+      detail={opened ? { targetId: opened.id, title: opened.row?.name ?? "Conversation", context: opened.row?.context, state: opened.error ? "error" : opened.data ? "ready" : "loading", error: opened.error, onRetry: () => void open(opened.id, true), content: opened.data ? <ConversationHistory orgId={identity.orgId} conversationId={opened.data.conversationId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.data }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={unavailable} /> : undefined } : undefined}
       activity={<p>Bulk actions and remaining individual tools are being connected.</p>} />
     <Dialog open={review} onOpenChange={setReview}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>{selected.length} selected conversations</DialogTitle><DialogDescription>Remove any conversations that do not belong in this group, including those outside the current view.</DialogDescription><ul>{selected.map(id => <li className="flex items-center justify-between gap-4 py-2" key={id}>{selectionNames.get(id)}<button onClick={() => select(selected.filter(value => value !== id))}>Remove</button></li>)}</ul></DialogContent></Dialog>
   </QueryClientProvider>;

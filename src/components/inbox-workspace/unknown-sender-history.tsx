@@ -5,11 +5,16 @@ export type UnknownSenderHistorySnapshot = Awaited<ReturnType<ReturnType<typeof 
 export interface UnknownSenderHistoryProps {
   orgId: string; senderGroupId: string; requestGeneration: number; visible: boolean;
   snapshot: { requestGeneration: number; data: UnknownSenderHistorySnapshot } | null;
-  onAccessLost: () => void; onRefresh: () => void; fetch?: typeof fetch;
+  /** Org/membership-scoped denial (401/403): the whole workspace has lost access. */
+  onAccessLost: () => void;
+  /** A single item-scoped 404 (this sender group only, or the server flag off):
+   * invalidate and remove just this group, not the whole workspace. */
+  onUnavailable: (senderGroupId: string) => void;
+  onRefresh: () => void; fetch?: typeof fetch;
 }
 /** Read-only raw sender history. Opening it never acknowledges a conversation. */
 export function UnknownSenderHistory(props: UnknownSenderHistoryProps) {
-  const { orgId, senderGroupId, requestGeneration, snapshot, visible, onAccessLost, onRefresh } = props;
+  const { orgId, senderGroupId, requestGeneration, snapshot, visible, onAccessLost, onUnavailable, onRefresh } = props;
   const initial = snapshot?.requestGeneration === requestGeneration && snapshot.data.orgId === orgId && snapshot.data.senderGroupId === senderGroupId ? snapshot.data : null;
   const key = `${orgId}:${senderGroupId}:${requestGeneration}`;
   const [state, setState] = useState<{ key: string; page: UnknownSenderHistorySnapshot; busy: boolean; error?: string } | null>(null);
@@ -27,11 +32,12 @@ export function UnknownSenderHistory(props: UnknownSenderHistoryProps) {
         credentials: "same-origin", redirect: "error", cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
       });
       if (controller.signal.aborted) return;
-      // 404 from this route is org-access denial (INBOX_ORG_DENIED / INBOX_READ_NOT_FOUND
-      // etc. in read-api.ts) wearing a not-found mask to avoid leaking existence — the
-      // route has no other, distinguishable "legitimately not found" case, so treat it
-      // the same as 401/403 and clear the cached pane rather than leave stale history visible.
-      if (response.status === 401 || response.status === 403 || response.status === 404) { setRevoked(key); onAccessLost(); return; }
+      // Org/membership-scoped denial: the whole workspace has lost access.
+      if (response.status === 401 || response.status === 403) { setRevoked(key); onAccessLost(); return; }
+      // Item-scoped denial (this sender group only, or the server flag off) — only this
+      // group is unavailable, not the whole workspace. Let the owner invalidate/remove
+      // just this pane instead of latching every conversation as access-denied.
+      if (response.status === 404) { onUnavailable(senderGroupId); return; }
       if (response.status === 410) throw Error("Refresh messages to continue through older history.");
       if (!response.ok) throw Error("Older messages could not load. Try again.");
       const next: UnknownSenderHistorySnapshot = await response.json();

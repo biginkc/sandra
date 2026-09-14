@@ -91,6 +91,8 @@ describe("render-bound conversation read acknowledgment", () => {
     await paint();
     await waitFor(() => expect(value.onUnavailable).toHaveBeenCalledExactlyOnceWith(conversationId));
     expect(value.onAccessLost).not.toHaveBeenCalled();
+    expect(screen.getByText("This conversation is no longer available.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
   it("stops acknowledging this boundary after a 404 during a batch, without latching permission_lost", async () => {
     const transport = vi.fn<typeof fetch>().mockResolvedValueOnce(receipt(0, false)).mockResolvedValueOnce(new Response(null, { status: 404 }));
