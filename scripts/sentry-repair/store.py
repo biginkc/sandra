@@ -1222,6 +1222,37 @@ class RepairStore:
         ).fetchone()
         return None if row is None else dict(row)
 
+    def list_issues(
+        self,
+        organization: str,
+        project: str,
+        environment: str,
+        *,
+        statuses: Iterable[str] = ("new", "unresolved"),
+    ) -> list[dict[str, Any]]:
+        """Return current issue state for one scoped controller poll.
+
+        The runner uses this after an atomic Sentry snapshot to discover
+        candidates for the durable GitHub outbox. Keeping the query here
+        makes the source and status filters explicit and avoids a caller
+        reaching into SQLite with an unscoped query.
+        """
+
+        status_values = tuple(str(status) for status in statuses)
+        if not status_values:
+            return []
+        if any(not re.fullmatch(r"[a-z_]{1,40}", value) for value in status_values):
+            raise ValueError("issue status is invalid")
+        placeholders = ",".join("?" for _ in status_values)
+        rows = self.db.execute(
+            f"""SELECT * FROM issues
+                WHERE organization=? AND project=? AND environment=?
+                  AND status IN ({placeholders})
+                ORDER BY updated_at DESC, issue_number ASC""",
+            (organization, project, environment, *status_values),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def claim_attempt(
         self,
         organization: str,

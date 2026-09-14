@@ -2,7 +2,10 @@
 
 This is a small, stdlib-only controller for deterministic Sentry intake and
 bounded repair state. It is intentionally an operator-facing building block.
-It does not install a scheduler, start workers, send Slack messages, merge PRs,
+The `runner.py` entry point supplies the long-lived intake and optional GitHub
+outbox process used by the Railway deployment artifact; this repository change
+does not create Railway infrastructure, provision a volume, or install a
+service automatically. The controller does not send Slack messages, merge PRs,
 or deploy releases.
 
 The canonical source is Sentry organization bmh-group, project sandra,
@@ -24,6 +27,25 @@ The database defaults to XDG_STATE_HOME/sandra-sentry-repair/repair.db, or
 outside a checkout. Sentry issues are keyed by their positive numeric id;
 short IDs such as SANDRA-A are evidence only and are never the idempotency
 key.
+
+## Long-lived Railway runner
+
+`runner.py` requires `SANDRA_REPAIR_DB_PATH` to be an absolute file path whose
+parent already exists and is writable. Set it to a path on a mounted Railway
+volume such as `/data/repair.db`; it refuses an in-memory or relative path so
+restart recovery cannot silently use ephemeral state. `SENTRY_AUTH_TOKEN` is
+required for live intake. GitHub publication remains disabled unless
+`SANDRA_GITHUB_PUBLISH_ENABLED=true` and a controller-only `GITHUB_TOKEN` is
+provided through the service environment. The runner never places either
+credential in argv, logs, health responses, or worker environments.
+
+The process claims the current America/Chicago slot once in SQLite, performs a
+fresh Sentry snapshot, and optionally drains a bounded number of GitHub outbox
+jobs. A failed intake is retried a bounded number of times with capped
+exponential delay. `/healthz` and `/readyz` expose sanitized process state.
+`deployment/sentry-repair/` contains the Dockerfile, Railway config, and
+volume/secret setup notes. `SANDRA_REPAIR_DISPATCH_ENABLED` must remain false;
+the repair-dispatch gate is reserved for a separately reviewed rollout.
 
 Use observe (the default) for intake and reporting. investigate permits a
 bounded investigation dispatch, while repair permits a bounded patch
