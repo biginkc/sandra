@@ -30,6 +30,18 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     return value
 
 
+def _positive_int(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise CompletionError(f"{label} must be a positive integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CompletionError(f"{label} must be a positive integer") from exc
+    if parsed <= 0:
+        raise CompletionError(f"{label} must be a positive integer")
+    return parsed
+
+
 def validate_completion_record(
     record: Mapping[str, Any], context: Mapping[str, Any]
 ) -> None:
@@ -41,15 +53,14 @@ def validate_completion_record(
     issue = _mapping(context.get("issue"), "persisted issue")
     if str(record.get("attempt_id")) != str(attempt["attempt_id"]):
         raise CompletionError("record attempt_id does not match persisted attempt")
-    if int(record.get("issue_number", 0)) != int(attempt["issue_number"]):
+    if _positive_int(record.get("issue_number"), "issue_number") != int(attempt["issue_number"]):
         raise CompletionError("record issue_number does not match persisted attempt")
-    if int(record.get("generation", 0)) != int(attempt["generation"]):
+    if _positive_int(record.get("generation"), "generation") != int(attempt["generation"]):
         raise CompletionError("record generation does not match persisted attempt")
     if record.get("outcome") != "resolved":
         raise CompletionError("only an explicit resolved outcome can complete an attempt")
-    _require(record.get("fencing_token"), "fencing_token")
-    if str(record["fencing_token"]) != str(attempt["fencing_token"]):
-        raise CompletionError("completion fencing token does not match attempt")
+    if not str(attempt.get("session_id") or "").strip():
+        raise CompletionError("repair attempt has no actual execution session")
 
     pr_persisted = _mapping(context.get("pull_request"), "persisted pull request")
     pr = _mapping(record.get("pull_request"), "pull_request")

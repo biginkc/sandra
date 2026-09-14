@@ -28,7 +28,7 @@ if str(HERE) not in sys.path:
 
 from dispatch import SubprocessExecutor, dispatch_attempt, dispatch_review  # noqa: E402
 from schedule import due_slot  # noqa: E402
-from sentry import SentryClient, SentryConfig, intake_from_sentry  # noqa: E402
+from sentry import SentryClient, SentryConfig, intake_from_sentry, numeric_issue_key  # noqa: E402
 from store import IssueInput, RepairStore, default_db_path  # noqa: E402
 
 
@@ -64,6 +64,8 @@ def parser() -> argparse.ArgumentParser:
     claim.add_argument("--mode", choices=("observe", "investigate", "repair"), default="observe")
     claim.add_argument("--generation", type=int)
     claim.add_argument("--lease-seconds", type=int, default=900)
+    claim.add_argument("--worktree", help="existing owned git worktree (required outside observe mode)")
+    claim.add_argument("--branch", help="optional exact branch name to verify")
 
     reconcile = sub.add_parser("reconcile", help="explicitly fence an expired lease")
     reconcile.add_argument("--attempt-id", required=True)
@@ -145,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                         raise ValueError("fixture issue must be an object")
                     items.append(
                         IssueInput(
-                            issue_number=int(raw["issue_number"]),
+                            issue_number=numeric_issue_key(raw["issue_number"]),
                             title=str(raw.get("title", "")),
                             level=str(raw.get("level", "error")),
                             release=raw.get("release"),
@@ -183,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
                 owner=args.owner,
                 mode=args.mode,
                 lease_seconds=args.lease_seconds,
+                worktree=args.worktree,
+                branch=args.branch,
             )
             print(json.dumps(None if attempt is None else attempt.__dict__, sort_keys=True))
             return 0

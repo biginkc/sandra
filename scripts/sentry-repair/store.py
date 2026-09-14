@@ -6,11 +6,12 @@ import json
 import os
 import secrets
 import sqlite3
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 
 MAX_ATTEMPTS = 2
@@ -64,6 +65,8 @@ class Attempt:
     session_id: str | None
     created_at: float
     lease_until: float
+    branch: str | None = None
+    worktree: str | None = None
 
 
 def default_db_path() -> Path:
@@ -76,8 +79,20 @@ def default_db_path() -> Path:
 class RepairStore:
     """SQLite store with short write transactions and explicit state fencing."""
 
-    def __init__(self, path: str | Path = ":memory:") -> None:
+    def __init__(
+        self,
+        path: str | Path = ":memory:",
+        *,
+        clock: Callable[[], float] | None = None,
+        allowed_worktree_root: str | Path | None = None,
+    ) -> None:
         self.path = str(path)
+        self.clock = clock or time.time
+        self.allowed_worktree_root = (
+            Path(allowed_worktree_root).expanduser().resolve()
+            if allowed_worktree_root
+            else None
+        )
         if self.path != ":memory:":
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
@@ -228,9 +243,53 @@ class RepairStore:
             if name not in columns:
                 self.db.execute(f"ALTER TABLE reviews ADD COLUMN {name} {ddl}")
 
-    @staticmethod
-    def _now(now: float | None = None) -> float:
-        return time.time() if now is None else float(now)
+    def _now(self, now: float | None = None) -> float:
+        return float(self.clock()) if now is None else float(now)
+
+    def _validate_worktree(
+        self, worktree: str | Path | None, branch: str | None = None
+    ) -> tuple[str, str | None]:
+        if not worktree:
+            raise StateError("investigate/repair attempts require an owned worktree")
+        path = Path(worktree).expanduser()
+        if not path.is_absolute() or not path.is_dir():
+            raise StateError("worktree must be an existing absolute directory")
+        resolved = path.resolve()
+        if self.allowed_worktree_root and (
+            resolved != self.allowed_worktree_root
+            and self.allowed_worktree_root not in resolved.parents
+        ):
+            raise StateError("worktree is outside the configured owned worktree root")
+        if not (resolved / ".git").exists():
+            raise StateError("worktree does not contain a .git worktree marker")
+        try:
+            probe = subprocess.run(
+                ["git", "-C", str(resolved), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise StateError("unable to verify worktree") from exc
+        if probe.returncode != 0 or probe.stdout.strip() != "true":
+            raise StateError("directory is not a valid git worktree")
+        actual_branch: str | None = None
+        if branch:
+            try:
+                branch_probe = subprocess.run(
+                    ["git", "-C", str(resolved), "branch", "--show-current"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise StateError("unable to verify worktree branch") from exc
+            actual_branch = branch_probe.stdout.strip()
+            if branch_probe.returncode != 0 or actual_branch != branch:
+                raise StateError("configured branch does not match worktree")
+        return str(resolved), actual_branch
 
     @staticmethod
     def _issue_key(
@@ -390,6 +449,8 @@ class RepairStore:
         mode: str = "observe",
         lease_seconds: int = 900,
         now: float | None = None,
+        worktree: str | Path | None = None,
+        branch: str | None = None,
     ) -> Attempt | None:
         if mode not in {"observe", "investigate", "repair"}:
             raise ValueError("mode must be observe, investigate, or repair")
@@ -405,6 +466,7 @@ class RepairStore:
             if generation is not None and generation != int(observed["generation"]):
                 raise StateError("requested generation is not current")
             return None
+        worktree_path, actual_branch = self._validate_worktree(worktree, branch)
         current = self._now(now)
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -453,7 +515,8 @@ class RepairStore:
             lease_until = current + lease_seconds
             self.db.execute(
                 """INSERT INTO attempts(attempt_id,organization,project,environment,issue_number,generation,mode,
-                   owner,fencing_token,status,created_at,lease_until) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   owner,fencing_token,status,branch,worktree,created_at,lease_until)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     attempt_id,
                     organization,
@@ -465,6 +528,8 @@ class RepairStore:
                     owner,
                     fencing,
                     "leased",
+                    actual_branch or branch,
+                    worktree_path,
                     current,
                     lease_until,
                 ),
@@ -494,6 +559,8 @@ class RepairStore:
                 None,
                 current,
                 lease_until,
+                actual_branch or branch,
+                worktree_path,
             )
         except Exception:
             if self.db.in_transaction:
@@ -537,7 +604,7 @@ class RepairStore:
             raise
 
     def _fenced_attempt_locked(
-        self, attempt_id: str, fencing_token: str
+        self, attempt_id: str, fencing_token: str, *, now: float | None = None
     ) -> sqlite3.Row:
         row = self.db.execute(
             "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
@@ -553,16 +620,18 @@ class RepairStore:
             or active["fencing_token"] != fencing_token
         ):
             raise FencingError("attempt fencing token is no longer active")
-        if float(row["lease_until"]) <= self._now():
+        if float(row["lease_until"]) <= self._now(now):
             raise FencingError("attempt lease has expired and requires reconciliation")
         if row["status"] not in {"leased", "running"}:
             raise FencingError(f"attempt {attempt_id} is not mutable in status {row['status']}")
         return row
 
-    def assert_fenced(self, attempt_id: str, fencing_token: str) -> None:
+    def assert_fenced(
+        self, attempt_id: str, fencing_token: str, *, now: float | None = None
+    ) -> None:
         """Check ownership before a worker starts any action."""
 
-        self._fenced_attempt_locked(attempt_id, fencing_token)
+        self._fenced_attempt_locked(attempt_id, fencing_token, now=now)
 
     def mark_running(
         self,
@@ -571,7 +640,7 @@ class RepairStore:
         *,
         model: str,
         effort: str,
-        session_id: str,
+        session_id: str | None,
         prompt_hash: str | None = None,
     ) -> None:
         self.db.execute("BEGIN IMMEDIATE")
@@ -587,16 +656,16 @@ class RepairStore:
             raise
 
     def update_session(
-        self, attempt_id: str, fencing_token: str, *, session_id: str
+        self, attempt_id: str, fencing_token: str, *, session_id: str | None
     ) -> None:
-        if not session_id.strip():
-            raise ValueError("session_id is required")
+        if session_id is not None and not session_id.strip():
+            raise ValueError("session_id cannot be empty")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self._fenced_attempt_locked(attempt_id, fencing_token)
             self.db.execute(
                 "UPDATE attempts SET session_id=? WHERE attempt_id=?",
-                (session_id.strip(), attempt_id),
+                (session_id.strip() if session_id else None, attempt_id),
             )
             self.db.execute("COMMIT")
         except Exception:
@@ -614,8 +683,16 @@ class RepairStore:
         current = self._now(now)
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            self._fenced_attempt_locked(attempt_id, fencing_token)
-            lease_until = current + lease_seconds
+            self._fenced_attempt_locked(attempt_id, fencing_token, now=current)
+            existing_lease = self.db.execute(
+                "SELECT lease_until FROM active_lease WHERE singleton=1 AND attempt_id=? AND fencing_token=?",
+                (attempt_id, fencing_token),
+            ).fetchone()
+            if existing_lease is None:
+                raise FencingError("active lease disappeared")
+            # A heartbeat may extend the lease, but must never shorten an
+            # operator-provided lease that is already longer.
+            lease_until = max(float(existing_lease["lease_until"]), current + lease_seconds)
             self.db.execute(
                 "UPDATE attempts SET lease_until=? WHERE attempt_id=?",
                 (lease_until, attempt_id),
@@ -645,7 +722,7 @@ class RepairStore:
         current = self._now(now)
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            self._fenced_attempt_locked(attempt_id, fencing_token)
+            self._fenced_attempt_locked(attempt_id, fencing_token, now=current)
             self.db.execute(
                 "UPDATE attempts SET status='failed',finished_at=? WHERE attempt_id=?",
                 (current, attempt_id),
@@ -834,8 +911,8 @@ class RepairStore:
     ) -> None:
         """Explicitly fence an expired worker before allowing a new claim."""
 
-        if outcome not in {"abandoned", "completed", "failed"}:
-            raise ValueError("outcome must be abandoned, completed, or failed")
+        if outcome not in {"abandoned", "failed"}:
+            raise ValueError("outcome must be abandoned or failed")
         if not evidence.strip():
             raise ValueError("reconciliation requires evidence")
         current = self._now(now)
@@ -853,7 +930,7 @@ class RepairStore:
                 raise StateError("attempt is not stale")
             self.db.execute(
                 "UPDATE attempts SET status=?,finished_at=? WHERE attempt_id=?",
-                ("orphaned" if outcome == "abandoned" else outcome, current, attempt_id),
+                ("orphaned" if outcome == "abandoned" else "failed", current, attempt_id),
             )
             self.db.execute(
                 "DELETE FROM active_lease WHERE singleton=1 AND attempt_id=?",
@@ -912,13 +989,15 @@ class RepairStore:
         attempt_id: str,
         fencing_token: str,
         record: Mapping[str, Any],
+        *,
+        now: float | None = None,
     ) -> None:
         from validation import validate_completion_record
 
-        current = self._now()
+        current = self._now(now)
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            attempt = self._fenced_attempt_locked(attempt_id, fencing_token)
+            attempt = self._fenced_attempt_locked(attempt_id, fencing_token, now=current)
             context = self.completion_context(attempt_id)
             validate_completion_record(record, context)
             self.db.execute(

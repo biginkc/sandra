@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import signal
 import subprocess
 import tempfile
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
 from prompts import build_investigation_prompt, build_review_prompt
+from store import FencingError, StateError
 from validation import validate_model_outcome
 
 
@@ -19,6 +21,15 @@ SPARK_MODEL = "gpt-5.3-codex-spark"
 LUNA_MODEL = "gpt-5.6-luna"
 ASTRA_REVIEW_MODEL = "gpt-6-astra"
 FABLE_REVIEW_MODEL = "claude-fable-5-1"
+
+
+def kill_process_group(process) -> None:
+    """Kill a Codex process and descendants without shell invocation."""
+
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (AttributeError, OSError, ProcessLookupError):
+        process.kill()
 
 
 @dataclass(frozen=True)
@@ -60,7 +71,6 @@ def codex_argv(
         f"model_reasoning_effort={json.dumps(effort)}",
         "--sandbox",
         sandbox,
-        "--skip-git-repo-check",
         "--json",
         prompt,
     ]
@@ -69,8 +79,9 @@ def codex_argv(
 class SubprocessExecutor:
     """Real CLI adapter; callers must opt into execute mode explicitly."""
 
-    def __init__(self, executable: str = "codex") -> None:
+    def __init__(self, executable: str = "codex", worktree: str | None = None) -> None:
         self.executable = executable
+        self.worktree = worktree
 
     def probe(self, model: str, effort: str) -> ProcessResult:
         probe_prompt = (
@@ -80,20 +91,16 @@ class SubprocessExecutor:
         argv = codex_argv(model, effort, probe_prompt)
         # A probe is read-only by instruction and by the CLI sandbox flag.
         argv[argv.index("--sandbox") + 1] = "read-only"
-        try:
-            result = subprocess.run(
-                [self.executable, *argv[1:]],
-                text=True,
-                capture_output=True,
-                timeout=60,
-                check=False,
+        result = self._run(argv, timeout_seconds=60)
+        if result.status == "success":
+            return ProcessResult(
+                "available",
+                result.stdout,
+                result.stderr,
+                result.returncode,
+                result.session_id,
             )
-        except subprocess.TimeoutExpired as exc:
-            return ProcessResult("timeout", str(exc.stdout or ""), str(exc.stderr or ""), -1)
-        except OSError as exc:
-            return ProcessResult("error", "", str(exc), -1)
-        status = "available" if result.returncode == 0 else "error"
-        return ProcessResult(status, result.stdout, result.stderr, result.returncode)
+        return result
 
     def run(self, argv: list[str], *, timeout_seconds: int) -> ProcessResult:
         return self._run(argv, timeout_seconds=timeout_seconds)
@@ -161,6 +168,8 @@ class SubprocessExecutor:
                     command,
                     stdout=stdout_file,
                     stderr=stderr_file,
+                    cwd=self.worktree,
+                    start_new_session=True,
                 )
             except OSError as exc:
                 return ProcessResult("error", "", str(exc), -1)
@@ -175,7 +184,7 @@ class SubprocessExecutor:
             while process.poll() is None:
                 now = time.monotonic()
                 if now - started >= timeout_seconds:
-                    process.kill()
+                    kill_process_group(process)
                     process.wait()
                     stdout, stderr = collect()
                     return ProcessResult(
@@ -191,13 +200,13 @@ class SubprocessExecutor:
                     except Exception as exc:
                         # Reconciliation can fence a worker while its child
                         # is still running. Kill it before returning.
-                        process.kill()
+                        kill_process_group(process)
                         process.wait()
                         stdout, stderr = collect()
                         return ProcessResult(
-                            "stale",
+                            "stale" if isinstance(exc, FencingError) else "error",
                             stdout,
-                            f"{stderr}\nheartbeat fenced: {exc}",
+                            f"{stderr}\nheartbeat {'fenced' if isinstance(exc, FencingError) else 'failed'}: {exc}",
                             process.returncode if process.returncode is not None else -1,
                             self._session_id(stdout),
                         )
@@ -232,6 +241,18 @@ def choose_execution_model(
     return LUNA_MODEL, "xhigh", probe
 
 
+def _terminalize_failure(store, attempt_id: str, fencing_token: str, reason: str) -> str | None:
+    """Best-effort terminalization; return fencing marker for stale workers."""
+
+    try:
+        store.fail_attempt(attempt_id, fencing_token, reason=reason)
+    except FencingError:
+        return "FencingError"
+    except Exception as exc:
+        return type(exc).__name__
+    return None
+
+
 def dispatch_attempt(
     store,
     attempt_id: str,
@@ -248,6 +269,11 @@ def dispatch_attempt(
     issue = context["issue"] or {}
     if attempt["mode"] not in {"investigate", "repair"}:
         raise ValueError("observe mode cannot dispatch a worker")
+    worktree = attempt.get("worktree")
+    if not worktree:
+        raise StateError("dispatch requires a persisted owned worktree")
+    if isinstance(executor, SubprocessExecutor):
+        executor.worktree = worktree
     store.assert_fenced(attempt_id, fencing_token)
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
@@ -258,15 +284,16 @@ def dispatch_attempt(
     else:
         # A dry-run is a local plan and must not launch an external model probe.
         model, effort, probe = SPARK_MODEL, spark_effort, ProcessResult("not_run")
-    prompt = build_investigation_prompt(issue, mode=attempt["mode"], fencing_token=fencing_token)
-    session_id = f"codex-{uuid.uuid4()}"
+    prompt = build_investigation_prompt(issue, mode=attempt["mode"], attempt_id=attempt_id)
+    session_id = None
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    sandbox = "read-only" if attempt["mode"] == "investigate" else "workspace-write"
     plan = {
         "attempt_id": attempt_id,
         "model": model,
         "effort": effort,
         "session_id": session_id,
-        "argv": codex_argv(model, effort, prompt),
+        "argv": codex_argv(model, effort, prompt, sandbox=sandbox),
         "probe": {
             "status": probe.status,
             "stdout": probe.stdout[-1000:],
@@ -287,11 +314,26 @@ def dispatch_attempt(
     # Ensure the lease outlives the configured timeout, then keep it alive
     # while the real subprocess is running. The subprocess adapter kills its
     # child at the deadline and returns a terminal timeout result.
-    store.heartbeat(
-        attempt_id,
-        fencing_token,
-        lease_seconds=max(900, timeout_seconds + heartbeat_interval_seconds + 60),
-    )
+    try:
+        store.heartbeat(
+            attempt_id,
+            fencing_token,
+            lease_seconds=max(900, timeout_seconds + heartbeat_interval_seconds + 60),
+        )
+    except FencingError:
+        plan.update({"executed": False, "fenced_result": "FencingError"})
+        return plan
+    except Exception as exc:
+        plan.update(
+            {
+                "executed": False,
+                "result": {"status": "error", "returncode": -1, "stdout": "", "stderr": str(exc)},
+                "terminalization": _terminalize_failure(
+                    store, attempt_id, fencing_token, f"initial lease heartbeat failed: {exc}"
+                ),
+            }
+        )
+        return plan
     try:
         if hasattr(executor, "run_with_heartbeat"):
             result = executor.run_with_heartbeat(
@@ -306,9 +348,21 @@ def dispatch_attempt(
             )
         else:
             result = executor.run(plan["argv"], timeout_seconds=timeout_seconds)
-    except Exception:
+    except FencingError:
         # A stale/reconciled worker is fenced and must not recreate the lease.
-        raise
+        plan.update({"executed": True, "fenced_result": "FencingError"})
+        return plan
+    except Exception as exc:
+        plan.update(
+            {
+                "executed": True,
+                "result": {"status": "error", "returncode": -1, "stdout": "", "stderr": str(exc)},
+                "terminalization": _terminalize_failure(
+                    store, attempt_id, fencing_token, f"codex executor failed: {exc}"
+                ),
+            }
+        )
+        return plan
     # A stale worker cannot write its result. The fencing check occurs in
     # mark_running before work and must be repeated by any result writer.
     if result.session_id:
@@ -317,10 +371,14 @@ def dispatch_attempt(
                 attempt_id, fencing_token, session_id=result.session_id
             )
             plan["session_id"] = result.session_id
-        except Exception as exc:
+        except FencingError:
             # The process may have completed after explicit reconciliation.
             # Its late session/result is evidence only and cannot mutate state.
-            plan["fenced_result"] = type(exc).__name__
+            plan["fenced_result"] = "FencingError"
+        except Exception as exc:
+            plan["terminalization"] = _terminalize_failure(
+                store, attempt_id, fencing_token, f"session persistence failed: {exc}"
+            )
     plan.update(
         {
             "executed": True,
@@ -332,6 +390,14 @@ def dispatch_attempt(
             },
         }
     )
+    if result.status in {"success", "passed"} and not result.session_id:
+        plan["terminalization"] = _terminalize_failure(
+            store,
+            attempt_id,
+            fencing_token,
+            "codex exec returned success without an actual session id",
+        )
+        return plan
     if result.status in {"error", "timeout"}:
         # Failure is terminal for this invocation. There is deliberately no
         # automatic duplicate retry for timeout/auth/unknown CLI failures.
@@ -398,6 +464,11 @@ def dispatch_review(
         raise ValueError("timeout_seconds must be positive")
     context = store.completion_context(attempt_id)
     store.assert_fenced(attempt_id, fencing_token)
+    worktree = context["attempt"].get("worktree")
+    if not worktree:
+        raise StateError("review requires a persisted owned worktree")
+    if isinstance(executor, SubprocessExecutor):
+        executor.worktree = worktree
     prompt = build_review_prompt(
         context["issue"] or {}, context["attempt"], context
     )
@@ -415,8 +486,25 @@ def dispatch_review(
         raise ValueError("review requires a persisted repair session")
     # A review does not replace the repair model/session on the attempt. Its
     # independent session is persisted in reviews after actual output parses.
-    store.heartbeat(attempt_id, fencing_token, lease_seconds=max(900, timeout_seconds + 60))
-    result = executor.run(argv, timeout_seconds=timeout_seconds)
+    try:
+        store.heartbeat(
+            attempt_id, fencing_token, lease_seconds=max(900, timeout_seconds + 60)
+        )
+        result = executor.run(argv, timeout_seconds=timeout_seconds)
+    except FencingError:
+        plan.update({"executed": True, "fenced_result": "FencingError"})
+        return plan
+    except Exception as exc:
+        plan.update(
+            {
+                "executed": True,
+                "result": {"status": "error", "returncode": -1, "stdout": "", "stderr": str(exc)},
+                "terminalization": _terminalize_failure(
+                    store, attempt_id, fencing_token, f"Astra review execution failed: {exc}"
+                ),
+            }
+        )
+        return plan
     plan["executed"] = True
     plan["result"] = {
         "status": result.status,
@@ -425,35 +513,46 @@ def dispatch_review(
         "stderr": result.stderr[-4000:],
     }
     if result.status not in {"success", "passed"}:
-        store.fail_attempt(
+        plan["terminalization"] = _terminalize_failure(
+            store,
             attempt_id,
             fencing_token,
-            reason=f"Astra review {result.status}: {result.stderr[-500:]}",
+            f"Astra review {result.status}: {result.stderr[-500:]}",
         )
         return plan
     parsed = _review_record(result.stdout)
     session_id = result.session_id or (parsed[2] if parsed else None)
     if parsed is None or not session_id:
-        store.fail_attempt(
+        plan["terminalization"] = _terminalize_failure(
+            store,
             attempt_id,
             fencing_token,
-            reason="Astra review returned no explicit decision/evidence/session",
+            "Astra review returned no explicit decision/evidence/session",
         )
         return plan
     decision, evidence, _ = parsed
-    store.record_review(
-        attempt_id,
-        fencing_token,
-        model=ASTRA_REVIEW_MODEL,
-        effort="medium",
-        session_id=session_id,
-        decision=decision,
-        evidence=evidence,
-        source="codex_exec",
-        command=argv,
-        result_status=result.status,
-        verified=True,
-    )
+    try:
+        store.record_review(
+            attempt_id,
+            fencing_token,
+            model=ASTRA_REVIEW_MODEL,
+            effort="medium",
+            session_id=session_id,
+            decision=decision,
+            evidence=evidence,
+            source="codex_exec",
+            command=argv,
+            result_status=result.status,
+            verified=True,
+        )
+    except FencingError:
+        plan["fenced_result"] = "FencingError"
+        return plan
+    except Exception as exc:
+        plan["terminalization"] = _terminalize_failure(
+            store, attempt_id, fencing_token, f"Astra review persistence failed: {exc}"
+        )
+        return plan
     plan["review"] = {
         "decision": decision,
         "evidence": evidence,

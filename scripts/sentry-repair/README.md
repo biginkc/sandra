@@ -27,6 +27,12 @@ second worker cannot restart it until an operator records explicit
 reconciliation evidence. A stale worker's token cannot mutate state after
 reconciliation.
 
+Investigate and repair claims require an existing absolute Git worktree (and
+optionally an exact branch). The controller verifies it with git before
+claiming and launches Codex with that worktree as cwd. The fencing token is
+controller-only authorization; it is never put in worker/reviewer prompts or
+completion payloads.
+
 Attempt history is bounded to two attempts per issue generation. A resolved
 issue does not create another generation merely because its lastSeen changed.
 The intake payload must explicitly carry a verified, evidenced post-resolution
