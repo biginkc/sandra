@@ -1,5 +1,5 @@
 {
-  "installed_bodies_verified": 11,
+  "installed_bodies_verified": 15,
   "permissions": [
     {
       "anon": false,
@@ -21,11 +21,23 @@
     },
     {
       "anon": false,
+      "name": "inbox_sync_finalize_v1(uuid,jsonb,integer,text,text)",
+      "service": false,
+      "authenticated": true
+    },
+    {
+      "anon": false,
+      "name": "inbox_sync_snapshot_v1(uuid)",
+      "service": false,
+      "authenticated": true
+    },
+    {
+      "anon": false,
       "name": "inbox_unknown_history_page(uuid,uuid,uuid)",
       "service": false,
       "authenticated": true
     }
   ],
-  "compiled_sha256": "fcceda1313d886c650bac168503168cb25ac57c4b6bc85d866bfdd7d82d400a9",
+  "compiled_sha256": "fefeaac92ee566eb57b7964057f4848671da5dda981f1772c8c84988c2de7ef0",
   "scope": "Actual fresh DB catalog proof; browser transport is independent evidence"
 }
