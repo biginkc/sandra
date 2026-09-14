@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from dispatch import SubprocessExecutor, dispatch_attempt  # noqa: E402
+from dispatch import SubprocessExecutor, dispatch_attempt, dispatch_review  # noqa: E402
 from schedule import due_slot  # noqa: E402
 from sentry import SentryClient, SentryConfig, intake_from_sentry  # noqa: E402
 from store import IssueInput, RepairStore, default_db_path  # noqa: E402
@@ -64,19 +64,18 @@ def parser() -> argparse.ArgumentParser:
     claim.add_argument("--mode", choices=("observe", "investigate", "repair"), default="observe")
     claim.add_argument("--generation", type=int)
     claim.add_argument("--lease-seconds", type=int, default=900)
-    claim.add_argument("--now", type=float)
 
     reconcile = sub.add_parser("reconcile", help="explicitly fence an expired lease")
     reconcile.add_argument("--attempt-id", required=True)
     reconcile.add_argument("--outcome", choices=("abandoned", "failed"), required=True)
     reconcile.add_argument("--evidence", required=True)
-    reconcile.add_argument("--now", type=float)
 
     dispatch = sub.add_parser("dispatch", help="plan or explicitly run one bounded Codex attempt")
     dispatch.add_argument("--attempt-id", required=True)
     dispatch.add_argument("--fencing-token", required=True)
     dispatch.add_argument("--spark-effort", choices=("low", "medium"), default="low")
     dispatch.add_argument("--timeout-seconds", type=int, default=900)
+    dispatch.add_argument("--heartbeat-interval-seconds", type=int, default=30)
     dispatch.add_argument("--execute", action="store_true", help="perform the codex exec after preflight")
 
     pr = sub.add_parser("record-pr", help="persist PR and actual CI evidence")
@@ -102,7 +101,13 @@ def parser() -> argparse.ArgumentParser:
     ver.add_argument("--kind", choices=("functional_probe", "sentry_observation", "ci"), required=True)
     ver.add_argument("--evidence-file", required=True)
 
-    review = sub.add_parser("record-review", help="persist the independent Astra medium gate")
+    review_run = sub.add_parser("review", help="plan or run the independent Astra medium gate")
+    review_run.add_argument("--attempt-id", required=True)
+    review_run.add_argument("--fencing-token", required=True)
+    review_run.add_argument("--timeout-seconds", type=int, default=600)
+    review_run.add_argument("--execute", action="store_true", help="run codex exec and parse its actual review record")
+
+    review = sub.add_parser("record-review", help="disabled manual write; review must come from codex exec")
     review.add_argument("--attempt-id", required=True)
     review.add_argument("--fencing-token", required=True)
     review.add_argument("--session-id", required=True)
@@ -178,13 +183,12 @@ def main(argv: list[str] | None = None) -> int:
                 owner=args.owner,
                 mode=args.mode,
                 lease_seconds=args.lease_seconds,
-                now=args.now,
             )
             print(json.dumps(None if attempt is None else attempt.__dict__, sort_keys=True))
             return 0
         if args.command == "reconcile":
             store.reconcile_stale_lease(
-                args.attempt_id, outcome=args.outcome, evidence=args.evidence, now=args.now
+                args.attempt_id, outcome=args.outcome, evidence=args.evidence
             )
             print(json.dumps({"reconciled": args.attempt_id}))
             return 0
@@ -195,6 +199,18 @@ def main(argv: list[str] | None = None) -> int:
                 args.fencing_token,
                 executor=SubprocessExecutor(),
                 spark_effort=args.spark_effort,
+                timeout_seconds=args.timeout_seconds,
+                heartbeat_interval_seconds=args.heartbeat_interval_seconds,
+                execute=args.execute,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        if args.command == "review":
+            result = dispatch_review(
+                store,
+                args.attempt_id,
+                args.fencing_token,
+                executor=SubprocessExecutor(),
                 timeout_seconds=args.timeout_seconds,
                 execute=args.execute,
             )
@@ -228,16 +244,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "record-review":
-            store.record_review(
-                args.attempt_id,
-                args.fencing_token,
-                model="gpt-6-astra",
-                effort="medium",
-                session_id=args.session_id,
-                decision=args.decision,
-                evidence=args.evidence,
-            )
-            return 0
+            raise ValueError("manual review writes are disabled; use review --execute")
         if args.command == "complete":
             record = _json_file(args.record_file)
             store.complete_attempt(args.attempt_id, args.fencing_token, record)
@@ -262,4 +269,3 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2)
-

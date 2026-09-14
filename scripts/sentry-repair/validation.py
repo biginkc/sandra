@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Mapping
 
@@ -58,12 +59,24 @@ def validate_completion_record(
     if head_sha.lower() != str(pr_persisted["head_sha"]).lower():
         raise CompletionError("completion PR SHA does not match persisted PR SHA")
     ci = _mapping(pr.get("ci_run"), "pull_request.ci_run")
-    if str(_require(ci.get("id"), "CI run id")) == "":
-        raise CompletionError("CI run id is required")
-    if str(ci.get("status", "")).lower() not in {"success", "successful", "passed"}:
+    persisted_ci_id = str(_require(pr_persisted.get("ci_run_id"), "persisted CI run id"))
+    persisted_ci_status = str(_require(pr_persisted.get("ci_status"), "persisted CI status")).lower()
+    persisted_ci_sha = _sha(pr_persisted.get("ci_sha"), "persisted CI SHA")
+    if str(_require(ci.get("id"), "CI run id")) != persisted_ci_id:
+        raise CompletionError("CI run id must match persisted CI evidence")
+    status_aliases = {"success": "success", "successful": "success", "passed": "success"}
+    record_ci_status = status_aliases.get(str(ci.get("status", "")).lower())
+    persisted_ci_status_normalized = status_aliases.get(persisted_ci_status)
+    if record_ci_status is None:
         raise CompletionError("CI run must have a successful status")
     if _sha(ci.get("sha"), "pull_request.ci_run.sha").lower() != head_sha.lower():
         raise CompletionError("CI SHA must equal PR head SHA")
+    if persisted_ci_status_normalized is None:
+        raise CompletionError("persisted CI status must be successful")
+    if persisted_ci_sha.lower() != head_sha.lower():
+        raise CompletionError("persisted CI SHA must equal PR head SHA")
+    if record_ci_status != persisted_ci_status_normalized:
+        raise CompletionError("completion CI status does not match persisted CI status")
 
     deployment_persisted = _mapping(context.get("deployment"), "persisted deployment")
     deployment = _mapping(record.get("deployment"), "deployment")
@@ -79,21 +92,59 @@ def validate_completion_record(
         raise CompletionError("functional probe must explicitly pass")
     if not str(_require(functional.get("evidence"), "functional_probe.evidence")).strip():
         raise CompletionError("functional probe evidence is required")
+    persisted_functional = _mapping(
+        context.get("verifications", {}).get("functional_probe"),
+        "persisted functional probe",
+    )
+    functional_aliases = {"pass": "pass", "passed": "pass", "success": "pass"}
+    persisted_functional_status = functional_aliases.get(
+        str(persisted_functional.get("status", "")).lower()
+    )
+    record_functional_status = functional_aliases.get(
+        str(functional.get("status", "")).lower()
+    )
+    if persisted_functional_status is None:
+        raise CompletionError("persisted functional probe must explicitly pass")
+    if record_functional_status != persisted_functional_status:
+        raise CompletionError("functional probe status does not match persisted evidence")
+    if str(functional.get("evidence")) != str(_require(persisted_functional.get("evidence"), "persisted functional probe evidence")):
+        raise CompletionError("functional probe evidence does not match persisted evidence")
 
     observation = _mapping(record.get("sentry_observation"), "sentry_observation")
     if observation.get("no_regression") is not True:
         raise CompletionError("Sentry observation must explicitly report no_regression=true")
     _require(observation.get("query_window"), "sentry_observation.query_window")
     _require(observation.get("observed_at"), "sentry_observation.observed_at")
-    if "functional_probe" not in context.get("verifications", {}):
-        raise CompletionError("functional probe evidence was not persisted")
-    if "sentry_observation" not in context.get("verifications", {}):
-        raise CompletionError("Sentry observation evidence was not persisted")
+    persisted_observation = _mapping(
+        context.get("verifications", {}).get("sentry_observation"),
+        "persisted Sentry observation",
+    )
+    if persisted_observation.get("no_regression") is not True:
+        raise CompletionError("persisted Sentry observation must report no_regression=true")
+    if observation.get("query_window") != persisted_observation.get("query_window"):
+        raise CompletionError("Sentry query window does not match persisted evidence")
+    if observation.get("observed_at") != persisted_observation.get("observed_at"):
+        raise CompletionError("Sentry observed_at does not match persisted evidence")
     persisted_review = _mapping(context.get("review"), "persisted independent review")
     if persisted_review.get("model") != "gpt-6-astra" or persisted_review.get("effort") != "medium":
         raise CompletionError("Astra medium review evidence is required")
     if persisted_review.get("decision") != "approved" or not str(persisted_review.get("evidence", "")).strip():
         raise CompletionError("independent review must be approved with evidence")
+    if persisted_review.get("source") != "codex_exec" or persisted_review.get("verified") != 1:
+        raise CompletionError("review provenance was not verified by the controller")
+    if persisted_review.get("result_status") not in {"success", "passed"}:
+        raise CompletionError("review execution did not succeed")
+    try:
+        review_command = json.loads(persisted_review.get("command_json", "[]"))
+    except (TypeError, ValueError):
+        raise CompletionError("review command provenance is invalid")
+    if (
+        not isinstance(review_command, list)
+        or review_command[:3] != ["codex", "exec", "--model"]
+        or "gpt-6-astra" not in review_command
+        or 'model_reasoning_effort="medium"' not in review_command
+    ):
+        raise CompletionError("review command provenance is not Astra medium")
     if str(persisted_review.get("session_id")) == str(attempt.get("session_id")):
         raise CompletionError("review session must be independent")
 
@@ -107,14 +158,26 @@ def validate_model_outcome(
         raise ValueError("only Spark may be probed for fallback selection")
     status = str(outcome.get("status", "")).lower()
     text = f"{outcome.get('stdout', '')} {outcome.get('stderr', '')}".lower()
+    if any(
+        phrase in text
+        for phrase in (
+            "authentication failed",
+            "unauthorized",
+            "invalid api key",
+            "permission denied",
+            "auth error",
+        )
+    ):
+        raise CompletionError("Spark probe authentication/permission failure is not model unavailability")
     explicit_quota = any(
         phrase in text
         for phrase in (
             "usage limit",
             "quota exhausted",
             "quota exceeded",
-            "rate limit exceeded",
-            "too many requests",
+            "model unavailable",
+            "model is not available",
+            "unknown model",
         )
     )
     if status in {"available", "ok", "success"}:
@@ -124,4 +187,3 @@ def validate_model_outcome(
     # Auth, timeout, malformed CLI, and unknown errors must stop; silently
     # switching models could duplicate or bypass a bounded attempt.
     raise CompletionError("Spark probe failed without verified model unavailability")
-

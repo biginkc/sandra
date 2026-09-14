@@ -191,6 +191,10 @@ class RepairStore:
                 session_id TEXT NOT NULL,
                 decision TEXT NOT NULL CHECK(decision IN ('approved','rejected','needs_changes')),
                 evidence TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                command_json TEXT NOT NULL DEFAULT '[]',
+                result_status TEXT NOT NULL DEFAULT '',
+                verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)),
                 recorded_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS notifications_outbox (
@@ -210,6 +214,19 @@ class RepairStore:
             );
             """
         )
+        # Keep durable databases from the initial revision forward-compatible.
+        columns = {
+            row["name"]
+            for row in self.db.execute("PRAGMA table_info(reviews)").fetchall()
+        }
+        for name, ddl in (
+            ("source", "TEXT NOT NULL DEFAULT ''"),
+            ("command_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("result_status", "TEXT NOT NULL DEFAULT ''"),
+            ("verified", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE reviews ADD COLUMN {name} {ddl}")
 
     @staticmethod
     def _now(now: float | None = None) -> float:
@@ -379,6 +396,15 @@ class RepairStore:
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         self._issue_key(organization, project, environment, issue_number)
+        if mode == "observe":
+            # Observation is read-only. It deliberately consumes no lease or
+            # repair attempt.
+            observed = self.get_issue(organization, project, environment, issue_number)
+            if observed is None:
+                raise StateError("cannot observe an issue before Sentry intake")
+            if generation is not None and generation != int(observed["generation"]):
+                raise StateError("requested generation is not current")
+            return None
         current = self._now(now)
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -560,6 +586,23 @@ class RepairStore:
             self.db.execute("ROLLBACK")
             raise
 
+    def update_session(
+        self, attempt_id: str, fencing_token: str, *, session_id: str
+    ) -> None:
+        if not session_id.strip():
+            raise ValueError("session_id is required")
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self._fenced_attempt_locked(attempt_id, fencing_token)
+            self.db.execute(
+                "UPDATE attempts SET session_id=? WHERE attempt_id=?",
+                (session_id.strip(), attempt_id),
+            )
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
     def heartbeat(
         self,
         attempt_id: str,
@@ -726,6 +769,10 @@ class RepairStore:
         session_id: str,
         decision: str,
         evidence: str,
+        source: str | None = None,
+        command: list[str] | None = None,
+        result_status: str | None = None,
+        verified: bool = False,
     ) -> None:
         if model != "gpt-6-astra" or effort != "medium":
             raise ValueError("independent Astra medium review is required")
@@ -735,16 +782,29 @@ class RepairStore:
             or not evidence.strip()
         ):
             raise ValueError("review requires a decision, independent session, and evidence")
+        if not verified or source != "codex_exec" or result_status not in {"success", "passed"}:
+            raise ValueError("review must come from a verified codex exec result")
+        if (
+            not isinstance(command, list)
+            or command[:3] != ["codex", "exec", "--model"]
+            or "gpt-6-astra" not in command
+        ):
+            raise ValueError("review command must explicitly run Astra through codex exec")
+        if 'model_reasoning_effort="medium"' not in command:
+            raise ValueError("review command must explicitly use medium reasoning effort")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             row = self._fenced_attempt_locked(attempt_id, fencing_token)
             if row["session_id"] and row["session_id"] == session_id:
                 raise ValueError("review session must be independent from repair session")
             self.db.execute(
-                """INSERT INTO reviews(attempt_id,model,effort,session_id,decision,evidence,recorded_at)
-                   VALUES(?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
+                """INSERT INTO reviews(attempt_id,model,effort,session_id,decision,evidence,source,
+                   command_json,result_status,verified,recorded_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
                    model=excluded.model,effort=excluded.effort,session_id=excluded.session_id,
-                   decision=excluded.decision,evidence=excluded.evidence,recorded_at=excluded.recorded_at""",
+                   decision=excluded.decision,evidence=excluded.evidence,source=excluded.source,
+                   command_json=excluded.command_json,result_status=excluded.result_status,
+                   verified=excluded.verified,recorded_at=excluded.recorded_at""",
                 (
                     attempt_id,
                     model,
@@ -752,6 +812,10 @@ class RepairStore:
                     session_id,
                     decision,
                     evidence.strip(),
+                    source,
+                    json.dumps(command, separators=(",", ":")),
+                    result_status,
+                    1,
                     self._now(),
                 ),
             )

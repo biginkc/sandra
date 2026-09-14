@@ -18,6 +18,7 @@ from dispatch import (  # noqa: E402
     choose_execution_model,
     codex_argv,
     dispatch_attempt,
+    dispatch_review,
 )
 from prompts import build_investigation_prompt  # noqa: E402
 from schedule import CHICAGO, cadence_minutes, due_slot, iter_slots, slot_identity  # noqa: E402
@@ -57,6 +58,38 @@ class FakeExecutor:
 
     def run(self, argv: list[str], *, timeout_seconds: int) -> ProcessResult:
         self.run_calls.append(argv)
+        return self.run_result
+
+
+class HeartbeatExecutor(FakeExecutor):
+    def __init__(self, probe: ProcessResult, run: ProcessResult | None = None):
+        super().__init__(probe, run)
+        self.heartbeats = 0
+
+    def run_with_heartbeat(self, argv, *, timeout_seconds, heartbeat, heartbeat_interval_seconds):
+        self.run_calls.append(argv)
+        heartbeat()
+        self.heartbeats += 1
+        return self.run_result
+
+
+class ReconcilingExecutor(FakeExecutor):
+    def __init__(self, store, attempt_id, probe, run=None):
+        super().__init__(probe, run)
+        self.store = store
+        self.attempt_id = attempt_id
+
+    def run(self, argv, *, timeout_seconds):
+        self.run_calls.append(argv)
+        lease = self.store.db.execute(
+            "SELECT lease_until FROM active_lease WHERE singleton=1"
+        ).fetchone()[0]
+        self.store.reconcile_stale_lease(
+            self.attempt_id,
+            outcome="abandoned",
+            evidence="simulated owner reconciliation before late result",
+            now=lease + 1,
+        )
         return self.run_result
 
 
@@ -158,7 +191,7 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaises(SentryError):
             intake_from_sentry(self.store, client)
         self.assertEqual(self.store.get_cursor("bmh-group", "sandra", "vercel-production"), "c0")
-        self.assertEqual(client.calls, ["c0", "page-two"])
+        self.assertEqual(client.calls, [None, "page-two"])
 
     def test_sentry_success_commits_terminal_cursor(self):
         client = PagingClient([
@@ -168,6 +201,63 @@ class ControllerTests(unittest.TestCase):
         intake_from_sentry(self.store, client)
         self.assertEqual(self.store.get_cursor("bmh-group", "sandra", "vercel-production"), "terminal")
         self.assertEqual(self.store.get_issue("bmh-group", "sandra", "vercel-production", 901)["title"], "second")
+
+    def test_observe_does_not_consume_lease_or_attempt(self):
+        self.assertIsNone(
+            self.store.claim_attempt(
+                "bmh-group",
+                "sandra",
+                "vercel-production",
+                101,
+                owner="observer",
+                mode="observe",
+            )
+        )
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 0)
+        self.assertIsNone(self.store.db.execute("SELECT * FROM active_lease").fetchone())
+
+    def test_dry_run_does_not_probe_external_model(self):
+        attempt = self.store.claim_attempt("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        executor = FakeExecutor(ProcessResult("error", stderr="would have launched"))
+        plan = dispatch_attempt(
+            self.store,
+            attempt.attempt_id,
+            attempt.fencing_token,
+            executor=executor,
+            execute=False,
+        )
+        self.assertEqual(plan["probe"]["status"], "not_run")
+        self.assertEqual(executor.probe_calls, [])
+
+    def test_persisted_ci_and_functional_evidence_cannot_be_overridden(self):
+        sha = "b" * 40
+        attempt = self.store.claim_attempt("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        self.store.mark_running(attempt.attempt_id, attempt.fencing_token, model=SPARK_MODEL, effort="low", session_id="repair-session")
+        self.store.record_pull_request(attempt.attempt_id, attempt.fencing_token, number=43, url="https://github.com/bmh-group/sandra/pull/43", head_sha=sha, ci_run_id="run-10", ci_status="success", ci_sha=sha)
+        self.store.record_deployment(attempt.attempt_id, attempt.fencing_token, environment="vercel-production", deployed_sha=sha)
+        self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="functional_probe", evidence={"status": "pass", "evidence": "persisted probe"})
+        self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="sentry_observation", evidence={"no_regression": True, "query_window": "10m", "observed_at": "now"})
+        review_executor = FakeExecutor(
+            ProcessResult("available"),
+            ProcessResult("success", stdout='{"decision":"approved","evidence":"independent review","session_id":"review-session"}', session_id="review-session"),
+        )
+        dispatch_review(self.store, attempt.attempt_id, attempt.fencing_token, executor=review_executor, execute=True)
+        with self.assertRaises(CompletionError):
+            self.store.complete_attempt(
+                attempt.attempt_id,
+                attempt.fencing_token,
+                {
+                    "attempt_id": attempt.attempt_id,
+                    "issue_number": 101,
+                    "generation": 1,
+                    "outcome": "resolved",
+                    "fencing_token": attempt.fencing_token,
+                    "pull_request": {"number": 43, "url": "https://github.com/bmh-group/sandra/pull/43", "head_sha": sha, "ci_run": {"id": "run-10", "status": "success", "sha": sha}},
+                    "deployment": {"environment": "vercel-production", "deployed_sha": sha},
+                    "functional_probe": {"status": "pass", "evidence": "invented probe"},
+                    "sentry_observation": {"no_regression": True, "query_window": "10m", "observed_at": "now"},
+                },
+            )
 
     def test_schedule_day_night_dst_and_once_only_catchup(self):
         day = datetime(2026, 9, 14, 12, 7, tzinfo=CHICAGO)
@@ -192,6 +282,22 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaises(CompletionError):
             choose_execution_model(auth)
 
+    def test_review_parses_codex_jsonl_agent_message_and_keeps_session_provenance(self):
+        attempt = self.store.claim_attempt("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        self.store.mark_running(attempt.attempt_id, attempt.fencing_token, model=SPARK_MODEL, effort="low", session_id="repair-session")
+        output = (
+            '{"type":"thread.started","thread_id":"astra-jsonl-session"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"independent JSONL review\\"}"}}\n'
+        )
+        executor = FakeExecutor(
+            ProcessResult("available"),
+            ProcessResult("success", stdout=output),
+        )
+        result = dispatch_review(self.store, attempt.attempt_id, attempt.fencing_token, executor=executor, execute=True)
+        self.assertEqual(result["review"]["session_id"], "astra-jsonl-session")
+        row = self.store.db.execute("SELECT model,effort,source,verified,session_id FROM reviews WHERE attempt_id=?", (attempt.attempt_id,)).fetchone()
+        self.assertEqual(tuple(row), ("gpt-6-astra", "medium", "codex_exec", 1, "astra-jsonl-session"))
+
     def test_timeout_is_terminal_without_duplicate_retry(self):
         attempt = self.store.claim_attempt("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
         executor = FakeExecutor(ProcessResult("available"), ProcessResult("timeout", stderr="timed out"))
@@ -201,6 +307,50 @@ class ControllerTests(unittest.TestCase):
         status = self.store.db.execute("SELECT status FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)).fetchone()[0]
         self.assertEqual(status, "failed")
         self.assertIsNone(self.store.db.execute("SELECT * FROM active_lease").fetchone())
+
+    def test_dispatch_heartbeats_and_persists_actual_session(self):
+        attempt = self.store.claim_attempt("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        executor = HeartbeatExecutor(
+            ProcessResult("available"),
+            ProcessResult("success", stdout="done", session_id="actual-codex-session"),
+        )
+        dispatch_attempt(
+            self.store,
+            attempt.attempt_id,
+            attempt.fencing_token,
+            executor=executor,
+            timeout_seconds=2,
+            heartbeat_interval_seconds=1,
+            execute=True,
+        )
+        self.assertEqual(executor.heartbeats, 1)
+        row = self.store.db.execute("SELECT status,session_id,lease_until FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)).fetchone()
+        self.assertEqual((row["status"], row["session_id"]), ("running", "actual-codex-session"))
+        self.assertGreater(row["lease_until"], attempt.lease_until)
+
+    def test_late_result_after_reconciliation_cannot_recreate_active_lease(self):
+        attempt = self.store.claim_attempt("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        executor = ReconcilingExecutor(
+            self.store,
+            attempt.attempt_id,
+            ProcessResult("available"),
+            ProcessResult("success", stdout="late", session_id="late-session"),
+        )
+        result = dispatch_attempt(
+            self.store,
+            attempt.attempt_id,
+            attempt.fencing_token,
+            executor=executor,
+            execute=True,
+        )
+        self.assertEqual(result["fenced_result"], "FencingError")
+        self.assertIsNone(self.store.db.execute("SELECT * FROM active_lease").fetchone())
+        self.assertEqual(
+            self.store.db.execute(
+                "SELECT status FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)
+            ).fetchone()[0],
+            "orphaned",
+        )
 
     def test_completion_requires_actual_evidence_and_review_gate(self):
         sha = "a" * 40
@@ -212,7 +362,23 @@ class ControllerTests(unittest.TestCase):
         self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="sentry_observation", evidence={"no_regression": True, "query_window": "10m", "observed_at": "2026-09-14T10:00:00Z"})
         with self.assertRaises(CompletionError):
             self.store.complete_attempt(attempt.attempt_id, attempt.fencing_token, {"attempt_id": attempt.attempt_id, "issue_number": 101, "generation": 1, "outcome": "resolved", "fencing_token": attempt.fencing_token})
-        self.store.record_review(attempt.attempt_id, attempt.fencing_token, model="gpt-6-astra", effort="medium", session_id="astra-session", decision="approved", evidence="reviewed patch, CI, deployed SHA, and probe")
+        review_executor = FakeExecutor(
+            ProcessResult(
+                "available",
+            ),
+            ProcessResult(
+                "success",
+                stdout='{"decision":"approved","evidence":"reviewed patch, CI, deployed SHA, and probe","session_id":"astra-session"}',
+                session_id="astra-session",
+            ),
+        )
+        dispatch_review(
+            self.store,
+            attempt.attempt_id,
+            attempt.fencing_token,
+            executor=review_executor,
+            execute=True,
+        )
         record = {
             "attempt_id": attempt.attempt_id,
             "issue_number": 101,
@@ -227,6 +393,22 @@ class ControllerTests(unittest.TestCase):
         self.store.complete_attempt(attempt.attempt_id, attempt.fencing_token, record)
         self.assertEqual(self.store.db.execute("SELECT status FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)).fetchone()[0], "completed")
         self.assertEqual(self.store.get_issue("bmh-group", "sandra", "vercel-production", 101)["status"], "resolved")
+
+    def test_completion_cannot_trust_record_when_persisted_ci_is_wrong(self):
+        sha = "c" * 40
+        attempt = self.store.claim_attempt("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        self.store.mark_running(attempt.attempt_id, attempt.fencing_token, model=SPARK_MODEL, effort="low", session_id="repair-session")
+        self.store.record_pull_request(attempt.attempt_id, attempt.fencing_token, number=44, url="https://github.com/bmh-group/sandra/pull/44", head_sha=sha, ci_run_id="run-11", ci_status="failure", ci_sha="d" * 40)
+        self.store.record_deployment(attempt.attempt_id, attempt.fencing_token, environment="vercel-production", deployed_sha=sha)
+        self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="functional_probe", evidence={"status": "pass", "evidence": "probe"})
+        self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="sentry_observation", evidence={"no_regression": True, "query_window": "10m", "observed_at": "now"})
+        review_executor = FakeExecutor(
+            ProcessResult("available"),
+            ProcessResult("success", stdout='{"decision":"approved","evidence":"review","session_id":"review-session-2"}', session_id="review-session-2"),
+        )
+        dispatch_review(self.store, attempt.attempt_id, attempt.fencing_token, executor=review_executor, execute=True)
+        with self.assertRaises(CompletionError):
+            self.store.complete_attempt(attempt.attempt_id, attempt.fencing_token, {"attempt_id": attempt.attempt_id, "issue_number": 101, "generation": 1, "outcome": "resolved", "fencing_token": attempt.fencing_token, "pull_request": {"number": 44, "url": "https://github.com/bmh-group/sandra/pull/44", "head_sha": sha, "ci_run": {"id": "run-11", "status": "success", "sha": sha}}, "deployment": {"environment": "vercel-production", "deployed_sha": sha}, "functional_probe": {"status": "pass", "evidence": "probe"}, "sentry_observation": {"no_regression": True, "query_window": "10m", "observed_at": "now"}})
 
     def test_argv_has_explicit_supported_codex_config_and_untrusted_prompt_is_bounded(self):
         argv = codex_argv(SPARK_MODEL, "medium", "prompt with; shell $(must remain text)")

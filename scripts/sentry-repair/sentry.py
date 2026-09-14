@@ -148,8 +148,11 @@ class SentryClient:
 
 def intake_from_sentry(store: RepairStore, client: SentryClient, *, retrieved_at: float | None = None) -> list[dict[str, Any]]:
     config = client.config
-    old_cursor = store.get_cursor(config.organization, config.project, config.environment)
-    issues, new_cursor = client.retrieve_all(old_cursor)
+    # A terminal cursor is a page position, not a durable polling checkpoint.
+    # Start every poll from the current snapshot and let the issue key
+    # reconcile overlap. Resuming a terminal cursor can miss newly unresolved
+    # issues inserted after the prior snapshot.
+    issues, new_cursor = client.retrieve_all(None)
     # ingest_issues has one transaction containing issue updates and cursor
     # advancement; failed retrieval above therefore leaves both untouched.
     return store.ingest_issues(
@@ -160,4 +163,3 @@ def intake_from_sentry(store: RepairStore, client: SentryClient, *, retrieved_at
         cursor=new_cursor,
         retrieved_at=retrieved_at,
     )
-
