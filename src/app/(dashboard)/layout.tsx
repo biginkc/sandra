@@ -1,4 +1,5 @@
 import Image from "next/image";
+import { recordingViewer } from "@/lib/recordings/data";
 import { GlobalSearchProvider } from "@/components/search/global-search-provider";
 import { GlobalSearchTrigger } from "@/components/search/global-search-trigger";
 import Link from "next/link";
@@ -32,6 +33,7 @@ export default async function DashboardLayout({
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
   const showAdmin = isAdminEmail(user.email);
+  const recordingAccess = await recordingViewer().catch(() => null);
   const [rosterResult, badgeResult] = await Promise.allSettled([
     getAcquisitionRoster(),
     getAcquisitionBadge(),
@@ -104,6 +106,8 @@ export default async function DashboardLayout({
         </Link>
         <DashboardSidebar
           showMyLeads={showMyLeads}
+          showRecordings={recordingAccess?.owner}
+          showMyRecordings={recordingAccess?.mine}
           initialAcquisitionBadge={initialAcquisitionBadge}
           onRefreshAcquisitionBadge={refreshMyLeadsBadge}
         />
@@ -118,6 +122,8 @@ export default async function DashboardLayout({
       <div className="nav-field fixed inset-x-0 top-16 z-30 border-b border-white/10 md:hidden">
         <DashboardMobileNav
           showMyLeads={showMyLeads}
+          showRecordings={recordingAccess?.owner}
+          showMyRecordings={recordingAccess?.mine}
           initialAcquisitionBadge={initialAcquisitionBadge}
           onRefreshAcquisitionBadge={refreshMyLeadsBadge}
         />

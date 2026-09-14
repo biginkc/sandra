@@ -1,0 +1,65 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import assert from 'node:assert/strict';
+const dir = mkdtempSync(join(tmpdir(), 'sandra-recordings-'));
+const data = join(dir,'pg');
+let started=false;
+const run=(cmd,args,input)=>execFileSync(process.env.SANDRA_POSTGRES_BIN ? join(process.env.SANDRA_POSTGRES_BIN,cmd) : cmd,args,{input,encoding:'utf8',stdio:['pipe','pipe','pipe']});
+const sql=q=>run('psql',['-h',dir,'-p','5498','-U','postgres','-d','postgres','-v','ON_ERROR_STOP=1','-At'],q).trim();
+const uid=n=>`10000000-0000-0000-0000-${String(n).padStart(12,'0')}`;
+const org='00000000-0000-0000-0000-000000000bbb';
+try {
+ run('initdb',['-D',data,'-A','trust','-U','postgres','--no-locale']);
+ run('pg_ctl',['-D',data,'-l',join(dir,'log'),'-o',`-k ${dir} -p 5498 -h ''`,'-w','start']);started=true;
+ sql(`create role anon;create role authenticated;create role service_role;
+ create schema auth;
+ create table auth.users(id uuid primary key,email text,raw_app_meta_data jsonb);
+ create table public.memberships(user_id uuid,org_id uuid,role text,access_status text,access_expires_at timestamptz,deletion_prepared_at timestamptz,acquisitions_enabled boolean);
+ create table public.properties(id uuid,org_id uuid,address text,city text,state text);
+ create table public.contacts(id uuid,org_id uuid,first_name text,last_name text,entity_name text);
+ create table public.call_activities(id uuid,org_id uuid,started_at timestamptz,created_at timestamptz,operator_user_id uuid,provider text,disposition text,outcome text,direction text,call_purpose text,contact_id uuid,property_id uuid,phone_e164 text,transcript_status text,summary_status text,recording_status text,jitter_attempt_id text,jitter_session_id text);
+ create table public.call_recordings(id uuid,call_activity_id uuid,status text,storage_path text,duration_seconds integer);
+ create table public.acquisition_attempts(id uuid,org_id uuid,actor_user_id uuid,call_activity_id uuid,recording_url text,occurred_at timestamptz,source text,outcome text,property_id uuid);
+ insert into auth.users values ${[1,2,3,4,5,6].map(n=>`('${uid(n)}','person${n}@example.test','{}')`).join(',')};
+ insert into memberships values ${[1,2,3,4,5,6].map(n=>`('${uid(n)}','${org}','${n===1||n===4?'owner':'member'}','${n===5?'revoked':'active'}',null,null,${[2,3,4,5].includes(n)})`).join(',')};
+ insert into call_activities select '${uid(100)}','${org}','2026-09-01','2026-09-01','${uid(2)}','jitter',null,'connected_human','outbound','customer',null,null,'+15555550100','available','available','available','attempt1','scope1';
+ insert into call_activities select '${uid(101)}','${org}','2026-09-01','2026-09-01','${uid(3)}','jitter',null,'no_answer','outbound','customer',null,null,null,'none','none','available','attempt2','scope2';
+ insert into call_activities select '${uid(102)}','${org}','2026-09-01','2026-09-01',null,'twilio',null,'unknown','outbound','customer',null,null,null,'none','none','available','attempt3','scope3';
+ insert into call_activities select '${uid(103)}','${org}','2026-09-01','2026-09-01','${uid(2)}','jitter',null,'unknown','outbound','customer',null,null,null,'none','none','none','attempt4','scope4';
+ insert into call_recordings values ('${uid(200)}','${uid(100)}','available','scope1/audio.mp3',30),('${uid(201)}','${uid(101)}','available','scope2/audio.mp3',60),('${uid(202)}','${uid(102)}','available','old/audio.mp3',10);
+ insert into acquisition_attempts values ('${uid(300)}','${org}','${uid(2)}',null,'https://dialpad.com/recording/example','2026-09-02','dialpad','reached',null);
+ insert into acquisition_attempts values ('${uid(301)}','${org}','${uid(3)}','${uid(103)}','https://dialpad.com/recording/conflict','2026-09-01','dialpad','reached',null);`);
+ sql(readFileSync(new URL('../supabase/migrations/20260915000100_recording_library.sql',import.meta.url),'utf8'));
+ const audio=[{id:uid(100),actorId:uid(2),files:[{id:'audio-a',duration:30,status:'available',matchesSummary:true},{id:'audio-b',duration:80,status:'available',matchesSummary:false}]},{id:uid(101),actorId:uid(3),files:[{id:'audio-c',duration:60,status:'available',matchesSummary:true}]}];
+ const literal=x=>`'${JSON.stringify(x).replaceAll("'","''")}'::jsonb`;
+ const search=(actor,scope,filter={status:'all'})=>JSON.parse(sql(`set role service_role;select public.fn_recording_library_search('${uid(actor)}','${scope}',${literal(filter)},${literal(audio)});`).split('\n').at(-1));
+ assert.equal(search(1,'owner').total,5);
+ const own=search(2,'mine');assert.equal(own.total,2);assert.equal(own.users.length,0);assert.ok(own.rows.every(r=>r.actor_id===uid(2)));
+ sql(`update call_activities set operator_user_id='${uid(2)}' where id='${uid(101)}';`);
+ assert.equal(search(2,'mine').total,2); // forged self attribution cannot widen scope
+ sql(`update call_activities set operator_user_id='${uid(3)}' where id='${uid(101)}';`);
+ assert.equal(search(4,'mine').total,0);assert.equal(search(4,'owner').total,5);
+ const available=search(1,'owner',{status:'available'});assert.equal(available.total,2);
+ assert.equal(available.rows.find(r=>r.id===`call:${uid(100)}`).files.length,2);
+ assert.equal(search(1,'owner',{status:'all',min:70,max:90}).total,1);
+ const extra={id:'failed-short',duration:10,status:'failed',matchesSummary:false};audio[1].files.push(extra);
+ assert.equal(search(1,'owner',{status:'available',max:20}).total,0);audio[1].files.pop();
+ assert.equal(search(1,'owner',{status:'all',min:90}).total,0); // never sum 30+80
+ assert.equal(search(1,'owner',{status:'all',group:'unattributed'}).total,2);
+ for(const [actor,scope] of [[2,'owner'],[5,'mine'],[6,'mine'],[6,'owner']]) assert.throws(()=>search(actor,scope),/FORBIDDEN/);
+ assert.throws(()=>search(2,'mine',{users:[uid(3)]}),/FORBIDDEN/);
+ assert.throws(()=>sql(`set role authenticated;select public.fn_recording_library_search('${uid(1)}','owner','{}','[]');`),/permission denied/);
+ assert.throws(()=>sql(`set role service_role;select public.recording_library_rows('${uid(1)}','owner','[]');`),/permission denied/);
+ sql(`insert into acquisition_attempts values ('${uid(302)}','${org}','${uid(2)}','${uid(100)}','https://example.test/linked','2026-09-01','dialpad','reached',null);`);
+ assert.ok(sql(`set role service_role;select public.fn_recording_library_file_parent('${uid(2)}','mine','reference:${uid(302)}');`).endsWith(uid(100)));
+ assert.ok(sql(`set role service_role;select public.fn_recording_library_file('${uid(2)}','mine','reference:${uid(302)}',${literal(audio)}) is not null;`).endsWith('t'));
+ const deniedFile=sql(`set role service_role;select public.fn_recording_library_file('${uid(2)}','mine','jitter:${uid(101)}:audio-c',${literal(audio)}) is null;`);assert.ok(deniedFile.endsWith('t'));
+ assert.ok(!JSON.stringify(available).includes('storagePath'));assert.ok(!JSON.stringify(available).includes('scope1'));
+ sql(`update memberships set access_expires_at=now()-interval '1 second' where user_id='${uid(2)}';`);assert.throws(()=>search(2,'mine'),/FORBIDDEN/);
+ sql(`update memberships set access_expires_at=null,deletion_prepared_at=now() where user_id='${uid(2)}';`);assert.throws(()=>search(2,'mine'),/FORBIDDEN/);
+ // Stable tie ordering and cursor move forward, with counts independent of page.
+ const page=search(1,'owner');const cursor=page.rows[1];const next=search(1,'owner',{status:'all',after:{at:cursor.at,id:cursor.id}});assert.equal(next.total,5);assert.equal(next.rows.length,3);
+ console.log('Recording library SQL rehearsal passed: roles, self scope, direct RPC denial, attribution conflicts, segments, duration, cursors, revocation and minimal metadata.');
+} finally {if(started)run('pg_ctl',['-D',data,'-m','immediate','-w','stop']);rmSync(dir,{recursive:true,force:true});}
