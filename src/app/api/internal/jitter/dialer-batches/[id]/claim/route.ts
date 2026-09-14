@@ -62,6 +62,9 @@ export async function POST(
         p_request_hash: idempotency.requestHash,
       },
     );
+    if (claimError?.code === "23514" && claimError.message === "VOICE_BATCH_TRANSPORT_CONFLICT") {
+      return NextResponse.json({ error: "conflict", error_code: "voice_transport_conflict" }, { status: 409 });
+    }
     if (claimError) throw claimError;
 
     const outcome = (claimResult as { outcome?: string } | null)?.outcome;

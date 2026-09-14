@@ -77,6 +77,7 @@ vi.mock("@/app/(dashboard)/messages/dispo-actions", () => ({ setOutreachDispo })
 import {
   completeSoftphoneCall,
   prepareLeadCall,
+  inspectLeadCall,
   prepareManualCall,
 } from "./actions";
 
@@ -380,6 +381,8 @@ describe("prepareManualCall", () => {
       from: vi.fn(() => builder),
     });
     pausePropertyEnrollments.mockResolvedValue(undefined);
+    await expect(inspectLeadCall(lead.id)).resolves.toMatchObject({ok:true,data:{propertyId:lead.id}});
+    expect(pausePropertyEnrollments).not.toHaveBeenCalled();
 
     await expect(prepareLeadCall(lead.id)).resolves.toMatchObject({
       ok: true,

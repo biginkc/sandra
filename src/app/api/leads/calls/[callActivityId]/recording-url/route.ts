@@ -1,3 +1,4 @@
+import { ownedDialpadPlayback } from "@/lib/dialpad-voice/recording-playback";
 import { createClient } from "@/lib/supabase/server";
 
 const NO_STORE_HEADERS = {
@@ -8,6 +9,8 @@ const NO_STORE_HEADERS = {
 type RecordingLookup = {
   id: string;
   provider: string;
+  org_id: string;
+  provider_call_id: string | null;
   jitter_attempt_id: string;
   jitter_session_id: string | null;
   call_recordings: Array<{ status: string }> | { status: string } | null;
@@ -55,7 +58,7 @@ export async function GET(
 
   const { data, error } = await supabase
     .from("call_activities")
-    .select("id, provider, jitter_attempt_id, jitter_session_id, call_recordings(status)")
+    .select("id, org_id, provider, provider_call_id, jitter_attempt_id, jitter_session_id, call_recordings(status)")
     .eq("id", callActivityId)
     .maybeSingle();
 
@@ -67,6 +70,10 @@ export async function GET(
   }
 
   const call = data as unknown as RecordingLookup;
+  if (call.provider === "dialpad") {
+    if (!call.org_id || !call.provider_call_id) return json({ error: "Call recording identity is incomplete", error_code: "missing_dialpad_identity" }, 409);
+    return ownedDialpadPlayback(call.org_id, call.provider_call_id, new URL(_request.url).searchParams.get("artifactId"));
+  }
   // Batch calls and embedded-softphone calls both store their audio in
   // Jitter; playback resolves through the same internal endpoint.
   if (call.provider !== "jitter" && call.provider !== "sandra_softphone") {

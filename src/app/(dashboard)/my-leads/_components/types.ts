@@ -210,6 +210,7 @@ export type MyLeadDetailPageResult =
   | { ok: false; message: string }
 
 export type AcquisitionCallReferenceOption = {
+  source?: "sandra" | "dialpad"
   id: string
   label: string
 }

@@ -27,6 +27,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install audio decoder for recording verification
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
+          ffmpeg -version
+
       - name: Rehearse My Leads metrics and signed call evidence
         run: node scripts/verify-my-leads-metrics.mjs && node scripts/rehearse-call-metrics-writeback.mjs
 

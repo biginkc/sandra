@@ -1,3 +1,5 @@
+const { ownedPlayback } = vi.hoisted(() => ({ ownedPlayback: vi.fn() }));
+vi.mock("@/lib/dialpad-voice/recording-playback", () => ({ ownedDialpadPlayback: ownedPlayback }));
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { authGetUser, eq, maybeSingle, select } = vi.hoisted(() => ({
@@ -229,6 +231,23 @@ describe("GET /api/leads/calls/[callActivityId]/recording-url", () => {
 
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toMatchObject({ error_code: "playback_not_configured" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Dialpad route authorization", () => {
+  it("does not use service playback for anonymous or RLS-inaccessible calls", async () => {
+    authGetUser.mockResolvedValueOnce({ data: { user: null } });
+    expect((await request()).status).toBe(401);
+    maybeSingle.mockResolvedValueOnce({ data: null, error: null });
+    expect((await request()).status).toBe(404);
+    expect(ownedPlayback).not.toHaveBeenCalled();
+  });
+  it("uses authorized call org and provider ID, never Jitter identity", async () => {
+    maybeSingle.mockResolvedValueOnce({ data: call({ provider: "dialpad", org_id: "authorized-org", provider_call_id: "provider-call" }), error: null });
+    ownedPlayback.mockResolvedValueOnce(Response.json({ signedUrl: "https://owned.test/audio", expiresAt: "future" }));
+    expect((await request()).status).toBe(200);
+    expect(ownedPlayback).toHaveBeenCalledWith("authorized-org", "provider-call", null);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

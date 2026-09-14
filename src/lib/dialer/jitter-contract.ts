@@ -125,6 +125,12 @@ export type JitterStartCallResult = JitterProxyResult<{
 type JsonObject = Record<string, unknown>;
 type ResponseValidator<T> = (value: unknown) => value is T;
 
+/** Read-only preflight: never exposes the configured credential or URL. */
+export function validateJitterConfiguration(): JitterProxyError | null {
+  const configuration = configuredJitter();
+  return "ok" in configuration ? { ...configuration, ambiguous: false } : null;
+}
+
 function configuredJitter():
   { baseUrl: string; serviceToken: string } | JitterProxyError {
   const baseUrl =

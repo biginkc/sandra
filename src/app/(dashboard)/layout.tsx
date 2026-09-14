@@ -1,4 +1,6 @@
 import Image from "next/image";
+import { MariaCtiPanel } from "@/components/dialpad/maria-cti-panel";
+import { mariaCtiConfig } from "@/lib/dialpad-voice/cti-config";
 import { GlobalSearchProvider } from "@/components/search/global-search-provider";
 import { GlobalSearchTrigger } from "@/components/search/global-search-trigger";
 import Link from "next/link";
@@ -37,6 +39,8 @@ export default async function DashboardLayout({
   ]);
   const acquisitionRoster =
     rosterResult.status === "fulfilled" ? rosterResult.value : null;
+  const cti = mariaCtiConfig(acquisitionRoster && acquisitionRoster.roster.members.some(member => member.id === user.id && member.active)
+    ? acquisitionRoster.viewer : null);
   const showMyLeads = Boolean(
     acquisitionRoster &&
       (acquisitionRoster.roster.settings.enabled || acquisitionRoster.viewer.isOwner),
@@ -49,6 +53,7 @@ export default async function DashboardLayout({
     <GlobalSearchProvider>
     <div className="bg-background min-h-screen">
       <ConnectionBanner />
+      {cti && <MariaCtiPanel key={cti.clientId} {...cti} />}
       <JobFailureNotifier />
 
       <header className="nav-field fixed inset-x-0 top-0 left-0 z-40 flex h-16 items-center justify-between gap-3 border-b border-white/10 px-4 md:left-64 md:px-7">

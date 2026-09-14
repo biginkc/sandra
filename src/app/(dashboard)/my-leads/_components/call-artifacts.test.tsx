@@ -32,3 +32,13 @@ describe("independent call artifacts", () => {
     view.unmount(); await waitFor(() => expect(signal?.aborted).toBe(true));
   });
 });
+
+
+it.each(["pending", "failed"])("keeps partial playback available while clearly reporting %s completeness", async (recordingStatus) => {
+  const partial = { ...base, recordingStatus, recordingComplete: false, recordingSegments: [{ artifactId: "one", durationSeconds: 10 }], durationSeconds: null };
+  vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, json: async () => partial } as Response);
+  render(<MyLeadCallArtifacts callActivityId="call-partial" />);
+  expect(await screen.findByText("Partial recording available. The full recording is incomplete.")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Load recording" })).toBeVisible();
+  expect(screen.getByText(recordingStatus === "failed" ? "Some recording segments could not be saved. Please reach out to an admin." : "Recording processing")).toBeVisible();
+});

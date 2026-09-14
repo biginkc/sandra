@@ -60,10 +60,15 @@ describe('attempt display',()=>{
   });
 });
 
-it('retains Sandra call identity for authenticated playback without an external URL',()=>{
+it('retains linked Sandra and Dialpad call identity for authenticated playback without an external URL',()=>{
   const detail={groups:{attempts:{rows:[{id:'attempt',actorId:null,at:'2026-09-12T18:00:00Z',source:'sandra',callActivityId:'call-123',recordingUrl:null}],hasMore:false,cursor:null}}} as AcquisitionDetail;
   expect(detailView(detail,{members:[]} as unknown as AcquisitionRoster).attempts.rows[0]).toMatchObject({callActivityId:'call-123',recordingUrl:null});
   detail.groups.attempts!.rows[0].source='dialpad';
+  expect(detailView(detail,{members:[]} as unknown as AcquisitionRoster).attempts.rows[0].callActivityId).toBe('call-123');
+  detail.groups.attempts!.rows[0].callActivityId=null;
+  expect(detailView(detail,{members:[]} as unknown as AcquisitionRoster).attempts.rows[0].callActivityId).toBeNull();
+  detail.groups.attempts!.rows[0].source='manual';
+  detail.groups.attempts!.rows[0].callActivityId='call-123';
   expect(detailView(detail,{members:[]} as unknown as AcquisitionRoster).attempts.rows[0].callActivityId).toBeNull();
 });
 

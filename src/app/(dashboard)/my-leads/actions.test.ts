@@ -4,7 +4,7 @@ vi.mock('next/cache',()=>({revalidatePath:mocks.revalidate}));
 vi.mock('@/lib/my-leads/queries',()=>({myLeadsViewer:mocks.viewer,getAcquisitionQueue:vi.fn(),getAcquisitionKpis:vi.fn(),getAcquisitionDetail:vi.fn()}));
 vi.mock('@/lib/my-leads/settings',()=>({setAcquisitionDesignation:vi.fn(),setAcquisitionSettings:vi.fn()}));
 import { getAcquisitionKpis, getAcquisitionQueue } from '@/lib/my-leads/queries';
-import { loadMyLeads, submitMyLeadCommand } from './actions';
+import { loadMyLeadCallReferences, loadMyLeads, submitMyLeadCommand } from './actions';
 beforeEach(()=>{vi.resetAllMocks();mocks.viewer.mockResolvedValue({orgId:'actual-org',userId:'actor',client:{rpc:mocks.rpc}});mocks.rpc.mockResolvedValue({data:{ok:true},error:null});});
 describe('My Leads command integration',()=>{
   it('injects the authenticated organization, overriding client input',async()=>{
@@ -32,6 +32,16 @@ it('keeps KPI scope at today for the rep regardless of search and obsolete perio
   expect(getAcquisitionQueue).toHaveBeenCalledWith(expect.objectContaining({search:'filtered lead'}));
 });
 
+it('finalizes evidenced Dialpad references while preserving manual Dialpad logging',async()=>{
+  await submitMyLeadCommand('log-attempt',{source:'dialpad',callActivityId:'activity',outcome:'reached'});
+  expect(mocks.rpc).toHaveBeenLastCalledWith('fn_finalize_acquisition_attempt',{p_input:{orgId:'actual-org',source:'dialpad',callActivityId:'activity',outcome:'reached'}});
+  await submitMyLeadCommand('log-attempt',{source:'dialpad',callActivityId:null,outcome:'no_answer'});
+  expect(mocks.rpc).toHaveBeenLastCalledWith('fn_log_acquisition_attempt',expect.anything());
+});
+it('preserves source on pending call options',async()=>{
+  mocks.rpc.mockResolvedValue({data:[{id:'call',occurredAt:'2026-09-13T12:00:00Z',source:'dialpad'}],error:null});
+  expect(await loadMyLeadCallReferences('lead','actor')).toMatchObject({ok:true,options:[{id:'call',source:'dialpad'}]});
+});
 it('returns safe typed access guidance without revealing assignment or revalidating', async()=>{
   mocks.rpc.mockResolvedValue({data:null,error:{message:'FORBIDDEN'}});
   expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,code:'FORBIDDEN',message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'});

@@ -1,3 +1,4 @@
+import { reserveJitterTransport, finishJitterTransport, markJitterDispatch } from "@/lib/dialpad-voice/jitter-exclusion";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { after } from "next/server";
 
@@ -21,6 +22,7 @@ import {
   requestJitterCallerIds,
   requestJitterDigit,
   requestJitterStartCall,
+  validateJitterConfiguration,
   requestJitterToken,
   requestJitterProviderStatus,
   requestJitterAudioRecovery,
@@ -233,6 +235,15 @@ export async function startAuthenticatedJitterCall(
   if (training && (!canCallHomeownerTraining(target.phoneE164, operator.userId) || target.propertyId || target.contactId)) {
     return startLocalError("Internal training requires an authorized operator and an unlinked number.");
   }
+  const configurationError = validateJitterConfiguration();
+  if (configurationError) return configurationError;
+
+  let transportReserved = false;
+  let transportDispatched = false;
+  try {
+    transportReserved = await reserveJitterTransport(SANDRA_ORG_ID, operator.userId, intent.idempotencyKey, target.propertyId ?? null);
+  } catch { return startLocalError("Another voice call is active or its status is unconfirmed."); }
+  try {
   // Re-run the unchanged Sandra eligibility path instead of trusting a
   // browser-prepared target.
   const prepared = target.propertyId
@@ -316,6 +327,8 @@ export async function startAuthenticatedJitterCall(
         errorCode: "acquisition_context_pending", ambiguous: false };
     }
   }
+  if (transportReserved) await markJitterDispatch(SANDRA_ORG_ID, operator.userId, intent.idempotencyKey);
+  transportDispatched = true;
   const started = await requestJitterStartCall(
     {
       operator_id: operator.userId,
@@ -341,6 +354,11 @@ export async function startAuthenticatedJitterCall(
       ...started,
       ambiguous: started.ambiguous ?? (!deterministic && started.status >= 500),
     };
+  }
+  if (transportReserved) {
+    // Failure to record the returned ID keeps the reservation blocking Dialpad;
+    // it must never turn a possibly active call into a released reservation.
+    await finishJitterTransport(SANDRA_ORG_ID, operator.userId, intent.idempotencyKey, started.data.call_id, false).catch(() => undefined);
   }
   if (training) {
     // Persist before handing the browser a connect capability. This makes an
@@ -377,6 +395,11 @@ export async function startAuthenticatedJitterCall(
     data: { callId: capability, batchId: started.data.batch_id },
     ambiguous: false,
   };
+  } finally {
+    if (transportReserved && !transportDispatched) {
+      await finishJitterTransport(SANDRA_ORG_ID, operator.userId, intent.idempotencyKey, null, true).catch(() => undefined);
+    }
+  }
 }
 
 export async function mintStartIntent(): Promise<

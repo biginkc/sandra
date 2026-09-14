@@ -84,7 +84,7 @@ async function getLead(supabase: Awaited<ReturnType<typeof createClient>>, prope
   return (data as unknown as LeadRow | null) ?? null;
 }
 
-export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActionResult<SoftphoneTarget>> {
+async function resolveLeadCall(propertyId: string, pauseEnrollment: boolean): Promise<SoftphoneActionResult<SoftphoneTarget>> {
   try {
     const supabase = await createClient();
     const lead = await getLead(supabase, propertyId);
@@ -119,7 +119,7 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
     }
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return { ok: false, error: "Not signed in." };
-    await pausePropertyEnrollments(supabase, {
+    if (pauseEnrollment) await pausePropertyEnrollments(supabase, {
       propertyId: lead.id,
       reason: "call_in_progress",
       actor: { actorType: "user", actorId: user.id },
@@ -128,6 +128,15 @@ export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActi
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "Could not start the call." };
   }
+}
+
+/** Eligibility inspection has no enrollment side effects. */
+export async function inspectLeadCall(propertyId: string): Promise<SoftphoneActionResult<SoftphoneTarget>> {
+  return resolveLeadCall(propertyId, false);
+}
+
+export async function prepareLeadCall(propertyId: string): Promise<SoftphoneActionResult<SoftphoneTarget>> {
+  return resolveLeadCall(propertyId, true);
 }
 
 /** Best-effort cleanup for a transport failure before wrap-up exists. */
