@@ -26,6 +26,12 @@ class AutoStoppedRecorder extends FakeRecorder {
       this.dispatchEvent(new Event("stop"));
     }, 0);
   }
+
+  autoStopBeforeQueuedFinalChunk(blob: Blob): void {
+    this.state = "inactive";
+    this.dispatchEvent(new Event("stop"));
+    setTimeout(() => this.chunk(blob), 0);
+  }
 }
 
 describe("browser playback capture", () => {
@@ -128,6 +134,25 @@ describe("browser playback capture", () => {
       onEvent: (event) => events.push(event),
     });
     recorder.autoStopWithFinalChunk(new Blob(["final flush"]));
+
+    await handle?.stop();
+
+    expect(chunks).toHaveLength(1);
+    expect(events.map((event) => event.kind)).toEqual(["started", "chunk", "stopped"]);
+  });
+
+  it("waits for dataavailable queued after an already-observed stop", async () => {
+    const recorder = new AutoStoppedRecorder();
+    const events: BrowserCaptureEvent[] = [];
+    const chunks: Blob[] = [];
+    const audio = { captureStream: () => ({ getAudioTracks: () => [{}] }) } as unknown as HTMLAudioElement;
+    const handle = startBrowserPlaybackCapture({
+      audio,
+      recorderFactory: () => recorder as unknown as MediaRecorder,
+      onChunk: (chunk) => { chunks.push(chunk.blob); },
+      onEvent: (event) => events.push(event),
+    });
+    recorder.autoStopBeforeQueuedFinalChunk(new Blob(["queued final flush"]));
 
     await handle?.stop();
 

@@ -157,10 +157,15 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
       // teardown. State is already inactive in that case, but the final
       // dataavailable/stop events can still be queued; the observer installed
       // at construction keeps stopped after that final flush.
+      const recorderWasInactive = recorder.state === "inactive";
       if (!recorderStopObserved) {
         if (recorder.state !== "inactive") recorder.stop();
         await recorderStopped;
       }
+      // A recorder that auto-stopped can queue dataavailable after its stop
+      // event. Give that already-inactive recorder one task turn to deliver
+      // the final blob before publishing the segment's stopped marker.
+      if (recorderWasInactive) await new Promise<void>((resolve) => setTimeout(resolve, 0));
       await Promise.all([...pending]);
       for (const eventName of ["pause", "volumechange", "stalled", "error", "abort"])
         options.audio.removeEventListener?.(eventName, reportPlaybackFault);

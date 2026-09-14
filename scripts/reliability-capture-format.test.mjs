@@ -46,3 +46,15 @@ test('export validation rejects an unfinished segment even when it has media', (
   };
   assert.throws(() => validateCaptureSegments(capture), /no ordered start\/stop evidence/);
 });
+
+test('export validation rejects a chunk event after stopped', () => {
+  const capture = {
+    chunks: [{ segment: 1, sequence: 1, size: 1, mimeType: 'audio/webm;codecs=opus' }],
+    events: [
+      { segment: 1, kind: 'started', atMonotonicMs: 1 },
+      { segment: 1, kind: 'stopped', atMonotonicMs: 2 },
+      { segment: 1, kind: 'chunk', atMonotonicMs: 3 },
+    ],
+  };
+  assert.throws(() => validateCaptureSegments(capture), /no ordered start\/stop evidence/);
+});
