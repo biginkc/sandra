@@ -22,12 +22,20 @@ Local env loading:
 Required environment:
 
 - `PROD_EMAIL`
-- `PROD_HUGO_STORAGE_STATE` pointing to an ignored Playwright state captured
-  after a real Hugo login on `https://sandra.bmhgroupkc.com`
+- `PROD_PASSWORD` for an unattended login through the real Hugo page. Use a
+  dedicated synthetic Hugo account; the old Sandra-only canary password does
+  not authenticate there.
+- Alternatively, `PROD_HUGO_STORAGE_STATE` may point to an ignored Playwright
+  state captured after a real Hugo login for local diagnostics. The scheduled
+  cloud job uses fresh login because saved sessions expire.
 - `PROD_BASE_URL` when testing a non-default deployed URL
 - `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` for canaries that
   verify persisted production state directly
 - `DIALPAD_WEBHOOK_SECRET` for signed inbound webhook canaries
+
+The `canary-leads-browser.yml` workflow remains dispatch-only until the new
+Hugo canary identity has passed a live run. GitHub Actions needs `PROD_EMAIL`
+and `PROD_PASSWORD` secrets for that job; do not commit them to the repository.
 
 Canary data must be tagged with `PROD-CANARY <run_id>`, and cleanup must only
 target data created by the active canary run.
