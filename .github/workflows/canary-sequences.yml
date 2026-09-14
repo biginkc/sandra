@@ -35,6 +35,8 @@ jobs:
       # developer's local `.env.local`.
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
+      PROD_CANARY_SMS_TO: ${{ secrets.PROD_CANARY_SMS_TO }}
+      PROD_CANARY_SMS_ALLOWLIST: ${{ secrets.PROD_CANARY_SMS_ALLOWLIST }}
       CI: "1"
 
     steps:

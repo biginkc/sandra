@@ -21,6 +21,7 @@
 import {
   env,
   fireInboundWebhook,
+  resolveCanarySmsReceiverFromEnv,
   pollUntil,
   prodSupabase,
   resolveActiveAiResponderOrgId,
@@ -28,7 +29,8 @@ import {
 
 const TS = Date.now();
 const TAG = `CANARY-AI-HAPPY-${TS}`;
-const PHONE = `+1555${String(TS).slice(-7)}`;
+const CANARY_RUN_STARTED_AT = new Date().toISOString();
+const RECEIVER_PHONE = resolveCanarySmsReceiverFromEnv();
 const CRM_NUMBER = env.DIALPAD_FROM_NUMBER ?? "+18162804181";
 const BENIGN_BODY = "yes I'd like to hear more about selling my property";
 
@@ -78,7 +80,8 @@ async function main(): Promise<void> {
         org_id: orgId,
         first_name: "Canary",
         last_name: TAG,
-        phone_1: PHONE,
+        phone_1: RECEIVER_PHONE,
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();
@@ -117,7 +120,7 @@ async function main(): Promise<void> {
       contact_id: contactId,
       property_id: propertyId,
       from_address: CRM_NUMBER,
-      to_address: PHONE,
+      to_address: RECEIVER_PHONE,
       metadata: { canary_anchor: TAG },
     });
     if (anchorErr) throw anchorErr;
@@ -125,7 +128,7 @@ async function main(): Promise<void> {
     // ---- Fire inbound webhook ---------------------------------------------
     const status = await fireInboundWebhook({
       id: `${TAG}-inbound`,
-      from_number: PHONE,
+      from_number: RECEIVER_PHONE,
       to_number: CRM_NUMBER,
       text: BENIGN_BODY,
       timestamp: new Date().toISOString(),
@@ -135,14 +138,23 @@ async function main(): Promise<void> {
     }
 
     // ---- Poll for the AI auto-reply ---------------------------------------
-    type Reply = { id: string; metadata: unknown; status: string };
+    type Reply = {
+      id: string;
+      from_address: string | null;
+      to_address: string | null;
+      body: string;
+      metadata: unknown;
+      status: string;
+    };
     const aiReply = await pollUntil<Reply>(
       async () => {
         const { data } = await supabase
           .from("messages")
-          .select("id, metadata, status")
+          .select("id, body, metadata, status, from_address, to_address")
           .eq("property_id", propertyId!)
           .eq("direction", "outbound")
+          .contains("metadata", { generated_by: "ai_responder_v1" })
+          .order("created_at", { ascending: false })
           .limit(1)
           .maybeSingle();
         return data ? (data as Reply) : null;
@@ -160,6 +172,29 @@ async function main(): Promise<void> {
       throw new Error(
         `AI outbound status=${aiReply.status}, expected sent`,
       );
+    }
+
+    if (!aiReply.from_address || !aiReply.to_address) {
+      throw new Error("AI outbound row missing from/to addresses.");
+    }
+
+    const receiverLogRow = await pollUntil<{ id: string }>(
+      async () => {
+        const { data } = await supabase
+          .from("test_sms_log")
+          .select("id, received_at")
+          .eq("from_number", aiReply.from_address!)
+          .eq("to_number", aiReply.to_address!)
+          .eq("signature_verified", true)
+          .eq("body", aiReply.body)
+          .gte("received_at", CANARY_RUN_STARTED_AT)
+          .maybeSingle();
+        return data ? (data as { id: string }) : null;
+      },
+      { intervalMs: 2_000, timeoutMs: 30_000, label: "receiver test_sms_log proof" },
+    );
+    if (!receiverLogRow?.id) {
+      throw new Error("Receiver-side proof missing in test_sms_log for AI outbound body.");
     }
 
     // ---- Assert no escalation ---------------------------------------------

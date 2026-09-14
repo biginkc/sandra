@@ -121,6 +121,55 @@ export type DialpadInboundEvent = {
   timestamp?: string;
 };
 
+// ----------- owned receiver guard -------------------------------------------
+
+const E164_RE = /^\+[1-9]\d{1,14}$/;
+
+function parseSmsAllowlist(allowlistRaw: string | undefined): string[] {
+  return allowlistRaw
+    ? allowlistRaw
+        .split(",")
+        .flatMap((part) => part.split(/\s+/g))
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0)
+    : [];
+}
+
+export function resolveCanarySmsReceiver(params: {
+  receiver?: string;
+  allowlist?: string;
+}): string {
+  const receiver = params.receiver?.trim();
+  const allowlist = parseSmsAllowlist(params.allowlist);
+
+  if (!receiver) {
+    throw new Error(
+      "PROD_CANARY_SMS_TO is required for this canary run and must be an owned receiver.",
+    );
+  }
+  if (!E164_RE.test(receiver)) {
+    throw new Error("PROD_CANARY_SMS_TO must be a valid E.164 phone number.");
+  }
+  if (allowlist.length === 0) {
+    throw new Error(
+      "PROD_CANARY_SMS_ALLOWLIST is required and must include the receiver.",
+    );
+  }
+  if (!allowlist.includes(receiver)) {
+    throw new Error(
+      "PROD_CANARY_SMS_TO is not present in PROD_CANARY_SMS_ALLOWLIST.",
+    );
+  }
+  return receiver;
+}
+
+export function resolveCanarySmsReceiverFromEnv(): string {
+  return resolveCanarySmsReceiver({
+    receiver: env.PROD_CANARY_SMS_TO,
+    allowlist: env.PROD_CANARY_SMS_ALLOWLIST,
+  });
+}
+
 /**
  * Build a Dialpad-shape webhook body: an HS256 JWT signed with the
  * shared `DIALPAD_WEBHOOK_SECRET`. The webhook handler verifies the
