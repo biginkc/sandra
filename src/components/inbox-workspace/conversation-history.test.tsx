@@ -85,6 +85,14 @@ describe("render-bound conversation read acknowledgment", () => {
     expect(screen.queryByText("Visible conversation")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
+  it("treats a masked 404 org-access denial the same as 401/403 and clears stale history", async () => {
+    const value = props({ fetch: vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 404 })) });
+    render(<ConversationHistory {...value} />);
+    await paint();
+    await waitFor(() => expect(value.onAccessLost).toHaveBeenCalledOnce());
+    expect(screen.queryByText("Visible conversation")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
   it("does not revive a revoked boundary when the owner's callback changes", async () => {
     const transport = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 403 }));
     const value = props({ fetch: transport });
@@ -148,6 +156,15 @@ describe("render-bound conversation read acknowledgment", () => {
     await waitFor(() => expect(value.onAccessLost).toHaveBeenCalledOnce());
     await act(async () => { finish(receipt()); });
     expect(transport.mock.calls[0][1]!.signal!.aborted).toBe(true);
+    expect(screen.queryByText("Visible conversation")).not.toBeInTheDocument();
+  });
+
+  it("clears the pane on a masked 404 org-access denial while loading an older page", async () => {
+    const value = props(); value.snapshot!.data.nextCursor = conversationId;
+    const transport = vi.fn<typeof fetch>().mockResolvedValueOnce(receipt()).mockResolvedValueOnce(new Response(null, { status: 404 }));
+    render(<ConversationHistory {...value} fetch={transport} />); await paint();
+    fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
+    await waitFor(() => expect(value.onAccessLost).toHaveBeenCalledOnce());
     expect(screen.queryByText("Visible conversation")).not.toBeInTheDocument();
   });
 

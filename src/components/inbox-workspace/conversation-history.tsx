@@ -49,7 +49,11 @@ export function ConversationHistory(props: ConversationHistoryProps) {
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
       });
       if (controller.signal.aborted) return;
-      if (response.status === 401 || response.status === 403) {
+      // 404 from this route is org-access denial (INBOX_ORG_DENIED / INBOX_READ_NOT_FOUND
+      // etc. in read-api.ts) wearing a not-found mask to avoid leaking existence — the
+      // route has no other, distinguishable "legitimately not found" case, so treat it
+      // the same as 401/403 and clear the pane rather than leave stale history visible.
+      if (response.status === 401 || response.status === 403 || response.status === 404) {
         if (progress.current?.boundary === boundary) progress.current.revoked = true;
         setRevokedBoundary(boundary); setReadState({ boundary, status: "permission_lost" }); controller.abort(); readRequest.current?.abort(); onAccessLost(); return;
       }
@@ -98,7 +102,10 @@ export function ConversationHistory(props: ConversationHistoryProps) {
                 signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
               });
               if (controller.signal.aborted) return;
-              if (response.status === 401 || response.status === 403) {
+              // Same org-access-denial-wearing-404 mask as the older-page route above;
+              // treat it the same as 401/403 so a live revocation clears the pane instead
+              // of leaving stale history visible.
+              if (response.status === 401 || response.status === 403 || response.status === 404) {
                 current.revoked = true;
                 pagingRequest.current?.abort();
                 setRevokedBoundary(boundary); setReadState({ boundary, status: "permission_lost" });
