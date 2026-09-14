@@ -12,6 +12,6 @@
   ],
   "stale_pending_rerun": {
     "keys": ["source_sha256"],
-    "reason": "recipient.sql changed across PR #596 rounds 2-3 for TCPA fail-closed fixes (unclassified-phone/no-consent exclusions, all-matching-slots duplicate check). This two-real-connection proof DROP SCHEMA CASCADEs on shared schema names and cannot be safely re-run against the current drifted, multi-session-shared fixture. verify.py treats ONLY this declared key as a warning, not a hard failure, until it is re-run against the Lane-2 isolated fixture rebuild and this marker is removed."
+    "reason": "recipient.sql changed across PR #596 rounds 2-4 for TCPA fail-closed fixes and the round-4 convergent destination_policy() rewrite (org-wide destination-keyed eligibility replacing the per-contact checks). This two-real-connection proof DROP SCHEMA CASCADEs on shared schema names and cannot be safely re-run against the current drifted, multi-session-shared fixture. verify.py treats ONLY this declared key as a warning, not a hard failure, until it is re-run against the Lane-2 isolated fixture rebuild and this marker is removed."
   }
 }

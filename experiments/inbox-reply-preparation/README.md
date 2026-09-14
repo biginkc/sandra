@@ -4,26 +4,67 @@ This private, disabled candidate resolves current canonical Inbox recipients bef
 
 `recipient.sql` locks canonical property/contact identity, captures inbound generation and purpose-specific content/policy versions, checks the saved normalized phone, opt-outs, suppression and active sender inventory, then captures sender/company/market context. Read receipts do not invalidate reply content. Arbitrary absent or foreign conversation IDs do not allocate persistent heads. Completion-time conversation expiry excludes a recipient even when versions have not changed.
 
-Eligibility fails closed on two axes, both deliberately **stricter** than the
-existing single-send/bulk-queue paths (`src/lib/messaging/send.ts`,
-`suppression.ts`'s `evaluateAutomatedSuppression` used by `bulk-queue.ts`),
-because bulk-reply has no per-message human review at send time:
-- **Line type** — only an affirmatively saved `'mobile'` slot is eligible,
-  checked across **every** saved slot that normalizes to the reply
-  destination, not just whichever slot comes first by ordinal. A contact can
-  have the same number saved twice (e.g. after a re-import or manual
-  correction) with conflicting types; if ANY matching slot is `'landline'`
-  the recipient excludes with `landline`, else if any matching slot is
-  anything but `'mobile'` (i.e. `'unknown'`, never classified) it excludes
-  with `unclassified_phone`. The existing paths let `'unknown'` through by
-  default (bulk-queue only gates it behind an operator opt-in toggle this
-  feature doesn't have yet), and neither existing path has ever needed a
-  multi-slot conflict rule since they never had this duplicate-save case.
-- **Consent** — an affirmative opt-in event
-  (`opt_in_marketing_written`/`opt_in_confirmed`/`opt_in_informational`) must
-  be on file; its absence excludes with `no_consent`. The existing paths only
-  hard-block explicit `opt_out`/`provider_auto_opt_out` and let a contact with
-  zero consent history through.
+## `inbox_reply_preparation.destination_policy()` — the sole eligibility authority
+
+Eligibility went through three rounds of per-contact, per-caller fail-open
+holes (a first-slot-only pick, then no cross-contact or global-DNC
+awareness). Round 4 replaced all of that with ONE org-wide,
+**destination-keyed** predicate — `destination_policy(o, destination,
+canonical_contact, strict)` — so a future fix is "add a fact to the
+predicate," not a new hole in a new caller. `recipient()` calls it once per
+candidate; nothing else in this file (or any future caller) re-derives
+eligibility on its own.
+
+Evaluated in order, first hit wins (tie prefers opt-out) — steps 1-4 run
+under **both** `strict` values:
+1. `sms_phone_suppressions` exact E.164 match — parity with
+   `src/lib/messaging/send.ts`'s `isSmsPhoneSuppressed`
+   (`opt-out-phone.ts`).
+2. `global_phone_dnc_registry` exact E.164 match — closes a real gap:
+   production `src/` code never reads this table for send-eligibility today.
+3. **Cross-contact bleed** — ANY contact in the org (not just the one tied to
+   this conversation) with a phone slot normalizing to this destination that
+   is `do_not_contact`/`sms_opted_out`, or whose latest sms consent event is
+   an opt-out.
+4. **Cross-contact landline** — ANY matching slot on ANY matching contact is
+   `'landline'`.
+
+`strict` (default `true`, fail-closed) additionally requires EVERY matching
+slot across every matching contact to be `'mobile'` (else
+`unclassified_phone`) and the CANONICAL contact's own latest sms consent
+event to be an affirmative opt-in (else `no_consent`). Both are deliberately
+**stricter** than the existing single-send/bulk-queue paths
+(`src/lib/messaging/send.ts`, `suppression.ts`'s
+`evaluateAutomatedSuppression` used by `bulk-queue.ts`), which let an
+`'unknown'`-typed or no-consent contact through by default — bulk-reply has
+no per-message human review at send time. Flipping `strict` to `false`
+(production parity) is Jarrad's Lane-1 compliance call to make later, and is
+a single argument, not a rewrite; `recipient()` currently always passes
+`true`.
+
+`recipient()` keeps two checks that are conversation/property identity, not
+destination policy, and are unaffected by `strict`: the canonical contact
+having this destination saved at all (`phone_not_saved`), and the property's
+own `is_training`/`is_dnc_locked`/terminal-disposition suppression
+(`property_suppressed`).
+
+`destination_policy()` is `SECURITY DEFINER` (needs read access to
+`global_phone_dnc_registry`, which is revoked from `authenticated`/
+`service_role`), with explicit `org_id=o` filters on every table query, its
+own `search_path=''`, and `lock_timeout`/`statement_timeout` matching the
+other reply RPCs.
+
+**Placement contract (E4), not built in this PR:** capture/freeze (this
+file) calls the predicate once per candidate and freezes the result.
+Acceptance (a future PR) MUST re-run it live per frozen item before commit —
+a newly surfaced exclusion there is a 409 (stale review), with the 50-cap
+recounted after removing newly-ineligible items. The dispatch worker's claim
+step (a future PR) MUST re-run it again per item immediately before
+`dispatch_started` — an exclusion there terminates that item as
+`skipped_ineligible` with no provider attempt, never a silent send. Neither
+of those call sites exists yet in this repo; `recipient.sql` documents this
+contract inline at `destination_policy()`'s definition for whoever builds
+them.
 
 `inbox_reply_preparation.recipient_limit()` is the single source of truth for
 the D5 bulk-reply cap (50); `batch.sql` and `inbox_reply_review.view()`
@@ -40,9 +81,11 @@ Run the actual rollback-only proof against the marked owned fixture:
 python3 experiments/inbox-reply-preparation/recipient-test.py --run-owned-fixture
 ```
 
-Seventeen groups cover canonical route/personalization, read-only versus content changes, foreign/missing identities, saved phone/landline/unclassified-phone, a conflicting duplicate save (mobile + landline on the same normalized destination) failing closed across every matching slot, inventory, consent opt-out AND no-consent, private grants, duplicate destinations, malformed target sets, winter/summer/territory quiet hours, and 51 recipients becoming 50 only after a canonical exclusion.
+Eighteen groups cover canonical route/personalization, read-only versus content changes, foreign/missing identities, saved phone/landline/unclassified-phone, a conflicting duplicate save (mobile + landline on the same normalized destination) failing closed across every matching slot, inventory, consent opt-out AND no-consent, private grants, duplicate destinations, malformed target sets, winter/summer/territory quiet hours, 51 recipients becoming 50 only after a canonical exclusion, and the full `destination_policy()` E1-E4 convergence matrix.
 
-Every fail-closed assertion in `recipient-test.py` compares `exclusion` with `IS DISTINCT FROM`, not `<>` — with `<>`, a broken guard that lets `exclusion` fall through as SQL `NULL` makes the comparison itself evaluate to `NULL`, and `IF NULL THEN RAISE` silently does not raise. `IS DISTINCT FROM` treats `NULL` as a real, comparable value, so the assertion actually fires when the guard is gone. All three fail-closed guards (line-type, consent, the multi-slot duplicate check) were mutation-checked by hand for real: each guard was fully removed from `recipient.sql`, the suite was run and confirmed to fail with the exact expected error, then the guard was restored and the suite re-confirmed green. Source hashes and limitations are in `recipient-evidence.json`. The runner removes the new schemas and all test data in the same rollback.
+Every fail-closed assertion in `recipient-test.py` compares `exclusion` with `IS DISTINCT FROM`, not `<>` — with `<>`, a broken guard that lets `exclusion` fall through as SQL `NULL` makes the comparison itself evaluate to `NULL`, and `IF NULL THEN RAISE` silently does not raise. `IS DISTINCT FROM` treats `NULL` as a real, comparable value, so the assertion actually fires when the guard is gone.
+
+Every fail-closed guard in `destination_policy()` was mutation-checked by hand for real, not just insert/remove-the-fact within the test: each of the 6 guards (steps 1-4, plus the two strict-only checks) was fully removed from `recipient.sql`, the exact expected failure was confirmed, then the guard was restored. Round-3's three guards (line-type, consent, the single-contact multi-slot duplicate check) were re-confirmed the same way. Source hashes and limitations are in `recipient-evidence.json`. The runner removes the new schemas and all test data in the same rollback.
 
 A separate real-connection proof in `recipient-concurrency.py` observes the reader waiting on a sender-context lock, crosses natural 90-day expiry while it waits, and verifies exclusion at completion. Temporary schemas/triggers are removed; uniquely marked synthetic source rows remain in the owned fixture. **Not re-run as part of this pass** — `recipient-concurrency-evidence.json` now declares a `stale_pending_rerun` marker on its `source_sha256` key (the only field affected by the `recipient.sql` fail-closed changes above); `verify.py` prints a warning for that specific declared key and still exits 0, rather than either hard-failing or silently dropping the binding. Any OTHER unexpected drift (the context source or the runner itself) still hard-fails `verify.py`. Re-run this proof and remove the marker once the Lane-2 isolated fixture rebuild lands, same as the `inbox-reply-review` concurrency proof.
 
