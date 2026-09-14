@@ -43,8 +43,9 @@ export async function dispatchBatch(pool,fetcher,ingress){
 }
 export function workerConfiguration(env){
  const ingress=new URL(env.INBOX_RESTATE_INGRESS_URL??'');
- const allowed=new Set(['inbox-restate.railway.internal','sandra-inbox-restate-owned']);
- if(ingress.protocol!=='http:'||!allowed.has(ingress.hostname)||ingress.port!=='8080'||ingress.username||ingress.password||ingress.search||ingress.hash||ingress.pathname!=='/')throw Error('Unapproved private Restate ingress');
+ const preview=env.NODE_ENV==='test'&&env.INBOX_ACTION_LOCAL_FIXTURE==='1'&&env.INBOX_ACTION_FIXTURE_PROFILE==='preview';
+ const approved=preview?ingress.hostname==='sandra-inbox-preview-restate-owned'&&ingress.port==='8480':new Set(['inbox-restate.railway.internal','sandra-inbox-restate-owned']).has(ingress.hostname)&&ingress.port==='8080';
+ if(ingress.protocol!=='http:'||!approved||ingress.username||ingress.password||ingress.search||ingress.hash||ingress.pathname!=='/')throw Error('Unapproved private Restate ingress');
  let identityKeys;try{identityKeys=JSON.parse(env.INBOX_RESTATE_IDENTITY_KEYS??'');}catch{throw Error('Restate signing keys required');}
  if(!Array.isArray(identityKeys)||identityKeys.length<1||identityKeys.length>2||identityKeys.some(k=>typeof k!=='string'||!/^publickeyv1_[1-9A-HJ-NP-Za-km-z]{40,50}$/.test(k)))throw Error('Invalid Restate signing keys');
  const connections=Number(env.INBOX_ACTION_CONNECTIONS??2);
@@ -73,7 +74,9 @@ export function databaseConfiguration(env){
  const database=decodeURIComponent(url.pathname.slice(1));
  let ssl={rejectUnauthorized:true,servername:url.hostname};
  if(env.INBOX_ACTION_LOCAL_FIXTURE==='1'){
-  if(env.NODE_ENV!=='test'||url.hostname!=='sandra-inbox-actions-db-owned'||database!=='sandra_inbox_action_runtime_20260913')throw Error('Unapproved plaintext fixture database');
+  const profile=env.INBOX_ACTION_FIXTURE_PROFILE??'proof';
+  const approved=profile==='proof'?url.hostname==='sandra-inbox-actions-db-owned'&&database==='sandra_inbox_action_runtime_20260913':profile==='preview'&&url.hostname==='sandra-inbox-preview-db-owned'&&database==='sandra_inbox_install_20260913';
+  if(env.NODE_ENV!=='test'||!approved)throw Error('Unapproved plaintext fixture database');
   ssl=false;
  }else{
   if(!url.hostname.endsWith('.supabase.co')&&!url.hostname.endsWith('.pooler.supabase.com'))throw Error('Unapproved production database host');

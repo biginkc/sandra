@@ -1,0 +1,7 @@
+# Existing preview metadata companion
+
+The fixed preview installer targets only `sandra_inbox_install_20260913` with marker `sandra-inbox-production-candidate-owned-synthetic`. It refuses existing metadata schemas and requires its compiled SQL hash to equal the separately proven full-schema action companion. The installed receipt verifies unchanged serving gate and canonical/Auth row counts, exact prerequisite and installed function bodies, capture triggers, constrained worker authority and baseline readiness. It creates no accepted operations.
+
+The runtime profile is available only with all three explicit settings: `NODE_ENV=test`, `INBOX_ACTION_LOCAL_FIXTURE=1`, and `INBOX_ACTION_FIXTURE_PROFILE=preview`. It pairs the exact preview database through `sandra-inbox-preview-db-owned:5432` with the separate signed engine at `sandra-inbox-preview-restate-owned:8480`. It cannot target the existing proof engine. Production TLS rules and the original proof profile remain unchanged. Eighteen focused runtime tests pass.
+
+The combined supervisor, image, signing key, engine volume, bounded projection child and actual restart proof belong to the separate combined-runtime package. This profile and installation receipt alone do not prove browser behavior, combined supervision or production readiness. The original signed proof database, image, engine volume and accepted receipts remain preserved. No production or provider calls were made.

@@ -56,3 +56,11 @@ test('engine readiness fails closed on unreachable or oversized health responses
  assert.equal(await createRestateReadinessProbe(async()=>{throw Error('offline');},'http://restate:8080/').read(),false);
  assert.equal(await createRestateReadinessProbe(async()=>new Response('x'.repeat(16385)),'http://restate:8080/').read(),false);
 });
+
+test('preview fixture profile pairs its exact database and separate private engine',()=>{
+ const env={NODE_ENV:'test',INBOX_ACTION_LOCAL_FIXTURE:'1',INBOX_ACTION_FIXTURE_PROFILE:'preview',INBOX_ACTION_DATABASE_URL:'postgres://inbox_action_worker:synthetic@sandra-inbox-preview-db-owned:5432/sandra_inbox_install_20260913',INBOX_RESTATE_INGRESS_URL:'http://sandra-inbox-preview-restate-owned:8480/',INBOX_RESTATE_IDENTITY_KEYS:JSON.stringify(['publickeyv1_'+'A'.repeat(43)])};
+ assert.equal(databaseConfiguration(env).ssl,false);assert.equal(workerConfiguration(env).ingress.port,'8480');
+ for(const change of [{NODE_ENV:'production'},{INBOX_ACTION_LOCAL_FIXTURE:'0'},{INBOX_ACTION_FIXTURE_PROFILE:'proof'}]){assert.throws(()=>databaseConfiguration({...env,...change}));assert.throws(()=>workerConfiguration({...env,...change}));}
+ for(const INBOX_RESTATE_INGRESS_URL of ['http://sandra-inbox-restate-owned:8080/','http://sandra-inbox-preview-restate-owned:8080/','http://inbox-restate.railway.internal:8480/'])assert.throws(()=>workerConfiguration({...env,INBOX_RESTATE_INGRESS_URL}));
+ assert.throws(()=>databaseConfiguration({...env,INBOX_ACTION_DATABASE_URL:env.INBOX_ACTION_DATABASE_URL.replace('install_20260913','action_runtime_20260913')}));
+});

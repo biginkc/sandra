@@ -1,0 +1,70 @@
+{
+  "database": "sandra_inbox_install_20260913",
+  "marker": "sandra-inbox-production-candidate-owned-synthetic",
+  "namespace_replace": {
+    "inbox_t2_": "inbox_"
+  },
+  "components": [
+    {
+      "path": "inbox-operation-acceptance/setup.sql",
+      "source_sha256": "04d34d74ef76dd11585ee45728e2a0a1f6e635cb2fd0376a4ef9b014ea12dae3",
+      "transformed_sha256": "53e8c8256092c68a743ecb21a10c5ae1d22b0b1ceab4cf46ca60bea9d1effd99"
+    },
+    {
+      "path": "inbox-operation-domain/setup.sql",
+      "source_sha256": "b7ca70de5cfe321ad3996b98de2f6097ba9b0545e7e2eb7bb0c955e9cc2a35ff",
+      "transformed_sha256": "b990e5f19bff89988f6e58a3bc12ef1a2c751c96942b8c9fc80a692ac636b587"
+    },
+    {
+      "path": "inbox-operation-domain/restrictive-scope.sql",
+      "source_sha256": "8b21a491160fedfb84ef85d1156fcede5ffdb8f56855786d430faed1784776d9",
+      "transformed_sha256": "8d3bedfdd5775ffdec0cd94a7d8e26870396922988050ff03168254afb2f0576"
+    },
+    {
+      "path": "inbox-operation-domain/restrictive-effect.sql",
+      "source_sha256": "3e643d1cd5b370f7cea3588a4caf9146a29e25da6eec808b0c4621ca424124df",
+      "transformed_sha256": "f2c5013d756882fbf2298b3af47644d23ffbb14808c34017e1097c4ab1885022"
+    },
+    {
+      "path": "inbox-operation-domain/restrictive-apply.sql",
+      "source_sha256": "c92977a209ead8e9c25e468887ecdc5d4e00a5688ae65128f7980996ed2ccdfa",
+      "transformed_sha256": "1d13f368d3ea58717aab5173b654fe14202b580a34c5ebef44bd894b8244ce1e"
+    },
+    {
+      "path": "inbox-operation-preparation/setup.sql",
+      "source_sha256": "cf3e5c61c81643b8386b3d5e361966f31200c08a3698c513ca08c36f4b75b377",
+      "transformed_sha256": "c363f43f67f3c23587f070f1629a65a394f80419e9a5555c462b921505b172ec"
+    },
+    {
+      "path": "inbox-operation-preparation/worker.sql",
+      "source_sha256": "5ddff6ea035d79a59d2396b825eb87bd9d4a75669588a5edd32fe7d4254a6a12",
+      "transformed_sha256": "749bae98dce5639490800d72d78679c45d02af27cec281300a01ecc2fdac8f1d"
+    },
+    {
+      "path": "inbox-operation-preparation/accept.sql",
+      "source_sha256": "fdd19c945b24f40057ed1fe63e90833ef27217462e977bb8d14945163cae24a9",
+      "transformed_sha256": "c9c8e37cdffffbf2ce089fd0994615115b85de82ec894ccc9664214b93769e94"
+    },
+    {
+      "path": "inbox-operation-preparation/public-api.sql",
+      "source_sha256": "45bafaf0f48c30c9cb98e1bd808b9d2112b7c191c692ee6de4302f1f624bc768",
+      "transformed_sha256": "76c07a94df3c133b2a2ea6029495d55ea59ce73ff06ab6ca1291308967d6ba27"
+    },
+    {
+      "path": "inbox-operation-preparation/review.sql",
+      "source_sha256": "faae82983465db8dd5624cd8fcc8bf5f44916fb2994afa30460f1e6832695eab",
+      "transformed_sha256": "d2e01801eed3294adca1ad1969ed36f33420a4b7ae8012d45a2484e540608555"
+    },
+    {
+      "path": "inbox-operation-preparation/worker-role.sql",
+      "source_sha256": "a686aec664667bf60e2a7507e5fad03508de5bc9d3d49265a3480797d3039948",
+      "transformed_sha256": "ce652a4d4d61241f2a3c7353e1f878ecfafffd0a6713e19b3ca5410f46a024eb"
+    }
+  ],
+  "compiled_sha256": "5fd578c67b401fcaa45d6ca6f5fba3e7022b6ad76b60ca3b3c8c6987daf2b090",
+  "runner_sha256": "6c68c01f69461b922289597f0586ebe7edffb6f4be68d40fb4c6634afe79595e",
+  "limits": [
+    "Owned full-schema fixture only; no production installation",
+    "No worker started by this installer"
+  ]
+}
