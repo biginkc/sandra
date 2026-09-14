@@ -9,7 +9,7 @@ import { runMonitoredCron } from "@/lib/errors/cron-monitor";
 
 export const runtime = "nodejs";
 
-export async function POST(request: Request) {
+async function postCanary(request: Request) {
   const secret = process.env.SENTRY_CANARY_SECRET;
   const supplied = request.headers.get("x-sandra-canary-secret");
   if (!(["preview", "production"].includes(process.env.VERCEL_ENV ?? "")) || !secret
@@ -56,3 +56,7 @@ export async function POST(request: Request) {
   const delivered = await Sentry.flush(2_000);
   return NextResponse.json({ eventId, delivered });
 }
+
+export const POST = Sentry.wrapRouteHandlerWithSentry(postCanary, {
+  method: "POST", parameterizedRoute: "/api/internal/sentry-canary",
+});

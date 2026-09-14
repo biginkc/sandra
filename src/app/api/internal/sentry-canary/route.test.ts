@@ -7,6 +7,7 @@ vi.mock("@sentry/nextjs", () => ({
   captureCheckIn: mocks.checkIn,
   flush: mocks.flush,
   withScope: (callback: (scope: { setTag: typeof mocks.tag }) => void) => callback({ setTag: mocks.tag }),
+  wrapRouteHandlerWithSentry: (handler: unknown) => handler,
 }));
 vi.mock("workflow/api", () => ({ start: mocks.start }));
 import { POST } from "./route";
