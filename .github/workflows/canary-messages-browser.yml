@@ -1,0 +1,42 @@
+name: Messages Browser Canary
+
+# Dispatch-only until a dedicated Hugo identity and owned SMS endpoint pass a
+# live run. Keep this separate from the Leads job so failures remain distinct.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  messages-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI: "1"
+      RUN_PROD_CANARIES: "1"
+      PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+      PROD_EMAIL: ${{ secrets.PROD_EMAIL }}
+      PROD_PASSWORD: ${{ secrets.PROD_PASSWORD }}
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
+      DIALPAD_WEBHOOK_SECRET: ${{ secrets.PROD_DIALPAD_WEBHOOK_SECRET }}
+      DIALPAD_FROM_NUMBER: ${{ secrets.PROD_DIALPAD_FROM_NUMBER }}
+      PROD_CANARY_SMS_TO: ${{ secrets.PROD_CANARY_SMS_TO }}
+      PROD_CANARY_SMS_ALLOWLIST: ${{ secrets.PROD_CANARY_SMS_ALLOWLIST }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Check Messages provider send and signed inbound threading
+        run: npx playwright test --config playwright.canary.config.ts e2e/prod-canary/outbound-sms.spec.ts e2e/prod-canary/messages-threading.spec.ts
+      - name: Preserve failure trace
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: messages-browser-canary-trace
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

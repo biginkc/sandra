@@ -22,12 +22,40 @@ Local env loading:
 Required environment:
 
 - `PROD_EMAIL`
-- `PROD_HUGO_STORAGE_STATE` pointing to an ignored Playwright state captured
-  after a real Hugo login on `https://sandra.bmhgroupkc.com`
+- `PROD_PASSWORD` for an unattended login through the real Hugo page. Use a
+  dedicated synthetic Hugo account; the old Sandra-only canary password does
+  not authenticate there.
+- Alternatively, `PROD_HUGO_STORAGE_STATE` may point to an ignored Playwright
+  state captured after a real Hugo login for local diagnostics. The scheduled
+  cloud job uses fresh login because saved sessions expire.
 - `PROD_BASE_URL` when testing a non-default deployed URL
 - `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` for canaries that
   verify persisted production state directly
 - `DIALPAD_WEBHOOK_SECRET` for signed inbound webhook canaries
+
+The `canary-leads-browser.yml` workflow remains dispatch-only until the new
+Hugo canary identity has passed a live run. GitHub Actions needs `PROD_EMAIL`
+and `PROD_PASSWORD` secrets for that job; do not commit them to the repository.
+Its My Leads test requires one active membership with Acquisitions enabled and
+an org where My Leads is enabled. It assigns only a run-tagged synthetic lead,
+searches and expands that queue row, saves a note, verifies the database and
+reload, then deletes the owned lead and its cascading notes/episode.
+
+The separate `canary-messages-browser.yml` workflow is also dispatch-only.
+It requires the same Hugo secrets, `PROD_DIALPAD_WEBHOOK_SECRET`,
+`PROD_DIALPAD_FROM_NUMBER`, and an owned `PROD_CANARY_SMS_TO` repeated in
+`PROD_CANARY_SMS_ALLOWLIST`. Its outbound spec sends through the real provider
+and checks Sandra's persisted `sent` row and lead thread. Its Messages spec
+posts a signed webhook with a synthetic phone, checks conversation attribution,
+then confirms both directions in `/messages` after reload. A signed webhook is
+an integration check, **not proof that an owned handset received or replied**;
+receiver-side evidence is still required before claiming that full journey.
+
+`canary-browser-freshness.yml` checks for a completed successful scheduled
+run of each browser workflow on a specified UTC date. It stays dispatch-only
+until both browser schedules are live. Its failing GitHub Action is a visible
+missing-run signal, but an independent external monitor is still needed to
+detect a GitHub-wide schedule outage that also prevents this check from running.
 
 Canary data must be tagged with `PROD-CANARY <run_id>`, and cleanup must only
 target data created by the active canary run.

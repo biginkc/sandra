@@ -1,0 +1,31 @@
+name: Browser Canary Freshness
+
+# Enable a Tuesday-Saturday UTC schedule after the Leads and Messages browser
+# workflows have passed dispatch and have weekday schedules. GitHub can delay
+# or drop scheduled jobs; a missing run must be visible as a failed monitor.
+on:
+  workflow_dispatch:
+    inputs:
+      date_utc:
+        description: UTC date to inspect (YYYY-MM-DD); defaults to yesterday
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  check-daily-runs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      CANARY_DATE_UTC: ${{ inputs.date_utc }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - run: node --test scripts/check-daily-canary-runs.test.mjs
+      - run: node scripts/check-daily-canary-runs.mjs
