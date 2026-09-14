@@ -85,6 +85,27 @@ describe("browser playback capture", () => {
     expect(events.some((event) => event.detail === "remote playback paused")).toBe(false);
   });
 
+  it("reports recorder errors during final flush before the last chunk", async () => {
+    const recorder = new FakeRecorder();
+    const events: BrowserCaptureEvent[] = [];
+    const audio = { captureStream: () => ({ getAudioTracks: () => [{}] }) } as unknown as HTMLAudioElement;
+    const handle = startBrowserPlaybackCapture({
+      audio,
+      recorderFactory: () => recorder as unknown as MediaRecorder,
+      onChunk: () => {},
+      onEvent: (event) => events.push(event),
+    });
+    recorder.beforeStop = () => {
+      recorder.dispatchEvent(new Event("error"));
+      recorder.chunk(new Blob(["final flush"]));
+    };
+
+    await handle?.stop();
+
+    expect(events.map((event) => event.kind)).toEqual(["started", "error", "chunk", "stopped"]);
+    expect(events.find((event) => event.kind === "error")?.detail).toBe("MediaRecorder error");
+  });
+
   it("timestamps and delivers chunks, including sink failures as visible errors", async () => {
     const recorder = new FakeRecorder();
     const events: BrowserCaptureEvent[] = [];

@@ -95,9 +95,9 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
     void write.finally(() => pending.delete(write));
     report("chunk");
   });
-  recorder.addEventListener("error", () => {
-    if (!stopRequested) report("error", "MediaRecorder error");
-  });
+  // Recorder errors remain evidence even during final flush/teardown. The
+  // intentional-stop guard applies only to playback faults caused by cleanup.
+  recorder.addEventListener("error", () => report("error", "MediaRecorder error"));
   try {
     recorder.start(options.timesliceMs ?? 1_000);
   } catch (error) {
