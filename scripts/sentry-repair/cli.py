@@ -396,6 +396,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 print(json.dumps(report, sort_keys=True))
                 return 0
+            existing_jobs = store.list_github_outbox_for_source(
+                config.organization,
+                config.project,
+                config.environment,
+                args.issue,
+            )
+            if any(str(job["repository"]) != args.repository for job in existing_jobs):
+                raise ValueError("--repository does not match the issue's claimed GitHub outbox")
             token = os.environ.get(args.token_env)
             if not token:
                 raise ValueError(f"{args.token_env} is required for explicit GitHub publishing")
@@ -418,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
                     timeout_seconds=args.timeout_seconds,
                 ),
                 owner=args.owner,
+                dedupe_key=queued.dedupe_key,
             ).publish_one()
             print(json.dumps(None if result is None else result.as_dict(), sort_keys=True))
             return 0

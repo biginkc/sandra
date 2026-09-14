@@ -292,7 +292,7 @@ class RepairStore:
                 action TEXT NOT NULL CHECK(action IN ('create','reconcile')),
                 payload_json TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN (
-                    'pending','publishing','create_unknown','published','failed'
+                    'pending','publishing','create_unknown','published','failed','suppressed'
                 )),
                 lease_owner TEXT,
                 lease_until REAL,
@@ -571,6 +571,19 @@ class RepairStore:
             "SELECT * FROM github_outbox WHERE dedupe_key=?", (dedupe_key,)
         ).fetchone()
 
+    def list_github_outbox_for_source(
+        self, organization: str, project: str, environment: str, issue_number: int
+    ) -> list[sqlite3.Row]:
+        """Return every repository binding for one Sentry source identity."""
+
+        self._issue_key(organization, project, environment, issue_number)
+        return self.db.execute(
+            """SELECT * FROM github_outbox
+               WHERE organization=? AND project=? AND environment=? AND issue_number=?
+               ORDER BY generation, repository""",
+            (organization, project, environment, issue_number),
+        ).fetchall()
+
     def enqueue_github_outbox(
         self,
         organization: str,
@@ -680,7 +693,12 @@ class RepairStore:
             raise
 
     def claim_github_outbox(
-        self, *, owner: str, lease_seconds: int = 120, now: float | None = None
+        self,
+        *,
+        owner: str,
+        lease_seconds: int = 120,
+        now: float | None = None,
+        dedupe_key: str | None = None,
     ) -> dict[str, Any] | None:
         """Claim one publication job, fencing abandoned publishers.
 
@@ -724,15 +742,28 @@ class RepairStore:
                         expired["repository"],
                     ),
                 )
-            row = self.db.execute(
-                """SELECT * FROM github_outbox
-                   WHERE (status IN ('pending','failed')
-                          OR (status='create_unknown' AND action='reconcile'))
-                     AND (lease_until IS NULL OR lease_until<=?)
-                     AND (next_attempt_at IS NULL OR next_attempt_at<=?)
-                   ORDER BY created_at, dedupe_key LIMIT 1""",
-                (current, current),
-            ).fetchone()
+            if dedupe_key is None:
+                row = self.db.execute(
+                    """SELECT * FROM github_outbox
+                       WHERE (status IN ('pending','failed')
+                              OR (status='create_unknown' AND action='reconcile'))
+                         AND (lease_until IS NULL OR lease_until<=?)
+                         AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+                       ORDER BY created_at, dedupe_key LIMIT 1""",
+                    (current, current),
+                ).fetchone()
+            else:
+                if not isinstance(dedupe_key, str) or not dedupe_key.strip():
+                    raise ValueError("dedupe_key must be non-empty")
+                row = self.db.execute(
+                    """SELECT * FROM github_outbox
+                       WHERE dedupe_key=?
+                         AND (status IN ('pending','failed')
+                              OR (status='create_unknown' AND action='reconcile'))
+                         AND (lease_until IS NULL OR lease_until<=?)
+                         AND (next_attempt_at IS NULL OR next_attempt_at<=?)""",
+                    (dedupe_key, current, current),
+                ).fetchone()
             if row is None:
                 self.db.execute("COMMIT")
                 return None
@@ -747,6 +778,100 @@ class RepairStore:
             ).fetchone()
             self.db.execute("COMMIT")
             return dict(claimed) if claimed is not None else None
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def suppress_github_outbox(
+        self,
+        dedupe_key: str,
+        *,
+        owner: str,
+        reason: str,
+        now: float | None = None,
+    ) -> None:
+        """Terminalize a stale or policy-ineligible claim without network I/O."""
+
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("suppression reason is required")
+        current = self._now(now)
+        safe_reason = reason.strip()[:500]
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._assert_github_outbox_owner_locked(dedupe_key, owner, now=current)
+            self.db.execute(
+                """UPDATE github_outbox SET status='suppressed',lease_owner=NULL,
+                   lease_until=NULL,next_attempt_at=NULL,last_error=?,updated_at=?
+                   WHERE dedupe_key=?""",
+                (safe_reason, current, dedupe_key),
+            )
+            self.db.execute(
+                """UPDATE github_links SET status='readback_failed',last_error=?,updated_at=?
+                   WHERE organization=? AND project=? AND environment=? AND issue_number=?
+                     AND generation=? AND repository=?""",
+                (
+                    safe_reason,
+                    current,
+                    row["organization"],
+                    row["project"],
+                    row["environment"],
+                    row["issue_number"],
+                    row["generation"],
+                    row["repository"],
+                ),
+            )
+            self.db.execute("COMMIT")
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+
+    def mark_github_readback_required(
+        self,
+        dedupe_key: str,
+        *,
+        owner: str,
+        error: str,
+        now: float | None = None,
+    ) -> None:
+        """Retain a marker match with bad labels as reconciliation-only.
+
+        A marker match proves that a GitHub issue already exists.  The
+        controller must never POST a second issue merely because labels are
+        missing or stale; an operator or a separately reviewed label-repair
+        action must reconcile it.
+        """
+
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("a readback reason is required")
+        current = self._now(now)
+        safe_error = error.strip()[:500]
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._assert_github_outbox_owner_locked(dedupe_key, owner, now=current)
+            self.db.execute(
+                """UPDATE github_outbox SET status='failed',action='reconcile',lease_owner=NULL,
+                   lease_until=NULL,next_attempt_at=NULL,last_error=?,updated_at=?
+                   WHERE dedupe_key=?""",
+                (safe_error, current, dedupe_key),
+            )
+            self.db.execute(
+                """UPDATE github_links SET status='readback_failed',last_error=?,updated_at=?
+                   WHERE organization=? AND project=? AND environment=? AND issue_number=?
+                     AND generation=? AND repository=?""",
+                (
+                    safe_error,
+                    current,
+                    row["organization"],
+                    row["project"],
+                    row["environment"],
+                    row["issue_number"],
+                    row["generation"],
+                    row["repository"],
+                ),
+            )
+            self.db.execute("COMMIT")
         except Exception:
             if self.db.in_transaction:
                 self.db.execute("ROLLBACK")

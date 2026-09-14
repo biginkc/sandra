@@ -7,6 +7,7 @@ import threading
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from unittest.mock import patch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -194,20 +195,34 @@ class PublisherTests(unittest.TestCase):
     def test_marker_and_all_labels_must_read_back_before_existing_link_is_used(self):
         self.enqueue()
         marker = github_payload(self.store.get_issue("bmh-group", "sandra", "vercel-production", 100))["marker"]
+        requests = []
         responses = iter([
             Response({"items": [{"number": 7}]}),
             Response(valid_issue(7, body=marker, labels=("sentry",))),
-            Response(valid_issue(8, body=marker)),
         ])
 
         def opener(request, *, timeout):
+            requests.append(request)
             return next(responses)
 
         result = GitHubPublisher(
             self.store, GitHubClient(opener=opener), owner="publisher"
         ).publish_one(now=101)
-        self.assertEqual(result.action, "created")
-        self.assertEqual(result.github_issue_number, 8)
+        self.assertEqual(result.action, "reconcile_required")
+        self.assertEqual(len([request for request in requests if request.method == "POST"]), 0)
+        self.assertEqual(self.store.list_github_outbox()[0]["action"], "reconcile")
+        self.assertEqual(self.store.get_github_link("bmh-group", "sandra", "vercel-production", 100)["status"], "readback_failed")
+
+        # Once an operator or separate label repair supplies the required
+        # labels, the same generation can be reconciled without another POST.
+        responses = iter([
+            Response({"items": [{"number": 7}]}),
+            Response(valid_issue(7, body=marker)),
+        ])
+        result = GitHubPublisher(
+            self.store, GitHubClient(opener=opener), owner="publisher"
+        ).publish_one(now=102)
+        self.assertEqual(result.action, "reconciled")
 
     def test_http_failures_are_classified_without_provider_body_leak(self):
         for status, expected_kind, retry_after in (
@@ -293,6 +308,99 @@ class PublisherTests(unittest.TestCase):
         outbox_payload = self.store.list_github_outbox()[0]["payload_json"]
         self.assertNotIn("customer@example.com", outbox_payload)
 
+    def test_stale_resolved_generation_is_terminalized_before_any_api_request(self):
+        self.enqueue()
+        original_get_issue = self.store.get_issue
+
+        def resolve_before_read(*args, **kwargs):
+            self.store.db.execute("UPDATE issues SET status='resolved' WHERE issue_number=100")
+            return original_get_issue(*args, **kwargs)
+
+        def forbidden_opener(request, *, timeout):
+            raise AssertionError("stale job must not contact GitHub")
+
+        with patch.object(self.store, "get_issue", side_effect=resolve_before_read):
+            result = GitHubPublisher(
+                self.store, GitHubClient(opener=forbidden_opener), owner="publisher"
+            ).publish_one(now=101)
+        self.assertEqual(result.action, "suppressed")
+        self.assertEqual(self.store.list_github_outbox()[0]["status"], "suppressed")
+
+    def test_generation_change_between_claim_and_readback_is_terminalized(self):
+        self.enqueue()
+        original_get_issue = self.store.get_issue
+
+        def advance_generation(*args, **kwargs):
+            self.store.db.execute("UPDATE issues SET generation=2 WHERE issue_number=100")
+            return original_get_issue(*args, **kwargs)
+
+        with patch.object(
+            self.store,
+            "get_issue",
+            side_effect=advance_generation,
+        ):
+            result = GitHubPublisher(
+                self.store,
+                GitHubClient(opener=lambda request, *, timeout: (_ for _ in ()).throw(AssertionError("no API"))),
+                owner="publisher",
+            ).publish_one(now=101)
+        self.assertEqual(result.action, "suppressed")
+        self.assertIn("generation", result.reason)
+
+    def test_status_change_immediately_before_post_is_revalidated(self):
+        self.enqueue()
+        marker = github_payload(self.store.get_issue("bmh-group", "sandra", "vercel-production", 100))["marker"]
+        calls = []
+        original_get_issue = self.store.get_issue
+        reads = 0
+
+        def resolve_on_second_read(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                self.store.db.execute("UPDATE issues SET status='resolved' WHERE issue_number=100")
+            return original_get_issue(*args, **kwargs)
+
+        def opener(request, *, timeout):
+            calls.append(request)
+            if request.method == "GET":
+                return Response({"items": []})
+            raise AssertionError("resolved job must not POST")
+
+        with patch.object(self.store, "get_issue", side_effect=resolve_on_second_read):
+            result = GitHubPublisher(
+                self.store, GitHubClient(opener=opener), owner="publisher"
+            ).publish_one(now=101)
+        self.assertEqual(result.action, "suppressed")
+        self.assertEqual(len([call for call in calls if call.method == "POST"]), 0)
+
+    def test_nonproduction_claim_is_suppressed_without_api_request(self):
+        self.store.close()
+        self.store = RepairStore(":memory:", clock=lambda: 100.0)
+        self.store.ingest_issues(
+            "bmh-group", "sandra", "staging", [IssueInput(100)], cursor=None, retrieved_at=100
+        )
+        row = self.store.get_issue("bmh-group", "sandra", "staging", 100)
+        self.store.enqueue_github_outbox(
+            "bmh-group",
+            "sandra",
+            "staging",
+            100,
+            generation=1,
+            repository=DEFAULT_REPOSITORY,
+            dedupe_key="staging-job",
+            action="create",
+            payload=github_payload(row),
+            now=100,
+        )
+        result = GitHubPublisher(
+            self.store,
+            GitHubClient(opener=lambda request, *, timeout: (_ for _ in ()).throw(AssertionError("no API"))),
+            owner="publisher",
+        ).publish_one(now=101)
+        self.assertEqual(result.action, "suppressed")
+        self.assertEqual(self.store.list_github_outbox()[0]["status"], "suppressed")
+
     def test_post_timeout_is_ambiguous_even_when_transport_error_has_no_details(self):
         self.enqueue()
 
@@ -346,6 +454,41 @@ class PublisherTests(unittest.TestCase):
                 self.assertEqual(check.list_github_outbox(), [])
             finally:
                 check.close()
+
+    def test_cli_rejects_mixed_repository_before_constructing_api_publisher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.db"
+            seed = RepairStore(path)
+            seed.ingest_issues(
+                "bmh-group", "sandra", "vercel-production", [IssueInput(100)], cursor=None
+            )
+            row = seed.get_issue("bmh-group", "sandra", "vercel-production", 100)
+            seed.enqueue_github_outbox(
+                "bmh-group",
+                "sandra",
+                "vercel-production",
+                100,
+                generation=1,
+                repository=DEFAULT_REPOSITORY,
+                dedupe_key="mixed-repository-job",
+                action="create",
+                payload=github_payload(row),
+            )
+            seed.close()
+            with patch.dict("os.environ", {"GITHUB_TOKEN": "controller-secret"}, clear=False):
+                with self.assertRaisesRegex(ValueError, "repository"):
+                    cli_main(
+                        [
+                            "--db",
+                            str(path),
+                            "github-publish",
+                            "--issue",
+                            "100",
+                            "--repository",
+                            "other-owner/other-repo",
+                            "--execute",
+                        ]
+                    )
 
 
 if __name__ == "__main__":

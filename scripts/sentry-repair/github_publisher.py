@@ -18,7 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from github import GITHUB_LABELS, github_dry_run, github_payload
+from github import GITHUB_LABELS, _payload, _safe_tags, github_dry_run, github_payload
 from store import RepairStore, StateError
 
 
@@ -95,6 +95,23 @@ def validate_repository(value: str) -> str:
     if not isinstance(value, str) or not _REPOSITORY_RE.fullmatch(value.strip()):
         raise ValueError("repository must be an owner/name pair")
     return value.strip()
+
+
+def _publish_eligibility(issue: Mapping[str, Any], outbox: Mapping[str, Any]) -> str | None:
+    """Return a terminal reason when a claimed source is no longer publishable."""
+
+    for field in ("organization", "project", "environment", "issue_number", "generation"):
+        if str(issue.get(field)) != str(outbox.get(field)):
+            return "Sentry issue identity or generation changed after enqueue"
+    if str(outbox.get("environment")) != "vercel-production":
+        return "non-production GitHub publication target"
+    issue_status = str(issue.get("status"))
+    if issue_status not in {"new", "investigating", "investigated"}:
+        return f"Sentry issue is no longer publishable ({issue_status or 'unknown'} status)"
+    tags = _safe_tags(_payload(issue))
+    if tags.get("kind") == "controlled" and tags.get("surface") == "preview_canary":
+        return "verified controlled canary after enqueue"
+    return None
 
 
 def _header(headers: Any, name: str) -> str | None:
@@ -288,11 +305,12 @@ class GitHubClient:
             if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
                 raise GitHubError("GitHub search issue number is invalid", kind="malformed")
             issue = self.read_issue(number)
-            if marker not in issue.body:
-                continue
-            if any(label not in issue.labels for label in required_labels):
-                continue
-            matches.append(issue)
+            if marker in issue.body:
+                # Marker identity is stronger than mutable labels. Returning
+                # a marker match with missing labels lets the publisher mark
+                # reconciliation-required; returning None would incorrectly
+                # permit a duplicate POST.
+                matches.append(issue)
         if len(matches) > 1:
             raise GitHubError("GitHub marker matched multiple issues", kind="collision")
         return matches[0] if matches else None
@@ -340,6 +358,8 @@ def enqueue_candidate(
         raise StateError("Sentry issue must be ingested before GitHub publication")
     key = github_dedupe_key(row, repository)
     link = store.get_github_link(organization, project, environment, issue_number)
+    if link is not None and str(link["repository"]) != repository:
+        raise StateError("GitHub repository does not match the current source-generation link")
     existing_job = store.get_github_outbox(key)
     # A pending link created by this controller already has its durable job;
     # repeated scheduler polls must not turn it into a reconciliation or
@@ -384,6 +404,9 @@ def publisher_dry_run(
     row = store.get_issue(organization, project, environment, issue_number)
     if row is None:
         raise StateError("Sentry issue must be ingested before GitHub publication")
+    link = store.get_github_link(organization, project, environment, issue_number)
+    if link is not None and str(link["repository"]) != repository:
+        raise StateError("GitHub repository does not match the current source-generation link")
     report = github_dry_run(store, organization, project, environment, issue_number)
     key = github_dedupe_key(row, repository)
     existing = store.get_github_outbox(key)
@@ -404,21 +427,67 @@ def publisher_dry_run(
 class GitHubPublisher:
     """Publish one leased outbox item; never passes credentials to workers."""
 
-    def __init__(self, store: RepairStore, client: GitHubClient, *, owner: str, lease_seconds: int = 120):
+    def __init__(
+        self,
+        store: RepairStore,
+        client: GitHubClient,
+        *,
+        owner: str,
+        lease_seconds: int = 120,
+        dedupe_key: str | None = None,
+    ):
         if not isinstance(owner, str) or not owner.strip():
             raise ValueError("publisher owner must be non-empty")
         self.store = store
         self.client = client
         self.owner = owner
         self.lease_seconds = lease_seconds
+        self.dedupe_key = dedupe_key
 
     def publish_one(self, *, now: float | None = None) -> PublishResult | None:
-        row = self.store.claim_github_outbox(owner=self.owner, lease_seconds=self.lease_seconds, now=now)
+        row = self.store.claim_github_outbox(
+            owner=self.owner,
+            lease_seconds=self.lease_seconds,
+            now=now,
+            dedupe_key=self.dedupe_key,
+        )
         if row is None:
             return None
         key = str(row["dedupe_key"])
         post_started = False
         try:
+            # The CLI and any automated caller may bind a publisher to one
+            # repository. Check that binding while the job is still local;
+            # no GitHub request is allowed on a mixed-repository claim.
+            if str(row["repository"]) != self.client.repository:
+                self.store.suppress_github_outbox(
+                    key,
+                    owner=self.owner,
+                    reason="claimed outbox repository does not match publisher repository",
+                    now=now,
+                )
+                return PublishResult(
+                    "suppressed",
+                    key,
+                    status="suppressed",
+                    reason="repository mismatch",
+                )
+            current_issue = self.store.get_issue(
+                str(row["organization"]),
+                str(row["project"]),
+                str(row["environment"]),
+                int(row["issue_number"]),
+            )
+            stale_reason = (
+                "Sentry issue disappeared after enqueue"
+                if current_issue is None
+                else _publish_eligibility(current_issue, row)
+            )
+            if stale_reason:
+                self.store.suppress_github_outbox(
+                    key, owner=self.owner, reason=stale_reason, now=now
+                )
+                return PublishResult("suppressed", key, status="suppressed", reason=stale_reason)
             payload = json.loads(str(row["payload_json"]))
             if not isinstance(payload, Mapping):
                 raise GitHubError("stored GitHub payload is invalid", kind="malformed")
@@ -436,6 +505,22 @@ class GitHubPublisher:
                 raise GitHubError("stored GitHub payload failed schema validation", kind="malformed")
             existing = self.client.find_marker(marker, GITHUB_LABELS)
             if existing is not None:
+                missing_labels = [label for label in GITHUB_LABELS if label not in existing.labels]
+                if missing_labels:
+                    self.store.mark_github_readback_required(
+                        key,
+                        owner=self.owner,
+                        error="marker matched existing issue with missing required labels",
+                        now=now,
+                    )
+                    return PublishResult(
+                        "reconcile_required",
+                        key,
+                        existing.number,
+                        existing.html_url,
+                        "failed",
+                        "marker matched but required labels are missing",
+                    )
                 self.store.complete_github_outbox(
                     key,
                     owner=self.owner,
@@ -453,6 +538,25 @@ class GitHubPublisher:
                     now=now,
                 )
                 return PublishResult("awaiting_marker", key, status="create_unknown", reason="no exact marker readback")
+            # Sentry can resolve or move an issue to a non-production scope
+            # while marker search is in flight. Re-read the authoritative row
+            # immediately before POST; a stale job is terminalized locally.
+            current_issue = self.store.get_issue(
+                str(row["organization"]),
+                str(row["project"]),
+                str(row["environment"]),
+                int(row["issue_number"]),
+            )
+            stale_reason = (
+                "Sentry issue disappeared before create"
+                if current_issue is None
+                else _publish_eligibility(current_issue, row)
+            )
+            if stale_reason:
+                self.store.suppress_github_outbox(
+                    key, owner=self.owner, reason=stale_reason, now=now
+                )
+                return PublishResult("suppressed", key, status="suppressed", reason=stale_reason)
             post_started = True
             created = self.client.create_issue(title, body, GITHUB_LABELS)
             if marker not in created.body or any(label not in created.labels for label in GITHUB_LABELS):
