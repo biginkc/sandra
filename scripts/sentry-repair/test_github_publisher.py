@@ -52,6 +52,16 @@ def valid_issue(number=7, *, body="", labels=("sentry", "sentry-production", "au
     }
 
 
+def search_response(items, *, total_count=None, incomplete=False):
+    return Response(
+        {
+            "incomplete_results": incomplete,
+            "total_count": len(items) if total_count is None else total_count,
+            "items": items,
+        }
+    )
+
+
 class PublisherTests(unittest.TestCase):
     def setUp(self):
         self.store = RepairStore(":memory:", clock=lambda: 100.0)
@@ -163,7 +173,7 @@ class PublisherTests(unittest.TestCase):
         def lost_opener(request, *, timeout):
             requests.append(request)
             if request.method == "GET":
-                return Response({"items": []})
+                return search_response([])
             raise TimeoutError("simulated lost response")
 
         first = GitHubPublisher(
@@ -178,7 +188,7 @@ class PublisherTests(unittest.TestCase):
 
         key = self.store.list_github_outbox()[0]["dedupe_key"]
         self.assertTrue(self.store.requeue_github_reconciliation(key, now=102))
-        responses = iter([Response({"items": [{"number": 7}]}), Response(valid_issue(7, body=marker))])
+        responses = iter([search_response([{"number": 7}]), Response(valid_issue(7, body=marker))])
 
         def recover_opener(request, *, timeout):
             return next(responses)
@@ -197,7 +207,7 @@ class PublisherTests(unittest.TestCase):
         marker = github_payload(self.store.get_issue("bmh-group", "sandra", "vercel-production", 100))["marker"]
         requests = []
         responses = iter([
-            Response({"items": [{"number": 7}]}),
+            search_response([{"number": 7}]),
             Response(valid_issue(7, body=marker, labels=("sentry",))),
         ])
 
@@ -216,7 +226,7 @@ class PublisherTests(unittest.TestCase):
         # Once an operator or separate label repair supplies the required
         # labels, the same generation can be reconciled without another POST.
         responses = iter([
-            Response({"items": [{"number": 7}]}),
+            search_response([{"number": 7}]),
             Response(valid_issue(7, body=marker)),
         ])
         result = GitHubPublisher(
@@ -243,7 +253,7 @@ class PublisherTests(unittest.TestCase):
 
                 def opener(request, *, timeout, status=status, retry_after=retry_after):
                     if request.method == "GET":
-                        return Response({"items": []})
+                        return search_response([])
                     headers = {"Retry-After": str(retry_after)} if retry_after is not None else {}
                     return Response({"message": "private provider response"}, status=status, headers=headers)
 
@@ -268,7 +278,7 @@ class PublisherTests(unittest.TestCase):
         self.enqueue()
 
         def malformed_search(request, *, timeout):
-            return Response({"items": "not-a-list"})
+            return Response({"incomplete_results": False, "total_count": 0, "items": "not-a-list"})
 
         result = GitHubPublisher(
             self.store, GitHubClient(opener=malformed_search), owner="publisher"
@@ -285,7 +295,7 @@ class PublisherTests(unittest.TestCase):
 
         def malformed_create(request, *, timeout):
             if request.method == "GET":
-                return Response({"items": []})
+                return search_response([])
             return Response({"number": 7})
 
         result = GitHubPublisher(
@@ -293,6 +303,89 @@ class PublisherTests(unittest.TestCase):
         ).publish_one(now=101)
         self.assertEqual(result.action, "create_unknown")
         self.assertEqual(self.store.list_github_outbox()[0]["status"], "create_unknown")
+
+    def test_incomplete_search_empty_page_cannot_trigger_create(self):
+        self.enqueue()
+        calls = []
+
+        def opener(request, *, timeout):
+            calls.append(request)
+            if request.method == "GET":
+                return search_response([], incomplete=True)
+            raise AssertionError("incomplete search must not POST")
+
+        result = GitHubPublisher(
+            self.store, GitHubClient(opener=opener), owner="publisher"
+        ).publish_one(now=101)
+        self.assertEqual(result.action, "failed")
+        self.assertEqual(result.reason, "incomplete")
+        self.assertEqual(len([request for request in calls if request.method == "POST"]), 0)
+
+    def test_missing_search_completeness_metadata_cannot_trigger_create(self):
+        self.enqueue()
+
+        def opener(request, *, timeout):
+            if request.method == "GET":
+                return Response({"items": []})
+            raise AssertionError("malformed search must not POST")
+
+        result = GitHubPublisher(
+            self.store, GitHubClient(opener=opener), owner="publisher"
+        ).publish_one(now=101)
+        self.assertEqual(result.action, "failed")
+        self.assertEqual(result.reason, "malformed")
+
+    def test_search_paginates_complete_results_until_marker_is_found(self):
+        self.enqueue()
+        marker = github_payload(
+            self.store.get_issue("bmh-group", "sandra", "vercel-production", 100)
+        )["marker"]
+        responses = iter(
+            [
+                search_response([{"number": 8}], total_count=2),
+                Response(valid_issue(8, body="other issue")),
+                search_response([{"number": 7}], total_count=2),
+                Response(valid_issue(7, body=marker)),
+            ]
+        )
+        requests = []
+
+        def opener(request, *, timeout):
+            requests.append(request)
+            return next(responses)
+
+        result = GitHubPublisher(
+            self.store, GitHubClient(opener=opener), owner="publisher"
+        ).publish_one(now=101)
+        self.assertEqual(result.action, "reconciled")
+        search_urls = [request.full_url for request in requests if request.full_url.find("/search/issues?") >= 0]
+        self.assertIn("page=1", search_urls[0])
+        self.assertIn("page=2", search_urls[1])
+        self.assertEqual(len([request for request in requests if request.method == "POST"]), 0)
+
+    def test_search_total_count_overflow_fails_closed_without_create(self):
+        self.enqueue()
+        responses = iter(
+            [
+                search_response([{"number": 8}], total_count=101),
+                Response(valid_issue(8, body="other issue")),
+                search_response([], total_count=101),
+            ]
+        )
+        calls = []
+
+        def opener(request, *, timeout):
+            calls.append(request)
+            if request.method == "POST":
+                raise AssertionError("overflow search must not POST")
+            return next(responses)
+
+        result = GitHubPublisher(
+            self.store, GitHubClient(opener=opener), owner="publisher"
+        ).publish_one(now=101)
+        self.assertEqual(result.action, "failed")
+        self.assertEqual(result.reason, "incomplete")
+        self.assertEqual(len([request for request in calls if request.method == "POST"]), 0)
 
     def test_sanitized_payload_excludes_pii_and_untrusted_telemetry(self):
         row = self.store.get_issue("bmh-group", "sandra", "vercel-production", 100)
@@ -364,7 +457,7 @@ class PublisherTests(unittest.TestCase):
         def opener(request, *, timeout):
             calls.append(request)
             if request.method == "GET":
-                return Response({"items": []})
+                return search_response([])
             raise AssertionError("resolved job must not POST")
 
         with patch.object(self.store, "get_issue", side_effect=resolve_on_second_read):
@@ -406,7 +499,7 @@ class PublisherTests(unittest.TestCase):
 
         def opener(request, *, timeout):
             if request.method == "GET":
-                return Response({"items": []})
+                return search_response([])
             raise GitHubTransportError("transport", kind="transport", ambiguous=True)
 
         result = GitHubPublisher(

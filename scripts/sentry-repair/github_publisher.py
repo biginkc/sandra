@@ -28,6 +28,8 @@ _REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 _HTTPS_URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*\Z")
 _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_RETRY_AFTER = 86_400
+_SEARCH_PAGE_SIZE = 100
+_SEARCH_PAGE_LIMIT = 5
 
 
 class GitHubError(RuntimeError):
@@ -291,26 +293,57 @@ class GitHubClient:
     def find_marker(self, marker: str, required_labels: tuple[str, ...] = GITHUB_LABELS) -> GitHubIssue | None:
         if not isinstance(marker, str) or not marker.startswith("<!-- sentry-sync:v") or len(marker) > 500:
             raise ValueError("invalid Sentry marker")
-        query = urllib.parse.urlencode(
-            {"q": f"repo:{self.repository} in:body \"{marker}\"", "per_page": "10"}
-        )
-        result = self._request_json("GET", f"/search/issues?{query}")
-        if not isinstance(result, Mapping) or not isinstance(result.get("items"), list):
-            raise GitHubError("GitHub search response is invalid", kind="malformed")
         matches: list[GitHubIssue] = []
-        for item in result["items"]:
-            if not isinstance(item, Mapping):
-                raise GitHubError("GitHub search item is invalid", kind="malformed")
-            number = item.get("number")
-            if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
-                raise GitHubError("GitHub search issue number is invalid", kind="malformed")
-            issue = self.read_issue(number)
-            if marker in issue.body:
-                # Marker identity is stronger than mutable labels. Returning
-                # a marker match with missing labels lets the publisher mark
-                # reconciliation-required; returning None would incorrectly
-                # permit a duplicate POST.
-                matches.append(issue)
+        inspected = 0
+        expected_total: int | None = None
+        for page in range(1, _SEARCH_PAGE_LIMIT + 1):
+            query = urllib.parse.urlencode(
+                {
+                    "q": f"repo:{self.repository} in:body \"{marker}\"",
+                    "per_page": str(_SEARCH_PAGE_SIZE),
+                    "page": str(page),
+                }
+            )
+            result = self._request_json("GET", f"/search/issues?{query}")
+            if not isinstance(result, Mapping):
+                raise GitHubError("GitHub search response is invalid", kind="malformed")
+            incomplete = result.get("incomplete_results")
+            total_count = result.get("total_count")
+            if not isinstance(incomplete, bool):
+                raise GitHubError("GitHub search completeness is invalid", kind="malformed")
+            if incomplete:
+                raise GitHubError("GitHub search completeness is unavailable", kind="incomplete")
+            if isinstance(total_count, bool) or not isinstance(total_count, int) or total_count < 0:
+                raise GitHubError("GitHub search total count is invalid", kind="malformed")
+            if expected_total is None:
+                expected_total = total_count
+            elif expected_total != total_count:
+                raise GitHubError("GitHub search total count changed during readback", kind="incomplete")
+            items = result.get("items")
+            if not isinstance(items, list):
+                raise GitHubError("GitHub search items are invalid", kind="malformed")
+            if total_count < len(items):
+                raise GitHubError("GitHub search total count is inconsistent", kind="malformed")
+            for item in items:
+                if not isinstance(item, Mapping):
+                    raise GitHubError("GitHub search item is invalid", kind="malformed")
+                number = item.get("number")
+                if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+                    raise GitHubError("GitHub search issue number is invalid", kind="malformed")
+                issue = self.read_issue(number)
+                if marker in issue.body:
+                    # Marker identity is stronger than mutable labels.
+                    # Returning a marker match with missing labels lets the
+                    # publisher mark reconciliation-required; returning None
+                    # would incorrectly permit a duplicate POST.
+                    matches.append(issue)
+            inspected += len(items)
+            if expected_total <= inspected:
+                break
+            if not items or page == _SEARCH_PAGE_LIMIT:
+                # A search that cannot account for all reported results must
+                # never be interpreted as "marker absent".
+                raise GitHubError("GitHub search results exceed inspected pages", kind="incomplete")
         if len(matches) > 1:
             raise GitHubError("GitHub marker matched multiple issues", kind="collision")
         return matches[0] if matches else None
