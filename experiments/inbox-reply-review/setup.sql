@@ -1,6 +1,19 @@
 -- Owned candidate: authenticated capture and immutable reviewed literal bodies.
 -- The application renders templates between capture and freeze. Rendered bodies
 -- are user-authored message intent; routes and eligibility are always canonical.
+--
+-- P-GATE (HARD, binds accept/claim in PR-E and every later lane):
+--  1. freeze() stores draft->>'body' and draft->>'exclusion' VERBATIM. Both are
+--     operator-authored and reachable by direct RPC. Neither is a safety input.
+--  2. No content rule (identification/opt-out footer, approved-templates-only,
+--     banned content) may be enforced only in the TS renderer. If one exists it
+--     MUST be enforced from the frozen row at accept AND claim, in SQL/worker.
+--  3. Until such a rule exists the frozen body is sent verbatim, never
+--     re-rendered, never re-parsed as template syntax.
+--  4. A frozen exclusion is send-SUPPRESSION only: exclusion IS NOT NULL is
+--     terminal (no send, no revival). exclusion IS NULL is a precondition, never
+--     an authorization: accept/claim re-run destination_policy, deps, expiry,
+--     and recipient_limit() from canonical state (E4/D1/D5).
 BEGIN;
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
 DO $$ BEGIN IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM inbox_t2_fixture.identity WHERE marker='sandra-inbox-projection-t2-owned-synthetic') THEN RAISE EXCEPTION 'Owned fixture required';END IF; END $$;
@@ -102,6 +115,7 @@ BEGIN
    IF reason IS NULL THEN
     SELECT value INTO draft FROM jsonb_array_elements(input->'drafts') WHERE (value->>'conversationId')::uuid=(target->>'id')::uuid;
     IF draft IS NULL OR draft->'dependencies' IS DISTINCT FROM capture->'dependencies' THEN RAISE EXCEPTION 'INBOX_REPLY_PREPARATION_CHANGED';END IF;
+--     Client-chosen rendering exclusion: subtractive only; see P-GATE header.
     reason:=draft->>'exclusion';
    END IF;
   END IF;

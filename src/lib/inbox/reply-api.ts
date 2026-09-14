@@ -130,12 +130,21 @@ function item(value: unknown, expectedBody: Map<string, string>, replayed: boole
     const renderedBody = recipient.renderedBody;
     need(typeof renderedBody === "string" && renderedBody.trim().length > 0 && renderedBody.length <= 1600);
     // Frozen items are operator-authored intent at the same trust level as
-    // the template: an authenticated caller can freeze a literal body via
-    // the public RPC directly, so this equality is a coordinator self-check
-    // against a broken/altered freeze response on a fresh freeze — NOT proof
-    // of server rendering. Send safety never depends on body provenance;
-    // routes/eligibility/dependencies are SQL-canonical and rechecked at
-    // accept and claim (E4/D1/D5).
+    // the template. An authenticated caller can call freeze() directly, so
+    // BOTH the literal body AND the per-recipient rendering exclusion
+    // (missing_variable | invalid_template | invalid_body) may be client-
+    // chosen — including bodies the TS renderer would reject (literal
+    // "{{"/"}}"), and self-exclusions of the caller's own eligible rows.
+    // Neither can widen a send: freeze consults a draft only for a
+    // conversation the canonical capture already marked eligible, takes
+    // recipient/from/to/dependencies from the capture, requires byte-equal
+    // dependencies, and scopes rows by (org, requester, key). The renderer's
+    // token validation is an authoring aid, not a safety control. Send
+    // safety rests on canonical routes/eligibility/consent/deps/cap, re-run
+    // at accept and claim (E4/D1/D5); a frozen exclusion is send-suppression
+    // only, never send-authorization (P-GATE). This equality is a coordinator
+    // self-check against a broken/altered freeze RESPONSE on a fresh freeze —
+    // NOT proof of server rendering.
     if (!replayed) {
         const expected = expectedBody.get(target.id);
         need(expected !== undefined && expected === renderedBody);
