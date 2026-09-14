@@ -67,6 +67,21 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
 - Store DB credentials and relay secret only in the named services' secret
   variables. Scope the DB role to the required projection or operation wrappers.
   Require verified TLS to Supabase. No administrator database fallback.
+- `INBOX_ELECTRIC_RELAY_TOKEN` (Next, read by `src/lib/inbox/sync-upstream-config.ts`)
+  and `INBOX_RELAY_TOKEN` (relay, read by `services/inbox-sync-relay/server.mjs`)
+  are the SAME secret in two processes' own env vars — not a mismatch to
+  reconcile, a value to keep identical on every rotation. Generate it from the
+  Next alphabet (`[A-Za-z0-9_-]{32,256}`, e.g. a base64url random value); the
+  relay's own check only requires 32-256 non-whitespace characters, so a
+  Next-valid token is always relay-valid (parity proved by
+  `deployment/inbox/relay-token-fixtures.json`, consumed by both
+  `src/lib/inbox/sync-upstream-config.test.ts` and
+  `services/inbox-sync-relay/server.test.mjs`). `INBOX_ELECTRIC_SHAPE_URL` must
+  be an `https://` shape URL with no query/fragment/userinfo and path exactly
+  `/v1/shape` (Next enforces this at `sync-upstream-config.ts:8`); TLS
+  terminates at the Railway edge, not in application code. The projection
+  worker service gets no public Railway domain — same rule as Electric and
+  Restate above; only the relay is public.
 - Deploy the relay from services/inbox-sync-relay; its railway.json is scoped to
   that service root. Other service image/config creation requires explicit IDs.
 - Rollback disables new Inbox admission and returns users to the existing Inbox,
