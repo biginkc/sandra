@@ -10,6 +10,8 @@ import type {
   JitterAudioHealthSample,
   JitterProxyResult,
 } from "./jitter-contract";
+import type { CaptureStore } from "./reliability-capture-store";
+import { createReliabilityTimingSession } from "./reliability-timing";
 
 const CALL_TOKEN = "11111111-1111-4111-8111-111111111111";
 const JITTER_LOCAL_MEDIA_SAMPLE_TIMEOUT_MS_FOR_TEST = 1_500;
@@ -211,6 +213,74 @@ function deferred<T>() {
 }
 
 describe("JitterCallTransport", () => {
+  it("closes a stale capture store when deferred timing writes race teardown, then permits a fresh reconnect segment", async () => {
+    const firstStoreTiming = deferred<void>();
+    const firstStore: CaptureStore = {
+      writeChunk: vi.fn(async () => undefined),
+      writeEvent: vi.fn(async () => undefined),
+      writeTiming: vi.fn(() => firstStoreTiming.promise),
+      close: vi.fn(),
+    };
+    const secondStore: CaptureStore = {
+      writeChunk: vi.fn(async () => undefined),
+      writeEvent: vi.fn(async () => undefined),
+      writeTiming: vi.fn(async () => undefined),
+      close: vi.fn(),
+    };
+    const firstStoreOpen = deferred<CaptureStore>();
+    let openCount = 0;
+    const openStore = vi.fn(() => {
+      openCount += 1;
+      return openCount === 1 ? firstStoreOpen.promise : Promise.resolve(secondStore);
+    });
+    const startCapture = vi.fn(() => ({ stop: vi.fn(async () => undefined) }));
+    const harness = transportHarness({
+      openReliabilityCaptureStore: openStore,
+      startBrowserPlaybackCapture: startCapture,
+    });
+    const timing = createReliabilityTimingSession({
+      monotonicNow: () => 1,
+      epochNow: () => 1_000,
+    });
+    timing.bind("qa_run_123", "call-1");
+    timing.mark("backend_accepted");
+    const call = new FakeCall();
+    const firstAudio = {} as HTMLAudioElement;
+    const secondAudio = {} as HTMLAudioElement;
+    const internals = harness.transport as unknown as {
+      qaCaptureConfig: { runId: string };
+      reliabilityTiming: typeof timing;
+      currentCall: FakeCall;
+      callId: string;
+      remoteAudio: HTMLAudioElement;
+      startQaBrowserCapture(call: FakeCall, callId: string, audio: HTMLAudioElement): Promise<void>;
+      stopQaBrowserCapture(): void;
+    };
+    internals.qaCaptureConfig = { runId: "qa_run_123" };
+    internals.reliabilityTiming = timing;
+    internals.currentCall = call;
+    internals.callId = "call-1";
+    internals.remoteAudio = firstAudio;
+
+    const staleStart = internals.startQaBrowserCapture(call, "call-1", firstAudio);
+    await flush();
+    firstStoreOpen.resolve(firstStore);
+    await flush();
+    expect(firstStore.writeTiming).toHaveBeenCalledTimes(1);
+
+    internals.stopQaBrowserCapture();
+    firstStoreTiming.resolve();
+    await staleStart;
+    expect(firstStore.close).toHaveBeenCalledTimes(1);
+    expect(startCapture).not.toHaveBeenCalled();
+
+    internals.remoteAudio = secondAudio;
+    await internals.startQaBrowserCapture(call, "call-1", secondAudio);
+    expect(openStore).toHaveBeenCalledTimes(2);
+    expect(startCapture).toHaveBeenCalledTimes(1);
+    expect(secondStore.close).not.toHaveBeenCalled();
+  });
+
   it("consumes QA capture configuration only for its exact caller/destination pair", async () => {
     const key = "sandra:reliability-capture:v1";
     const values = new Map<string, string>();

@@ -132,6 +132,9 @@ export type JitterTransportDependencies = {
   scheduleAudioHealth(handler: () => void): () => void;
   now(): number;
   registrationTimeoutMs: number;
+  /** Test seams for the async, exact-call browser evidence path. */
+  openReliabilityCaptureStore?: typeof openReliabilityCaptureStore;
+  startBrowserPlaybackCapture?: typeof startBrowserPlaybackCapture;
 };
 
 const defaultDependencies: JitterTransportDependencies = {
@@ -257,6 +260,7 @@ export class JitterCallTransport implements CallTransport {
   private qaCaptureAudio: HTMLAudioElement | null = null;
   private qaCaptureHandle: BrowserCaptureHandle | null = null;
   private qaCaptureSegment = 0;
+  private qaCaptureGeneration = 0;
   private reliabilityTiming: ReliabilityTimingSession | null = null;
   private removeRemoteAudioDiagnostics: (() => void) | null = null;
   private stopAudioHealth: (() => void) | null = null;
@@ -1622,15 +1626,24 @@ export class JitterCallTransport implements CallTransport {
     const config = this.qaCaptureConfig;
     if (!config || this.qaCaptureAudio === audio) return;
     this.stopQaBrowserCapture();
+    const captureGeneration = ++this.qaCaptureGeneration;
     this.qaCaptureAudio = audio;
     const segment = ++this.qaCaptureSegment;
     const failureKey = `sandra:reliability-capture-error:${config.runId}:${callId}`;
     const fail = (message: string) => {
       try { sessionStorage.setItem(failureKey, message); } catch { /* storage may be unavailable */ }
     };
+    const isCurrent = () =>
+      this.qaCaptureGeneration === captureGeneration &&
+      this.currentCall === call &&
+      this.callId === callId &&
+      this.remoteAudio === audio &&
+      this.qaCaptureAudio === audio &&
+      !this.terminal;
     try {
-      const store = await openReliabilityCaptureStore(config.runId, callId, segment);
-      if (this.currentCall !== call || this.callId !== callId || this.remoteAudio !== audio || this.terminal) {
+      const openStore = this.dependencies.openReliabilityCaptureStore ?? openReliabilityCaptureStore;
+      const store = await openStore(config.runId, callId, segment);
+      if (!isCurrent()) {
         store.close();
         return;
       }
@@ -1638,8 +1651,13 @@ export class JitterCallTransport implements CallTransport {
         fail(error instanceof Error ? error.message : "timing marker write failed"),
       );
       await this.reliabilityTiming?.attach(store);
+      if (!isCurrent()) {
+        store.close();
+        return;
+      }
       const pendingEvents = new Set<Promise<void>>();
-      const capture = startBrowserPlaybackCapture({
+      const startCapture = this.dependencies.startBrowserPlaybackCapture ?? startBrowserPlaybackCapture;
+      const capture = startCapture({
         audio,
         onChunk: (chunk) => store.writeChunk(chunk),
         onEvent: (event) => {
@@ -1652,6 +1670,11 @@ export class JitterCallTransport implements CallTransport {
         },
       });
       if (capture) {
+        if (!isCurrent()) {
+          await capture.stop();
+          store.close();
+          return;
+        }
         this.qaCaptureHandle = {
           stop: async () => {
             try {
@@ -1674,6 +1697,7 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private stopQaBrowserCapture(): void {
+    this.qaCaptureGeneration += 1;
     this.reliabilityTiming?.detach();
     const capture = this.qaCaptureHandle;
     this.qaCaptureHandle = null;

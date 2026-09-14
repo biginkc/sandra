@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, open, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { chromium } from '@playwright/test';
+import { containerMime, extensionForMime } from './reliability-capture-format.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).map((part) => {
   const separator = part.indexOf('=');
@@ -95,10 +96,14 @@ try {
     if (!Number.isSafeInteger(chunk.segment) || chunk.segment < 1 ||
         !Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1 ||
         !Number.isSafeInteger(chunk.size) || chunk.size < 1) throw new Error('Invalid chunk metadata');
-    const ext = ({ 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'm4a', 'video/webm': 'webm' })[chunk.mimeType];
+    const ext = extensionForMime(chunk.mimeType);
     if (!ext) throw new Error(`Unsupported capture MIME type: ${chunk.mimeType}`);
-    const previous = segments.get(chunk.segment) ?? { next: 1, mimeType: chunk.mimeType, ext, chunks: [] };
-    if (chunk.sequence !== previous.next || chunk.mimeType !== previous.mimeType)
+    const previous = segments.get(chunk.segment) ?? {
+      next: 1, mimeType: chunk.mimeType, containerMime: containerMime(chunk.mimeType), ext,
+      mimeTypes: new Set(), chunks: [],
+    };
+    previous.mimeTypes.add(chunk.mimeType);
+    if (chunk.sequence !== previous.next || containerMime(chunk.mimeType) !== previous.containerMime)
       throw new Error(`Missing, duplicate, or inconsistent chunk in segment ${chunk.segment}`);
     previous.next += 1;
     previous.chunks.push(chunk);
@@ -160,13 +165,13 @@ try {
         bytes += data.length;
       }
     } finally { await file.close(); }
-    files.push({ filename, segment, mimeType: info.mimeType, chunks: info.chunks.length,
+    files.push({ filename, mimeType: info.mimeType, mimeTypes: [...info.mimeTypes], segment, chunks: info.chunks.length,
       bytes, sha256: hash.digest('hex') });
   }
   const manifest = { schemaVersion: 2, runId: args.run, callId: args.call, origin: origin.origin,
     exportedAt: new Date().toISOString(), files, events: capture.events, timings: capture.timings,
-    chunks: capture.chunks.map(({ segment, sequence, size, atMonotonicMs, atEpochMs }) =>
-      ({ segment, sequence, size, atMonotonicMs, atEpochMs })) };
+    chunks: capture.chunks.map(({ segment, sequence, size, mimeType, atMonotonicMs, atEpochMs }) =>
+      ({ segment, sequence, size, mimeType, atMonotonicMs, atEpochMs })) };
   await writeFile(`${output}/browser-receive-manifest.json`, JSON.stringify(manifest, null, 2), { flag: 'wx' });
   process.stdout.write(`Exported ${files.length} browser-receive segment(s) for the exact QA call.\n`);
 } finally { await browser.close(); }
