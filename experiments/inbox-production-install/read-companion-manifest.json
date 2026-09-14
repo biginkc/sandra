@@ -26,6 +26,17 @@
     "source_file": "experiments/inbox-production-install/reviewed-read/04-inbox-unknown-history-setup.sql",
     "source_sha256": "41a88203f264f42256be7a3b96b71620802574a53189b2beafa357463b1d5f98",
     "compiled_sha256": "9027523425412211ecea3bd0e3ca45f515c2e16409c4bbea9e81a043422ca1a7",
-    "concurrent_index": true
+    "concurrent_index": true,
+    "upgrade_name": "unknown"
+  },
+  {
+    "path": "experiments/inbox-sync-authority-batch/setup.sql",
+    "commit": "d129f52d47356d52dfb7cc93fededbf187612352",
+    "source_file": "experiments/inbox-production-install/reviewed-read/05-inbox-sync-authority-batch-setup.sql",
+    "source_sha256": "421e747de0fb812b3f2c31de4f834aa6a1346909582d5a0891311c1fe56e2f2a",
+    "fixture_guard": "install_fixture.identity",
+    "rename_prefix": null,
+    "compiled_sha256": "9d97106f699e312f85f85a24a71d09f6416c14c590a396deccadfdbc9697c577",
+    "upgrade_name": "sync-authority"
   }
 ]
