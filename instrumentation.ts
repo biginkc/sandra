@@ -10,4 +10,11 @@ export async function register() {
   }
 }
 
-export const onRequestError = Sentry.captureRequestError;
+export const onRequestError: typeof Sentry.captureRequestError = (error, request, context) => {
+  Sentry.withScope((scope) => {
+    scope.setTag("surface", "server_request");
+    scope.setTag("routePattern", context.routePath);
+    scope.setTag("routeType", context.routeType);
+    Sentry.captureRequestError(error, request, context);
+  });
+};

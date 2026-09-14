@@ -15,7 +15,10 @@ export default function GlobalError({
   useEffect(() => {
     if (reportedError.current === error) return;
     reportedError.current = error;
-    Sentry.captureException(error);
+    Sentry.withScope((scope) => {
+      scope.setTag("surface", "root_layout");
+      Sentry.captureException(error);
+    });
   }, [error]);
 
   return (

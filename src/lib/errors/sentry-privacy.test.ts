@@ -3,6 +3,15 @@ import type { ErrorEvent } from "@sentry/nextjs";
 import { scrubSentryEvent } from "./sentry-privacy";
 
 describe("scrubSentryEvent", () => {
+  it("retains only static route patterns and exception type for unhandled requests", () => {
+    const event = { tags: { surface: "server_request", routePattern: "/leads/[id]", routeType: "render" },
+      exception: { values: [{ type: "TypeError", value: "customer@example.com" }] } } as unknown as ErrorEvent;
+    const scrubbed = scrubSentryEvent(event);
+    expect(scrubbed.tags).toMatchObject({ routePattern: "/leads/[id]", routeType: "render" });
+    expect(scrubbed.exception?.values?.[0]?.value).toBe("unknown:TypeError");
+    expect(scrubSentryEvent({ ...event, tags: { routePattern: "/leads/customer-12345678", routeType: "unsafe" } }).tags)
+      .toEqual({ surface: "unknown", errorClass: "unknown" });
+  });
   it("groups state anomalies by safe signal and outcome without retaining entity fingerprints", () => {
     const event = {
       type: "error",

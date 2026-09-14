@@ -1,6 +1,6 @@
 import type { ErrorEvent } from "@sentry/nextjs";
 
-const SAFE_TAGS = new Set(["surface", "operation", "kind", "phase", "outcome", "errorClass", "code", "httpStatus"]);
+const SAFE_TAGS = new Set(["surface", "operation", "kind", "phase", "outcome", "errorClass", "code", "httpStatus", "routePattern", "routeType"]);
 const SAFE_TOKEN = /^[a-zA-Z][a-zA-Z0-9_:-]{0,79}$/;
 const SAFE_CODE = /^[a-zA-Z][a-zA-Z0-9_:-]{0,39}$/;
 
@@ -12,11 +12,25 @@ export function safeDiagnosticToken(value: unknown, code = false): string | unde
   return value;
 }
 
+export function safeRoutePattern(value: unknown): string | undefined {
+  if (value === "/") return "/";
+  if (typeof value !== "string" || value.length > 160) return undefined;
+  const segments = value.split("/");
+  if (segments[0] !== "" || segments.length > 9 || segments.length < 2) return undefined;
+  if (!segments.slice(1).every((segment) =>
+    ((/^[a-z][a-z0-9-]{0,30}$/i.test(segment)
+      && !/\d{8,}|[a-f0-9]{16,}/i.test(segment))
+    || /^\[(?:\.\.\.)?[a-z][a-z0-9-]{0,30}\]$/i.test(segment)))) return undefined;
+  return value;
+}
+
 export function safeSentryTags(tags: Record<string, unknown>): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(tags)) {
     if (!SAFE_TAGS.has(key)) continue;
-    const safe = key === "httpStatus"
+    const safe = key === "routePattern" ? safeRoutePattern(value)
+      : key === "routeType" ? (["render", "route", "action", "proxy"].includes(String(value)) ? String(value) : undefined)
+      : key === "httpStatus"
       ? (Number.isInteger(Number(value)) && Number(value) >= 100 && Number(value) <= 599 ? String(value) : undefined)
       : safeDiagnosticToken(value, key === "code");
     if (safe) result[key] = safe;
@@ -77,7 +91,7 @@ export function scrubSentryEvent(event: ErrorEvent): ErrorEvent {
     }
   }
   if (event.exception?.values) {
-    const code = tags.code ?? "unclassified";
+    const code = tags.code ?? safeDiagnosticToken(event.exception.values[0]?.type, true) ?? "unclassified";
     result.exception = { values: event.exception.values.map((exception) => ({
       type: safeDiagnosticToken(exception.type) ?? "Error",
       value: `${tags.errorClass ?? "unknown"}:${code}`,

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { createHash, timingSafeEqual } from "node:crypto";
 import * as Sentry from "@sentry/nextjs";
 import { start } from "workflow/api";
 import { sentryPreviewCanaryWorkflow } from "@/workflows/sentry-preview-canary";
@@ -9,8 +10,11 @@ export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   const secret = process.env.SENTRY_CANARY_SECRET;
+  const supplied = request.headers.get("x-sandra-canary-secret");
   if (process.env.VERCEL_ENV !== "preview" || !secret
-    || request.headers.get("x-sandra-canary-secret") !== secret) {
+    || !supplied || supplied.length > 256
+    || !timingSafeEqual(createHash("sha256").update(supplied).digest(),
+      createHash("sha256").update(secret).digest())) {
     return new Response(null, { status: 404 });
   }
   const input: unknown = await request.json().catch(() => null);
