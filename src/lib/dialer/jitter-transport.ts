@@ -30,6 +30,17 @@ import type {
   CallTransportState,
   DtmfDigit,
 } from "./transport";
+import { startBrowserPlaybackCapture, type BrowserCaptureHandle } from "./reliability-browser-capture";
+import {
+  openReliabilityCaptureStore,
+  parseReliabilityCaptureConfig,
+  RELIABILITY_CAPTURE_CONFIG_KEY,
+  type ReliabilityCaptureConfig,
+} from "./reliability-capture-store";
+import {
+  takePendingReliabilityTiming,
+  type ReliabilityTimingSession,
+} from "./reliability-timing";
 
 const TELNYX_REGISTER_TIMEOUT_MS = 25_000;
 const JITTER_START_ACTION_ATTEMPTS = 2;
@@ -121,6 +132,9 @@ export type JitterTransportDependencies = {
   scheduleAudioHealth(handler: () => void): () => void;
   now(): number;
   registrationTimeoutMs: number;
+  /** Test seams for the async, exact-call browser evidence path. */
+  openReliabilityCaptureStore?: typeof openReliabilityCaptureStore;
+  startBrowserPlaybackCapture?: typeof startBrowserPlaybackCapture;
 };
 
 const defaultDependencies: JitterTransportDependencies = {
@@ -242,6 +256,13 @@ export class JitterCallTransport implements CallTransport {
   private localTerminalProofCall: TelnyxCallLike | null = null;
   private removePageHideListener: (() => void) | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
+  private qaCaptureConfig: ReliabilityCaptureConfig | null = null;
+  private qaCaptureAudio: HTMLAudioElement | null = null;
+  private qaCaptureCall: TelnyxCallLike | null = null;
+  private qaCaptureHandle: BrowserCaptureHandle | null = null;
+  private qaCaptureSegment = 0;
+  private qaCaptureGeneration = 0;
+  private reliabilityTiming: ReliabilityTimingSession | null = null;
   private removeRemoteAudioDiagnostics: (() => void) | null = null;
   private stopAudioHealth: (() => void) | null = null;
   private audioHealthControllerId = newControllerId();
@@ -511,6 +532,7 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private releaseRecoveryClient(client: TelnyxRtcLike, audio: HTMLAudioElement | null): void {
+    if (audio && this.qaCaptureAudio === audio) this.stopQaBrowserCapture();
     if (this.rtcClient === client) {
       this.removeRemoteAudioDiagnostics?.();
       this.removeRemoteAudioDiagnostics = null;
@@ -630,6 +652,15 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private async startInternal(target: CallTarget): Promise<CallHandle> {
+    this.reliabilityTiming = takePendingReliabilityTiming();
+    // QA recording is opt-in, short-lived and bound to the exact target pair.
+    // Consume the configuration once so a later ordinary call cannot inherit it.
+    try {
+      this.qaCaptureConfig = parseReliabilityCaptureConfig(
+        sessionStorage.getItem(RELIABILITY_CAPTURE_CONFIG_KEY), target, Date.now(),
+      );
+      if (this.qaCaptureConfig) sessionStorage.removeItem(RELIABILITY_CAPTURE_CONFIG_KEY);
+    } catch { this.qaCaptureConfig = null; }
     this.startIntentCapability = target.intentCapability ?? null;
     this.startOutcomeAmbiguous = false;
     this.emit("connecting");
@@ -640,10 +671,15 @@ export class JitterCallTransport implements CallTransport {
       // answer timeout, which can terminate the leg as busy before the user
       // has a chance to grant access. Do not provision anything until audio
       // capture is proven available.
+      this.reliabilityTiming?.mark("microphone_preparation_started");
       await this.dependencies.prepareMicrophone();
+      this.reliabilityTiming?.mark("microphone_preparation_completed");
       const started = await this.startCallWithLostResponseRecovery(target);
       this.startOutcomeAmbiguous = started.ambiguous === true;
       if (!started.ok) throw proxyError(started);
+      this.reliabilityTiming?.mark("backend_accepted", {
+        source: "server_action_response",
+      });
       if (this.hangupRequested || this.terminal || this.cancelPromise) {
         // The operator may have ended the attempt while the start response was
         // in flight. Treat that response as ambiguous and never resurrect a
@@ -653,6 +689,8 @@ export class JitterCallTransport implements CallTransport {
         throw new Error("Call start was canceled.");
       }
       this.callId = started.data.callId;
+      if (this.reliabilityTiming && this.qaCaptureConfig)
+        this.reliabilityTiming.bind(this.qaCaptureConfig.runId, this.callId);
       this.removePageHideListener = this.dependencies.subscribePageHide(() =>
         this.onPageHide(),
       );
@@ -750,6 +788,9 @@ export class JitterCallTransport implements CallTransport {
       .on("telnyx.ready", () => {
         if (this.rtcClient !== client) return;
         if (this.liveAt === null) this.clearRecoveryTimer();
+        this.reliabilityTiming?.mark("rtc_registered", {
+          phase: this.liveAt === null ? "initial" : "recovery",
+        });
         this.finishRegistration();
       })
       .on("telnyx.socket.close", () => {
@@ -797,6 +838,9 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private async registerRtc(client: TelnyxRtcLike): Promise<void> {
+    this.reliabilityTiming?.mark("rtc_registration_started", {
+      phase: this.liveAt === null ? "initial" : "recovery",
+    });
     const registration = new Promise<void>((resolve, reject) => {
       this.resolveRegistration = resolve;
       this.rejectRegistration = reject;
@@ -1091,6 +1135,10 @@ export class JitterCallTransport implements CallTransport {
     this.currentCall = call;
     this.currentCallId = call.id ?? "incoming-call";
     this.expectedIncoming = false;
+    this.reliabilityTiming?.mark("operator_ringing", {
+      source: "provider_call_update",
+      providerState: call.state?.trim().toLowerCase() ?? null,
+    });
     this.emit("ringing");
     if (this.answerStarted) return;
     this.answerStarted = true;
@@ -1107,7 +1155,14 @@ export class JitterCallTransport implements CallTransport {
     if (mapped === "live") {
       if (!this.currentCall) return;
       const firstLive = this.liveAt === null;
-      if (firstLive) this.liveAt = this.dependencies.now();
+      if (firstLive) {
+        this.liveAt = this.dependencies.now();
+        this.reliabilityTiming?.mark("operator_live", {
+          source: "provider_call_update",
+          providerState: call.state?.trim().toLowerCase() ?? null,
+          sipCode: call.sipCode ?? null,
+        });
+      }
       if (firstLive) void this.applyDesiredControls(call);
       if (firstLive) void this.acceptActiveCall(call);
       if (firstLive) this.startAudioHealth();
@@ -1122,6 +1177,7 @@ export class JitterCallTransport implements CallTransport {
       return;
     }
     if (mapped === "failed") {
+      if (isTerminalCallState(call.state)) this.stopQaBrowserCapture();
       if (this.liveAt !== null) {
         if (isTerminalCallState(call.state)) {
           void this.reconcileLocalSdkTerminal(call, "failed");
@@ -1146,6 +1202,7 @@ export class JitterCallTransport implements CallTransport {
       return;
     }
     if (mapped === "ended") {
+      this.stopQaBrowserCapture();
       if (this.liveAt !== null) {
         void this.reconcileLocalSdkTerminal(call, "ended");
         return;
@@ -1524,8 +1581,19 @@ export class JitterCallTransport implements CallTransport {
   private async markAudioRecovered(call: TelnyxCallLike): Promise<boolean> {
     const peer = call.peer?.instance ?? null;
     try {
-      const playback = this.remoteAudio?.play?.();
-      if (playback) await playback;
+      const audio = this.remoteAudio;
+      if (audio) {
+        this.reliabilityTiming?.mark("playback_start", {
+          source: "browser_media_element",
+        });
+        const playback = audio.play?.();
+        if (playback) await playback;
+        this.reliabilityTiming?.mark("playback_ready", {
+          source: "browser_media_element",
+          paused: audio.paused,
+          muted: audio.muted,
+        });
+      }
     } catch (error) {
       this.requireAudioReconnect(error);
       return false;
@@ -1547,7 +1615,186 @@ export class JitterCallTransport implements CallTransport {
     this.recoveryAttachCandidates.clear();
     this.recoveryAttachAuthority = null;
     this.emit("live");
+    if (this.qaCaptureConfig && this.callId && this.remoteAudio) {
+      void this.startQaBrowserCapture(call, this.callId, this.remoteAudio);
+    }
     return true;
+  }
+
+  private async startQaBrowserCapture(
+    call: TelnyxCallLike,
+    callId: string,
+    audio: HTMLAudioElement,
+    force = false,
+  ): Promise<void> {
+    const config = this.qaCaptureConfig;
+    if (!config || (!force && this.qaCaptureAudio === audio && this.qaCaptureCall === call)) return;
+    const stopGeneration = this.qaCaptureGeneration + 1;
+    await this.stopQaBrowserCapture();
+    if (
+      this.qaCaptureGeneration !== stopGeneration ||
+      this.currentCall !== call ||
+      this.callId !== callId ||
+      this.remoteAudio !== audio ||
+      this.terminal ||
+      this.hangupRequested
+    ) return;
+    // Telnyx can clear the element during BYE/finalization. Do not force a
+    // new segment onto a detached or paused source; a later media recovery can
+    // retry once the same exact call has usable playback again.
+    if (audio.srcObject === null || audio.paused === true) return;
+    const captureGeneration = ++this.qaCaptureGeneration;
+    this.qaCaptureAudio = audio;
+    this.qaCaptureCall = call;
+    const segment = ++this.qaCaptureSegment;
+    const failureKey = `sandra:reliability-capture-error:${config.runId}:${callId}`;
+    const fail = (message: string) => {
+      try { sessionStorage.setItem(failureKey, message); } catch { /* storage may be unavailable */ }
+    };
+    const isCurrent = () =>
+      this.qaCaptureGeneration === captureGeneration &&
+      this.currentCall === call &&
+      this.callId === callId &&
+      this.remoteAudio === audio &&
+      this.qaCaptureAudio === audio &&
+      this.qaCaptureCall === call &&
+      !this.terminal &&
+      !this.hangupRequested;
+    try {
+      const openStore = this.dependencies.openReliabilityCaptureStore ?? openReliabilityCaptureStore;
+      const store = await openStore(config.runId, callId, segment);
+      if (!isCurrent()) {
+        store.close();
+        return;
+      }
+      this.reliabilityTiming?.setWriteErrorHandler((error) =>
+        fail(error instanceof Error ? error.message : "timing marker write failed"),
+      );
+      await this.reliabilityTiming?.attach(store);
+      if (!isCurrent()) {
+        store.close();
+        return;
+      }
+      const pendingEvents = new Set<Promise<void>>();
+      const startCapture = this.dependencies.startBrowserPlaybackCapture ?? startBrowserPlaybackCapture;
+      const capture = startCapture({
+        audio,
+        onChunk: (chunk) => store.writeChunk(chunk),
+        onEvent: (event) => {
+          if (event.kind === "error" || event.kind === "unsupported" || event.kind === "no_audio_track")
+            fail(event.detail ?? event.kind);
+          const write = store.writeEvent(event).catch((error) =>
+            fail(error instanceof Error ? error.message : "capture event write failed"));
+          pendingEvents.add(write);
+          void write.finally(() => pendingEvents.delete(write));
+        },
+        onSourceChange: () => {
+          if (
+            this.qaCaptureGeneration === captureGeneration &&
+            this.callId === callId &&
+            this.remoteAudio === audio &&
+            !this.terminal &&
+            !this.hangupRequested
+          ) this.resegmentQaBrowserCapture(callId, audio, captureGeneration);
+        },
+      });
+      if (capture) {
+        if (!isCurrent()) {
+          await capture.stop();
+          store.close();
+          return;
+        }
+        this.qaCaptureHandle = {
+          stop: async () => {
+            try {
+              await capture.stop();
+              await Promise.all([...pendingEvents]);
+            } finally {
+              store.close();
+            }
+          },
+        };
+      } else {
+        fail("browser playback capture did not start");
+        await Promise.all([...pendingEvents]);
+        this.reliabilityTiming?.detach();
+        store.close();
+        if (this.qaCaptureGeneration === captureGeneration) {
+          this.qaCaptureAudio = null;
+          this.qaCaptureCall = null;
+        }
+      }
+    } catch (error) {
+      fail(error instanceof Error ? error.message : "capture database unavailable");
+      if (this.qaCaptureGeneration === captureGeneration) {
+        this.qaCaptureAudio = null;
+        this.qaCaptureCall = null;
+      }
+    }
+  }
+
+  private resegmentQaBrowserCapture(
+    callId: string,
+    audio: HTMLAudioElement,
+    captureGeneration: number,
+  ): void {
+    if (
+      this.qaCaptureGeneration !== captureGeneration ||
+      this.callId !== callId ||
+      this.remoteAudio !== audio ||
+      this.qaCaptureAudio !== audio ||
+      this.terminal
+    ) return;
+    const capture = this.qaCaptureHandle;
+    if (!capture) return;
+    this.qaCaptureHandle = null;
+    this.qaCaptureAudio = null;
+    this.qaCaptureCall = null;
+    this.qaCaptureGeneration += 1;
+    const continuationGeneration = this.qaCaptureGeneration;
+    this.reliabilityTiming?.detach();
+    void capture.stop().then(() => {
+      if (
+        this.qaCaptureGeneration === continuationGeneration &&
+        this.callId === callId &&
+        this.remoteAudio === audio &&
+        this.qaCaptureHandle === null &&
+        this.qaCaptureAudio === null &&
+        !this.terminal &&
+        !this.hangupRequested &&
+        this.qaCaptureConfig &&
+        this.currentCall
+      ) void this.startQaBrowserCapture(this.currentCall, callId, audio, true);
+    }).catch((error) => {
+      const config = this.qaCaptureConfig;
+      if (!config) return;
+      try {
+        sessionStorage.setItem(
+          `sandra:reliability-capture-error:${config.runId}:${callId}`,
+          error instanceof Error ? error.message : "capture source-change stop failed",
+        );
+      } catch { /* storage may be unavailable */ }
+    });
+  }
+
+  private stopQaBrowserCapture(): Promise<void> {
+    this.qaCaptureGeneration += 1;
+    this.reliabilityTiming?.detach();
+    const capture = this.qaCaptureHandle;
+    this.qaCaptureHandle = null;
+    this.qaCaptureAudio = null;
+    this.qaCaptureCall = null;
+    if (!capture) return Promise.resolve();
+    return capture.stop().catch((error) => {
+      const config = this.qaCaptureConfig;
+      if (!config || !this.callId) return;
+      try {
+        sessionStorage.setItem(
+          `sandra:reliability-capture-error:${config.runId}:${this.callId}`,
+          error instanceof Error ? error.message : "capture stop failed",
+        );
+      } catch { /* storage may be unavailable */ }
+    });
   }
 
   private bindRemoteAudioDiagnostics(audio: HTMLAudioElement | null): (() => void) | null {
@@ -1578,6 +1825,9 @@ export class JitterCallTransport implements CallTransport {
       };
     }
     this.hangupRequested = true;
+    // Invalidate and stop QA capture before SDK hangup can detach the media
+    // element and emit teardown pause events.
+    this.stopQaBrowserCapture();
     if (!this.callId && this.startPromise) this.startOutcomeAmbiguous = true;
     this.expectedIncoming = false;
     this.terminalAt ??= this.dependencies.now();
@@ -1741,6 +1991,7 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private destroyRtc(preservePageHideListener = false): void {
+    this.stopQaBrowserCapture();
     this.lifecycleGeneration += 1;
     this.recoverySetupGeneration += 1;
     this.stopAudioHealth?.();
