@@ -1,0 +1,62 @@
+{
+  "contacts": [
+    {
+      "id": "9dd3ccb7-8ddd-4994-a0e7-e0d07cff7ddf",
+      "org_id": "adca5bb0-9155-400a-84ff-cd62e9c5a100",
+      "phone_1": null,
+      "phone_2": null,
+      "phone_3": null,
+      "phone_1_type": "unknown",
+      "phone_2_type": "unknown",
+      "phone_3_type": "unknown",
+      "sms_opted_out": true,
+      "do_not_contact": false
+    }
+  ],
+  "contact_id": "9dd3ccb7-8ddd-4994-a0e7-e0d07cff7ddf",
+  "properties": [
+    {
+      "id": "d39fe1bb-e75b-437c-9e7c-d16d08346c9d",
+      "state": "MO",
+      "org_id": "adca5bb0-9155-400a-84ff-cd62e9c5a100",
+      "is_training": false,
+      "outreach_dispo": null,
+      "homeowner_contact_id": "9dd3ccb7-8ddd-4994-a0e7-e0d07cff7ddf"
+    },
+    {
+      "id": "84054f3f-48ac-454c-aee0-ac27002cb017",
+      "state": "MO",
+      "org_id": "adca5bb0-9155-400a-84ff-cd62e9c5a100",
+      "is_training": false,
+      "outreach_dispo": "not_interested",
+      "homeowner_contact_id": "9dd3ccb7-8ddd-4994-a0e7-e0d07cff7ddf"
+    },
+    {
+      "id": "ce513f69-bb19-4f5d-bede-e0e52a4f8e87",
+      "state": "MO",
+      "org_id": "adca5bb0-9155-400a-84ff-cd62e9c5a100",
+      "is_training": false,
+      "outreach_dispo": null,
+      "homeowner_contact_id": "9dd3ccb7-8ddd-4994-a0e7-e0d07cff7ddf"
+    }
+  ],
+  "property_id": "ce513f69-bb19-4f5d-bede-e0e52a4f8e87",
+  "enrollment_id": "e79cc859-d965-46e3-8636-2c9bda02a6c6",
+  "consent_events": [
+    {
+      "channel": "sms",
+      "contact_id": "9dd3ccb7-8ddd-4994-a0e7-e0d07cff7ddf",
+      "event_type": "opt_out",
+      "occurred_at": "2026-09-13T21:46:58.217214+00:00"
+    },
+    {
+      "channel": "sms",
+      "contact_id": "9dd3ccb7-8ddd-4994-a0e7-e0d07cff7ddf",
+      "event_type": "opt_in_informational",
+      "occurred_at": "2026-09-13T21:46:57.733148+00:00"
+    }
+  ],
+  "organization_id": "adca5bb0-9155-400a-84ff-cd62e9c5a100",
+  "enrollment_status": "active",
+  "runner_sha256": "9b74c064e6b21543eb24fd1546252c716d7637891f59bc21e00e6fb83cc1382d"
+}
