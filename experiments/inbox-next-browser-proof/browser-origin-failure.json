@@ -1,0 +1,13 @@
+{
+  "message": "locator.waitFor: Timeout 60000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: 'Open Inbox Ada', exact: true }) to be visible\u001b[22m\n",
+  "url": "http://127.0.0.1:52582/inbox",
+  "text": "SANDRA\n← Back to Inbox overview\nInbox workspace\nAll\nYour access has changed. Reload to continue.",
+  "calls": [
+    {
+      "path": "/api/inbox/worksets",
+      "status": 403,
+      "durationMs": 178.56441600000016
+    }
+  ],
+  "errors": []
+}

@@ -1,0 +1,82 @@
+{
+  "passed": true,
+  "firstOpenMs": 206.1672910000002,
+  "revisitMs": 47.37950000000001,
+  "calls": [
+    {
+      "path": "/api/inbox/counts",
+      "status": 200,
+      "older": false,
+      "durationMs": 345.01883299999986
+    },
+    {
+      "path": "/api/inbox/worksets",
+      "status": 201,
+      "older": false,
+      "durationMs": 379.64275
+    },
+    {
+      "path": "/api/inbox/sync/acfbcc42-255c-481a-a436-a71815d371da",
+      "status": 200,
+      "older": false,
+      "durationMs": 500.9540000000002
+    },
+    {
+      "path": "/api/inbox/sync/acfbcc42-255c-481a-a436-a71815d371da",
+      "status": 200,
+      "older": false,
+      "durationMs": 497.19191599999976
+    },
+    {
+      "path": "/api/inbox/conversations/1db63bbc-21c5-484d-bc97-6aa3ffa278d4/detail",
+      "status": 200,
+      "older": false,
+      "durationMs": 138.13595799999985
+    },
+    {
+      "path": "/api/inbox/read-acknowledgments",
+      "status": 200,
+      "older": false,
+      "durationMs": 184.57375000000002
+    },
+    {
+      "path": "/api/inbox/conversations/1db63bbc-21c5-484d-bc97-6aa3ffa278d4/detail",
+      "status": 200,
+      "older": true,
+      "durationMs": 205.84574999999995
+    },
+    {
+      "path": "/api/inbox/read-acknowledgments",
+      "status": 200,
+      "older": false,
+      "durationMs": 149.07195899999988
+    },
+    {
+      "path": "/api/inbox/sync/acfbcc42-255c-481a-a436-a71815d371da",
+      "status": 200,
+      "older": false,
+      "durationMs": 8549.623541
+    },
+    {
+      "path": "/api/inbox/sync/acfbcc42-255c-481a-a436-a71815d371da",
+      "status": 200,
+      "older": false,
+      "durationMs": 8608.119875
+    }
+  ],
+  "postgrestRequestCounts": {},
+  "errors": [],
+  "proof": [
+    "real GoTrue password session and unchanged domain/membership middleware",
+    "real PostgREST canonical workset and Electric rows",
+    "selection does not fetch detail",
+    "real detail, read acknowledgment and older cursor page",
+    "bounded Query revisit reuses detail",
+    "quiet live polling exceeds two cycles"
+  ],
+  "limitations": [
+    "local development and namespace relay timings are not production SLO evidence",
+    "production Hugo OAuth not exercised",
+    "metadata and replies are not wired yet"
+  ]
+}

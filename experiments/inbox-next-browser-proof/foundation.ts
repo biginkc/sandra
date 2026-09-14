@@ -1,0 +1,119 @@
+import assert from "node:assert/strict";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import { spawn } from "node:child_process";
+import { createServerClient } from "@supabase/ssr";
+import { readFile, writeFile } from "node:fs/promises";
+const docker = ["--host", "unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock"];
+const target = "sandra-inbox-projection-t2-db";
+const database = "sandra_inbox_install_20260913";
+const marker = "sandra-inbox-production-candidate-owned-synthetic";
+const authImage = "public.ecr.aws/supabase/gotrue@sha256:c0c25187a6b835e65a6f6e6c6b39d090e832d40e6de5186f2c038e0411944232";
+const restImage = "public.ecr.aws/supabase/postgrest@sha256:5922bde07147b82b1c9d8f749e48c1e5b99ebb233f3888bb7ab65f07cf4ac82d";
+const stamp = Date.now(), authRole = `inbox_browser_auth_${stamp}`, apiRole = `inbox_browser_api_${stamp}`;
+const authContainer = `${authRole}-service`, apiContainer = `${apiRole}-service`;
+const authPassword = randomBytes(24).toString("hex"), apiPassword = randomBytes(24).toString("hex"), secret = randomBytes(48).toString("hex");
+const children: string[] = [], roles: string[] = [];
+let stopped = false;
+let origin = "";
+let fixtureUser: { id: string; email: string; password: string } | null = null;
+let bootstrapUser: Promise<void> | null = null;
+const orgId = "00000000-0000-0000-0000-000000000bbb";
+function adminToken() {
+  const body = [Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url"), Buffer.from(JSON.stringify({ role: "service_role", aud: "authenticated", iss: "supabase", exp: Math.floor(Date.now()/1000)+3600 })).toString("base64url")].join(".");
+  return `${body}.${createHmac("sha256",secret).update(body).digest("base64url")}`;
+}
+async function provisionUser() {
+  assert.equal(await sql("SELECT to_regprocedure('public.inbox_authorize_sync(uuid)') IS NOT NULL"), "t", "Reviewed Inbox installer is not ready");
+  const email = `inbox-fixture-${randomUUID()}@bmhgroupkc.com`, password = randomBytes(24).toString("hex");
+  const response = await namespaceHttp("/admin/users","POST",{ "content-type":"application/json", authorization:`Bearer ${adminToken()}` },JSON.stringify({ email, password, email_confirm:true }),58794);
+  assert.equal(response.status,200,"Real GoTrue admin user creation failed");
+  const user = JSON.parse(response.body); assert.match(user.id,/^[a-f0-9-]{36}$/);
+  await sql(`INSERT INTO public.organizations(id,name) VALUES('${orgId}','Owned Inbox browser fixture') ON CONFLICT DO NOTHING;INSERT INTO public.memberships(user_id,org_id,role,access_status) VALUES('${user.id}','${orgId}','owner','active');`);
+  fixtureUser = { id:user.id,email,password };
+}
+function run(args: string[], input = "", env = process.env, captureErrors = false) {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn("docker", [...docker, ...args], { env, stdio: ["pipe", "pipe", "pipe"] });
+    let out = ""; child.stdout.on("data", data => { out += data; if (out.length > 4_000_000) child.kill(); }); if (captureErrors) child.stderr.on("data", data => { out += data; }); else child.stderr.resume();
+    child.on("error", () => reject(Error("Owned Docker command unavailable")));
+    child.on("close", code => code === 0 ? resolve(out.trim()) : reject(Error(`Owned Docker command failed (${code})`)));
+    child.stdin.end(input);
+  });
+}
+const sql = (query: string, db = database) => run(["exec", "-i", target, "psql", "-XqAt", "-U", "supabase_admin", "-d", db, "-v", "ON_ERROR_STOP=1"], query);
+const quote = (value: string) => value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\r", "\\r").replaceAll("\n", "\\n");
+async function namespaceHttp(path: string, method: string, headers: Record<string, string>, body: string, port: number) {
+  const config = [`url = "http://127.0.0.1:${port}${quote(path)}"`, `request = "${quote(method)}"`, "include", "silent", "show-error", "max-time = 15", 'header = "Accept-Encoding: identity"', ...Object.entries(headers).filter(([name]) => !["host", "connection", "content-length", "accept-encoding"].includes(name.toLowerCase())).map(([name, value]) => `header = "${quote(`${name}: ${value}`)}"`), ...(body ? [`data = "${quote(body)}"`] : [])].join("\n");
+  const raw = await run(["exec", "-i", target, "curl", "--config", "-"], config);
+  const split = raw.indexOf("\r\n\r\n"); assert(split >= 0);
+  const head = raw.slice(0, split), status = Number(head.match(/^HTTP\/\S+ (\d+)/)?.[1]); assert(Number.isInteger(status));
+  return { status, headers: head.split("\r\n").slice(1).flatMap(line => { const index = line.indexOf(":"); return index < 0 ? [] : [[line.slice(0,index), line.slice(index+1).trim()]]; }), body: raw.slice(split+4) };
+}
+const server = createServer(async (request, response) => {
+  try {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/__fixture/login" && request.method === "GET") {
+      const destination = new URL(url.searchParams.get("return") ?? "/inbox", origin);
+      assert.equal(destination.hostname,"127.0.0.1"); assert.equal(destination.protocol,"http:"); assert.equal(destination.pathname,"/inbox");
+      if (!fixtureUser) { bootstrapUser ??= provisionUser().catch(error => { bootstrapUser = null; throw error; }); await bootstrapUser; }
+      assert(fixtureUser);
+      const cookies: string[] = [];
+      const client = createServerClient(origin,"owned-fixture-anon-key",{ cookies: { getAll: () => [], setAll: values => { for (const cookie of values) cookies.push(`${cookie.name}=${cookie.value}; Path=/; HttpOnly; SameSite=Lax`); } } });
+      const result = await client.auth.signInWithPassword({ email:fixtureUser.email,password:fixtureUser.password });
+      assert(!result.error && result.data.session,"Real GoTrue login failed");
+      response.writeHead(302,{ "set-cookie":cookies, location:destination.href,"cache-control":"no-store" }).end(); return;
+    }
+    const auth = url.pathname.startsWith("/auth/v1/");
+    if (!auth && !url.pathname.startsWith("/rest/v1/")) { response.writeHead(404).end(); return; }
+    let body = "";
+    for await (const chunk of request) { body += chunk; if (Buffer.byteLength(body) > 64000) throw Error("Bounded request exceeded"); }
+    const result = await namespaceHttp(url.pathname.slice(8) + url.search, request.method ?? "GET", Object.fromEntries(Object.entries(request.headers).flatMap(([key,value]) => typeof value === "string" ? [[key,value]] : [])), body, auth ? 58794 : 58792);
+    response.statusCode = result.status;
+    for (const [key,value] of result.headers) if (!["content-length","transfer-encoding","connection","content-encoding"].includes(key.toLowerCase())) response.setHeader(key,value);
+    response.end(result.body);
+  } catch { response.writeHead(503, { "content-type": "application/json" }).end('{"error":"Owned fixture transport unavailable"}'); }
+});
+async function cleanup() {
+  if (stopped) return; stopped = true; server.close();
+  for (const name of [...children].reverse()) await run(["rm", "-f", name]);
+  for (const name of [...roles].reverse()) await sql(`DROP ROLE ${name}`, "postgres");
+}
+async function main() {
+  const fresh = process.argv.includes("--create-owned-full-auth"), resume = process.argv.includes("--resume-owned-full-auth");
+  assert(fresh !== resume, "Exactly one explicit foundation mode required");
+  const info = JSON.parse(await run(["inspect", target]))[0];
+  assert.equal(info.Id,"603c10117cb7ef6a07d81448dd1a25b0c1ee2787a59f75871015c4a416cac557"); assert.equal(info.HostConfig.NetworkMode,"none"); assert.equal(info.HostConfig.Memory,536870912); assert(info.State.Running);
+  assert.equal(await sql("SELECT marker FROM inbox_t2_fixture.identity", "postgres"), "sandra-inbox-projection-t2-owned-synthetic");
+  assert.equal(await sql("SHOW cron.launch_active_jobs", "postgres"), "off");
+  await run(["image","inspect",authImage]); await run(["image","inspect",restImage]);
+  assert.equal(await sql(`SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname='${database}')`, "postgres"), fresh ? "f" : "t", "Owned database existence disagrees with explicit mode");
+  if (fresh) {
+    await sql(`CREATE DATABASE ${database} OWNER postgres TEMPLATE template0`, "postgres");
+    await sql(`CREATE SCHEMA install_fixture;CREATE TABLE install_fixture.identity(marker text PRIMARY KEY);INSERT INTO install_fixture.identity VALUES('${marker}');CREATE SCHEMA auth AUTHORIZATION supabase_auth_admin;GRANT CREATE ON DATABASE ${database} TO supabase_auth_admin;`);
+  }
+  assert.equal(await sql("SELECT marker FROM install_fixture.identity"), marker);
+  assert.equal(await sql("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='auth'"), "supabase_auth_admin");
+  await sql(`CREATE ROLE ${authRole} LOGIN PASSWORD '${authPassword}' CONNECTION LIMIT 4;GRANT supabase_auth_admin TO ${authRole};CREATE ROLE ${apiRole} LOGIN PASSWORD '${apiPassword}' CONNECTION LIMIT 2;GRANT authenticated,anon TO ${apiRole};`, "postgres"); roles.push(authRole,apiRole);
+  await new Promise<void>(resolve => server.listen(0,"127.0.0.1",resolve));
+  const address = server.address(); assert(address && typeof address !== "string"); origin = `http://127.0.0.1:${address.port}`;
+  const authUrl = new URL(`postgres://${authRole}:${authPassword}@127.0.0.1:5432/${database}`); authUrl.searchParams.set("options","-c role=supabase_auth_admin -c search_path=auth");
+  const authEnv = { ...process.env, DATABASE_URL: authUrl.href, GOTRUE_JWT_SECRET: secret };
+  await run(["run","-d","--name",authContainer,"--label",`com.bmh.inbox-fixture=${marker}`,"--network",`container:${target}`,"--memory","128m","--cpus","0.5","--env","DATABASE_URL","--env","GOTRUE_JWT_SECRET","--env","GOTRUE_DB_DRIVER=postgres","--env","GOTRUE_API_HOST=127.0.0.1","--env","PORT=58794","--env","DB_NAMESPACE=auth","--env",`API_EXTERNAL_URL=${origin}/auth/v1`,"--env",`GOTRUE_SITE_URL=${origin}`,"--env","GOTRUE_DISABLE_SIGNUP=true","--env","GOTRUE_EXTERNAL_EMAIL_ENABLED=true","--env","GOTRUE_MAILER_AUTOCONFIRM=true","--env","GOTRUE_JWT_AUD=authenticated","--env","GOTRUE_JWT_DEFAULT_GROUP_NAME=authenticated","--env","GOTRUE_JWT_ADMIN_ROLES=service_role","--env","GOTRUE_DB_MAX_POOL_SIZE=2",authImage],"",authEnv); children.push(authContainer);
+  for (let i = 0; ; i++) {
+    try { const health = await namespaceHttp("/health","GET",{},"",58794); assert.equal(health.status,200); break; }
+    catch { if (i >= 60) { const log = await run(["logs","--tail","30",authContainer], "", process.env, true); await writeFile("experiments/inbox-next-browser-proof/auth-startup-failure.log",log.replaceAll(authPassword,"[redacted]").replaceAll(secret,"[redacted]")); throw Error("GoTrue health failed; sanitized local evidence retained"); } await new Promise(resolve => setTimeout(resolve,500)); }
+  }
+  const tables = await sql("SELECT count(*) FROM information_schema.tables WHERE table_schema='auth'");
+  const helpers = await sql("SELECT to_regprocedure('auth.uid()') IS NOT NULL AND to_regprocedure('auth.role()') IS NOT NULL AND to_regprocedure('auth.jwt()') IS NOT NULL");
+  assert.equal(helpers,"t","Pinned GoTrue migrations must provide canonical helpers");
+  await sql("GRANT USAGE ON SCHEMA auth TO postgres,anon,authenticated,service_role;GRANT ALL ON ALL TABLES IN SCHEMA auth TO postgres;GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO postgres;GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA auth TO postgres;");
+  await run(["run","-d","--name",apiContainer,"--label",`com.bmh.inbox-fixture=${marker}`,"--network",`container:${target}`,"--memory","128m","--cpus","0.5","--env","PGRST_DB_URI","--env","PGRST_JWT_SECRET","--env","PGRST_DB_ANON_ROLE=anon","--env","PGRST_DB_SCHEMAS=public","--env","PGRST_DB_POOL=1","--env","PGRST_SERVER_HOST=127.0.0.1","--env","PGRST_SERVER_PORT=58792",restImage],"",{...process.env,PGRST_DB_URI:`postgres://${apiRole}:${apiPassword}@127.0.0.1:5432/${database}`,PGRST_JWT_SECRET:secret}); children.push(apiContainer);
+  const evidence = { database, marker, origin, authContainer, apiContainer, authRole, apiRole, authImage, restImage, authTables: Number(tables), helpersVerified: true, authVersion: await sql("SELECT max(version) FROM auth.schema_migrations"), sourceSha256: createHash("sha256").update(await readFile("experiments/inbox-next-browser-proof/foundation.ts")).digest("hex"), processId:process.pid, note:"Real GoTrue foundation; app/Inbox installer pending. Secrets only in process memory." };
+  await writeFile("experiments/inbox-next-browser-proof/foundation-evidence.json",JSON.stringify(evidence,null,2)+"\n");
+  console.log(JSON.stringify({stage:"full-auth-ready",database,origin,authTables:Number(tables)}));
+  // Keep only owned local services alive for the application bootstrap and preview.
+  setTimeout(() => { void cleanup().finally(() => process.exit(0)); },3_600_000);
+}
+process.on("SIGINT",()=>{ void cleanup().finally(()=>process.exit(0)); }); process.on("SIGTERM",()=>{ void cleanup().finally(()=>process.exit(0)); });
+main().catch(async error => { console.error(error instanceof Error ? error.message : "Owned foundation failed"); await cleanup(); process.exitCode=1; });

@@ -1,0 +1,86 @@
+[
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 67.38383299999987,
+    "bytes": 1220
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 40.02295800001593,
+    "bytes": 74
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 8046.842000000004,
+    "bytes": 74
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 45.05062499997439,
+    "bytes": 1220
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 35.657124999997905,
+    "bytes": 74
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 8050.155625000014,
+    "bytes": 74
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 36.520750000025146,
+    "bytes": 1220
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 31.390291000017896,
+    "bytes": 74
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 8039.155833000026,
+    "bytes": 74
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 8040.046875,
+    "bytes": 74
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 8057.470042000001,
+    "bytes": 74
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 42.821916999993846,
+    "bytes": 1220
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 32.60733299999265,
+    "bytes": 74
+  },
+  {
+    "path": "/v1/shape",
+    "status": 200,
+    "durationMs": 8041.035875000001,
+    "bytes": 74
+  }
+]
