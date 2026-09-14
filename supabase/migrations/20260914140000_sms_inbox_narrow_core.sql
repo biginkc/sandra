@@ -81,13 +81,18 @@
 -- compile and pass a naive equivalence test while silently breaking
 -- every real call site that omits an argument.
 --
--- work_mem: NOT added in this migration. S18.3/S19.1 require the
--- ascending 8/16/24/32 MiB ladder be run AFTER this rewrite lands and
--- proves out in the nested plan, on the fixture, and only ships a
--- `work_mem` SET if the rewrite alone does not already clear
--- `temp_bytes` delta 0 at the Postgres default. That measurement is the
--- orchestrator's job (S19.3/S19.5.4 fixture matrix), not this author's
--- (no database access here) — this migration ships no `work_mem` line.
+-- Round 3 fix (S20.1/S21.1 E5, this migration): the E1/E2 narrowing
+-- above still built the contacts/properties hash tables from the FULL
+-- base tables inside `classified_narrow` — narrowing the PROBE side
+-- (`keys`) does not narrow the BUILD side. Two new MATERIALIZED CTEs,
+-- `contacts_in_window` and `properties_in_window`, semi-join-prefilter
+-- each table down to only the rows `keys` can reference before
+-- `classified_narrow` joins against them. Combined with the
+-- function-scoped `SET work_mem TO '32MB'` added to the header below
+-- (S19.1's ascending ladder settled at 32MB on the fixture), this is
+-- the combination the orchestrator proved clears `temp_bytes` delta 0
+-- (Batches: 1) on the fixture. No `plan_cache_mode` or other planner
+-- GUC is set, per S16.3/S18.1/S19.
 --
 -- Reviewability: see the companion migration
 -- 20260914140000_sms_inbox_narrow_core.integration.test.ts for the
@@ -115,6 +120,7 @@ CREATE OR REPLACE FUNCTION public.sms_inbox_thread_page_snapshot(
  STABLE SECURITY INVOKER
  SET search_path TO ''
  SET statement_timeout TO '15s'
+ SET work_mem TO '32MB'
 AS $function$
   with search_input as (
     select case when length(btrim(p_search)) >= 3
@@ -363,6 +369,36 @@ AS $function$
   -- No WHERE clause filters on the nullable (contacts) side of any join
   -- in this CTE (S19.5.2) -- the search filter is applied one CTE
   -- downstream, in `classified`.
+  --
+  -- S20.1/S21.1 E5 (semi-join prefilter): `keys` is at most ~64,643 rows
+  -- across at most that many distinct (contact_id, org_id) /
+  -- (property_id, org_id) pairs, but the OLD join built its hash table
+  -- from the FULL `public.contacts` (308k rows) and `public.properties`
+  -- (184k rows) tables, spilling to disk (EVIDENCE-RESULTS-S17.md,
+  -- GATE-RESULTS.md). These two MATERIALIZED CTEs pre-filter each table
+  -- down to only the rows `keys` can actually reference (via `exists`
+  -- against `keys`, org-scoped) before the hash build in
+  -- `classified_narrow` ever runs, so the planner builds its hash table
+  -- from a narrow, correctly-estimated row set instead of the full
+  -- table. Column lists carry exactly the columns `classified_narrow`
+  -- reads from `c.*`/`p.*` (verified against every downstream c./p.
+  -- reference in this CTE) plus `p.address`/`p.city`/`p.state`, which
+  -- `classified_narrow` reads to derive `is_test_traffic`. Display-only
+  -- hydration in `page_rows` (contact_name, property_address,
+  -- needs_human_attention, last_ai_escalation_reason) is untouched by
+  -- this change and continues to join `public.contacts`/
+  -- `public.properties` directly, since it only ever touches the
+  -- page's <=200 rows.
+  contacts_in_window as materialized (
+    select c.id, c.org_id, c.do_not_contact, c.sms_opted_out, c.entity_name, c.first_name, c.last_name, c.search_text, c.phone_digits
+    from public.contacts c
+    where exists (select 1 from keys k where k.contact_id = c.id and k.org_id = c.org_id)
+  ),
+  properties_in_window as materialized (
+    select p.id, p.org_id, p.status, p.outreach_dispo, p.is_dnc_locked, p.assigned_user_id, p.address, p.city, p.state
+    from public.properties p
+    where exists (select 1 from keys k where k.property_id = p.id and k.org_id = p.org_id)
+  ),
   classified_narrow as materialized (
     select
       k.org_id,
@@ -400,8 +436,8 @@ AS $function$
         or (length(search.digits) >= 3 and c.phone_digits ilike '%' || search.digits || '%')
       ) as contact_hit
     from keys k
-    left join public.contacts c on c.id = k.contact_id and c.org_id = k.org_id
-    left join public.properties p on p.id = k.property_id and p.org_id = k.org_id
+    left join contacts_in_window c on c.id = k.contact_id and c.org_id = k.org_id
+    left join properties_in_window p on p.id = k.property_id and p.org_id = k.org_id
     left join pending_reviews review
       on review.org_id = k.org_id
       and review.conversation_id = k.conversation_id
