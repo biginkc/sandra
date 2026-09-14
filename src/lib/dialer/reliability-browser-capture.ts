@@ -29,6 +29,16 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
   const now = options.now ?? (() => performance.now());
   const report = (kind: BrowserCaptureEvent["kind"], detail?: string) =>
     options.onEvent({ kind, atMonotonicMs: now(), ...(detail ? { detail } : {}) });
+  const playbackFault = () => options.audio.paused === true
+    ? "remote playback paused"
+    : options.audio.muted === true || options.audio.volume === 0
+      ? "remote playback muted"
+      : null;
+  const initialPlaybackFault = playbackFault();
+  if (initialPlaybackFault) {
+    report("error", initialPlaybackFault);
+    return null;
+  }
   const capturableAudio = options.audio as HTMLAudioElement & { captureStream?: () => MediaStream };
   const captureStream = capturableAudio.captureStream;
   if (typeof captureStream !== "function") {
@@ -57,7 +67,18 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
   }
   let sequence = 0;
   const pending = new Set<Promise<void>>();
+  let playbackFaultReported = false;
+  const reportPlaybackFault = () => {
+    const fault = playbackFault();
+    if (fault && !playbackFaultReported) {
+      playbackFaultReported = true;
+      report("error", fault);
+    }
+  };
+  for (const eventName of ["pause", "volumechange", "stalled", "error", "abort"])
+    options.audio.addEventListener?.(eventName, reportPlaybackFault);
   recorder.addEventListener("dataavailable", (event) => {
+    reportPlaybackFault();
     if (event.data.size === 0) return;
     if (pending.size >= (options.maxPendingChunks ?? 8)) {
       report("error", "capture chunk sink backpressure");
@@ -76,6 +97,8 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
   try {
     recorder.start(options.timesliceMs ?? 1_000);
   } catch (error) {
+    for (const eventName of ["pause", "volumechange", "stalled", "error", "abort"])
+      options.audio.removeEventListener?.(eventName, reportPlaybackFault);
     report("error", error instanceof Error ? error.message : "MediaRecorder start failed");
     return null;
   }
@@ -89,6 +112,8 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
         });
       }
       await Promise.all([...pending]);
+      for (const eventName of ["pause", "volumechange", "stalled", "error", "abort"])
+        options.audio.removeEventListener?.(eventName, reportPlaybackFault);
       report("stopped");
     },
   };

@@ -31,6 +31,33 @@ describe("browser playback capture", () => {
     expect(events.at(-1)?.kind).toBe("no_audio_track");
   });
 
+  it("does not start when browser playback is paused", () => {
+    const events: BrowserCaptureEvent[] = [];
+    const audio = { paused: true, captureStream: () => ({ getAudioTracks: () => [{}] }) } as unknown as HTMLAudioElement;
+    expect(startBrowserPlaybackCapture({ audio, onChunk: () => {}, onEvent: (event) => events.push(event) })).toBeNull();
+    expect(events.at(-1)?.detail).toBe("remote playback paused");
+  });
+
+  it("reports a later browser mute even when media chunks continue", async () => {
+    const recorder = new FakeRecorder();
+    const events: BrowserCaptureEvent[] = [];
+    const audio = Object.assign(new EventTarget(), {
+      paused: false, muted: false, volume: 1,
+      captureStream: () => ({ getAudioTracks: () => [{}] }),
+    }) as unknown as HTMLAudioElement;
+    const handle = startBrowserPlaybackCapture({
+      audio,
+      recorderFactory: () => recorder as unknown as MediaRecorder,
+      onChunk: () => {},
+      onEvent: (event) => events.push(event),
+    });
+    audio.muted = true;
+    audio.dispatchEvent(new Event("volumechange"));
+    recorder.chunk(new Blob(["still encoded"]));
+    await handle?.stop();
+    expect(events.filter((event) => event.detail === "remote playback muted")).toHaveLength(1);
+  });
+
   it("timestamps and delivers chunks, including sink failures as visible errors", async () => {
     const recorder = new FakeRecorder();
     const events: BrowserCaptureEvent[] = [];
