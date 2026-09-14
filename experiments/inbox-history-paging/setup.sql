@@ -30,7 +30,8 @@ BEGIN
   IF NOT FOUND OR position.session_id IS DISTINCT FROM (a->>'session_id')::uuid OR position.access_epoch IS DISTINCT FROM (a->>'access_epoch')::bigint THEN
    RAISE EXCEPTION 'INBOX_READ_NOT_FOUND' USING ERRCODE='42501';END IF;
   SELECT * INTO boundary FROM inbox_t2_read.boundaries WHERE id=position.boundary_id;
-  IF NOT FOUND OR boundary.requester_id IS DISTINCT FROM (a->>'user_id')::uuid OR boundary.org_id IS DISTINCT FROM o OR boundary.conversation_id IS DISTINCT FROM c THEN
+  IF NOT FOUND OR boundary.requester_id IS DISTINCT FROM (a->>'user_id')::uuid OR boundary.org_id IS DISTINCT FROM o OR boundary.conversation_id IS DISTINCT FROM c
+   OR boundary.session_id IS DISTINCT FROM (a->>'session_id')::uuid OR boundary.access_epoch IS DISTINCT FROM (a->>'access_epoch')::bigint THEN
    RAISE EXCEPTION 'INBOX_READ_NOT_FOUND' USING ERRCODE='42501';END IF;
   IF boundary.expires_at<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_READ_EXPIRED' USING ERRCODE='55000';END IF;
   -- Reuse the canonical measured keyset query. No message update and no new read

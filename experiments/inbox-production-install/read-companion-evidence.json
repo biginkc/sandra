@@ -26,6 +26,6 @@
       "authenticated": true
     }
   ],
-  "compiled_sha256": "9112d20c7bf22c5f330b6af3fcdf63af6c3bacf328c1b336ab650d983d361674",
+  "compiled_sha256": "fcceda1313d886c650bac168503168cb25ac57c4b6bc85d866bfdd7d82d400a9",
   "scope": "Actual fresh DB catalog proof; browser transport is independent evidence"
 }

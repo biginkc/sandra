@@ -11,7 +11,8 @@ CREATE TABLE inbox_read.boundaries (
  org_id uuid NOT NULL, conversation_id uuid NOT NULL, generation uuid NOT NULL,
  revision bigint NOT NULL CHECK(revision>=0), created_at timestamptz NOT NULL,
  expires_at timestamptz NOT NULL, execution_deadline timestamptz,
- next_batch integer NOT NULL DEFAULT 0, completed boolean NOT NULL DEFAULT false
+ next_batch integer NOT NULL DEFAULT 0, completed boolean NOT NULL DEFAULT false,
+ session_id uuid NOT NULL, access_epoch bigint NOT NULL
 );
 CREATE TABLE inbox_read.receipts (
  boundary_id uuid NOT NULL REFERENCES inbox_read.boundaries(id), batch integer NOT NULL,
@@ -35,9 +36,10 @@ BEGIN
   SELECT inbox_authenticated_detail.detail_v2(o,c) AS data,
    g.generation FROM inbox_capture_boundary.generation g WHERE singleton IS TRUE
  ), recorded AS (
-  INSERT INTO inbox_read.boundaries(requester_id,org_id,conversation_id,generation,revision,created_at,expires_at)
+  INSERT INTO inbox_read.boundaries(requester_id,org_id,conversation_id,generation,revision,created_at,expires_at,session_id,access_epoch)
   SELECT (a->>'user_id')::uuid,o,c,s.generation,(s.data->>'head_revision')::bigint,
-   statement_timestamp(),least(statement_timestamp()+interval '5 minutes',(a->>'expires_at')::timestamptz)
+   statement_timestamp(),least(statement_timestamp()+interval '5 minutes',(a->>'expires_at')::timestamptz),
+   (a->>'session_id')::uuid,(a->>'access_epoch')::bigint
   FROM snapshot s RETURNING id,expires_at
  ) SELECT s.data || jsonb_build_object('read_boundary',r.id,'boundary_expires_at',r.expires_at,
   'capture_generation',s.generation) INTO result FROM snapshot s CROSS JOIN recorded r;
@@ -60,7 +62,8 @@ BEGIN
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=(a->>'user_id')::uuid FOR UPDATE;
  a:=inbox_bridge.authorize(NULL);
  SELECT * INTO w FROM inbox_read.boundaries WHERE id=b FOR UPDATE;
- IF NOT FOUND OR w.requester_id<>(a->>'user_id')::uuid OR w.org_id<>(a->>'org_id')::uuid THEN
+ IF NOT FOUND OR w.requester_id<>(a->>'user_id')::uuid OR w.org_id<>(a->>'org_id')::uuid
+  OR w.session_id IS DISTINCT FROM (a->>'session_id')::uuid OR w.access_epoch IS DISTINCT FROM (a->>'access_epoch')::bigint THEN
   RAISE EXCEPTION 'INBOX_READ_NOT_FOUND' USING ERRCODE='42501'; END IF;
  SELECT * INTO r FROM inbox_read.receipts WHERE boundary_id=b AND batch=batch_number;
  IF FOUND THEN RETURN jsonb_build_object('boundary_id',b,'batch',r.batch,'changed',r.changed,'completed',r.completed); END IF;
@@ -95,7 +98,9 @@ BEGIN
    AND m.org_id=w.org_id AND m.conversation_id=w.conversation_id AND m.channel='sms'
    AND m.direction='inbound' AND m.read_at IS NULL AND m.inbox_inbound_revision<=w.revision RETURNING m.id
  ) SELECT count(*) INTO changed_count FROM changed;
- PERFORM inbox_bridge.authorize(w.org_id);
+ a:=inbox_bridge.authorize(w.org_id);
+ IF w.access_epoch IS DISTINCT FROM (a->>'access_epoch')::bigint THEN
+  RAISE EXCEPTION 'INBOX_READ_NOT_FOUND' USING ERRCODE='42501'; END IF;
  IF (w.execution_deadline IS NULL AND w.expires_at<=clock_timestamp()) OR w.execution_deadline<=clock_timestamp() THEN
   RAISE EXCEPTION 'INBOX_READ_EXPIRED' USING ERRCODE='55000'; END IF;
  SELECT NOT EXISTS(SELECT 1 FROM public.messages WHERE org_id=w.org_id AND conversation_id=w.conversation_id
@@ -157,7 +162,8 @@ BEGIN
   IF NOT FOUND OR position.session_id IS DISTINCT FROM (a->>'session_id')::uuid OR position.access_epoch IS DISTINCT FROM (a->>'access_epoch')::bigint THEN
    RAISE EXCEPTION 'INBOX_READ_NOT_FOUND' USING ERRCODE='42501';END IF;
   SELECT * INTO boundary FROM inbox_read.boundaries WHERE id=position.boundary_id;
-  IF NOT FOUND OR boundary.requester_id IS DISTINCT FROM (a->>'user_id')::uuid OR boundary.org_id IS DISTINCT FROM o OR boundary.conversation_id IS DISTINCT FROM c THEN
+  IF NOT FOUND OR boundary.requester_id IS DISTINCT FROM (a->>'user_id')::uuid OR boundary.org_id IS DISTINCT FROM o OR boundary.conversation_id IS DISTINCT FROM c
+   OR boundary.session_id IS DISTINCT FROM (a->>'session_id')::uuid OR boundary.access_epoch IS DISTINCT FROM (a->>'access_epoch')::bigint THEN
    RAISE EXCEPTION 'INBOX_READ_NOT_FOUND' USING ERRCODE='42501';END IF;
   IF boundary.expires_at<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_READ_EXPIRED' USING ERRCODE='55000';END IF;
   -- Reuse the canonical measured keyset query. No message update and no new read

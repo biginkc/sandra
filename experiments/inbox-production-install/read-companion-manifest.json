@@ -3,8 +3,8 @@
     "path": "experiments/inbox-post-render-read/setup.sql",
     "commit": "db852ee9",
     "source_file": "experiments/inbox-production-install/reviewed-read/01-inbox-post-render-read-setup.sql",
-    "source_sha256": "d8d13328cd70d0b4e6a0414c9d3560f99f00151928e68a1186693342d87035c7",
-    "compiled_sha256": "0b9efe43ddcc0d15d1d8687f649ebb59f6ecf90906c300da6353284c1c25e80e"
+    "source_sha256": "955693a70b6fe44f85a22fda0f9310b64eda011386a55c18a05cade8a84c0f09",
+    "compiled_sha256": "88c6315dde6b56147cf91acfbb464aa95b3724d42d0ef6b0ccec7f79f8288300"
   },
   {
     "path": "experiments/inbox-post-render-read/public-api.sql",
@@ -17,8 +17,8 @@
     "path": "experiments/inbox-history-paging/setup.sql",
     "commit": "db852ee9",
     "source_file": "experiments/inbox-production-install/reviewed-read/03-inbox-history-paging-setup.sql",
-    "source_sha256": "c84adb6d6ade6d09d7ca7045217a3694dadd1f396c4406a8711c12e23607ecf5",
-    "compiled_sha256": "e9ec372a747ca26489c77de13e0e21819d9a99faf0bc4568b4bb2fb7cb7e052b"
+    "source_sha256": "8b44f376f75d2be90d54c0537a521985a2212137df74a0594feecb0b7b7e402b",
+    "compiled_sha256": "7aa01bfb5e34d96905e83a1af87c21a94933711c4447519fa6d5033d66de2d46"
   },
   {
     "path": "experiments/inbox-unknown-history/setup.sql",

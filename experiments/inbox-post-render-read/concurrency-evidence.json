@@ -1,7 +1,7 @@
 {
   "deadlock_victim": "acknowledgment",
   "aborted_acknowledgment_rollback_proved": true,
-  "at": "2026-09-13 21:05:55.624785+00",
+  "at": "2026-09-14 03:38:20.353002+00",
   "checks": [
     "held message prevents false completion; generation reset actually waits for acknowledgment FOR SHARE",
     "separate writer backdated arrival remains unread under old boundary",
@@ -10,7 +10,7 @@
     "execution deadline elapses during observed source wait; read, receipt and boundary advancement roll back",
     "aborted acknowledgment rolls back read/receipt; same boundary/batch retry converges to one receipt"
   ],
-  "setup_sha256": "d8d13328cd70d0b4e6a0414c9d3560f99f00151928e68a1186693342d87035c7",
+  "setup_sha256": "955693a70b6fe44f85a22fda0f9310b64eda011386a55c18a05cade8a84c0f09",
   "runner_sha256": "8e9dd093fa49d49d37f2272a94de1966e36d6b22a1f707809a99813e540f2530",
   "limits": [
     "Trusted SQL claims, no JWT transport or browser render proof",

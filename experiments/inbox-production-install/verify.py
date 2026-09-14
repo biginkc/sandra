@@ -54,7 +54,8 @@ if a.installed:
   if sql(f"SELECT relrowsecurity::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='{schema}' AND c.relname='{table}'")!='true':
    raise RuntimeError('Installed table missing RLS: '+full)
  for name,full in indexes:
-  if sql(f"SELECT (to_regclass('{name}') IS NOT NULL)::text")!='true':
+  schema=full.partition('.')[0]
+  if sql(f"SELECT (to_regclass('{schema}.{name}') IS NOT NULL)::text")!='true':
    raise RuntimeError('Installed index missing: '+name)
  for name,full in triggers:
   schema,_,table=full.partition('.')

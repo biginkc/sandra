@@ -1,22 +1,25 @@
 {
   "passed": true,
-  "org": "6c160ffd-ed06-41f2-acad-740a28540006",
+  "org": "306f9794-9fdd-4e66-a516-be8389077554",
   "checks": [
     "canonical message capture through durable worker",
     "canonical owner assignment",
     "property outcome/unassignment fanout",
     "authenticated known/unknown outcome facets",
     "canonical timestamp expiry removal",
-    "API enablement assertion rolled back"
+    "API enablement assertion rolled back",
+    "T0 positive control acknowledges and marks read (inbox_read.* via public wrapper)",
+    "T1 session replacement rejected without writes (inbox_read.* via public wrapper)",
+    "T2 access-epoch bump rejected without writes (inbox_read.* via public wrapper)"
   ],
   "worker_passes": [
     {
       "rounds": 10,
       "processed": {
         "baseline": 10,
-        "backfill": 6,
+        "backfill": 0,
         "parent": 3,
-        "summary": 4,
+        "summary": 2,
         "expiry": 0
       },
       "readiness": {
@@ -68,5 +71,5 @@
       }
     }
   ],
-  "scope": "Owned synthetic DB only; does not prove production throughput or human display-name updates"
+  "scope": "Owned synthetic DB only; does not prove production throughput or human display-name updates. Companion session-isolation mirror covers T0-T2 only; T3 (two-connection fence) is proven against the identical source in inbox-post-render-read/run.py, not re-run here."
 }
