@@ -21,6 +21,18 @@ describe("BMH signature invitation", () => {
     expect(invitation.message).toContain("Prepared by the BMH Group acquisitions team.");
   });
 
+  it("names the selected novation document instead of the purchase agreement", () => {
+    const invitation = buildEsignInvitation({
+      propertyAddress: "123 Main St",
+      documentType: "novation_agreement",
+      createdByLabel: "Maria Unkovich",
+      testMode: false,
+    });
+    expect(invitation.subject).toBe("BMH Group | Novation agreement for 123 Main St");
+    expect(invitation.message).toContain("Please review your novation agreement");
+    expect(invitation.message).not.toContain("purchase agreement");
+  });
+
   it("removes prohibited punctuation and subject line breaks only from email presentation", () => {
     const input = Object.freeze({
       propertyAddress: "123 Main St; Unit 2 — Kansas City\r\nMO",

@@ -1,6 +1,7 @@
 import { rehearseFinalSignerTimestamps } from "./rehearse-esign-final-signer-timestamps.mjs";
 import { rehearseFinalSignedPdf } from "./rehearse-esign-final-signed-pdf.mjs";
 import { rehearseResidentialSchema } from "./rehearse-esign-residential-schema.mjs";
+import { rehearseNovationSchema } from "./rehearse-esign-novation-schema.mjs";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -1254,6 +1255,7 @@ try {
     }
 
     await rehearseResidentialSchema(client, ids, metadata);
+    await rehearseNovationSchema(client, ids, metadata);
     await rehearseFinalSignedPdf(client, ids);
     await rehearseFinalSignerTimestamps(client, ids);
     console.log("eSign Essentials local rehearsal passed");

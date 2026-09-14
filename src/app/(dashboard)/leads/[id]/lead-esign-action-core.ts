@@ -585,6 +585,7 @@ async function dispatchClaimed(
         mergeValues: request.mergeValues,
         ...buildEsignInvitation({
           propertyAddress: request.mergeValues.property_address,
+          documentType: request.template.documentType,
           createdByLabel: request.createdByLabel,
           testMode: request.testMode,
         }),

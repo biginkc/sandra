@@ -1,5 +1,6 @@
 type InvitationInput = {
   propertyAddress: string;
+  documentType?: string;
   createdByLabel?: string | null;
   testMode: boolean;
 };
@@ -14,7 +15,10 @@ export function buildEsignInvitation(input: InvitationInput): {
 } {
   const address = invitationText(input.propertyAddress);
   const preparer = invitationText(input.createdByLabel ?? "");
-  const subject = `${input.testMode ? "TEST | " : ""}BMH Group | Purchase agreement${address ? ` for ${address}` : ""}`;
+  const documentLabel = input.documentType === "novation_agreement"
+    ? "Novation agreement"
+    : "Purchase agreement";
+  const subject = `${input.testMode ? "TEST | " : ""}BMH Group | ${documentLabel}${address ? ` for ${address}` : ""}`;
 
   return {
     subject: Array.from(subject).slice(0, 255).join(""),
@@ -23,7 +27,7 @@ export function buildEsignInvitation(input: InvitationInput): {
       preparer
         ? `Prepared by ${preparer} for BMH Group.`
         : "Prepared by the BMH Group acquisitions team.",
-      "Please review your purchase agreement and follow the prompts to complete your signature fields.",
+      `Please review your ${documentLabel.toLowerCase()} and follow the prompts to complete your signature fields.`,
       "Once everyone has signed, Dropbox Sign will email you a copy of the completed agreement.",
       "If you have questions before signing, email acquisitions@bmhgroupkc.com.",
       "Thank you,\nBMH Group",
