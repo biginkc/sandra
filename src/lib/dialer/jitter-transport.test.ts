@@ -2066,6 +2066,29 @@ describe("JitterCallTransport", () => {
     ]);
   });
 
+  it("waits for a slow cleanup acknowledgment before showing the unconfirmed warning", async () => {
+    const cancel = vi.fn(
+      () => new Promise<JitterProxyResult<typeof cancelData>>((resolve) => {
+        setTimeout(() => resolve({ ok: true, data: cancelData }), 2_000);
+      }),
+    );
+    const harness = transportHarness({ cancel });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+    await harness.transport.start(target());
+
+    const hangup = harness.transport.hangup();
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(states).not.toContain("teardown_unconfirmed");
+    expect(cancel).toHaveBeenCalledTimes(1);
+    await expect(hangup).resolves.toEqual({
+      durationSeconds: 0,
+      outcome: "failed",
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(states).not.toContain("teardown_unconfirmed");
+  }, 10_000);
+
   it("does not make a local pre-live failure authoritative when cancel never settles", async () => {
     vi.useFakeTimers();
     try {
@@ -2086,7 +2109,7 @@ describe("JitterCallTransport", () => {
       harness.transport.onStateChange((state) => states.push(state));
       const start = harness.transport.start(target());
       const rejected = expect(start).rejects.toThrow();
-      await vi.advanceTimersByTimeAsync(6_000);
+      await vi.advanceTimersByTimeAsync(75_000);
       await rejected;
 
       expect(cancel).toHaveBeenCalledTimes(3);

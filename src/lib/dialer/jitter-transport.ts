@@ -47,6 +47,10 @@ const JITTER_START_ACTION_ATTEMPTS = 2;
 const JITTER_CANCEL_ATTEMPTS = 3;
 const JITTER_CANCEL_BACKOFF_MS = [100, 300] as const;
 const JITTER_AUDIO_HEALTH_REPORT_TIMEOUT_MS = 1_500;
+// Jitter's exact owned-leg cleanup may take up to 20 seconds. Keep one
+// cancel request in flight until that durable teardown receipt can return so
+// a slow provider cleanup is not mistaken for an unconfirmed call end.
+const JITTER_CANCEL_RESPONSE_TIMEOUT_MS = 25_000;
 const JITTER_LOCAL_MEDIA_SAMPLE_TIMEOUT_MS = 1_500;
 const JITTER_AUDIO_HEALTH_RESUME_FAILURE_LIMIT = 3;
 const JITTER_AUDIO_HEALTH_LOCAL_FAILURE_LIMIT = 3;
@@ -1864,7 +1868,7 @@ export class JitterCallTransport implements CallTransport {
               try {
                 const result = await settleValueBeforeDeadline(
                   cancelByStartIntent(intentCapability, reason),
-                  JITTER_AUDIO_HEALTH_REPORT_TIMEOUT_MS,
+                  JITTER_CANCEL_RESPONSE_TIMEOUT_MS,
                 );
                 if (result?.ok) {
                   const recovered = this.teardownUnconfirmedEmitted;
@@ -1919,7 +1923,7 @@ export class JitterCallTransport implements CallTransport {
         try {
           const result = await settleValueBeforeDeadline(
             this.dependencies.cancel(callId, reason),
-            JITTER_AUDIO_HEALTH_REPORT_TIMEOUT_MS,
+            JITTER_CANCEL_RESPONSE_TIMEOUT_MS,
           );
           if (result?.ok) {
             const recovered = this.teardownUnconfirmedEmitted;
