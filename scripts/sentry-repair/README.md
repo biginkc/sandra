@@ -30,14 +30,18 @@ key.
 
 ## Long-lived Railway runner
 
-`runner.py` requires `SANDRA_REPAIR_DB_PATH` to be an absolute file path whose
-parent already exists and is writable. Set it to a path on a mounted Railway
-volume such as `/data/repair.db`; it refuses an in-memory or relative path so
-restart recovery cannot silently use ephemeral state. `SENTRY_AUTH_TOKEN` is
-required for live intake. GitHub publication remains disabled unless
-`SANDRA_GITHUB_PUBLISH_ENABLED=true` and a controller-only `GITHUB_TOKEN` is
-provided through the service environment. The runner never places either
-credential in argv, logs, health responses, or worker environments.
+`runner.py` requires `SANDRA_REPAIR_VOLUME_PATH` to name a writable mounted
+directory and `SANDRA_REPAIR_DB_PATH` to name an absolute file below that
+directory. Set them to `/data` and `/data/repair.db` on Railway; the process
+checks the mount boundary and refuses image storage, in-memory state, or a
+path outside the volume. `SENTRY_AUTH_TOKEN` is required for live intake.
+GitHub publication remains disabled unless
+`SANDRA_GITHUB_PUBLISH_ENABLED=true` and controller-only GitHub App settings
+(`SANDRA_GITHUB_APP_ID`, `SANDRA_GITHUB_INSTALLATION_ID`, and an unencrypted
+`SANDRA_GITHUB_APP_PRIVATE_KEY`) are provided through the service environment.
+The provider mints short-lived installation tokens in memory and renews them
+before expiry. The runner never places credentials in argv, logs, health
+responses, or worker environments.
 
 The process claims the current America/Chicago slot once in SQLite, performs a
 fresh Sentry snapshot, and optionally drains a bounded number of GitHub outbox

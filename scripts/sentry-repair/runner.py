@@ -35,6 +35,7 @@ from github_publisher import (
     enqueue_candidate,
     validate_repository,
 )
+from github_app import GitHubAppTokenProvider
 from schedule import current_slot, due_slot, slot_identity
 from sentry import (
     DEFAULT_ENVIRONMENT,
@@ -57,6 +58,7 @@ DEFAULT_BACKOFF_MAX_SECONDS = 300
 DEFAULT_HEALTH_HOST = "0.0.0.0"
 DEFAULT_HEALTH_PORT = 8080
 REPAIR_GATE = "staged-v1"
+EXPECTED_VOLUME_PATH = Path("/data")
 
 
 class RunnerConfigError(ValueError):
@@ -113,7 +115,7 @@ def _bounded_int(
     return value
 
 
-def _db_path(env: Mapping[str, str]) -> Path:
+def _db_path(env: Mapping[str, str], *, volume_path: Path | None = None) -> Path:
     raw = _required_text(env, "SANDRA_REPAIR_DB_PATH")
     path = Path(raw).expanduser()
     if not path.is_absolute() or raw == ":memory:":
@@ -122,11 +124,45 @@ def _db_path(env: Mapping[str, str]) -> Path:
         raise RunnerConfigError("SANDRA_REPAIR_DB_PATH must name a file")
     if not path.parent.is_dir():
         raise RunnerConfigError("SANDRA_REPAIR_DB_PATH parent directory must already exist")
+    resolved = path.resolve()
+    if volume_path is not None and volume_path not in resolved.parents:
+        raise RunnerConfigError("SANDRA_REPAIR_DB_PATH must reside under SANDRA_REPAIR_VOLUME_PATH")
     if path.exists() and not os.access(path, os.R_OK | os.W_OK):
         raise RunnerConfigError("SANDRA_REPAIR_DB_PATH is not readable and writable")
     if not os.access(path.parent, os.W_OK):
         raise RunnerConfigError("SANDRA_REPAIR_DB_PATH parent is not writable")
-    return path.resolve()
+    return resolved
+
+
+def _is_effective_mount(path: Path) -> bool:
+    """Return whether the path is a real mounted volume, not image storage."""
+
+    return path.is_mount()
+
+
+def _volume_path(env: Mapping[str, str]) -> Path:
+    raw = _required_text(env, "SANDRA_REPAIR_VOLUME_PATH")
+    path = Path(raw).expanduser()
+    if not path.is_absolute() or path.resolve() == Path("/"):
+        raise RunnerConfigError("SANDRA_REPAIR_VOLUME_PATH must be a non-root absolute path")
+    if not path.is_dir() or not _is_effective_mount(path):
+        raise RunnerConfigError("SANDRA_REPAIR_VOLUME_PATH must be an effective mounted directory")
+    resolved = path.resolve()
+    if not os.access(resolved, os.W_OK):
+        raise RunnerConfigError("SANDRA_REPAIR_VOLUME_PATH is not writable")
+    return resolved
+
+
+def _private_key(env: Mapping[str, str], name: str) -> str:
+    value = _required_text(env, name)
+    if len(value) > 32_000 or "BEGIN ENCRYPTED PRIVATE KEY" in value:
+        raise RunnerConfigError(f"{name} must be an unencrypted RSA PEM")
+    if not (
+        ("BEGIN RSA PRIVATE KEY" in value and "END RSA PRIVATE KEY" in value)
+        or ("BEGIN PRIVATE KEY" in value and "END PRIVATE KEY" in value)
+    ):
+        raise RunnerConfigError(f"{name} must be an RSA private-key PEM")
+    return value
 
 
 @dataclass(frozen=True)
@@ -139,8 +175,12 @@ class RunnerConfig:
 
     db_path: Path
     sentry_token: str = field(repr=False)
+    volume_path: Path = EXPECTED_VOLUME_PATH
     github_publish_enabled: bool = False
-    github_token: str | None = field(default=None, repr=False)
+    github_app_id: int | None = None
+    github_installation_id: int | None = None
+    github_app_private_key: str | None = field(default=None, repr=False)
+    github_api_base_url: str = "https://api.github.com"
     repository: str = DEFAULT_REPOSITORY
     publisher_owner: str = "sandra-controller"
     poll_seconds: int = DEFAULT_POLL_SECONDS
@@ -160,10 +200,39 @@ class RunnerConfig:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "RunnerConfig":
         values = os.environ if env is None else env
-        db_path = _db_path(values)
+        volume_path = _volume_path(values)
+        db_path = _db_path(values, volume_path=volume_path)
         sentry_token = _secret(values, "SENTRY_AUTH_TOKEN")
         github_enabled = _strict_bool(values, "SANDRA_GITHUB_PUBLISH_ENABLED")
-        github_token = _secret(values, "GITHUB_TOKEN") if github_enabled else None
+        github_app_id: int | None = None
+        github_installation_id: int | None = None
+        github_app_private_key: str | None = None
+        api_base_url = str(values.get("SANDRA_GITHUB_API_BASE_URL", "https://api.github.com")).strip()
+        if not api_base_url.startswith("https://"):
+            raise RunnerConfigError("SANDRA_GITHUB_API_BASE_URL must use HTTPS")
+        if github_enabled:
+            if str(values.get("GITHUB_TOKEN", "")).strip():
+                raise RunnerConfigError(
+                    "static GITHUB_TOKEN is unsupported; configure renewable GitHub App credentials"
+                )
+            try:
+                github_app_id = _bounded_int(
+                    values,
+                    "SANDRA_GITHUB_APP_ID",
+                    default=0,
+                    minimum=1,
+                    maximum=9_223_372_036_854_775_807,
+                )
+                github_installation_id = _bounded_int(
+                    values,
+                    "SANDRA_GITHUB_INSTALLATION_ID",
+                    default=0,
+                    minimum=1,
+                    maximum=9_223_372_036_854_775_807,
+                )
+            except RunnerConfigError:
+                raise
+            github_app_private_key = _private_key(values, "SANDRA_GITHUB_APP_PRIVATE_KEY")
         try:
             repository = validate_repository(
                 str(values.get("SANDRA_GITHUB_REPOSITORY", DEFAULT_REPOSITORY)).strip()
@@ -195,9 +264,13 @@ class RunnerConfig:
             raise RunnerConfigError("SANDRA_REPAIR_HEALTH_HOST is invalid")
         return cls(
             db_path=db_path,
+            volume_path=volume_path,
             sentry_token=sentry_token,
             github_publish_enabled=github_enabled,
-            github_token=github_token,
+            github_app_id=github_app_id,
+            github_installation_id=github_installation_id,
+            github_app_private_key=github_app_private_key,
+            github_api_base_url=api_base_url,
             repository=repository,
             publisher_owner=owner,
             poll_seconds=_bounded_int(values, "SANDRA_REPAIR_POLL_SECONDS", default=DEFAULT_POLL_SECONDS, minimum=1, maximum=3600),
@@ -238,6 +311,11 @@ class HealthState:
     last_success_at: float | None = None
     last_slot_id: str | None = None
     last_error_type: str | None = None
+    last_publisher_error_type: str | None = None
+    last_publisher_failure_at: float | None = None
+    last_publisher_success_at: float | None = None
+    intake_succeeded: bool = False
+    publisher_degraded: bool = False
     stopping: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -247,9 +325,22 @@ class HealthState:
 
     def record_success(self, slot_id: str | None, observed_at: float) -> None:
         with self._lock:
+            self.intake_succeeded = True
             self.last_success_at = float(observed_at)
             self.last_slot_id = slot_id
             self.last_error_type = None
+
+    def record_publisher_failure(self, error_type: str, observed_at: float | None = None) -> None:
+        with self._lock:
+            self.publisher_degraded = True
+            self.last_publisher_error_type = error_type[:120]
+            self.last_publisher_failure_at = time.time() if observed_at is None else float(observed_at)
+
+    def record_publisher_success(self, observed_at: float | None = None) -> None:
+        with self._lock:
+            self.publisher_degraded = False
+            self.last_publisher_error_type = None
+            self.last_publisher_success_at = time.time() if observed_at is None else float(observed_at)
 
     def record_failure(self, error_type: str) -> None:
         with self._lock:
@@ -263,7 +354,15 @@ class HealthState:
     def payload(self, now: float | None = None) -> dict[str, Any]:
         current = time.time() if now is None else float(now)
         with self._lock:
-            status = "stopping" if self.stopping else ("degraded" if self.last_error_type else "ok")
+            ready = self.intake_succeeded and not self.publisher_degraded and not self.last_error_type and not self.stopping
+            if self.stopping:
+                status = "stopping"
+            elif ready:
+                status = "ok"
+            elif self.last_error_type or self.publisher_degraded:
+                status = "degraded"
+            else:
+                status = "starting"
             return {
                 "service": "sandra-sentry-repair",
                 "status": status,
@@ -274,6 +373,12 @@ class HealthState:
                 "last_success_at": self.last_success_at,
                 "last_slot_id": self.last_slot_id,
                 "last_error_type": self.last_error_type,
+                "last_publisher_error_type": self.last_publisher_error_type,
+                "last_publisher_failure_at": self.last_publisher_failure_at,
+                "last_publisher_success_at": self.last_publisher_success_at,
+                "intake_succeeded": self.intake_succeeded,
+                "publisher_degraded": self.publisher_degraded,
+                "ready": ready,
             }
 
 
@@ -300,6 +405,7 @@ class CycleResult:
     intake_changed: int = 0
     queued: int = 0
     published: int = 0
+    publisher_failures: int = 0
     error_type: str | None = None
     retry_delay_seconds: float | None = None
 
@@ -313,8 +419,10 @@ class _HealthHandler(BaseHTTPRequestHandler):
         if self.path not in {"/healthz", "/readyz"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        body = json.dumps(self.state.payload(), sort_keys=True, separators=(",", ":")).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
+        payload = self.state.payload()
+        is_ready = bool(payload["ready"])
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        self.send_response(HTTPStatus.OK if self.path == "/healthz" or is_ready else HTTPStatus.SERVICE_UNAVAILABLE)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -334,6 +442,7 @@ class ControllerRunner:
         store: RepairStore | Any | None = None,
         sentry_client: SentryClient | Any | None = None,
         github_client: GitHubClient | Any | None = None,
+        github_token_provider: Any | None = None,
         clock: Callable[[], float] | None = None,
         wait: Callable[[float], None] | None = None,
         health: HealthState | None = None,
@@ -351,15 +460,29 @@ class ControllerRunner:
             token=config.sentry_token,
         )
         if config.github_publish_enabled:
-            # from_env guarantees the token exists in this branch. It is
-            # consumed only by this controller object and never by dispatch.
-            if not config.github_token:
-                raise RunnerConfigError("GitHub publishing requires a controller token")
+            if github_token_provider is None:
+                if (
+                    config.github_app_id is None
+                    or config.github_installation_id is None
+                    or not config.github_app_private_key
+                ):
+                    raise RunnerConfigError(
+                        "GitHub publishing requires renewable GitHub App credentials"
+                    )
+                github_token_provider = GitHubAppTokenProvider(
+                    app_id=config.github_app_id,
+                    installation_id=config.github_installation_id,
+                    private_key=config.github_app_private_key,
+                    base_url=config.github_api_base_url,
+                )
+            self.github_token_provider = github_token_provider
             self.github = github_client or GitHubClient(
                 repository=config.repository,
-                token=config.github_token,
+                token_provider=github_token_provider,
+                base_url=config.github_api_base_url,
             )
         else:
+            self.github_token_provider = None
             self.github = None
         self.publisher = (
             GitHubPublisher(
@@ -427,15 +550,32 @@ class ControllerRunner:
         current = datetime.fromtimestamp(now, tz=timezone.utc)
         if self._retry_slot is not None:
             retry_id, retry_slot, retry_count = self._retry_slot
-            if retry_id == slot_identity(current_slot(current)) and retry_count < self.config.max_cycle_retries:
+            if retry_id == slot_identity(current_slot(current)) and retry_count <= self.config.max_cycle_retries:
                 return retry_id, retry_slot
             self._retry_slot = None
+        slot = current_slot(current)
+        slot_id = slot_identity(slot)
+        get_slot = getattr(self.store, "get_scheduler_slot", None)
+        if callable(get_slot):
+            persisted = get_slot(slot_id)
+            # A process can die after SQLite claims a slot but before its
+            # Sentry transaction completes. Resume that exact current slot;
+            # ingestion and the marker-based publisher are idempotent. A
+            # completed or terminally failed slot is never replayed.
+            if persisted is not None:
+                state = str(persisted.get("status", ""))
+                if state == "claimed":
+                    return slot_id, slot
+                if state in {"completed", "failed"}:
+                    return None
         return due_slot(current, self.store)
 
     def _run_claimed_slot(self, slot_id: str, slot: datetime, now: float) -> CycleResult:
         changed = intake_from_sentry(self.store, self.sentry, retrieved_at=now)
+        self.health.record_success(slot_id, now)
         queued = 0
         published = 0
+        publisher_failures = 0
         if self.publisher is not None:
             for row in self.store.list_issues(
                 self.config.organization,
@@ -460,12 +600,17 @@ class ControllerRunner:
                     break
                 if result.action in {"created", "reconciled"}:
                     published += 1
+                    self.health.record_publisher_success(now)
+                elif result.action in {"failed", "create_unknown", "awaiting_marker", "reconcile_required"}:
+                    publisher_failures += 1
+                    self.health.record_publisher_failure(f"publisher_{result.action}", now)
         _log(
             "slot_completed",
             slot_id=slot_id,
             intake_changed=len(changed),
             queued=queued,
             published=published,
+            publisher_failures=publisher_failures,
             github_publishing=self.publisher is not None,
             repair_dispatch=False,
         )
@@ -475,6 +620,7 @@ class ControllerRunner:
             intake_changed=len(changed),
             queued=queued,
             published=published,
+            publisher_failures=publisher_failures,
         )
 
     def run_once(self, now: float | None = None) -> CycleResult:
@@ -498,6 +644,9 @@ class ControllerRunner:
         slot_id, slot = claimed
         try:
             result = self._run_claimed_slot(slot_id, slot, observed_at)
+            complete_slot = getattr(self.store, "complete_scheduler_slot", None)
+            if callable(complete_slot):
+                complete_slot(slot_id, now=observed_at)
         except Exception as exc:  # noqa: BLE001 - process must retry safely
             error_type = type(exc).__name__
             self.health.record_failure(error_type)
@@ -506,6 +655,9 @@ class ControllerRunner:
                 self._retry_slot = (slot_id, slot, retry_count)
             else:
                 self._retry_slot = None
+                fail_slot = getattr(self.store, "fail_scheduler_slot", None)
+                if callable(fail_slot):
+                    fail_slot(slot_id, error=error_type, now=observed_at)
             _log("slot_failed", slot_id=slot_id, error_type=error_type, retry_count=retry_count)
             return CycleResult(
                 "failed",
@@ -515,7 +667,6 @@ class ControllerRunner:
             )
         self._retry_slot = None
         self.backoff.reset()
-        self.health.record_success(slot_id, observed_at)
         return result
 
     def run_forever(self) -> None:

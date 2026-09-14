@@ -5,7 +5,6 @@
     "dockerfilePath": "deployment/sentry-repair/Dockerfile"
   },
   "deploy": {
-    "startCommand": "python3 /app/scripts/sentry-repair/runner.py",
     "healthcheckPath": "/healthz",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",

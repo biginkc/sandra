@@ -8,14 +8,16 @@ WORKDIR /app
 # The controller is stdlib-only. Copy its complete package so imports stay
 # local and the image does not need the Sandra web application's dependencies.
 COPY scripts/sentry-repair /app/scripts/sentry-repair
+COPY deployment/sentry-repair/entrypoint.sh /usr/local/bin/sandra-sentry-repair-entrypoint
 
 RUN useradd --create-home --uid 10001 sandra \
     && mkdir -p /data \
-    && chown -R sandra:sandra /app /data
+    && chown -R sandra:sandra /app /data \
+    && chmod 0755 /usr/local/bin/sandra-sentry-repair-entrypoint
 
-USER sandra
 EXPOSE 8080
 
 # Credentials and the durable database path are injected by the Railway
 # service. They are intentionally absent from this image and this command.
-CMD ["python3", "/app/scripts/sentry-repair/runner.py"]
+ENTRYPOINT ["/usr/local/bin/sandra-sentry-repair-entrypoint"]
+CMD []

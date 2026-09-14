@@ -188,6 +188,7 @@ class GitHubClient:
         *,
         repository: str = DEFAULT_REPOSITORY,
         token: str | None = None,
+        token_provider: Any | None = None,
         base_url: str = DEFAULT_API_BASE_URL,
         timeout_seconds: int = 20,
         opener: Callable[..., Any] | None = None,
@@ -199,8 +200,24 @@ class GitHubClient:
         self.base_url = base_url.rstrip("/")
         if not self.base_url.startswith(("https://", "http://")):
             raise ValueError("GitHub API base URL must use HTTP(S)")
+        if token is not None and token_provider is not None:
+            raise ValueError("GitHub client accepts either a static token or a token provider")
         self._token = token.strip() if isinstance(token, str) and token.strip() else None
+        if token is not None and self._token is None:
+            raise ValueError("GitHub token must be non-empty")
+        if token_provider is not None and not callable(getattr(token_provider, "get_token", None)):
+            raise ValueError("GitHub token provider must expose get_token")
+        self._token_provider = token_provider
         self._opener = opener or urllib.request.urlopen
+
+    @staticmethod
+    def _close_response(response: Any) -> None:
+        close = getattr(response, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
     @staticmethod
     def _decode_body(response: Any) -> Any:
@@ -221,64 +238,98 @@ class GitHubClient:
         if not path.startswith("/") or "?" in path and any(part in path for part in ("#", "\\")):
             raise ValueError("invalid GitHub API path")
         body = None
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "sandra-sentry-controller/1",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
         if payload is not None:
             body = json.dumps(dict(payload), sort_keys=True, separators=(",", ":")).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(
-            f"{self.base_url}{path}", data=body, headers=headers, method=method
-        )
-        try:
-            response = self._opener(request, timeout=self.timeout_seconds)
-            status = int(response.getcode()) if hasattr(response, "getcode") else 200
-            response_headers = getattr(response, "headers", {})
-            if status >= 400:
-                # Do not consume or expose the provider's arbitrary body.
+        auth_retry = False
+        while True:
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "sandra-sentry-controller/1",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            request_token: str | None = None
+            if self._token_provider is not None:
                 try:
-                    response.read(_MAX_RESPONSE_BYTES + 1)
-                except TypeError:
-                    response.read()
-                retry = _retry_after(response_headers)
-                kind = "rate_limited" if status == 429 else "forbidden" if status == 403 else "validation" if status == 422 else "api"
+                    request_token = self._token_provider.get_token()
+                except Exception as exc:  # noqa: BLE001 - redact provider internals
+                    raise GitHubError("GitHub installation token unavailable", kind="auth") from exc
+                if not isinstance(request_token, str) or not request_token.strip() or any(
+                    character.isspace() for character in request_token
+                ):
+                    raise GitHubError("GitHub installation token unavailable", kind="auth")
+                headers["Authorization"] = f"Bearer {request_token.strip()}"
+            elif self._token:
+                headers["Authorization"] = f"Bearer {self._token}"
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+            request = urllib.request.Request(
+                f"{self.base_url}{path}", data=body, headers=headers, method=method
+            )
+            try:
+                response = self._opener(request, timeout=self.timeout_seconds)
+                status = int(response.getcode()) if hasattr(response, "getcode") else 200
+                response_headers = getattr(response, "headers", {})
+                if status >= 400:
+                    # Do not consume or expose the provider's arbitrary body.
+                    try:
+                        response.read(_MAX_RESPONSE_BYTES + 1)
+                    except TypeError:
+                        response.read()
+                    self._close_response(response)
+                    if status == 401 and self._token_provider is not None and not auth_retry:
+                        invalidate = getattr(self._token_provider, "invalidate", None)
+                        if callable(invalidate):
+                            invalidate(request_token)
+                            auth_retry = True
+                            continue
+                    retry = _retry_after(response_headers)
+                    kind = "rate_limited" if status == 429 else "forbidden" if status == 403 else "validation" if status == 422 else "auth" if status == 401 else "api"
+                    raise GitHubError(
+                        f"GitHub API returned HTTP {status}",
+                        status=status,
+                        kind=kind,
+                        retry_after=retry,
+                        ambiguous=method == "POST" and status not in {401, 403, 422, 429},
+                    )
+                try:
+                    return self._decode_body(response)
+                finally:
+                    self._close_response(response)
+            except GitHubError:
+                raise
+            except urllib.error.HTTPError as exc:
+                status = int(exc.code) if isinstance(exc.code, int) else None
+                if status == 401 and self._token_provider is not None and not auth_retry:
+                    invalidate = getattr(self._token_provider, "invalidate", None)
+                    if callable(invalidate):
+                        invalidate(request_token)
+                        auth_retry = True
+                        try:
+                            exc.close()
+                        except Exception:
+                            pass
+                        continue
+                retry = _retry_after(exc.headers)
+                kind = "rate_limited" if status == 429 else "forbidden" if status == 403 else "validation" if status == 422 else "auth" if status == 401 else "api"
+                try:
+                    exc.close()
+                except Exception:
+                    pass
                 raise GitHubError(
-                    f"GitHub API returned HTTP {status}",
+                    f"GitHub API returned HTTP {status or 'unknown'}",
                     status=status,
                     kind=kind,
                     retry_after=retry,
-                    ambiguous=method == "POST" and status not in {403, 422, 429},
-                )
-            return self._decode_body(response)
-        except GitHubError:
-            raise
-        except urllib.error.HTTPError as exc:
-            status = int(exc.code) if isinstance(exc.code, int) else None
-            retry = _retry_after(exc.headers)
-            kind = "rate_limited" if status == 429 else "forbidden" if status == 403 else "validation" if status == 422 else "api"
-            try:
-                exc.close()
-            except Exception:
-                pass
-            raise GitHubError(
-                f"GitHub API returned HTTP {status or 'unknown'}",
-                status=status,
-                kind=kind,
-                retry_after=retry,
-                ambiguous=method == "POST" and status not in {403, 422, 429},
-            ) from None
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            # The request path is deliberately omitted from this message; a
-            # POST may have reached GitHub before the connection failed.
-            raise GitHubTransportError(
-                "GitHub request transport failure",
-                kind="transport",
-                ambiguous=method == "POST",
-            ) from exc
+                    ambiguous=method == "POST" and status not in {401, 403, 422, 429},
+                ) from None
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                # The request path is deliberately omitted from this message; a
+                # POST may have reached GitHub before the connection failed.
+                raise GitHubTransportError(
+                    "GitHub request transport failure",
+                    kind="transport",
+                    ambiguous=method == "POST",
+                ) from exc
 
     def read_issue(self, number: int) -> GitHubIssue:
         number = _positive_int(number, "issue number")

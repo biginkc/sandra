@@ -9,6 +9,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 HERE = Path(__file__).resolve().parent
@@ -33,10 +34,23 @@ RUN_AT = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc).timestamp()
 def env_for(path: Path, **overrides: str) -> dict[str, str]:
     values = {
         "SANDRA_REPAIR_DB_PATH": str(path),
+        "SANDRA_REPAIR_VOLUME_PATH": str(path.parent),
         "SENTRY_AUTH_TOKEN": "sentry-token-value",
     }
     values.update(overrides)
     return values
+
+
+def config_from_env(values: dict[str, str]) -> RunnerConfig:
+    """Treat a temporary test directory as the mounted Railway volume."""
+
+    with patch("runner._is_effective_mount", return_value=True):
+        return RunnerConfig.from_env(values)
+
+
+class FakeTokenProvider:
+    def get_token(self):
+        return "installation-token-value"
 
 
 class FakeSentry:
@@ -90,26 +104,53 @@ class RunnerTests(unittest.TestCase):
     def test_environment_requires_absolute_durable_path_and_sentry_secret(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "repair.db"
-            config = RunnerConfig.from_env(env_for(path))
+            config = config_from_env(env_for(path))
             self.assertEqual(config.db_path, path.resolve())
             self.assertFalse(config.github_publish_enabled)
             self.assertNotIn("sentry-token-value", repr(config))
         with self.assertRaisesRegex(RunnerConfigError, "absolute durable"):
-            RunnerConfig.from_env({"SANDRA_REPAIR_DB_PATH": "relative.db", "SENTRY_AUTH_TOKEN": "long-enough"})
+            config_from_env(
+                {
+                    "SANDRA_REPAIR_DB_PATH": "relative.db",
+                    "SANDRA_REPAIR_VOLUME_PATH": "/tmp",
+                    "SENTRY_AUTH_TOKEN": "long-enough",
+                }
+            )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "repair.db"
             with self.assertRaisesRegex(RunnerConfigError, "GITHUB_TOKEN"):
-                RunnerConfig.from_env(env_for(path, SANDRA_GITHUB_PUBLISH_ENABLED="true"))
+                config_from_env(
+                    env_for(
+                        path,
+                        SANDRA_GITHUB_PUBLISH_ENABLED="true",
+                        GITHUB_TOKEN="legacy-static-token",
+                    )
+                )
+
+    def test_volume_must_be_a_writable_mount_and_database_must_be_inside_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            volume = Path(directory) / "volume"
+            volume.mkdir()
+            db = volume / "repair.db"
+            values = env_for(db, SANDRA_REPAIR_VOLUME_PATH=str(volume))
+            with self.assertRaisesRegex(RunnerConfigError, "effective mounted"):
+                RunnerConfig.from_env(values)
+            with patch("runner._is_effective_mount", return_value=True):
+                self.assertEqual(RunnerConfig.from_env(values).volume_path, volume.resolve())
+                with self.assertRaisesRegex(RunnerConfigError, "reside under"):
+                    RunnerConfig.from_env(
+                        env_for(Path(directory) / "outside.db", SANDRA_REPAIR_VOLUME_PATH=str(volume))
+                    )
 
     def test_dispatch_requires_future_gate_and_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "repair.db"
-            config = RunnerConfig.from_env(env_for(path))
+            config = config_from_env(env_for(path))
             self.assertFalse(config.repair_dispatch_enabled)
             with self.assertRaisesRegex(RunnerConfigError, "staged-v1"):
-                RunnerConfig.from_env(env_for(path, SANDRA_REPAIR_DISPATCH_ENABLED="true"))
+                config_from_env(env_for(path, SANDRA_REPAIR_DISPATCH_ENABLED="true"))
             with self.assertRaisesRegex(RunnerConfigError, "reserved"):
-                RunnerConfig.from_env(
+                config_from_env(
                     env_for(
                         path,
                         SANDRA_REPAIR_DISPATCH_ENABLED="true",
@@ -156,7 +197,8 @@ class RunnerTests(unittest.TestCase):
                 db_path=path,
                 sentry_token="sentry-token-value",
                 github_publish_enabled=True,
-                github_token="github-token-value",
+                github_app_id=1,
+                github_installation_id=1,
                 health_port=0,
             )
             store = RepairStore(path)
@@ -166,6 +208,7 @@ class RunnerTests(unittest.TestCase):
                 store=store,
                 sentry_client=FakeSentry(),
                 github_client=fake_github,
+                github_token_provider=FakeTokenProvider(),
             )
             result = runner.run_once(RUN_AT)
             self.assertEqual(result.status, "completed")
@@ -200,7 +243,8 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(first.retry_delay_seconds, 2.0)
             self.assertEqual(second.status, "failed")
             self.assertEqual(second.retry_delay_seconds, 3.0)
-            self.assertEqual(third.status, "not_due")
+            self.assertEqual(third.status, "failed")
+            self.assertEqual(runner.run_once(RUN_AT + 90).status, "not_due")
             self.assertEqual(runner.health.payload()["status"], "degraded")
             runner.close()
 
@@ -213,12 +257,21 @@ class RunnerTests(unittest.TestCase):
                 health_host="127.0.0.1",
                 health_port=0,
             )
-            runner = ControllerRunner(config)
+            runner = ControllerRunner(config, sentry_client=FakeSentry())
             host, port = runner.start_health_server()
             with urlopen(f"http://{host}:{port}/healthz", timeout=2) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(payload["service"], "sandra-sentry-repair")
-            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["status"], "starting")
+            self.assertFalse(payload["ready"])
+            with self.assertRaisesRegex(HTTPError, "HTTP Error 503") as not_ready:
+                urlopen(f"http://{host}:{port}/readyz", timeout=2)
+            not_ready.exception.close()
+            self.assertEqual(runner.run_once(RUN_AT).status, "completed")
+            with urlopen(f"http://{host}:{port}/readyz", timeout=2) as response:
+                ready_payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(ready_payload["status"], "ok")
+            self.assertTrue(ready_payload["ready"])
             self.assertNotIn("sentry-token-value", json.dumps(payload))
             with patch("runner.signal.signal") as register:
                 runner.install_signal_handlers()
@@ -228,6 +281,41 @@ class RunnerTests(unittest.TestCase):
             runner.request_stop()
             self.assertTrue(runner.stop_event.is_set())
             self.assertEqual(runner.health.payload()["status"], "stopping")
+            runner.close()
+
+    def test_restart_after_claimed_slot_before_intake_resumes_current_slot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "repair.db"
+            store = RepairStore(path)
+            slot_id = __import__("schedule").slot_identity(
+                __import__("schedule").current_slot(datetime.fromtimestamp(RUN_AT, tz=timezone.utc))
+            )
+            self.assertTrue(store.claim_scheduler_slot(slot_id, RUN_AT, now=RUN_AT))
+            store.close()
+            sentry = FakeSentry()
+            runner = ControllerRunner(
+                RunnerConfig(db_path=path, sentry_token="sentry-token-value", health_port=0),
+                store=RepairStore(path),
+                sentry_client=sentry,
+            )
+            result = runner.run_once(RUN_AT + 1)
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(sentry.calls, 1)
+            self.assertEqual(runner.store.get_scheduler_slot(slot_id)["status"], "completed")
+            runner.close()
+
+    def test_health_degrades_on_first_intake_failure_and_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "repair.db"
+            runner = ControllerRunner(
+                RunnerConfig(db_path=path, sentry_token="sentry-token-value", health_port=0),
+                sentry_client=FakeSentry(failure=RuntimeError("provider failure")),
+            )
+            self.assertEqual(runner.health.payload()["status"], "starting")
+            self.assertEqual(runner.run_once(RUN_AT).status, "failed")
+            payload = runner.health.payload()
+            self.assertEqual(payload["status"], "degraded")
+            self.assertFalse(payload["ready"])
             runner.close()
 
     def test_structured_log_filter_drops_token_fields(self):

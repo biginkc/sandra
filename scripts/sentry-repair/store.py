@@ -18,6 +18,8 @@ from typing import Any, Callable, Iterable, Mapping
 
 
 MAX_ATTEMPTS = 2
+GITHUB_FAILURE_BACKOFF_BASE_SECONDS = 60
+GITHUB_FAILURE_BACKOFF_MAX_SECONDS = 86_400
 FULL_SHA_RE = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 SAFE_GIT_CONFIG = (
     "-c",
@@ -998,10 +1000,24 @@ class RepairStore:
             raise ValueError("retry_after must be non-negative")
         current = self._now(now)
         safe_error = error.strip()[:500]
-        next_attempt = current + min(int(retry_after), 86_400) if retry_after is not None else None
         self.db.execute("BEGIN IMMEDIATE")
         try:
             row = self._assert_github_outbox_owner_locked(dedupe_key, owner, now=current)
+            if retry_after is not None:
+                next_attempt = current + min(int(retry_after), GITHUB_FAILURE_BACKOFF_MAX_SECONDS)
+            else:
+                # A persistent 401/403/422 (or a malformed local response)
+                # must not be immediately reclaimable.  Without this durable
+                # delay the oldest row can consume every publisher iteration
+                # in a slot and starve newer incidents. Attempts is incremented
+                # when the lease is claimed, so the first failure waits one
+                # minute and later failures back off up to one day.
+                attempt_number = max(1, int(row["attempts"]))
+                delay = min(
+                    GITHUB_FAILURE_BACKOFF_MAX_SECONDS,
+                    GITHUB_FAILURE_BACKOFF_BASE_SECONDS * (2 ** min(attempt_number - 1, 10)),
+                )
+                next_attempt = current + delay
             self.db.execute(
                 """UPDATE github_outbox SET status='failed',lease_owner=NULL,lease_until=NULL,
                    next_attempt_at=?,last_error=?,updated_at=? WHERE dedupe_key=?""",
@@ -2196,6 +2212,37 @@ class RepairStore:
         except Exception:
             self.db.execute("ROLLBACK")
             raise
+
+    def get_scheduler_slot(self, slot_id: str) -> dict[str, Any] | None:
+        """Read one slot state without changing its claim."""
+
+        if not isinstance(slot_id, str) or not slot_id.strip():
+            raise ValueError("slot_id is required")
+        row = self.db.execute(
+            "SELECT * FROM scheduler_slots WHERE slot_id=?", (slot_id,)
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def complete_scheduler_slot(self, slot_id: str, *, now: float | None = None) -> None:
+        """Mark a claimed slot complete after its intake transaction finishes."""
+
+        current = self._now(now)
+        self.db.execute(
+            "UPDATE scheduler_slots SET status='completed' WHERE slot_id=? AND status='claimed'",
+            (slot_id,),
+        )
+
+    def fail_scheduler_slot(
+        self, slot_id: str, *, error: str, now: float | None = None
+    ) -> None:
+        """Mark a slot terminal after its bounded retry budget is exhausted."""
+
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("scheduler failure type is required")
+        self.db.execute(
+            "UPDATE scheduler_slots SET status='failed' WHERE slot_id=? AND status='claimed'",
+            (slot_id,),
+        )
 
     def list_outbox(self) -> list[dict[str, Any]]:
         return [
