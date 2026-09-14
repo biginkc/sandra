@@ -847,6 +847,22 @@ describe("lead eSign action orchestration", () => {
     });
   });
 
+  it("records a rejected canary lease without claiming provider delivery", async () => {
+    const h = harness();
+    h.provider.sendWithTemplate.mockResolvedValue({ outcome: "canary_lease_blocked" });
+
+    const result = await h.core.send(sendInput);
+
+    expect(result).toMatchObject({ ok: false, error: { code: "CANARY_LEASE_BLOCKED" } });
+    expect(h.repository.markSendOutcome).toHaveBeenCalledWith({
+      orgId: "org-1",
+      requestId: "request-1",
+      deliveryState: "failed",
+      safeErrorMessage: "CANARY_LEASE_BLOCKED",
+    });
+    expect(h.repository.reconcileSent).not.toHaveBeenCalled();
+  });
+
   it("records a provider-plan rejection through the durable reservation repair RPC", async () => {
     const h = harness();
     h.repository.loadLeadSendContext.mockResolvedValue(

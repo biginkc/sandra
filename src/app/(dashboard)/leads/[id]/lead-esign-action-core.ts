@@ -280,6 +280,7 @@ export type ProviderDispatchOutcome =
     }>
   | Readonly<{ outcome: "ambiguous" }>
   | Readonly<{ outcome: "definitive_failure" }>
+  | Readonly<{ outcome: "canary_lease_blocked" }>
   | Readonly<{ outcome: "provider_plan_required" }>;
 
 export type ProviderMutationOutcome =
@@ -607,6 +608,10 @@ async function dispatchClaimed(
   if (outcome.outcome === "definitive_failure") {
     await markFailed(dependencies, request, "PROVIDER_REJECTED");
     fail("SEND_FAILED", "Dropbox Sign could not send this contract.");
+  }
+  if (outcome.outcome === "canary_lease_blocked") {
+    await markFailed(dependencies, request, "CANARY_LEASE_BLOCKED");
+    fail("CANARY_LEASE_BLOCKED", "The test contract was stopped by its canary lease. No request was sent.");
   }
   if (outcome.outcome === "provider_plan_required") {
     const repaired = await repairProviderPlanRequiredSend(dependencies, request);
