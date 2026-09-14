@@ -2,7 +2,7 @@
 
 import { MessageSquarePlusIcon, PlusIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState, useMemo } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
@@ -139,7 +139,9 @@ export function CockpitView({
   // Unread scope changed). The composer that started it captured an older
   // callback, so always dispatch through the refreshers of the current scope.
   const latestRefresh = useRef({ refreshSelectedDetail, refreshInbox });
-  useEffect(() => {
+  useLayoutEffect(() => {
+    // Layout timing: the ref must point at the new scope before any send
+    // completion can observe the committed selection.
     latestRefresh.current = { refreshSelectedDetail, refreshInbox };
   }, [refreshSelectedDetail, refreshInbox]);
   const handleReplySent = useCallback(() => {
