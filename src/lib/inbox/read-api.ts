@@ -4,6 +4,7 @@ import type { Database, Json } from "@/lib/supabase/types";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
 
 type ReadDatabase = Omit<Database, "public"> & { public: Omit<Database["public"], "Functions"> & { Functions: Database["public"]["Functions"] & {
+  inbox_unknown_history_page: { Args: { org_id: string; sender_group_id: string; before_cursor?: string }; Returns: Json };
   inbox_history_page: { Args: { org_id: string; conversation_id: string; before_cursor?: string }; Returns: Json };
   inbox_read_detail: { Args: { org_id: string; conversation_id: string }; Returns: Json };
   inbox_acknowledge_read: { Args: { boundary_id: string; batch_number: number }; Returns: Json };
@@ -39,6 +40,25 @@ function fail(error: { code?: string; message?: string } | null): void {
 }
 export function createInboxReadRepository(client: InboxReadClient) {
   return {
+    async unknownHistory(orgId: string, senderGroupId: string, signal: AbortSignal, beforeCursor?: string) {
+      requireValue(UUID.test(orgId) && UUID.test(senderGroupId) && (beforeCursor === undefined || UUID.test(beforeCursor)), 400);
+      signal.throwIfAborted();
+      const { data, error } = await client.rpc("inbox_unknown_history_page", { org_id: orgId, sender_group_id: senderGroupId, ...(beforeCursor ? { before_cursor: beforeCursor } : {}) }).abortSignal(signal);
+      signal.throwIfAborted(); fail(error);
+      const row = record(data);
+      requireValue(row.org_id === orgId && row.sender_group_id === senderGroupId && typeof row.raw_sender === "string" && row.raw_sender.length > 0 && Array.isArray(row.history) && row.history.length <= 50);
+      const seen = new Set<string>();
+      const history = row.history.map(value => {
+        const message = record(value), messageId = id(message.id);
+        requireValue(!seen.has(messageId)); seen.add(messageId);
+        requireValue(message.body === null || typeof message.body === "string");
+        requireValue(message.direction === "inbound" || message.direction === "outbound");
+        return { id: messageId, createdAtRaw: timestamp(message.created_at_raw), body: message.body,
+          direction: message.direction, dismissedAtRaw: nullableTimestamp(message.dismissed_at_raw) };
+      });
+      return { requesterId: id(row.requester_id), orgId, senderGroupId, rawSender: row.raw_sender,
+        expiresAt: timestamp(row.expires_at), history, nextCursor: row.next_cursor === null ? null : id(row.next_cursor) };
+    },
     async detail(orgId: string, conversationId: string, signal: AbortSignal, beforeCursor?: string) {
       requireValue(UUID.test(orgId) && UUID.test(conversationId) && (beforeCursor === undefined || UUID.test(beforeCursor)), 400);
       signal.throwIfAborted();

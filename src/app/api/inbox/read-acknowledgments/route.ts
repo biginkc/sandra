@@ -1,3 +1,4 @@
+import { isInboxSameOrigin } from "@/lib/inbox/same-origin";
 import { createClient } from "@/lib/supabase/server";
 import { createInboxReadRepository, InboxReadError, type InboxReadClient } from "@/lib/inbox/read-api";
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
@@ -8,8 +9,8 @@ export async function POST(request: Request) {
   const cancel = () => { void reader?.cancel().catch(() => {}); };
   signal.addEventListener("abort", cancel, { once: true });
   try {
-    const url = new URL(request.url), origin = request.headers.get("origin");
-    if (url.search || (origin && origin !== url.origin) || request.headers.get("sec-fetch-site") === "cross-site") throw new InboxReadError(403);
+    const url = new URL(request.url);
+    if (url.search || !isInboxSameOrigin(request)) throw new InboxReadError(403);
     if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") throw new InboxReadError(415);
     reader = request.body?.getReader();
     if (!reader) throw new InboxReadError(400);
