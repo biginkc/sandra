@@ -18,3 +18,6 @@ it("retains no-origin API clients and URL authority when Host is absent", () => 
   expect(isInboxSameOrigin(request({}))).toBe(true);
   expect(isInboxSameOrigin(request({ origin: "http://localhost:52582" }))).toBe(true);
 });
+it("rejects a forged Host that agrees with a foreign Origin but isn't the app's trusted origin", () => {
+  expect(isInboxSameOrigin(request({ origin: "http://evil.test", host: "evil.test" }))).toBe(false);
+});

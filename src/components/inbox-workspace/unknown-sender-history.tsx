@@ -27,7 +27,11 @@ export function UnknownSenderHistory(props: UnknownSenderHistoryProps) {
         credentials: "same-origin", redirect: "error", cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
       });
       if (controller.signal.aborted) return;
-      if (response.status === 401 || response.status === 403) { setRevoked(key); onAccessLost(); return; }
+      // 404 from this route is org-access denial (INBOX_ORG_DENIED / INBOX_READ_NOT_FOUND
+      // etc. in read-api.ts) wearing a not-found mask to avoid leaking existence — the
+      // route has no other, distinguishable "legitimately not found" case, so treat it
+      // the same as 401/403 and clear the cached pane rather than leave stale history visible.
+      if (response.status === 401 || response.status === 403 || response.status === 404) { setRevoked(key); onAccessLost(); return; }
       if (response.status === 410) throw Error("Refresh messages to continue through older history.");
       if (!response.ok) throw Error("Older messages could not load. Try again.");
       const next: UnknownSenderHistorySnapshot = await response.json();

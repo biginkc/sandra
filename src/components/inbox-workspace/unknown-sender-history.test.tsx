@@ -29,6 +29,12 @@ it("clears the pane on access denial and rejects foreign page identity", async (
   fireEvent.click(screen.getByText("Load older messages")); await waitFor(() => expect(p.onAccessLost).toHaveBeenCalledOnce());
   expect(screen.queryByText("Latest sender message")).not.toBeInTheDocument();
 });
+it("clears the pane on a 404 org-access denial from an older-page load", async () => {
+  const p = props(); p.fetch = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 404 }));
+  render(<UnknownSenderHistory {...p} />); fireEvent.click(screen.getByText("Load older messages"));
+  await waitFor(() => expect(p.onAccessLost).toHaveBeenCalledOnce());
+  expect(screen.queryByText("Latest sender message")).not.toBeInTheDocument();
+});
 it("ignores a late older page after navigation", async () => {
   const p = props(); let resolve!: (response: Response) => void;
   p.fetch = vi.fn<typeof fetch>().mockImplementation(() => new Promise(done => { resolve = done; }));

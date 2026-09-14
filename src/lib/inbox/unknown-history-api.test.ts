@@ -15,8 +15,11 @@ it("loads raw sender history by opaque group ID without acknowledgment", async (
   expect(rpc).toHaveBeenCalledExactlyOnceWith("inbox_unknown_history_page", { org_id: org, sender_group_id: group, before_cursor: org });
   expect(result).not.toHaveProperty("readBoundary");
 });
+function oversizedHistory(count: number) {
+  return Array.from({ length: count }, (_, index) => ({ ...row.history[0], id: `33333333-3333-3333-3333-${String(index).padStart(12, "0")}` }));
+}
 it("rejects foreign identity, duplicate or oversized history and invalid cursor", async () => {
-  for (const data of [{ ...row, org_id: group }, { ...row, sender_group_id: org }, { ...row, history: [row.history[0], row.history[0]] }, { ...row, history: Array(51).fill(row.history[0]) }, { ...row, next_cursor: "invalid" }]) {
+  for (const data of [{ ...row, org_id: group }, { ...row, sender_group_id: org }, { ...row, history: [row.history[0], row.history[0]] }, { ...row, history: oversizedHistory(51) }, { ...row, next_cursor: "invalid" }]) {
     await expect(fixture(data).repository.unknownHistory(org, group, new AbortController().signal)).rejects.toMatchObject({ status: 503 });
   }
   const { rpc, repository } = fixture(row);
