@@ -62,7 +62,12 @@ BEGIN
  -- between a crafted targets/template split and a different one. Hashing
  -- each component to a fixed-width digest before combining removes that
  -- ambiguity entirely.
- hash:=encode(sha256(convert_to('sandra:inbox:reply:intent:v1','utf8')||sha256(convert_to((SELECT coalesce(jsonb_agg(value ORDER BY value->>'kind',value->>'id'),'[]'::jsonb) FROM jsonb_array_elements(input->'targets'))::text,'utf8'))||sha256(convert_to(input->>'template','utf8'))),'hex');
+ -- Targets are normalized through ::uuid::text (not hashed as raw client
+ -- text) before hashing: the uuid type parses case- and (within reason)
+ -- format-insensitively, so two requests naming the identical target with
+ -- different letter-case in its id string must hash identically, not be
+ -- treated as a different intent.
+ hash:=encode(sha256(convert_to('sandra:inbox:reply:intent:v1','utf8')||sha256(convert_to((SELECT coalesce(jsonb_agg(jsonb_build_object('kind',value->>'kind','id',(value->>'id')::uuid::text) ORDER BY value->>'kind',(value->>'id')::uuid::text),'[]'::jsonb) FROM jsonb_array_elements(input->'targets'))::text,'utf8'))||sha256(convert_to(input->>'template','utf8'))),'hex');
  SELECT * INTO existing FROM inbox_reply_review.preparations WHERE org_id=o AND requester_id=u AND request_key=k;
  IF FOUND THEN
   IF existing.input_hash<>hash THEN RAISE EXCEPTION 'INBOX_REPLY_IDEMPOTENCY_MISMATCH';END IF;

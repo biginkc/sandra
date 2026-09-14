@@ -1,16 +1,16 @@
 {
   "sources": {
     "inbox-reply-boundary/context.sql": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
-    "inbox-reply-preparation/recipient.sql": "a1bdc7ba65d6f356b6e331a41bdb6409b7ff0fae989c37304e09236581153017",
+    "inbox-reply-preparation/recipient.sql": "f72e995aa6495461c76c26c53adbf56f31d0b29227525084a72680569c92c668",
     "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
-    "inbox-reply-review/setup.sql": "82fb22442eb22ca2ceea73f0e7401da1a8a0fc3438efa03e12566118dfe5555d",
+    "inbox-reply-review/setup.sql": "a0ad0f7b863b1f60ed6df10b4a08556e942d97efb40670cf1114c28079e70724",
     "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772"
   },
-  "runner_sha256": "41782946054cc5c911a691b288558c9f54e5ca33045c36db41821d8685ff9756",
+  "runner_sha256": "5e15dfb41748b6dfd7bb9a89bc31fd783cbdb7d1db63a5aeaa5c820aae64acb5",
   "checks": [
     "authenticated public capture/freeze derives canonical personalized literal body and route; default admission closed",
     "same pair returns exact immutable snapshot after read update",
-    "same key changed body rejected",
+    "same key/same template with a different draft body still returns the original frozen view; same key with a changed TEMPLATE (real intent change) is rejected",
     "stored review cannot be updated",
     "changed inbound blocks stale rendered content",
     "same-key replay after real dependency drift (known_reply revision bumped) still returns the original frozen view \u2014 idempotency keys on client intent, not server-rendered deps",

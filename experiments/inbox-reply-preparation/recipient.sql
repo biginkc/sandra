@@ -18,7 +18,7 @@ CREATE FUNCTION inbox_reply_preparation.recipient_limit() RETURNS integer LANGUA
 $$;
 CREATE FUNCTION inbox_reply_preparation.recipient(o uuid,c uuid) RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path='' AS $$
 DECLARE initial jsonb;resolved jsonb;p public.properties;contact public.contacts;inbound public.messages;head public.inbox_inbound_heads;
- target_revision bigint;content_revision bigint;capture_generation uuid;destination text;business text;line_type text;consent text;sender uuid;inventory jsonb;organization jsonb;market jsonb;requirements jsonb;policy jsonb;
+ target_revision bigint;content_revision bigint;capture_generation uuid;destination text;business text;matched_slots integer;any_landline boolean;any_non_mobile boolean;consent text;sender uuid;inventory jsonb;organization jsonb;market jsonb;requirements jsonb;policy jsonb;
 BEGIN
  IF o IS NULL OR c IS NULL THEN RAISE EXCEPTION 'Invalid recipient identity';END IF;
  initial:=inbox_t2_summary_contract.compute(o,c,clock_timestamp());
@@ -48,15 +48,21 @@ BEGIN
  destination:=inbox_reply_preparation.phone(inbound.from_address);
  business:=inbox_reply_preparation.phone(inbound.to_address);
  IF destination IS NULL OR business IS NULL THEN RETURN jsonb_build_object('exclusion','reply_route_unavailable');END IF;
- SELECT t INTO line_type FROM (VALUES(1,contact.phone_1,contact.phone_1_type),(2,contact.phone_2,contact.phone_2_type),(3,contact.phone_3,contact.phone_3_type)) slots(ordinal,phone,t) WHERE inbox_reply_preparation.phone(phone)=destination ORDER BY ordinal LIMIT 1;
- IF NOT FOUND THEN RETURN jsonb_build_object('exclusion','phone_not_saved');END IF;
- -- Fail closed: eligible only when the saved slot is affirmatively mobile.
+ -- Fail closed across ALL slots that normalize to this destination, not just
+ -- the first by ordinal: a contact can have the same number saved twice
+ -- (e.g. phone_1='mobile' and phone_2 the identical digits as 'landline'/
+ -- 'unknown' after a re-import or manual correction). Picking only the
+ -- first-ordinal slot would let a conflicting duplicate save mask a bad
+ -- classification and stay eligible — mobile is required on EVERY matching
+ -- slot, not merely on one of them.
+ SELECT count(*),bool_or(t='landline'),bool_or(t IS DISTINCT FROM 'mobile') INTO matched_slots,any_landline,any_non_mobile FROM (VALUES(1,contact.phone_1,contact.phone_1_type),(2,contact.phone_2,contact.phone_2_type),(3,contact.phone_3,contact.phone_3_type)) slots(ordinal,phone,t) WHERE inbox_reply_preparation.phone(phone)=destination;
+ IF matched_slots=0 THEN RETURN jsonb_build_object('exclusion','phone_not_saved');END IF;
  -- Mirrors the bulk-queue precedent (audience-assessment.ts/bulk-queue.ts) —
  -- landline is a hard block, 'unknown' (never classified) needs an explicit
  -- operator opt-in there. Bulk-reply v1 has no such toggle, so 'unknown'
  -- fails closed the same as landline; it never falls through as eligible.
- IF line_type='landline' THEN RETURN jsonb_build_object('exclusion','landline');END IF;
- IF line_type IS DISTINCT FROM 'mobile' THEN RETURN jsonb_build_object('exclusion','unclassified_phone');END IF;
+ IF any_landline THEN RETURN jsonb_build_object('exclusion','landline');END IF;
+ IF any_non_mobile THEN RETURN jsonb_build_object('exclusion','unclassified_phone');END IF;
  requirements:=jsonb_build_array(
   jsonb_build_object('namespace','property_identity','key',jsonb_build_array(p.id)),jsonb_build_object('namespace','property_policy','key',jsonb_build_array(p.id)),
   jsonb_build_object('namespace','property_outcome','key',jsonb_build_array(p.id)),jsonb_build_object('namespace','property_reply_content','key',jsonb_build_array(p.id)),

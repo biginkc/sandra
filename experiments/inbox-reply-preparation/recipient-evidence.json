@@ -1,8 +1,8 @@
 {
-  "source_sha256": "a1bdc7ba65d6f356b6e331a41bdb6409b7ff0fae989c37304e09236581153017",
+  "source_sha256": "f72e995aa6495461c76c26c53adbf56f31d0b29227525084a72680569c92c668",
   "batch_sha256": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
   "context_sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
-  "runner_sha256": "4c279ac7aff0e16877013e4e88196be45569046567b52b8a148c93b558fa7807",
+  "runner_sha256": "8b5125ee6b7731fab994088489d993e09321282b4a8162c8d0df2df3c1651e7f",
   "checks": [
     "canonical contact, normalized saved destination, sender inventory and variables",
     "read status leaves known-reply content revision unchanged",
@@ -10,6 +10,7 @@
     "foreign and missing target denied without head allocation",
     "landline and unsaved destination excluded",
     "never-classified line type fails closed (unclassified_phone), not silently eligible",
+    "conflicting duplicate save (same destination saved as mobile AND landline) fails closed on every matching slot, not just the first by ordinal",
     "inactive inventory sender excluded",
     "canonical consent opt-out excluded",
     "saved mobile with zero consent history fails closed (no_consent), not silently eligible",
