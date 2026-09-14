@@ -1,4 +1,5 @@
 import "server-only";
+import { HistoricalConnectionError } from "./historical-connection";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { DialpadVoiceDatabase } from "./database.generated";
 import { DialpadVoiceClient, DialpadVoiceError } from "./client";
@@ -20,8 +21,7 @@ function object(value: unknown): Record<string, unknown> | null {
 export async function processDialpadRecording(options: {
   client: SupabaseClient<DialpadVoiceDatabase>;
   orgId: string;
-  providerUserId: string;
-  apiKey: string;
+  resolveConnection(artifact: { org_id: string; intent_id: string | null; provider_call_id: string }): Promise<{ providerUserId: string; providerCompanyId: string; apiKey: string }>;
   bucket: string;
   decode: RecordingDecoder;
   fetchImpl?: typeof fetch;
@@ -35,10 +35,11 @@ export async function processDialpadRecording(options: {
   let status: "retry" | "denied" | "failed" = "retry";
   let errorCode = "recording_processing_unavailable";
   try {
-    const api = new DialpadVoiceClient(options.apiKey, { fetch: options.fetchImpl });
+    const connection = await options.resolveConnection(artifact);
+    const api = new DialpadVoiceClient(connection.apiKey, { fetch: options.fetchImpl });
     const call = await api.getCall(artifact.provider_call_id);
     const target = object(call.target);
-    if (id(call.call_id) !== artifact.provider_call_id || id(target?.id) !== options.providerUserId ||
+    if (id(call.call_id) !== artifact.provider_call_id || id(target?.id) !== connection.providerUserId ||
       typeof target?.type !== "string" || target.type.trim().toLowerCase() !== "user") {
       status = "denied";
       errorCode = "recording_identity_mismatch";
@@ -49,19 +50,19 @@ export async function processDialpadRecording(options: {
         errorCode = "recording_not_yet_available";
       } else {
         const eventUrl = await signedRecordingUrl(client, {
-          orgId, callId: artifact.provider_call_id, providerUserId: options.providerUserId,
+          orgId, callId: artifact.provider_call_id, providerUserId: connection.providerUserId, providerCompanyId: connection.providerCompanyId,
           recordingId: artifact.provider_recording_id, recordingKind: artifact.recording_kind,
         });
         const restUrl = typeof segment.url === "string" ? segment.url : null;
         const url = eventUrl ?? restUrl;
         if (!url) throw new Error("Recording source unavailable");
-        let download = await downloadDialpadRecording({ url, apiKey: options.apiKey, decode: options.decode, fetchImpl: options.fetchImpl });
+        let download = await downloadDialpadRecording({ url, apiKey: connection.apiKey, decode: options.decode, fetchImpl: options.fetchImpl });
         // A stored event link may expire while Call Get now has a fresh link.
         // Try that distinct authenticated source once for source/access failures only;
         // never follow a redirect, rewrite a URL, or bypass media validation.
         if (!download.ok && eventUrl && restUrl && eventUrl !== restUrl &&
           ["invalid_url", "login_required", "http_error", "redirect_rejected", "html_response"].includes(download.reason)) {
-          download = await downloadDialpadRecording({ url: restUrl, apiKey: options.apiKey, decode: options.decode, fetchImpl: options.fetchImpl });
+          download = await downloadDialpadRecording({ url: restUrl, apiKey: connection.apiKey, decode: options.decode, fetchImpl: options.fetchImpl });
         }
         if (!download.ok) {
           errorCode = `recording_${download.reason}`;
@@ -82,6 +83,10 @@ export async function processDialpadRecording(options: {
       }
     }
   } catch (error) {
+    if (error instanceof HistoricalConnectionError) {
+      errorCode = `recording_${error.code}`;
+      if (["invalid_scope", "history_unavailable", "company_mismatch"].includes(error.code)) status = "denied";
+    }
     if (error instanceof DialpadVoiceError && error.status === 429) {
       errorCode = "recording_rate_limited";
       const deferred = await client.rpc("fn_defer_dialpad_detail_budget", { p_org_id: orgId, p_seconds: 60 });

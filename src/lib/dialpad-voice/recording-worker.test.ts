@@ -1,3 +1,5 @@
+import { HistoricalConnectionError } from "./historical-connection";
+import { DialpadVoiceError } from "./client";
 import { createClient } from "@supabase/supabase-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DialpadVoiceDatabase } from "./database.generated";
@@ -17,7 +19,9 @@ function fixture(callResponse?: Response, mediaResponse?: Response | ((url: stri
         recording_kind: "admincallrecording", status: "processing", lease_token: "lease", attempt_count: 1,
       }]);
       if (path.endsWith("fn_defer_dialpad_detail_budget")) return Response.json(null);
-      if (path.endsWith("dialpad_voice_event_inbox")) return Response.json(eventUrl ? [{ payload: {
+      if(path.endsWith('dialpad_voice_webhook_sources'))return Response.json({id:'source',org_id:'org',connection_id:'connection',connection_version:1});
+      if(path.endsWith('dialpad_connection_revisions'))return Response.json({org_id:'org',connection_id:'connection',config_version:1,provider_company_id:'company'});
+      if (path.endsWith("dialpad_voice_event_inbox")) return Response.json(eventUrl ? [{org_id:"org",webhook_source_id:"source",status:"processed", payload: {
         call_id: "123", state: "recording", event_timestamp: 200, target: { id: "456", type: "User" },
         recording_details: [{ id: "segment", recording_type: "admincallrecording", url: eventUrl }],
       } }] : []);
@@ -32,8 +36,9 @@ function fixture(callResponse?: Response, mediaResponse?: Response | ((url: stri
     return typeof mediaResponse === "function" ? mediaResponse(String(input)) : mediaResponse ?? new Response(null, { status: 302, headers: { location: "/login" } });
   });
   const decode = vi.fn().mockResolvedValue({ durationSeconds: 1, channels: 1, sampleRate: 16000 });
-  const run = () => processDialpadRecording({ client, orgId: "org", providerUserId: "456", apiKey: "fixture-key", bucket: "private", decode, fetchImpl });
-  return { run, writes, fetchImpl, decode };
+  const resolveConnection = vi.fn().mockResolvedValue({providerUserId:"456",providerCompanyId:"company",apiKey:"fixture-key"});
+  const run = () => processDialpadRecording({ client, orgId: "org", resolveConnection, bucket: "private", decode, fetchImpl });
+  return { run, writes, fetchImpl, decode, resolveConnection };
 }
 describe("recording job orchestration", () => {
   it("marks login redirects denied without decoding, uploading or claiming success", async () => {
@@ -88,3 +93,7 @@ describe("recording job orchestration", () => {
   });
 
 });
+
+it('retries transient historical company verification429 without downloading',async()=>{const f=fixture();f.resolveConnection.mockRejectedValue(new DialpadVoiceError('http',429));expect(await f.run()).toBe('retry');expect(f.fetchImpl).not.toHaveBeenCalled();expect(f.writes.some(w=>w.path.endsWith('fn_defer_dialpad_detail_budget'))).toBe(true);});
+it('denies missing historical binding without default provider fallback',async()=>{const f=fixture();f.resolveConnection.mockRejectedValue(new HistoricalConnectionError('history_unavailable'));expect(await f.run()).toBe('denied');expect(f.fetchImpl).not.toHaveBeenCalled();});
+it('retries historical DB failures without media fetch',async()=>{const f=fixture();f.resolveConnection.mockRejectedValue(new HistoricalConnectionError('history_read_unavailable'));expect(await f.run()).toBe('retry');expect(f.fetchImpl).not.toHaveBeenCalled();});
