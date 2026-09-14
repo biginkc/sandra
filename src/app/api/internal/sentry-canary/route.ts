@@ -31,6 +31,9 @@ export async function POST(request: Request) {
     const run = await start(sentryPreviewCanaryWorkflow, []);
     return NextResponse.json({ runId: run.runId });
   }
+  if (mode === "unhandled" && process.env.VERCEL_ENV === "preview") {
+    throw new Error("Controlled Sentry canary unhandled request failure");
+  }
   if (mode === "cron_ok" || mode === "cron_error") {
     if (process.env.VERCEL_ENV !== "preview") return new Response(null, { status: 404 });
     return runMonitoredCron(
