@@ -19,6 +19,12 @@ from typing import Any, Callable, Iterable, Mapping
 
 MAX_ATTEMPTS = 2
 FULL_SHA_RE = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
+SAFE_GIT_CONFIG = (
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+)
 
 
 class StateError(RuntimeError):
@@ -71,6 +77,7 @@ class Attempt:
     lease_until: float
     branch: str | None = None
     worktree: str | None = None
+    git_common_dir: str | None = None
 
 
 def default_db_path() -> Path:
@@ -165,6 +172,7 @@ class RepairStore:
                 session_id TEXT,
                 branch TEXT,
                 worktree TEXT,
+                git_common_dir TEXT,
                 prompt_hash TEXT,
                 created_at REAL NOT NULL,
                 lease_until REAL NOT NULL,
@@ -277,6 +285,12 @@ class RepairStore:
         }
         if "regression_evidence" not in issue_columns:
             self.db.execute("ALTER TABLE issues ADD COLUMN regression_evidence TEXT")
+        attempt_columns = {
+            row["name"]
+            for row in self.db.execute("PRAGMA table_info(attempts)").fetchall()
+        }
+        if "git_common_dir" not in attempt_columns:
+            self.db.execute("ALTER TABLE attempts ADD COLUMN git_common_dir TEXT")
         deployment_columns = {
             row["name"]
             for row in self.db.execute("PRAGMA table_info(deployments)").fetchall()
@@ -361,7 +375,7 @@ class RepairStore:
 
     def _validate_worktree(
         self, worktree: str | Path | None, branch: str | None = None
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None, str]:
         if not worktree:
             raise StateError("investigate/repair attempts require an owned worktree")
         path = Path(worktree).expanduser()
@@ -382,7 +396,7 @@ class RepairStore:
             raise StateError("path is not an isolated linked Git worktree")
         try:
             probe = subprocess.run(
-                ["git", "-C", str(resolved), "rev-parse", "--is-inside-work-tree"],
+                self._git_command(str(resolved), "rev-parse", "--is-inside-work-tree"),
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -396,7 +410,7 @@ class RepairStore:
         if branch:
             try:
                 branch_probe = subprocess.run(
-                    ["git", "-C", str(resolved), "branch", "--show-current"],
+                    self._git_command(str(resolved), "branch", "--show-current"),
                     capture_output=True,
                     text=True,
                     timeout=5,
@@ -407,7 +421,59 @@ class RepairStore:
             actual_branch = branch_probe.stdout.strip()
             if branch_probe.returncode != 0 or actual_branch != branch:
                 raise StateError("configured branch does not match worktree")
-        return str(resolved), actual_branch
+        common_dir = self._git_common_dir(str(resolved))
+        return str(resolved), actual_branch, common_dir
+
+    @staticmethod
+    def _git_command(worktree: str, *arguments: str) -> list[str]:
+        return ["git", *SAFE_GIT_CONFIG, "-C", worktree, *arguments]
+
+    @classmethod
+    def _git_common_dir(cls, worktree: str) -> str:
+        try:
+            result = subprocess.run(
+                cls._git_command(worktree, "rev-parse", "--git-common-dir"),
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise StateError("unable to verify git common directory") from exc
+        raw = result.stdout.strip()
+        if result.returncode != 0 or not raw or "\n" in raw:
+            raise StateError("unable to verify git common directory")
+        path = Path(raw)
+        if not path.is_absolute():
+            path = Path(worktree) / path
+        resolved = path.resolve()
+        if not resolved.is_dir():
+            raise StateError("git common directory is not present")
+        return str(resolved)
+
+    @classmethod
+    def _assert_worktree_identity_locked(cls, attempt: Mapping[str, Any]) -> None:
+        try:
+            worktree = str(attempt["worktree"] or "")
+            expected = str(attempt["git_common_dir"] or "")
+        except (KeyError, IndexError, TypeError):
+            worktree = ""
+            expected = ""
+        if not worktree or not expected:
+            raise StateError("attempt is missing its claimed git common directory")
+        actual = cls._git_common_dir(worktree)
+        if actual != str(Path(expected).expanduser().resolve()):
+            raise StateError("worktree git common directory changed since claim")
+
+    def assert_worktree_identity(self, attempt_id: str) -> None:
+        """Reverify the repository identity captured when the attempt claimed."""
+
+        row = self.db.execute(
+            "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
+        ).fetchone()
+        if row is None:
+            raise StateError("unknown attempt")
+        self._assert_worktree_identity_locked(row)
 
     @staticmethod
     def _issue_key(
@@ -588,7 +654,7 @@ class RepairStore:
             if generation is not None and generation != int(observed["generation"]):
                 raise StateError("requested generation is not current")
             return None
-        worktree_path, actual_branch = self._validate_worktree(worktree, branch)
+        worktree_path, actual_branch, git_common_dir = self._validate_worktree(worktree, branch)
         current = self._now(now)
         try:
             self.db.execute("BEGIN IMMEDIATE")
@@ -643,8 +709,8 @@ class RepairStore:
             lease_until = current + lease_seconds
             self.db.execute(
                 """INSERT INTO attempts(attempt_id,organization,project,environment,issue_number,generation,mode,
-                   owner,fencing_token,status,branch,worktree,created_at,lease_until)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   owner,fencing_token,status,branch,worktree,git_common_dir,created_at,lease_until)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     attempt_id,
                     organization,
@@ -658,6 +724,7 @@ class RepairStore:
                     "leased",
                     actual_branch or branch,
                     worktree_path,
+                    git_common_dir,
                     current,
                     lease_until,
                 ),
@@ -689,6 +756,7 @@ class RepairStore:
                 lease_until,
                 actual_branch or branch,
                 worktree_path,
+                git_common_dir,
             )
         except Exception:
             if self.db.in_transaction:
@@ -1096,9 +1164,9 @@ class RepairStore:
             self.db.execute("ROLLBACK")
             raise
 
-    @staticmethod
+    @classmethod
     def _verify_deployment_ancestry(
-        attempt: Mapping[str, Any], pr_head_sha: str, deployed_sha: str
+        cls, attempt: Mapping[str, Any], pr_head_sha: str, deployed_sha: str
     ) -> bool:
         """Verify that a deployed target contains the reviewed PR head."""
 
@@ -1112,11 +1180,19 @@ class RepairStore:
             raise StateError("merge deployment requires the owned worktree for ancestry verification")
         try:
             result = subprocess.run(
-                ["git", "-C", worktree, "merge-base", "--is-ancestor", pr_head_sha, deployed_sha],
+                cls._git_command(
+                    worktree,
+                    "--no-replace-objects",
+                    "merge-base",
+                    "--is-ancestor",
+                    pr_head_sha,
+                    deployed_sha,
+                ),
                 capture_output=True,
                 text=True,
                 timeout=20,
                 check=False,
+                env={**os.environ, "GIT_GRAFT_FILE": os.devnull},
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise StateError("unable to verify deployed commit ancestry") from exc
@@ -1426,6 +1502,7 @@ class RepairStore:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             attempt = self._fenced_attempt_locked(attempt_id, fencing_token, now=current)
+            self._assert_worktree_identity_locked(attempt)
             context = self.completion_context(attempt_id)
             persisted_pr = context.get("pull_request")
             persisted_deployment = context.get("deployment")

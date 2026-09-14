@@ -470,6 +470,45 @@ class ControllerTests(unittest.TestCase):
         finally:
             unscoped.close()
 
+    def test_claim_captures_and_later_rechecks_git_common_dir(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101,
+            owner="one", mode="repair",
+        )
+        persisted = self.store.db.execute(
+            "SELECT git_common_dir FROM attempts WHERE attempt_id=?",
+            (attempt.attempt_id,),
+        ).fetchone()[0]
+        self.assertTrue(persisted)
+        self.assertEqual(persisted, attempt.git_common_dir)
+        self.store.db.execute(
+            "UPDATE attempts SET git_common_dir=? WHERE attempt_id=?",
+            (str(self.tmp.name), attempt.attempt_id),
+        )
+        with self.assertRaises(StateError):
+            dispatch_review(
+                self.store, attempt.attempt_id, attempt.fencing_token,
+                executor=FakeExecutor(ProcessResult("available")), execute=False,
+            )
+        with self.assertRaises(StateError):
+            self.store.complete_attempt(
+                attempt.attempt_id, attempt.fencing_token, {"outcome": "resolved"}
+            )
+
+    def test_git_ancestry_check_disables_replace_objects_and_hooks(self):
+        fake = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch("store.subprocess.run", return_value=fake) as run:
+            self.assertTrue(
+                RepairStore._verify_deployment_ancestry(
+                    {"worktree": str(self.worktree)}, "a" * 40, "b" * 40
+                )
+            )
+        command = run.call_args.args[0]
+        self.assertIn("--no-replace-objects", command)
+        self.assertIn(["-c", "core.fsmonitor=false"], [command[i : i + 2] for i in range(len(command) - 1)])
+        self.assertIn(["-c", "core.hooksPath=/dev/null"], [command[i : i + 2] for i in range(len(command) - 1)])
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_GRAFT_FILE"], "/dev/null")
+
     def test_dry_run_does_not_probe_external_model(self):
         attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
         executor = FakeExecutor(ProcessResult("error", stderr="would have launched"))

@@ -438,7 +438,16 @@ def _git_capture(worktree: str, *arguments: str) -> subprocess.CompletedProcess[
     """Run a fixed-argument Git inspection without invoking a shell."""
 
     return subprocess.run(
-        ["git", "-C", worktree, *arguments],
+        [
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            worktree,
+            *arguments,
+        ],
         capture_output=True,
         text=True,
         timeout=20,
@@ -479,7 +488,18 @@ def _fresh_review_checkout(worktree: str, expected_sha: str):
         with tempfile.TemporaryDirectory(prefix=".sandra-review-", dir=parent) as temporary:
             checkout = str(Path(temporary) / "checkout")
             cloned = subprocess.run(
-                ["git", "clone", "--no-local", "--quiet", source, checkout],
+                [
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "clone",
+                    "--no-local",
+                    "--quiet",
+                    source,
+                    checkout,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -776,6 +796,7 @@ def dispatch_review(
         raise ValueError("timeout_seconds must be positive")
     context = store.completion_context(attempt_id)
     store.assert_fenced(attempt_id, fencing_token)
+    store.assert_worktree_identity(attempt_id)
     worktree = context["attempt"].get("worktree")
     if not worktree:
         raise StateError("review requires a persisted owned worktree")
