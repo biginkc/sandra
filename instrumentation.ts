@@ -12,7 +12,6 @@ export async function register() {
 }
 
 export const onRequestError: typeof Sentry.captureRequestError = (error, request, context) => {
-  if (process.env.VERCEL_ENV === "preview") console.info("[sentry-on-request-error] invoked");
   if (!ensureSentryServerClient()) return;
   Sentry.withScope((scope) => {
     scope.setTag("surface", "server_request");

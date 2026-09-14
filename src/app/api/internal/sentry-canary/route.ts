@@ -32,6 +32,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ runId: run.runId });
   }
   if (mode === "unhandled" && process.env.VERCEL_ENV === "preview") {
+    ensureSentryServerClient();
     throw new Error("Controlled Sentry canary unhandled request failure");
   }
   if (mode === "cron_ok" || mode === "cron_error") {
