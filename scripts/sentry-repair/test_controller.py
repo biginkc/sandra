@@ -417,7 +417,7 @@ class ControllerTests(unittest.TestCase):
     def test_github_dry_run_is_sanitized_and_non_mutating(self):
         self.store.ingest_issues(
             "bmh-group", "sandra", "vercel-production",
-            [IssueInput(501, title="customer@example.com should never reach GitHub", release="release-1", payload={
+            [IssueInput(501, title="customer@example.com should never reach GitHub", level="customer@example.com", release="a" * 40, payload={
                 "count": "12", "userCount": "2", "culprit": "private-value",
                 "tags": [
                     {"key": "surface", "value": "cron_sweep"},
@@ -433,15 +433,29 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertIn("issue_id=501", report.body)
         self.assertIn("`surface`", report.body)
+        self.assertIn("`" + "a" * 40 + "`", report.body)
+        self.assertIn("- Level: `unknown`", report.body)
         self.assertNotIn("customer@example.com", report.body)
         self.assertNotIn("private-value", report.body)
-        self.assertNotIn("release-1", report.body)
 
     def test_read_only_store_never_creates_or_migrates_a_database(self):
         missing = Path(self.tmp.name) / "missing-repair.db"
         with self.assertRaises(sqlite3.OperationalError):
             RepairStore(missing, read_only=True)
         self.assertFalse(missing.exists())
+
+    def test_read_only_store_escapes_reserved_uri_path_characters(self):
+        path = Path(self.tmp.name) / "state#one?.db"
+        writable = RepairStore(path)
+        writable.close()
+        readonly = RepairStore(path, read_only=True)
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                readonly.db.execute("CREATE TABLE must_not_be_written (id INTEGER)")
+        finally:
+            readonly.close()
+        self.assertTrue(path.exists())
+        self.assertFalse((Path(self.tmp.name) / "state").exists())
 
     def test_github_dry_run_suppresses_only_explicit_controlled_canary(self):
         self.store.ingest_issues(

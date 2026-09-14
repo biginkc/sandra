@@ -113,7 +113,10 @@ class RepairStore:
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         if self.read_only:
             resolved = Path(self.path).expanduser().resolve()
-            self.path = f"file:{resolved}?mode=ro"
+            # SQLite URI fragments are meaningful.  Use a proper file URI so
+            # literal `#`, `?`, and spaces in an operator-selected path cannot
+            # redirect a purported read-only open to another writable file.
+            self.path = f"{resolved.as_uri()}?mode=ro"
             self._uri = True
         self.db = sqlite3.connect(
             self.path, timeout=10, isolation_level=None, uri=self._uri

@@ -17,8 +17,9 @@ from store import RepairStore
 
 MARKER_VERSION = 1
 SAFE_TAG_NAMES = frozenset({"surface", "operation", "kind", "code"})
-SAFE_RELEASE = re.compile(r"[0-9a-fA-F]{7,64}\\Z")
-SAFE_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\\Z")
+SAFE_LEVELS = frozenset({"fatal", "error", "warning", "info", "debug"})
+SAFE_RELEASE = re.compile(r"[0-9a-fA-F]{7,64}\Z")
+SAFE_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\Z")
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,11 @@ def _safe_timestamp(value: Any) -> str:
     return text if SAFE_TIMESTAMP.fullmatch(text) else "unknown"
 
 
+def _safe_level(value: Any) -> str:
+    text = str(value or "").lower()
+    return text if text in SAFE_LEVELS else "unknown"
+
+
 def _safe_tags(payload: Mapping[str, Any]) -> dict[str, str]:
     result: dict[str, str] = {}
     raw_tags = payload.get("tags")
@@ -95,7 +101,7 @@ def _body(row: Mapping[str, Any]) -> str:
         f"- Release: `{_safe_release(row['release'])}`",
         f"- First seen: `{_safe_timestamp(row['first_seen'])}`",
         f"- Last seen: `{_safe_timestamp(row['last_seen'])}`",
-        f"- Level: `{row['level']}`",
+        f"- Level: `{_safe_level(row['level'])}`",
         f"- Controller generation: `{row['generation']}`",
     ]
     for label, value in (("Events", _safe_count(payload.get("count"))), ("Affected users", _safe_count(payload.get("userCount")))):
