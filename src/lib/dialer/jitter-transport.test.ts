@@ -386,6 +386,58 @@ describe("JitterCallTransport", () => {
     expect(openStore).toHaveBeenCalledTimes(2);
   });
 
+  it("resegments when the durable Sandra call keeps its id but Telnyx replaces the Call object", async () => {
+    const stores: CaptureStore[] = [
+      { writeChunk: vi.fn(async () => undefined), writeEvent: vi.fn(async () => undefined), writeTiming: vi.fn(async () => undefined), close: vi.fn() },
+      { writeChunk: vi.fn(async () => undefined), writeEvent: vi.fn(async () => undefined), writeTiming: vi.fn(async () => undefined), close: vi.fn() },
+    ];
+    let openCount = 0;
+    const openStore = vi.fn(async () => stores[openCount++]!);
+    const captures: Array<{ stop: ReturnType<typeof vi.fn> }> = [];
+    const startCapture = vi.fn(() => {
+      const stop = vi.fn(async () => undefined);
+      captures.push({ stop });
+      return { stop };
+    });
+    const harness = transportHarness({
+      openReliabilityCaptureStore: openStore,
+      startBrowserPlaybackCapture: startCapture,
+    });
+    const firstCall = new FakeCall();
+    const replacementCall = new FakeCall() as FakeCall & { recoveredCallId: string };
+    firstCall.state = "active";
+    replacementCall.state = "active";
+    replacementCall.recoveredCallId = firstCall.id;
+    const audio = { srcObject: {} } as HTMLAudioElement;
+    const internals = harness.transport as unknown as {
+      qaCaptureConfig: { runId: string };
+      currentCall: FakeCall;
+      currentCallId: string;
+      callId: string;
+      liveAt: number;
+      remoteAudio: HTMLAudioElement;
+      handleCallUpdate(call: FakeCall): void;
+      clearRecoveryTimer(): void;
+      startQaBrowserCapture(call: FakeCall, callId: string, audio: HTMLAudioElement): Promise<void>;
+    };
+    internals.qaCaptureConfig = { runId: "qa_run_123" };
+    internals.currentCall = firstCall;
+    internals.currentCallId = firstCall.id;
+    internals.callId = "call-1";
+    internals.liveAt = harness.dependencies.now();
+    internals.remoteAudio = audio;
+
+    await internals.startQaBrowserCapture(firstCall, "call-1", audio);
+    internals.handleCallUpdate(replacementCall);
+    await internals.startQaBrowserCapture(replacementCall, "call-1", audio);
+    internals.clearRecoveryTimer();
+
+    expect(captures).toHaveLength(2);
+    expect(captures[0].stop).toHaveBeenCalledTimes(1);
+    expect(openStore).toHaveBeenCalledTimes(2);
+    expect(stores[0].close).toHaveBeenCalledTimes(1);
+  });
+
   it("stops QA capture before SDK hangup can detach playback", async () => {
     const harness = transportHarness();
     const call = new FakeCall();
@@ -414,6 +466,49 @@ describe("JitterCallTransport", () => {
 
     expect(captureStopped).toBe(true);
     expect(call.hangup).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops capture on a terminal SDK update and does not restart detached playback", async () => {
+    const harness = transportHarness({
+      getProviderStatus: vi.fn(async () => ({
+        ok: true as const,
+        data: { state: "terminal" as const, outcome: "ended" as const },
+      })),
+    });
+    const call = new FakeCall();
+    const audio = { srcObject: null, paused: true, remove: vi.fn() } as unknown as HTMLAudioElement;
+    let captureStopped = false;
+    const internals = harness.transport as unknown as {
+      currentCall: FakeCall;
+      currentCallId: string;
+      callId: string;
+      liveAt: number;
+      remoteAudio: HTMLAudioElement;
+      qaCaptureAudio: HTMLAudioElement;
+      qaCaptureCall: FakeCall;
+      qaCaptureHandle: { stop(): Promise<void> };
+      qaCaptureConfig: { runId: string };
+      handleCallUpdate(call: FakeCall): void;
+    };
+    internals.currentCall = call;
+    internals.currentCallId = call.id;
+    internals.callId = "call-1";
+    internals.liveAt = harness.dependencies.now();
+    internals.remoteAudio = audio;
+    internals.qaCaptureAudio = audio;
+    internals.qaCaptureCall = call;
+    internals.qaCaptureConfig = { runId: "qa_run_123" };
+    internals.qaCaptureHandle = {
+      stop: async () => { captureStopped = true; },
+    };
+
+    call.state = "hangup";
+    internals.handleCallUpdate(call);
+    await vi.waitFor(() => expect(harness.transport.terminalIsAuthoritative()).toBe(true));
+
+    expect(captureStopped).toBe(true);
+    expect((harness.transport as unknown as { qaCaptureHandle: unknown }).qaCaptureHandle).toBeNull();
+    expect((harness.transport as unknown as { qaCaptureAudio: unknown }).qaCaptureAudio).toBeNull();
   });
 
   it("consumes QA capture configuration only for its exact caller/destination pair", async () => {

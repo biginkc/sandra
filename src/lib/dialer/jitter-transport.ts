@@ -258,6 +258,7 @@ export class JitterCallTransport implements CallTransport {
   private remoteAudio: HTMLAudioElement | null = null;
   private qaCaptureConfig: ReliabilityCaptureConfig | null = null;
   private qaCaptureAudio: HTMLAudioElement | null = null;
+  private qaCaptureCall: TelnyxCallLike | null = null;
   private qaCaptureHandle: BrowserCaptureHandle | null = null;
   private qaCaptureSegment = 0;
   private qaCaptureGeneration = 0;
@@ -1176,6 +1177,7 @@ export class JitterCallTransport implements CallTransport {
       return;
     }
     if (mapped === "failed") {
+      if (isTerminalCallState(call.state)) this.stopQaBrowserCapture();
       if (this.liveAt !== null) {
         if (isTerminalCallState(call.state)) {
           void this.reconcileLocalSdkTerminal(call, "failed");
@@ -1200,6 +1202,7 @@ export class JitterCallTransport implements CallTransport {
       return;
     }
     if (mapped === "ended") {
+      this.stopQaBrowserCapture();
       if (this.liveAt !== null) {
         void this.reconcileLocalSdkTerminal(call, "ended");
         return;
@@ -1625,10 +1628,24 @@ export class JitterCallTransport implements CallTransport {
     force = false,
   ): Promise<void> {
     const config = this.qaCaptureConfig;
-    if (!config || (!force && this.qaCaptureAudio === audio)) return;
-    this.stopQaBrowserCapture();
+    if (!config || (!force && this.qaCaptureAudio === audio && this.qaCaptureCall === call)) return;
+    const stopGeneration = this.qaCaptureGeneration + 1;
+    await this.stopQaBrowserCapture();
+    if (
+      this.qaCaptureGeneration !== stopGeneration ||
+      this.currentCall !== call ||
+      this.callId !== callId ||
+      this.remoteAudio !== audio ||
+      this.terminal ||
+      this.hangupRequested
+    ) return;
+    // Telnyx can clear the element during BYE/finalization. Do not force a
+    // new segment onto a detached or paused source; a later media recovery can
+    // retry once the same exact call has usable playback again.
+    if (audio.srcObject === null || audio.paused === true) return;
     const captureGeneration = ++this.qaCaptureGeneration;
     this.qaCaptureAudio = audio;
+    this.qaCaptureCall = call;
     const segment = ++this.qaCaptureSegment;
     const failureKey = `sandra:reliability-capture-error:${config.runId}:${callId}`;
     const fail = (message: string) => {
@@ -1640,6 +1657,7 @@ export class JitterCallTransport implements CallTransport {
       this.callId === callId &&
       this.remoteAudio === audio &&
       this.qaCaptureAudio === audio &&
+      this.qaCaptureCall === call &&
       !this.terminal &&
       !this.hangupRequested;
     try {
@@ -1695,9 +1713,17 @@ export class JitterCallTransport implements CallTransport {
         await Promise.all([...pendingEvents]);
         this.reliabilityTiming?.detach();
         store.close();
+        if (this.qaCaptureGeneration === captureGeneration) {
+          this.qaCaptureAudio = null;
+          this.qaCaptureCall = null;
+        }
       }
     } catch (error) {
       fail(error instanceof Error ? error.message : "capture database unavailable");
+      if (this.qaCaptureGeneration === captureGeneration) {
+        this.qaCaptureAudio = null;
+        this.qaCaptureCall = null;
+      }
     }
   }
 
@@ -1713,12 +1739,14 @@ export class JitterCallTransport implements CallTransport {
       this.callId !== callId ||
       this.remoteAudio !== audio ||
       this.qaCaptureAudio !== audio ||
+      this.qaCaptureCall !== call ||
       this.terminal
     ) return;
     const capture = this.qaCaptureHandle;
     if (!capture) return;
     this.qaCaptureHandle = null;
     this.qaCaptureAudio = null;
+    this.qaCaptureCall = null;
     this.qaCaptureGeneration += 1;
     const continuationGeneration = this.qaCaptureGeneration;
     this.reliabilityTiming?.detach();
@@ -1746,13 +1774,15 @@ export class JitterCallTransport implements CallTransport {
     });
   }
 
-  private stopQaBrowserCapture(): void {
+  private stopQaBrowserCapture(): Promise<void> {
     this.qaCaptureGeneration += 1;
     this.reliabilityTiming?.detach();
     const capture = this.qaCaptureHandle;
     this.qaCaptureHandle = null;
     this.qaCaptureAudio = null;
-    if (capture) void capture.stop().catch((error) => {
+    this.qaCaptureCall = null;
+    if (!capture) return Promise.resolve();
+    return capture.stop().catch((error) => {
       const config = this.qaCaptureConfig;
       if (!config || !this.callId) return;
       try {
