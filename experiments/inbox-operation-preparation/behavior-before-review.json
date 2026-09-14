@@ -1,0 +1,24 @@
+{
+  "checks": [
+    "authenticated preparation derives canonical mapping and hash; key binding, accepted replay, actual outcome+assignment, completed status",
+    "canonical edit before acceptance rejected atomically",
+    "postaccept canonical conflict records durable conflict, blocks successor, completes polling, prevents reclaim",
+    "assignee expires after committed outcome; assignment conflicts and partial outcome remains explicit",
+    "server-derived SMS contact/scope/policy executes actual opt-out",
+    "anon/service_role denied all three public wrappers",
+    "arbitrary absent target is excluded without persistent counter allocation"
+  ],
+  "source_hashes": {
+    "worker.sql": "5ddff6ea035d79a59d2396b825eb87bd9d4a75669588a5edd32fe7d4254a6a12",
+    "setup.sql": "6b026f678bf72ffdf82e1daf02d4e6305781435abb8004b91aa438165ee39e00",
+    "accept.sql": "ddc2714337cc5aa813bd51b63af9b20047148a0bb9a5f7e467a1c5825d6552bc",
+    "setup-before-runtime-fix.sql": "1d16fc352a4694ae02dcc2b076cd99a78eb3756ea5a4377ac2d185bfb9860feb",
+    "public-api.sql": "45bafaf0f48c30c9cb98e1bd808b9d2112b7c191c692ee6de4302f1f624bc768"
+  },
+  "runner_sha256": "a66633822d79f7ea9e3d570a2550320c8c6e8ed61b70ebd9b12bb1b634049e79",
+  "fixture_org": "9246f626-8131-4760-8333-72432cd3dd8d",
+  "limits": [
+    "Trusted SQL JWT claims; HTTP cryptographic JWT proof separate",
+    "No browser or durable dispatcher runtime proof"
+  ]
+}
