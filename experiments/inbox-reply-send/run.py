@@ -573,23 +573,62 @@ BEGIN
  frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
  IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ -- P2.4 fast path (kept) — a cheap pre-check that avoids running item_current
+ -- at all when the sender is obviously already busy. The real fence is the
+ -- unique index guarding the marker UPDATE below.
  IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
   RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
  END IF;
+ -- Pre-marker cheap skip: returns without ever touching the sender-inflight
+ -- index when the item is already visibly ineligible. This does NOT
+ -- satisfy the invariant below by itself — see the post-marker recheck.
  ev:=inbox_reply_send.item_current(o,frozen);
  IF ev IS NOT NULL THEN
   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
   RETURN jsonb_build_object('kind','skipped','reason',ev);
  END IF;
  token:=gen_random_uuid();
+ -- INVARIANT: the last eligibility read happens after the last statement
+ -- that can WAIT in the transaction; the marker UPDATE is the last
+ -- statement that can wait (it can block on the D-6(5) sender-inflight
+ -- unique index), so item_current runs once MORE after it returns — inside
+ -- this same savepoint-shaped EXCEPTION block, so a stale-at-marker result
+ -- rolls the marker/token back in-tx rather than ever being returned to a
+ -- caller. The pre-marker call above is a cheap optimization only; this one
+ -- is the actual gate. frozen need not be re-read (preparations are
+ -- immutable) and the outer attempt row's FOR UPDATE lock is retained
+ -- throughout — only the marker write itself rolls back.
  BEGIN
   UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
- EXCEPTION WHEN unique_violation THEN
-  GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
-  IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
-  ELSE RAISE;
-  END IF;
+  -- The LAST read, after the marker's own wait. `ev` is reassigned here (not
+  -- reused from the pre-marker call above) so a caught IR001 below records
+  -- the FRESH reason as evidence.
+  ev:=inbox_reply_send.item_current(o,frozen);
+  IF ev IS NOT NULL THEN RAISE EXCEPTION 'stale after marker' USING ERRCODE='IR001';END IF;
+ EXCEPTION
+  WHEN SQLSTATE 'IR001' THEN
+   -- The marker UPDATE above rolled back to this block's implicit savepoint:
+   -- state, dispatch_started_at and dispatch_token are all back to their
+   -- pre-BEGIN ('claimed') values, so this UPDATE's OLD.state='claimed' is a
+   -- listed trigger edge, exactly like the pre-marker skip path.
+   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+   RETURN jsonb_build_object('kind','skipped','reason',ev);
+  WHEN unique_violation THEN
+   -- P2.4: the fast pre-check above can miss a same-instant competitor (it
+   -- only sees already-committed dispatch_started rows). The D-6(5) unique
+   -- index on (org_id,from_e164) WHERE state='dispatch_started' is the real
+   -- fence; a unique_violation here is only ever this specific race —
+   -- anything else re-raises unchanged. The 55P03 carries no DETAIL/HINT so
+   -- the raw 23505 detail (which would include the phone number) never
+   -- leaks. Deliberately no WHEN OTHERS here: any other error must abort
+   -- the whole transaction, never be swallowed by this block.
+   GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+   IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+   ELSE RAISE;
+   END IF;
  END;
+ -- Body is read VERBATIM from the frozen row (P-GATE 3/R4) — never copied
+ -- into this table, never re-rendered, never re-parsed as template syntax.
  RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
 END $$;
  INSERT INTO sms_phone_suppressions(org_id,channel,phone_e164,source) VALUES(o,'sms',item20->'recipient'->>'to','owned_prd_test');
@@ -1024,13 +1063,15 @@ if sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespac
   'Round 2 #10: claim() redefined so dispatch_started re-entry LIES that it re-claimed ({claimed} without touching the row) instead of labelling uncertain — start_dispatch still independently re-verifies the row'"'"'s real state and raises INBOX_REPLY_STALE_CLAIM, so no second token is ever produced by this lie; restored, re-entry correctly labels uncertain and the original token still reconciles',
   'Round 2 #3: claim()'"'"'s reclaim predicate redefined without "AND dispatch_started_at IS NULL" — confirmed a documented no-op (identical reclaim outcome) because CHECK((dispatch_started_at IS NULL)=(state IN (approved,claimed,skipped_ineligible))) already guarantees it structurally; restored',
   'Round 2 #4: the trigger'"'"'s uncertain->provider_accepted edge removed (not the whole trigger) — persist(accepted) from uncertain now raises from the trigger itself with the row left unchanged; edge restored, the same persist() call succeeds',
-  'Round 2 P1.2: item_current() now acquires its sender and inbound-head FOR SHARE locks BEFORE evaluating destination_policy()/quiet_hours/validUntil — each is a fresh READ COMMITTED snapshot, so a suppression committed while item_current was blocked on either lock is guaranteed visible (proven with a genuine two-connection lock-wait + concurrent suppression commit in concurrency.py); start_dispatch'"'"'s sender-busy pre-check moved before item_current so no statement sits between the eligibility reads and the marker UPDATE; item_current and destination_policy() remain VOLATILE',
+  'Round 2 P1.2: item_current() now acquires its sender and inbound-head FOR SHARE locks BEFORE evaluating destination_policy() (round 3 additionally moves validUntil/quiet_hours after the same locks — see below) — each eligibility read is a fresh READ COMMITTED snapshot, so a change committed while item_current was blocked on either lock is guaranteed visible (proven with a genuine two-connection lock-wait + concurrent suppression commit in concurrency.py); start_dispatch'"'"'s sender-busy pre-check moved before item_current so no statement sits between the eligibility reads and the marker UPDATE; item_current and destination_policy() remain VOLATILE',
   'Round 2 P2.3: the INSERT trigger'"'"'s operation-admission check now does SELECT ... FOR NO KEY UPDATE on the operations row before the distinct-item-count cap, serializing concurrent inserts against one operation (proven with a genuine two-connection race in concurrency.py — the second insert at the cap correctly raises INBOX_REPLY_RECIPIENT_LIMIT instead of both committing past 50)',
   'Round 2 P2.4: start_dispatch'"'"'s marker UPDATE is wrapped to catch unique_violation, and only re-raises as the sanitized INBOX_REPLY_SENDER_BUSY (55P03, no DETAIL/HINT) when the violated constraint is inbox_reply_send_sender_inflight — every other constraint violation re-raises unchanged, and no phone number ever appears in the error',
   'Round 2 REVOKE reconcile: the unconditional PUBLIC,anon,authenticated,service_role REVOKEs at schema/table/function level were narrowed to PUBLIC only; the guarded absence-checking loop is now the sole role-conditional revocation path',
   'Round 2 frozen_item(): returns ONLY {recipient, validUntil, state, target, dependencies:{head}} — never the whole frozen item (id/exclusion/duplicateDestination/full dependencies excluded)',
   'Round 2 harness: quiet_hours() is pinned to always-open for the duration of this rolled-back transaction only (no proof here concerns quiet_hours transitions), removing a wall-clock-dependent setup failure when every state in its table falls outside its local 08:00-21:00 window during the same UTC hour the harness happens to run in',
-  'The whole test is rolled back; inbox_reply_context/inbox_reply_preparation/inbox_reply_review/inbox_reply_send are all absent afterward'
+  'Round 3 invariant: the last eligibility read happens after the last statement that can WAIT in the transaction; the marker UPDATE is the last statement that can wait, so item_current runs once MORE after it returns. item_current() now evaluates validUntil and quiet_hours AFTER acquiring both FOR SHARE locks (not just destination_policy, as round 2 left it) — time eligibility is sampled after the last possible wait, never before it',
+  'Round 3 R3-2b: the trigger'"'"'s claimed->dispatch_started edge now rejects any marker whose own dispatch_started_at is already at or past the frozen validUntil (INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER), independent of any function-body bug — same one-row frozen_item() read pattern already paid on the INSERT path',
+  'Round 3 R3-1: start_dispatch re-runs the full eligibility check (item_current) a second time immediately after the marker UPDATE, inside a plpgsql EXCEPTION block that acts as a savepoint — a stale-after-marker result (SQLSTATE IR001) rolls the marker/token back in-tx and records skipped_ineligible from a fresh, post-marker reason; only IR001 and unique_violation are caught, never WHEN OTHERS, so any other error still aborts the whole transaction. The two-real-connection proofs for this (marker blocked on the sender-inflight index during a suppression commit, and validUntil expiring during a head-lock wait, each with failing-then-passing controls) live in concurrency.py',
  ],
  'limits':[
   'Trusted SQL calls (no HTTP/JWT signature proof; this PR ships no public RPC)',

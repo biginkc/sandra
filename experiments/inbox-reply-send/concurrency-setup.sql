@@ -1,7 +1,7 @@
 DO $setup$
 DECLARE
  o uuid:=gen_random_uuid();u uuid:=gen_random_uuid();sess uuid:=gen_random_uuid();s uuid:=gen_random_uuid();
- n integer:=12;i integer;cids uuid[];pids uuid[];ctids uuid[];targets jsonb:='[]';drafts jsonb:='[]';
+ n integer:=21;i integer;cids uuid[];pids uuid[];ctids uuid[];targets jsonb:='[]';drafts jsonb:='[]';
  capture jsonb;freeze_result jsonb;prep_id uuid;items jsonb;op_id uuid:=gen_random_uuid();k uuid:=gen_random_uuid();
  chosen_state text;itemv jsonb;
  -- Second, isolated small preparation+operation (P2.3): a clean 0-attempts
@@ -53,9 +53,9 @@ BEGIN
  prep_id:=(freeze_result->>'preparationId')::uuid;
  SELECT p.items INTO items FROM inbox_reply_review.preparations p WHERE p.id=prep_id;
  INSERT INTO inbox_reply_send.operations(org_id,id,requester_id,preparation_id,idempotency_key) VALUES(o,op_id,u,prep_id,k);
- -- Only items 1..10 get a real attempt row inserted here; items 11 and 12
- -- are left as frozen-but-unattempted so concurrency.py can insert their
- -- first attempt itself, mid-race, for the P1.2 proof.
+ -- Only items 1..10 get a real attempt row inserted here; items 11..21 are
+ -- left as frozen-but-unattempted so concurrency.py can insert their first
+ -- attempt itself, mid-race, for the P1.2/Race#1/Race#2 proofs.
  FOR i IN 1..10 LOOP
   itemv:=(SELECT value FROM jsonb_array_elements(items) value WHERE value->'target'->>'id'=cids[i]::text);
   INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state)

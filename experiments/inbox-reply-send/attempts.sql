@@ -18,7 +18,16 @@
 --    Within an attempt, the attempt row is always FOR UPDATE first; every
 --    canonical read after that (sender, inbound head) is FOR SHARE only,
 --    matching the prepare/worker inversion note — never FOR UPDATE on
---    heads/versions here.
+--    heads/versions here. No path in this file, or any future PR-E/F
+--    caller, may take the inbound-head row FOR UPDATE and then take a
+--    write-lock on a sender row in the same transaction — that specific
+--    order is the one shape that can deadlock against item_current()'s own
+--    sender-then-head FOR SHARE order.
+--  - THE INVARIANT (R3, binding): the last eligibility read happens after
+--    the last statement that can WAIT in the transaction; the marker UPDATE
+--    is the last statement that can wait, so item_current runs once MORE
+--    after it returns. Nothing about a caller's business logic may run
+--    between that final item_current() call and the RETURN of its result.
 --  - No body/phone is ever put in an evidence string or RAISE message
 --    (S11 audit trail). evidence is always a short lowercase code;
 --    provider_reference is the provider's own id, never message content.
@@ -189,6 +198,13 @@ BEGIN
    IF NEW.generation<=OLD.generation THEN RAISE EXCEPTION 'Reclaim must strictly increase generation';END IF;
   WHEN OLD.state='claimed' AND NEW.state='dispatch_started' THEN
    IF NEW.dispatch_started_at IS NULL OR NEW.dispatch_token IS NULL THEN RAISE EXCEPTION 'Dispatch marker must be set exactly once here';END IF;
+   -- R3-2b defense-in-depth (same D-3/P-GATE-4 pattern as the INSERT path,
+   -- which already pays this one-row frozen_item() read): a marker whose
+   -- own timestamp is already past the frozen conversation window is
+   -- unwritable regardless of any function-body bug in start_dispatch.
+   IF NEW.dispatch_started_at>=(inbox_reply_send.frozen_item(NEW.org_id,NEW.preparation_id,NEW.item_id)->>'validUntil')::timestamptz THEN
+    RAISE EXCEPTION 'INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER';
+   END IF;
   WHEN OLD.state='claimed' AND NEW.state='skipped_ineligible' THEN NULL;
   WHEN OLD.state='dispatch_started' AND NEW.state IN ('provider_accepted','uncertain','confirmed_not_submitted') THEN NULL;
   WHEN OLD.state='uncertain' AND NEW.state='provider_accepted' THEN NULL;
@@ -223,28 +239,37 @@ END $$;
 CREATE FUNCTION inbox_reply_send.item_current(o uuid,item jsonb) RETURNS text LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE qh jsonb;policy_result jsonb;sender public.provider_sender_numbers;head public.inbox_inbound_heads;
 BEGIN
+ -- INVARIANT: the last eligibility read happens after the last statement
+ -- that can WAIT in the transaction; the marker UPDATE is the last
+ -- statement that can wait, so item_current runs once MORE after it
+ -- returns (see start_dispatch). Inside this function that same invariant
+ -- means BOTH canonical FOR SHARE locks — sender, then head — are acquired
+ -- FIRST, and only then are ALL FIVE eligibility facts evaluated (including
+ -- validUntil and quiet_hours, which round 2 left evaluated before the
+ -- locks — a concurrent writer racing the head/sender lock while this
+ -- function is mid-wait was still invisible to a validUntil/quiet_hours
+ -- check already made from an earlier statement). Each plpgsql statement
+ -- takes a fresh snapshot under READ COMMITTED, so if a concurrent writer
+ -- holds either row locked (e.g. touching it as part of committing a
+ -- suppression) we block here, and once we unblock, EVERY eligibility read
+ -- below — all later, separate statements — is guaranteed to see whatever
+ -- that writer just committed. Only the lock acquisition and the
+ -- clock_timestamp() sampling move; the exclusion precedence itself
+ -- (validUntil -> quiet_hours -> destination_policy -> sender -> head) is
+ -- unchanged. This function and destination_policy() MUST stay VOLATILE
+ -- (never STABLE) — STABLE would pin the snapshot for the whole function
+ -- call and silently revert this fix. Never FOR UPDATE on heads/versions or
+ -- any suppression table, matching the prepare/worker lock inversion note;
+ -- and never take head FOR UPDATE before a sender write-lock in any future
+ -- caller — that specific order is the one shape that can deadlock against
+ -- this function's own sender-then-head lock order.
+ SELECT * INTO sender FROM public.provider_sender_numbers WHERE org_id=o AND provider='sendillo' AND phone_e164=item->'recipient'->>'from' FOR SHARE;
+ SELECT * INTO head FROM public.inbox_inbound_heads WHERE org_id=o AND conversation_id=(item->'target'->>'id')::uuid FOR SHARE;
  IF (item->>'validUntil')::timestamptz<=clock_timestamp() THEN RETURN 'conversation_window_expired';END IF;
  qh:=inbox_reply_preparation.quiet_hours(item->>'state',clock_timestamp());
  IF qh->>'ok' IS DISTINCT FROM 'true' THEN
   IF qh->>'reason'='unknown_state' THEN RETURN 'unknown_state';ELSE RETURN 'outside_window';END IF;
  END IF;
- -- P1.2: acquire BOTH canonical FOR SHARE locks — sender, then head — BEFORE
- -- evaluating destination_policy() or reading either row's own value. Each
- -- plpgsql statement takes a fresh snapshot under READ COMMITTED, so if a
- -- concurrent writer holds either row locked (e.g. touching it as part of
- -- committing a suppression) we block here, and once we unblock,
- -- destination_policy() below — a later, separate statement — is guaranteed
- -- to see whatever that writer just committed. Evaluating destination_policy
- -- BEFORE this wait (the original ordering) could miss a suppression that
- -- committed during the wait. Only the lock acquisition moved earlier; the
- -- exclusion precedence below (validUntil -> quiet_hours -> destination_policy
- -- -> sender -> head) is unchanged. This function and destination_policy()
- -- MUST stay VOLATILE (never STABLE) — STABLE would pin the snapshot for the
- -- whole function call and silently revert this fix. Never FOR UPDATE on
- -- heads/versions or any suppression table, matching the prepare/worker lock
- -- inversion note.
- SELECT * INTO sender FROM public.provider_sender_numbers WHERE org_id=o AND provider='sendillo' AND phone_e164=item->'recipient'->>'from' FOR SHARE;
- SELECT * INTO head FROM public.inbox_inbound_heads WHERE org_id=o AND conversation_id=(item->'target'->>'id')::uuid FOR SHARE;
  policy_result:=inbox_reply_preparation.destination_policy(o,item->'recipient'->>'to',(item->'recipient'->>'contactId')::uuid,true);
  IF policy_result->>'exclusion' IS NOT NULL THEN RETURN policy_result->>'exclusion';END IF;
  IF sender.status IS DISTINCT FROM 'active' THEN RETURN 'sender_unavailable';END IF;
@@ -298,30 +323,53 @@ BEGIN
  IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
   RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
  END IF;
- -- P1.2: item_current()'s eligibility reads (and the FOR SHARE locks they
- -- acquire) must be the LAST thing evaluated before the marker UPDATE — no
- -- statement may sit between them, or a suppression/DNC/sender/head change
- -- committed in that gap could go unseen right up to the moment we hand out
- -- a token.
+ -- Pre-marker cheap skip: returns without ever touching the sender-inflight
+ -- index when the item is already visibly ineligible. This does NOT
+ -- satisfy the invariant below by itself — see the post-marker recheck.
  ev:=inbox_reply_send.item_current(o,frozen);
  IF ev IS NOT NULL THEN
   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
   RETURN jsonb_build_object('kind','skipped','reason',ev);
  END IF;
  token:=gen_random_uuid();
- -- P2.4: the fast path above can miss a same-instant competitor (it only
- -- sees already-committed dispatch_started rows). The D-6(5) unique index on
- -- (org_id,from_e164) WHERE state='dispatch_started' is the real fence; a
- -- unique_violation here is only ever this specific race — anything else
- -- re-raises unchanged. The 55P03 carries no DETAIL/HINT so the raw 23505
- -- detail (which would include the phone number) never leaks.
+ -- INVARIANT: the last eligibility read happens after the last statement
+ -- that can WAIT in the transaction; the marker UPDATE is the last
+ -- statement that can wait (it can block on the D-6(5) sender-inflight
+ -- unique index), so item_current runs once MORE after it returns — inside
+ -- this same savepoint-shaped EXCEPTION block, so a stale-at-marker result
+ -- rolls the marker/token back in-tx rather than ever being returned to a
+ -- caller. The pre-marker call above is a cheap optimization only; this one
+ -- is the actual gate. frozen need not be re-read (preparations are
+ -- immutable) and the outer attempt row's FOR UPDATE lock is retained
+ -- throughout — only the marker write itself rolls back.
  BEGIN
   UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
- EXCEPTION WHEN unique_violation THEN
-  GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
-  IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
-  ELSE RAISE;
-  END IF;
+  -- The LAST read, after the marker's own wait. `ev` is reassigned here (not
+  -- reused from the pre-marker call above) so a caught IR001 below records
+  -- the FRESH reason as evidence.
+  ev:=inbox_reply_send.item_current(o,frozen);
+  IF ev IS NOT NULL THEN RAISE EXCEPTION 'stale after marker' USING ERRCODE='IR001';END IF;
+ EXCEPTION
+  WHEN SQLSTATE 'IR001' THEN
+   -- The marker UPDATE above rolled back to this block's implicit savepoint:
+   -- state, dispatch_started_at and dispatch_token are all back to their
+   -- pre-BEGIN ('claimed') values, so this UPDATE's OLD.state='claimed' is a
+   -- listed trigger edge, exactly like the pre-marker skip path.
+   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+   RETURN jsonb_build_object('kind','skipped','reason',ev);
+  WHEN unique_violation THEN
+   -- P2.4: the fast pre-check above can miss a same-instant competitor (it
+   -- only sees already-committed dispatch_started rows). The D-6(5) unique
+   -- index on (org_id,from_e164) WHERE state='dispatch_started' is the real
+   -- fence; a unique_violation here is only ever this specific race —
+   -- anything else re-raises unchanged. The 55P03 carries no DETAIL/HINT so
+   -- the raw 23505 detail (which would include the phone number) never
+   -- leaks. Deliberately no WHEN OTHERS here: any other error must abort
+   -- the whole transaction, never be swallowed by this block.
+   GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+   IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+   ELSE RAISE;
+   END IF;
  END;
  -- Body is read VERBATIM from the frozen row (P-GATE 3/R4) — never copied
  -- into this table, never re-rendered, never re-parsed as template syntax.
