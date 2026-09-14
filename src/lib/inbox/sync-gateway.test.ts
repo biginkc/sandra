@@ -3,7 +3,7 @@ import { createInboxSyncGateway, type InboxSyncRepository, type DurableInboxScop
 const org="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",user="cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 function fixture() {
   let now=1000;
-  const scope:DurableInboxScope={id,orgId:org,userId:user,sessionId:"session",accessEpoch:"e1",generation:"g1",expiresAt:100000,targets:[{kind:"known_conversation",id}],handle:null};
+  const scope:DurableInboxScope={id,orgId:org,userId:user,sessionId:"session",accessEpoch:"e1",generation:"g1",expiresAt:100000,targets:[{kind:"known_conversation",id}],handles:[null]};
   const access:InboxAccess={sessionActive:true,activeMembershipCount:1,status:"active",epoch:"e1",expiresAt:null,deletionPrepared:false};
   const repo:InboxSyncRepository={authenticate:vi.fn(async()=>({userId:user,sessionId:"session",expiresAt:100000})),getAccess:vi.fn(async()=>access),getScope:vi.fn(async()=>scope),bindHandle:vi.fn(async()=>true)};
   const fetcher=vi.fn<typeof fetch>().mockImplementation(async()=>new Response("[]",{headers:{"electric-handle":"handle-one","electric-offset":"0_0","x-secret":"private"}}));
@@ -33,10 +33,21 @@ describe("Inbox gateway durable authorization boundary",()=>{
     const before=Date.now();const response=await f.make()(f.request(),id);
     expect(response.status).toBe(503);expect(aborted).toBe(true);expect(Date.now()-before).toBeLessThan(1000);
   });
-  it("accepts all 500 typed targets within explicit upstream URL budget",async()=>{
+  it("partitions 500 typed targets into disjoint bounded upstream predicates",async()=>{
     const f=fixture();f.scope.targets=Array.from({length:500},(_,i)=>({kind:i%2?"known_conversation":"unknown_sender",id:`00000000-0000-4000-8000-${i.toString(16).padStart(12,"0")}`}));
+    f.scope.handles=Array(5).fill(null);
     expect((await f.make()(f.request(),id)).status).toBe(200);
-    expect(new TextEncoder().encode(String(f.fetcher.mock.calls[0][0])).length).toBeLessThan(65536);
+    expect(new TextEncoder().encode(String(f.fetcher.mock.calls[0][0])).length).toBeLessThan(8192);
+    const seen = new Set<string>();
+    for (let partition = 0; partition < 5; partition++) {
+      expect((await f.make()(f.request(`?partition=${partition}`), id)).status).toBe(200);
+      const url = new URL(String(f.fetcher.mock.calls.at(-1)![0]));
+      const ids = [...url.searchParams].filter(([key]) => key.startsWith("params[") && key !== "params[1]").map(([, value]) => value);
+      expect(ids).toHaveLength(100); expect(url.searchParams.has("partition")).toBe(false);
+      for (const value of ids) { expect(seen.has(value)).toBe(false); seen.add(value); }
+    }
+    expect(seen.size).toBe(500);
+    expect((await f.make()(f.request("?partition=5"), id)).status).toBe(400);
   });
   it("copies scope identity across repository awaits",async()=>{
     const f=fixture();f.repo.getAccess=async()=>{f.scope.orgId=user;return f.access;};

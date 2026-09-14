@@ -1,0 +1,27 @@
+name: Inbox reply boundary evidence
+on:
+  pull_request:
+    paths:
+      - "experiments/inbox-reply-boundary/**"
+      - "src/lib/inbox/reply-*.ts"
+      - ".github/workflows/inbox-reply-boundary.yml"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/inbox-reply-boundary/**"
+      - "src/lib/inbox/reply-*.ts"
+      - ".github/workflows/inbox-reply-boundary.yml"
+permissions:
+  contents: read
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 experiments/inbox-reply-boundary/verify.py
+      # Unit tests run in Verify. This job checks source integrity, not a new
+      # database or provider runtime result.

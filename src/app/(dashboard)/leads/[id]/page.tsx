@@ -71,6 +71,7 @@ import type { TagRow } from "../tags-actions";
 import type { Database } from "@/lib/supabase/types";
 import { LeadMediaHero } from "./lead-media-hero";
 import { resolveLeadMediaPresentation } from "./lead-media";
+import {loadLeadAcquisitionHistory} from "./acquisition-history-actions";
 import { LeadActivityTimeline } from "./lead-activity";
 import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
@@ -187,6 +188,7 @@ export default async function LeadDetailPage({
       />
     );
   }
+  const acquisitionHistory=await loadLeadAcquisitionHistory(lead.id);
   const training = lead.is_training;
   const esign: Awaited<ReturnType<typeof loadLeadEsignPageModel>> = training
     ? { blockers: ["sending_disabled"], contracts: [], files: [], contractsError: null, filesError: null }
@@ -824,6 +826,7 @@ export default async function LeadDetailPage({
               initialNotes={initialNotes}
               initialCalls={initialCallRows}
               initialEvents={initialLeadEvents}
+              initialAcquisitionHistory={acquisitionHistory}
               messageError={threadError?.message ?? null}
               noteError={notesError?.message ?? null}
               callError={callRollupError?.message ?? null}

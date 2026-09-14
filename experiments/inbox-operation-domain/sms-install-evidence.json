@@ -1,0 +1,15 @@
+{
+  "source_hashes": {
+    "setup.sql": "b7ca70de5cfe321ad3996b98de2f6097ba9b0545e7e2eb7bb0c955e9cc2a35ff",
+    "restrictive-scope.sql": "5d66302b14659eec032e0955d436dd39a79674efc0698eb26d4cb46064adafef",
+    "restrictive-effect.sql": "fae7909d87be36a08b98bdb19405c8f3068fb2819ab0b85634b06bb72f5eee3f",
+    "restrictive-apply.sql": "9715287b68d09755ee0c460e2274c29a9b2cba822a4802cc69ebab9dc21f61b5"
+  },
+  "canonical_guard_sha256": "06fec6bc7bba71b538e2e43ac64ab9529dd8d409174f14bf37e060a9586a01af",
+  "writer_trigger": "BEFORE ROW INSERT/UPDATE/DELETE, unconditional, enabled",
+  "limits": [
+    "Private fixture only",
+    "No historical scope baseline",
+    "No caller grants or routes enabled"
+  ]
+}

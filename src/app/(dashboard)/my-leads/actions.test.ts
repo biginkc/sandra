@@ -21,7 +21,7 @@ describe('My Leads command integration',()=>{
   });
   it('does not revalidate or report success for a rejected stale command',async()=>{
     mocks.rpc.mockResolvedValue({data:null,error:{message:'STALE_ASSIGNMENT'}});
-    expect(await submitMyLeadCommand('handoff',{propertyId:'lead'})).toEqual({ok:false,message:'This lead changed. Refresh before trying again.'});
+    expect(await submitMyLeadCommand('handoff',{propertyId:'lead'})).toEqual({ok:false,code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'});
     expect(mocks.revalidate).not.toHaveBeenCalled();
   });
 });
@@ -41,4 +41,9 @@ it('finalizes evidenced Dialpad references while preserving manual Dialpad loggi
 it('preserves source on pending call options',async()=>{
   mocks.rpc.mockResolvedValue({data:[{id:'call',occurredAt:'2026-09-13T12:00:00Z',source:'dialpad'}],error:null});
   expect(await loadMyLeadCallReferences('lead','actor')).toMatchObject({ok:true,options:[{id:'call',source:'dialpad'}]});
+});
+it('returns safe typed access guidance without revealing assignment or revalidating', async()=>{
+  mocks.rpc.mockResolvedValue({data:null,error:{message:'FORBIDDEN'}});
+  expect(await submitMyLeadCommand('log-attempt',{propertyId:'lead'})).toEqual({ok:false,code:'FORBIDDEN',message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'});
+  expect(mocks.revalidate).not.toHaveBeenCalled();
 });

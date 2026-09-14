@@ -12,6 +12,10 @@ import {
   type MyLeadsQueueProps,
 } from "./types"
 
+const noteActions = vi.hoisted(() => ({ createLeadNote: vi.fn() }))
+vi.mock("@/app/(dashboard)/leads/[id]/sandra-recording-player", () => ({ SandraRecordingPlayer: () => <audio data-testid="recording-audio" /> }))
+vi.mock("@/app/(dashboard)/leads/actions", () => ({ createLeadNote: noteActions.createLeadNote }))
+
 const EMPTY_DETAIL: MyLeadDetail = {
   messages: { rows: [], hasMore: false, nextCursor: null },
   notes: { rows: [], hasMore: false, nextCursor: null },
@@ -462,3 +466,108 @@ describe("MyLeadsQueue", () => {
   })
 
 })
+
+
+it.each(["row", "section", "all"])("preserves a note draft through %s collapse and saves it to the original property", async (mode) => {
+  const user=userEvent.setup();
+  noteActions.createLeadNote.mockReset();
+  noteActions.createLeadNote.mockResolvedValue({ok:true,data:{id:"saved-note"}});
+  const onLoadDetail=vi.fn().mockResolvedValueOnce({ok:true,detail:EMPTY_DETAIL}).mockResolvedValue({ok:true,detail:{...EMPTY_DETAIL,notes:{rows:[{id:"saved-note",body:"Retained draft",authorLabel:"Maria",createdLabel:"Now"}],hasMore:false,nextCursor:null}}});
+  const props=buildProps({onLoadDetail});
+  render(<MyLeadsQueue {...props}/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));
+  await user.click(await screen.findByText("+ Add note"));
+  const composer=screen.getByRole("textbox",{name:"Add a note"});
+  await user.type(composer,"Retained draft");
+  const section=screen.getByTestId("my-leads-section-not_contacted");
+  const stageToggle=within(section).getAllByRole("button")[0];
+  if(mode==="row")await user.click(screen.getByRole("button",{name:"Hide details for 1 Main Street"}));
+  else if(mode==="section")await user.click(stageToggle);
+  else await user.click(screen.getByRole("button",{name:"Collapse all"}));
+  expect(composer).not.toBeVisible();
+  expect(onLoadDetail).toHaveBeenCalledTimes(1);
+  if(mode==="section")await user.click(stageToggle);
+  else await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));
+  expect(screen.getByRole("textbox",{name:"Add a note"})).toBe(composer);
+  expect(composer).toHaveValue("Retained draft");
+  expect(onLoadDetail).toHaveBeenCalledTimes(1);
+  await user.click(within(screen.getByTestId("lead-add-note-composer")).getByRole("button"));
+  await waitFor(()=>expect(noteActions.createLeadNote).toHaveBeenCalledWith("property-1","Retained draft"));
+  expect(noteActions.createLeadNote).toHaveBeenCalledTimes(1);
+  expect(await screen.findByText("Retained draft",{selector:"p"})).toBeVisible();
+});
+
+it("clears retained notes on scope change and does not attach another property's draft",async()=>{
+  const user=userEvent.setup();const props=buildProps();
+  const view=render(<MyLeadsQueue {...props}/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));
+  await user.click(await screen.findByText("+ Add note"));
+  await user.type(screen.getByRole("textbox",{name:"Add a note"}),"Private first scope draft");
+  await user.click(screen.getByRole("button",{name:"Hide details for 1 Main Street"}));
+  view.rerender(<MyLeadsQueue {...props} selectedRepId="jarrad"/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 2 Main Street"}));
+  await user.click(await screen.findByText("+ Add note"));
+  expect(screen.getByRole("textbox",{name:"Add a note"})).toHaveValue("");
+  expect(screen.queryByDisplayValue("Private first scope draft")).not.toBeInTheDocument();
+});
+
+
+it("refreshes only notes after a later-page save, preserving both rows and another draft", async () => {
+  const user=userEvent.setup();noteActions.createLeadNote.mockReset();noteActions.createLeadNote.mockResolvedValue({ok:true,data:{id:"new-note"}});
+  const onLeadChanged=vi.fn();
+  const onLoadDetailPage=vi.fn().mockResolvedValue({ok:true,group:"notes",page:{rows:[{id:"new-note",body:"Later seller note",authorLabel:"Maria",createdLabel:"Now"}],hasMore:false,nextCursor:null}});
+  const props=buildProps({onLeadChanged,onLoadDetailPage});
+  const view=render(<MyLeadsQueue {...props}/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));
+  await user.click(await screen.findByText("+ Add note"));
+  const original=screen.getByRole("textbox",{name:"Add a note"});await user.type(original,"Keep another draft");
+  const appended={...props.stages,not_contacted:{...props.stages.not_contacted,rows:[...props.stages.not_contacted.rows,makeRow("not_contacted",99)],totalCount:2}};
+  view.rerender(<MyLeadsQueue {...props} stages={appended}/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 99 Main Street"}));
+  const later=screen.getByTestId("my-lead-row-property-99");
+  await user.click(await within(later).findByText("+ Add note"));
+  await user.type(within(later).getByRole("textbox",{name:"Add a note"}),"Later seller note");
+  await user.click(within(later).getByRole("button",{name:"Add"}));
+  expect(await within(later).findByText("Later seller note",{selector:"p"})).toBeVisible();
+  expect(onLoadDetailPage).toHaveBeenCalledWith("property-99","notes",null);
+  expect(noteActions.createLeadNote).toHaveBeenCalledWith("property-99","Later seller note");
+  expect(onLeadChanged).not.toHaveBeenCalled();
+  expect(props.onLoadDetail).toHaveBeenCalledTimes(2);
+  expect(original).toHaveValue("Keep another draft");
+  expect(screen.getByTestId("my-lead-row-property-1")).toBeVisible();
+  expect(later).toBeVisible();
+});
+
+it.each(["row","section"])("unmounts audio and suspends artifact polling while %s is hidden",async mode=>{
+  const user=userEvent.setup();
+  const fetchMock=vi.spyOn(globalThis,"fetch").mockResolvedValue({ok:true,json:async()=>({recordingStatus:"available",durationSeconds:30,transcriptStatus:"none",transcript:null,summaryStatus:"none",summary:null})} as Response);
+  try{
+    const detail={...EMPTY_DETAIL,attempts:{rows:[{id:"attempt",outcomeLabel:"Reached",actorLabel:"Maria",occurredLabel:"Now",sourceLabel:"Sandra",recordingUrl:null,callActivityId:"call-1"}],hasMore:false,nextCursor:null}};
+    render(<MyLeadsQueue {...buildProps({onLoadDetail:vi.fn().mockResolvedValue({ok:true,detail})})}/>);
+    await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));
+    await screen.findByTestId("recording-audio");
+    const signal=fetchMock.mock.calls[0][1]?.signal;
+    vi.useFakeTimers();
+    const toggle=mode==="row"?screen.getByRole("button",{name:"Hide details for 1 Main Street"}):within(screen.getByTestId("my-leads-section-not_contacted")).getAllByRole("button")[0];
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId("recording-audio")).not.toBeInTheDocument();
+    expect(signal?.aborted).toBe(true);
+    await act(async()=>{vi.advanceTimersByTime(60_000);window.dispatchEvent(new Event("focus"));});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  }finally{vi.useRealTimers();fetchMock.mockRestore();}
+});
+
+
+it("reports failed saved-note refresh and retries the first page without another write",async()=>{
+  const user=userEvent.setup();noteActions.createLeadNote.mockReset();noteActions.createLeadNote.mockResolvedValue({ok:true,data:{id:"saved"}});
+  const onLoadDetailPage=vi.fn().mockResolvedValueOnce({ok:false,message:"History refresh failed"}).mockResolvedValueOnce({ok:true,group:"notes",page:{rows:[{id:"saved",body:"Already persisted",authorLabel:"Maria",createdLabel:"Now"}],hasMore:false,nextCursor:null}});
+  const onLeadChanged=vi.fn();render(<MyLeadsQueue {...buildProps({onLoadDetailPage,onLeadChanged})}/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));await user.click(await screen.findByText("+ Add note"));
+  await user.type(screen.getByRole("textbox",{name:"Add a note"}),"Already persisted");
+  await user.click(within(screen.getByTestId("lead-add-note-composer")).getByRole("button"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("History refresh failed");
+  await user.click(screen.getByRole("button",{name:"Retry"}));
+  expect(await screen.findByText("Already persisted",{selector:"p"})).toBeVisible();
+  expect(onLoadDetailPage.mock.calls).toEqual([["property-1","notes",null],["property-1","notes",null]]);
+  expect(noteActions.createLeadNote).toHaveBeenCalledTimes(1);expect(onLeadChanged).not.toHaveBeenCalled();
+});

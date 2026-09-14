@@ -7,8 +7,9 @@ export const INBOX_ACTION_LIMITS = Object.freeze({ bytes: 128 * 1024, targets: 5
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Matches setOutreachDispo's VALID_DISPOS. A label never authorizes enrollment,
 // scheduling, or bypassing the existing opt-out/locked-property side effects.
-// In particular, dnc and opted_out require existing SMS opt-out side effects;
-// neither enables the separately excluded permanent-DNC action.
+// Parsing dnc preserves an intent only: its canonical property trigger creates
+// a permanent DNC lock, so execution remains separately gated. opted_out is
+// SMS suppression and requires complete consent/enrollment side effects.
 const OUTCOMES = new Set<OutreachDispo>(["wrong_number", "bad_number", "not_interested", "needs_sequence", "nurture", "opted_out", "dnc"]);
 export type InboxActionStep =
   | { type: "outcome"; value: OutreachDispo }

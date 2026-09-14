@@ -2,7 +2,7 @@
 
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import { ExternalLink, Phone } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -556,9 +556,11 @@ export function LeadCallSummary({
 export function CallEventCard({
   row,
   jitterHref,
+  children,
 }: {
   row: CallActivityRollupRow;
   jitterHref?: string | null;
+  children?: ReactNode;
 }) {
   const disposition = row.disposition?.trim() || null;
   const timestamp = row.started_at ?? row.created_at;
@@ -616,6 +618,7 @@ export function CallEventCard({
         )}
       </div>
       <CallArtifactStates row={row} />
+      {children}
     </article>
   );
 }

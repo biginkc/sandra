@@ -1,0 +1,23 @@
+{
+  "actual_future_enrollment_status": "active",
+  "actual_production_sender_outcome": {
+    "status": "blocked_terminal_dispo",
+    "reason": "Contact is marked opted out of SMS.",
+    "source": "sms_opted_out",
+    "outreachDispo": null,
+    "consentState": "opted_out"
+  },
+  "provider_calls": 0,
+  "consent_fallback_suppressed": true,
+  "snapshot_sha256": "ed2a35e22cd9ed1ee7b995daf924db01646016e30b70de90726fe3ce79209d60",
+  "source_hashes": {
+    "src/lib/messaging/send.ts": "0f43ebc8c28cf87f1c6d4840f61805a0b85b9b78f6740b05ab29f2cb95f041e0",
+    "src/lib/messaging/consent.ts": "bd459f482b81787f6afd351b9d3ade81cdf6014bbc87d7cbd826a4e57cfdbe1b",
+    "src/lib/messaging/suppression.ts": "3a22c69d12053e4cd6d7c093ebd09dbeff09c86c244813b879f62b3cbc6e0b9c"
+  },
+  "limits": [
+    "Database responses use exported canonical fixture rows; no PostgREST transport exercised",
+    "Provider registry stubbed; no provider calls permitted",
+    "Consent-only fallback deliberately models a stale false cache flag without changing the canonical fixture"
+  ]
+}

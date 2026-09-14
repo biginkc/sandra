@@ -10,7 +10,7 @@ import { NewTemplateButton } from "./new-template-button";
 import { TemplatesList } from "./templates-list";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
 
-export const TEMPLATES_SORTABLE_COLUMNS = [
+const TEMPLATES_SORTABLE_COLUMNS = [
   "name",
   "category",
   "updated_at",

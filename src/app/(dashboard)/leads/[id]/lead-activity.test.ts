@@ -241,3 +241,113 @@ describe("selectLatestCallActivityRows", () => {
     ]);
   });
 });
+
+import type { AcquisitionHistoryFact } from "@/lib/leads/acquisition-history";
+const projectedOffer = {
+  kind: "offer",
+  id: "offer-a",
+  at: "2026-08-23T10:01:00.000Z",
+  actorId: "rep",
+  amountCents: "12500050",
+  method: "verbal",
+  followUpAt: "2026-08-24T10:00:00Z",
+  outcome: "pending",
+  outcomeAt: null,
+} satisfies AcquisitionHistoryFact;
+const projectedAttempt = {
+  kind: "attempt",
+  id: "attempt-a",
+  at: "2026-08-23T09:59:00.000Z",
+  actorId: "rep",
+  source: "dialpad",
+  attemptKind: "call",
+  outcome: "no_answer",
+  note: "Left note",
+  recordingUrl: null,
+  callActivityId: null,
+} satisfies AcquisitionHistoryFact;
+describe("canonical acquisition history projection", () => {
+  it("orders facts by occurrence and suppresses only a matching generic offer audit", () => {
+    const generic = {
+      ...leadEvent,
+      event_type: "my_leads_workflow",
+      payload: { operation: "log_acquisition_offer", offerId: "offer-a" },
+    };
+    const result = normalizeLeadActivityEvents(
+      [],
+      [],
+      [],
+      [generic],
+      [projectedOffer, projectedAttempt],
+    );
+    expect(result.map((x) => x.source)).toEqual(["acquisition", "acquisition"]);
+    expect(result.map((x) => x.timestamp)).toEqual([
+      projectedAttempt.at,
+      projectedOffer.at,
+    ]);
+    expect(normalizeLeadActivityEvents([], [], [], [generic], [])).toHaveLength(
+      1,
+    );
+    expect(
+      normalizeLeadActivityEvents(
+        [],
+        [],
+        [],
+        [
+          {
+            ...generic,
+            payload: {
+              operation: "decline_acquisition_offer",
+              offerId: "offer-a",
+            },
+          },
+        ],
+        [projectedOffer],
+      ),
+    ).toHaveLength(2);
+  });
+  it("merges Sandra rep facts into its loaded physical call without losing attribution", () => {
+    const sandra = {
+      ...projectedAttempt,
+      source: "sandra",
+      callActivityId: call.id,
+      outcome: "reached",
+      note: "Seller wants a Friday callback",
+      actorId: "original-rep",
+    };
+    const merged = normalizeLeadActivityEvents([], [], [call], [], [sandra]);
+    expect(merged[0]).toMatchObject({
+      source: "call",
+      acquisitionDetails: [sandra],
+    });
+    expect(
+      normalizeLeadActivityEvents([], [], [call], [], [sandra]).map(
+        (x) => x.source,
+      ),
+    ).toEqual(["call"]);
+    expect(
+      normalizeLeadActivityEvents([], [], [], [], [sandra]).map(
+        (x) => x.source,
+      ),
+    ).toEqual(["acquisition"]);
+  });
+  it("reports the acquisition page trust floor and independent failure", () => {
+    const snapshot = buildLeadActivitySnapshot(
+      [],
+      [],
+      [],
+      [],
+      { acquisition: "Unavailable" },
+      [projectedOffer, projectedAttempt],
+      true,
+    );
+    expect(snapshot.trustFloor).toBe(projectedAttempt.at);
+    expect(snapshot.failures).toEqual([
+      { source: "acquisition", detail: "Unavailable" },
+    ]);
+    expect(
+      buildLeadActivitySnapshot([], [], [], [], {}, [projectedOffer], false)
+        .trustFloor,
+    ).toBeNull();
+  });
+});

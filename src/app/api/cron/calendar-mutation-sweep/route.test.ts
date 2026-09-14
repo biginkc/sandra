@@ -10,7 +10,7 @@ vi.mock("@/lib/integrations/google/create-worker", () => ({
 }));
 vi.mock("@/lib/errors/report", () => ({ reportError: mocks.reportError }));
 
-import { runCalendarMutationSweep } from "./route";
+import { runCalendarMutationSweep } from "./handlers";
 import type { ClaimedCalendarMutationRow } from "@/lib/integrations/google/create-worker";
 
 /** Fake row `fn_claim_calendar_mutations` would return for one claim. */

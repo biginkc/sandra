@@ -69,7 +69,7 @@
     "googleapis": "^171.4.0",
     "hellosign-embedded": "2.12.3",
     "lucide-react": "^1.8.0",
-    "next": "16.2.4",
+    "next": "16.3.5",
     "next-themes": "^0.4.6",
     "papaparse": "^5.5.3",
     "react": "19.2.4",
@@ -85,6 +85,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@mswjs/interceptors": "0.41.4",
     "@playwright/test": "^1.59.1",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6.9.1",
@@ -97,7 +98,7 @@
     "@types/react-dom": "^19",
     "esbuild": "^0.27.7",
     "eslint": "^9",
-    "eslint-config-next": "16.2.4",
+    "eslint-config-next": "16.3.5",
     "husky": "^9.1.7",
     "jsdom": "^29.1.0",
     "pg": "^8.21.0",

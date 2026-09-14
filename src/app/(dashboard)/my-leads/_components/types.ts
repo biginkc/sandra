@@ -242,6 +242,7 @@ export type MyLeadsQueueProps = {
 }
 
 export type MyLeadDetailPanelProps = {
+  visible?: boolean
   state: MyLeadDetailState
   onRetry: () => void
   propertyId?: string
