@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -87,6 +88,7 @@ class RepairStore:
         allowed_worktree_root: str | Path | None = None,
     ) -> None:
         self.path = str(path)
+        self._uri = self.path.startswith("file:")
         self.clock = clock or time.time
         self.allowed_worktree_root = (
             Path(allowed_worktree_root).expanduser().resolve()
@@ -95,7 +97,9 @@ class RepairStore:
         )
         if self.path != ":memory:":
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        self.db = sqlite3.connect(
+            self.path, timeout=10, isolation_level=None, uri=self._uri
+        )
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("PRAGMA journal_mode = WAL")
@@ -210,6 +214,16 @@ class RepairStore:
                 command_json TEXT NOT NULL DEFAULT '[]',
                 result_status TEXT NOT NULL DEFAULT '',
                 verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)),
+                reviewed_head_sha TEXT,
+                reviewed_ci_run_id TEXT,
+                reviewed_ci_sha TEXT,
+                reviewed_ci_status TEXT,
+                reviewed_deployed_sha TEXT,
+                reviewed_functional_evidence_id TEXT,
+                reviewed_functional_observed_at TEXT,
+                reviewed_sentry_query_window TEXT,
+                reviewed_sentry_observed_at TEXT,
+                evidence_snapshot_json TEXT,
                 recorded_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS notifications_outbox (
@@ -239,12 +253,40 @@ class RepairStore:
             ("command_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("result_status", "TEXT NOT NULL DEFAULT ''"),
             ("verified", "INTEGER NOT NULL DEFAULT 0"),
+            ("reviewed_head_sha", "TEXT"),
+            ("reviewed_ci_run_id", "TEXT"),
+            ("reviewed_ci_sha", "TEXT"),
+            ("reviewed_ci_status", "TEXT"),
+            ("reviewed_deployed_sha", "TEXT"),
+            ("reviewed_functional_evidence_id", "TEXT"),
+            ("reviewed_functional_observed_at", "TEXT"),
+            ("reviewed_sentry_query_window", "TEXT"),
+            ("reviewed_sentry_observed_at", "TEXT"),
+            ("evidence_snapshot_json", "TEXT"),
         ):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE reviews ADD COLUMN {name} {ddl}")
+        # Legacy controller databases stored the random token itself. Convert
+        # that representation once; current rows store only its digest.
+        for table in ("attempts", "active_lease"):
+            rows = self.db.execute(
+                f"SELECT rowid, fencing_token FROM {table} WHERE length(fencing_token)=48"
+            ).fetchall()
+            for row in rows:
+                digest = hashlib.sha256(str(row["fencing_token"]).encode("utf-8")).hexdigest()
+                self.db.execute(
+                    f"UPDATE {table} SET fencing_token=? WHERE rowid=?",
+                    (digest, row["rowid"]),
+                )
 
     def _now(self, now: float | None = None) -> float:
         return float(self.clock()) if now is None else float(now)
+
+    @staticmethod
+    def _fence_digest(token: str) -> str:
+        if not isinstance(token, str) or not token:
+            raise FencingError("fencing token is required")
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     def _validate_worktree(
         self, worktree: str | Path | None, branch: str | None = None
@@ -255,13 +297,18 @@ class RepairStore:
         if not path.is_absolute() or not path.is_dir():
             raise StateError("worktree must be an existing absolute directory")
         resolved = path.resolve()
-        if self.allowed_worktree_root and (
+        if self.allowed_worktree_root is None:
+            raise StateError("an owned worktree root must be configured")
+        if (
             resolved != self.allowed_worktree_root
             and self.allowed_worktree_root not in resolved.parents
         ):
             raise StateError("worktree is outside the configured owned worktree root")
-        if not (resolved / ".git").exists():
-            raise StateError("worktree does not contain a .git worktree marker")
+        # A linked worktree has a .git *file* pointing at the common Git
+        # directory. A normal checkout has a .git directory and is rejected;
+        # repairs must never run in the operator's main checkout.
+        if not (resolved / ".git").is_file():
+            raise StateError("path is not an isolated linked Git worktree")
         try:
             probe = subprocess.run(
                 ["git", "-C", str(resolved), "rev-parse", "--is-inside-work-tree"],
@@ -468,7 +515,12 @@ class RepairStore:
             return None
         worktree_path, actual_branch = self._validate_worktree(worktree, branch)
         current = self._now(now)
-        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower():
+                raise LeaseBusy("global lease transaction is busy") from exc
+            raise
         try:
             issue = self.db.execute(
                 "SELECT * FROM issues WHERE organization=? AND project=? AND environment=? AND issue_number=?",
@@ -511,7 +563,8 @@ class RepairStore:
                     f"attempt bound {MAX_ATTEMPTS} reached for issue {issue_number} generation {selected_generation}"
                 )
             attempt_id = str(uuid.uuid4())
-            fencing = secrets.token_hex(24)
+            fencing = secrets.token_urlsafe(32)
+            fencing_digest = self._fence_digest(fencing)
             lease_until = current + lease_seconds
             self.db.execute(
                 """INSERT INTO attempts(attempt_id,organization,project,environment,issue_number,generation,mode,
@@ -526,7 +579,7 @@ class RepairStore:
                     selected_generation,
                     mode,
                     owner,
-                    fencing,
+                    fencing_digest,
                     "leased",
                     actual_branch or branch,
                     worktree_path,
@@ -536,7 +589,7 @@ class RepairStore:
             )
             self.db.execute(
                 "INSERT INTO active_lease(singleton,attempt_id,fencing_token,lease_until,owner,created_at) VALUES(1,?,?,?,?,?)",
-                (attempt_id, fencing, lease_until, owner, current),
+                (attempt_id, fencing_digest, lease_until, owner, current),
             )
             self.db.execute(
                 "UPDATE issues SET status='investigating',updated_at=? WHERE organization=? AND project=? AND environment=? AND issue_number=?",
@@ -584,6 +637,81 @@ class RepairStore:
             ),
         )
 
+    def _ensure_evidence_mutable_locked(self, attempt_id: str) -> None:
+        review = self.db.execute(
+            "SELECT decision FROM reviews WHERE attempt_id=?", (attempt_id,)
+        ).fetchone()
+        if review is not None and review["decision"] == "approved":
+            raise StateError("approved review evidence is immutable")
+
+    def _review_snapshot_locked(self, attempt_id: str) -> dict[str, Any]:
+        """Capture the exact persisted evidence a review is allowed to approve."""
+
+        pr = self.db.execute(
+            "SELECT * FROM pull_requests WHERE attempt_id=?", (attempt_id,)
+        ).fetchone()
+        deployment = self.db.execute(
+            "SELECT * FROM deployments WHERE attempt_id=?", (attempt_id,)
+        ).fetchone()
+        verification_rows = self.db.execute(
+            "SELECT kind,evidence_json FROM verifications WHERE attempt_id=?",
+            (attempt_id,),
+        ).fetchall()
+        verifications = {
+            row["kind"]: json.loads(row["evidence_json"])
+            for row in verification_rows
+        }
+        if pr is None:
+            raise StateError("review requires persisted pull request and CI evidence")
+        required_pr = (pr["head_sha"], pr["ci_run_id"], pr["ci_sha"], pr["ci_status"])
+        if any(value in (None, "") for value in required_pr):
+            raise StateError("review requires persisted pull request and CI evidence")
+        if str(pr["ci_status"]).lower() not in {"success", "successful", "passed"}:
+            raise StateError("review requires successful persisted CI evidence")
+        if deployment is None or not deployment["deployed_sha"]:
+            raise StateError("review requires persisted deployment evidence")
+        functional = verifications.get("functional_probe")
+        if not isinstance(functional, Mapping):
+            raise StateError("review requires persisted functional probe evidence")
+        if str(functional.get("status", "")).lower() not in {"pass", "passed", "success"}:
+            raise StateError("review requires a passing persisted functional probe")
+        functional_id = functional.get("evidence_id") or functional.get("id")
+        if not str(functional_id or "").strip():
+            raise StateError("review requires a functional evidence id")
+        if not str(functional.get("observed_at") or "").strip():
+            raise StateError("review requires functional observation timestamp")
+        sentry = verifications.get("sentry_observation")
+        if not isinstance(sentry, Mapping) or sentry.get("no_regression") is not True:
+            raise StateError("review requires persisted Sentry no-regression evidence")
+        if not str(sentry.get("query_window") or "").strip() or not str(sentry.get("observed_at") or "").strip():
+            raise StateError("review requires Sentry query window and observation timestamp")
+        snapshot = {
+            "reviewed_head_sha": str(pr["head_sha"]),
+            "reviewed_ci_run_id": str(pr["ci_run_id"]),
+            "reviewed_ci_sha": str(pr["ci_sha"]),
+            "reviewed_ci_status": str(pr["ci_status"]).lower(),
+            "reviewed_deployed_sha": str(deployment["deployed_sha"]),
+            "reviewed_functional_evidence_id": str(functional_id),
+            "reviewed_functional_observed_at": functional.get("observed_at"),
+            "reviewed_sentry_query_window": sentry.get("query_window"),
+            "reviewed_sentry_observed_at": sentry.get("observed_at"),
+            "evidence_snapshot_json": json.dumps(
+                {
+                    "pull_request": dict(pr),
+                    "deployment": dict(deployment),
+                    "verifications": verifications,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+        return snapshot
+
+    def review_snapshot(self, attempt_id: str) -> dict[str, Any]:
+        """Return current evidence for the review prompt; no state mutation."""
+
+        return self._review_snapshot_locked(attempt_id)
+
     def enqueue_notification(
         self,
         event_type: str,
@@ -606,6 +734,7 @@ class RepairStore:
     def _fenced_attempt_locked(
         self, attempt_id: str, fencing_token: str, *, now: float | None = None
     ) -> sqlite3.Row:
+        fencing_digest = self._fence_digest(fencing_token)
         row = self.db.execute(
             "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
         ).fetchone()
@@ -615,9 +744,9 @@ class RepairStore:
         if (
             row is None
             or active is None
-            or row["fencing_token"] != fencing_token
+            or row["fencing_token"] != fencing_digest
             or active["attempt_id"] != attempt_id
-            or active["fencing_token"] != fencing_token
+            or active["fencing_token"] != fencing_digest
         ):
             raise FencingError("attempt fencing token is no longer active")
         if float(row["lease_until"]) <= self._now(now):
@@ -681,25 +810,30 @@ class RepairStore:
         now: float | None = None,
     ) -> float:
         current = self._now(now)
+        fencing_digest = self._fence_digest(fencing_token)
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            self._fenced_attempt_locked(attempt_id, fencing_token, now=current)
+            row = self._fenced_attempt_locked(attempt_id, fencing_token, now=current)
             existing_lease = self.db.execute(
                 "SELECT lease_until FROM active_lease WHERE singleton=1 AND attempt_id=? AND fencing_token=?",
-                (attempt_id, fencing_token),
+                (attempt_id, fencing_digest),
             ).fetchone()
             if existing_lease is None:
                 raise FencingError("active lease disappeared")
             # A heartbeat may extend the lease, but must never shorten an
             # operator-provided lease that is already longer.
-            lease_until = max(float(existing_lease["lease_until"]), current + lease_seconds)
+            lease_until = max(
+                float(row["lease_until"]),
+                float(existing_lease["lease_until"]),
+                current + lease_seconds,
+            )
             self.db.execute(
                 "UPDATE attempts SET lease_until=? WHERE attempt_id=?",
                 (lease_until, attempt_id),
             )
             self.db.execute(
                 "UPDATE active_lease SET lease_until=? WHERE singleton=1 AND attempt_id=? AND fencing_token=?",
-                (lease_until, attempt_id, fencing_token),
+                (lease_until, attempt_id, fencing_digest),
             )
             self.db.execute("COMMIT")
             return lease_until
@@ -720,6 +854,7 @@ class RepairStore:
         if not reason.strip():
             raise ValueError("failure reason is required")
         current = self._now(now)
+        fencing_digest = self._fence_digest(fencing_token)
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self._fenced_attempt_locked(attempt_id, fencing_token, now=current)
@@ -729,7 +864,7 @@ class RepairStore:
             )
             self.db.execute(
                 "DELETE FROM active_lease WHERE singleton=1 AND attempt_id=? AND fencing_token=?",
-                (attempt_id, fencing_token),
+                (attempt_id, fencing_digest),
             )
             self._enqueue_locked(
                 "repair_failed",
@@ -759,6 +894,7 @@ class RepairStore:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self._fenced_attempt_locked(attempt_id, fencing_token)
+            self._ensure_evidence_mutable_locked(attempt_id)
             self.db.execute(
                 """INSERT INTO pull_requests(
                    attempt_id,number,url,head_sha,ci_run_id,ci_status,ci_sha,recorded_at)
@@ -796,6 +932,7 @@ class RepairStore:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self._fenced_attempt_locked(attempt_id, fencing_token)
+            self._ensure_evidence_mutable_locked(attempt_id)
             self.db.execute(
                 """INSERT INTO deployments(attempt_id,environment,deployed_sha,provider,recorded_at)
                    VALUES(?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
@@ -825,6 +962,7 @@ class RepairStore:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self._fenced_attempt_locked(attempt_id, fencing_token)
+            self._ensure_evidence_mutable_locked(attempt_id)
             self.db.execute(
                 """INSERT INTO verifications(attempt_id,kind,evidence_json,recorded_at)
                    VALUES(?,?,?,?) ON CONFLICT(attempt_id,kind) DO UPDATE SET
@@ -850,6 +988,7 @@ class RepairStore:
         command: list[str] | None = None,
         result_status: str | None = None,
         verified: bool = False,
+        snapshot: Mapping[str, Any] | None = None,
     ) -> None:
         if model != "gpt-6-astra" or effort != "medium":
             raise ValueError("independent Astra medium review is required")
@@ -874,14 +1013,36 @@ class RepairStore:
             row = self._fenced_attempt_locked(attempt_id, fencing_token)
             if row["session_id"] and row["session_id"] == session_id:
                 raise ValueError("review session must be independent from repair session")
+            existing_review = self.db.execute(
+                "SELECT decision FROM reviews WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if existing_review is not None and existing_review["decision"] == "approved":
+                raise StateError("approved review cannot be replaced")
+            reviewed = self._review_snapshot_locked(attempt_id)
+            if snapshot is not None and any(
+                snapshot.get(key) != reviewed.get(key)
+                for key in reviewed
+            ):
+                raise StateError("review evidence changed while the review was running")
             self.db.execute(
                 """INSERT INTO reviews(attempt_id,model,effort,session_id,decision,evidence,source,
-                   command_json,result_status,verified,recorded_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
+                   command_json,result_status,verified,reviewed_head_sha,reviewed_ci_run_id,
+                   reviewed_ci_sha,reviewed_ci_status,reviewed_deployed_sha,
+                   reviewed_functional_evidence_id,reviewed_functional_observed_at,
+                   reviewed_sentry_query_window,reviewed_sentry_observed_at,
+                   evidence_snapshot_json,recorded_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
                    model=excluded.model,effort=excluded.effort,session_id=excluded.session_id,
                    decision=excluded.decision,evidence=excluded.evidence,source=excluded.source,
                    command_json=excluded.command_json,result_status=excluded.result_status,
-                   verified=excluded.verified,recorded_at=excluded.recorded_at""",
+                   verified=excluded.verified,reviewed_head_sha=excluded.reviewed_head_sha,
+                   reviewed_ci_run_id=excluded.reviewed_ci_run_id,reviewed_ci_sha=excluded.reviewed_ci_sha,
+                   reviewed_ci_status=excluded.reviewed_ci_status,reviewed_deployed_sha=excluded.reviewed_deployed_sha,
+                   reviewed_functional_evidence_id=excluded.reviewed_functional_evidence_id,
+                   reviewed_functional_observed_at=excluded.reviewed_functional_observed_at,
+                   reviewed_sentry_query_window=excluded.reviewed_sentry_query_window,
+                   reviewed_sentry_observed_at=excluded.reviewed_sentry_observed_at,
+                   evidence_snapshot_json=excluded.evidence_snapshot_json,recorded_at=excluded.recorded_at""",
                 (
                     attempt_id,
                     model,
@@ -893,6 +1054,16 @@ class RepairStore:
                     json.dumps(command, separators=(",", ":")),
                     result_status,
                     1,
+                    reviewed["reviewed_head_sha"],
+                    reviewed["reviewed_ci_run_id"],
+                    reviewed["reviewed_ci_sha"],
+                    reviewed["reviewed_ci_status"],
+                    reviewed["reviewed_deployed_sha"],
+                    reviewed["reviewed_functional_evidence_id"],
+                    reviewed["reviewed_functional_observed_at"],
+                    reviewed["reviewed_sentry_query_window"],
+                    reviewed["reviewed_sentry_observed_at"],
+                    reviewed["evidence_snapshot_json"],
                     self._now(),
                 ),
             )
@@ -1006,7 +1177,7 @@ class RepairStore:
             )
             self.db.execute(
                 "DELETE FROM active_lease WHERE singleton=1 AND attempt_id=? AND fencing_token=?",
-                (attempt_id, fencing_token),
+                (attempt_id, self._fence_digest(fencing_token)),
             )
             self.db.execute(
                 """UPDATE issues SET status='resolved',updated_at=?

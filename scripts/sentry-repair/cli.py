@@ -2,9 +2,10 @@
 """Operator CLI for the bounded Sandra Sentry repair controller.
 
 Examples:
-  cli.py intake --db /path/state.db
-  cli.py claim --db /path/state.db --issue 123 --owner worker --mode investigate
-  cli.py dispatch --db /path/state.db --attempt-id ID --fencing-token TOKEN
+  cli.py --db /path/state.db intake
+  cli.py --db /path/state.db --worktree-root /owned/_codex_worktrees claim \
+      --issue 123 --owner worker --mode investigate --worktree /owned/_codex_worktrees/job
+  SANDRA_FENCING_TOKEN=TOKEN cli.py --db /path/state.db dispatch --attempt-id ID
 
 Dispatch is a dry-run unless --execute is explicitly supplied. This CLI never
 sends the notification outbox to Slack and never installs a scheduler.
@@ -37,6 +38,28 @@ def _json_file(path: str) -> Any:
         return json.load(handle)
 
 
+def _add_fencing_input(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--fencing-token-file",
+        help="file containing the controller fencing token (keeps it out of argv)",
+    )
+    command.add_argument(
+        "--fencing-token-env",
+        default="SANDRA_FENCING_TOKEN",
+        help="environment variable containing the controller fencing token",
+    )
+
+
+def _fencing_token(args: argparse.Namespace) -> str:
+    if args.fencing_token_file:
+        token = Path(args.fencing_token_file).expanduser().read_text(encoding="utf-8").strip()
+    else:
+        token = os.environ.get(args.fencing_token_env, "").strip()
+    if not token:
+        raise ValueError("provide a fencing token through --fencing-token-file or the configured environment variable")
+    return token
+
+
 def _parse_at(value: str) -> datetime:
     text = value.strip()
     if text.endswith("Z"):
@@ -50,6 +73,11 @@ def _parse_at(value: str) -> datetime:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="Sandra bounded Sentry repair controller")
     root.add_argument("--db", default=str(default_db_path()), help="durable SQLite path")
+    root.add_argument(
+        "--worktree-root",
+        default=os.environ.get("SANDRA_REPAIR_WORKTREE_ROOT"),
+        help="owned worktree parent; required for investigate/repair claims (or SANDRA_REPAIR_WORKTREE_ROOT)",
+    )
     sub = root.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init", help="create/migrate the durable state database")
@@ -72,9 +100,14 @@ def parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--outcome", choices=("abandoned", "failed"), required=True)
     reconcile.add_argument("--evidence", required=True)
 
+    heartbeat = sub.add_parser("heartbeat", help="extend one active lease without shortening it")
+    heartbeat.add_argument("--attempt-id", required=True)
+    _add_fencing_input(heartbeat)
+    heartbeat.add_argument("--lease-seconds", type=int, default=900)
+
     dispatch = sub.add_parser("dispatch", help="plan or explicitly run one bounded Codex attempt")
     dispatch.add_argument("--attempt-id", required=True)
-    dispatch.add_argument("--fencing-token", required=True)
+    _add_fencing_input(dispatch)
     dispatch.add_argument("--spark-effort", choices=("low", "medium"), default="low")
     dispatch.add_argument("--timeout-seconds", type=int, default=900)
     dispatch.add_argument("--heartbeat-interval-seconds", type=int, default=30)
@@ -82,7 +115,7 @@ def parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("record-pr", help="persist PR and actual CI evidence")
     pr.add_argument("--attempt-id", required=True)
-    pr.add_argument("--fencing-token", required=True)
+    _add_fencing_input(pr)
     pr.add_argument("--number", type=int, required=True)
     pr.add_argument("--url", required=True)
     pr.add_argument("--head-sha", required=True)
@@ -92,33 +125,33 @@ def parser() -> argparse.ArgumentParser:
 
     dep = sub.add_parser("record-deployment", help="persist deployed commit evidence")
     dep.add_argument("--attempt-id", required=True)
-    dep.add_argument("--fencing-token", required=True)
+    _add_fencing_input(dep)
     dep.add_argument("--environment", required=True)
     dep.add_argument("--deployed-sha", required=True)
     dep.add_argument("--provider")
 
     ver = sub.add_parser("record-verification", help="persist functional/Sentry evidence JSON")
     ver.add_argument("--attempt-id", required=True)
-    ver.add_argument("--fencing-token", required=True)
+    _add_fencing_input(ver)
     ver.add_argument("--kind", choices=("functional_probe", "sentry_observation", "ci"), required=True)
     ver.add_argument("--evidence-file", required=True)
 
     review_run = sub.add_parser("review", help="plan or run the independent Astra medium gate")
     review_run.add_argument("--attempt-id", required=True)
-    review_run.add_argument("--fencing-token", required=True)
+    _add_fencing_input(review_run)
     review_run.add_argument("--timeout-seconds", type=int, default=600)
     review_run.add_argument("--execute", action="store_true", help="run codex exec and parse its actual review record")
 
     review = sub.add_parser("record-review", help="disabled manual write; review must come from codex exec")
     review.add_argument("--attempt-id", required=True)
-    review.add_argument("--fencing-token", required=True)
+    _add_fencing_input(review)
     review.add_argument("--session-id", required=True)
     review.add_argument("--decision", choices=("approved", "rejected", "needs_changes"), required=True)
     review.add_argument("--evidence", required=True)
 
     complete = sub.add_parser("complete", help="validate exact completion evidence and close attempt")
     complete.add_argument("--attempt-id", required=True)
-    complete.add_argument("--fencing-token", required=True)
+    _add_fencing_input(complete)
     complete.add_argument("--record-file", required=True)
 
     slot = sub.add_parser("schedule", help="claim one due schedule slot (no scheduler is installed)")
@@ -130,7 +163,9 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    store = RepairStore(args.db)
+    if args.command == "claim" and args.mode != "observe" and not args.worktree_root:
+        raise ValueError("--worktree-root or SANDRA_REPAIR_WORKTREE_ROOT is required for repair claims")
+    store = RepairStore(args.db, allowed_worktree_root=args.worktree_root)
     try:
         if args.command == "init":
             print(json.dumps({"db": str(Path(args.db).expanduser())}))
@@ -196,11 +231,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps({"reconciled": args.attempt_id}))
             return 0
+        if args.command == "heartbeat":
+            lease_until = store.heartbeat(
+                args.attempt_id,
+                _fencing_token(args),
+                lease_seconds=args.lease_seconds,
+            )
+            print(json.dumps({"attempt_id": args.attempt_id, "lease_until": lease_until}))
+            return 0
         if args.command == "dispatch":
             result = dispatch_attempt(
                 store,
                 args.attempt_id,
-                args.fencing_token,
+                _fencing_token(args),
                 executor=SubprocessExecutor(),
                 spark_effort=args.spark_effort,
                 timeout_seconds=args.timeout_seconds,
@@ -213,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             result = dispatch_review(
                 store,
                 args.attempt_id,
-                args.fencing_token,
+                _fencing_token(args),
                 executor=SubprocessExecutor(),
                 timeout_seconds=args.timeout_seconds,
                 execute=args.execute,
@@ -223,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "record-pr":
             store.record_pull_request(
                 args.attempt_id,
-                args.fencing_token,
+                _fencing_token(args),
                 number=args.number,
                 url=args.url,
                 head_sha=args.head_sha,
@@ -235,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "record-deployment":
             store.record_deployment(
                 args.attempt_id,
-                args.fencing_token,
+                _fencing_token(args),
                 environment=args.environment,
                 deployed_sha=args.deployed_sha,
                 provider=args.provider,
@@ -244,14 +287,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "record-verification":
             evidence = _json_file(args.evidence_file)
             store.record_verification(
-                args.attempt_id, args.fencing_token, kind=args.kind, evidence=evidence
+                args.attempt_id, _fencing_token(args), kind=args.kind, evidence=evidence
             )
             return 0
         if args.command == "record-review":
             raise ValueError("manual review writes are disabled; use review --execute")
         if args.command == "complete":
             record = _json_file(args.record_file)
-            store.complete_attempt(args.attempt_id, args.fencing_token, record)
+            store.complete_attempt(args.attempt_id, _fencing_token(args), record)
             print(json.dumps({"completed": args.attempt_id}))
             return 0
         if args.command == "schedule":

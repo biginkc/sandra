@@ -59,6 +59,8 @@ def validate_completion_record(
         raise CompletionError("record generation does not match persisted attempt")
     if record.get("outcome") != "resolved":
         raise CompletionError("only an explicit resolved outcome can complete an attempt")
+    if attempt.get("mode") != "repair":
+        raise CompletionError("only repair attempts can be completed")
     if not str(attempt.get("session_id") or "").strip():
         raise CompletionError("repair attempt has no actual execution session")
 
@@ -120,6 +122,12 @@ def validate_completion_record(
         raise CompletionError("functional probe status does not match persisted evidence")
     if str(functional.get("evidence")) != str(_require(persisted_functional.get("evidence"), "persisted functional probe evidence")):
         raise CompletionError("functional probe evidence does not match persisted evidence")
+    functional_id = functional.get("evidence_id") or functional.get("id")
+    persisted_functional_id = persisted_functional.get("evidence_id") or persisted_functional.get("id")
+    if str(_require(functional_id, "functional_probe.evidence_id")) != str(_require(persisted_functional_id, "persisted functional probe evidence_id")):
+        raise CompletionError("functional probe evidence id does not match persisted evidence")
+    if functional.get("observed_at") != persisted_functional.get("observed_at"):
+        raise CompletionError("functional probe timestamp does not match persisted evidence")
 
     observation = _mapping(record.get("sentry_observation"), "sentry_observation")
     if observation.get("no_regression") is not True:
@@ -158,6 +166,33 @@ def validate_completion_record(
         raise CompletionError("review command provenance is not Astra medium")
     if str(persisted_review.get("session_id")) == str(attempt.get("session_id")):
         raise CompletionError("review session must be independent")
+    snapshot_fields = (
+        ("reviewed_head_sha", head_sha),
+        ("reviewed_ci_run_id", persisted_ci_id),
+        ("reviewed_ci_sha", persisted_ci_sha),
+        ("reviewed_ci_status", persisted_ci_status),
+        ("reviewed_deployed_sha", str(deployment_persisted["deployed_sha"])),
+        ("reviewed_functional_evidence_id", str(persisted_functional_id)),
+        ("reviewed_functional_observed_at", persisted_functional.get("observed_at")),
+        ("reviewed_sentry_query_window", persisted_observation.get("query_window")),
+        ("reviewed_sentry_observed_at", persisted_observation.get("observed_at")),
+    )
+    for field, expected in snapshot_fields:
+        actual = persisted_review.get(field)
+        if actual is None or str(actual).lower() != str(expected).lower():
+            raise CompletionError(f"reviewed evidence snapshot does not match {field}")
+    try:
+        snapshot = json.loads(persisted_review.get("evidence_snapshot_json", ""))
+    except (TypeError, ValueError):
+        raise CompletionError("reviewed evidence snapshot is invalid")
+    if not isinstance(snapshot, Mapping):
+        raise CompletionError("reviewed evidence snapshot is invalid")
+    if (
+        snapshot.get("pull_request") != dict(pr_persisted)
+        or snapshot.get("deployment") != dict(deployment_persisted)
+        or snapshot.get("verifications") != dict(context.get("verifications", {}))
+    ):
+        raise CompletionError("reviewed evidence snapshot no longer matches persisted evidence")
 
 
 def validate_model_outcome(

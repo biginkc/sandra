@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import sys
 import signal
 import subprocess
@@ -25,6 +27,7 @@ from dispatch import (  # noqa: E402
     kill_process_group,
     SubprocessExecutor,
 )
+from cli import parser as cli_parser  # noqa: E402
 from prompts import build_investigation_prompt, build_review_prompt  # noqa: E402
 from schedule import CHICAGO, cadence_minutes, due_slot, iter_slots, slot_identity  # noqa: E402
 from sentry import SentryClient, SentryError, SentryPage, intake_from_sentry  # noqa: E402
@@ -36,7 +39,7 @@ from store import (  # noqa: E402
     RepairStore,
     StateError,
 )
-from validation import CompletionError  # noqa: E402
+from validation import CompletionError, validate_completion_record  # noqa: E402
 
 
 def issue(number: int, *, release: str = "r1", event_id: str = "e1") -> IssueInput:
@@ -115,9 +118,8 @@ class PagingClient(SentryClient):
 class ControllerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.store = RepairStore(Path(self.tmp.name) / "state.db")
-        self.worktree = Path(self.tmp.name) / "owned-worktree"
-        subprocess.run(["git", "init", "--quiet", str(self.worktree)], check=True)
+        self.store = RepairStore(":memory:", allowed_worktree_root=self.tmp.name)
+        self.worktree = self.make_worktree("owned-worktree")
         self.store.ingest_issues("bmh-group", "sandra", "vercel-production", [issue(101), issue(102)], cursor="c0", retrieved_at=1)
 
     def tearDown(self):
@@ -128,18 +130,85 @@ class ControllerTests(unittest.TestCase):
         kwargs.setdefault("worktree", self.worktree)
         return self.store.claim_attempt(*args, **kwargs)
 
+    def make_worktree(self, name: str) -> Path:
+        """Create a real linked worktree so tests reject ordinary checkouts."""
+
+        source = Path(self.tmp.name) / f"source-{name}"
+        worktree = Path(self.tmp.name) / name
+        subprocess.run(["git", "init", "--quiet", str(source)], check=True)
+        (source / "README.md").write_text("controller test\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(source), "add", "README.md"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "-c",
+                "user.email=controller-test@example.invalid",
+                "-c",
+                "user.name=Controller Test",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source), "worktree", "add", "--quiet", "--detach", str(worktree), "HEAD"],
+            check=True,
+        )
+        return worktree
+
+    def seed_review_evidence(self, attempt, *, sha="a" * 40):
+        self.store.record_pull_request(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            number=42,
+            url="https://github.com/bmh-group/sandra/pull/42",
+            head_sha=sha,
+            ci_run_id="run-review",
+            ci_status="success",
+            ci_sha=sha,
+        )
+        self.store.record_deployment(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            environment="vercel-production",
+            deployed_sha=sha,
+        )
+        self.store.record_verification(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            kind="functional_probe",
+            evidence={
+                "status": "pass",
+                "evidence_id": "probe-review",
+                "evidence": "review probe",
+                "observed_at": "2026-09-14T10:00:00Z",
+            },
+        )
+        self.store.record_verification(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            kind="sentry_observation",
+            evidence={
+                "no_regression": True,
+                "query_window": "10m",
+                "observed_at": "2026-09-14T10:00:00Z",
+            },
+        )
+
     def test_global_claim_is_atomic(self):
-        path = Path(self.tmp.name) / "concurrent.db"
-        first = RepairStore(path)
+        path = "file:controller-concurrency?mode=memory&cache=shared"
+        first = RepairStore(path, allowed_worktree_root=self.tmp.name)
         first.ingest_issues("bmh-group", "sandra", "vercel-production", [issue(1), issue(2)], cursor=None, retrieved_at=1)
-        worktree = Path(self.tmp.name) / "concurrent-worktree"
-        subprocess.run(["git", "init", "--quiet", str(worktree)], check=True)
-        first.close()
+        worktree = self.make_worktree("concurrent-worktree")
         outcomes = []
         barrier = threading.Barrier(2)
 
         def claim(n):
-            local = RepairStore(path)
+            local = RepairStore(path, allowed_worktree_root=self.tmp.name)
             try:
                 barrier.wait()
                 attempt = local.claim_attempt("bmh-group", "sandra", "vercel-production", n, owner=f"w{n}", mode="investigate", now=10, worktree=worktree)
@@ -154,6 +223,7 @@ class ControllerTests(unittest.TestCase):
             thread.start()
         for thread in threads:
             thread.join()
+        first.close()
         self.assertEqual(sorted(kind for kind, _ in outcomes), ["busy", "ok"])
         winner = next(item for kind, item in outcomes if kind == "ok")
         loser = next(item for kind, item in outcomes if kind == "busy")
@@ -189,6 +259,16 @@ class ControllerTests(unittest.TestCase):
                 now=12,
             )
 
+    def test_fencing_token_is_hashed_in_durable_state(self):
+        attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        row = self.store.db.execute(
+            "SELECT fencing_token FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)
+        ).fetchone()
+        self.assertNotEqual(row[0], attempt.fencing_token)
+        self.assertEqual(row[0], hashlib.sha256(attempt.fencing_token.encode()).hexdigest())
+        active = self.store.db.execute("SELECT fencing_token FROM active_lease").fetchone()
+        self.assertEqual(active[0], row[0])
+
     def test_heartbeat_never_shrinks_operator_lease(self):
         attempt = self.claim(
             "bmh-group",
@@ -202,6 +282,12 @@ class ControllerTests(unittest.TestCase):
         before = self.store.db.execute(
             "SELECT lease_until FROM active_lease WHERE singleton=1"
         ).fetchone()[0]
+        # Even if the two durable rows ever diverge, a heartbeat must retain
+        # the longest operator lease rather than trusting a shorter row.
+        self.store.db.execute(
+            "UPDATE active_lease SET lease_until=? WHERE singleton=1",
+            (before - 100,),
+        )
         after = self.store.heartbeat(
             attempt.attempt_id,
             attempt.fencing_token,
@@ -217,7 +303,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_injected_clock_is_used_for_fencing_and_lease_transitions(self):
         current = [100.0]
-        store = RepairStore(Path(self.tmp.name) / "clock.db", clock=lambda: current[0])
+        store = RepairStore(":memory:", clock=lambda: current[0], allowed_worktree_root=self.tmp.name)
         try:
             store.ingest_issues("bmh-group", "sandra", "vercel-production", [issue(777)], cursor=None)
             attempt = store.claim_attempt(
@@ -337,6 +423,33 @@ class ControllerTests(unittest.TestCase):
                 mode="repair",
                 worktree=self.tmp.name,
             )
+        main_checkout = Path(self.tmp.name) / "main-checkout"
+        subprocess.run(["git", "init", "--quiet", str(main_checkout)], check=True)
+        with self.assertRaises(StateError):
+            self.store.claim_attempt(
+                "bmh-group",
+                "sandra",
+                "vercel-production",
+                101,
+                owner="worker",
+                mode="repair",
+                worktree=main_checkout,
+            )
+        unscoped = RepairStore(":memory:")
+        try:
+            unscoped.ingest_issues("bmh-group", "sandra", "vercel-production", [issue(102)], cursor=None, retrieved_at=1)
+            with self.assertRaises(StateError):
+                unscoped.claim_attempt(
+                    "bmh-group",
+                    "sandra",
+                    "vercel-production",
+                    102,
+                    owner="worker",
+                    mode="repair",
+                    worktree=self.worktree,
+                )
+        finally:
+            unscoped.close()
 
     def test_dry_run_does_not_probe_external_model(self):
         attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
@@ -351,6 +464,28 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(plan["probe"]["status"], "not_run")
         self.assertEqual(executor.probe_calls, [])
         self.assertNotIn(attempt.fencing_token, "\n".join(plan["argv"]))
+
+    def test_spark_preflight_auth_failure_terminalizes_without_luna_retry(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair"
+        )
+        executor = FakeExecutor(ProcessResult("error", stderr="authentication failed"))
+        result = dispatch_attempt(
+            self.store,
+            attempt.attempt_id,
+            attempt.fencing_token,
+            executor=executor,
+            execute=True,
+        )
+        self.assertIn("preflight_error", result)
+        self.assertEqual(executor.run_calls, [])
+        self.assertEqual(
+            self.store.db.execute(
+                "SELECT status FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)
+            ).fetchone()[0],
+            "failed",
+        )
+        self.assertIsNone(self.store.db.execute("SELECT * FROM active_lease").fetchone())
 
     def test_investigation_dispatch_is_read_only(self):
         attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="investigate")
@@ -371,11 +506,11 @@ class ControllerTests(unittest.TestCase):
         self.store.mark_running(attempt.attempt_id, attempt.fencing_token, model=SPARK_MODEL, effort="low", session_id="repair-session")
         self.store.record_pull_request(attempt.attempt_id, attempt.fencing_token, number=43, url="https://github.com/bmh-group/sandra/pull/43", head_sha=sha, ci_run_id="run-10", ci_status="success", ci_sha=sha)
         self.store.record_deployment(attempt.attempt_id, attempt.fencing_token, environment="vercel-production", deployed_sha=sha)
-        self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="functional_probe", evidence={"status": "pass", "evidence": "persisted probe"})
+        self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="functional_probe", evidence={"status": "pass", "evidence_id": "probe-10", "evidence": "persisted probe", "observed_at": "2026-09-14T10:00:00Z"})
         self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="sentry_observation", evidence={"no_regression": True, "query_window": "10m", "observed_at": "now"})
         review_executor = FakeExecutor(
             ProcessResult("available"),
-            ProcessResult("success", stdout='{"decision":"approved","evidence":"independent review","session_id":"review-session"}', session_id="review-session"),
+            ProcessResult("success", stdout='{"type":"thread.started","thread_id":"review-session"}\n{"type":"item.completed","item":{"text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"independent review\\"}"}}', session_id="review-session"),
         )
         dispatch_review(self.store, attempt.attempt_id, attempt.fencing_token, executor=review_executor, execute=True)
         with self.assertRaises(CompletionError):
@@ -390,7 +525,7 @@ class ControllerTests(unittest.TestCase):
                     "fencing_token": attempt.fencing_token,
                     "pull_request": {"number": 43, "url": "https://github.com/bmh-group/sandra/pull/43", "head_sha": sha, "ci_run": {"id": "run-10", "status": "success", "sha": sha}},
                     "deployment": {"environment": "vercel-production", "deployed_sha": sha},
-                    "functional_probe": {"status": "pass", "evidence": "invented probe"},
+                    "functional_probe": {"status": "pass", "evidence_id": "probe-10", "evidence": "invented probe", "observed_at": "2026-09-14T10:00:00Z"},
                     "sentry_observation": {"no_regression": True, "query_window": "10m", "observed_at": "now"},
                 },
             )
@@ -421,6 +556,7 @@ class ControllerTests(unittest.TestCase):
     def test_review_parses_codex_jsonl_agent_message_and_keeps_session_provenance(self):
         attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
         self.store.mark_running(attempt.attempt_id, attempt.fencing_token, model=SPARK_MODEL, effort="low", session_id="repair-session")
+        self.seed_review_evidence(attempt)
         output = (
             '{"type":"thread.started","thread_id":"astra-jsonl-session"}\n'
             '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"independent JSONL review\\"}"}}\n'
@@ -434,6 +570,216 @@ class ControllerTests(unittest.TestCase):
         self.assertNotIn(attempt.fencing_token, "\n".join(executor.run_calls[0]))
         row = self.store.db.execute("SELECT model,effort,source,verified,session_id FROM reviews WHERE attempt_id=?", (attempt.attempt_id,)).fetchone()
         self.assertEqual(tuple(row), ("gpt-6-astra", "medium", "codex_exec", 1, "astra-jsonl-session"))
+
+    def test_review_requires_persisted_evidence_before_execution(self):
+        attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        self.store.mark_running(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            model=SPARK_MODEL,
+            effort="low",
+            session_id="repair-session",
+        )
+        executor = FakeExecutor(ProcessResult("available"), ProcessResult("success"))
+        with self.assertRaises(StateError):
+            dispatch_review(
+                self.store,
+                attempt.attempt_id,
+                attempt.fencing_token,
+                executor=executor,
+                execute=True,
+            )
+        self.assertEqual(executor.run_calls, [])
+        self.assertEqual(
+            self.store.db.execute("SELECT status FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)).fetchone()[0],
+            "running",
+        )
+
+    def test_review_failure_does_not_burn_repair_attempt(self):
+        attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        self.store.mark_running(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            model=SPARK_MODEL,
+            effort="low",
+            session_id="repair-session",
+        )
+        self.seed_review_evidence(attempt)
+        executor = FakeExecutor(
+            ProcessResult("available"),
+            ProcessResult("error", stderr="review CLI failed"),
+        )
+        result = dispatch_review(
+            self.store,
+            attempt.attempt_id,
+            attempt.fencing_token,
+            executor=executor,
+            execute=True,
+        )
+        self.assertIn("review_error", result)
+        self.assertEqual(
+            self.store.db.execute("SELECT status FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)).fetchone()[0],
+            "running",
+        )
+        self.assertEqual(
+            self.store.db.execute(
+                "SELECT COUNT(*) FROM attempts WHERE issue_number=101 AND generation=1"
+            ).fetchone()[0],
+            1,
+        )
+
+    def test_approved_review_freezes_reviewed_scope_and_evidence_snapshot(self):
+        attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        self.store.mark_running(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            model=SPARK_MODEL,
+            effort="low",
+            session_id="repair-session",
+        )
+        sha = "e" * 40
+        self.seed_review_evidence(attempt, sha=sha)
+        executor = FakeExecutor(
+            ProcessResult("available"),
+            ProcessResult(
+                "success",
+                stdout='{"type":"thread.started","thread_id":"review-frozen"}\n{"type":"item.completed","item":{"text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"frozen scope\\"}"}}',
+                session_id="review-frozen",
+            ),
+        )
+        dispatch_review(
+            self.store,
+            attempt.attempt_id,
+            attempt.fencing_token,
+            executor=executor,
+            execute=True,
+        )
+        row = self.store.db.execute(
+            "SELECT reviewed_head_sha,reviewed_ci_run_id,reviewed_functional_evidence_id,reviewed_functional_observed_at,reviewed_sentry_observed_at,evidence_snapshot_json FROM reviews WHERE attempt_id=?",
+            (attempt.attempt_id,),
+        ).fetchone()
+        self.assertEqual(tuple(row[:5]), (sha, "run-review", "probe-review", "2026-09-14T10:00:00Z", "2026-09-14T10:00:00Z"))
+        self.assertTrue(row[5])
+        with self.assertRaises(StateError):
+            self.store.record_pull_request(
+                attempt.attempt_id,
+                attempt.fencing_token,
+                number=42,
+                url="https://github.com/bmh-group/sandra/pull/42",
+                head_sha="f" * 40,
+                ci_run_id="run-new",
+                ci_status="success",
+                ci_sha="f" * 40,
+            )
+
+    def test_review_rejects_session_id_only_in_model_text(self):
+        attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
+        self.store.mark_running(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            model=SPARK_MODEL,
+            effort="low",
+            session_id="repair-session",
+        )
+        self.seed_review_evidence(attempt)
+        output = '{"type":"item.completed","item":{"text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"text session\\",\\"session_id\\":\\"model-claimed-session\\"}"}}'
+        result = dispatch_review(
+            self.store,
+            attempt.attempt_id,
+            attempt.fencing_token,
+            executor=FakeExecutor(ProcessResult("available"), ProcessResult("success", stdout=output)),
+            execute=True,
+        )
+        self.assertIn("review_error", result)
+        self.assertIsNone(self.store.db.execute("SELECT * FROM reviews").fetchone())
+
+    def test_review_rejects_adapter_session_that_disagrees_with_thread_event(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair"
+        )
+        self.store.mark_running(
+            attempt.attempt_id,
+            attempt.fencing_token,
+            model=SPARK_MODEL,
+            effort="low",
+            session_id="repair-session",
+        )
+        self.seed_review_evidence(attempt)
+        output = (
+            '{"type":"thread.started","thread_id":"event-session"}\n'
+            '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"review\\"}"}}'
+        )
+        result = dispatch_review(
+            self.store,
+            attempt.attempt_id,
+            attempt.fencing_token,
+            executor=FakeExecutor(
+                ProcessResult("available"),
+                ProcessResult("success", stdout=output, session_id="adapter-session"),
+            ),
+            execute=True,
+        )
+        self.assertIn("review_error", result)
+        self.assertIsNone(self.store.db.execute("SELECT * FROM reviews").fetchone())
+        self.assertEqual(
+            self.store.db.execute(
+                "SELECT status FROM attempts WHERE attempt_id=?", (attempt.attempt_id,)
+            ).fetchone()[0],
+            "running",
+        )
+
+    def test_worker_environment_scrubs_provider_secrets(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SENTRY_AUTH_TOKEN": "sentry-secret",
+                "VERCEL_TOKEN": "vercel-secret",
+                "DATABASE_URL": "postgres://secret",
+                "CODEX_HOME": "/tmp/codex",
+            },
+            clear=False,
+        ):
+            environment = SubprocessExecutor._worker_environment()
+        self.assertNotIn("SENTRY_AUTH_TOKEN", environment)
+        self.assertNotIn("VERCEL_TOKEN", environment)
+        self.assertNotIn("DATABASE_URL", environment)
+        self.assertEqual(environment["CODEX_HOME"], "/tmp/codex")
+
+    def test_cli_exposes_fenced_heartbeat_without_token_argv(self):
+        args = cli_parser().parse_args(
+            [
+                "heartbeat",
+                "--attempt-id",
+                "attempt-1",
+                "--fencing-token-file",
+                "/secure/token",
+                "--lease-seconds",
+                "7200",
+            ]
+        )
+        self.assertEqual(args.command, "heartbeat")
+        self.assertEqual(args.lease_seconds, 7200)
+        self.assertFalse(hasattr(args, "fencing_token"))
+
+    def test_completion_requires_repair_mode(self):
+        with self.assertRaises(CompletionError):
+            validate_completion_record(
+                {
+                    "attempt_id": "attempt-1",
+                    "issue_number": 101,
+                    "generation": 1,
+                    "outcome": "resolved",
+                },
+                {
+                    "attempt": {
+                        "attempt_id": "attempt-1",
+                        "issue_number": 101,
+                        "generation": 1,
+                        "mode": "investigate",
+                    },
+                    "issue": {},
+                },
+            )
 
     def test_timeout_is_terminal_without_duplicate_retry(self):
         attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")
@@ -534,7 +880,7 @@ class ControllerTests(unittest.TestCase):
         self.store.mark_running(attempt.attempt_id, attempt.fencing_token, model=SPARK_MODEL, effort="low", session_id="repair-session")
         self.store.record_pull_request(attempt.attempt_id, attempt.fencing_token, number=42, url="https://github.com/bmh-group/sandra/pull/42", head_sha=sha, ci_run_id="run-9", ci_status="success", ci_sha=sha)
         self.store.record_deployment(attempt.attempt_id, attempt.fencing_token, environment="vercel-production", deployed_sha=sha, provider="vercel")
-        self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="functional_probe", evidence={"status": "pass", "evidence": "probe id 7"})
+        self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="functional_probe", evidence={"status": "pass", "evidence_id": "probe-7", "evidence": "probe id 7", "observed_at": "2026-09-14T10:00:00Z"})
         self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="sentry_observation", evidence={"no_regression": True, "query_window": "10m", "observed_at": "2026-09-14T10:00:00Z"})
         with self.assertRaises(CompletionError):
             self.store.complete_attempt(attempt.attempt_id, attempt.fencing_token, {"attempt_id": attempt.attempt_id, "issue_number": 101, "generation": 1, "outcome": "resolved", "fencing_token": attempt.fencing_token})
@@ -544,7 +890,7 @@ class ControllerTests(unittest.TestCase):
             ),
             ProcessResult(
                 "success",
-                stdout='{"decision":"approved","evidence":"reviewed patch, CI, deployed SHA, and probe","session_id":"astra-session"}',
+                stdout='{"type":"thread.started","thread_id":"astra-session"}\n{"type":"item.completed","item":{"text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"reviewed patch, CI, deployed SHA, and probe\\"}"}}',
                 session_id="astra-session",
             ),
         )
@@ -562,7 +908,7 @@ class ControllerTests(unittest.TestCase):
             "outcome": "resolved",
             "pull_request": {"number": 42, "url": "https://github.com/bmh-group/sandra/pull/42", "head_sha": sha, "ci_run": {"id": "run-9", "status": "success", "sha": sha}},
             "deployment": {"environment": "vercel-production", "deployed_sha": sha},
-            "functional_probe": {"status": "pass", "evidence": "probe id 7"},
+            "functional_probe": {"status": "pass", "evidence_id": "probe-7", "evidence": "probe id 7", "observed_at": "2026-09-14T10:00:00Z"},
             "sentry_observation": {"no_regression": True, "query_window": "10m", "observed_at": "2026-09-14T10:00:00Z"},
         }
         # Completion payload carries no controller authorization secret.
@@ -576,15 +922,16 @@ class ControllerTests(unittest.TestCase):
         self.store.mark_running(attempt.attempt_id, attempt.fencing_token, model=SPARK_MODEL, effort="low", session_id="repair-session")
         self.store.record_pull_request(attempt.attempt_id, attempt.fencing_token, number=44, url="https://github.com/bmh-group/sandra/pull/44", head_sha=sha, ci_run_id="run-11", ci_status="failure", ci_sha="d" * 40)
         self.store.record_deployment(attempt.attempt_id, attempt.fencing_token, environment="vercel-production", deployed_sha=sha)
-        self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="functional_probe", evidence={"status": "pass", "evidence": "probe"})
+        self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="functional_probe", evidence={"status": "pass", "evidence_id": "probe-11", "evidence": "probe", "observed_at": "2026-09-14T10:00:00Z"})
         self.store.record_verification(attempt.attempt_id, attempt.fencing_token, kind="sentry_observation", evidence={"no_regression": True, "query_window": "10m", "observed_at": "now"})
         review_executor = FakeExecutor(
             ProcessResult("available"),
-            ProcessResult("success", stdout='{"decision":"approved","evidence":"review","session_id":"review-session-2"}', session_id="review-session-2"),
+            ProcessResult("success", stdout='{"type":"thread.started","thread_id":"review-session-2"}\n{"type":"item.completed","item":{"text":"{\\"decision\\":\\"approved\\",\\"evidence\\":\\"review\\"}"}}', session_id="review-session-2"),
         )
-        dispatch_review(self.store, attempt.attempt_id, attempt.fencing_token, executor=review_executor, execute=True)
+        with self.assertRaises(StateError):
+            dispatch_review(self.store, attempt.attempt_id, attempt.fencing_token, executor=review_executor, execute=True)
         with self.assertRaises(CompletionError):
-            self.store.complete_attempt(attempt.attempt_id, attempt.fencing_token, {"attempt_id": attempt.attempt_id, "issue_number": 101, "generation": 1, "outcome": "resolved", "fencing_token": attempt.fencing_token, "pull_request": {"number": 44, "url": "https://github.com/bmh-group/sandra/pull/44", "head_sha": sha, "ci_run": {"id": "run-11", "status": "success", "sha": sha}}, "deployment": {"environment": "vercel-production", "deployed_sha": sha}, "functional_probe": {"status": "pass", "evidence": "probe"}, "sentry_observation": {"no_regression": True, "query_window": "10m", "observed_at": "now"}})
+            self.store.complete_attempt(attempt.attempt_id, attempt.fencing_token, {"attempt_id": attempt.attempt_id, "issue_number": 101, "generation": 1, "outcome": "resolved", "fencing_token": attempt.fencing_token, "pull_request": {"number": 44, "url": "https://github.com/bmh-group/sandra/pull/44", "head_sha": sha, "ci_run": {"id": "run-11", "status": "success", "sha": sha}}, "deployment": {"environment": "vercel-production", "deployed_sha": sha}, "functional_probe": {"status": "pass", "evidence_id": "probe-11", "evidence": "probe", "observed_at": "2026-09-14T10:00:00Z"}, "sentry_observation": {"no_regression": True, "query_window": "10m", "observed_at": "now"}})
 
     def test_argv_has_explicit_supported_codex_config_and_untrusted_prompt_is_bounded(self):
         argv = codex_argv(SPARK_MODEL, "medium", "prompt with; shell $(must remain text)")

@@ -13,6 +13,12 @@ offline fixture for tests and rehearsals:
     python3 scripts/sentry-repair/cli.py --db /var/tmp/sandra-repair.db intake \
       --issues-file fixture.json
 
+Set `SANDRA_REPAIR_WORKTREE_ROOT` (or pass `--worktree-root`) to the owned
+worktree parent before making an investigate/repair claim. The claim rejects
+the main checkout and any path outside that root. Controller fencing tokens
+are supplied through `SANDRA_FENCING_TOKEN` or `--fencing-token-file`; they
+are never placed in Codex worker argv.
+
 The database defaults to XDG_STATE_HOME/sandra-sentry-repair/repair.db, or
 ~/.local/state/sandra-sentry-repair/repair.db. Keep it on durable storage
 outside a checkout. Sentry issues are keyed by their positive numeric id;
@@ -30,8 +36,8 @@ reconciliation.
 Investigate and repair claims require an existing absolute Git worktree (and
 optionally an exact branch). The controller verifies it with git before
 claiming and launches Codex with that worktree as cwd. The fencing token is
-controller-only authorization; it is never put in worker/reviewer prompts or
-completion payloads.
+hashed in SQLite and is controller-only authorization; it is never put in
+worker/reviewer prompts or completion payloads.
 
 Attempt history is bounded to two attempts per issue generation. A resolved
 issue does not create another generation merely because its lastSeen changed.
@@ -50,10 +56,15 @@ separate Astra session (gpt-6-astra, medium); Fable, when used, is a separate
 Claude CLI and is never sent to Codex.
 
 The review command is also dry-run by default. With --execute, it requires an
-existing repair session, invokes an explicit Astra medium Codex command in
-read-only mode, parses an actual JSON/JSONL decision and session ID, and only
-then persists the independent review gate. Manual record-review writes are
-disabled.
+existing repair session plus persisted PR/CI, deployment, functional-probe,
+and Sentry evidence. It invokes an explicit Astra medium Codex command in
+read-only mode, parses a strict raw JSON decision from JSONL, obtains the
+session ID from a real thread event, and only then persists an immutable
+evidence snapshot for the independent review gate. Review execution and
+format failures leave the repair attempt running for retry; they do not burn
+an attempt. Manual record-review writes are disabled. Use `heartbeat` with
+the fencing token file/env to extend the lease while CI, deployment, and
+post-deployment observation finish.
 
 Completion requires an exact evidence record tying together the PR head SHA,
 successful CI run and SHA, deployed SHA, passing functional probe, Sentry

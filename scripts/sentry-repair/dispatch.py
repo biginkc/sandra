@@ -21,6 +21,27 @@ SPARK_MODEL = "gpt-5.3-codex-spark"
 LUNA_MODEL = "gpt-5.6-luna"
 ASTRA_REVIEW_MODEL = "gpt-6-astra"
 FABLE_REVIEW_MODEL = "claude-fable-5-1"
+_PRODUCTION_SECRET_ENV = frozenset(
+    {
+        "SENTRY_AUTH_TOKEN",
+        "SENTRY_DSN",
+        "VERCEL_TOKEN",
+        "VERCEL_ORG_ID",
+        "VERCEL_PROJECT_ID",
+        "DATABASE_URL",
+        "DIRECT_URL",
+        "POSTGRES_URL",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_SERVICE_ROLE",
+        "SUPABASE_DB_PASSWORD",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "NPM_TOKEN",
+        "SANDRA_FENCING_TOKEN",
+    }
+)
 
 
 def kill_process_group(process) -> None:
@@ -83,6 +104,16 @@ class SubprocessExecutor:
         self.executable = executable
         self.worktree = worktree
 
+    @staticmethod
+    def _worker_environment() -> dict[str, str]:
+        """Keep model auth while excluding provider and production secrets."""
+
+        return {
+            key: value
+            for key, value in os.environ.items()
+            if key not in _PRODUCTION_SECRET_ENV
+        }
+
     def probe(self, model: str, effort: str) -> ProcessResult:
         probe_prompt = (
             "This is a model availability probe. Return exactly MODEL_PROBE_OK. "
@@ -127,7 +158,7 @@ class SubprocessExecutor:
                 event = json.loads(line)
             except (TypeError, ValueError):
                 continue
-            if isinstance(event, dict):
+            if isinstance(event, dict) and event.get("type") in {"thread.started", "thread.created"}:
                 for key in ("session_id", "thread_id"):
                     value = event.get(key)
                     if isinstance(value, str) and value.strip():
@@ -170,6 +201,7 @@ class SubprocessExecutor:
                     stderr=stderr_file,
                     cwd=self.worktree,
                     start_new_session=True,
+                    env=self._worker_environment(),
                 )
             except OSError as exc:
                 return ProcessResult("error", "", str(exc), -1)
@@ -280,7 +312,25 @@ def dispatch_attempt(
     if heartbeat_interval_seconds <= 0:
         raise ValueError("heartbeat_interval_seconds must be positive")
     if execute:
-        model, effort, probe = choose_execution_model(executor, spark_effort=spark_effort)
+        try:
+            model, effort, probe = choose_execution_model(executor, spark_effort=spark_effort)
+        except Exception as exc:
+            # A failed preflight must stop this claimed invocation. In
+            # particular, auth/timeout/unknown Spark failures are not proof
+            # that Luna is safe to select and must not invite a duplicate
+            # worker attempt.
+            terminalization = _terminalize_failure(
+                store, attempt_id, fencing_token, f"Spark preflight failed: {exc}"
+            )
+            return {
+                "attempt_id": attempt_id,
+                "model": SPARK_MODEL,
+                "effort": spark_effort,
+                "probe": {"status": "error", "stdout": "", "stderr": str(exc)},
+                "executed": False,
+                "preflight_error": str(exc),
+                "terminalization": terminalization,
+            }
     else:
         # A dry-run is a local plan and must not launch an external model probe.
         model, effort, probe = SPARK_MODEL, spark_effort, ProcessResult("not_run")
@@ -430,7 +480,10 @@ def _review_record(stdout: str) -> tuple[str, str, str] | None:
             continue
         if isinstance(event, dict):
             events.append(event)
-            session_id_from_stream = session_id_from_stream or event.get("session_id") or event.get("thread_id")
+            if event.get("type") in {"thread.started", "thread.created"}:
+                candidate_session = event.get("session_id") or event.get("thread_id")
+                if isinstance(candidate_session, str) and candidate_session.strip():
+                    session_id_from_stream = session_id_from_stream or candidate_session.strip()
     for payload in reversed(events):
         candidate = payload.get("review") if isinstance(payload.get("review"), dict) else payload
         item = payload.get("item")
@@ -439,13 +492,18 @@ def _review_record(stdout: str) -> tuple[str, str, str] | None:
                 candidate = json.loads(item["text"])
             except (TypeError, ValueError):
                 candidate = payload
-        decision = candidate.get("decision") if isinstance(candidate, dict) else None
-        evidence = candidate.get("evidence") if isinstance(candidate, dict) else None
-        session_id = payload.get("session_id") or payload.get("thread_id") or session_id_from_stream
-        if isinstance(candidate, dict):
-            session_id = session_id or candidate.get("session_id") or candidate.get("thread_id")
-        if decision in {"approved", "rejected", "needs_changes"} and isinstance(evidence, str) and evidence.strip() and isinstance(session_id, str) and session_id.strip():
-            return decision, evidence.strip(), session_id.strip()
+        if not isinstance(candidate, dict) or set(candidate) != {"decision", "evidence"}:
+            continue
+        decision = candidate.get("decision")
+        evidence = candidate.get("evidence")
+        if (
+            decision in {"approved", "rejected", "needs_changes"}
+            and isinstance(evidence, str)
+            and evidence.strip()
+            and isinstance(session_id_from_stream, str)
+            and session_id_from_stream.strip()
+        ):
+            return decision, evidence.strip(), session_id_from_stream.strip()
     return None
 
 
@@ -484,6 +542,7 @@ def dispatch_review(
         return plan
     if not context["attempt"].get("session_id"):
         raise ValueError("review requires a persisted repair session")
+    snapshot = store.review_snapshot(attempt_id)
     # A review does not replace the repair model/session on the attempt. Its
     # independent session is persisted in reviews after actual output parses.
     try:
@@ -499,9 +558,7 @@ def dispatch_review(
             {
                 "executed": True,
                 "result": {"status": "error", "returncode": -1, "stdout": "", "stderr": str(exc)},
-                "terminalization": _terminalize_failure(
-                    store, attempt_id, fencing_token, f"Astra review execution failed: {exc}"
-                ),
+                "review_error": f"Astra review execution failed: {exc}",
             }
         )
         return plan
@@ -513,24 +570,19 @@ def dispatch_review(
         "stderr": result.stderr[-4000:],
     }
     if result.status not in {"success", "passed"}:
-        plan["terminalization"] = _terminalize_failure(
-            store,
-            attempt_id,
-            fencing_token,
-            f"Astra review {result.status}: {result.stderr[-500:]}",
-        )
+        plan["review_error"] = f"Astra review {result.status}: {result.stderr[-500:]}"
         return plan
     parsed = _review_record(result.stdout)
-    session_id = result.session_id or (parsed[2] if parsed else None)
-    if parsed is None or not session_id:
-        plan["terminalization"] = _terminalize_failure(
-            store,
-            attempt_id,
-            fencing_token,
-            "Astra review returned no explicit decision/evidence/session",
-        )
+    # The adapter may expose a convenience session id, but the controller's
+    # provenance source is the real thread event parsed above. Never accept a
+    # model supplied field or an adapter id that disagrees with that event.
+    if parsed is None:
+        plan["review_error"] = "Astra review returned no explicit decision/evidence/session"
         return plan
-    decision, evidence, _ = parsed
+    decision, evidence, session_id = parsed
+    if result.session_id and result.session_id != session_id:
+        plan["review_error"] = "Astra review session provenance disagrees with thread event"
+        return plan
     try:
         store.record_review(
             attempt_id,
@@ -544,14 +596,13 @@ def dispatch_review(
             command=argv,
             result_status=result.status,
             verified=True,
+            snapshot=snapshot,
         )
     except FencingError:
         plan["fenced_result"] = "FencingError"
         return plan
     except Exception as exc:
-        plan["terminalization"] = _terminalize_failure(
-            store, attempt_id, fencing_token, f"Astra review persistence failed: {exc}"
-        )
+        plan["review_error"] = f"Astra review persistence failed: {exc}"
         return plan
     plan["review"] = {
         "decision": decision,
