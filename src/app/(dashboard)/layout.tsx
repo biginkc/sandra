@@ -40,7 +40,7 @@ export default async function DashboardLayout({
     rosterResult.status === "fulfilled" ? rosterResult.value : null;
   const showMyLeads = Boolean(
     acquisitionRoster &&
-      canViewMyLeads(acquisitionRoster.roster, acquisitionRoster.viewer.userId),
+      canViewMyLeads(acquisitionRoster.roster, acquisitionRoster.viewer.userId, acquisitionRoster.viewer.isOwner),
   );
   const initialAcquisitionBadge =
     showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value : null;

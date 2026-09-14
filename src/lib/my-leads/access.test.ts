@@ -14,15 +14,19 @@ const roster: AcquisitionRoster = {
 };
 
 describe('My Leads page access', () => {
-  it('allows only active acquisitions members', () => {
-    expect(canViewMyLeads(roster, 'acquisitions')).toBe(true);
-    expect(canViewMyLeads(roster, 'other')).toBe(false);
-    expect(canViewMyLeads(roster, 'former')).toBe(false);
-    expect(canViewMyLeads(roster, 'owner')).toBe(false);
-    expect(canViewMyLeads(roster, 'missing')).toBe(false);
+  it('allows active acquisitions members but not other members', () => {
+    expect(canViewMyLeads(roster, 'acquisitions', false)).toBe(true);
+    expect(canViewMyLeads(roster, 'other', false)).toBe(false);
+    expect(canViewMyLeads(roster, 'former', false)).toBe(false);
+    expect(canViewMyLeads(roster, 'missing', false)).toBe(false);
+  });
+
+  it('allows owners even without an acquisitions designation', () => {
+    expect(canViewMyLeads(roster, 'owner', true)).toBe(true);
+    expect(canViewMyLeads({ ...roster, settings: { ...roster.settings, enabled: false } }, 'owner', true)).toBe(true);
   });
 
   it('hides the page when My Leads is disabled', () => {
-    expect(canViewMyLeads({ ...roster, settings: { ...roster.settings, enabled: false } }, 'acquisitions')).toBe(false);
+    expect(canViewMyLeads({ ...roster, settings: { ...roster.settings, enabled: false } }, 'acquisitions', false)).toBe(false);
   });
 });
