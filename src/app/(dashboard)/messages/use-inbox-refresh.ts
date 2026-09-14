@@ -98,7 +98,12 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
     };
     // Re-runs the same gate at fire time (visibility/scope may have changed
     // since the timer was armed) and stamps only if it actually dispatches.
+    // Defensive no-op: if a leading dispatch already cancelled this timer
+    // (cleared the ref) between it firing and this callback running, do
+    // nothing — window.clearTimeout should already prevent that, but this
+    // guards against relying on that alone.
     const fireTrailingAutoRefresh = () => {
+      if (autoRefreshTrailingTimer.current === null) return;
       autoRefreshTrailingTimer.current = null;
       if (refresh()) lastAutoRefreshAt.current = Date.now();
     };
@@ -109,7 +114,17 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
         // Leading edge: try to dispatch now. Stamp only on an actual
         // dispatch — a no-op (hidden/disabled/stale-scope/pin-mismatch)
         // must never burn the window for the next ambient event.
-        if (refresh()) lastAutoRefreshAt.current = now;
+        if (refresh()) {
+          lastAutoRefreshAt.current = now;
+          // A trailing timer can still be armed and overdue (its target
+          // fire time already passed) if this leading event's handler
+          // happens to run first — real event ordering doesn't guarantee
+          // an overdue timer callback runs before a same-tick focus/online
+          // listener. Left alone, that stale timer would fire right after
+          // this dispatch and double-hit the RPC inside what should be a
+          // fresh 10s window. Cancel it: this dispatch already covers it.
+          clearAutoRefreshTrailing();
+        }
         return;
       }
       // Inside the window. A hidden tab gets no trailing timer at all —

@@ -144,7 +144,51 @@ it("arms a single trailing refresh for a suppressed event and fires it at window
   }
 });
 
-it("collapses multiple suppressed events into the one armed trailing timer (no re-arm, no extension)", async () => {
+it("collapses multiple suppressed events into exactly one trailing timer — no re-arm, no extension (construction-count assertion)", async () => {
+  // A prior version of this test only asserted fetch-call timing, which a
+  // "clear + recreate with the same correctly-computed remaining delay"
+  // re-arm would pass by coincidence (same net fire time, extra timer
+  // churn under the hood). Astra flagged that as not mutation-sound. This
+  // asserts construction directly: exactly one setTimeout for the whole
+  // suppressed burst, zero clearTimeout calls (nothing was ever replaced).
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+  const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+  try {
+    fetchMock.mockResolvedValue(response(5));
+    renderHook(() => useInboxRefresh(initial, "filter=all", true));
+    act(() => { fireEvent.focus(window); }); // t=0: leading edge, dispatches
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    setTimeoutSpy.mockClear();
+    clearTimeoutSpy.mockClear();
+    act(() => { vi.advanceTimersByTime(5_000); }); // t=5
+    act(() => { fireEvent(window, new Event("online")); }); // arms the ONE trailing timer, for t=10
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+    act(() => { vi.advanceTimersByTime(1_000); }); // t=6
+    act(() => { fireEvent.focus(window); }); // suppressed — must create/cancel nothing
+    act(() => { vi.advanceTimersByTime(1_000); }); // t=7
+    act(() => { fireEvent(window, new Event("online")); }); // suppressed — must create/cancel nothing
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1); // still exactly one ever created
+    expect(clearTimeoutSpy).not.toHaveBeenCalled(); // never replaced
+    await act(async () => { vi.advanceTimersByTime(2_999); }); // t=9.999
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { vi.advanceTimersByTime(1); }); // t=10.000 — the ORIGINAL timer fires
+    expect(fetchMock).toHaveBeenCalledTimes(2); // exactly one trailing dispatch, not three
+  } finally {
+    setTimeoutSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+it("a leading dispatch cancels a pending trailing timer so it cannot also fire (no double dispatch)", async () => {
+  // Astra: a leading dispatch (e.g. focus at t=10.001) can run before an
+  // already-overdue trailing callback gets its turn on the event loop —
+  // real event ordering doesn't guarantee the timer fires first just
+  // because its target time passed first. Left uncancelled, that stale
+  // timer would fire right after and double-hit the RPC inside what
+  // should be a fresh window.
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
   try {
     fetchMock.mockResolvedValue(response(5));
@@ -153,16 +197,25 @@ it("collapses multiple suppressed events into the one armed trailing timer (no r
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     act(() => { vi.advanceTimersByTime(5_000); }); // t=5
-    act(() => { fireEvent(window, new Event("online")); }); // arms trailing for t=10
-    act(() => { vi.advanceTimersByTime(1_000); }); // t=6
-    act(() => { fireEvent.focus(window); }); // suppressed — must not re-arm
-    act(() => { vi.advanceTimersByTime(1_000); }); // t=7
-    act(() => { fireEvent(window, new Event("online")); }); // suppressed — must not extend
-    // If either had re-armed/extended, the window would now end after t=10.
-    await act(async () => { vi.advanceTimersByTime(2_999); }); // t=9.999
+    act(() => { fireEvent(window, new Event("online")); }); // suppressed — arms trailing for t=10
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    await act(async () => { vi.advanceTimersByTime(1); }); // t=10.000 — the ORIGINAL trailing timer fires
-    expect(fetchMock).toHaveBeenCalledTimes(2); // exactly one trailing dispatch, not three
+    // vi.setSystemTime moves only what Date.now() reports — the fake-timer
+    // engine's own scheduling clock (what actually fires callbacks) is
+    // untouched until advanceTimersByTime runs it forward. This reproduces
+    // the real race precisely: Date perceives t=10.001 (so the ambient
+    // gate's elapsed check takes the leading-edge branch), while the
+    // trailing callback's due point hasn't actually been reached by the
+    // scheduler yet — exactly like an overdue real setTimeout that hasn't
+    // had its macrotask turn when a focus handler runs first.
+    vi.setSystemTime(new Date(Date.now() + 5_001)); // Date now reads t=10.001
+    act(() => { fireEvent.focus(window); }); // leading edge per Date — must cancel the trailing timer
+    expect(fetchMock).toHaveBeenCalledTimes(2); // this dispatch
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    // Now let the scheduler's own clock actually reach the trailing timer's
+    // original due point (it was armed at internal t=5 for +5000ms). If it
+    // wasn't cancelled, it fires here.
+    await act(async () => { vi.advanceTimersByTime(5_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(2); // NOT 3 — the stale trailing timer must not have fired
   } finally {
     vi.useRealTimers();
   }
