@@ -725,7 +725,8 @@ describe("<InboxDetail />", () => {
     expect(screen.getByTestId("inline-reply-send")).toBeEnabled();
   });
 
-  it("starts gated when the initial snapshot already contains a pending send", async () => {
+  it.each([false, true])("starts gated when the initial snapshot contains a pending send (focused=%s)", async focused => {
+    const revalidate = vi.fn();
     const user = userEvent.setup();
     const priorRoute = makeMessage({
       id: "initial-pending-prior-route",
@@ -763,7 +764,7 @@ describe("<InboxDetail />", () => {
       initialMessages: [priorRoute, pendingMessage],
     });
     const view = render(
-      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
+      <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" onRevalidate={focused ? revalidate : undefined} />,
     );
 
     await user.type(
@@ -786,11 +787,13 @@ describe("<InboxDetail />", () => {
       updateSubscription!.callback({ new: sentMessage });
     });
 
-    expect(refreshCalls.length).toBeGreaterThan(0);
+    if (focused) { expect(revalidate).toHaveBeenCalledOnce(); expect(refreshCalls).toHaveLength(0); }
+    else expect(refreshCalls.length).toBeGreaterThan(0);
     expect(screen.getByTestId("inline-reply-send")).toBeDisabled();
     view.rerender(
       <InboxDetail
         data={{ ...data, initialMessages: [priorRoute, sentMessage] }}
+        onRevalidate={focused ? revalidate : undefined}
         assigneeEmails={{}}
         currentUserId="user-1"
       />,

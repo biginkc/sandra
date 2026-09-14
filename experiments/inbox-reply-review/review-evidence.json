@@ -1,12 +1,12 @@
 {
   "sources": {
     "inbox-reply-boundary/context.sql": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
-    "inbox-reply-preparation/recipient.sql": "3740a1b620901bbf1d67f76926666d96884d62f1aa3c56c82e0a3ecff3cfd255",
+    "inbox-reply-preparation/recipient.sql": "90d1e6d24f954a7ae809962c8f7181a4f9a21b973303163c9655940e4c18cdf1",
     "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
-    "inbox-reply-review/setup.sql": "a0ad0f7b863b1f60ed6df10b4a08556e942d97efb40670cf1114c28079e70724",
+    "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
     "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772"
   },
-  "runner_sha256": "5e15dfb41748b6dfd7bb9a89bc31fd783cbdb7d1db63a5aeaa5c820aae64acb5",
+  "runner_sha256": "7e2a021991e3112124117922c88b7dd0c530f3c5850d5dd63bed6896895bb16c",
   "checks": [
     "authenticated public capture/freeze derives canonical personalized literal body and route; default admission closed",
     "same pair returns exact immutable snapshot after read update",

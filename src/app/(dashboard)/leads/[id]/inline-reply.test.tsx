@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,6 +25,25 @@ import { InlineReply } from "./inline-reply";
 describe("<InlineReply /> disabled explanations", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("notifies the Messages resource owner exactly once after a double keyboard send", async () => {
+    let finish!: (value: Awaited<ReturnType<typeof sendSmsFromLead>>) => void;
+    vi.mocked(sendSmsFromLead).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const onSent = vi.fn();
+    render(<InlineReply propertyId="property-1" homeownerContactId="contact-1" homeownerPhone="+18165550123" onSent={onSent} />);
+    const composer = screen.getByLabelText("Reply to this lead");
+    fireEvent.change(composer, { target: { value: "Owned test reply" } });
+    act(() => {
+      fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
+      fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
+    });
+    expect(sendSmsFromLead).toHaveBeenCalledOnce();
+    await act(async () => finish({ ok: true, data: { outcome: { status: "sent", messageId: "confirmed-message", externalId: "test-provider" } } } as Awaited<ReturnType<typeof sendSmsFromLead>>));
+    expect(onSent).toHaveBeenCalledExactlyOnceWith("confirmed-message");
+    expect(routerRefreshMock).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Reply to this lead")).toBe(composer);
+    expect(composer).toHaveValue("");
   });
 
   it("stacks the send control at narrow widths instead of forcing overflow", () => {

@@ -6,9 +6,10 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./cockpit-view";
+import { sendSmsFromLead } from "../leads/actions";
 import type { InboxFilterCounts } from "./inbox-filters";
 import type { InboxDetail as InboxDetailData } from "./inbox-detail-data";
 import type { Thread } from "@/lib/messages/list-threads";
@@ -57,6 +58,7 @@ vi.mock("./actions", () => ({
 }));
 
 vi.mock("../leads/actions", () => ({
+  markMessagesReadForThread: vi.fn(async () => ({ ok: true })),
   listFromNumbers: vi.fn(async () => ({ ok: true, data: [] })),
   sendSmsFromLead: vi.fn(),
   loadLeadVars: vi.fn(async () => ({ ok: true, data: {} })),
@@ -222,7 +224,11 @@ const baseProps = {
 };
 
 describe("<CockpitView /> URL deep-linking", () => {
+  afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
+    vi.mocked(sendSmsFromLead).mockReset();
+    window.history.replaceState(null, "", "/messages");
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
     navigationMocks.push.mockClear();
     navigationMocks.replace.mockClear();
     navigationMocks.refresh.mockClear();
@@ -232,6 +238,83 @@ describe("<CockpitView /> URL deep-linking", () => {
       ok: true,
       data: baseProps.queueStats,
     });
+  });
+
+  it.each(["send-first", "switch-first"])("keeps the shell and B draft through send A → select B (%s)", async order => {
+    navigationMocks.search = "thread=conv-a";
+    window.history.replaceState(null, "", "/messages?thread=conv-a");
+    let finishSend!: (value: Awaited<ReturnType<typeof sendSmsFromLead>>) => void;
+    vi.mocked(sendSmsFromLead).mockImplementationOnce(() => new Promise(resolve => { finishSend = resolve; }));
+    let finishA!: (value: Response) => void;
+    const response = (detail: InboxDetailData) => ({ ok: true, json: async () => ({ detail }) }) as Response;
+    vi.mocked(fetch).mockImplementation((input) => {
+      if (String(input).includes("thread-detail?thread=conv-b")) return Promise.resolve(response(makeDetail("b", "Message B")));
+      if (String(input).includes("thread-detail?thread=conv-a")) return new Promise(resolve => { finishA = resolve; });
+      return new Promise(() => {}); // Counts may be slower than selected detail.
+    });
+    render(<CockpitView {...baseProps} activeTab="inbox" threads={[makeThread({ contactId: "a" }), makeThread({ contactId: "b" })]}
+      selectedThreadId="conv-a" threadDetail={makeDetail("a", "Message A")} />);
+    const shell = screen.getByTestId("inbox-cockpit-grid");
+    const complete = async () => {
+      await act(async () => finishSend({ ok: true, data: { outcome: { status: "sent", messageId: "sent-a", externalId: "test-provider" } } } as Awaited<ReturnType<typeof sendSmsFromLead>>));
+    };
+    fireEvent.change(screen.getByLabelText("Reply to this lead"), { target: { value: "Owned synthetic reply A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    if (order === "send-first") await complete();
+    fireEvent.click(screen.getByTestId("inbox-thread-conv-b"));
+    await screen.findByText("Message B");
+    const composerB = screen.getByLabelText("Reply to this lead");
+    fireEvent.change(composerB, { target: { value: "Keep draft B" } });
+    if (order === "switch-first") await complete();
+    if (finishA) await act(async () => finishA(response(makeDetail("a", "Late A"))));
+    expect(screen.getByTestId("inbox-cockpit-grid")).toBe(shell);
+    expect(screen.getByLabelText("Reply to this lead")).toBe(composerB);
+    expect(composerB).toHaveValue("Keep draft B");
+    expect(screen.queryByText("Late A")).not.toBeInTheDocument();
+    expect(window.location.search).toContain("thread=conv-b");
+    expect(navigationMocks.refresh).not.toHaveBeenCalled();
+    expect(navigationMocks.replace).not.toHaveBeenCalled();
+    expect(sendSmsFromLead).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes the current Unread inbox scope when a send finishes after switching conversations", async () => {
+    navigationMocks.search = "filter=unread&thread=conv-a";
+    window.history.replaceState(null, "", "/messages?filter=unread&thread=conv-a");
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    let finishSend!: (value: Awaited<ReturnType<typeof sendSmsFromLead>>) => void;
+    vi.mocked(sendSmsFromLead).mockImplementationOnce(() => new Promise(resolve => { finishSend = resolve; }));
+    const threads = [makeThread({ contactId: "a", unreadCount: 1 }), makeThread({ contactId: "b", unreadCount: 1 })];
+    const inboxRefreshCalls: string[] = [];
+    let bDetailFetches = 0;
+    vi.mocked(fetch).mockImplementation((input) => {
+      const url = String(input);
+      if (url.includes("thread-detail?thread=conv-b")) { bDetailFetches += 1; return Promise.resolve({ ok: true, json: async () => ({ detail: makeDetail("b", "Message B") }) } as Response); }
+      if (url.includes("inbox-refresh?")) {
+        inboxRefreshCalls.push(url);
+        return Promise.resolve({ ok: true, json: async () => ({
+          page: { threads, counts: baseProps.filterCounts, hiddenCount: 0, degraded: false, page: 1, pageSize: 200, total: threads.length },
+          unknown: 0, dismissed: 0,
+        }) } as Response);
+      }
+      return new Promise(() => {});
+    });
+    render(<CockpitView {...baseProps} activeTab="inbox" filter="unread" threads={threads}
+      selectedThreadId="conv-a" threadDetail={makeDetail("a", "Message A")} />);
+    fireEvent.change(screen.getByLabelText("Reply to this lead"), { target: { value: "Owned synthetic reply A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByTestId("inbox-thread-conv-b"));
+    await screen.findByText("Message B");
+    await waitFor(() => expect(inboxRefreshCalls.some(url => url.includes("thread=conv-b"))).toBe(true));
+    const before = inboxRefreshCalls.length;
+    const bDetailBefore = bDetailFetches;
+    await act(async () => finishSend({ ok: true, data: { outcome: { status: "sent", messageId: "sent-a", externalId: "test-provider" } } } as Awaited<ReturnType<typeof sendSmsFromLead>>));
+    await waitFor(() => expect(inboxRefreshCalls.length).toBeGreaterThan(before));
+    expect(inboxRefreshCalls[inboxRefreshCalls.length - 1]).toContain("thread=conv-b");
+    // A's late result must never refetch B's detail (B's scroll/draft stay put).
+    expect(bDetailFetches).toBe(bDetailBefore);
+    expect(navigationMocks.refresh).not.toHaveBeenCalled();
   });
 
   it("activeTab='outbox' renders the Outbox tab as aria-selected (test 32)", () => {
@@ -270,6 +353,80 @@ describe("<CockpitView /> URL deep-linking", () => {
     );
   });
 
+  it("keeps an unsent draft mounted when its loaded conversation is clicked again", async () => {
+    const thread = makeThread({ contactId: "a" });
+    navigationMocks.search = `thread=${thread.threadId}`;
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
+    render(<CockpitView {...baseProps} activeTab="inbox" threads={[thread]}
+      selectedThreadId={thread.threadId} threadDetail={makeDetail("a", "Message A")} />);
+    const composer = screen.getByRole("textbox", { name: "Reply to this lead" });
+    fireEvent.change(composer, { target: { value: "Please keep this unsent draft" } });
+    fireEvent.click(screen.getByTestId(`inbox-thread-${thread.threadId}`));
+    await waitFor(() => {
+      expect(screen.getByRole("textbox", { name: "Reply to this lead" })).toBe(composer);
+      expect(composer).toHaveValue("Please keep this unsent draft");
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("inbox-detail-skeleton")).not.toBeInTheDocument();
+  });
+
+  it("opens destination detail immediately while a soft navigation still shows the origin browser address", async () => {
+    const thread = makeThread({ contactId: "b" });
+    navigationMocks.search = `thread=${thread.threadId}`;
+    window.history.replaceState(null, "", "/leads/prop-b");
+    render(<CockpitView {...baseProps} activeTab="inbox" threads={[thread]}
+      selectedThreadId={thread.threadId} threadDetail={makeDetail("b", "Destination thread B")} />);
+    expect(screen.getByTestId("inbox-detail-panel")).toHaveTextContent("Destination thread B");
+    expect(screen.queryByTestId("inbox-detail-empty")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("inbox-detail-loading")).not.toBeInTheDocument();
+    expect(screen.getByTestId("inbox-list-view")).toHaveClass("hidden");
+    expect(screen.getByTestId("inbox-detail-view")).toHaveClass("block");
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    expect(screen.getByTestId("inbox-detail-panel")).toHaveTextContent("Destination thread B");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("clears local detail during pagination instead of showing the previous server conversation", async () => {
+    const threadA = makeThread({ contactId: "a" });
+    const threadB = makeThread({ contactId: "b" });
+    navigationMocks.search = `thread=${threadA.threadId}`;
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
+    vi.mocked(fetch).mockResolvedValue({ ok: true, json: async () => ({ detail: makeDetail("b", "Message B") }) } as Response);
+    render(<CockpitView {...baseProps} activeTab="inbox" threads={[threadA, threadB]}
+      selectedThreadId={threadA.threadId} threadDetail={makeDetail("a", "Message A")}
+      inboxPageSize={2} inboxTotal={4} />);
+    fireEvent.click(screen.getByTestId(`inbox-thread-${threadB.threadId}`));
+    await waitFor(() => expect(screen.getByTestId("inbox-detail-panel")).toHaveTextContent("Message B"));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByTestId("inbox-detail-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("inbox-detail-panel")).not.toBeInTheDocument();
+    expect(navigationMocks.push).toHaveBeenCalledWith("/messages?inboxPage=2");
+    await waitFor(() => expect(screen.getByTestId("inbox-list-view")).toHaveClass("block"));
+  });
+
+  it.each(["page", "tab"] as const)("cancels a thread skeleton when %s navigation interrupts the click", async (destination) => {
+    const thread = makeThread({ contactId: "pending" });
+    const props = { ...baseProps, activeTab: "inbox" as const, threads: [thread], inboxPageSize: 1, inboxTotal: 2 };
+    const view = render(<CockpitView {...props} />);
+    // Keep both interactions in the same event turn, before the deferred
+    // pending-thread cleanup gets a chance to run.
+    act(() => {
+      fireEvent.click(screen.getByTestId(`inbox-thread-${thread.threadId}`));
+      fireEvent.click(destination === "page" ? screen.getByRole("button", { name: "Next" }) : screen.getByTestId("tab-outbox"));
+    });
+    navigationMocks.search = destination === "page" ? "inboxPage=2" : "tab=outbox";
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
+    view.rerender(<CockpitView {...props} activeTab={destination === "page" ? "inbox" : "outbox"} inboxPage={2} />);
+    if (destination === "tab") {
+      fireEvent.click(screen.getByTestId("tab-inbox"));
+      window.history.replaceState(null, "", "/messages");
+      view.rerender(<CockpitView {...props} />);
+    }
+    await waitFor(() => expect(screen.getByTestId("inbox-detail-empty")).toBeInTheDocument());
+    expect(screen.queryByTestId("inbox-detail-loading")).not.toBeInTheDocument();
+  });
+
   it("activeTab='inbox' renders the Inbox tab as aria-selected (baseline for test 32)", () => {
     render(<CockpitView {...baseProps} activeTab="inbox" />);
 
@@ -278,6 +435,33 @@ describe("<CockpitView /> URL deep-linking", () => {
 
     expect(inbox).toHaveAttribute("aria-selected", "true");
     expect(outbox).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("announces filter completion and releases results after new server props arrive", async () => {
+    const threadA = makeThread({ contactId: "a" });
+    const threadB = makeThread({ contactId: "b", unreadCount: 1 });
+    const view = render(<CockpitView {...baseProps} activeTab="inbox" threads={[threadA, threadB]} />);
+    fireEvent.click(screen.getByTestId("filter-unread"));
+    expect(screen.getByRole("status")).toHaveTextContent("Loading Unread messages");
+    expect(screen.getByTestId("inbox-filter-results")).toHaveAttribute("inert");
+    navigationMocks.search = "filter=unread";
+    window.history.replaceState(null, "", "/messages?filter=unread");
+    view.rerender(<CockpitView {...baseProps} activeTab="inbox" filter="unread" threads={[threadB]} />);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Unread messages loaded"));
+    expect(screen.getByTestId("inbox-filter-results")).not.toHaveAttribute("inert");
+    expect(screen.queryByTestId(`inbox-thread-${threadA.threadId}`)).not.toBeInTheDocument();
+    expect(screen.getByTestId(`inbox-thread-${threadB.threadId}`)).toBeInTheDocument();
+  });
+
+  it("announces DNC visibility completion after its server props arrive", async () => {
+    const view = render(<CockpitView {...baseProps} activeTab="inbox" />);
+    fireEvent.click(screen.getByTestId("dnc-toggle"));
+    expect(screen.getByRole("status")).toHaveTextContent("Updating DNC visibility");
+    navigationMocks.search = "hideDnc=0";
+    window.history.replaceState(null, "", "/messages?hideDnc=0");
+    view.rerender(<CockpitView {...baseProps} activeTab="inbox" hideDnc={false} />);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("DNC visibility updated"));
+    expect(screen.getByTestId("inbox-filter-results")).not.toHaveAttribute("inert");
   });
 
   it("implements roving tab focus and arrow-key activation", () => {
@@ -602,15 +786,15 @@ describe("<CockpitView /> URL deep-linking", () => {
 
     expect(screen.getByTestId("inbox-list-view")).toHaveClass("hidden");
     expect(screen.getByTestId("inbox-detail-view")).toHaveClass("block");
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(window.location.pathname + window.location.search).toBe(
       `/messages?filter=mine&hideDnc=0&thread=${thread.threadId}`,
-      { scroll: false },
     );
   });
 
   it("Back preserves URL context and returns focus to the selected row", async () => {
     navigationMocks.search =
       "tab=inbox&filter=unread&hideDnc=0&thread=conv-focus-thread";
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
     const thread = makeThread({
       contactId: "focus-thread",
       threadId: "conv-focus-thread",
@@ -633,11 +817,10 @@ describe("<CockpitView /> URL deep-linking", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "All conversations" }));
 
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(window.location.pathname + window.location.search).toBe(
       "/messages?tab=inbox&filter=unread&hideDnc=0",
-      { scroll: false },
     );
-    expect(navigationMocks.refresh).toHaveBeenCalled();
+    expect(navigationMocks.refresh).not.toHaveBeenCalled();
     await waitFor(() => {
       expect(screen.getByTestId(threadBTestId(thread.threadId))).toHaveFocus();
     });
@@ -646,6 +829,7 @@ describe("<CockpitView /> URL deep-linking", () => {
   it("lets a narrow stale thread URL return focus to the preserved conversation list", async () => {
     navigationMocks.search =
       "tab=inbox&filter=unread&hideDnc=0&thread=missing-thread";
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
     const thread = makeThread({ contactId: "still-visible" });
 
     render(
@@ -664,9 +848,8 @@ describe("<CockpitView /> URL deep-linking", () => {
     fireEvent.click(screen.getByRole("button", { name: "All conversations" }));
 
     expect(screen.getByTestId("inbox-list-view")).toHaveClass("block");
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(window.location.pathname + window.location.search).toBe(
       "/messages?tab=inbox&filter=unread&hideDnc=0",
-      { scroll: false },
     );
     await waitFor(() => {
       expect(screen.getByTestId(threadBTestId(thread.threadId))).toHaveFocus();
@@ -675,6 +858,7 @@ describe("<CockpitView /> URL deep-linking", () => {
 
   it("returns stale-thread focus to a filtered empty-list status", async () => {
     navigationMocks.search = "filter=escalated&thread=missing-thread";
+    window.history.replaceState(null, "", `/messages?${navigationMocks.search}`);
 
     render(
       <CockpitView
@@ -691,9 +875,8 @@ describe("<CockpitView /> URL deep-linking", () => {
     await waitFor(() => {
       expect(screen.getByTestId("inbox-empty")).toHaveFocus();
     });
-    expect(navigationMocks.replace).toHaveBeenCalledWith(
+    expect(window.location.pathname + window.location.search).toBe(
       "/messages?filter=escalated",
-      { scroll: false },
     );
   });
 

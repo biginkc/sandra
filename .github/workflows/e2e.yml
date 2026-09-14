@@ -96,7 +96,7 @@ jobs:
         if: success()
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
-        run: npx vitest run --config vitest.integration.config.ts supabase/migrations/20260914000000_esign_canary_lease.integration.test.ts
+        run: npx vitest run --config vitest.integration.config.ts supabase/migrations/20260914235900_esign_canary_lease.integration.test.ts
       - name: Destroy disposable E2E database
         if: always() && env.E2E_LOCAL_WORKDIR != ''
         run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup

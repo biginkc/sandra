@@ -1,6 +1,19 @@
 -- Owned candidate: authenticated capture and immutable reviewed literal bodies.
 -- The application renders templates between capture and freeze. Rendered bodies
 -- are user-authored message intent; routes and eligibility are always canonical.
+--
+-- P-GATE (HARD, binds accept/claim in PR-E and every later lane):
+--  1. freeze() stores draft->>'body' and draft->>'exclusion' VERBATIM. Both are
+--     operator-authored and reachable by direct RPC. Neither is a safety input.
+--  2. No content rule (identification/opt-out footer, approved-templates-only,
+--     banned content) may be enforced only in the TS renderer. If one exists it
+--     MUST be enforced from the frozen row at accept AND claim, in SQL/worker.
+--  3. Until such a rule exists the frozen body is sent verbatim, never
+--     re-rendered, never re-parsed as template syntax.
+--  4. A frozen exclusion is send-SUPPRESSION only: exclusion IS NOT NULL is
+--     terminal (no send, no revival). exclusion IS NULL is a precondition, never
+--     an authorization: accept/claim re-run destination_policy, deps, expiry,
+--     and recipient_limit() from canonical state (E4/D1/D5).
 BEGIN;
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
 DO $$ BEGIN IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM inbox_t2_fixture.identity WHERE marker='sandra-inbox-projection-t2-owned-synthetic') THEN RAISE EXCEPTION 'Owned fixture required';END IF; END $$;
@@ -72,7 +85,9 @@ BEGIN
  IF FOUND THEN
   IF existing.input_hash<>hash THEN RAISE EXCEPTION 'INBOX_REPLY_IDEMPOTENCY_MISMATCH';END IF;
   PERFORM inbox_action_api.authorize(o,u);
-  RETURN inbox_reply_review.view(existing);
+  -- B2: mark this a replay so the coordinator never compares the immutable
+  -- frozen items against a fresh render of a possibly-drifted dependency.
+  RETURN inbox_reply_review.view(existing)||jsonb_build_object('replayed',true);
  END IF;
  FOR target IN SELECT value FROM jsonb_array_elements(input->'targets') LOOP
   IF jsonb_typeof(target) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(target))<>2 OR NOT(target ?& ARRAY['kind','id']) OR target->>'kind' NOT IN ('conversation','unknown_sender_group') OR target->>'kind' IS NULL OR target->>'id' IS NULL THEN RAISE EXCEPTION 'Invalid reply target';END IF;
@@ -100,6 +115,7 @@ BEGIN
    IF reason IS NULL THEN
     SELECT value INTO draft FROM jsonb_array_elements(input->'drafts') WHERE (value->>'conversationId')::uuid=(target->>'id')::uuid;
     IF draft IS NULL OR draft->'dependencies' IS DISTINCT FROM capture->'dependencies' THEN RAISE EXCEPTION 'INBOX_REPLY_PREPARATION_CHANGED';END IF;
+--     Client-chosen rendering exclusion: subtractive only; see P-GATE header.
     reason:=draft->>'exclusion';
    END IF;
   END IF;
@@ -121,7 +137,7 @@ BEGIN
  -- drafts + template) for audit/debugging only; it is never read by the
  -- replay gate above, which compares input_hash (client intent) alone.
  INSERT INTO inbox_reply_review.preparations(id,org_id,requester_id,request_key,input_hash,canonical_input,items,expires_at) VALUES(gen_random_uuid(),o,u,k,hash,raw_input,items,expires) RETURNING * INTO prep;
- RETURN inbox_reply_review.view(prep);
+ RETURN inbox_reply_review.view(prep)||jsonb_build_object('replayed',false);
 END $$;
 REVOKE ALL ON ALL TABLES IN SCHEMA inbox_reply_review FROM PUBLIC,anon,authenticated,service_role;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_reply_review FROM PUBLIC,anon,authenticated,service_role;
