@@ -153,7 +153,7 @@ export function ConversationHistory(props: ConversationHistoryProps) {
     start();
     document.addEventListener("visibilitychange", start);
     return () => { controller.abort(); if (frame !== undefined) cancelAnimationFrame(frame); document.removeEventListener("visibilitychange", start); };
-  }, [data, visible, requestGeneration, transport, retry, onAccessLost, onUnavailable]);
+  }, [data, visible, requestGeneration, transport, retry, onAccessLost, onUnavailable, conversationId]);
   if (!data || !visible) return null;
   const status = readState?.boundary === data.readBoundary ? readState.status : "pending";
   if (status === "permission_lost" || revokedBoundary === data.readBoundary) return null;

@@ -12,6 +12,8 @@ const orgId = "00000000-0000-4000-8000-000000000001", userId = "00000000-0000-40
 const conversationId = "00000000-0000-4000-8000-000000000004";
 const identity = { orgId, userId, sessionId, accessEpoch: "1", expiresAt: Date.now() + 60000 };
 const row: WorkspaceRow = { target: { kind: "conversation", orgId, conversationId }, name: "Ada", context: "123 Oak", preview: "A real conversation", timeLabel: "Now", outcomeLabel: "Needs outcome", assignedLabel: "Unassigned" };
+const conversationId2 = "00000000-0000-4000-8000-000000000005";
+const row2: WorkspaceRow = { target: { kind: "conversation", orgId, conversationId: conversationId2 }, name: "Bea", context: "456 Pine", preview: "A second conversation", timeLabel: "Now", outcomeLabel: "Needs outcome", assignedLabel: "Unassigned" };
 let calls: string[];
 beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ x: 0, y: 0, left: 0, top: 0, width: 900, height: 600, right: 900, bottom: 600, toJSON: () => ({}) }));
@@ -99,6 +101,29 @@ it("removes a row on a benign 404 from the INITIAL detail load, instead of a gen
   await waitFor(() => expect(screen.queryByRole("checkbox", { name: "Select Ada" })).not.toBeInTheDocument());
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(screen.queryByText(/Your access has changed/)).not.toBeInTheDocument();
+});
+it("prunes selection (not just visibility) on item-scoped invalidation, so it neither lists in Review nor resurrects on the next load()", async () => {
+  await loaded();
+  act(() => state.callbacks!.onChange({ state: "live", rows: [row, row2] }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select Ada" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select Bea" }));
+  state.detailUnavailable = true;
+  fireEvent.click(screen.getByRole("button", { name: "Open Ada" }));
+  await waitFor(() => expect(screen.queryByRole("checkbox", { name: "Select Ada" })).not.toBeInTheDocument());
+  // The Review dialog reads the raw selection array directly (not the invalidatedIds-
+  // filtered list InboxWorkspace renders checkboxes from) — it must not still list Ada.
+  fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+  expect(screen.getByRole("dialog")).toHaveTextContent("1 selected conversations");
+  expect(screen.getByRole("dialog")).toHaveTextContent("Bea");
+  expect(screen.getByRole("dialog")).not.toHaveTextContent("Ada");
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  // A later load() clears invalidatedIds; Ada's pruned selection must not resurrect.
+  state.detailUnavailable = false;
+  fireEvent.click(screen.getByRole("button", { name: "Refresh view" }));
+  await waitFor(() => expect(state.replacements).toHaveLength(2));
+  act(() => state.callbacks!.onChange({ state: "live", rows: [row, row2] }));
+  expect(screen.getByRole("checkbox", { name: "Select Ada" })).not.toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "Select Bea" })).toBeChecked();
 });
 it("removes an authoritative tombstone from selection, detail and its revisit cache", async () => {
   await loaded();

@@ -31,6 +31,14 @@ it("clears displayed counts at canonical session expiry", async () => {
   expect(screen.queryByText("42")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Retry counts" })).toBeVisible();
 });
+it("surfaces a canonical 401/403 on counts as access loss, not a retryable count failure", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 403 })));
+  render(<InboxOverview identity={identity} />);
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Your access has changed"));
+  expect(screen.getAllByText("—")).toHaveLength(5);
+  expect(screen.queryByRole("button", { name: "Retry counts" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Reload overview" })).toBeVisible();
+});
 it("retries a failed independent count request", async () => {
   const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 503 })).mockResolvedValueOnce(Response.json({ accessEpoch: "1", asOf: new Date().toISOString(), counts: { all: 42 } }));
   vi.stubGlobal("fetch", fetcher);

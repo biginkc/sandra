@@ -43,13 +43,18 @@ export function InboxWorkspaceClient({ identity, initialFilter }: { identity: In
     sync.current?.revoke(); setSnapshot({ state: "permission_lost", rows: [] }); setBusy(false);
   }, [cache]);
   /** A single item-scoped denial (404): only this target is affected. Invalidate its
-   * cached detail and close its pane if it is the one currently open — do not touch
-   * the rest of the workspace or latch permission_lost. Stable across renders (a
-   * child effect keys off this reference — see conversation-history.tsx). */
+   * cached detail, prune it from selection the same way the sync adapter's authoritative
+   * onInvalidated does below (selected IDs must never silently become replacement rows,
+   * nor resurrect once invalidatedIds clears on the next load()), and close its pane if
+   * it is the one currently open — do not touch the rest of the workspace or latch
+   * permission_lost. Stable across renders (a child effect keys off this reference —
+   * see conversation-history.tsx). */
   const invalidateTarget = useCallback((target: WorkspaceTarget) => {
     const id = workspaceId(target);
     cache.invalidate("detail", id);
     setInvalidatedIds(previous => (previous.includes(id) ? previous : [...previous, id]));
+    setSelected(previous => previous.filter(value => value !== id));
+    setSelectionNames(previous => { if (!previous.has(id)) return previous; const next = new Map(previous); next.delete(id); return next; });
     if (activeOpen.current === id) { sequence.current++; activeOpen.current = null; setOpened(null); }
   }, [cache]);
   const unavailable = useCallback((conversationId: string) =>
