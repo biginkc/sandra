@@ -47,11 +47,26 @@ const MERGE_FIELDS: ReadonlyArray<{
 }> = [
   { name: "seller_name", label: "Seller name", type: "text" },
   { name: "property_address", label: "Property address", type: "text" },
+  { name: "agreement_date", label: "Agreement date", type: "date" },
   { name: "buyer_name", label: "Buyer name / entity", type: "text" },
   { name: "property_city", label: "Property city", type: "text" },
   { name: "property_state", label: "Property state", type: "text" },
   { name: "property_zip", label: "Property ZIP", type: "text" },
   { name: "legal_description", label: "Legal description", type: "text", multiline: true },
+  { name: "closing_agent_name", label: "Closing agent name", type: "text" },
+  { name: "closing_agent_phone", label: "Closing agent phone", type: "text" },
+  { name: "closing_agent_address", label: "Closing agent address", type: "text" },
+  { name: "due_diligence_days", label: "Due diligence business days", type: "text" },
+  { name: "access_days_per_week", label: "Property access days per week", type: "text" },
+  { name: "access_hours_per_visit", label: "Property access hours per visit", type: "text" },
+  { name: "offer_expiration", label: "Offer expiration date and time", type: "text" },
+  { name: "acceptance_date", label: "Acceptance date", type: "date" },
+  { name: "buyer_phone", label: "Buyer phone", type: "text" },
+  { name: "seller_phone", label: "Seller phone", type: "text" },
+  { name: "buyer_email", label: "Buyer email", type: "text" },
+  { name: "seller_email", label: "Seller email", type: "text" },
+  { name: "attorney_in_fact", label: "Attorney in fact", type: "text" },
+  { name: "release_date", label: "Conditional release date", type: "date" },
   { name: "earnest_money_holder", label: "Earnest money holder", type: "text" },
   { name: "cash_balance", label: "Cash balance", type: "text", placeholder: "$0.00" },
   { name: "additional_terms", label: "Additional terms (optional)", type: "text", multiline: true },
@@ -618,6 +633,13 @@ function defaultsFor(template: TemplateOption, preflight: LeadEsignPreflight): C
     const address = preflight.residentialAddress;
     return { ...values, property_address: address?.street ?? "",
       property_city: address?.city ?? "", property_state: address?.state ?? "", property_zip: address?.zip ?? "" };
+  }
+  if (schema.version === "novation-v1") {
+    return {
+      ...values,
+      property_state: preflight.residentialAddress?.state ?? "",
+      seller_email: preflight.sellerDefaults.emailAddress,
+    };
   }
   return values;
 }

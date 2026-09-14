@@ -82,9 +82,9 @@ export async function registerDropboxWebsiteTemplate(
     providerTemplateId: metadata.providerTemplateId,
     sellerRoleName: "Seller",
     signerRoles: ESIGN_TEMPLATE_SIGNER_ROLES,
-    mergeFieldNames: getEsignFieldSchema(metadata.documents.flatMap((document) =>
+    mergeFieldNames: getEsignFieldSchema([...new Set(metadata.documents.flatMap((document) =>
       document.customFields.filter((field) => field.assignedTo === "sender").map((field) => field.name ?? ""),
-    ))!.names,
+    ))])!.names,
   };
 }
 
@@ -263,12 +263,15 @@ function validateWebsiteProviderMetadata(
 
 function hasExactSenderMergeFields(fields: readonly ProviderTemplateField[]): boolean {
   const senderFields = fields.filter((field) => field.assignedTo === "sender");
-  const schema = getEsignFieldSchema(senderFields.map((field) => field.name ?? ""));
+  const names = senderFields.map((field) => field.name ?? "");
+  const schema = getEsignFieldSchema([...new Set(names)]);
   if (!schema) return false;
   return senderFields.every(isValidSenderMergeField) &&
+    fields.length === senderFields.length &&
+    (schema.version === "novation-v1" || names.length === schema.names.length) &&
     (schema.version !== "residential-v1" || senderFields.every((field) =>
       field.required === (field.name !== "additional_terms"))) &&
-    fields.filter((field) => schema.names.some((name) => name === field.name)).length === schema.names.length;
+    (schema.version !== "novation-v1" || senderFields.every((field) => field.required === true));
 }
 
 function isValidSenderMergeField(field: ProviderTemplateField): boolean {

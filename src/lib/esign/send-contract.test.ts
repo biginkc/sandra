@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ESIGN_MERGE_FIELD_NAMES,
   ESIGN_RESIDENTIAL_FIELD_NAMES,
+  ESIGN_NOVATION_FIELD_NAMES,
+  type EsignMergeValues,
   type DropboxSignProvider,
   type ProviderSignature,
   type TemplateOption,
@@ -298,5 +300,21 @@ describe("residential purchase contract", () => {
   it.each(["buyer_name", "legal_description", "cash_balance", "property_city"])("requires %s", async (name) => {
     await expect(sendContractWithTemplate(provider(), input({ template: residentialTemplate,
       mergeValues: { ...residentialValues, [name]: " " } }))).rejects.toThrow(/required residential/);
+  });
+});
+
+describe("novation packet", () => {
+  const novationTemplate = { ...template, documentType: "novation_agreement", mergeFieldNames: ESIGN_NOVATION_FIELD_NAMES };
+  const values = { ...mergeValues, ...Object.fromEntries(ESIGN_NOVATION_FIELD_NAMES.map((name) => [name, `${name} fixture`])) } as EsignMergeValues;
+
+  it("sends exactly the packet field set", async () => {
+    const adapter = provider();
+    await sendContractWithTemplate(adapter, input({ template: novationTemplate, mergeValues: values }));
+    expect(adapter.sendWithTemplate).toHaveBeenCalledWith(expect.objectContaining({ mergeValues: values }));
+  });
+
+  it("rejects a missing required packet value", async () => {
+    await expect(sendContractWithTemplate(provider(), input({ template: novationTemplate,
+      mergeValues: { ...values, attorney_in_fact: " " } }))).rejects.toThrow(/required novation packet/);
   });
 });

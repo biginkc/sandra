@@ -126,7 +126,9 @@ function assertExactMergeValues(
   )) {
     throw new ValidationError(schema?.version === "legacy-v1"
       ? "Complete the five required contract fields before sending."
-      : "Complete all required residential contract fields before sending.");
+      : schema?.version === "novation-v1"
+        ? "Complete all required novation packet fields before sending."
+        : "Complete all required residential contract fields before sending.");
   }
 }
 

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProviderError } from "@/lib/errors/classes";
 
-import { ESIGN_MERGE_FIELD_NAMES, ESIGN_RESIDENTIAL_FIELD_NAMES, type ProviderTemplateMetadata } from "./contracts";
+import { ESIGN_MERGE_FIELD_NAMES, ESIGN_NOVATION_FIELD_NAMES, ESIGN_RESIDENTIAL_FIELD_NAMES, type ProviderTemplateMetadata } from "./contracts";
 import {
   registerDropboxWebsiteTemplate,
   revalidateDropboxWebsiteTemplate,
@@ -152,6 +152,29 @@ describe("Dropbox website eSign template registration", () => {
     await expect(registerDropboxWebsiteTemplate({ orgId: "org-1", actorId: "user-1",
       providerTemplateId: "provider-template-1", name: "Residential", documentType: "Purchase agreement" }))
       .resolves.toMatchObject({ mergeFieldNames: ESIGN_RESIDENTIAL_FIELD_NAMES });
+  });
+
+  it("registers a novation template with repeated sender fields", async () => {
+    const data = metadata();
+    data.documents[0].customFields = [
+      ...ESIGN_NOVATION_FIELD_NAMES.map((name) => field(name, { required: true })),
+      field("property_address", { apiId: "property_address-again", required: true }),
+    ];
+    mocks.getTemplate.mockResolvedValue(data);
+    await expect(registerDropboxWebsiteTemplate({ orgId: "org-1", actorId: "user-1",
+      providerTemplateId: "provider-template-1", name: "Novation packet", documentType: "novation_agreement" }))
+      .resolves.toMatchObject({ mergeFieldNames: ESIGN_NOVATION_FIELD_NAMES });
+  });
+
+  it("rejects an optional novation sender field", async () => {
+    const data = metadata();
+    data.documents[0].customFields = ESIGN_NOVATION_FIELD_NAMES.map((name) =>
+      field(name, { required: name !== "release_date" }));
+    mocks.getTemplate.mockResolvedValue(data);
+    await expect(registerDropboxWebsiteTemplate({ orgId: "org-1", actorId: "user-1",
+      providerTemplateId: "provider-template-1", name: "Novation packet", documentType: "novation_agreement" }))
+      .rejects.toThrow(/supported Sandra contract field set/);
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 
   it("rejects residential required-flag drift", async () => {
