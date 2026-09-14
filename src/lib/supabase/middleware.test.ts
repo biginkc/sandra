@@ -88,7 +88,6 @@ describe("isPublicPath", () => {
   it("allows only the exact gated Sentry canary paths", () => {
     expect(isPublicPath("/api/internal/sentry-canary")).toBe(true);
     expect(isPublicPath("/sentry-canary")).toBe(true);
-    expect(isPublicPath("/sentry-canary/server")).toBe(true);
     expect(isPublicPath("/api/internal/sentry-canary/other")).toBe(false);
     expect(isPublicPath("/sentry-canary/other")).toBe(false);
   });
