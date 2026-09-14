@@ -1,0 +1,326 @@
+{
+  "capturedAt": "2026-09-12T05:58:30.744Z",
+  "evidenceKind": "read-only local database corroboration",
+  "properties": [
+    {
+      "id": "20000000-0000-4000-8000-000000000001",
+      "property": [
+        {
+          "id": "20000000-0000-4000-8000-000000000001",
+          "status": "under_contract",
+          "motivation_level": null,
+          "assigned_user_id": "10000000-0000-4000-8000-000000000003",
+          "outreach_dispo": null
+        }
+      ],
+      "queue": [
+        {
+          "property_id": "20000000-0000-4000-8000-000000000001",
+          "org_id": "00000000-0000-0000-0000-000000000bbb",
+          "stage": "under_contract",
+          "stage_entered_at": "2026-09-11T19:00:00.000Z",
+          "motivation_recorded": true,
+          "motivation_kind": "no_motivation",
+          "motivation_text": null,
+          "motivation_recorded_at": "2026-09-12T05:53:28.268Z",
+          "motivation_recorded_by": "10000000-0000-4000-8000-000000000003",
+          "archived_at": "2026-09-12T05:57:11.047Z",
+          "archived_by": "10000000-0000-4000-8000-000000000003",
+          "archive_reason": "under_contract_archived",
+          "version": "5",
+          "launch_cohort_id": null,
+          "launch_previous_shared_status": null,
+          "signed_at": "2026-09-11T19:00:00.000Z",
+          "signed_by": "10000000-0000-4000-8000-000000000003",
+          "created_at": "2026-09-12T05:52:21.724Z",
+          "updated_at": "2026-09-12T05:57:11.047Z"
+        }
+      ],
+      "attempts": [
+        {
+          "id": "cd495519-8461-46c5-8e81-9df052115fbd",
+          "org_id": "00000000-0000-0000-0000-000000000bbb",
+          "property_id": "20000000-0000-4000-8000-000000000001",
+          "assignment_episode_id": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d",
+          "actor_user_id": "10000000-0000-4000-8000-000000000003",
+          "attempt_kind": "outreach",
+          "source": "manual",
+          "outcome": "no_answer",
+          "occurred_at": "2026-09-11T17:00:00.000Z",
+          "recorded_at": "2026-09-12T05:52:21.724Z",
+          "note": null,
+          "recording_url": null,
+          "call_activity_id": null,
+          "provider_attempt_key": null,
+          "idempotency_key": "3bfd7def-5b1f-49e4-8d32-69973f0e0a0f",
+          "command_id": "faad70e6-c9f2-43fd-af96-7e52cd6a8d5e",
+          "created_at": "2026-09-12T05:52:21.724Z"
+        }
+      ],
+      "offers": [
+        {
+          "id": "dc26b03b-9f63-4a28-ae6b-bae2371d68c7",
+          "org_id": "00000000-0000-0000-0000-000000000bbb",
+          "property_id": "20000000-0000-4000-8000-000000000001",
+          "assignment_episode_id": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d",
+          "actor_user_id": "10000000-0000-4000-8000-000000000003",
+          "amount_cents": "1",
+          "sent_via": "dropbox_sign",
+          "sent_at": "2026-09-11T17:00:00.000Z",
+          "follow_up_at": "2026-09-11T18:00:00.000Z",
+          "outcome": "pending",
+          "outcome_at": null,
+          "outcome_by": null,
+          "idempotency_key": "4182c919-2239-48bd-877d-f5e0e92ce6f3",
+          "command_id": "1fc4d8fe-6159-4591-bd71-581eb9f568ca",
+          "created_at": "2026-09-12T05:54:18.313Z",
+          "updated_at": "2026-09-12T05:54:18.313Z",
+          "outcome_precedes_sent": null
+        }
+      ],
+      "episodes": [
+        {
+          "id": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d",
+          "org_id": "00000000-0000-0000-0000-000000000bbb",
+          "property_id": "20000000-0000-4000-8000-000000000001",
+          "assignee_user_id": "10000000-0000-4000-8000-000000000003",
+          "episode_kind": "live",
+          "eligible": true,
+          "assigned_at": "2026-09-12T05:49:09.574Z",
+          "initialized_at": "2026-09-12T05:49:09.574Z",
+          "ended_at": null,
+          "first_call_started_at": null,
+          "first_call_actor_user_id": null,
+          "first_call_activity_id": null,
+          "first_call_provider_key": null,
+          "launch_cohort_id": null,
+          "created_at": "2026-09-12T05:49:09.574Z"
+        }
+      ],
+      "commands": [
+        {
+          "operation": "log_acquisition_attempt",
+          "result": {
+            "ok": true,
+            "stage": "contacted",
+            "archived": false,
+            "attemptId": "cd495519-8461-46c5-8e81-9df052115fbd",
+            "duplicate": false,
+            "propertyId": "20000000-0000-4000-8000-000000000001",
+            "queueVersion": 1,
+            "assignmentEpisodeId": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d"
+          },
+          "created_at": "2026-09-12T05:52:21.724Z"
+        },
+        {
+          "operation": "ready_acquisition_offer",
+          "result": {
+            "ok": true,
+            "stage": "needs_offer",
+            "archived": false,
+            "duplicate": false,
+            "propertyId": "20000000-0000-4000-8000-000000000001",
+            "queueVersion": 2,
+            "assignmentEpisodeId": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d"
+          },
+          "created_at": "2026-09-12T05:53:28.267Z"
+        },
+        {
+          "operation": "log_acquisition_offer",
+          "result": {
+            "ok": true,
+            "stage": "offer_sent",
+            "offerId": "dc26b03b-9f63-4a28-ae6b-bae2371d68c7",
+            "archived": false,
+            "duplicate": false,
+            "propertyId": "20000000-0000-4000-8000-000000000001",
+            "queueVersion": 3,
+            "assignmentEpisodeId": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d"
+          },
+          "created_at": "2026-09-12T05:54:18.313Z"
+        },
+        {
+          "operation": "record_acquisition_contract",
+          "result": {
+            "ok": true,
+            "stage": "under_contract",
+            "archived": false,
+            "duplicate": false,
+            "propertyId": "20000000-0000-4000-8000-000000000001",
+            "queueVersion": 4,
+            "assignmentEpisodeId": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d"
+          },
+          "created_at": "2026-09-12T05:56:27.131Z"
+        },
+        {
+          "operation": "archive_acquisition_contract",
+          "result": {
+            "ok": true,
+            "stage": "under_contract",
+            "archived": true,
+            "duplicate": false,
+            "propertyId": "20000000-0000-4000-8000-000000000001",
+            "queueVersion": 5,
+            "assignmentEpisodeId": "a666a341-9be7-40dc-8c06-4b5f41dd6b3d"
+          },
+          "created_at": "2026-09-12T05:57:11.045Z"
+        }
+      ]
+    },
+    {
+      "id": "20000000-0000-4000-8000-000000000004",
+      "property": [
+        {
+          "id": "20000000-0000-4000-8000-000000000004",
+          "status": "offer_declined",
+          "motivation_level": "hot",
+          "assigned_user_id": "10000000-0000-4000-8000-000000000002",
+          "outreach_dispo": "needs_sequence"
+        }
+      ],
+      "queue": [
+        {
+          "property_id": "20000000-0000-4000-8000-000000000004",
+          "org_id": "00000000-0000-0000-0000-000000000bbb",
+          "stage": "offer_sent",
+          "stage_entered_at": "2026-09-12T05:49:09.659Z",
+          "motivation_recorded": true,
+          "motivation_kind": "specified",
+          "motivation_text": "Synthetic relocation",
+          "motivation_recorded_at": "2026-09-12T05:49:09.738Z",
+          "motivation_recorded_by": "10000000-0000-4000-8000-000000000003",
+          "archived_at": "2026-09-12T05:57:33.384Z",
+          "archived_by": "10000000-0000-4000-8000-000000000003",
+          "archive_reason": "needs_sequence_handoff",
+          "version": "2",
+          "launch_cohort_id": null,
+          "launch_previous_shared_status": null,
+          "signed_at": null,
+          "signed_by": null,
+          "created_at": "2026-09-12T05:49:09.737Z",
+          "updated_at": "2026-09-12T05:57:33.384Z"
+        }
+      ],
+      "attempts": [],
+      "offers": [
+        {
+          "id": "a4660b01-42c9-4799-b2c5-20a960e41a33",
+          "org_id": "00000000-0000-0000-0000-000000000bbb",
+          "property_id": "20000000-0000-4000-8000-000000000004",
+          "assignment_episode_id": "56573899-7959-40f4-a8e4-8c1aaafe680b",
+          "actor_user_id": "10000000-0000-4000-8000-000000000003",
+          "amount_cents": "12500000",
+          "sent_via": "verbal",
+          "sent_at": "2026-09-12T05:49:09.659Z",
+          "follow_up_at": "2026-09-12T06:49:09.659Z",
+          "outcome": "declined",
+          "outcome_at": "2026-09-11T19:00:00.000Z",
+          "outcome_by": "10000000-0000-4000-8000-000000000003",
+          "idempotency_key": "cc0f9e91-ee18-4a89-a0e2-4e70f5db661a",
+          "command_id": "a712c7b1-7e0b-4aca-8a76-497c76ff95e6",
+          "created_at": "2026-09-12T05:49:09.737Z",
+          "updated_at": "2026-09-12T05:57:33.384Z",
+          "outcome_precedes_sent": true
+        }
+      ],
+      "episodes": [
+        {
+          "id": "56573899-7959-40f4-a8e4-8c1aaafe680b",
+          "org_id": "00000000-0000-0000-0000-000000000bbb",
+          "property_id": "20000000-0000-4000-8000-000000000004",
+          "assignee_user_id": "10000000-0000-4000-8000-000000000003",
+          "episode_kind": "live",
+          "eligible": true,
+          "assigned_at": "2026-09-12T05:49:09.581Z",
+          "initialized_at": "2026-09-12T05:49:09.581Z",
+          "ended_at": "2026-09-12T05:57:33.384Z",
+          "first_call_started_at": null,
+          "first_call_actor_user_id": null,
+          "first_call_activity_id": null,
+          "first_call_provider_key": null,
+          "launch_cohort_id": null,
+          "created_at": "2026-09-12T05:49:09.581Z"
+        },
+        {
+          "id": "8b290ef8-3618-4169-8eb2-25b94ed4a112",
+          "org_id": "00000000-0000-0000-0000-000000000bbb",
+          "property_id": "20000000-0000-4000-8000-000000000004",
+          "assignee_user_id": "10000000-0000-4000-8000-000000000002",
+          "episode_kind": "live",
+          "eligible": false,
+          "assigned_at": "2026-09-12T05:57:33.384Z",
+          "initialized_at": "2026-09-12T05:57:33.384Z",
+          "ended_at": null,
+          "first_call_started_at": null,
+          "first_call_actor_user_id": null,
+          "first_call_activity_id": null,
+          "first_call_provider_key": null,
+          "launch_cohort_id": null,
+          "created_at": "2026-09-12T05:57:33.383Z"
+        }
+      ],
+      "commands": [
+        {
+          "operation": "log_acquisition_offer",
+          "result": {
+            "ok": true,
+            "stage": "offer_sent",
+            "offerId": "a4660b01-42c9-4799-b2c5-20a960e41a33",
+            "archived": false,
+            "duplicate": false,
+            "propertyId": "20000000-0000-4000-8000-000000000004",
+            "queueVersion": 1,
+            "assignmentEpisodeId": "56573899-7959-40f4-a8e4-8c1aaafe680b"
+          },
+          "created_at": "2026-09-12T05:49:09.737Z"
+        },
+        {
+          "operation": "decline_acquisition_offer",
+          "result": {
+            "ok": true,
+            "stage": "offer_sent",
+            "archived": true,
+            "duplicate": false,
+            "propertyId": "20000000-0000-4000-8000-000000000004",
+            "queueVersion": 2,
+            "assignmentEpisodeId": "56573899-7959-40f4-a8e4-8c1aaafe680b"
+          },
+          "created_at": "2026-09-12T05:57:33.383Z"
+        }
+      ]
+    }
+  ],
+  "globalCounts": {
+    "principals": 4,
+    "tasks": 0,
+    "sequence_enrollments": 0,
+    "esign_requests": 0
+  },
+  "checks": {
+    "contractSigned19Z": true,
+    "archivePreservesUnderContract": true,
+    "priorAttemptPreserved": true,
+    "priorOfferPreserved": true,
+    "declineStored": true,
+    "declineBeforeSent": true,
+    "declineAt19Z": true,
+    "declineReassignedToOwner": true,
+    "needsSequence": true,
+    "sharedOfferDeclined": true,
+    "handoffArchived": true,
+    "noAutomaticSideEffects": true,
+    "fourPrincipals": true
+  },
+  "finding": {
+    "severity": "P2",
+    "status": "confirmed persisted chronology defect",
+    "description": "Decline accepted before the offers sent_at, then atomically archived/reassigned the lead. Finite/nonfuture validation exists, but no lower bound against selected offer sent_at.",
+    "source": [
+      "supabase/migrations/20260912120000_acquisition_workflow_commands.sql:605",
+      "supabase/migrations/20260912120000_acquisition_workflow_commands.sql:631",
+      "supabase/migrations/20260912120000_acquisition_workflow_commands.sql:640",
+      "supabase/migrations/20260912090200_acquisition_attempt_offer_facts.sql:101"
+    ],
+    "scope": "Database corroborates parent browser report; no independent browser action here. Contract offer outcome is recorded as observed, not assumed."
+  }
+}

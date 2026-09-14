@@ -14,7 +14,7 @@ import {
   seedSenderCatalog,
 } from "@tests/integration/delivery";
 
-import { runSequenceTick } from "./route";
+import { runSequenceTick } from "./handlers";
 
 const supabase = createTestClient();
 

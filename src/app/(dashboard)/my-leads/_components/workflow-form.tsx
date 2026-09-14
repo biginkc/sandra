@@ -1,6 +1,6 @@
 "use client"
 
-import { useRef, useState, type ReactNode } from "react"
+import { createContext, useContext, useRef, useState, type ReactNode } from "react"
 import { AlertCircle } from "lucide-react"
 
 import {
@@ -15,6 +15,10 @@ import { cn } from "@/lib/utils"
 import { wallTimeToUtc } from "@/lib/time/zoned"
 import { ACQUISITION_TIME_ZONE } from "@/lib/my-leads/time"
 import type { AcquisitionFormSubmitResult, AcquisitionSubmit } from "./types"
+
+export const WorkflowRecoveryContext = createContext<{
+  message: string; blocked: boolean; busy: boolean; refresh: () => void
+} | null>(null)
 
 // Shared card shell to match the approved My Leads dialog mock: a 22px
 // rounded card (~420-440px) with a muted footer band. Spread this onto each
@@ -113,12 +117,13 @@ export function WorkflowDialogFooter({
   onCancel: () => void
   destructive?: boolean
 }) {
+  const recovery = useContext(WorkflowRecoveryContext)
   return (
     <DialogFooter className="rounded-b-[22px]">
       <Button type="button" variant="outline" disabled={submitting} onClick={onCancel}>
         Cancel
       </Button>
-      <Button type="submit" variant={destructive ? "destructive" : "default"} disabled={submitting}>
+      <Button type="submit" variant={destructive ? "destructive" : "default"} disabled={submitting || recovery?.blocked || recovery?.busy}>
         {submitting ? "Saving…" : submitLabel}
       </Button>
     </DialogFooter>
@@ -131,11 +136,12 @@ export function FieldError({ message, id }: { message?: string; id?: string }) {
 }
 
 export function WorkflowFormError({ message }: { message: string | null }) {
-  if (!message) return null
+  const recovery = useContext(WorkflowRecoveryContext)
+  if (!message && !recovery) return null
   return (
     <div className="flex items-start gap-2 rounded-[12px] border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">
       <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-      <span>{message}</span>
+      <span>{recovery?.message ?? message}{recovery?.blocked && <Button type="button" variant="link" disabled={recovery.busy} onClick={recovery.refresh}>{recovery.busy ? "Refreshing…" : "Refresh"}</Button>}</span>
     </div>
   )
 }

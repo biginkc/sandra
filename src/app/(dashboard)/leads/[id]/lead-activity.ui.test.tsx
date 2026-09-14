@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CallActivityRollupRow } from "./lead-call-summary";
@@ -230,4 +230,68 @@ describe("<LeadActivityTimeline /> with lead events", () => {
       "Activity did not load",
     );
   });
+});
+
+it("retains reached, rep note, actor and recording time inside one linked Sandra call", () => {
+  const attempt = {
+    kind: "attempt" as const,
+    id: "linked-attempt",
+    at: "2026-08-25T18:05:00.000Z",
+    actorId: "original-rep",
+    source: "sandra",
+    attemptKind: "call",
+    outcome: "reached",
+    note: "Seller wants a Friday callback",
+    recordingUrl: null,
+    callActivityId: "physical-call",
+  };
+  render(
+    <LeadActivityTimeline
+      propertyId="property-1"
+      contactId="contact-1"
+      initialMessages={[]}
+      initialNotes={[]}
+      initialEvents={[]}
+      initialCalls={[
+        {
+          id: "physical-call",
+          created_at: "2026-08-25T18:00:00.000Z",
+          started_at: "2026-08-25T18:00:00.000Z",
+          outcome: "completed",
+          disposition: null,
+          recording_status: "none",
+          transcript_status: "none",
+          summary_status: "none",
+          jitter_attempt_id: "attempt-provider",
+          jitter_session_id: "session-provider",
+          call_recordings: [],
+          call_transcripts: [],
+        } as CallActivityRollupRow,
+      ]}
+      initialAcquisitionHistory={{
+        ok: true,
+        page: { rows: [attempt], hasMore: false, cursor: null },
+      }}
+      messageError={null}
+      noteError={null}
+      callError={null}
+      eventError={null}
+      authorEmails={{ "original-rep": "original@example.test" }}
+      currentUserId="different-rep"
+      currentUserEmail={null}
+      jitterHost=""
+    />,
+  );
+  expect(screen.getAllByTestId("lead-activity-call")).toHaveLength(1);
+  const physicalCall = within(screen.getByTestId("lead-activity-call"));
+  expect(physicalCall.getByText("Reached")).toBeInTheDocument();
+  expect(
+    physicalCall.getByText("Seller wants a Friday callback"),
+  ).toBeInTheDocument();
+  expect(physicalCall.getByText(/original@example.test/)).toBeInTheDocument();
+  expect(
+    physicalCall
+      .getByTestId("lead-acquisition-attempt-linked-attempt")
+      .querySelector("time"),
+  ).toHaveAttribute("dateTime", attempt.at);
 });

@@ -353,7 +353,7 @@ function MyLeadStageSection({
       </button>
 
       <div id={`my-leads-rows-${stage}`} hidden={collapsed}>
-        {!collapsed && (
+        {/* Keep loaded rows mounted so collapsing a stage preserves local drafts. */}
           <div className="space-y-2">
             {page.totalCount > page.rows.length && (
               <p className="px-1 text-xs text-muted-foreground">
@@ -372,6 +372,7 @@ function MyLeadStageSection({
                     key={row.propertyId}
                     row={row}
                     detailsOpen={expandedIds.has(row.propertyId)}
+                    sectionVisible={!collapsed}
                     detailState={detailStates[row.propertyId]}
                     onToggleDetails={() => onToggleDetails(row.propertyId)}
                     onRetryDetails={() => onRetryDetails(row.propertyId)}
@@ -397,7 +398,6 @@ function MyLeadStageSection({
               </Button>
             )}
           </div>
-        )}
       </div>
     </section>
   )

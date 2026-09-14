@@ -130,6 +130,7 @@ const ACTIONS_BY_STAGE: Record<
 
 export type MyLeadQueueRowProps = {
   row: MyLeadQueueRow
+  sectionVisible?: boolean
   detailsOpen: boolean
   detailState?: MyLeadDetailState
   onToggleDetails: () => void
@@ -145,6 +146,7 @@ export type MyLeadQueueRowProps = {
 export function MyLeadQueueRow({
   row,
   detailsOpen,
+  sectionVisible = true,
   detailState,
   onToggleDetails,
   onRetryDetails,
@@ -238,7 +240,8 @@ export function MyLeadQueueRow({
       </button>
 
       <div id={`my-lead-detail-${row.propertyId}`} hidden={!detailsOpen}>
-      {detailsOpen && <>
+      {/* Retain loaded detail state through collapse without mounting unopened details. */}
+      {(detailsOpen || detailState?.status === "ready") && <>
       <div className="border-t border-[#f0eeec] pl-[33px] pr-[18px] pt-2 pb-[18px] dark:border-border">
         <p className="flex items-center gap-2 pt-2 text-sm text-muted-foreground"><Phone className="size-3.5" aria-hidden="true" />{row.phone || "Phone unavailable"}</p>
 
@@ -351,6 +354,7 @@ export function MyLeadQueueRow({
       </div>
 
       <MyLeadDetailPanel
+            visible={detailsOpen && sectionVisible}
             state={detailState ?? { status: "loading" }}
             onRetry={onRetryDetails}
             propertyId={row.propertyId}

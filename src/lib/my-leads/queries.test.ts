@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createClient } from '@supabase/supabase-js';
-const mocks=vi.hoisted(()=>({rpc:vi.fn(),getUser:vi.fn(),memberships:vi.fn(),from:vi.fn(),fetch:vi.fn()}));
+const mocks=vi.hoisted(()=>({rpc:vi.fn(),getUser:vi.fn(),memberships:vi.fn(),from:vi.fn(),fetch:vi.fn(),teamMembers:vi.fn()}));
 vi.mock('@/lib/supabase/server',()=>({createClient:async()=>({rpc:mocks.rpc,from:mocks.from,auth:{getUser:mocks.getUser}})}));
+vi.mock('@/lib/auth/team-roster',()=>({loadOrgTeamMembers:mocks.teamMembers}));
 vi.mock('@/lib/auth/memberships',()=>({getCallerMemberships:mocks.memberships}));
 import { getAcquisitionBadge,getAcquisitionDetail,getAcquisitionKpis,getAcquisitionQueue,getAcquisitionRoster } from './queries';
 beforeEach(()=>{
   vi.resetAllMocks();
+  mocks.teamMembers.mockResolvedValue([]);
   mocks.getUser.mockResolvedValue({data:{user:{id:'rep'}}});
   mocks.memberships.mockResolvedValue([{user_id:'rep',org_id:'org',role:'member'}]);
   mocks.rpc.mockResolvedValue({data:{stages:{}},error:null});
@@ -196,4 +198,32 @@ describe('acquisition text history',()=>{
     expect(mocks.rpc.mock.calls[0][1]).toMatchObject({p_group:'notes',p_cursor:otherId});
     expect(mocks.from).not.toHaveBeenCalled();
   });
+});
+
+describe('permitted detail historical identity labels',()=>{
+ it('resolves only actor IDs from authorized detail and returns display labels without roster expansion',async()=>{
+  mocks.rpc.mockResolvedValue({data:{groups:{notes:{rows:[{id:'note',actorId:'colleague',at:'2026-09-13T12:00:00Z',body:'History'}],cursor:null,hasMore:false}}},error:null});
+  mocks.teamMembers.mockResolvedValue([{id:'colleague',displayName:'Former colleague',email:'private@example.invalid'},{id:'unrelated',displayName:'Unrelated secret',email:'other@example.invalid'}]);
+  const result=await getAcquisitionDetail({memberId:'rep',propertyId:'allowed',group:'notes'});
+  expect(mocks.teamMembers).toHaveBeenCalledWith('org',{historicalAssigneeIds:['colleague'],allowMissingIdentityLabels:true});
+  expect(result.groups.notes?.rows[0]).toMatchObject({actorId:'colleague',actorLabel:'Former colleague'});
+  expect(JSON.stringify(result)).not.toContain('Unrelated secret');expect(JSON.stringify(result)).not.toContain('private@example.invalid');
+ });
+ it('never resolves identities when lead RPC denies access',async()=>{
+  mocks.rpc.mockResolvedValue({data:null,error:{code:'42501'}});
+  await expect(getAcquisitionDetail({memberId:'rep',propertyId:'foreign',group:'notes'})).rejects.toMatchObject({code:'FORBIDDEN'});
+  expect(mocks.teamMembers).not.toHaveBeenCalled();
+ });
+ it('rejects forged selected member before detail or identities',async()=>{
+  await expect(getAcquisitionDetail({memberId:'other',propertyId:'foreign',group:'history'})).rejects.toMatchObject({code:'FORBIDDEN'});
+  expect(mocks.rpc).not.toHaveBeenCalled();expect(mocks.teamMembers).not.toHaveBeenCalled();
+ });
+});
+
+it('keeps authorized history readable when a historical identity no longer has a label',async()=>{
+ mocks.rpc.mockResolvedValue({data:{groups:{notes:{rows:[{id:'retained',actorId:'removed',at:'2026-09-13T12:00:00Z',body:'Preserved history'}],cursor:null,hasMore:false}}},error:null});
+ mocks.teamMembers.mockResolvedValue([{id:'removed',displayName:null,email:null},{id:'unrelated',displayName:null,email:null}]);
+ const result=await getAcquisitionDetail({memberId:'rep',propertyId:'allowed',group:'notes'});
+ expect(mocks.teamMembers).toHaveBeenCalledWith('org',{historicalAssigneeIds:['removed'],allowMissingIdentityLabels:true});
+ expect(result.groups.notes?.rows).toEqual([{id:'retained',actorId:'removed',actorLabel:'Team member',at:'2026-09-13T12:00:00Z',body:'Preserved history'}]);
 });
