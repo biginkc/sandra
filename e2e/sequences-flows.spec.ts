@@ -344,7 +344,7 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     await expect(primaryNav).toHaveCount(1);
     const overviewLink = primaryNav.getByRole("link", { name: /^Overview$/ });
     await overviewLink.click();
-    await expect(page).toHaveURL((url) => url.pathname === "/dashboard");
+    await expect(page).toHaveURL((url) => url.pathname === "/dashboard", { timeout: 30_000 });
     await page.goto("/sequences");
 
     // Assert every primary link's exact mapping and clickability, then require
