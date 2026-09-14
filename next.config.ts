@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 import { withWorkflow } from "workflow/next";
+import { withSentryConfig } from "@sentry/nextjs/config";
 
 const nextConfig: NextConfig = {
   experimental: {
@@ -15,4 +16,7 @@ const nextConfig: NextConfig = {
 
 // withWorkflow wires the "use workflow" / "use step" directives into the
 // Next.js build. Required for the CSV import workflow runner.
-export default withWorkflow(nextConfig);
+export default withSentryConfig(withWorkflow(nextConfig), {
+  silent: true,
+  sourcemaps: { disable: !process.env.SENTRY_AUTH_TOKEN },
+});

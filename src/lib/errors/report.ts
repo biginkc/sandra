@@ -1,4 +1,5 @@
 import type { ErrorClass } from "./classes";
+import * as Sentry from "@sentry/nextjs";
 
 export type ReportContext = {
   errorClass?: ErrorClass;
@@ -8,7 +9,6 @@ export type ReportContext = {
 };
 
 export function reportError(err: unknown, context: ReportContext = {}): void {
-  // Swap to Sentry/Axiom/BetterStack when observability vendor is picked (risk #20).
   const payload = {
     message: err instanceof Error ? err.message : String(err),
     name: err instanceof Error ? err.name : "Unknown",
@@ -19,6 +19,13 @@ export function reportError(err: unknown, context: ReportContext = {}): void {
     extra: context.extra,
   };
   console.error("[reportError]", payload);
+  if (Sentry.getClient()) {
+    Sentry.withScope((scope) => {
+      if (context.errorClass) scope.setTag("errorClass", context.errorClass);
+      scope.setTag("surface", "handled");
+      Sentry.captureException(err instanceof Error ? err : new Error(String(err)));
+    });
+  }
 }
 
 export function reportInfo(message: string, context: ReportContext = {}): void {
