@@ -1,0 +1,86 @@
+
+> sandra@0.1.0 test:rtl
+> vitest run --config vitest.rtl.config.ts src/lib/coach/use-coach-session.test.tsx -t pre-call snapshot handoff
+
+
+ RUN  v4.1.5 /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup
+
+ ❯ src/lib/coach/use-coach-session.test.tsx (19 tests | 2 failed | 17 skipped) 14ms
+     ↓ hydrates prepared names during connecting, then subscribes without resetting the session
+     ↓ replaces a prior connecting identity synchronously when the session key changes
+     ↓ loads context once and exposes it as ready
+     ↓ uses only the successful authorized context for file-number identity
+     ↓ does not replace an absent authenticated rep with the prepared target rep
+     ↓ fills missing seller and address tokens from the already-prepared call target
+     ↓ keeps the trusted property context ahead of prepared-target fallbacks
+     ↓ does not turn a manual-dial phone-number label into a homeowner token
+     ↓ replaces prepared-target fallbacks when a second call starts
+     ↓ moves to error state when context loading rejects, and retryContext re-fetches
+     ↓ tracks valid branch-variant and section-path selections
+     ↓ owns manual section navigation independently of realtime state
+     ↓ supports deliberate phase jumps through the phase's first manual section
+     ↓ ignores an unknown section id instead of stranding navigation
+     ↓ resets context, branch overrides, and manual section for a new callId
+     ↓ setEntryField dispatches into the underlying reducer state
+     ↓ does nothing when callId is null
+     × seeds branches and prepared values on first paint, freezes file identity, and preserves live clears through retry 11ms
+     × replaces all prepared values and branches for a new session before effects run 2ms
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 17 skipped (19)
+   Start at  08:02:26
+   Duration  492ms (transform 88ms, setup 64ms, import 103ms, tests 14ms, environment 237ms)
+
+(node:15733) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+stderr | src/lib/coach/use-coach-session.test.tsx > pre-call snapshot handoff > seeds branches and prepared values on first paint, freezes file identity, and preserves live clears through retry
+An update to TestComponent inside a test was not wrapped in act(...).
+
+When testing, code that causes React state updates should be wrapped into act(...):
+
+act(() => {
+  /* fire events that update state */
+});
+/* assert on the output */
+
+This ensures that you're testing the behavior the user would see in the browser. Learn more at https://react.dev/link/wrap-tests-with-act
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/coach/use-coach-session.test.tsx > pre-call snapshot handoff > seeds branches and prepared values on first paint, freezes file identity, and preserves live clears through retry
+AssertionError: expected {} to match object { Opener: 'fsbo', Entry: 'vacant' }
+
+- Expected
++ Received
+
+- {
+-   "Entry": "vacant",
+-   "Opener": "fsbo",
+- }
++ {}
+
+ ❯ src/lib/coach/use-coach-session.test.tsx:501:44
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/lib/coach/use-coach-session.test.tsx > pre-call snapshot handoff > replaces all prepared values and branches for a new session before effects run
+AssertionError: expected undefined to be 'sms' // Object.is equality
+
+- Expected:
+"sms"
+
++ Received:
+undefined
+
+ ❯ src/lib/coach/use-coach-session.test.tsx:518:51
+    516|     rerender({key:'B',prepared:{...setup,edits:{...setup.edits,seller_…
+    517|     expect(result.current.tokenOverrides).toMatchObject({seller_name:'…
+    518|     expect(result.current.branchOverrides.Opener).toBe('sms');
+       |                                                   ^
+    519|   });
+    520| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+

@@ -1,0 +1,14 @@
+2026-09-10 09:52:37.342 CDT [2349] LOG:  starting PostgreSQL 17.10 (Homebrew) on aarch64-apple-darwin24.6.0, compiled by Apple clang version 17.0.0 (clang-1700.6.4.2), 64-bit
+2026-09-10 09:52:37.343 CDT [2349] LOG:  listening on IPv6 address "::1", port 55489
+2026-09-10 09:52:37.343 CDT [2349] LOG:  listening on IPv4 address "127.0.0.1", port 55489
+2026-09-10 09:52:37.344 CDT [2349] LOG:  listening on Unix socket "/tmp/sandra-precall-pg.yVHuO9/socket/.s.PGSQL.55489"
+2026-09-10 09:52:37.345 CDT [2354] LOG:  database system was shut down at 2026-09-10 09:52:37 CDT
+2026-09-10 09:52:37.346 CDT [2349] LOG:  database system is ready to accept connections
+2026-09-10 09:52:37.902 CDT [2420] FATAL:  role "postgres" does not exist
+2026-09-10 09:52:37.915 CDT [2349] LOG:  received fast shutdown request
+2026-09-10 09:52:37.915 CDT [2349] LOG:  aborting any active transactions
+2026-09-10 09:52:37.915 CDT [2349] LOG:  background worker "logical replication launcher" (PID 2357) exited with exit code 1
+2026-09-10 09:52:37.915 CDT [2352] LOG:  shutting down
+2026-09-10 09:52:37.916 CDT [2352] LOG:  checkpoint starting: shutdown immediate
+2026-09-10 09:52:37.916 CDT [2352] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.001 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=0/1518908, redo lsn=0/1518908
+2026-09-10 09:52:37.917 CDT [2349] LOG:  database system is shut down

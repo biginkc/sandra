@@ -169,8 +169,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   // knew and leaves only genuinely unavailable values as placeholders.
   const activeContext = contextLoad.context;
   const tokens: ResolvedTokens = useMemo(
-    () => resolveCoachTokens(activeContext, state.entryFields),
-    [activeContext, state.entryFields],
+    () => resolveCoachTokens(activeContext, state.entryFields, session.tokenOverrides),
+    [activeContext, state.entryFields, session.tokenOverrides],
   );
   const selectCtx: BranchSelectContext = useMemo(
     () => ({ leadSource: activeContext.leadSource, occupancy: activeContext.occupancy }),

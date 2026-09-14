@@ -1,0 +1,31 @@
+
+> sandra@0.1.0 test:e2e:synthetic
+> playwright test --config playwright.synthetic.config.ts precall-matrix.spec.ts --max-failures=1
+
+(node:18013) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+Running 15 tests using 1 worker
+
+(node:18017) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:18017) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(node:18017) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/synthetic/precall-matrix.spec.ts:111:5 › eight fictional profiles prepare without dialing and keep separate edits (3.8s)
+  ✓   2 e2e/synthetic/precall-matrix.spec.ts:179:7 › 100 deterministic setup cycles, seed 515 (52.2s)
+  ✓   3 e2e/synthetic/precall-matrix.spec.ts:179:7 › 100 deterministic setup cycles, seed 20260910 (52.8s)
+  ✓   4 e2e/synthetic/precall-matrix.spec.ts:295:7 › profile 0: all selectors and 26 live sections forward/back (4.4s)
+  ✓   5 e2e/synthetic/precall-matrix.spec.ts:295:7 › profile 1: all selectors and 26 live sections forward/back (4.5s)
+  ✓   6 e2e/synthetic/precall-matrix.spec.ts:295:7 › profile 2: all selectors and 26 live sections forward/back (4.5s)
+  ✓   7 e2e/synthetic/precall-matrix.spec.ts:295:7 › profile 3: all selectors and 26 live sections forward/back (4.4s)
+  ✓   8 e2e/synthetic/precall-matrix.spec.ts:295:7 › profile 4: all selectors and 26 live sections forward/back (4.5s)
+  ✓   9 e2e/synthetic/precall-matrix.spec.ts:295:7 › profile 5: all selectors and 26 live sections forward/back (4.2s)
+  ✓  10 e2e/synthetic/precall-matrix.spec.ts:295:7 › profile 6: all selectors and 26 live sections forward/back (4.4s)
+  ✓  11 e2e/synthetic/precall-matrix.spec.ts:295:7 › profile 7: all selectors and 26 live sections forward/back (4.1s)
+  ✓  12 e2e/synthetic/precall-matrix.spec.ts:386:77 › setup layout and keyboard at 375x740 (672ms)
+  ✓  13 e2e/synthetic/precall-matrix.spec.ts:386:77 › setup layout and keyboard at 768x800 (701ms)
+  ✓  14 e2e/synthetic/precall-matrix.spec.ts:386:77 › setup layout and keyboard at 1280x480 (710ms)
+  ✓  15 e2e/synthetic/precall-matrix.spec.ts:386:77 › setup layout and keyboard at 1440x900 (828ms)
+
+  15 passed (2.5m)

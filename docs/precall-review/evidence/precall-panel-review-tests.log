@@ -1,0 +1,16 @@
+
+> sandra@0.1.0 test:rtl
+> vitest run --config vitest.rtl.config.ts src/components/softphone/precall-setup-panel.test.tsx --maxWorkers=1
+
+
+ RUN  v4.1.5 /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup
+
+(node:32749) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+ ✓ src/components/softphone/precall-setup-panel.test.tsx (4 tests) 329ms
+
+ Test Files  1 passed (1)
+      Tests  4 passed (4)
+   Start at  08:28:06
+   Duration  1.15s (transform 80ms, setup 117ms, import 228ms, tests 329ms, environment 403ms)
+

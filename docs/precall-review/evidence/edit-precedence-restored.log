@@ -1,0 +1,16 @@
+
+> sandra@0.1.0 test
+> vitest run src/lib/coach/precall-setup.test.ts -t preserves explicit blanks
+
+
+ RUN  v4.1.5 /Users/jarradhenry/Sites/BMH apps/Sandra-coach-precall-setup
+
+ ✓ src/lib/coach/precall-setup.test.ts (12 tests | 11 skipped) 2ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 11 skipped (12)
+   Start at  08:02:23
+   Duration  141ms (transform 55ms, setup 0ms, import 74ms, tests 2ms, environment 0ms)
+
+(node:15658) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)

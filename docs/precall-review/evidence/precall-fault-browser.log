@@ -1,0 +1,17 @@
+
+> sandra@0.1.0 test:e2e:synthetic
+> playwright test --config playwright.synthetic.config.ts precall-matrix.spec.ts --grep delayed A-B-A --max-failures=1
+
+(node:20413) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+Running 1 test using 1 worker
+
+(node:20421) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:20421) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(node:20421) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/synthetic/precall-matrix.spec.ts:417:5 › delayed A-B-A reads and failed retry cannot overwrite explicit edits (1.6s)
+
+  1 passed (4.3s)

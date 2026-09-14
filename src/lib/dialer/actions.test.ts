@@ -77,6 +77,8 @@ vi.mock("@/app/(dashboard)/messages/dispo-actions", () => ({ setOutreachDispo })
 import {
   completeSoftphoneCall,
   prepareLeadCall,
+  inspectLeadCall,
+  inspectManualCall,
   prepareManualCall,
 } from "./actions";
 
@@ -188,7 +190,12 @@ describe("prepareManualCall", () => {
       }),
     });
 
+    const replayResponses = [...responses];
+    await expect(inspectManualCall("+1 (816) 555-0123")).resolves.toMatchObject({ok:true});
+    expect(pausePropertyEnrollments).not.toHaveBeenCalled();
+    responses.push(...replayResponses);
     const result = await prepareManualCall("+1 (816) 555-0123");
+    expect(pausePropertyEnrollments).toHaveBeenCalledTimes(1);
 
     expect(result).toMatchObject({
       ok: true,
@@ -381,6 +388,8 @@ describe("prepareManualCall", () => {
     });
     pausePropertyEnrollments.mockResolvedValue(undefined);
 
+    await expect(inspectLeadCall(lead.id)).resolves.toMatchObject({ok:true});
+    expect(pausePropertyEnrollments).not.toHaveBeenCalled();
     await expect(prepareLeadCall(lead.id)).resolves.toMatchObject({
       ok: true,
       data: {

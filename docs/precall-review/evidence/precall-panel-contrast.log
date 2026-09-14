@@ -1,0 +1,17 @@
+
+> sandra@0.1.0 test:e2e:synthetic
+> playwright test --config playwright.synthetic.config.ts precall-matrix.spec.ts --grep empty-field hints --max-failures=1
+
+(node:21358) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+Running 1 test using 1 worker
+
+(node:21359) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:21359) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(node:21359) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/synthetic/precall-matrix.spec.ts:450:5 › setup text and empty-field hints meet 4.5:1 in all groups (686ms)
+
+  1 passed (1.9s)
