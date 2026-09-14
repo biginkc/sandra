@@ -96,25 +96,35 @@ class RepairStore:
         *,
         clock: Callable[[], float] | None = None,
         allowed_worktree_root: str | Path | None = None,
+        read_only: bool = False,
     ) -> None:
         self.path = str(path)
         self._uri = self.path.startswith("file:")
+        self.read_only = read_only
         self.clock = clock or time.time
         self.allowed_worktree_root = (
             Path(allowed_worktree_root).expanduser().resolve()
             if allowed_worktree_root
             else None
         )
-        if self.path != ":memory:":
+        if self.read_only and self.path == ":memory:":
+            raise ValueError("read-only repair store requires an existing database path")
+        if self.path != ":memory:" and not self.read_only:
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        if self.read_only:
+            resolved = Path(self.path).expanduser().resolve()
+            self.path = f"file:{resolved}?mode=ro"
+            self._uri = True
         self.db = sqlite3.connect(
             self.path, timeout=10, isolation_level=None, uri=self._uri
         )
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
-        self.db.execute("PRAGMA journal_mode = WAL")
+        if not self.read_only:
+            self.db.execute("PRAGMA journal_mode = WAL")
         self.db.execute("PRAGMA busy_timeout = 10000")
-        self._migrate()
+        if not self.read_only:
+            self._migrate()
 
     def close(self) -> None:
         self.db.close()

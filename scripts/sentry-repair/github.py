@@ -8,6 +8,7 @@ before a later, separately reviewed outbox publisher receives GitHub credentials
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -16,6 +17,8 @@ from store import RepairStore
 
 MARKER_VERSION = 1
 SAFE_TAG_NAMES = frozenset({"surface", "operation", "kind", "code"})
+SAFE_RELEASE = re.compile(r"[0-9a-fA-F]{7,64}\\Z")
+SAFE_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\\Z")
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,16 @@ def _safe_count(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if 0 <= parsed <= 10_000_000 else None
+
+
+def _safe_release(value: Any) -> str:
+    text = str(value or "")
+    return text if SAFE_RELEASE.fullmatch(text) else "unknown"
+
+
+def _safe_timestamp(value: Any) -> str:
+    text = str(value or "")
+    return text if SAFE_TIMESTAMP.fullmatch(text) else "unknown"
 
 
 def _safe_tags(payload: Mapping[str, Any]) -> dict[str, str]:
@@ -79,9 +92,9 @@ def _body(row: Mapping[str, Any]) -> str:
         "",
         f"- Sentry numeric issue ID: `{row['issue_number']}`",
         f"- Environment: `{row['environment']}`",
-        f"- Release: `{row['release'] or 'unknown'}`",
-        f"- First seen: `{row['first_seen'] or 'unknown'}`",
-        f"- Last seen: `{row['last_seen'] or 'unknown'}`",
+        f"- Release: `{_safe_release(row['release'])}`",
+        f"- First seen: `{_safe_timestamp(row['first_seen'])}`",
+        f"- Last seen: `{_safe_timestamp(row['last_seen'])}`",
         f"- Level: `{row['level']}`",
         f"- Controller generation: `{row['generation']}`",
     ]
@@ -89,7 +102,10 @@ def _body(row: Mapping[str, Any]) -> str:
         if value is not None:
             lines.append(f"- {label}: `{value}`")
     if tags:
-        lines.append("- Allowlisted diagnostic tags: " + ", ".join(f"`{key}={value}`" for key, value in sorted(tags.items())))
+        # Tag *values* are supplied by telemetry and can contain identifiers.
+        # The dry run names the fields that informed triage without publishing
+        # any of their values.
+        lines.append("- Allowlisted diagnostic fields present: " + ", ".join(f"`{key}`" for key in sorted(tags)))
     lines.extend([
         "",
         "This record intentionally excludes raw Sentry event data, request content, message content, and user or business identifiers.",
@@ -107,11 +123,17 @@ def github_dry_run(store: RepairStore, organization: str, project: str, environm
         raise ValueError("Sentry issue must be ingested before GitHub planning")
     source_key = f"{organization}/{project}/{environment}/{issue_number}"
     link = store.get_github_link(organization, project, environment, issue_number)
-    if link is not None:
+    if link is not None and link["status"] == "created" and link["html_url"]:
         return GitHubDryRun("linked", "durable current-generation link exists", source_key, int(row["generation"]), None, link["html_url"])
+    if link is not None:
+        return GitHubDryRun("reconcile", f"durable link is {link['status']}; publisher must read back before any create", source_key, int(row["generation"]), None, None)
+    if row["status"] == "resolved":
+        return GitHubDryRun("suppress", "Sentry issue is resolved", source_key, int(row["generation"]), None, None)
     if environment != "vercel-production":
         return GitHubDryRun("suppress", "non-production environment", source_key, int(row["generation"]), None, None)
     tags = _safe_tags(_payload(row))
-    if tags.get("kind") == "controlled" or tags.get("surface") == "preview_canary":
+    # A route name or one broad tag is not enough to hide a production
+    # incident. Both tags are required by the controlled-canary contract.
+    if tags.get("kind") == "controlled" and tags.get("surface") == "preview_canary":
         return GitHubDryRun("suppress", "verified controlled canary marker", source_key, int(row["generation"]), None, None)
     return GitHubDryRun("would_create", "unresolved production incident requires operator-approved publisher", source_key, int(row["generation"]), _body(row), None)

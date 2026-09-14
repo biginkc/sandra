@@ -4,6 +4,7 @@ import hashlib
 import os
 import sys
 import signal
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -431,19 +432,56 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(report.action, "would_create")
         self.assertEqual(before, after)
         self.assertIn("issue_id=501", report.body)
-        self.assertIn("surface=cron_sweep", report.body)
+        self.assertIn("`surface`", report.body)
         self.assertNotIn("customer@example.com", report.body)
         self.assertNotIn("private-value", report.body)
+        self.assertNotIn("release-1", report.body)
+
+    def test_read_only_store_never_creates_or_migrates_a_database(self):
+        missing = Path(self.tmp.name) / "missing-repair.db"
+        with self.assertRaises(sqlite3.OperationalError):
+            RepairStore(missing, read_only=True)
+        self.assertFalse(missing.exists())
 
     def test_github_dry_run_suppresses_only_explicit_controlled_canary(self):
         self.store.ingest_issues(
             "bmh-group", "sandra", "vercel-production",
-            [IssueInput(502, payload={"tags": [{"key": "kind", "value": "controlled"}]})],
+            [IssueInput(502, payload={"tags": [
+                {"key": "kind", "value": "controlled"},
+                {"key": "surface", "value": "preview_canary"},
+            ]})],
             cursor=None,
         )
         report = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 502)
         self.assertEqual(report.action, "suppress")
         self.assertIn("controlled canary", report.reason)
+
+    def test_github_dry_run_does_not_suppress_partial_canary_marker(self):
+        self.store.ingest_issues(
+            "bmh-group", "sandra", "vercel-production",
+            [IssueInput(503, payload={"tags": [
+                {"key": "kind", "value": "controlled"},
+                {"key": "surface", "value": "workflow"},
+            ]})],
+            cursor=None,
+        )
+        report = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 503)
+        self.assertEqual(report.action, "would_create")
+
+    def test_github_dry_run_suppresses_resolved_and_reconciles_unknown_link(self):
+        self.store.ingest_issues("bmh-group", "sandra", "vercel-production", [IssueInput(504)], cursor=None)
+        self.store.db.execute("UPDATE issues SET status='resolved' WHERE issue_number=504")
+        resolved = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 504)
+        self.assertEqual(resolved.action, "suppress")
+        self.store.db.execute("UPDATE issues SET status='new' WHERE issue_number=504")
+        self.store.db.execute(
+            """INSERT INTO github_links(
+               organization,project,environment,issue_number,generation,repository,status,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            ("bmh-group", "sandra", "vercel-production", 504, 1, "biginkc/sandra", "create_unknown", 1, 1),
+        )
+        unknown = github_dry_run(self.store, "bmh-group", "sandra", "vercel-production", 504)
+        self.assertEqual(unknown.action, "reconcile")
 
     def test_sentry_success_commits_terminal_cursor(self):
         client = PagingClient([

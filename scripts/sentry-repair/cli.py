@@ -185,7 +185,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.command == "claim" and args.mode != "observe" and not args.worktree_root:
         raise ValueError("--worktree-root or SANDRA_REPAIR_WORKTREE_ROOT is required for repair claims")
-    store = RepairStore(args.db, allowed_worktree_root=args.worktree_root)
+    store = RepairStore(
+        args.db,
+        allowed_worktree_root=args.worktree_root,
+        # A dry run must neither initialize nor migrate durable state.  An
+        # absent or unreadable database is therefore a fail-closed error.
+        read_only=args.command == "github-dry-run",
+    )
     try:
         if args.command == "init":
             print(json.dumps({"db": str(Path(args.db).expanduser())}))
