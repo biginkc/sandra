@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, open, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { chromium } from '@playwright/test';
-import { containerMime, extensionForMime } from './reliability-capture-format.mjs';
+import { validateCaptureSegments } from './reliability-capture-export-validation.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).map((part) => {
   const separator = part.indexOf('=');
@@ -95,36 +95,7 @@ try {
   if (capture.captureError) throw new Error('Named QA capture has a browser-side failure marker');
   if (capture.events.some((event) => ['error', 'unsupported', 'no_audio_track'].includes(event.kind)))
     throw new Error('Named QA capture contains a recorder or playback failure');
-  const segments = new Map();
-  for (const chunk of capture.chunks) {
-    if (!Number.isSafeInteger(chunk.segment) || chunk.segment < 1 ||
-        !Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1 ||
-        !Number.isSafeInteger(chunk.size) || chunk.size < 1) throw new Error('Invalid chunk metadata');
-    const ext = extensionForMime(chunk.mimeType);
-    if (!ext) throw new Error(`Unsupported capture MIME type: ${chunk.mimeType}`);
-    const previous = segments.get(chunk.segment) ?? {
-      next: 1, mimeType: chunk.mimeType, containerMime: containerMime(chunk.mimeType), ext,
-      mimeTypes: new Set(), chunks: [],
-    };
-    previous.mimeTypes.add(chunk.mimeType);
-    if (chunk.sequence !== previous.next || containerMime(chunk.mimeType) !== previous.containerMime)
-      throw new Error(`Missing, duplicate, or inconsistent chunk in segment ${chunk.segment}`);
-    previous.next += 1;
-    previous.chunks.push(chunk);
-    segments.set(chunk.segment, previous);
-  }
-  if ([...segments.keys()].some((segment, index) => segment !== index + 1))
-    throw new Error('Missing or noncontiguous capture segment');
-  for (const segment of segments.keys()) {
-    const events = capture.events.filter((event) => event.segment === segment);
-    if (events[0]?.kind !== 'started' || events.at(-1)?.kind !== 'stopped' ||
-        events.filter((event) => event.kind === 'started').length !== 1 ||
-        events.filter((event) => event.kind === 'stopped').length !== 1 ||
-        events[0].atMonotonicMs > events.at(-1).atMonotonicMs)
-      throw new Error(`Segment ${segment} has no ordered start/stop evidence`);
-    if (events.filter((event) => event.kind === 'chunk').length !== segments.get(segment).chunks.length)
-      throw new Error(`Segment ${segment} has mismatched chunk events`);
-  }
+  const segments = validateCaptureSegments(capture);
   const output = resolve(args.out);
   await mkdir(output, { recursive: false });
   const files = [];

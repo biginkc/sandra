@@ -1689,7 +1689,13 @@ export class JitterCallTransport implements CallTransport {
           void write.finally(() => pendingEvents.delete(write));
         },
         onSourceChange: () => {
-          if (isCurrent()) this.resegmentQaBrowserCapture(call, callId, audio, captureGeneration);
+          if (
+            this.qaCaptureGeneration === captureGeneration &&
+            this.callId === callId &&
+            this.remoteAudio === audio &&
+            !this.terminal &&
+            !this.hangupRequested
+          ) this.resegmentQaBrowserCapture(callId, audio, captureGeneration);
         },
       });
       if (capture) {
@@ -1728,18 +1734,15 @@ export class JitterCallTransport implements CallTransport {
   }
 
   private resegmentQaBrowserCapture(
-    call: TelnyxCallLike,
     callId: string,
     audio: HTMLAudioElement,
     captureGeneration: number,
   ): void {
     if (
       this.qaCaptureGeneration !== captureGeneration ||
-      this.currentCall !== call ||
       this.callId !== callId ||
       this.remoteAudio !== audio ||
       this.qaCaptureAudio !== audio ||
-      this.qaCaptureCall !== call ||
       this.terminal
     ) return;
     const capture = this.qaCaptureHandle;
@@ -1753,15 +1756,15 @@ export class JitterCallTransport implements CallTransport {
     void capture.stop().then(() => {
       if (
         this.qaCaptureGeneration === continuationGeneration &&
-        this.currentCall === call &&
         this.callId === callId &&
         this.remoteAudio === audio &&
         this.qaCaptureHandle === null &&
         this.qaCaptureAudio === null &&
         !this.terminal &&
         !this.hangupRequested &&
-        this.qaCaptureConfig
-      ) void this.startQaBrowserCapture(call, callId, audio, true);
+        this.qaCaptureConfig &&
+        this.currentCall
+      ) void this.startQaBrowserCapture(this.currentCall, callId, audio, true);
     }).catch((error) => {
       const config = this.qaCaptureConfig;
       if (!config) return;

@@ -18,6 +18,16 @@ class FakeRecorder extends EventTarget {
   }
 }
 
+class AutoStoppedRecorder extends FakeRecorder {
+  autoStopWithFinalChunk(blob: Blob): void {
+    this.state = "inactive";
+    setTimeout(() => {
+      this.chunk(blob);
+      this.dispatchEvent(new Event("stop"));
+    }, 0);
+  }
+}
+
 describe("browser playback capture", () => {
   it("reports unavailable playback capture instead of treating it as silence", () => {
     const events: BrowserCaptureEvent[] = [];
@@ -106,6 +116,25 @@ describe("browser playback capture", () => {
     expect(events.find((event) => event.kind === "error")?.detail).toBe("MediaRecorder error");
   });
 
+  it("waits for a final chunk and stop event after the recorder auto-stops", async () => {
+    const recorder = new AutoStoppedRecorder();
+    const events: BrowserCaptureEvent[] = [];
+    const chunks: Blob[] = [];
+    const audio = { captureStream: () => ({ getAudioTracks: () => [{}] }) } as unknown as HTMLAudioElement;
+    const handle = startBrowserPlaybackCapture({
+      audio,
+      recorderFactory: () => recorder as unknown as MediaRecorder,
+      onChunk: (chunk) => { chunks.push(chunk.blob); },
+      onEvent: (event) => events.push(event),
+    });
+    recorder.autoStopWithFinalChunk(new Blob(["final flush"]));
+
+    await handle?.stop();
+
+    expect(chunks).toHaveLength(1);
+    expect(events.map((event) => event.kind)).toEqual(["started", "chunk", "stopped"]);
+  });
+
   it("notifies the owner when the playback element swaps srcObject", async () => {
     vi.useFakeTimers();
     try {
@@ -129,6 +158,7 @@ describe("browser playback capture", () => {
       audioState.srcObject = {} as MediaStream;
       audioState.paused = true;
       audio.dispatchEvent(new Event("pause"));
+      recorder.chunk(new Blob(["queued final chunk"]));
       vi.advanceTimersByTime(250);
 
       expect(onSourceChange).toHaveBeenCalledTimes(1);

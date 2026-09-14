@@ -11,7 +11,11 @@ import type {
   JitterProxyResult,
 } from "./jitter-contract";
 import type { CaptureStore } from "./reliability-capture-store";
-import type { BrowserCaptureOptions } from "./reliability-browser-capture";
+import {
+  startBrowserPlaybackCapture,
+  type BrowserCaptureEvent,
+  type BrowserCaptureOptions,
+} from "./reliability-browser-capture";
 import { createReliabilityTimingSession } from "./reliability-timing";
 
 const CALL_TOKEN = "11111111-1111-4111-8111-111111111111";
@@ -87,6 +91,30 @@ class FakeCall {
   readonly unmuteAudio = vi.fn();
   readonly hold = vi.fn<() => Promise<unknown>>(async () => undefined);
   readonly unhold = vi.fn<() => Promise<unknown>>(async () => undefined);
+}
+
+class DeferredStopCaptureRecorder extends EventTarget {
+  state: RecordingState = "inactive";
+  stopRequested = false;
+
+  start(): void {
+    this.state = "recording";
+  }
+
+  stop(): void {
+    this.stopRequested = true;
+  }
+
+  finishStop(): void {
+    this.state = "inactive";
+    this.dispatchEvent(new Event("stop"));
+  }
+
+  chunk(blob: Blob): void {
+    const event = new Event("dataavailable") as BlobEvent;
+    Object.defineProperty(event, "data", { value: blob });
+    this.dispatchEvent(event);
+  }
 }
 
 function attachConnectedPeer(call: FakeCall): void {
@@ -436,6 +464,121 @@ describe("JitterCallTransport", () => {
     expect(captures[0].stop).toHaveBeenCalledTimes(1);
     expect(openStore).toHaveBeenCalledTimes(2);
     expect(stores[0].close).toHaveBeenCalledTimes(1);
+  });
+
+  it("transfers capture across a replacement Call after queued source teardown", async () => {
+    const firstEvents: BrowserCaptureEvent[] = [];
+    const secondEvents: BrowserCaptureEvent[] = [];
+    const firstStore: CaptureStore = {
+      writeChunk: vi.fn(async () => undefined),
+      writeEvent: vi.fn(async (event) => { firstEvents.push(event); }),
+      writeTiming: vi.fn(async () => undefined),
+      close: vi.fn(),
+    };
+    const secondStore: CaptureStore = {
+      writeChunk: vi.fn(async () => undefined),
+      writeEvent: vi.fn(async (event) => { secondEvents.push(event); }),
+      writeTiming: vi.fn(async () => undefined),
+      close: vi.fn(),
+    };
+    let openCount = 0;
+    const openStore = vi.fn(async () => {
+      openCount += 1;
+      return openCount === 1 ? firstStore : secondStore;
+    });
+    const recorders: DeferredStopCaptureRecorder[] = [];
+    const startCapture = vi.fn((options: BrowserCaptureOptions) => {
+      const recorder = new DeferredStopCaptureRecorder();
+      recorders.push(recorder);
+      return startBrowserPlaybackCapture({
+        ...options,
+        recorderFactory: () => recorder as unknown as MediaRecorder,
+        sourcePollIntervalMs: 1,
+      });
+    });
+    const harness = transportHarness({
+      openReliabilityCaptureStore: openStore,
+      startBrowserPlaybackCapture: startCapture,
+    });
+    const firstCall = new FakeCall();
+    firstCall.state = "active";
+    const replacementCall = new FakeCall() as FakeCall & { recoveredCallId: string };
+    replacementCall.id = "browser-leg-2";
+    replacementCall.state = "active";
+    replacementCall.recoveredCallId = firstCall.id;
+    const firstSource = {} as MediaStream;
+    const audioState = Object.assign(new EventTarget(), {
+      paused: false,
+      muted: false,
+      volume: 1,
+      srcObject: firstSource as MediaStream | null,
+      play: vi.fn(async () => undefined),
+      captureStream: () => ({ getAudioTracks: () => [{}] }),
+    });
+    const audio = audioState as unknown as HTMLAudioElement;
+    const internals = harness.transport as unknown as {
+      qaCaptureConfig: { runId: string };
+      currentCall: FakeCall;
+      currentCallId: string;
+      callId: string;
+      liveAt: number;
+      remoteAudio: HTMLAudioElement;
+      handleCallUpdate(call: FakeCall): void;
+      markAudioRecovered(call: FakeCall): Promise<boolean>;
+      clearRecoveryTimer(): void;
+      startQaBrowserCapture(call: FakeCall, callId: string, audio: HTMLAudioElement): Promise<void>;
+      stopQaBrowserCapture(): Promise<void>;
+      qaCaptureAudio: HTMLAudioElement | null;
+      qaCaptureCall: FakeCall | null;
+    };
+    internals.qaCaptureConfig = { runId: "qa_run_123" };
+    internals.currentCall = firstCall;
+    internals.currentCallId = firstCall.id;
+    internals.callId = "call-1";
+    internals.liveAt = harness.dependencies.now();
+    internals.remoteAudio = audio;
+
+    await internals.startQaBrowserCapture(firstCall, "call-1", audio);
+    expect(recorders).toHaveLength(1);
+    expect(recorders[0].state).toBe("recording");
+
+    // Telnyx can replace the SDK Call object while the same durable Sandra
+    // call is recovering. The media element is detached before its queued
+    // pause/final chunk callbacks run, so the old segment must retire without
+    // producing a false playback error.
+    audioState.srcObject = null;
+    audioState.paused = true;
+    internals.handleCallUpdate(replacementCall);
+    audio.dispatchEvent(new Event("pause"));
+    recorders[0].chunk(new Blob(["queued old segment"]));
+    await flush();
+    expect(recorders[0].stopRequested).toBe(true);
+    expect(internals.qaCaptureAudio).toBeNull();
+    expect(internals.qaCaptureCall).toBeNull();
+    expect(firstEvents.some((event) => event.detail === "remote playback paused")).toBe(false);
+
+    recorders[0].finishStop();
+    await flush();
+    await flush();
+    expect(recorders).toHaveLength(1);
+
+    // Recovery readiness is the only point at which a replacement segment is
+    // allowed to start. This prevents capture from binding to a detached or
+    // paused source while the old recorder is still flushing.
+    audioState.srcObject = {} as MediaStream;
+    audioState.paused = false;
+    await expect(internals.markAudioRecovered(replacementCall)).resolves.toBe(true);
+    await flush();
+    await flush();
+    expect(recorders).toHaveLength(2);
+    expect(recorders[1].state).toBe("recording");
+    expect(internals.qaCaptureCall).toBe(replacementCall);
+    expect(secondEvents.map((event) => event.kind)).toContain("started");
+
+    internals.clearRecoveryTimer();
+    const finalStop = internals.stopQaBrowserCapture();
+    recorders[1].finishStop();
+    await finalStop;
   });
 
   it("stops QA capture before SDK hangup can detach playback", async () => {

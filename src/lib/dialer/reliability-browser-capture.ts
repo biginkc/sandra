@@ -75,6 +75,13 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
   let sourceChangeNotified = false;
   let sourceMonitorTimer: ReturnType<typeof setInterval> | null = null;
   let playbackFaultReported = false;
+  let recorderStopObserved = false;
+  let resolveRecorderStop!: () => void;
+  const recorderStopped = new Promise<void>((resolve) => { resolveRecorderStop = resolve; });
+  recorder.addEventListener("stop", () => {
+    recorderStopObserved = true;
+    resolveRecorderStop();
+  }, { once: true });
   const sourceChanged = () => options.onSourceChange !== undefined && options.audio.srcObject !== sourceAtStart;
   const notifySourceChange = (): boolean => {
     if (!sourceChanged() || sourceChangeNotified) return false;
@@ -91,7 +98,11 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
     return true;
   };
   const reportPlaybackFault = () => {
-    if (stopRequested || notifySourceChange()) return;
+    // Once a source swap has been observed, the SDK may queue pause/error
+    // events behind the swap while the old recorder flushes its final chunk.
+    // Those playback faults belong to the retired segment; recorder errors
+    // remain unconditionally visible through the MediaRecorder listener.
+    if (stopRequested || sourceChangeNotified || notifySourceChange()) return;
     const fault = playbackFault();
     if (fault && !playbackFaultReported) {
       playbackFaultReported = true;
@@ -142,11 +153,13 @@ export function startBrowserPlaybackCapture(options: BrowserCaptureOptions): Bro
       stopRequested = true;
       if (sourceMonitorTimer !== null) clearInterval(sourceMonitorTimer);
       sourceMonitorTimer = null;
-      if (recorder.state !== "inactive") {
-        await new Promise<void>((resolve) => {
-          recorder.addEventListener("stop", () => resolve(), { once: true });
-          recorder.stop();
-        });
+      // The SDK/peer can stop a recorder before transport observes the
+      // teardown. State is already inactive in that case, but the final
+      // dataavailable/stop events can still be queued; the observer installed
+      // at construction keeps stopped after that final flush.
+      if (!recorderStopObserved) {
+        if (recorder.state !== "inactive") recorder.stop();
+        await recorderStopped;
       }
       await Promise.all([...pending]);
       for (const eventName of ["pause", "volumechange", "stalled", "error", "abort"])
