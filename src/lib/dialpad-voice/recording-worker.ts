@@ -45,6 +45,20 @@ export async function processDialpadRecording(options: {
       errorCode = "recording_identity_mismatch";
     } else {
       const segments = Array.isArray(call.recording_details) ? call.recording_details : [];
+      // Call Get may expose additional automatic segments after the signed
+      // recording event. Queue them before making this segment available so
+      // the owned-recording completeness read includes every known segment.
+      const additional = segments.map(object).filter((value) => value &&
+        value.recording_type === "admincallrecording" && id(value.id) &&
+        id(value.id) !== artifact.provider_recording_id && id(value.id)!.length <= 500);
+      if (additional.length > 0) {
+        const queued = await client.from("dialpad_recording_artifacts").upsert(additional.map((value) => ({
+          org_id: orgId, provider_call_id: artifact.provider_call_id,
+          provider_recording_id: id(value!.id)!, recording_kind: "admincallrecording",
+          intent_id: artifact.intent_id, status: "pending",
+        })), { onConflict: "org_id,provider_call_id,provider_recording_id", ignoreDuplicates: true });
+        if (queued.error) throw new Error("Additional recording queue unavailable");
+      }
       const segment = segments.map(object).find((value) => value && id(value.id) === artifact.provider_recording_id);
       if (!segment || segment.recording_type !== artifact.recording_kind) {
         errorCode = "recording_not_yet_available";

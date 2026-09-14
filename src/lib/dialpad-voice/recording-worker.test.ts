@@ -16,7 +16,7 @@ function fixture(callResponse?: Response, mediaResponse?: Response | ((url: stri
       writes.push({ path, body: JSON.parse(String(init?.body ?? "{}")) });
       if (path.endsWith("fn_claim_dialpad_recording")) return Response.json([{
         id: "artifact", org_id: "org", provider_call_id: "123", provider_recording_id: "segment",
-        recording_kind: "admincallrecording", status: "processing", lease_token: "lease", attempt_count: 1,
+        recording_kind: "admincallrecording", intent_id: "intent", status: "processing", lease_token: "lease", attempt_count: 1,
       }]);
       if (path.endsWith("fn_defer_dialpad_detail_budget")) return Response.json(null);
       if(path.endsWith('dialpad_voice_webhook_sources'))return Response.json({id:'source',org_id:'org',connection_id:'connection',connection_version:1});
@@ -67,6 +67,23 @@ describe("recording job orchestration", () => {
     vi.mocked(retainDialpadRecording).mockResolvedValueOnce({ ok: true, storagePath: "owned", verifiedAt: "now" });
     expect(await second.run()).toBe("available");
     expect(second.writes.map(r => r.path)).toEqual(["/rest/v1/rpc/fn_claim_dialpad_recording", "/rest/v1/dialpad_voice_event_inbox"]); // Storage helper owns availability CAS.
+  });
+  it("queues additional automatic segments from the verified call before retaining the claimed segment", async () => {
+    const h = fixture(Response.json({
+      call_id: "123", target: { id: "456", type: "User" },
+      recording_details: [
+        { id: "segment", recording_type: "admincallrecording", url: "https://dialpad.com/blob/adminrecording/segment" },
+        { id: "second", recording_type: "admincallrecording", url: "https://dialpad.com/blob/adminrecording/second" },
+        { id: "manual", recording_type: "callrecording", url: "https://dialpad.com/blob/callrecording/manual" },
+      ],
+    }), new Response(Buffer.from("RIFF0000WAVEdata"), { headers: { "content-type": "audio/wav" } }));
+    vi.mocked(retainDialpadRecording).mockResolvedValueOnce({ ok: true, storagePath: "owned", verifiedAt: "now" });
+    expect(await h.run()).toBe("available");
+    const queue = h.writes.find((write) => write.path.endsWith("dialpad_recording_artifacts"));
+    expect(queue?.body).toEqual([{
+      org_id: "org", provider_call_id: "123", provider_recording_id: "second",
+      recording_kind: "admincallrecording", intent_id: "intent", status: "pending",
+    }]);
   });
   it("downloads the matching signed-event URL instead of the stale Call Get URL", async () => {
     const fresh = "https://dialpad.com/secureblob/callrecording/segment?token=fresh";
