@@ -5,15 +5,16 @@
     "same-user other-session, wrong-conversation and unknown cursor denied",
     "anon/service_role direct execution denied",
     "late backdated arrival visible in older history but excluded from original acknowledgment",
-    "expired history cursor denied"
+    "expired history cursor denied",
+    "mutation control: fabricated cursor with matching session but a different session's boundary is rejected by the boundary.session_id/access_epoch clause; removing that clause lets it wrongly succeed, restoring it rejects again"
   ],
   "source_sha256": "8b44f376f75d2be90d54c0537a521985a2212137df74a0594feecb0b7b7e402b",
-  "runner_sha256": "54fad48e60ec48dd0a267069612fe8f6087293266fc31d817514f986e7260954",
+  "runner_sha256": "e13a58e6db39b2fc728e08ddaa7a52d94357d556203b6ee59a97cb7653369268",
   "first_page": {
-    "org_id": "080ea46a-e7d9-420f-ae32-ed89f449d04f",
+    "org_id": "cadb146f-a6bc-4472-985f-989158ef96d0",
     "history": [
       {
-        "id": "34e00e3a-7fcf-4b66-8ba2-d7c9b4f1b109",
+        "id": "77381778-bd68-43b5-85dc-f5ee7b0629ac",
         "body": "Synthetic history 153",
         "direction": "inbound",
         "read_at_raw": null,
@@ -21,23 +22,7 @@
         "inbound_revision": "153"
       },
       {
-        "id": "e47da90d-509c-45ae-85e9-f3bdd2bd0115",
-        "body": "Synthetic history 152",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.12305+00",
-        "inbound_revision": "152"
-      },
-      {
-        "id": "c55fa7ce-2d93-4218-b2ba-0e7f9ef79fe1",
-        "body": "Synthetic history 151",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.12305+00",
-        "inbound_revision": "151"
-      },
-      {
-        "id": "2ad6fa20-f02d-496b-bdc9-8fde44b30610",
+        "id": "e9252f8b-36d3-4739-b8ca-e43e50915f17",
         "body": "Synthetic history 150",
         "direction": "inbound",
         "read_at_raw": null,
@@ -45,7 +30,23 @@
         "inbound_revision": "150"
       },
       {
-        "id": "fe3fbb57-c93a-4ad1-83e7-83cb4ee9c453",
+        "id": "a5b4365e-5886-4ee9-9419-f890a8a8ab13",
+        "body": "Synthetic history 151",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12305+00",
+        "inbound_revision": "151"
+      },
+      {
+        "id": "94bbdc33-0e9c-4506-8eea-030887bc411e",
+        "body": "Synthetic history 152",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12305+00",
+        "inbound_revision": "152"
+      },
+      {
+        "id": "daf600a1-7b3a-4fe8-a588-721ac7b56bba",
         "body": "Synthetic history 147",
         "direction": "inbound",
         "read_at_raw": null,
@@ -53,7 +54,7 @@
         "inbound_revision": "147"
       },
       {
-        "id": "d3e2f6a7-7c4a-4aa7-86e8-4fd2c301a439",
+        "id": "979c4640-f850-4c66-891d-d608a7e04dac",
         "body": "Synthetic history 148",
         "direction": "inbound",
         "read_at_raw": null,
@@ -61,7 +62,7 @@
         "inbound_revision": "148"
       },
       {
-        "id": "aa6f3b8c-02bd-437b-b96a-6310998704c2",
+        "id": "06c25299-1d64-46a1-8f57-51653da0d6f0",
         "body": "Synthetic history 149",
         "direction": "inbound",
         "read_at_raw": null,
@@ -69,23 +70,7 @@
         "inbound_revision": "149"
       },
       {
-        "id": "f87ebf09-205e-481f-9486-37054770092a",
-        "body": "Synthetic history 144",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123048+00",
-        "inbound_revision": "144"
-      },
-      {
-        "id": "d25eff7a-a5f6-4610-86fb-68284b1ca164",
-        "body": "Synthetic history 145",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123048+00",
-        "inbound_revision": "145"
-      },
-      {
-        "id": "8ef8ad2b-c687-4f57-b481-a5bae29ce2e1",
+        "id": "f1244693-5781-40aa-8fd4-c9fc1ac2ff51",
         "body": "Synthetic history 146",
         "direction": "inbound",
         "read_at_raw": null,
@@ -93,23 +78,23 @@
         "inbound_revision": "146"
       },
       {
-        "id": "d92df4ed-9ad8-42a9-b561-ad98068b8ab8",
-        "body": "Synthetic history 142",
+        "id": "4fb2c043-7b32-46c5-ac5f-eedae9b4a47c",
+        "body": "Synthetic history 145",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123047+00",
-        "inbound_revision": "142"
+        "created_at_raw": "2026-09-01 12:00:00.123048+00",
+        "inbound_revision": "145"
       },
       {
-        "id": "87165dd2-b5a8-405a-b0e1-bab7e4c1a296",
-        "body": "Synthetic history 141",
+        "id": "32874a43-53fc-4a70-9b76-796e248e2638",
+        "body": "Synthetic history 144",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123047+00",
-        "inbound_revision": "141"
+        "created_at_raw": "2026-09-01 12:00:00.123048+00",
+        "inbound_revision": "144"
       },
       {
-        "id": "3469ae96-22c0-41b3-9212-c4b7a8de642e",
+        "id": "d9ec0af8-d517-4c1e-8a4a-43a4e05f4648",
         "body": "Synthetic history 143",
         "direction": "inbound",
         "read_at_raw": null,
@@ -117,23 +102,23 @@
         "inbound_revision": "143"
       },
       {
-        "id": "f15c7461-196f-44a4-915b-aab8664db7fa",
-        "body": "Synthetic history 138",
+        "id": "53017a10-06fd-4ff3-bb33-66f743d2ccc9",
+        "body": "Synthetic history 142",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123046+00",
-        "inbound_revision": "138"
+        "created_at_raw": "2026-09-01 12:00:00.123047+00",
+        "inbound_revision": "142"
       },
       {
-        "id": "a15a9a58-7003-4ffc-b526-8c10cb2effd4",
-        "body": "Synthetic history 139",
+        "id": "3d59f61c-ab67-48df-be2c-5462b06acee0",
+        "body": "Synthetic history 141",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123046+00",
-        "inbound_revision": "139"
+        "created_at_raw": "2026-09-01 12:00:00.123047+00",
+        "inbound_revision": "141"
       },
       {
-        "id": "7f5276e6-ca9c-4cf6-999d-61c8db3cc1a1",
+        "id": "f4b24cc1-4327-4aff-ad75-ddc68796d298",
         "body": "Synthetic history 140",
         "direction": "inbound",
         "read_at_raw": null,
@@ -141,7 +126,23 @@
         "inbound_revision": "140"
       },
       {
-        "id": "cb99fad0-4b54-4449-af50-1d28a128b98c",
+        "id": "907c5a9c-7fe2-492b-904e-3d830b4fd106",
+        "body": "Synthetic history 139",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123046+00",
+        "inbound_revision": "139"
+      },
+      {
+        "id": "22ebe892-06e5-4071-a866-74834e2393f3",
+        "body": "Synthetic history 138",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123046+00",
+        "inbound_revision": "138"
+      },
+      {
+        "id": "df4ed495-2168-44ca-b7b3-787cf0c4919c",
         "body": "Synthetic history 137",
         "direction": "inbound",
         "read_at_raw": null,
@@ -149,7 +150,7 @@
         "inbound_revision": "137"
       },
       {
-        "id": "0d8cd9a8-c54d-464c-bfa3-5e8e0aece94e",
+        "id": "cb5629d9-2c76-406c-9dad-ba6ecd51db2d",
         "body": "Synthetic history 135",
         "direction": "inbound",
         "read_at_raw": null,
@@ -157,7 +158,7 @@
         "inbound_revision": "135"
       },
       {
-        "id": "0a0d386b-aaae-400f-a319-2ed5d963b38f",
+        "id": "20d3052e-f543-45fd-886c-2d94ceffb33b",
         "body": "Synthetic history 136",
         "direction": "inbound",
         "read_at_raw": null,
@@ -165,23 +166,7 @@
         "inbound_revision": "136"
       },
       {
-        "id": "f8323234-63c4-496a-8db5-2f3a7b80efb1",
-        "body": "Synthetic history 133",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123044+00",
-        "inbound_revision": "133"
-      },
-      {
-        "id": "8a911563-01dc-4f7e-b4f0-db4e6288d98f",
-        "body": "Synthetic history 132",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123044+00",
-        "inbound_revision": "132"
-      },
-      {
-        "id": "5fc59ce3-13f2-4563-96ad-66b4a106bfa0",
+        "id": "9eaf4037-15f3-47a3-9dec-4e7ad0bdf4a7",
         "body": "Synthetic history 134",
         "direction": "inbound",
         "read_at_raw": null,
@@ -189,7 +174,23 @@
         "inbound_revision": "134"
       },
       {
-        "id": "c2672b7d-db34-41ca-a89e-3f5c74cb87dd",
+        "id": "99cf7eb0-4b3e-4a54-a3d7-ff2cec19885b",
+        "body": "Synthetic history 132",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123044+00",
+        "inbound_revision": "132"
+      },
+      {
+        "id": "2cde34b1-8551-4cf7-b7d2-6dc672ef26af",
+        "body": "Synthetic history 133",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123044+00",
+        "inbound_revision": "133"
+      },
+      {
+        "id": "66a249a1-4726-4b47-9a68-e163e130c549",
         "body": "Synthetic history 130",
         "direction": "inbound",
         "read_at_raw": null,
@@ -197,7 +198,7 @@
         "inbound_revision": "130"
       },
       {
-        "id": "2212b6f6-aa38-410a-b3a4-af6225398eb7",
+        "id": "519d6e84-90d3-4003-94bd-96e9b9b6a26d",
         "body": "Synthetic history 131",
         "direction": "inbound",
         "read_at_raw": null,
@@ -205,7 +206,7 @@
         "inbound_revision": "131"
       },
       {
-        "id": "1208aafa-337d-4461-80e3-161f3876842d",
+        "id": "34b9e489-a2d4-4541-9428-681b3d3a7add",
         "body": "Synthetic history 129",
         "direction": "inbound",
         "read_at_raw": null,
@@ -213,15 +214,7 @@
         "inbound_revision": "129"
       },
       {
-        "id": "eba7e64f-e284-408d-9ae2-8bb3b5cbdaa6",
-        "body": "Synthetic history 128",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123042+00",
-        "inbound_revision": "128"
-      },
-      {
-        "id": "bc1bba7d-8182-4d8a-9c94-fc6f83c39e1f",
+        "id": "a7ca9cca-b41f-4ed9-8889-597696a4e0b3",
         "body": "Synthetic history 126",
         "direction": "inbound",
         "read_at_raw": null,
@@ -229,7 +222,15 @@
         "inbound_revision": "126"
       },
       {
-        "id": "8035be0f-780f-4b21-8d64-b561e19039b0",
+        "id": "42b2438e-651e-4f64-956f-8c74031be1a7",
+        "body": "Synthetic history 128",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123042+00",
+        "inbound_revision": "128"
+      },
+      {
+        "id": "0983265d-44a7-4e7e-8ab2-587078ef350c",
         "body": "Synthetic history 127",
         "direction": "inbound",
         "read_at_raw": null,
@@ -237,7 +238,7 @@
         "inbound_revision": "127"
       },
       {
-        "id": "c602b7a4-1c2b-4521-af22-023a7beda7ac",
+        "id": "642d7328-0af5-45b9-a7e0-8d5c16ba6e13",
         "body": "Synthetic history 123",
         "direction": "inbound",
         "read_at_raw": null,
@@ -245,15 +246,7 @@
         "inbound_revision": "123"
       },
       {
-        "id": "30c0dbcc-fade-4c5c-9558-894157f31726",
-        "body": "Synthetic history 124",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123041+00",
-        "inbound_revision": "124"
-      },
-      {
-        "id": "2fb3481f-52ef-47f5-ade4-f7cc0949c094",
+        "id": "2ec282d5-f29d-42ce-a0f9-52963a55049c",
         "body": "Synthetic history 125",
         "direction": "inbound",
         "read_at_raw": null,
@@ -261,7 +254,15 @@
         "inbound_revision": "125"
       },
       {
-        "id": "e5c8b8dd-d78b-477b-b1b2-c620b7ca0aa5",
+        "id": "174f138d-2f73-48e4-a83b-98ea114a100d",
+        "body": "Synthetic history 124",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123041+00",
+        "inbound_revision": "124"
+      },
+      {
+        "id": "819568ba-11cd-4029-9c58-4c6356476bdd",
         "body": "Synthetic history 120",
         "direction": "inbound",
         "read_at_raw": null,
@@ -269,15 +270,7 @@
         "inbound_revision": "120"
       },
       {
-        "id": "72be5319-3577-409f-ab75-72ec6b978964",
-        "body": "Synthetic history 122",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.12304+00",
-        "inbound_revision": "122"
-      },
-      {
-        "id": "5c29872c-3318-4086-9ed6-3bcba0eb3e73",
+        "id": "5dde1705-9979-49d5-811e-2231fd9a3845",
         "body": "Synthetic history 121",
         "direction": "inbound",
         "read_at_raw": null,
@@ -285,7 +278,15 @@
         "inbound_revision": "121"
       },
       {
-        "id": "bdef8a7a-950a-481d-8d8c-589bff249d59",
+        "id": "33d99cd5-aad8-40d4-90c4-e74f56a2147c",
+        "body": "Synthetic history 122",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12304+00",
+        "inbound_revision": "122"
+      },
+      {
+        "id": "ebd2de54-b75e-4584-a3db-396fbe1e0d10",
         "body": "Synthetic history 119",
         "direction": "inbound",
         "read_at_raw": null,
@@ -293,7 +294,7 @@
         "inbound_revision": "119"
       },
       {
-        "id": "7135b9b5-9114-46d3-83f9-37d87bd0d2bb",
+        "id": "b7061ae9-45f7-46db-bd18-2ea9b9a2d64c",
         "body": "Synthetic history 118",
         "direction": "inbound",
         "read_at_raw": null,
@@ -301,7 +302,7 @@
         "inbound_revision": "118"
       },
       {
-        "id": "15517637-4cb9-42fc-a190-fcdb6fc5ac22",
+        "id": "af361584-5cf0-4f2f-9f6e-70b3e227efc6",
         "body": "Synthetic history 117",
         "direction": "inbound",
         "read_at_raw": null,
@@ -309,15 +310,7 @@
         "inbound_revision": "117"
       },
       {
-        "id": "e78cc144-6136-4048-a3d2-66e58c48f84f",
-        "body": "Synthetic history 114",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123038+00",
-        "inbound_revision": "114"
-      },
-      {
-        "id": "b2418fbf-9709-4e84-b5f5-07099901cebf",
+        "id": "5d6d61be-e654-4b82-8337-540a0f3da292",
         "body": "Synthetic history 115",
         "direction": "inbound",
         "read_at_raw": null,
@@ -325,7 +318,7 @@
         "inbound_revision": "115"
       },
       {
-        "id": "ac4ce614-c04a-426d-a61a-37a6de56d984",
+        "id": "5895d6f2-032d-4260-8266-c6c0ca03ae17",
         "body": "Synthetic history 116",
         "direction": "inbound",
         "read_at_raw": null,
@@ -333,7 +326,15 @@
         "inbound_revision": "116"
       },
       {
-        "id": "f35e69e4-c070-459d-88f1-f43b49b9af2f",
+        "id": "42371507-8925-48b7-bd5c-aa1f998749eb",
+        "body": "Synthetic history 114",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123038+00",
+        "inbound_revision": "114"
+      },
+      {
+        "id": "472c7a4b-be52-4053-b852-27c62a927fd5",
         "body": "Synthetic history 112",
         "direction": "inbound",
         "read_at_raw": null,
@@ -341,15 +342,7 @@
         "inbound_revision": "112"
       },
       {
-        "id": "ccbcb5e7-5f77-4cd5-805a-c383f458f903",
-        "body": "Synthetic history 111",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123037+00",
-        "inbound_revision": "111"
-      },
-      {
-        "id": "1defac8d-c94b-4255-858c-87be6dd59bf6",
+        "id": "35c0e885-b524-42db-8f4c-c7e133e1658c",
         "body": "Synthetic history 113",
         "direction": "inbound",
         "read_at_raw": null,
@@ -357,15 +350,15 @@
         "inbound_revision": "113"
       },
       {
-        "id": "fca5eb6e-ae50-43f2-82de-6df3945a309d",
-        "body": "Synthetic history 109",
+        "id": "14a36e34-942f-4c72-a3cd-9f4937ffdfa0",
+        "body": "Synthetic history 111",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123036+00",
-        "inbound_revision": "109"
+        "created_at_raw": "2026-09-01 12:00:00.123037+00",
+        "inbound_revision": "111"
       },
       {
-        "id": "f4edbd86-ad49-4a4b-a1be-635f0b2066f5",
+        "id": "c5fcbcd8-c236-4b3d-b116-131a86c47bf0",
         "body": "Synthetic history 110",
         "direction": "inbound",
         "read_at_raw": null,
@@ -373,7 +366,15 @@
         "inbound_revision": "110"
       },
       {
-        "id": "6165dd61-965a-4904-b3bf-38d81ec9aeaf",
+        "id": "9863d071-d75c-469e-9414-0048a4ec7a07",
+        "body": "Synthetic history 109",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123036+00",
+        "inbound_revision": "109"
+      },
+      {
+        "id": "1ca6318c-1a12-4298-80d9-d4d79744c968",
         "body": "Synthetic history 108",
         "direction": "inbound",
         "read_at_raw": null,
@@ -381,23 +382,7 @@
         "inbound_revision": "108"
       },
       {
-        "id": "c2384a66-97f6-4afb-bc6d-b2d3361d37e9",
-        "body": "Synthetic history 107",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123035+00",
-        "inbound_revision": "107"
-      },
-      {
-        "id": "69c828d8-c88b-4ad4-bd9e-28ffd2e26435",
-        "body": "Synthetic history 106",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123035+00",
-        "inbound_revision": "106"
-      },
-      {
-        "id": "2b8d12f3-ee9b-4298-b22b-dd3c3145636f",
+        "id": "841ace1d-f007-46c2-ac19-3a88d45daa4c",
         "body": "Synthetic history 105",
         "direction": "inbound",
         "read_at_raw": null,
@@ -405,27 +390,43 @@
         "inbound_revision": "105"
       },
       {
-        "id": "a52dd0dd-10c6-4291-adff-745ea6d37cce",
-        "body": "Synthetic history 103",
+        "id": "779deb58-ded3-443f-9ce9-12e4720e3410",
+        "body": "Synthetic history 107",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123035+00",
+        "inbound_revision": "107"
+      },
+      {
+        "id": "2be8eec5-de7b-4585-ba56-627696bed8d0",
+        "body": "Synthetic history 106",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123035+00",
+        "inbound_revision": "106"
+      },
+      {
+        "id": "e3d0d79d-d704-49b0-a75a-5345d3508597",
+        "body": "Synthetic history 104",
         "direction": "inbound",
         "read_at_raw": null,
         "created_at_raw": "2026-09-01 12:00:00.123034+00",
-        "inbound_revision": "103"
+        "inbound_revision": "104"
       }
     ],
-    "next_cursor": "228f2c3f-0dce-49f7-9a1b-5e0b9756df79",
-    "requester_id": "9c8c97d0-154e-4de9-bd3d-c820ae7d2d24",
+    "next_cursor": "930a5fe3-eae5-4c17-8432-26b7867c1f65",
+    "requester_id": "8fb19b5b-99e2-46b6-8b4d-33ff3520c5d2",
     "head_revision": "153",
-    "read_boundary": "57330e82-df1b-416b-8f52-35df1107d17c",
-    "conversation_id": "e1ef9d50-1fa3-43a0-b3de-596b0be3e71d",
+    "read_boundary": "5b55052b-4736-441a-b9c5-0f0bffda2d14",
+    "conversation_id": "966b4905-55aa-46ba-afbf-fd4bc964d819",
     "capture_generation": "9788de28-dfa7-46af-80e0-409f7c383ca1",
-    "boundary_expires_at": "2026-09-14T03:43:21.19256+00:00"
+    "boundary_expires_at": "2026-09-14T04:09:01.531391+00:00"
   },
   "second_page": {
-    "org_id": "080ea46a-e7d9-420f-ae32-ed89f449d04f",
+    "org_id": "cadb146f-a6bc-4472-985f-989158ef96d0",
     "history": [
       {
-        "id": "a29ea2eb-2290-4949-9e9e-2345ece24e30",
+        "id": "765b3f57-1b63-436c-8672-27a06c2e723e",
         "body": "Synthetic history 102",
         "direction": "inbound",
         "read_at_raw": null,
@@ -433,23 +434,15 @@
         "inbound_revision": "102"
       },
       {
-        "id": "57a1df95-a445-49af-85e9-50f58fa0b285",
-        "body": "Synthetic history 104",
+        "id": "527984ac-92bc-4bf7-9575-69365f12ff2e",
+        "body": "Synthetic history 103",
         "direction": "inbound",
         "read_at_raw": null,
         "created_at_raw": "2026-09-01 12:00:00.123034+00",
-        "inbound_revision": "104"
+        "inbound_revision": "103"
       },
       {
-        "id": "c52d6acc-69e4-4564-819c-94de3a547e11",
-        "body": "Synthetic history 99",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123033+00",
-        "inbound_revision": "99"
-      },
-      {
-        "id": "53ddedcc-c6d0-4794-89e8-9444d41bab8f",
+        "id": "af6d02f4-0f8a-4465-af74-bc9b7736b12e",
         "body": "Synthetic history 101",
         "direction": "inbound",
         "read_at_raw": null,
@@ -457,7 +450,15 @@
         "inbound_revision": "101"
       },
       {
-        "id": "2c033949-4661-41b9-8e07-41fa3c16c214",
+        "id": "592a423f-b26a-408a-9f52-f3c7d97e0d24",
+        "body": "Synthetic history 99",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123033+00",
+        "inbound_revision": "99"
+      },
+      {
+        "id": "1d94196b-99ce-4bae-8043-84dbb97200d5",
         "body": "Synthetic history 100",
         "direction": "inbound",
         "read_at_raw": null,
@@ -465,7 +466,7 @@
         "inbound_revision": "100"
       },
       {
-        "id": "57075b01-9893-42a8-95b5-5783e4d17184",
+        "id": "c1149a77-07ce-4f07-9bee-e8b1bfbcfc20",
         "body": "Synthetic history 97",
         "direction": "inbound",
         "read_at_raw": null,
@@ -473,7 +474,7 @@
         "inbound_revision": "97"
       },
       {
-        "id": "48b12d5f-3fe4-4960-9a7a-f7654ff4f100",
+        "id": "8b7eb8d6-63a7-4c5e-a6b3-bfeab1919cf2",
         "body": "Synthetic history 96",
         "direction": "inbound",
         "read_at_raw": null,
@@ -481,7 +482,7 @@
         "inbound_revision": "96"
       },
       {
-        "id": "3be188d2-18a9-4f65-982d-968ba3b830e0",
+        "id": "5e03565a-78ea-4af1-974f-eaa5b4a14443",
         "body": "Synthetic history 98",
         "direction": "inbound",
         "read_at_raw": null,
@@ -489,15 +490,7 @@
         "inbound_revision": "98"
       },
       {
-        "id": "55d7d8f7-0665-4de4-9f61-f6b7d92268e9",
-        "body": "Synthetic history 94",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123031+00",
-        "inbound_revision": "94"
-      },
-      {
-        "id": "26748fa4-7041-4e2e-8bdb-f764ef349d86",
+        "id": "d5f6585f-094d-4fab-a7fa-f71ad979616e",
         "body": "Synthetic history 93",
         "direction": "inbound",
         "read_at_raw": null,
@@ -505,7 +498,15 @@
         "inbound_revision": "93"
       },
       {
-        "id": "00b1ad26-2224-4552-8be5-709914652701",
+        "id": "d022cb6f-e227-463e-aead-72c9c17e56fc",
+        "body": "Synthetic history 94",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123031+00",
+        "inbound_revision": "94"
+      },
+      {
+        "id": "2ce74faf-80b4-4f30-8ffe-e02371889af4",
         "body": "Synthetic history 95",
         "direction": "inbound",
         "read_at_raw": null,
@@ -513,7 +514,7 @@
         "inbound_revision": "95"
       },
       {
-        "id": "d2fe0388-07e8-4d72-a86a-c6f95595b3cc",
+        "id": "d523f4d0-0865-43c9-87dd-ee159893c0a8",
         "body": "Synthetic history 90",
         "direction": "inbound",
         "read_at_raw": null,
@@ -521,15 +522,7 @@
         "inbound_revision": "90"
       },
       {
-        "id": "b7389477-7485-4a63-af75-31cc13ee1a1f",
-        "body": "Synthetic history 92",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.12303+00",
-        "inbound_revision": "92"
-      },
-      {
-        "id": "9e4bdab6-1ec5-4af9-b000-94c6c29ca871",
+        "id": "4223c15f-dc53-4489-ac3b-387d41d045b0",
         "body": "Synthetic history 91",
         "direction": "inbound",
         "read_at_raw": null,
@@ -537,7 +530,15 @@
         "inbound_revision": "91"
       },
       {
-        "id": "83065844-7fef-4790-9199-e3e518c9541c",
+        "id": "02a2f740-0b41-449a-84aa-ad0689692ab7",
+        "body": "Synthetic history 92",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12303+00",
+        "inbound_revision": "92"
+      },
+      {
+        "id": "43c2d6b4-b1b4-4f28-abc7-642fd2c28967",
         "body": "Synthetic history 88",
         "direction": "inbound",
         "read_at_raw": null,
@@ -545,7 +546,7 @@
         "inbound_revision": "88"
       },
       {
-        "id": "668999f0-366f-4649-a5f9-b6944aac2966",
+        "id": "1e719055-f2f6-4ec9-9b06-316e64f86063",
         "body": "Synthetic history 89",
         "direction": "inbound",
         "read_at_raw": null,
@@ -553,7 +554,7 @@
         "inbound_revision": "89"
       },
       {
-        "id": "0683934e-8227-44ae-8ab8-a9b7e81fe525",
+        "id": "1bf1d6cc-01e2-43c5-974c-761dc8af3541",
         "body": "Synthetic history 87",
         "direction": "inbound",
         "read_at_raw": null,
@@ -561,23 +562,7 @@
         "inbound_revision": "87"
       },
       {
-        "id": "8215a06d-6cda-4533-9dfa-880dcc7e10d1",
-        "body": "Synthetic history 84",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123028+00",
-        "inbound_revision": "84"
-      },
-      {
-        "id": "5d892d2e-867f-4dfc-ae04-d864284dcc61",
-        "body": "Synthetic history 86",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123028+00",
-        "inbound_revision": "86"
-      },
-      {
-        "id": "38fcf7a7-ceba-407d-846d-3e245dda260d",
+        "id": "7b28456d-2ec1-4bf2-a06d-057649d6f1ac",
         "body": "Synthetic history 85",
         "direction": "inbound",
         "read_at_raw": null,
@@ -585,23 +570,23 @@
         "inbound_revision": "85"
       },
       {
-        "id": "c0207c34-8b4f-4b4b-9868-8bfda9101211",
-        "body": "Synthetic history 81",
+        "id": "44997e76-848e-40d9-9dc8-e7d1fd9f0ca8",
+        "body": "Synthetic history 86",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123027+00",
-        "inbound_revision": "81"
+        "created_at_raw": "2026-09-01 12:00:00.123028+00",
+        "inbound_revision": "86"
       },
       {
-        "id": "b8cd7a4c-b1d8-4149-b0b3-eb179e77d139",
-        "body": "Synthetic history 82",
+        "id": "2b2460e0-8d03-4fac-b199-165a15686a0f",
+        "body": "Synthetic history 84",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123027+00",
-        "inbound_revision": "82"
+        "created_at_raw": "2026-09-01 12:00:00.123028+00",
+        "inbound_revision": "84"
       },
       {
-        "id": "14c0d7e0-b638-4a21-a1f5-f8d8ad776e63",
+        "id": "f1adf10d-7b45-4546-be36-811ce52157d1",
         "body": "Synthetic history 83",
         "direction": "inbound",
         "read_at_raw": null,
@@ -609,23 +594,23 @@
         "inbound_revision": "83"
       },
       {
-        "id": "f618b780-66aa-47fb-8fba-9e1694e6dcda",
-        "body": "Synthetic history 78",
+        "id": "92958871-caef-4a5c-b4c8-2b8311eacc6e",
+        "body": "Synthetic history 81",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123026+00",
-        "inbound_revision": "78"
+        "created_at_raw": "2026-09-01 12:00:00.123027+00",
+        "inbound_revision": "81"
       },
       {
-        "id": "9f309b0e-6ab4-43e7-8941-50235ad0416c",
-        "body": "Synthetic history 80",
+        "id": "7ae3c4b5-d3bf-416f-be6c-38cc0d83416a",
+        "body": "Synthetic history 82",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123026+00",
-        "inbound_revision": "80"
+        "created_at_raw": "2026-09-01 12:00:00.123027+00",
+        "inbound_revision": "82"
       },
       {
-        "id": "88cd416d-1f5a-40c0-9a58-0ad08539facb",
+        "id": "d3b0d1c5-d836-4ee9-a79e-567b032caa84",
         "body": "Synthetic history 79",
         "direction": "inbound",
         "read_at_raw": null,
@@ -633,15 +618,23 @@
         "inbound_revision": "79"
       },
       {
-        "id": "f73b93a9-73f0-4ba5-a59c-87a057c79910",
-        "body": "Synthetic history 75",
+        "id": "c42d98c5-8014-4ee9-ab06-84f4f0d3ee5b",
+        "body": "Synthetic history 80",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123025+00",
-        "inbound_revision": "75"
+        "created_at_raw": "2026-09-01 12:00:00.123026+00",
+        "inbound_revision": "80"
       },
       {
-        "id": "7b828928-9958-4cdc-a690-4a167968bcbf",
+        "id": "83618b4b-e1bd-4e5f-a258-fbbb3169bc98",
+        "body": "Synthetic history 78",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123026+00",
+        "inbound_revision": "78"
+      },
+      {
+        "id": "8e7c4f85-7e41-490e-8f51-32443d1b3c35",
         "body": "Synthetic history 77",
         "direction": "inbound",
         "read_at_raw": null,
@@ -649,7 +642,15 @@
         "inbound_revision": "77"
       },
       {
-        "id": "57e4db04-b7c3-4894-88ae-73da7956574c",
+        "id": "85e4a536-69c3-4bb0-985b-2d066fac0f5e",
+        "body": "Synthetic history 75",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123025+00",
+        "inbound_revision": "75"
+      },
+      {
+        "id": "15169525-384c-4b57-80f2-b87cd65c1ca6",
         "body": "Synthetic history 76",
         "direction": "inbound",
         "read_at_raw": null,
@@ -657,7 +658,7 @@
         "inbound_revision": "76"
       },
       {
-        "id": "f2e88f10-4f32-4fa3-8a2f-91a32f3a6e04",
+        "id": "d797f02e-87eb-47e9-a255-0f24491b8442",
         "body": "Synthetic history 73",
         "direction": "inbound",
         "read_at_raw": null,
@@ -665,15 +666,7 @@
         "inbound_revision": "73"
       },
       {
-        "id": "d6d29d3b-c6f1-4727-a39d-5902119d6b22",
-        "body": "Synthetic history 74",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123024+00",
-        "inbound_revision": "74"
-      },
-      {
-        "id": "82b7d411-59fa-4d76-9a87-30cf021b7287",
+        "id": "5e1d4bec-9ac3-4e1e-acfe-e6bcc1557eee",
         "body": "Synthetic history 72",
         "direction": "inbound",
         "read_at_raw": null,
@@ -681,7 +674,15 @@
         "inbound_revision": "72"
       },
       {
-        "id": "e61dc2f1-8be2-4e54-b534-191e5e580c7f",
+        "id": "4d9bf3f5-d53d-4a8a-acb4-95a6f7c6625c",
+        "body": "Synthetic history 74",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123024+00",
+        "inbound_revision": "74"
+      },
+      {
+        "id": "bcf4125e-3c09-4d60-9786-36ccf89d57c2",
         "body": "Synthetic history 71",
         "direction": "inbound",
         "read_at_raw": null,
@@ -689,7 +690,7 @@
         "inbound_revision": "71"
       },
       {
-        "id": "baeb09a0-36f1-4d8d-8d33-e635ea0b5691",
+        "id": "42d8d7cd-663b-4f34-9c81-2a5590581b6a",
         "body": "Synthetic history 69",
         "direction": "inbound",
         "read_at_raw": null,
@@ -697,7 +698,7 @@
         "inbound_revision": "69"
       },
       {
-        "id": "9d5bd242-2a8b-436c-98cd-8968f554059f",
+        "id": "257d4252-90a5-418d-9076-d34da510bf5f",
         "body": "Synthetic history 70",
         "direction": "inbound",
         "read_at_raw": null,
@@ -705,15 +706,7 @@
         "inbound_revision": "70"
       },
       {
-        "id": "cee98343-b7eb-4656-a0e9-bbef461a9c2f",
-        "body": "Synthetic history 66",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123022+00",
-        "inbound_revision": "66"
-      },
-      {
-        "id": "b4fcc0ca-7eb6-4130-b89b-a0ae716bbfc3",
+        "id": "ea10f4b5-f691-4ae4-9c04-f60b1c1ca59f",
         "body": "Synthetic history 68",
         "direction": "inbound",
         "read_at_raw": null,
@@ -721,7 +714,15 @@
         "inbound_revision": "68"
       },
       {
-        "id": "b4a98ca1-0116-44ed-9677-607a4e40d672",
+        "id": "438ca176-77dc-455f-9d92-8cad03606ce2",
+        "body": "Synthetic history 66",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123022+00",
+        "inbound_revision": "66"
+      },
+      {
+        "id": "0a9bc6f2-9de8-4645-9ab7-59745735e5c8",
         "body": "Synthetic history 67",
         "direction": "inbound",
         "read_at_raw": null,
@@ -729,15 +730,7 @@
         "inbound_revision": "67"
       },
       {
-        "id": "fe050e83-cece-46ac-819a-bf3517ffc512",
-        "body": "Synthetic history 64",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123021+00",
-        "inbound_revision": "64"
-      },
-      {
-        "id": "ad561dc9-5c99-409a-9bef-c7ca4c0a7754",
+        "id": "d8ab854a-d488-4f0a-825c-cabe4c776a17",
         "body": "Synthetic history 65",
         "direction": "inbound",
         "read_at_raw": null,
@@ -745,7 +738,15 @@
         "inbound_revision": "65"
       },
       {
-        "id": "8089e5ed-d2da-48d8-9dba-73ec709e73dd",
+        "id": "6a9bff37-aeb3-4df1-b153-51733a828dc5",
+        "body": "Synthetic history 64",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123021+00",
+        "inbound_revision": "64"
+      },
+      {
+        "id": "0bd72b51-7a94-4a67-94a6-1b453a6232df",
         "body": "Synthetic history 63",
         "direction": "inbound",
         "read_at_raw": null,
@@ -753,23 +754,7 @@
         "inbound_revision": "63"
       },
       {
-        "id": "1172e32a-fb53-4f72-bc80-ee452da60b9f",
-        "body": "Synthetic history 61",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.12302+00",
-        "inbound_revision": "61"
-      },
-      {
-        "id": "0a6ae21a-4c7b-4661-b476-f92770552deb",
-        "body": "Synthetic history 62",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.12302+00",
-        "inbound_revision": "62"
-      },
-      {
-        "id": "021ab3bc-ed56-4902-9e9b-1c845b9e4917",
+        "id": "ab707c2d-9c69-42c7-a935-7f9aff9312c9",
         "body": "Synthetic history 60",
         "direction": "inbound",
         "read_at_raw": null,
@@ -777,7 +762,23 @@
         "inbound_revision": "60"
       },
       {
-        "id": "98bb73a6-9932-4d59-919e-1d7df320d07e",
+        "id": "3d68187b-464d-4582-ba35-f20f512676b1",
+        "body": "Synthetic history 62",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12302+00",
+        "inbound_revision": "62"
+      },
+      {
+        "id": "0e18a71e-c48e-4ae4-aadd-b8be65c4c462",
+        "body": "Synthetic history 61",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12302+00",
+        "inbound_revision": "61"
+      },
+      {
+        "id": "b3959acd-bfa1-44cc-86a4-cc5371513c02",
         "body": "Synthetic history 59",
         "direction": "inbound",
         "read_at_raw": null,
@@ -785,7 +786,7 @@
         "inbound_revision": "59"
       },
       {
-        "id": "7fd4ae39-ec0b-4b9d-b119-d3d8cb6496e3",
+        "id": "b0db9da9-07cb-43fa-aeaf-a30269431d76",
         "body": "Synthetic history 58",
         "direction": "inbound",
         "read_at_raw": null,
@@ -793,7 +794,7 @@
         "inbound_revision": "58"
       },
       {
-        "id": "54dcca53-8131-427e-9e11-07eacbbe6ccb",
+        "id": "ac53e370-549c-4d15-bf3c-bd9fca58992e",
         "body": "Synthetic history 57",
         "direction": "inbound",
         "read_at_raw": null,
@@ -801,7 +802,7 @@
         "inbound_revision": "57"
       },
       {
-        "id": "f15f137d-63a8-429f-9756-4a938f14d474",
+        "id": "b6a9a3af-ecb3-48f5-9f4d-8ef10ec2f36a",
         "body": "Synthetic history 56",
         "direction": "inbound",
         "read_at_raw": null,
@@ -809,29 +810,29 @@
         "inbound_revision": "56"
       },
       {
-        "id": "e8006bc9-48c5-4a39-9585-ce93365153da",
-        "body": "Synthetic history 54",
-        "direction": "inbound",
-        "read_at_raw": null,
-        "created_at_raw": "2026-09-01 12:00:00.123018+00",
-        "inbound_revision": "54"
-      },
-      {
-        "id": "9207e13b-153d-4aef-8418-35e9ccc3484c",
+        "id": "4d0261ae-127f-4639-b670-a8a722b8425d",
         "body": "Synthetic history 55",
         "direction": "inbound",
         "read_at_raw": null,
         "created_at_raw": "2026-09-01 12:00:00.123018+00",
         "inbound_revision": "55"
+      },
+      {
+        "id": "2d32ffe9-a7cd-4604-8d2c-bf302bd94c09",
+        "body": "Synthetic history 54",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123018+00",
+        "inbound_revision": "54"
       }
     ],
-    "next_cursor": "32d4d246-0c0f-4e3d-a8a6-a4133477f9ae",
-    "requester_id": "9c8c97d0-154e-4de9-bd3d-c820ae7d2d24",
+    "next_cursor": "ea2944c7-09c1-47b6-a4da-68b50cb34754",
+    "requester_id": "8fb19b5b-99e2-46b6-8b4d-33ff3520c5d2",
     "head_revision": "153",
-    "read_boundary": "57330e82-df1b-416b-8f52-35df1107d17c",
-    "conversation_id": "e1ef9d50-1fa3-43a0-b3de-596b0be3e71d",
+    "read_boundary": "5b55052b-4736-441a-b9c5-0f0bffda2d14",
+    "conversation_id": "966b4905-55aa-46ba-afbf-fd4bc964d819",
     "capture_generation": "9788de28-dfa7-46af-80e0-409f7c383ca1",
-    "boundary_expires_at": "2026-09-14T03:43:21.19256+00:00"
+    "boundary_expires_at": "2026-09-14T04:09:01.531391+00:00"
   },
   "limitations": [
     "SQL claims, not JWT transport",

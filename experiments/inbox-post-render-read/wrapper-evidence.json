@@ -7,37 +7,37 @@
   "public_api_sha256": "26ee2bb0c23ef6223083455f4ff49eca221f2167edea49af00c430f9d7a310b5",
   "runner_sha256": "5823975fe4fd8a9e2204c6d3fd04128966e866b45f6649a192d8b787b520efae",
   "scalar_detail": {
-    "org_id": "067875e8-1813-4ff8-9dcd-9c0c34364e96",
+    "org_id": "5721d83d-ca7c-402a-9290-fbae9c882fa6",
     "history": [
       {
-        "id": "ea01767c-9594-49c9-bc9c-51c6731c76c9",
+        "id": "d3c460e3-857d-43d2-9edc-82de1127cdc3",
         "body": "Synthetic inbound",
         "direction": "inbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-14 03:38:20.574905+00",
+        "created_at_raw": "2026-09-14 04:04:00.931729+00",
         "inbound_revision": "1"
       },
       {
-        "id": "51b30324-f432-42c8-8404-d14926b0412f",
+        "id": "bd056978-35bb-4ca9-ac40-6280c650738e",
         "body": "Synthetic outbound",
         "direction": "outbound",
         "read_at_raw": null,
-        "created_at_raw": "2026-09-14 03:38:20.574905+00",
+        "created_at_raw": "2026-09-14 04:04:00.931729+00",
         "inbound_revision": "0"
       }
     ],
-    "requester_id": "05224fa9-1d80-4eec-a0f3-476c01233feb",
+    "requester_id": "f95cb029-e1ed-4fc6-8819-33fb3be50f06",
     "head_revision": "1",
-    "read_boundary": "3758aad6-e93c-41a0-8ceb-73204b0cb467",
-    "conversation_id": "b8728220-eb50-4f29-a1c4-4b4e4ae24ef8",
+    "read_boundary": "dd4b6caa-e92d-4c49-9ac0-45c5910eadca",
+    "conversation_id": "cd95e1d5-5cb7-48f2-aac2-d0949f729302",
     "capture_generation": "9788de28-dfa7-46af-80e0-409f7c383ca1",
-    "boundary_expires_at": "2026-09-14T03:43:20.658353+00:00"
+    "boundary_expires_at": "2026-09-14T04:09:01.010025+00:00"
   },
   "scalar_acknowledgment": {
     "batch": 0,
     "changed": 1,
     "completed": true,
-    "boundary_id": "3758aad6-e93c-41a0-8ceb-73204b0cb467"
+    "boundary_id": "dd4b6caa-e92d-4c49-9ac0-45c5910eadca"
   },
   "limits": [
     "Trusted SQL claims only; not an HTTP/JWT proof",

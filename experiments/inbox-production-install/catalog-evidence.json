@@ -1,12 +1,13 @@
 {
   "foundation_sha256": "9dbda65aa4c9b810bb94968a97c97d04f19d9744a76b642f47fa625c858fb938",
-  "installed_function_bodies": 67,
-  "installed_tables": 21,
-  "installed_indexes": 18,
+  "installed_function_bodies": 78,
+  "installed_tables": 26,
+  "installed_indexes": 28,
   "installed_triggers": 23,
-  "installed_rls_tables": 21,
-  "installed_constraints": 1,
+  "installed_constraints": 67,
+  "private_schemas_scanned": 13,
+  "rollout_serving_default": "false",
   "private_helper_exposure_count": 0,
   "replica_identity": "FULL",
-  "scope": "Read-only owned fixture catalog proof; excludes runtime throughput and production schema equivalence"
+  "scope": "Read-only owned fixture catalog proof, definition-level (columns/indexes/triggers/constraints/extra-objects/rollout-default/function-attributes), not merely name presence; excludes runtime throughput and production schema equivalence"
 }

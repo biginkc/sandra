@@ -10,16 +10,16 @@ guard()
 if a.install:
  if sql("SELECT to_regprocedure('inbox_read.prune_expired_boundaries(integer)') IS NOT NULL")=='t':raise RuntimeError('Retention exists; verify rather than blindly replace')
  sql('BEGIN;'+(P/'read-retention.sql').read_text()+'COMMIT;')
-old,active,executing,recent,held,u,o,c,g=[str(uuid.uuid4()) for _ in range(9)]
+old,active,executing,recent,held,u,session,o,c,g=[str(uuid.uuid4()) for _ in range(10)]
 probe=sql(f"""BEGIN;
 INSERT INTO inbox_read.boundaries(id,requester_id,org_id,conversation_id,generation,revision,created_at,expires_at,execution_deadline,session_id,access_epoch)
 VALUES
-('{old}','{u}','{o}','{c}','{g}',0,clock_timestamp()-interval '101 years',clock_timestamp()-interval '100 years',NULL,'{u}',1),
-('{active}','{u}','{o}','{c}','{g}',0,clock_timestamp(),clock_timestamp()+interval '5 minutes',NULL,'{u}',1),
-('{executing}','{u}','{o}','{c}','{g}',0,clock_timestamp()-interval '9 days',clock_timestamp()-interval '8 days',clock_timestamp()+interval '5 minutes','{u}',1),
-('{recent}','{u}','{o}','{c}','{g}',0,clock_timestamp()-interval '2 days',clock_timestamp()-interval '1 day',NULL,'{u}',1);
+('{old}','{u}','{o}','{c}','{g}',0,clock_timestamp()-interval '101 years',clock_timestamp()-interval '100 years',NULL,'{session}',1),
+('{active}','{u}','{o}','{c}','{g}',0,clock_timestamp(),clock_timestamp()+interval '5 minutes',NULL,'{session}',1),
+('{executing}','{u}','{o}','{c}','{g}',0,clock_timestamp()-interval '9 days',clock_timestamp()-interval '8 days',clock_timestamp()+interval '5 minutes','{session}',1),
+('{recent}','{u}','{o}','{c}','{g}',0,clock_timestamp()-interval '2 days',clock_timestamp()-interval '1 day',NULL,'{session}',1);
 INSERT INTO inbox_read.history_cursors(boundary_id,session_id,access_epoch,before_at,before_id)
-SELECT '{old}','{u}',1,clock_timestamp(),gen_random_uuid() FROM generate_series(1,800);
+SELECT '{old}','{session}',1,clock_timestamp(),gen_random_uuid() FROM generate_series(1,800);
 INSERT INTO inbox_read.receipts(boundary_id,batch,changed,completed) SELECT '{old}',n,0,false FROM generate_series(1,201)n;
 INSERT INTO inbox_read.receipts VALUES('{active}',0,0,false),('{executing}',0,0,false),('{recent}',0,0,false);
 DO $$ DECLARE result jsonb; BEGIN
@@ -33,7 +33,7 @@ DO $$ DECLARE result jsonb; BEGIN
 END $$;SELECT 'retention_budget_and_deadlines_passed';ROLLBACK;""")
 if probe!='retention_budget_and_deadlines_passed':raise RuntimeError('Retention probe receipt mismatch')
 # A committed synthetic expired boundary allows a real independent lock race.
-sql(f"INSERT INTO inbox_read.boundaries(id,requester_id,org_id,conversation_id,generation,revision,created_at,expires_at,session_id,access_epoch) VALUES('{held}','{u}','{o}','{c}','{g}',0,clock_timestamp()-interval '101 years',clock_timestamp()-interval '100 years','{u}',1)")
+sql(f"INSERT INTO inbox_read.boundaries(id,requester_id,org_id,conversation_id,generation,revision,created_at,expires_at,session_id,access_epoch) VALUES('{held}','{u}','{o}','{c}','{g}',0,clock_timestamp()-interval '101 years',clock_timestamp()-interval '100 years','{session}',1)")
 tag='inbox-owned-retention-'+held
 query=f"SET application_name='{tag}';BEGIN;SELECT id FROM inbox_read.boundaries WHERE id='{held}' FOR UPDATE;SELECT pg_sleep(4);COMMIT;"
 proc=subprocess.Popen(D+['exec','-i',N,'psql','-XqAt','-U','postgres','-d',DB,'-v','ON_ERROR_STOP=1','-c',query],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
