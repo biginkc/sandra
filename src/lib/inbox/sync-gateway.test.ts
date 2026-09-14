@@ -99,3 +99,16 @@ describe("Inbox gateway durable authorization boundary",()=>{
     const f=fixture();f.scope.sessionId="other";expect((await f.make()(f.request(),id)).status).toBe(403);expect(f.fetcher).not.toHaveBeenCalled();
   });
 });
+describe("atomic authority gateway",()=>{
+  function atomic(){const f=fixture();const snap=()=>({session:{userId:user,sessionId:"session",expiresAt:100000},scope:structuredClone(f.scope),access:{...f.access},proof:{opaque:true}});f.repo.loadAuthorizedScope=vi.fn(async()=>snap());f.repo.finalizeAuthorizedScope=vi.fn(async()=>snap());return {...f,snap};}
+  it("uses one prefetch and one postbuffer call without duplicate legacy authority",async()=>{const f=atomic();const result=await f.make()(f.request(),id);expect(result.status).toBe(200);expect(f.repo.loadAuthorizedScope).toHaveBeenCalledOnce();expect(f.repo.finalizeAuthorizedScope).toHaveBeenCalledOnce();expect(f.repo.authenticate).not.toHaveBeenCalled();expect(f.repo.getScope).not.toHaveBeenCalled();expect(f.repo.getAccess).not.toHaveBeenCalled();expect(f.repo.bindHandle).not.toHaveBeenCalled();});
+  it.each(["generation","targets","epoch","session","expiry","replacement"])("withholds buffered data after %s changes",async(kind)=>{const f=atomic();f.fetcher.mockImplementation(async()=>{f.repo.finalizeAuthorizedScope=async()=>{const s=f.snap();if(kind==="generation")s.scope.generation="other";if(kind==="targets")s.scope.targets=[];if(kind==="epoch")s.access.epoch="other";if(kind==="session")s.session.sessionId="other";if(kind==="expiry")f.advance(100000);if(kind==="replacement")return null;return s;};return new Response("must-not-deliver",{headers:{"electric-handle":"next"}});});const response=await f.make()(f.request(),id);expect(response.status).toBeGreaterThanOrEqual(400);expect(await response.text()).not.toContain("must-not-deliver");});
+  it("finalizes a response without a new handle and rejects invalid partition before fetch",async()=>{const f=atomic();f.fetcher.mockResolvedValue(new Response("[]"));expect((await f.make()(f.request(),id)).status).toBe(200);expect(f.repo.finalizeAuthorizedScope).toHaveBeenCalledWith(expect.anything(),0,null,null,expect.any(AbortSignal));expect((await f.make()(f.request("?partition=4"),id)).status).toBe(400);expect(f.fetcher).toHaveBeenCalledOnce();});
+});
+it("classifies an atomic handle CAS conflict as409 rather than permission loss",async()=>{const f=fixture();f.repo.loadAuthorizedScope=async()=>({scope:f.scope,session:{userId:user,sessionId:"session",expiresAt:100000},access:f.access,proof:{}});f.repo.finalizeAuthorizedScope=async()=>({conflict:true});const response=await f.make()(f.request(),id);expect(response.status).toBe(409);});
+it.each(["loadAuthorizedScope","finalizeAuthorizedScope"])("denies with 503 rather than silently falling back to legacy authority when only %s is implemented",async(only)=>{
+  const f=fixture();
+  if(only==="loadAuthorizedScope")f.repo.loadAuthorizedScope=async()=>null;else f.repo.finalizeAuthorizedScope=async()=>null;
+  const response=await f.make()(f.request(),id);
+  expect(response.status).toBe(503);expect(f.fetcher).not.toHaveBeenCalled();
+});

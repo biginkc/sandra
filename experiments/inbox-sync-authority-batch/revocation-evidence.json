@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "status": 401,
+  "denialVisibleMs": 7448.134250000001,
+  "sessionId": "a16b6f70-c4ea-4aa4-bc9b-80627cc93287",
+  "scopeLost": true,
+  "selectionCleared": true,
+  "pendingLivePollsAtDenial": 0,
+  "response": {
+    "bodyUnavailableAfterClientCancellation": true
+  },
+  "note": "Fresh owned real GoTrue volume session deleted while authenticated Electric live poll was pending. Stable review actor unchanged."
+}

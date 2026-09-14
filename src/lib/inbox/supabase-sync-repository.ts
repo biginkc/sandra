@@ -3,9 +3,11 @@ import { inboxCountNames, type InboxFilter, type InboxCounts } from "./filter-co
 import { InboxHttpError, inboxDatabaseError } from "./http-error";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Json, Database } from "@/lib/supabase/types";
-import type { DurableInboxScope, InboxSession, InboxSyncTarget, InboxWorksetRepository } from "./sync-gateway";
+import type { AuthorizedInboxScope, DurableInboxScope, InboxSession, InboxSyncTarget, InboxWorksetRepository } from "./sync-gateway";
 
 type InboxDatabase = Omit<Database, "public"> & { public: Omit<Database["public"], "Functions"> & { Functions: Database["public"]["Functions"] & {
+  inbox_sync_snapshot_v1: { Args: { scope_id: string }; Returns: Json };
+  inbox_sync_finalize_v1: { Args: { scope_id: string; expected_scope: Json; partition_index: number; expected_handle: string | null; next_handle: string | null }; Returns: Json };
   inbox_authorize_sync: { Args: { org_id: string | null }; Returns: Json };
   inbox_create_workset_v2: { Args: { org_id: string; filter: Json; limit: number; replaces_scope_id: string | null; cursor_id: string | null }; Returns: Json };
   inbox_counts_v2: { Args: { org_id: string; filter: Json }; Returns: Json };
@@ -58,7 +60,28 @@ export function createSupabaseInboxRepository(client: InboxRpcClient): InboxData
     return { userId: identifier(row.user_id), sessionId: identifier(row.session_id), orgId: identifier(row.org_id), epoch: text(row.access_epoch), expiresAt: expiry(row.expires_at) };
   }
   const same = (actual: InboxSession, expected: InboxSession) => actual.userId === expected.userId && actual.sessionId === expected.sessionId;
+  function authorized(value: unknown): AuthorizedInboxScope | null {
+    if(value===null)return null;
+    const row=object(value), a=object(row.authority), current=scope(row.scope);
+    if(!current || a.session_active!==true || a.active_membership_count!==1)throw unavailable();
+    const session={userId:identifier(a.user_id),sessionId:identifier(a.session_id),expiresAt:expiry(a.expires_at)};
+    const epoch=text(a.access_epoch);
+    if(identifier(a.org_id)!==current.orgId || session.userId!==current.userId || session.sessionId!==current.sessionId || epoch!==current.accessEpoch)throw unavailable();
+    return {session,access:{sessionActive:true,activeMembershipCount:1,status:"active",epoch,expiresAt:session.expiresAt,deletionPrepared:false},scope:current,proof:row.scope};
+  }
   return {
+    async loadAuthorizedScope(id,signal) {
+      signal.throwIfAborted();
+      const {data,error}=await client.rpc("inbox_sync_snapshot_v1",{scope_id:id}).abortSignal(signal);signal.throwIfAborted();
+      if(error)throw inboxDatabaseError(error);return authorized(data);
+    },
+    async finalizeAuthorizedScope(expected,partition,expectedHandle,nextHandle,signal) {
+      signal.throwIfAborted();
+      const {data,error}=await client.rpc("inbox_sync_finalize_v1",{scope_id:expected.scope.id,expected_scope:expected.proof as Json,partition_index:partition,expected_handle:expectedHandle,next_handle:nextHandle}).abortSignal(signal);signal.throwIfAborted();
+      if(error)throw inboxDatabaseError(error);
+      if(data && typeof data==="object" && !Array.isArray(data) && (data as Record<string,unknown>).conflict===true)return {conflict:true};
+      return authorized(data);
+    },
     async getContext(signal) { const value = await authorize(null, signal); return { userId: value.userId, sessionId: value.sessionId, orgId: value.orgId, accessEpoch: value.epoch, expiresAt: value.expiresAt }; },
     async authenticate(_request, signal) { return authorize(null, signal); },
     async getAccess(session, orgId, signal) {
