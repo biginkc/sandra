@@ -1,0 +1,151 @@
+#!/usr/bin/env node
+/** Read only the named QA call's browser-side IndexedDB capture over local CDP. */
+import { createHash } from 'node:crypto';
+import { mkdir, open, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { chromium } from '@playwright/test';
+
+const args = Object.fromEntries(process.argv.slice(2).map((part) => {
+  const separator = part.indexOf('=');
+  if (separator < 3 || !part.startsWith('--')) throw new Error('Arguments must be --name=value');
+  return [part.slice(2, separator), part.slice(separator + 1)];
+}));
+if (!args.cdp || !args.origin || !args.run || !args.call || !args.out ||
+    !/^[a-zA-Z0-9_-]{8,80}$/.test(args.run) ||
+    !/^[0-9a-f-]{36}$/i.test(args.call)) {
+  throw new Error('Usage: --cdp=http://127.0.0.1:9222 --origin=https://sandra.example --run=RUN_ID --call=CALL_UUID --out=/absolute/empty/directory');
+}
+const cdp = new URL(args.cdp);
+const origin = new URL(args.origin);
+if (!['127.0.0.1', 'localhost'].includes(cdp.hostname) || !['http:', 'ws:'].includes(cdp.protocol) ||
+    origin.protocol !== 'https:' || origin.pathname !== '/' || origin.search || origin.hash ||
+    !args.out.startsWith('/') || !args.call.match(/^[0-9a-f-]{36}$/i)) {
+  throw new Error('Invalid local CDP endpoint, HTTPS origin, output path, or call ID');
+}
+
+const browser = await chromium.connectOverCDP(cdp.toString());
+try {
+  const pages = browser.contexts().flatMap((context) => context.pages()).filter((page) => {
+    try { return new URL(page.url()).origin === origin.origin; } catch { return false; }
+  });
+  if (pages.length !== 1) throw new Error(`Expected one matching Sandra tab, found ${pages.length}`);
+  const page = pages[0];
+  const capture = await page.evaluate(async ({ runId, callId }) => {
+    const database = await new Promise((ok, fail) => {
+      const request = indexedDB.open('sandra-reliability-capture-v2', 2);
+      request.onerror = () => fail(request.error ?? new Error('IndexedDB open failed'));
+      request.onblocked = () => fail(new Error('IndexedDB open blocked'));
+      request.onsuccess = () => ok(request.result);
+    });
+    try {
+      if (!database.objectStoreNames.contains('chunks') || !database.objectStoreNames.contains('events'))
+        throw new Error('No QA capture stores in this tab');
+      const chunks = await new Promise((ok, fail) => {
+        const results = [];
+        const transaction = database.transaction('chunks', 'readonly');
+        const range = IDBKeyRange.bound(
+          [runId, callId, 0, 0], [runId, callId, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+        );
+        const request = transaction.objectStore('chunks').openCursor(range);
+        request.onerror = () => fail(request.error ?? new Error('Chunk cursor failed'));
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) return ok(results);
+          const value = cursor.value;
+          results.push({ segment: value.segment, sequence: value.sequence, mimeType: value.mimeType,
+            size: value.blob?.size, atMonotonicMs: value.atMonotonicMs, atEpochMs: value.atEpochMs });
+          cursor.continue();
+        };
+      });
+      const events = await new Promise((ok, fail) => {
+        const transaction = database.transaction('events', 'readonly');
+        const request = transaction.objectStore('events').index('byCall').getAll(IDBKeyRange.only([runId, callId]));
+        request.onerror = () => fail(request.error ?? new Error('Event read failed'));
+        request.onsuccess = () => ok(request.result);
+      });
+      return { chunks, events };
+    } finally { database.close(); }
+  }, { runId: args.run, callId: args.call });
+  if (!capture.chunks.length || !capture.events.length) throw new Error('Named QA capture is empty');
+  if (capture.events.some((event) => ['error', 'unsupported', 'no_audio_track'].includes(event.kind)))
+    throw new Error('Named QA capture contains a recorder or playback failure');
+  const segments = new Map();
+  for (const chunk of capture.chunks) {
+    if (!Number.isSafeInteger(chunk.segment) || chunk.segment < 1 ||
+        !Number.isSafeInteger(chunk.sequence) || chunk.sequence < 1 ||
+        !Number.isSafeInteger(chunk.size) || chunk.size < 1) throw new Error('Invalid chunk metadata');
+    const ext = ({ 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'm4a', 'video/webm': 'webm' })[chunk.mimeType];
+    if (!ext) throw new Error(`Unsupported capture MIME type: ${chunk.mimeType}`);
+    const previous = segments.get(chunk.segment) ?? { next: 1, mimeType: chunk.mimeType, ext, chunks: [] };
+    if (chunk.sequence !== previous.next || chunk.mimeType !== previous.mimeType)
+      throw new Error(`Missing, duplicate, or inconsistent chunk in segment ${chunk.segment}`);
+    previous.next += 1;
+    previous.chunks.push(chunk);
+    segments.set(chunk.segment, previous);
+  }
+  if ([...segments.keys()].some((segment, index) => segment !== index + 1))
+    throw new Error('Missing or noncontiguous capture segment');
+  for (const segment of segments.keys()) {
+    const events = capture.events.filter((event) => event.segment === segment);
+    if (events[0]?.kind !== 'started' || events.at(-1)?.kind !== 'stopped' ||
+        events.filter((event) => event.kind === 'started').length !== 1 ||
+        events.filter((event) => event.kind === 'stopped').length !== 1 ||
+        events[0].atMonotonicMs > events.at(-1).atMonotonicMs)
+      throw new Error(`Segment ${segment} has no ordered start/stop evidence`);
+    if (events.filter((event) => event.kind === 'chunk').length !== segments.get(segment).chunks.length)
+      throw new Error(`Segment ${segment} has mismatched chunk events`);
+  }
+  const output = resolve(args.out);
+  await mkdir(output, { recursive: false });
+  const files = [];
+  for (const [segment, info] of segments) {
+    const filename = `browser-receive-segment-${segment}.${info.ext}`;
+    const file = await open(`${output}/${filename}`, 'wx');
+    const hash = createHash('sha256');
+    let bytes = 0;
+    try {
+      for (const chunk of info.chunks) {
+        const base64 = await page.evaluate(async ({ runId, callId, segment, sequence }) => {
+          const database = await new Promise((ok, fail) => {
+            const request = indexedDB.open('sandra-reliability-capture-v2', 2);
+            request.onerror = () => fail(request.error ?? new Error('IndexedDB open failed'));
+            request.onsuccess = () => ok(request.result);
+          });
+          try {
+            const record = await new Promise((ok, fail) => {
+              const request = database.transaction('chunks', 'readonly').objectStore('chunks')
+                .get([runId, callId, segment, sequence]);
+              request.onerror = () => fail(request.error ?? new Error('Chunk read failed'));
+              request.onsuccess = () => ok(request.result);
+            });
+            if (!record?.blob) throw new Error('Capture chunk disappeared during export');
+            return await new Promise((ok, fail) => {
+              const reader = new FileReader();
+              reader.onerror = () => fail(reader.error ?? new Error('Blob read failed'));
+              reader.onload = () => ok(String(reader.result).split(',')[1]);
+              reader.readAsDataURL(record.blob);
+            });
+          } finally { database.close(); }
+        }, { runId: args.run, callId: args.call, segment, sequence: chunk.sequence });
+        const data = Buffer.from(base64, 'base64');
+        if (data.length !== chunk.size) throw new Error('Capture chunk size changed during export');
+        let offset = 0;
+        while (offset < data.length) {
+          const result = await file.write(data, offset, data.length - offset);
+          if (result.bytesWritten < 1) throw new Error('Capture output write stalled');
+          offset += result.bytesWritten;
+        }
+        hash.update(data);
+        bytes += data.length;
+      }
+    } finally { await file.close(); }
+    files.push({ filename, segment, mimeType: info.mimeType, chunks: info.chunks.length,
+      bytes, sha256: hash.digest('hex') });
+  }
+  const manifest = { schemaVersion: 1, runId: args.run, callId: args.call, origin: origin.origin,
+    exportedAt: new Date().toISOString(), files, events: capture.events,
+    chunks: capture.chunks.map(({ segment, sequence, size, atMonotonicMs, atEpochMs }) =>
+      ({ segment, sequence, size, atMonotonicMs, atEpochMs })) };
+  await writeFile(`${output}/browser-receive-manifest.json`, JSON.stringify(manifest, null, 2), { flag: 'wx' });
+  process.stdout.write(`Exported ${files.length} browser-receive segment(s) for the exact QA call.\n`);
+} finally { await browser.close(); }
