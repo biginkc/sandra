@@ -63,10 +63,12 @@ try {
         request.onerror = () => fail(request.error ?? new Error('Event read failed'));
         request.onsuccess = () => ok(request.result);
       });
-      return { chunks, events };
+      const captureError = sessionStorage.getItem(`sandra:reliability-capture-error:${runId}:${callId}`);
+      return { chunks, events, captureError };
     } finally { database.close(); }
   }, { runId: args.run, callId: args.call });
   if (!capture.chunks.length || !capture.events.length) throw new Error('Named QA capture is empty');
+  if (capture.captureError) throw new Error('Named QA capture has a browser-side failure marker');
   if (capture.events.some((event) => ['error', 'unsupported', 'no_audio_track'].includes(event.kind)))
     throw new Error('Named QA capture contains a recorder or playback failure');
   const segments = new Map();
