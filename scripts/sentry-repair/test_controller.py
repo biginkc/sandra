@@ -626,6 +626,7 @@ class ControllerTests(unittest.TestCase):
                 check=True,
             ).stdout
             observed["rules"] = "--ignore-rules" if "--ignore-rules" in argv else ""
+            observed["timestamps"] = "recorded_at" if "recorded_at" in "\n".join(argv) else ""
             return ProcessResult("error", stderr="review intentionally not run")
 
         executor.run = capture_run
@@ -638,6 +639,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(observed["head"], self.head_sha())
         self.assertEqual(observed["status"], "")
         self.assertEqual(observed["rules"], "--ignore-rules")
+        self.assertEqual(observed["timestamps"], "")
         self.assertEqual(executor.worktree, str(self.worktree))
 
     def test_review_checkout_masks_committed_project_codex_config(self):
@@ -827,6 +829,19 @@ class ControllerTests(unittest.TestCase):
             executor=executor,
             execute=True,
         )
+        rerun = FakeExecutor(
+            ProcessResult("available"),
+            ProcessResult("success", stdout="must not run", session_id="shopping-session"),
+        )
+        skipped = dispatch_review(
+            self.store,
+            attempt.attempt_id,
+            attempt.fencing_token,
+            executor=rerun,
+            execute=True,
+        )
+        self.assertEqual(skipped["skipped"], "already_approved")
+        self.assertEqual(rerun.run_calls, [])
         row = self.store.db.execute(
             "SELECT reviewed_head_sha,reviewed_ci_run_id,reviewed_functional_evidence_id,reviewed_functional_observed_at,reviewed_sentry_observed_at,evidence_snapshot_json FROM reviews WHERE attempt_id=?",
             (attempt.attempt_id,),
@@ -844,6 +859,54 @@ class ControllerTests(unittest.TestCase):
                 ci_status="success",
                 ci_sha="f" * 40,
             )
+
+    def test_pr_head_change_invalidates_deployment_ancestry(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101,
+            owner="one", mode="repair",
+        )
+        self.store.mark_running(
+            attempt.attempt_id, attempt.fencing_token,
+            model=SPARK_MODEL, effort="low", session_id="repair-session",
+        )
+        self.seed_review_evidence(attempt)
+        replacement = "f" * 40
+        self.store.record_pull_request(
+            attempt.attempt_id, attempt.fencing_token,
+            number=42, url="https://github.com/bmh-group/sandra/pull/42",
+            head_sha=replacement, ci_run_id="run-new", ci_status="success", ci_sha=replacement,
+        )
+        self.assertIsNone(
+            self.store.db.execute(
+                "SELECT * FROM deployments WHERE attempt_id=?", (attempt.attempt_id,)
+            ).fetchone()
+        )
+        with self.assertRaises(StateError):
+            self.store.review_snapshot(attempt.attempt_id)
+
+    def test_record_pr_and_deployment_require_full_hex_shas(self):
+        attempt = self.claim(
+            "bmh-group", "sandra", "vercel-production", 101,
+            owner="one", mode="repair",
+        )
+        self.store.mark_running(
+            attempt.attempt_id, attempt.fencing_token,
+            model=SPARK_MODEL, effort="low", session_id="repair-session",
+        )
+        for invalid in ("HEAD", "a" * 39, "b" * 41):
+            with self.assertRaises(ValueError):
+                self.store.record_pull_request(
+                    attempt.attempt_id, attempt.fencing_token,
+                    number=42, url="https://github.com/bmh-group/sandra/pull/42",
+                    head_sha=invalid,
+                )
+        self.seed_review_evidence(attempt)
+        for invalid in ("main", "c" * 39, "d" * 41):
+            with self.assertRaises(ValueError):
+                self.store.record_deployment(
+                    attempt.attempt_id, attempt.fencing_token,
+                    environment="vercel-production", deployed_sha=invalid,
+                )
 
     def test_review_rejects_session_id_only_in_model_text(self):
         attempt = self.claim("bmh-group", "sandra", "vercel-production", 101, owner="one", mode="repair")

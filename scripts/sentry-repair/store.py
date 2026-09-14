@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 
 MAX_ATTEMPTS = 2
+FULL_SHA_RE = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 
 
 class StateError(RuntimeError):
@@ -721,6 +722,11 @@ class RepairStore:
     def _review_snapshot_locked(self, attempt_id: str) -> dict[str, Any]:
         """Capture the exact persisted evidence a review is allowed to approve."""
 
+        attempt = self.db.execute(
+            "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
+        ).fetchone()
+        if attempt is None:
+            raise StateError("unknown attempt")
         pr = self.db.execute(
             "SELECT * FROM pull_requests WHERE attempt_id=?", (attempt_id,)
         ).fetchone()
@@ -744,6 +750,14 @@ class RepairStore:
             raise StateError("review requires successful persisted CI evidence")
         if deployment is None or not deployment["deployed_sha"]:
             raise StateError("review requires persisted deployment evidence")
+        try:
+            ancestry_verified = self._verify_deployment_ancestry(
+                attempt, str(pr["head_sha"]), str(deployment["deployed_sha"])
+            )
+        except StateError:
+            raise
+        if not ancestry_verified:
+            raise StateError("review requires a verified deployment target ancestry")
         if int(deployment["ancestry_verified"] or 0) != 1:
             raise StateError("review requires a verified deployment target ancestry")
         functional = verifications.get("functional_probe")
@@ -797,6 +811,19 @@ class RepairStore:
         """Return current evidence for the review prompt; no state mutation."""
 
         return self._review_snapshot_locked(attempt_id)
+
+    def review_context(self, attempt_id: str) -> dict[str, Any]:
+        """Capture prompt context and its evidence snapshot in one read turn."""
+
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            context = self.completion_context(attempt_id)
+            context["review_snapshot"] = self._review_snapshot_locked(attempt_id)
+            self.db.execute("COMMIT")
+            return context
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
 
     def enqueue_notification(
         self,
@@ -981,10 +1008,22 @@ class RepairStore:
     ) -> None:
         if number <= 0 or not url or not head_sha:
             raise ValueError("PR number, URL, and head SHA are required")
+        if not FULL_SHA_RE.fullmatch(str(head_sha)):
+            raise ValueError("PR head SHA must be a full 40- or 64-character hexadecimal SHA")
+        if ci_sha is not None and not FULL_SHA_RE.fullmatch(str(ci_sha)):
+            raise ValueError("CI SHA must be a full 40- or 64-character hexadecimal SHA")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self._fenced_attempt_locked(attempt_id, fencing_token)
             self._ensure_evidence_mutable_locked(attempt_id)
+            previous = self.db.execute(
+                "SELECT head_sha FROM pull_requests WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if previous is not None and str(previous["head_sha"]).lower() != str(head_sha).lower():
+                # A new PR head invalidates any deployment ancestry proof that
+                # was tied to the prior head. Force a fresh deployment record
+                # rather than leaving a stale verified flag behind.
+                self.db.execute("DELETE FROM deployments WHERE attempt_id=?", (attempt_id,))
             self.db.execute(
                 """INSERT INTO pull_requests(
                    attempt_id,number,url,head_sha,ci_run_id,ci_status,ci_sha,recorded_at)
@@ -1019,8 +1058,8 @@ class RepairStore:
     ) -> None:
         if not environment or not deployed_sha:
             raise ValueError("deployment environment and deployed SHA are required")
-        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", str(deployed_sha)):
-            raise ValueError("deployed SHA must be a git SHA")
+        if not FULL_SHA_RE.fullmatch(str(deployed_sha)):
+            raise ValueError("deployed SHA must be a full 40- or 64-character hexadecimal SHA")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             attempt = self._fenced_attempt_locked(attempt_id, fencing_token)
@@ -1388,6 +1427,17 @@ class RepairStore:
         try:
             attempt = self._fenced_attempt_locked(attempt_id, fencing_token, now=current)
             context = self.completion_context(attempt_id)
+            persisted_pr = context.get("pull_request")
+            persisted_deployment = context.get("deployment")
+            if persisted_pr is not None and persisted_deployment is not None:
+                try:
+                    context["deployment_ancestry_verified"] = self._verify_deployment_ancestry(
+                        attempt,
+                        str(persisted_pr["head_sha"]),
+                        str(persisted_deployment["deployed_sha"]),
+                    )
+                except (KeyError, StateError):
+                    context["deployment_ancestry_verified"] = False
             validate_completion_record(record, context)
             self.db.execute(
                 "UPDATE attempts SET status='completed',finished_at=? WHERE attempt_id=?",

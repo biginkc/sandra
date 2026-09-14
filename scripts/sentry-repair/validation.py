@@ -20,8 +20,8 @@ def _require(value: Any, label: str) -> Any:
 
 def _sha(value: Any, label: str) -> str:
     text = str(_require(value, label))
-    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", text):
-        raise CompletionError(f"{label} must be a git SHA")
+    if not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z", text):
+        raise CompletionError(f"{label} must be a full 40- or 64-character hexadecimal SHA")
     return text
 
 
@@ -133,9 +133,12 @@ def validate_completion_record(
         raise CompletionError("deployment environment does not match persisted deployment")
     if _sha(deployment.get("deployed_sha"), "deployment.deployed_sha").lower() != str(deployment_persisted["deployed_sha"]).lower():
         raise CompletionError("deployed SHA does not match persisted deployment")
-    if str(deployment.get("deployed_sha")).lower() != head_sha.lower() and int(
-        deployment_persisted.get("ancestry_verified") or 0
-    ) != 1:
+    deployed_matches_head = str(deployment.get("deployed_sha")).lower() == head_sha.lower()
+    recomputed_ancestry = context.get("deployment_ancestry_verified")
+    if not deployed_matches_head and not (
+        recomputed_ancestry is True
+        or (recomputed_ancestry is None and int(deployment_persisted.get("ancestry_verified") or 0) == 1)
+    ):
         raise CompletionError("deployed SHA must equal PR head or have verified ancestry")
     deployment_recorded_at = _timestamp(
         deployment_persisted.get("recorded_at"), "persisted deployment.recorded_at"

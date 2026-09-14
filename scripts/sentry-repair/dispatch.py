@@ -309,7 +309,7 @@ class SubprocessExecutor:
                             if signal.getsignal(signum) == signal.SIG_IGN:
                                 continue
                             previous_handlers[signum] = signal.signal(signum, stop_child_on_signal)
-                        except (OSError, ValueError):
+                        except (OSError, TypeError, ValueError):
                             continue
                 while process.poll() is None:
                     now = time.monotonic()
@@ -375,7 +375,7 @@ class SubprocessExecutor:
                 for signum, handler in previous_handlers.items():
                     try:
                         signal.signal(signum, handler)
-                    except (OSError, ValueError):
+                    except (OSError, TypeError, ValueError):
                         pass
                 # Covers KeyboardInterrupt, SystemExit, unexpected adapter
                 # errors, and exceptions from output collection. The child
@@ -790,11 +790,44 @@ def dispatch_review(
         "argv": argv,
         "executed": False,
     }
+    existing_review = context.get("review")
+    if existing_review is not None and existing_review.get("decision") == "approved":
+        # Approval is terminal for this review scope. Do not spend another
+        # independent model run or permit review shopping after approval.
+        plan.update(
+            {
+                "skipped": "already_approved",
+                "review": {
+                    "decision": existing_review["decision"],
+                    "evidence": existing_review["evidence"],
+                    "session_id": existing_review["session_id"],
+                },
+            }
+        )
+        return plan
     if not execute:
         return plan
     if not context["attempt"].get("session_id"):
         raise ValueError("review requires a persisted repair session")
-    snapshot = store.review_snapshot(attempt_id)
+    # Capture every value that enters the prompt with the exact immutable
+    # evidence snapshot in one transaction. record_review later fences this
+    # snapshot against any evidence changed during model execution.
+    context = store.review_context(attempt_id)
+    store.assert_fenced(attempt_id, fencing_token)
+    snapshot = context.pop("review_snapshot")
+    try:
+        bound_evidence = json.loads(snapshot["evidence_snapshot_json"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StateError("review evidence snapshot is invalid") from exc
+    if not isinstance(bound_evidence, dict):
+        raise StateError("review evidence snapshot is invalid")
+    # Prompt evidence must be the same canonical values that record_review
+    # will later compare, rather than a second pre-snapshot DB read carrying
+    # mutable storage timestamps.
+    context["pull_request"] = bound_evidence.get("pull_request")
+    context["deployment"] = bound_evidence.get("deployment")
+    context["verifications"] = bound_evidence.get("verifications", {})
+    worktree = context["attempt"].get("worktree")
     existing_review = context.get("review")
     if (
         existing_review is not None
