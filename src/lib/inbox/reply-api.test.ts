@@ -95,10 +95,30 @@ describe("freeze DTO validation is fail-closed (obligation 5, C8)", () => {
   it("rejects a non-null recipient on an excluded item", async () => {
     const capture = { items: [captureItem(5, { exclusion: "property_unavailable" })] };
     const bogus = { ...excludedFreezeItem(5, "property_unavailable"), recipient: { contactName: "x", propertyAddress: "x", propertyId: id(1), contactId: id(2), from: "+18165550001", to: "+18165550002", renderedBody: "x" } };
-    const freeze = freezeResult([bogus]);
+    // blockers:["empty"] matches this fixture's recipientCount (0) correctly,
+    // so the 503 here can ONLY come from need(row.recipient === null) — not
+    // from the (also-failing, but unrelated) empty-blocker equivalence check.
+    // Without this override the default blockers:[] mismatches recipientCount
+    // 0 too, and the test would still 503 even if the strict-null guard were
+    // deleted — masking the very check it claims to cover.
+    const freeze = freezeResult([bogus], { blockers: ["empty"] });
     const c = client([ok(capture), ok(freeze)]);
     await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
   });
+  // MUTATION: relaxing `need(row.recipient === null)` to accept any
+  // non-undefined value (or dropping it) makes this test — isolated from the
+  // empty-blocker check by the override above — incorrectly resolve instead
+  // of rejecting.
+  it("rejects a recipientCount:0 response whose blockers omit 'empty' (empty-blocker equivalence)", async () => {
+    const capture = { items: [captureItem(5, { exclusion: "property_unavailable" })] };
+    const freeze = freezeResult([excludedFreezeItem(5, "property_unavailable")], { blockers: [] });
+    const c = client([ok(capture), ok(freeze)]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+  // MUTATION: dropping `need(blockers.includes("empty") === (recipientCount
+  // === 0))` (or weakening it to a one-directional check) makes this
+  // well-formed-otherwise excluded-only response — recipientCount 0 but no
+  // 'empty' blocker — incorrectly resolve instead of rejecting.
   it("rejects an exclusion string outside INBOX_REPLY_EXCLUSIONS", async () => {
     const capture = { items: [captureItem(5)] };
     const freeze = freezeResult([excludedFreezeItem(5, "not_a_real_exclusion_code")]);
@@ -177,6 +197,71 @@ describe("freeze replayed flag controls body equality (B2, obligation 5)", () =>
   // replayed:true (i.e. never branching on the flag) makes the legitimate
   // replay-after-drift test above fail — it would incorrectly 503 instead of
   // returning 200 with the original frozen body.
+
+  // Both gates confirmed the replayed:true path enforces every structural
+  // invariant except fresh body-equality (skipped by design — `replayed`
+  // comes only from the trusted SQL fn, never client-settable). Previously
+  // that was proven only by ad-hoc probes; these pin it as committed tests.
+  it("rejects a blank renderedBody even when replayed is true", async () => {
+    const capture = { items: [captureItem(5)] };
+    const freeze = freezeResult([freezeItemFor(5, "   ")], { replayed: true });
+    const c = client([ok(capture), ok(freeze)]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+  // MUTATION: relaxing the renderedBody check from `typeof renderedBody ===
+  // "string" && renderedBody.trim().length > 0 && renderedBody.length <=
+  // 1600` down to just `typeof renderedBody === "string"` makes this
+  // blank-body replayed row incorrectly resolve instead of rejecting.
+  it("rejects a renderedBody over 1600 UTF-16 units even when replayed is true", async () => {
+    const capture = { items: [captureItem(5)] };
+    const freeze = freezeResult([freezeItemFor(5, "x".repeat(1601))], { replayed: true });
+    const c = client([ok(capture), ok(freeze)]);
+    await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+  // MUTATION: the same renderedBody relaxation above (dropping the `<=
+  // 1600` clause) makes this over-length replayed body incorrectly resolve.
+  it("rejects a missing or non-boolean replayed field instead of silently taking the trust path", async () => {
+    // Deliberately uses a body that WOULD legitimately match the fresh
+    // render ("Hi Ada, I'm Mel." for id(5)) — so ANY silent coercion of a
+    // malformed `replayed` value, in EITHER direction (defaulting to false
+    // and running equality against a body that happens to match, or
+    // defaulting to true and skipping equality altogether), would let this
+    // resolve as 200. Only a strict typeof-boolean check 503s regardless of
+    // which way a buggy coercion leans.
+    const capture = { items: [captureItem(5)] };
+    for (const overrides of [{ replayed: undefined }, { replayed: "true" }, { replayed: 1 }]) {
+      // freezeResult()'s spread would keep the key at `undefined` for the
+      // first case, which JSON.stringify would drop — but here the mock
+      // response is the object itself (never serialized), so `row.replayed`
+      // really is `undefined` on the object bool() receives, matching the
+      // "field omitted by the RPC" case exactly.
+      const freeze = freezeResult([freezeItemFor(5, "Hi Ada, I'm Mel.")], overrides);
+      const c = client([ok(capture), ok(freeze)]);
+      await expect(c.repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+    }
+  });
+  // MUTATION: changing `const replayed = bool(row.replayed);` to something
+  // like `row.replayed === true` (silently defaulting non-boolean/missing
+  // values to `false`, then running fresh-body-equality — which this
+  // fixture's body happens to satisfy) would make this test fail to reject
+  // the non-boolean cases and incorrectly resolve as 200 instead of 503.
+  it("still enforces structural invariants on a replay: missing recipient field, wrong idempotencyKey, and item/target count mismatch each 503", async () => {
+    const capture = { items: [captureItem(5)] };
+    // missing recipient field (contactId absent) on an otherwise-eligible
+    // replayed item.
+    const missingField = { ...freezeItemFor(5, "Hi Ada, I'm Mel."), recipient: { ...freezeItemFor(5, "Hi Ada, I'm Mel.").recipient, contactId: undefined } };
+    await expect(client([ok(capture), ok(freezeResult([missingField], { replayed: true }))]).repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+    // wrong idempotencyKey echoed back on a replayed response.
+    await expect(client([ok(capture), ok(freezeResult([freezeItemFor(5, "Hi Ada, I'm Mel.")], { replayed: true, idempotencyKey: id(7) }))]).repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+    // item count doesn't match target count on a replayed response.
+    await expect(client([ok(capture), ok(freezeResult([freezeItemFor(5, "Hi Ada, I'm Mel."), excludedFreezeItem(6, "conversation_unavailable")], { replayed: true }))]).repository.prepare(JSON.stringify(request()), signal())).rejects.toMatchObject({ status: 503 });
+  });
+  // MUTATION: short-circuiting any of the envelope/per-item structural
+  // checks (id() UUID validation on recipient fields, the idempotencyKey
+  // echo check, or the `row.items.length === parsed.targets.length` check)
+  // specifically when `replayed` is true would make each respective case
+  // above incorrectly resolve instead of rejecting — proving those guards
+  // are NOT gated on `!replayed` the way fresh-body-equality alone is.
 });
 
 describe("canonical envelope drafts (obligation 7, C5)", () => {
