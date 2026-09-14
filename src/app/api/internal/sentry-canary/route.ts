@@ -5,6 +5,7 @@ import { start } from "workflow/api";
 import { sentryPreviewCanaryWorkflow } from "@/workflows/sentry-preview-canary";
 import { CANARY_COOKIE, canaryCookieValue } from "@/lib/errors/preview-canary-access";
 import { ensureSentryServerClient } from "@/lib/errors/sentry-server-client";
+import { runMonitoredCron } from "@/lib/errors/cron-monitor";
 
 export const runtime = "nodejs";
 
@@ -29,6 +30,14 @@ export async function POST(request: Request) {
   if (mode === "workflow") {
     const run = await start(sentryPreviewCanaryWorkflow, []);
     return NextResponse.json({ runId: run.runId });
+  }
+  if (mode === "cron_ok" || mode === "cron_error") {
+    return runMonitoredCron(
+      "sandra-sentry-preview-canary",
+      { schedule: { type: "crontab", value: "* * * * *" }, checkinMargin: 1, maxRuntime: 1 },
+      async () => NextResponse.json({ monitored: true, expectedFailure: mode === "cron_error" }),
+      async () => mode === "cron_error",
+    );
   }
   if (mode !== "server") return NextResponse.json({ error: "Invalid canary mode" }, { status: 400 });
   if (!ensureSentryServerClient()) return NextResponse.json({ error: "Sentry client inactive" }, { status: 503 });

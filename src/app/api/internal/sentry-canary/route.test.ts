@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ client: vi.fn(), capture: vi.fn(), flush: vi.fn(), start: vi.fn(), tag: vi.fn() }));
+const mocks = vi.hoisted(() => ({ client: vi.fn(), capture: vi.fn(), checkIn: vi.fn(), flush: vi.fn(), start: vi.fn(), tag: vi.fn() }));
 vi.mock("@sentry/nextjs", () => ({
   getClient: mocks.client,
   captureException: mocks.capture,
+  captureCheckIn: mocks.checkIn,
   flush: mocks.flush,
   withScope: (callback: (scope: { setTag: typeof mocks.tag }) => void) => callback({ setTag: mocks.tag }),
 }));
@@ -27,6 +28,7 @@ describe("preview-only Sentry canary", () => {
     process.env.SENTRY_CANARY_SECRET = "owned-canary-secret";
     mocks.client.mockReturnValue({});
     mocks.capture.mockReturnValue("safe-event-id");
+    mocks.checkIn.mockReturnValue("check-in-id");
     mocks.flush.mockResolvedValue(true);
   });
   afterEach(() => {
@@ -55,6 +57,14 @@ describe("preview-only Sentry canary", () => {
     const response = await POST(request("workflow", "owned-canary-secret"));
     expect(await response.json()).toEqual({ runId: "canary-run" });
     expect(mocks.start).toHaveBeenCalledOnce();
+  });
+  it("sends a controlled failed Cron check-in from the preview runtime", async () => {
+    const response = await POST(request("cron_error", "owned-canary-secret"));
+    expect(response.status).toBe(200);
+    expect(mocks.checkIn).toHaveBeenCalledWith(
+      expect.objectContaining({ monitorSlug: "sandra-sentry-preview-canary", status: "error" }),
+    );
+    expect(mocks.flush).toHaveBeenCalledWith(2_000);
   });
   it("issues a short-lived HttpOnly browser canary cookie after authorization", async () => {
     const response = await POST(request("session", "owned-canary-secret"));
