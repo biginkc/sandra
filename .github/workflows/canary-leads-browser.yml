@@ -7,7 +7,7 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  lead-detail-baseline:
+  leads-browser:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -26,8 +26,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - name: Check dedicated Hugo identity and lead detail persistence
-        run: npx playwright test --config playwright.canary.config.ts e2e/prod-canary/lead-management.spec.ts
+      - name: Check dedicated Hugo identity, My Leads queue, and lead detail
+        run: npx playwright test --config playwright.canary.config.ts e2e/prod-canary/my-leads-queue.spec.ts e2e/prod-canary/lead-management.spec.ts
       - name: Preserve failure trace
         if: failure()
         uses: actions/upload-artifact@v4

@@ -36,6 +36,10 @@ Required environment:
 The `canary-leads-browser.yml` workflow remains dispatch-only until the new
 Hugo canary identity has passed a live run. GitHub Actions needs `PROD_EMAIL`
 and `PROD_PASSWORD` secrets for that job; do not commit them to the repository.
+Its My Leads test requires one active membership with Acquisitions enabled and
+an org where My Leads is enabled. It assigns only a run-tagged synthetic lead,
+searches and expands that queue row, saves a note, verifies the database and
+reload, then deletes the owned lead and its cascading notes/episode.
 
 Canary data must be tagged with `PROD-CANARY <run_id>`, and cleanup must only
 target data created by the active canary run.
