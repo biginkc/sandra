@@ -2,7 +2,7 @@ import * as Sentry from "@sentry/nextjs";
 
 /** Run only from a Node step after the business step has exhausted retries. */
 export async function reportTerminalWorkflowFailure(
-  operation: "skip_trace_submit",
+  operation: "skip_trace_submit" | "sentry_preview_canary",
 ): Promise<void> {
   "use step";
 
