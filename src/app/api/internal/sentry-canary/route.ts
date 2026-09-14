@@ -40,6 +40,9 @@ async function postCanary(request: Request) {
       async () => mode === "cron_error",
     );
   }
+  if (mode === "server_unhandled") {
+    throw new Error("Controlled Sentry unhandled server canary");
+  }
   if (mode !== "server") return NextResponse.json({ error: "Invalid canary mode" }, { status: 400 });
   if (!ensureSentryServerClient()) return NextResponse.json({ error: "Sentry client inactive" }, { status: 503 });
   let eventId = "";

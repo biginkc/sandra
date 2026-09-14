@@ -7,6 +7,9 @@ export async function register() {
 }
 
 export const onRequestError: typeof Sentry.captureRequestError = (error, request, context) => {
+  if (context.routePath === "/api/internal/sentry-canary") {
+    console.info("[sentry-canary] onRequestError invoked", context.routeType);
+  }
   if (!ensureSentryServerClient()) return;
   Sentry.withScope((scope) => {
     scope.setTag("surface", "server_request");
