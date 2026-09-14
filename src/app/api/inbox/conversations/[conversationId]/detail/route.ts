@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { createInboxReadRepository, InboxReadError, type InboxReadClient } from "@/lib/inbox/read-api";
+import { isInboxPilotRequest, type InboxPilotAuthClient } from "@/lib/inbox/pilot-cohort";
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 export async function GET(request: Request, { params }: { params: Promise<{ conversationId: string }> }) {
   if (process.env.INBOX_WORKSPACE_SERVER_ENABLED !== "1") return Response.json({ error: "Not found" }, { status: 404, headers });
@@ -11,6 +12,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ conv
     if (before !== null && !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(before)) throw new InboxReadError(400);
     const { conversationId } = await params;
     const client = await createClient();
+    // GL-4/G5: pilot cohort gate before the inbox_* RPC below.
+    if (!(await isInboxPilotRequest(client as unknown as InboxPilotAuthClient))) return Response.json({ error: "Not found" }, { status: 404, headers });
     const data = await createInboxReadRepository(client as unknown as InboxReadClient).detail(query.get("orgId")!, conversationId, AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]), query.get("before") ?? undefined);
     return Response.json(data, { headers });
   } catch (error) {

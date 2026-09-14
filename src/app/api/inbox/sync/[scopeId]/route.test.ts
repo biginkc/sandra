@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "./route";
 import * as gateway from "@/lib/inbox/sync-gateway";
-const mocks = vi.hoisted(() => ({ create: vi.fn(), rpc: vi.fn() }));
+const mocks = vi.hoisted(() => ({ create: vi.fn(), rpc: vi.fn(), getUser: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.create }));
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const request = () => new Request(`https://example.com/api/inbox/sync/${id}`);
 const params = () => ({ params: Promise.resolve({ scopeId: id }) });
-beforeEach(() => { vi.clearAllMocks(); mocks.create.mockResolvedValue({ rpc: mocks.rpc }); });
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.create.mockResolvedValue({ rpc: mocks.rpc, auth: { getUser: mocks.getUser } });
+  mocks.getUser.mockResolvedValue({ data: { user: { id } } });
+  vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", id);
+});
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 describe("sync deployment boundary", () => {
   it.each([undefined, "0", "true"])("defaults closed for flag %s before client creation", async flag => {
@@ -16,6 +21,18 @@ describe("sync deployment boundary", () => {
   it("fails closed without fixed upstream configuration", async () => {
     vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); vi.stubEnv("INBOX_ELECTRIC_SHAPE_URL", undefined);
     expect((await GET(request(), params())).status).toBe(503); expect(mocks.create).not.toHaveBeenCalled();
+  });
+  it("returns 404 and never calls the sync RPC for a user outside the pilot allowlist (GL-4/G5)", async () => {
+    vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); vi.stubEnv("INBOX_ELECTRIC_UPSTREAM_MODE", "owned-local"); vi.stubEnv("INBOX_ELECTRIC_SHAPE_URL", "http://127.0.0.1:58783/v1/shape"); vi.stubEnv("INBOX_ELECTRIC_PROJECTION_TABLE", "inbox_t2_bridge.summary_rows");
+    mocks.getUser.mockResolvedValue({ data: { user: { id: "not-piloted-user" } } });
+    expect((await GET(request(), params())).status).toBe(404); expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+  // MUTATION: removing the pilot check in route.ts makes this fail — the
+  // out-of-cohort user would reach inbox_sync_snapshot_v1.
+  it("returns 404 when the allowlist is empty (default = nobody)", async () => {
+    vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); vi.stubEnv("INBOX_ELECTRIC_UPSTREAM_MODE", "owned-local"); vi.stubEnv("INBOX_ELECTRIC_SHAPE_URL", "http://127.0.0.1:58783/v1/shape"); vi.stubEnv("INBOX_ELECTRIC_PROJECTION_TABLE", "inbox_t2_bridge.summary_rows");
+    vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", undefined);
+    expect((await GET(request(), params())).status).toBe(404); expect(mocks.rpc).not.toHaveBeenCalled();
   });
   it("uses cookie RPC authority and fails closed without deployed schema", async () => {
     vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); vi.stubEnv("INBOX_ELECTRIC_UPSTREAM_MODE", "owned-local"); vi.stubEnv("INBOX_ELECTRIC_SHAPE_URL", "http://127.0.0.1:58783/v1/shape"); vi.stubEnv("INBOX_ELECTRIC_PROJECTION_TABLE", "inbox_t2_bridge.summary_rows");
