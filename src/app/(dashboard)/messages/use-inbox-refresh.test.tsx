@@ -115,3 +115,119 @@ it("an online event while hidden does not burn the cooldown for the next focus",
   await act(async () => { await Promise.resolve(); await Promise.resolve(); });
   if (originalVisibility) Object.defineProperty(document, "visibilityState", originalVisibility);
 });
+
+// --- Fable-mandated leading-edge + trailing-timer contract (2026-09-14) ---
+// Astra blocked the leading-edge-only cooldown: a reconnect landing inside
+// the window was simply dropped with nothing to recover it, so the inbox
+// went stale until an unrelated event happened to fire. These tests use
+// `vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] })`
+// rather than the full fake-timer set — faking everything (including the
+// scheduler's own internals) hangs React's `act()` flush.
+
+it("arms a single trailing refresh for a suppressed event and fires it at window end", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    fetchMock.mockResolvedValue(response(5));
+    renderHook(() => useInboxRefresh(initial, "filter=all", true));
+    act(() => { fireEvent.focus(window); }); // t=0: leading edge, dispatches
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); }); // let it settle
+    act(() => { vi.advanceTimersByTime(5_000); }); // t=5
+    act(() => { fireEvent(window, new Event("online")); }); // suppressed — arms trailing for t=10
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no fetch yet
+    await act(async () => { vi.advanceTimersByTime(4_999); }); // t=9.999
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { vi.advanceTimersByTime(1); }); // t=10 — trailing fires
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("collapses multiple suppressed events into the one armed trailing timer (no re-arm, no extension)", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    fetchMock.mockResolvedValue(response(5));
+    renderHook(() => useInboxRefresh(initial, "filter=all", true));
+    act(() => { fireEvent.focus(window); }); // t=0: leading edge, dispatches
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    act(() => { vi.advanceTimersByTime(5_000); }); // t=5
+    act(() => { fireEvent(window, new Event("online")); }); // arms trailing for t=10
+    act(() => { vi.advanceTimersByTime(1_000); }); // t=6
+    act(() => { fireEvent.focus(window); }); // suppressed — must not re-arm
+    act(() => { vi.advanceTimersByTime(1_000); }); // t=7
+    act(() => { fireEvent(window, new Event("online")); }); // suppressed — must not extend
+    // If either had re-armed/extended, the window would now end after t=10.
+    await act(async () => { vi.advanceTimersByTime(2_999); }); // t=9.999
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { vi.advanceTimersByTime(1); }); // t=10.000 — the ORIGINAL trailing timer fires
+    expect(fetchMock).toHaveBeenCalledTimes(2); // exactly one trailing dispatch, not three
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("a trailing refresh that fires while hidden does not dispatch or stamp; the next visible focus does", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+  try {
+    fetchMock.mockResolvedValue(response(5));
+    renderHook(() => useInboxRefresh(initial, "filter=all", true));
+    act(() => { fireEvent.focus(window); }); // t=0: leading edge, dispatches
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    act(() => { vi.advanceTimersByTime(5_000); }); // t=5, still visible
+    act(() => { fireEvent(window, new Event("online")); }); // suppressed — arms trailing for t=10
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    await act(async () => { vi.advanceTimersByTime(5_000); }); // t=10 — trailing fires while hidden
+    expect(fetchMock).toHaveBeenCalledTimes(1); // reconcile's own visibility gate blocked it — no dispatch, no stamp
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    act(() => { fireEvent.focus(window); }); // next visible focus — must dispatch, not be dropped
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  } finally {
+    vi.useRealTimers();
+    if (originalVisibility) Object.defineProperty(document, "visibilityState", originalVisibility);
+  }
+});
+
+it("a suppressed ambient event that arrives while hidden arms no trailing timer", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+  try {
+    fetchMock.mockResolvedValue(response(5));
+    renderHook(() => useInboxRefresh(initial, "filter=all", true));
+    act(() => { fireEvent.focus(window); }); // t=0: leading edge, dispatches
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    act(() => { vi.advanceTimersByTime(5_000); }); // t=5, inside window
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    act(() => { fireEvent(window, new Event("online")); }); // suppressed AND hidden — arms nothing
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    await act(async () => { vi.advanceTimersByTime(5_000); }); // t=10 — a wrongly-armed timer would fire here
+    expect(fetchMock).toHaveBeenCalledTimes(1); // still just the leading-edge dispatch
+  } finally {
+    vi.useRealTimers();
+    if (originalVisibility) Object.defineProperty(document, "visibilityState", originalVisibility);
+  }
+});
+
+it("a disabled ambient event does not burn the window for the next enabled event", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    fetchMock.mockResolvedValue(response(5));
+    const { rerender } = renderHook(
+      ({ enabled }) => useInboxRefresh(initial, "filter=all", enabled),
+      { initialProps: { enabled: false } },
+    );
+    act(() => { fireEvent.focus(window); }); // disabled — reconcile returns false, must not stamp
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+    rerender({ enabled: true });
+    act(() => { fireEvent.focus(window); }); // same instant, now enabled — must dispatch immediately
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  } finally {
+    vi.useRealTimers();
+  }
+});

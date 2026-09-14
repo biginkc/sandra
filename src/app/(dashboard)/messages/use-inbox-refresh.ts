@@ -15,6 +15,15 @@ export type InboxRefreshSnapshot = { page: ThreadPage; unknown: number; dismisse
  * 15s timeout under concurrent load). This only gates the two ambient
  * triggers below — explicit user actions (filter change, manual retry,
  * pagination, selection change) always refresh immediately.
+ *
+ * Leading-edge + single trailing timer, same shape as useThrottledRefresh:
+ * an ambient event outside the window dispatches immediately; one inside
+ * the window arms exactly one trailing refresh for the remainder of the
+ * window, and further suppressed events collapse into it rather than
+ * re-arming or extending it. This is required, not cosmetic — a bare
+ * leading-edge-only gate drops a reconnect that lands inside the window
+ * with nothing left to recover it (the realtime path doesn't either), so
+ * the inbox goes stale until some other unrelated event happens to fire.
  */
 const AUTO_REFRESH_MIN_INTERVAL_MS = 10_000;
 
@@ -36,10 +45,16 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
       pending.current = null;
     };
   }, [scope]);
-  const refresh = useCallback(function reconcile(): void {
-    if (activeScope.current !== scope || !enabled || document.visibilityState !== "visible") return;
-    if (pinSelection && new URLSearchParams(window.location.search).get("thread") !== selectedThreadId) return;
-    if (pending.current) { pending.current.again = true; return; }
+  // Returns whether this call was an effective dispatch — it created a new
+  // request, or queued one on top of an in-flight request via `again`
+  // (both mean the RPC will run again for this call's sake). False for
+  // hidden/disabled/stale-scope/Unread-pin-mismatch, where nothing was or
+  // will be requested. The ambient focus/online cooldown below stamps only
+  // on `true`, so a no-op call never burns the throttle window.
+  const refresh = useCallback(function reconcile(): boolean {
+    if (activeScope.current !== scope || !enabled || document.visibilityState !== "visible") return false;
+    if (pinSelection && new URLSearchParams(window.location.search).get("thread") !== selectedThreadId) return false;
+    if (pending.current) { pending.current.again = true; return true; }
     const request = { abort: new AbortController(), again: false };
     pending.current = request;
     void (async () => {
@@ -64,6 +79,7 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
         }
       }
     })();
+    return true;
   }, [initial, query, enabled, selectedThreadId, pinSelection, scope]);
   const previousSelection = useRef(pinSelection ? serverThreadId : null);
   useEffect(() => {
@@ -72,22 +88,49 @@ export function useInboxRefresh(initial: InboxRefreshSnapshot, query: string, en
     refresh();
   }, [selectedThreadId, refresh]);
   const lastAutoRefreshAt = useRef(0);
+  const autoRefreshTrailingTimer = useRef<number | null>(null);
   useEffect(() => {
+    const clearAutoRefreshTrailing = () => {
+      if (autoRefreshTrailingTimer.current !== null) {
+        window.clearTimeout(autoRefreshTrailingTimer.current);
+        autoRefreshTrailingTimer.current = null;
+      }
+    };
+    // Re-runs the same gate at fire time (visibility/scope may have changed
+    // since the timer was armed) and stamps only if it actually dispatches.
+    const fireTrailingAutoRefresh = () => {
+      autoRefreshTrailingTimer.current = null;
+      if (refresh()) lastAutoRefreshAt.current = Date.now();
+    };
     const requestAutoRefresh = () => {
-      // `refresh()` itself no-ops while hidden — stamping the cooldown here
-      // regardless would let an `online` event that fires while the tab is
-      // backgrounded burn the window without ever dispatching, dropping the
-      // next legitimate `focus` refresh for up to 10s. Only stamp when the
-      // call is actually going to dispatch.
-      if (document.visibilityState !== "visible") return;
       const now = Date.now();
-      if (now - lastAutoRefreshAt.current < AUTO_REFRESH_MIN_INTERVAL_MS) return;
-      lastAutoRefreshAt.current = now;
-      refresh();
+      const elapsed = now - lastAutoRefreshAt.current;
+      if (elapsed >= AUTO_REFRESH_MIN_INTERVAL_MS) {
+        // Leading edge: try to dispatch now. Stamp only on an actual
+        // dispatch — a no-op (hidden/disabled/stale-scope/pin-mismatch)
+        // must never burn the window for the next ambient event.
+        if (refresh()) lastAutoRefreshAt.current = now;
+        return;
+      }
+      // Inside the window. A hidden tab gets no trailing timer at all —
+      // returning to the tab re-fires `focus` (a fresh leading-edge
+      // attempt), and useThrottledRefresh's own visibility reconcile
+      // covers the realtime-driven refresh path independently.
+      if (document.visibilityState !== "visible") return;
+      // Suppressed: arm exactly one trailing refresh for the remainder of
+      // the window. Further suppressed events collapse into it — no
+      // re-arm, no extension — so a burst still yields at most one
+      // trailing dispatch.
+      if (autoRefreshTrailingTimer.current !== null) return;
+      autoRefreshTrailingTimer.current = window.setTimeout(fireTrailingAutoRefresh, AUTO_REFRESH_MIN_INTERVAL_MS - elapsed);
     };
     window.addEventListener("focus", requestAutoRefresh);
     window.addEventListener("online", requestAutoRefresh);
-    return () => { window.removeEventListener("focus", requestAutoRefresh); window.removeEventListener("online", requestAutoRefresh); };
+    return () => {
+      window.removeEventListener("focus", requestAutoRefresh);
+      window.removeEventListener("online", requestAutoRefresh);
+      clearAutoRefreshTrailing();
+    };
   }, [refresh]);
   return { snapshot: result?.source === initial && result.query === query && result.selectedThreadId === selectedThreadId ? result.snapshot : initial,
     failed: failure?.source === initial && failure.query === query && failure.selectedThreadId === selectedThreadId, refresh };
