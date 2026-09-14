@@ -390,6 +390,28 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.store.get_cursor("bmh-group", "sandra", "vercel-production"), "c0")
         self.assertEqual(client.calls, [None, "page-two"])
 
+    def test_sentry_intake_uses_scoped_organization_endpoint(self):
+        requests = []
+
+        class Response:
+            headers = {"Link": ""}
+
+            @staticmethod
+            def read():
+                return b"[]"
+
+        def opener(request, *, timeout):
+            requests.append((request.full_url, timeout))
+            return Response()
+
+        SentryClient(token="token", opener=opener).fetch_page()
+        url, timeout = requests[0]
+        self.assertEqual(timeout, 20)
+        self.assertIn("/api/0/organizations/bmh-group/issues/", url)
+        self.assertIn("project=sandra", url)
+        self.assertIn("environment=vercel-production", url)
+        self.assertNotIn("/api/0/projects/", url)
+
     def test_sentry_success_commits_terminal_cursor(self):
         client = PagingClient([
             SentryPage([{"id": "900", "title": "first"}], "page-two", True),
