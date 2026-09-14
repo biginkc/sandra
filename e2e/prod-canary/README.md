@@ -41,6 +41,16 @@ an org where My Leads is enabled. It assigns only a run-tagged synthetic lead,
 searches and expands that queue row, saves a note, verifies the database and
 reload, then deletes the owned lead and its cascading notes/episode.
 
+The separate `canary-messages-browser.yml` workflow is also dispatch-only.
+It requires the same Hugo secrets, `PROD_DIALPAD_WEBHOOK_SECRET`,
+`PROD_DIALPAD_FROM_NUMBER`, and an owned `PROD_CANARY_SMS_TO` repeated in
+`PROD_CANARY_SMS_ALLOWLIST`. Its outbound spec sends through the real provider
+and checks Sandra's persisted `sent` row and lead thread. Its Messages spec
+posts a signed webhook with a synthetic phone, checks conversation attribution,
+then confirms both directions in `/messages` after reload. A signed webhook is
+an integration check, **not proof that an owned handset received or replied**;
+receiver-side evidence is still required before claiming that full journey.
+
 Canary data must be tagged with `PROD-CANARY <run_id>`, and cleanup must only
 target data created by the active canary run.
 
