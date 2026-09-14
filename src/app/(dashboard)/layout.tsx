@@ -16,6 +16,7 @@ import { JobFailureNotifier } from "@/components/job-failure-notifier";
 import { NotificationsBell } from "@/components/notifications-bell";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "@/components/softphone/softphone-provider";
 import { isAdminEmail } from "@/lib/auth/allowlist";
+import { canViewMyLeads } from "@/lib/my-leads/access";
 import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
 import { createClient } from "@/lib/supabase/server";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
@@ -39,7 +40,7 @@ export default async function DashboardLayout({
     rosterResult.status === "fulfilled" ? rosterResult.value : null;
   const showMyLeads = Boolean(
     acquisitionRoster &&
-      (acquisitionRoster.roster.settings.enabled || acquisitionRoster.viewer.isOwner),
+      canViewMyLeads(acquisitionRoster.roster, acquisitionRoster.viewer.userId),
   );
   const initialAcquisitionBadge =
     showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value : null;
