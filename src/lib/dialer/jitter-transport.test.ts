@@ -211,6 +211,33 @@ function deferred<T>() {
 }
 
 describe("JitterCallTransport", () => {
+  it("consumes QA capture configuration only for its exact caller/destination pair", async () => {
+    const key = "sandra:reliability-capture:v1";
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (name: string) => values.get(name) ?? null,
+      removeItem: (name: string) => { values.delete(name); },
+      setItem: (name: string, value: string) => { values.set(name, value); },
+    };
+    vi.stubGlobal("sessionStorage", storage);
+    const config = {
+      runId: "qa_run_123",
+      destinationE164: "+18165550123",
+      callerIdE164: "+18165550124",
+      expiresAtEpochMs: Date.now() + 60_000,
+    };
+    try {
+      storage.setItem(key, JSON.stringify(config));
+      await transportHarness().transport.start(target({ callerIdE164: config.callerIdE164 }));
+      expect(storage.getItem(key)).toBeNull();
+      storage.setItem(key, JSON.stringify(config));
+      await transportHarness().transport.start(target({ callerIdE164: "+18165550125" }));
+      expect(storage.getItem(key)).toBe(JSON.stringify(config));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("reports durable inbound RTP counters while the browser leg is live and stops on teardown", async () => {
     let scheduled: (() => void) | undefined;
     const stop = vi.fn();
