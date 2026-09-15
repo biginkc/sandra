@@ -39,6 +39,8 @@ jobs:
       DIALPAD_WEBHOOK_SECRET: ${{ secrets.PROD_DIALPAD_WEBHOOK_SECRET }}
       DIALPAD_FROM_NUMBER: ${{ secrets.PROD_DIALPAD_FROM_NUMBER }}
       PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+      PROD_CANARY_SMS_TO: ${{ secrets.PROD_CANARY_SMS_TO }}
+      PROD_CANARY_SMS_ALLOWLIST: ${{ secrets.PROD_CANARY_SMS_ALLOWLIST }}
       CI: "1"
     steps:
       - uses: actions/checkout@v5
@@ -59,6 +61,8 @@ jobs:
       DIALPAD_WEBHOOK_SECRET: ${{ secrets.PROD_DIALPAD_WEBHOOK_SECRET }}
       DIALPAD_FROM_NUMBER: ${{ secrets.PROD_DIALPAD_FROM_NUMBER }}
       PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+      PROD_CANARY_SMS_TO: ${{ secrets.PROD_CANARY_SMS_TO }}
+      PROD_CANARY_SMS_ALLOWLIST: ${{ secrets.PROD_CANARY_SMS_ALLOWLIST }}
       CI: "1"
     steps:
       - uses: actions/checkout@v5
