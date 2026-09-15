@@ -87,6 +87,36 @@ export async function rehearseNovationSchema(client, ids, legacyMetadata) {
       "novation_agreement", "provider-account-1", JSON.stringify(twoSellerMetadata)],
   );
   assert.equal(twoSellerRegistered.rows[0].outcome, "registered");
+  const roleFixSql = readFileSync(
+    "supabase/migrations/20260915001100_esign_website_novation_signer_roles.sql", "utf8",
+  );
+  await client.query(roleFixSql);
+  await client.query(roleFixSql);
+  const repaired = await client.query(
+    "select signer_roles from public.esign_templates where id = $1",
+    [twoSellerRegistered.rows[0].template_id],
+  );
+  assert.deepEqual(repaired.rows[0].signer_roles, twoSellerMetadata.signerRoles,
+    "existing two-seller registration was not repaired");
+  const preserved = await client.query(
+    "select signer_roles from public.esign_templates where id = $1",
+    [registered.rows[0].template_id],
+  );
+  assert.deepEqual(preserved.rows[0].signer_roles, legacyMetadata.signerRoles,
+    "one-seller registration changed");
+  const newTwoSellerMetadata = structuredClone(twoSellerMetadata);
+  newTwoSellerMetadata.providerTemplateId = `novation-two-sellers-new-${randomUUID()}`;
+  const newTwoSellerRegistered = await client.query(
+    "select * from public.register_dropbox_website_esign_template($1,$2,$3,$4,$5,$6,$7::jsonb)",
+    [ids.org, ids.owner, newTwoSellerMetadata.providerTemplateId, "New novation packet, two sellers",
+      "novation_agreement", "provider-account-1", JSON.stringify(newTwoSellerMetadata)],
+  );
+  const newStored = await client.query(
+    "select signer_roles from public.esign_templates where id = $1",
+    [newTwoSellerRegistered.rows[0].template_id],
+  );
+  assert.deepEqual(newStored.rows[0].signer_roles, twoSellerMetadata.signerRoles,
+    "new two-seller registration lost Seller 2");
 
   const signers = legacyMetadata.signerRoles.map((role) => ({
     role: role.name, order: role.order, name: `${role.name} Fixture`,
