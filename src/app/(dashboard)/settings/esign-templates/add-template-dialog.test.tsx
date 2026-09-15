@@ -150,7 +150,7 @@ describe("AddTemplateDialog", () => {
         error: {
           code: "MERGE_FIELD_MISMATCH",
           message:
-            "Dropbox Sign Sender merge fields must match either the five basic contract fields or all thirteen residential purchase agreement fields.",
+            "Dropbox Sign Sender merge fields must match a supported contract field set, including all 26 novation fields when used.",
         },
       })
       .mockResolvedValueOnce({
@@ -189,7 +189,7 @@ describe("AddTemplateDialog", () => {
 
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
-        "Dropbox Sign Sender merge fields must match either",
+        "Dropbox Sign Sender merge fields must match a supported contract field set",
       ),
     );
     expect(registerWebsiteTemplate).toHaveBeenCalledWith({
