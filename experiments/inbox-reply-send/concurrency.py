@@ -1,0 +1,1250 @@
+#!/usr/bin/env python3
+"""Two real connections, observed lock-waits: double-claim, stale-fence,
+reclaim-after-dispatch, sender one-in-flight. Installs its own schemas
+(committed, not rollback-only, since separate connections must see them) and
+drops them all in a finally block."""
+import hashlib,json,subprocess,sys,time,uuid
+from pathlib import Path
+P=Path(__file__).resolve().parent
+sys.path.insert(0,str(P.parent/'inbox-projection'/'fixture'))
+from guards import validate_container,validate_cron
+if sys.argv[1:]!=['--run-owned-fixture']:raise SystemExit('Explicit owned fixture required')
+D=['docker','--host','unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock'];N='sandra-inbox-projection-t2-db'
+validate_container(json.loads(subprocess.check_output(D+['inspect',N],text=True))[0])
+CMD=D+['exec','-i',N,'psql','-XqAt','-U','postgres','-d','postgres','-v','ON_ERROR_STOP=1']
+def need(v,label):
+ if not v:raise RuntimeError(label)
+def sql(q,timeout=20):
+ r=subprocess.run(CMD,input="SET statement_timeout='15s'; SET lock_timeout='10s';"+q,text=True,capture_output=True,timeout=timeout)
+ need(r.returncode==0,r.stderr);return r.stdout.strip()
+def start(q):
+ p=subprocess.Popen(CMD,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+ p.stdin.write("SET statement_timeout='15s'; SET lock_timeout='10s';"+q);p.stdin.close();p.stdin=None;return p
+def wait_for(query,label,deadline_s=6):
+ deadline=time.monotonic()+deadline_s
+ while time.monotonic()<deadline:
+  if sql(query)=='t':return
+  time.sleep(.05)
+ raise RuntimeError(label)
+def finish(proc,label,timeout=12):
+ out,err=proc.communicate(timeout=timeout)
+ need(proc.returncode==0,f'{label}: {err}')
+ return out.strip()
+def dest(i):
+ return '+130255'+str(i).zfill(5)
+def fetch_item(prep_id,i):
+ """(item_id, conversation/target_id) for the fixture item destined to dest(i)."""
+ item_id=sql(f"SELECT (value->>'id') FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{prep_id}' AND value->'recipient'->>'to'='{dest(i)}'")
+ conv_id=sql(f"SELECT (value->'target'->>'id') FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{prep_id}' AND value->'recipient'->>'to'='{dest(i)}'")
+ need(item_id and conv_id,f'Fixture item for index {i} not found')
+ return item_id,conv_id
+def insert_attempt(org,op_id,prep_id,item_id):
+ """INSERT the first (ordinal 1, approved) attempt for a frozen-but-unattempted item; returns the new attempt id."""
+ recipient=sql(f"SELECT jsonb_build_object('contactId',value->'recipient'->>'contactId','from',value->'recipient'->>'from','to',value->'recipient'->>'to','renderedBody',value->'recipient'->>'renderedBody')::text FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{prep_id}' AND value->>'id'='{item_id}'")
+ return sql(f"INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) SELECT '{org}',gen_random_uuid(),'{op_id}','{prep_id}','{item_id}',1,(r->>'contactId')::uuid,r->>'from',r->>'to',inbox_reply_send.body_hash(r->>'renderedBody',r->>'from',r->>'to'),'approved' FROM (SELECT '{recipient}'::jsonb r) s RETURNING id")
+
+validate_cron(sql('SHOW cron.launch_active_jobs'))
+need(sql('SELECT marker FROM inbox_t2_fixture.identity')=='sandra-inbox-projection-t2-owned-synthetic','Wrong fixture')
+need(sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespace('inbox_reply_preparation') IS NULL AND to_regnamespace('inbox_reply_review') IS NULL AND to_regnamespace('inbox_reply_send') IS NULL")=='t','Refusing existing reply schema')
+# Defensive: a prior interrupted run of this script can leave schemas
+# committed (unlike run.py's rollback-only harness, this script commits real
+# DDL across separate connections). Clean any such leftovers before install.
+sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;")
+
+sources=[P.parent/'inbox-reply-boundary/context.sql',P.parent/'inbox-reply-preparation/recipient.sql',P.parent/'inbox-reply-preparation/batch.sql',P.parent/'inbox-reply-review/setup.sql',P.parent/'inbox-reply-review/public-api.sql',P/'attempts.sql']
+setup_sql=(P/'concurrency-setup.sql').read_text()
+installed=False;org=None;children=[]
+checks=[]
+try:
+ sql(''.join(s.read_text() for s in sources))
+ installed=True
+ sql(setup_sql)
+ org=sql("SELECT id FROM organizations WHERE name LIKE 'Owned PR-D concurrency %' ORDER BY created_at DESC LIMIT 1")
+ need(org,'Concurrency org not found after setup')
+ atts=sql(f"SELECT string_agg(id::text,',' ORDER BY to_e164) FROM inbox_reply_send.attempts WHERE org_id='{org}'").split(',')
+ need(len(atts)>=10,f'Expected at least 10 attempts, got {len(atts)}')
+ a1,a2,a3,a4,a5,a6,a7,a8,a9,a10=atts[0:10]
+ prep_id=sql(f"SELECT preparation_id FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{a1}'")
+ op_id=sql(f"SELECT operation_id FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{a1}'")
+ # P1.2 fixture: items 11/12 are frozen but have no attempt row yet.
+ item11=sql(f"SELECT (value->>'id') FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{prep_id}' AND value->'recipient'->>'to'='+13025500011'")
+ item12=sql(f"SELECT (value->>'id') FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{prep_id}' AND value->'recipient'->>'to'='+13025500012'")
+ need(item11 and item12,'P1.2 fixture items 11/12 not found')
+ conv11=sql(f"SELECT (value->'target'->>'id') FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{prep_id}' AND value->'recipient'->>'to'='+13025500011'")
+ conv12=sql(f"SELECT (value->'target'->>'id') FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{prep_id}' AND value->'recipient'->>'to'='+13025500012'")
+ # P2.3 fixture: an isolated 3-item preparation+operation with zero attempts.
+ cap_op_id=sql(f"SELECT o2.id FROM inbox_reply_send.operations o2 JOIN inbox_reply_review.preparations p ON p.id=o2.preparation_id WHERE o2.org_id='{org}' AND jsonb_array_length(p.items)=3")
+ cap_prep_id=sql(f"SELECT preparation_id FROM inbox_reply_send.operations WHERE org_id='{org}' AND id='{cap_op_id}'")
+ need(cap_op_id and cap_prep_id,'P2.3 cap fixture not found')
+ cap_item_ids=sql(f"SELECT string_agg(value->>'id',',' ORDER BY value->'recipient'->>'to') FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{cap_prep_id}'").split(',')
+ need(len(cap_item_ids)==3,f'Expected 3 cap fixture items, got {len(cap_item_ids)}')
+ cap_item_a,cap_item_b,cap_item_c=cap_item_ids
+
+ # === #1 Double-claim: two real connections, observed lock-wait. Both
+ # claim() the same 'approved' row; one wins {claimed}, one gets {busy};
+ # exactly one generation bump.
+ wname='dc-writer-'+str(uuid.uuid4());rname='dc-reader-'+str(uuid.uuid4())
+ writer=start(f"SET application_name='{wname}';BEGIN;SELECT inbox_reply_send.claim('{org}','{a1}',60);SELECT pg_sleep(3);COMMIT;");children=[writer]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wname}' AND wait_event='PgSleep')",'#1 writer did not hold the claim lock')
+ reader=start(f"SET application_name='{rname}';SELECT inbox_reply_send.claim('{org}','{a1}',60);");children=[writer,reader]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{rname}' AND wait_event_type='Lock')",'#1 reader did not actually wait on the row lock')
+ wout=finish(writer,'#1 writer');children=[reader]
+ rout=finish(reader,'#1 reader');children=[]
+ need('claimed' in wout and 'generation' in wout,f'#1 writer unexpected result: {wout}')
+ need('"kind": "busy"' in rout or 'busy' in rout,f'#1 reader unexpected result: {rout}')
+ need(sql(f"SELECT generation FROM inbox_reply_send.attempts WHERE id='{a1}'")=='1','#1 generation bumped more than once')
+ checks.append('#1 double-claim: two real connections, reader observed waiting on the writer row lock (pg_stat_activity wait_event_type=Lock) before the writer committed; writer got {claimed}, reader got {busy}; generation bumped exactly once')
+
+ # Mutation: redefine claim() WITHOUT "FOR UPDATE" on the row read, watch a
+ # second real connection no longer block on the first at all (lock-wait
+ # disappears), then restore and reconfirm the original guard holds.
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE row inbox_reply_send.attempts;new_generation bigint;
+BEGIN
+ IF seconds IS NULL OR seconds NOT BETWEEN 1 AND 300 THEN RAISE EXCEPTION 'Invalid lease';END IF;
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;
+ IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=o AND operation_id=row.operation_id)>inbox_reply_preparation.recipient_limit() THEN RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';END IF;
+ IF row.state='approved' OR (row.state='claimed' AND row.lease_until<=clock_timestamp() AND row.dispatch_started_at IS NULL) THEN
+  UPDATE inbox_reply_send.attempts SET state='claimed',generation=generation+1,lease_until=clock_timestamp()+make_interval(secs=>seconds) WHERE org_id=o AND id=attempt_id RETURNING generation INTO new_generation;
+  RETURN jsonb_build_object('kind','claimed','generation',new_generation::text);
+ ELSIF row.state='claimed' THEN RETURN jsonb_build_object('kind','busy');
+ ELSIF row.state='dispatch_started' THEN
+  UPDATE inbox_reply_send.attempts SET state='uncertain',evidence='reentered_without_result',lease_until=NULL,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','existing','state','uncertain');
+ ELSE RETURN jsonb_build_object('kind','existing','state',row.state);
+ END IF;
+END $mut$;""")
+ # Removing FOR UPDATE from the SELECT does NOT remove Postgres's implicit
+ # row lock on the later UPDATE statement itself — the reader still blocks
+ # on that. What it removes is the re-check: the reader's IF-branch decision
+ # was made from a stale pre-writer-commit read, and its UPDATE has no
+ # "AND state='approved'" guard, so once unblocked it blindly re-applies the
+ # SAME transition the writer already made. The observable bug is not an
+ # absent lock-wait — it's that BOTH connections come back reporting
+ # {kind:'claimed'} for the one row, at two different generations: a real
+ # double-claim.
+ wname2='dc-mut-writer-'+str(uuid.uuid4());rname2='dc-mut-reader-'+str(uuid.uuid4())
+ writer=start(f"SET application_name='{wname2}';BEGIN;SELECT inbox_reply_send.claim('{org}','{a2}',60);SELECT pg_sleep(2);COMMIT;");children=[writer]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wname2}' AND wait_event='PgSleep')",'#1-mut writer did not reach sleep')
+ reader=start(f"SET application_name='{rname2}';SELECT inbox_reply_send.claim('{org}','{a2}',60);");children=[writer,reader]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{rname2}' AND wait_event_type='Lock')",'#1-mut reader unexpectedly did not block on the update')
+ wout=finish(writer,'#1-mut writer');children=[reader]
+ rout=finish(reader,'#1-mut reader',timeout=6);children=[]
+ need('"kind": "claimed"' in wout,f'#1-mut writer unexpected result: {wout}')
+ need('"kind": "claimed"' in rout,f'#1-mut reader unexpectedly did NOT also double-claim: {rout}')
+ need(sql(f"SELECT generation FROM inbox_reply_send.attempts WHERE id='{a2}'")=='2','#1-mut expected exactly two stacked generation bumps (the double-claim)')
+ checks.append('#1 mutation: claim() redefined without FOR UPDATE — the reader still blocks on the writer row lock (its own UPDATE has no state re-check), but on unblocking it blindly re-applies the transition: both connections report {kind:claimed} for the same row, generation double-bumped to 2 — the real double-claim the FOR UPDATE + reclaim predicate prevents; restored below')
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_reply_send.attempts;new_generation bigint;
+BEGIN
+ IF seconds IS NULL OR seconds NOT BETWEEN 1 AND 300 THEN RAISE EXCEPTION 'Invalid lease';END IF;
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;
+ IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=o AND operation_id=row.operation_id)>inbox_reply_preparation.recipient_limit() THEN RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';END IF;
+ IF row.state='approved' OR (row.state='claimed' AND row.lease_until<=clock_timestamp() AND row.dispatch_started_at IS NULL) THEN
+  UPDATE inbox_reply_send.attempts SET state='claimed',generation=generation+1,lease_until=clock_timestamp()+make_interval(secs=>seconds) WHERE org_id=o AND id=attempt_id RETURNING generation INTO new_generation;
+  RETURN jsonb_build_object('kind','claimed','generation',new_generation::text);
+ ELSIF row.state='claimed' THEN RETURN jsonb_build_object('kind','busy');
+ ELSIF row.state='dispatch_started' THEN
+  UPDATE inbox_reply_send.attempts SET state='uncertain',evidence='reentered_without_result',lease_until=NULL,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','existing','state','uncertain');
+ ELSE RETURN jsonb_build_object('kind','existing','state',row.state);
+ END IF;
+END $$;""")
+ # Reconfirm the restored guard blocks again on a third fresh row (a7 held
+ # in reserve for exactly this).
+ wname3='dc-restore-writer-'+str(uuid.uuid4());rname3='dc-restore-reader-'+str(uuid.uuid4())
+ writer=start(f"SET application_name='{wname3}';BEGIN;SELECT inbox_reply_send.claim('{org}','{a3}',60);SELECT pg_sleep(2);COMMIT;");children=[writer]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wname3}' AND wait_event='PgSleep')",'#1-restore writer did not reach sleep')
+ reader=start(f"SET application_name='{rname3}';SELECT inbox_reply_send.claim('{org}','{a3}',60);");children=[writer,reader]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{rname3}' AND wait_event_type='Lock')",'#1-restore reader did not wait after restore')
+ finish(writer,'#1-restore writer');children=[reader]
+ rout=finish(reader,'#1-restore reader');children=[]
+ need('"kind": "busy"' in rout,f'#1-restore reader unexpected result after restore: {rout}')
+ checks.append('#1 restore: with the original FOR UPDATE claim() back in place, a fresh reader (a3) is observed waiting on the row lock again and correctly reports busy, not a second claim')
+
+ # === #2 cond1 stale-fence: two real connections racing a RECLAIM (not an
+ # initial claim) on an expired-lease row serialize the same way #1 proved
+ # for the initial claim — genuine lock-wait, exactly one winner. Then,
+ # single-connection, the original (now-stale) generation is rejected by
+ # start_dispatch while the winning generation is accepted exactly once.
+ stale_g=int(json.loads(sql(f"SELECT inbox_reply_send.claim('{org}','{a4}',60)::text"))['generation'])
+ sql(f"UPDATE inbox_reply_send.attempts SET generation=generation+1,lease_until=clock_timestamp()-interval '1 second' WHERE org_id='{org}' AND id='{a4}'")
+ wname='sf-writer-'+str(uuid.uuid4());rname='sf-reader-'+str(uuid.uuid4())
+ writer=start(f"SET application_name='{wname}';BEGIN;SELECT inbox_reply_send.claim('{org}','{a4}',60);SELECT pg_sleep(3);COMMIT;");children=[writer]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wname}' AND wait_event='PgSleep')",'#2 writer did not hold the reclaim lock')
+ reader=start(f"SET application_name='{rname}';SELECT inbox_reply_send.claim('{org}','{a4}',60);");children=[writer,reader]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{rname}' AND wait_event_type='Lock')",'#2 reader did not actually wait on the reclaim row lock')
+ wout=finish(writer,'#2 writer');children=[reader]
+ rout=finish(reader,'#2 reader');children=[]
+ winning_g=int(json.loads(wout)['generation'])
+ need(winning_g>stale_g+1,f'#2 winning generation ({winning_g}) did not advance past the expiry bump (stale_g={stale_g})')
+ need('"kind": "busy"' in rout,f'#2 reader unexpected result (expected busy, a second concurrent reclaim must not also win): {rout}')
+ need(sql(f"SELECT generation FROM inbox_reply_send.attempts WHERE id='{a4}'")==str(winning_g),'#2 generation advanced more than once across the race')
+ failed=False
+ try:sql(f"SELECT inbox_reply_send.start_dispatch('{org}','{a4}',{stale_g})")
+ except RuntimeError as e:
+  failed='INBOX_REPLY_STALE_CLAIM' in str(e)
+ need(failed,'#2 start_dispatch with the original stale generation did not raise INBOX_REPLY_STALE_CLAIM')
+ need(sql(f"SELECT state,dispatch_token IS NULL FROM inbox_reply_send.attempts WHERE id='{a4}'")=='claimed|t','#2 a stale start_dispatch mutated the row')
+ dout=sql(f"SELECT inbox_reply_send.start_dispatch('{org}','{a4}',{winning_g})")
+ need('"kind": "dispatch"' in dout,f'#2 start_dispatch with the winning (current) generation failed: {dout}')
+ need(sql(f"SELECT count(*) FROM inbox_reply_send.attempts WHERE id='{a4}' AND dispatch_token IS NOT NULL")=='1','#2 more than one token ever appeared on this row')
+ checks.append(f'#2 stale-fence: two real connections raced a reclaim on an expired-lease row — reader observed waiting on the writer row lock, writer won ({{claimed}}, generation {stale_g}->{winning_g}), reader correctly got busy, generation advanced exactly once across the race; the original stale generation ({stale_g}) is rejected by start_dispatch with the row left unchanged (still claimed, no token); the winning generation ({winning_g}) dispatches successfully and exactly one token is ever set on the row')
+ # Free the sender before the mutation section below also calls start_dispatch.
+ tok4=json.loads(dout)['token']
+ sql(f"SELECT inbox_reply_send.persist('{org}','{a4}','{tok4}',jsonb_build_object('kind','accepted','externalId','PROV-CONC-4'))")
+
+ # Mutation: drop the "generation=g" fence from start_dispatch, watch the
+ # ALREADY-STALE original generation from a fresh claim/expire/reclaim cycle
+ # wrongly succeed; restore, reverify it raises again.
+ stale_g2=int(json.loads(sql(f"SELECT inbox_reply_send.claim('{org}','{a5}',60)::text"))['generation'])
+ sql(f"UPDATE inbox_reply_send.attempts SET generation=generation+1,lease_until=clock_timestamp()-interval '1 second' WHERE org_id='{org}' AND id='{a5}'")
+ winning_g2=int(json.loads(sql(f"SELECT inbox_reply_send.claim('{org}','{a5}',60)::text"))['generation'])
+ need(winning_g2>stale_g2,'#2-mut setup did not actually produce a stale generation')
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
+BEGIN
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ -- MUTATION: generation=g check dropped.
+ IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
+ END IF;
+ frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
+ recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+ IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
+ ev:=inbox_reply_send.item_current(o,frozen);
+ IF ev IS NOT NULL THEN
+  UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','skipped','reason',ev);
+ END IF;
+ token:=gen_random_uuid();
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+  ev:=inbox_reply_send.item_current(o,frozen);
+  IF ev IS NOT NULL THEN RAISE EXCEPTION 'stale after marker' USING ERRCODE='IR001';END IF;
+ EXCEPTION
+  WHEN SQLSTATE 'IR001' THEN
+   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+   RETURN jsonb_build_object('kind','skipped','reason',ev);
+  WHEN unique_violation THEN
+   GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+   IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+   ELSE RAISE;
+   END IF;
+ END;
+ RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
+END $mut$;""")
+ dout2=sql(f"SELECT inbox_reply_send.start_dispatch('{org}','{a5}',{stale_g2})")
+ need('"kind": "dispatch"' in dout2,f'#2-mut the stale generation was still rejected — mutation had no effect: {dout2}')
+ checks.append(f'#2 mutation: start_dispatch redefined without the generation=g fence — the ORIGINAL stale generation ({stale_g2}) from before a real reclaim ({winning_g2}) wrongly dispatches; restored below')
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
+BEGIN
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
+ END IF;
+ frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
+ recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+ IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ -- P2.4 fast path (kept) — a cheap pre-check that avoids running item_current
+ -- at all when the sender is obviously already busy. The real fence is the
+ -- unique index guarding the marker UPDATE below.
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
+ -- Pre-marker cheap skip: returns without ever touching the sender-inflight
+ -- index when the item is already visibly ineligible. This does NOT
+ -- satisfy the invariant below by itself — see the post-marker recheck.
+ ev:=inbox_reply_send.item_current(o,frozen);
+ IF ev IS NOT NULL THEN
+  UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','skipped','reason',ev);
+ END IF;
+ token:=gen_random_uuid();
+ -- INVARIANT: the last eligibility read happens after the last statement
+ -- that can WAIT in the transaction; the marker UPDATE is the last
+ -- statement that can wait (it can block on the D-6(5) sender-inflight
+ -- unique index), so item_current runs once MORE after it returns — inside
+ -- this same savepoint-shaped EXCEPTION block, so a stale-at-marker result
+ -- rolls the marker/token back in-tx rather than ever being returned to a
+ -- caller. The pre-marker call above is a cheap optimization only; this one
+ -- is the actual gate. frozen need not be re-read (preparations are
+ -- immutable) and the outer attempt row's FOR UPDATE lock is retained
+ -- throughout — only the marker write itself rolls back.
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+  -- The LAST read, after the marker's own wait. `ev` is reassigned here (not
+  -- reused from the pre-marker call above) so a caught IR001 below records
+  -- the FRESH reason as evidence.
+  ev:=inbox_reply_send.item_current(o,frozen);
+  IF ev IS NOT NULL THEN RAISE EXCEPTION 'stale after marker' USING ERRCODE='IR001';END IF;
+ EXCEPTION
+  WHEN SQLSTATE 'IR001' THEN
+   -- The marker UPDATE above rolled back to this block's implicit savepoint:
+   -- state, dispatch_started_at and dispatch_token are all back to their
+   -- pre-BEGIN ('claimed') values, so this UPDATE's OLD.state='claimed' is a
+   -- listed trigger edge, exactly like the pre-marker skip path.
+   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+   RETURN jsonb_build_object('kind','skipped','reason',ev);
+  WHEN unique_violation THEN
+   -- P2.4: the fast pre-check above can miss a same-instant competitor (it
+   -- only sees already-committed dispatch_started rows). The D-6(5) unique
+   -- index on (org_id,from_e164) WHERE state='dispatch_started' is the real
+   -- fence; a unique_violation here is only ever this specific race —
+   -- anything else re-raises unchanged. The 55P03 carries no DETAIL/HINT so
+   -- the raw 23505 detail (which would include the phone number) never
+   -- leaks. Deliberately no WHEN OTHERS here: any other error must abort
+   -- the whole transaction, never be swallowed by this block.
+   GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+   IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+   ELSE RAISE;
+   END IF;
+ END;
+ -- Body is read VERBATIM from the frozen row (P-GATE 3/R4) — never copied
+ -- into this table, never re-rendered, never re-parsed as template syntax.
+ RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
+END $$;""")
+ # a5 is now dispatch_started under the mutated function — free the sender
+ # (only one attempt may hold dispatch_started at a time, D-6(5)) before any
+ # later section needs it.
+ tok5=json.loads(dout2)['token']
+ sql(f"SELECT inbox_reply_send.persist('{org}','{a5}','{tok5}',jsonb_build_object('kind','accepted','externalId','PROV-CONC-5'))")
+
+ # Reconfirm the restored fence on a fresh stale generation (a9).
+ stale_g3=int(json.loads(sql(f"SELECT inbox_reply_send.claim('{org}','{a9}',60)::text"))['generation'])
+ sql(f"UPDATE inbox_reply_send.attempts SET generation=generation+1,lease_until=clock_timestamp()-interval '1 second' WHERE org_id='{org}' AND id='{a9}'")
+ winning_g3=int(json.loads(sql(f"SELECT inbox_reply_send.claim('{org}','{a9}',60)::text"))['generation'])
+ failed=False
+ try:sql(f"SELECT inbox_reply_send.start_dispatch('{org}','{a9}',{stale_g3})")
+ except RuntimeError as e:
+  failed='INBOX_REPLY_STALE_CLAIM' in str(e)
+ need(failed,'#2 restore: the original generation-checking start_dispatch was not actually restored')
+ dout9=sql(f"SELECT inbox_reply_send.start_dispatch('{org}','{a9}',{winning_g3})")
+ checks.append(f'#2 restore: with the generation fence back in place, the original stale generation ({stale_g3}) is rejected again and only the current one ({winning_g3}) dispatches')
+ # Free the sender again before #3/#8 below.
+ tok9=json.loads(dout9)['token']
+ sql(f"SELECT inbox_reply_send.persist('{org}','{a9}','{tok9}',jsonb_build_object('kind','accepted','externalId','PROV-CONC-9'))")
+
+ # === #3 Reclaim-after-dispatch: two real connections. A claims and starts
+ # dispatch (holding the row open, mid pg_sleep, FOR UPDATE lock live); B
+ # concurrently calls claim() and must block on that same lock, then on
+ # unblocking see state=dispatch_started and label uncertain — never
+ # re-claim, never see a second token.
+ sql(f"SELECT inbox_reply_send.claim('{org}','{a6}',60)")
+ wname='rd-writer-'+str(uuid.uuid4());rname='rd-reader-'+str(uuid.uuid4())
+ writer=start(f"SET application_name='{wname}';BEGIN;SELECT inbox_reply_send.start_dispatch('{org}','{a6}',1);SELECT pg_sleep(3);COMMIT;");children=[writer]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wname}' AND wait_event='PgSleep')",'#3 writer did not hold the dispatch lock')
+ reader=start(f"SET application_name='{rname}';SELECT inbox_reply_send.claim('{org}','{a6}',60);");children=[writer,reader]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{rname}' AND wait_event_type='Lock')",'#3 reader did not actually wait on the dispatch_started row lock')
+ wout=finish(writer,'#3 writer');children=[reader]
+ rout=finish(reader,'#3 reader');children=[]
+ need('"kind": "dispatch"' in wout,f'#3 writer unexpected start_dispatch result: {wout}')
+ token_a6=json.loads(wout)['token']
+ need('"kind": "existing"' in rout and '"state": "uncertain"' in rout,f'#3 reader (re-entry) unexpected result: {rout}')
+ row_state=sql(f"SELECT state,generation,dispatch_token FROM inbox_reply_send.attempts WHERE id='{a6}'").split('|')
+ need(row_state[0]=='uncertain',f'#3 row not uncertain after concurrent re-entry: {row_state}')
+ need(row_state[2]==token_a6,'#3 dispatch_token changed on re-entry (a second token was issued)')
+ pout=sql(f"SELECT inbox_reply_send.persist('{org}','{a6}','{token_a6}',jsonb_build_object('kind','accepted','externalId','PROV-CONC-6'))")
+ need('provider_accepted' in pout,f'#3 persist with the original token after re-entry failed: {pout}')
+ checks.append('#3 reclaim-after-dispatch: two real connections — reader observed waiting on the writer row lock while the writer held start_dispatch open mid-transaction; once the writer committed (dispatch_started, token issued), the reader'"'"'s claim() on the now-dispatch_started row labelled uncertain (never re-claimed, generation unchanged, no second token); the original token still reconciles the row to provider_accepted afterward')
+
+ # === #8 Sender one-in-flight: two real connections, the unique_violation
+ # branch GUARANTEED exercised (not "either pre-check or catch"). Holder (a7)
+ # keeps its start_dispatch transaction OPEN and uncommitted; under READ
+ # COMMITTED the racer's (a8) EXISTS pre-check cannot see an uncommitted row
+ # from another transaction, so it PASSES the pre-check and proceeds to its
+ # own marker UPDATE, which then genuinely BLOCKS on the D-6(5) unique index
+ # (observed as a real lock-wait) until the holder resolves.
+ sql(f"SELECT inbox_reply_send.claim('{org}','{a7}',60)")
+ sql(f"SELECT inbox_reply_send.claim('{org}','{a8}',60)")
+ n7='sb7-'+str(uuid.uuid4());n8='sb8-'+str(uuid.uuid4())
+ holder=start(f"SET application_name='{n7}';BEGIN;SELECT inbox_reply_send.start_dispatch('{org}','{a7}',1);SELECT pg_sleep(3);COMMIT;");children=[holder]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{n7}' AND wait_event='PgSleep')",'#8 holder did not hold its start_dispatch transaction open')
+ racer=start(f"SET application_name='{n8}';SELECT inbox_reply_send.start_dispatch('{org}','{a8}',1);");children=[holder,racer]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{n8}' AND wait_event_type='Lock')",'#8 racer did not actually block on the sender-inflight index (EXISTS pre-check must have passed)')
+ hout=finish(holder,'#8 holder');children=[racer]
+ out8,rout8=racer.communicate(timeout=12);children=[]
+ need('"kind": "dispatch"' in hout,f'#8 holder unexpected start_dispatch result: {hout}')
+ need(racer.returncode!=0,f'#8 racer unexpectedly succeeded: {out8!r}')
+ # P2.4: the surfaced error for the racer, whether it lost via the EXISTS
+ # pre-check or (this branch, guaranteed here) the unique_violation caught
+ # and re-raised at the marker UPDATE, is always the same sanitized
+ # INBOX_REPLY_SENDER_BUSY — never the raw 23505 detail, which would carry
+ # the destination phone number.
+ need('INBOX_REPLY_SENDER_BUSY' in rout8,f'#8 racer did not fail on the sanitized sender guard: {rout8}')
+ need('DETAIL' not in rout8 and 'duplicate key' not in rout8.lower(),f'#8 racer leaked raw constraint detail (would carry the phone number) instead of the sanitized error: {rout8}')
+ need(sql(f"SELECT count(*) FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id IN ('{a7}','{a8}') AND state='dispatch_started'")=='1','#8 expected exactly one of the two same-sender attempts dispatched')
+ checks.append('#8 sender one-in-flight: two real connections — the holder kept its start_dispatch open uncommitted, so the racer'"'"'s EXISTS pre-check (which cannot see an uncommitted row) passed and it proceeded to genuinely block on the D-6(5) unique index (observed wait_event_type=Lock) until the holder committed; the racer then received the caught-and-sanitized INBOX_REPLY_SENDER_BUSY (55P03) with no raw constraint DETAIL — the unique_violation branch itself, not just the fast pre-check, is exercised here')
+ # Free the sender: a7 (the holder) is still dispatch_started.
+ tok7=json.loads(hout)['token']
+ sql(f"SELECT inbox_reply_send.persist('{org}','{a7}','{tok7}',jsonb_build_object('kind','accepted','externalId','PROV-CONC-8W'))")
+
+ # === P1.2 eligibility-staleness reorder: two real connections + a third
+ # (main) writer. Conn B holds the inbound-head row FOR UPDATE (an
+ # unrelated-to-suppression lock used purely as a controllable
+ # synchronization gate); conn A calls start_dispatch and blocks waiting
+ # for that same row (item_current's own FOR SHARE request conflicts with
+ # B's FOR UPDATE); while A is blocked, this script (acting as "conn C")
+ # commits a suppression for A's destination; B releases; A must see the
+ # suppression and return skipped/sms_suppressed with NO token, because its
+ # destination_policy() read is a fresh statement issued only after A's own
+ # lock wait resolves.
+ item11_recipient=sql(f"SELECT jsonb_build_object('contactId',value->'recipient'->>'contactId','from',value->'recipient'->>'from','to',value->'recipient'->>'to','renderedBody',value->'recipient'->>'renderedBody')::text FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{prep_id}' AND value->>'id'='{item11}'")
+ att11=sql(f"INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) SELECT '{org}',gen_random_uuid(),'{op_id}','{prep_id}','{item11}',1,(r->>'contactId')::uuid,r->>'from',r->>'to',inbox_reply_send.body_hash(r->>'renderedBody',r->>'from',r->>'to'),'approved' FROM (SELECT '{item11_recipient}'::jsonb r) s RETURNING id")
+ sql(f"SELECT inbox_reply_send.claim('{org}','{att11}',60)")
+ wname='p12-writer-'+str(uuid.uuid4());rname='p12-reader-'+str(uuid.uuid4())
+ writer=start(f"SET application_name='{wname}';BEGIN;SELECT revision FROM inbox_inbound_heads WHERE org_id='{org}' AND conversation_id='{conv11}' FOR UPDATE;SELECT pg_sleep(3);COMMIT;");children=[writer]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wname}' AND wait_event='PgSleep')",'P1.2 writer did not hold the head lock')
+ reader=start(f"SET application_name='{rname}';SELECT inbox_reply_send.start_dispatch('{org}','{att11}',1);");children=[writer,reader]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{rname}' AND wait_event_type='Lock')",'P1.2 reader (start_dispatch) did not actually wait on the head lock')
+ # Conn C: commit a suppression for item11's destination WHILE the reader is
+ # still blocked on the head lock.
+ sql(f"INSERT INTO sms_phone_suppressions(org_id,channel,phone_e164,source) VALUES('{org}','sms','+13025500011','owned_prd_concurrency_p12')")
+ finish(writer,'P1.2 writer');children=[reader]
+ rout=finish(reader,'P1.2 reader');children=[]
+ need('"kind": "skipped"' in rout and 'sms_suppressed' in rout,f'P1.2 reader did not see the suppression committed during its lock wait: {rout}')
+ need('token' not in rout,f'P1.2 reader issued a token despite the suppression: {rout}')
+ need(sql(f"SELECT state,dispatch_token IS NULL FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att11}'")=='skipped_ineligible|t','P1.2 row not cleanly skipped_ineligible with no token')
+ checks.append('P1.2 positive case: two real connections — a start_dispatch call observed waiting on an inbound-head row lock (pg_stat_activity wait_event_type=Lock); a suppression committed by a third connection WHILE it waited was still seen (item_current'"'"'s destination_policy read is a fresh statement issued only after the lock wait resolves) — the row ended skipped_ineligible/sms_suppressed with no token ever issued')
+
+ # Positive control: temporarily restore the OLD (pre-round-2) read-before-
+ # lock ordering in item_current() AND strip round-3's post-marker recheck
+ # from start_dispatch (i.e. the full pre-round-2 architecture — round 3's
+ # independent second defense layer would otherwise also catch this exact
+ # race on its own and mask whether item_current's own reorder matters in
+ # isolation). Repeat the identical race on item12 — this time the
+ # suppression, committed during the SAME head-lock wait, must be MISSED
+ # (destination_policy already evaluated before the wait, and nothing reads
+ # eligibility again after the marker), and a token wrongly gets issued
+ # despite the suppression.
+ item12_recipient=sql(f"SELECT jsonb_build_object('contactId',value->'recipient'->>'contactId','from',value->'recipient'->>'from','to',value->'recipient'->>'to','renderedBody',value->'recipient'->>'renderedBody')::text FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{prep_id}' AND value->>'id'='{item12}'")
+ att12=sql(f"INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) SELECT '{org}',gen_random_uuid(),'{op_id}','{prep_id}','{item12}',1,(r->>'contactId')::uuid,r->>'from',r->>'to',inbox_reply_send.body_hash(r->>'renderedBody',r->>'from',r->>'to'),'approved' FROM (SELECT '{item12_recipient}'::jsonb r) s RETURNING id")
+ sql(f"SELECT inbox_reply_send.claim('{org}','{att12}',60)")
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.item_current(o uuid,item jsonb) RETURNS text LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE qh jsonb;policy_result jsonb;sender public.provider_sender_numbers;head public.inbox_inbound_heads;
+BEGIN
+ IF (item->>'validUntil')::timestamptz<=clock_timestamp() THEN RETURN 'conversation_window_expired';END IF;
+ qh:=inbox_reply_preparation.quiet_hours(item->>'state',clock_timestamp());
+ IF qh->>'ok' IS DISTINCT FROM 'true' THEN
+  IF qh->>'reason'='unknown_state' THEN RETURN 'unknown_state';ELSE RETURN 'outside_window';END IF;
+ END IF;
+ -- MUTATION (pre-round-2 order): destination_policy evaluated BEFORE the
+ -- sender/head locks, so a concurrent suppression committed during the
+ -- later lock wait is invisible to this already-evaluated read.
+ policy_result:=inbox_reply_preparation.destination_policy(o,item->'recipient'->>'to',(item->'recipient'->>'contactId')::uuid,true);
+ IF policy_result->>'exclusion' IS NOT NULL THEN RETURN policy_result->>'exclusion';END IF;
+ SELECT * INTO sender FROM public.provider_sender_numbers WHERE org_id=o AND provider='sendillo' AND phone_e164=item->'recipient'->>'from' FOR SHARE;
+ IF sender.status IS DISTINCT FROM 'active' THEN RETURN 'sender_unavailable';END IF;
+ SELECT * INTO head FROM public.inbox_inbound_heads WHERE org_id=o AND conversation_id=(item->'target'->>'id')::uuid FOR SHARE;
+ IF head.revision::text IS DISTINCT FROM item->'dependencies'->>'head' THEN RETURN 'inbound_changed';END IF;
+ RETURN NULL;
+END $mut$;""")
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
+BEGIN
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
+ END IF;
+ frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
+ recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+ IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
+ -- MUTATION (pre-round-3): only the pre-marker check; no post-marker recheck.
+ ev:=inbox_reply_send.item_current(o,frozen);
+ IF ev IS NOT NULL THEN
+  UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','skipped','reason',ev);
+ END IF;
+ token:=gen_random_uuid();
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+ EXCEPTION WHEN unique_violation THEN
+  GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+  IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+  ELSE RAISE;
+  END IF;
+ END;
+ RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
+END $mut$;""")
+ wname2='p12-mut-writer-'+str(uuid.uuid4());rname2='p12-mut-reader-'+str(uuid.uuid4())
+ writer=start(f"SET application_name='{wname2}';BEGIN;SELECT revision FROM inbox_inbound_heads WHERE org_id='{org}' AND conversation_id='{conv12}' FOR UPDATE;SELECT pg_sleep(3);COMMIT;");children=[writer]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wname2}' AND wait_event='PgSleep')",'P1.2-control writer did not hold the head lock')
+ reader=start(f"SET application_name='{rname2}';SELECT inbox_reply_send.start_dispatch('{org}','{att12}',1);");children=[writer,reader]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{rname2}' AND wait_event_type='Lock')",'P1.2-control reader did not actually wait on the head lock')
+ sql(f"INSERT INTO sms_phone_suppressions(org_id,channel,phone_e164,source) VALUES('{org}','sms','+13025500012','owned_prd_concurrency_p12_control')")
+ finish(writer,'P1.2-control writer');children=[reader]
+ rout2=finish(reader,'P1.2-control reader');children=[]
+ need('"kind": "dispatch"' in rout2,f'P1.2 positive control did not actually reproduce the miss (old order should wrongly dispatch): {rout2}')
+ checks.append('P1.2 positive control: with BOTH the pre-round-2 read-before-lock item_current() AND round 3'"'"'s post-marker recheck stripped from start_dispatch (the full pre-round-3 architecture), the IDENTICAL race (suppression committed during the same head-lock wait) is MISSED — a token is wrongly issued despite the suppression, confirming the reorder + recheck in the real functions are what make the positive case above actually work, and that round 3'"'"'s second layer is not merely masking round 2'"'"'s own effect')
+ # Free the sender + restore the real item_current() AND start_dispatch.
+ tok12=json.loads(rout2)['token']
+ sql(f"SELECT inbox_reply_send.persist('{org}','{att12}','{tok12}',jsonb_build_object('kind','accepted','externalId','PROV-CONC-P12'))")
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.item_current(o uuid,item jsonb) RETURNS text LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE qh jsonb;policy_result jsonb;sender public.provider_sender_numbers;head public.inbox_inbound_heads;
+BEGIN
+ -- INVARIANT: the last eligibility read happens after the last statement
+ -- that can WAIT in the transaction; the marker UPDATE is the last
+ -- statement that can wait, so item_current runs once MORE after it
+ -- returns (see start_dispatch). Inside this function that same invariant
+ -- means BOTH canonical FOR SHARE locks — sender, then head — are acquired
+ -- FIRST, and only then are ALL FIVE eligibility facts evaluated (including
+ -- validUntil and quiet_hours, which round 2 left evaluated before the
+ -- locks — a concurrent writer racing the head/sender lock while this
+ -- function is mid-wait was still invisible to a validUntil/quiet_hours
+ -- check already made from an earlier statement). Each plpgsql statement
+ -- takes a fresh snapshot under READ COMMITTED, so if a concurrent writer
+ -- holds either row locked (e.g. touching it as part of committing a
+ -- suppression) we block here, and once we unblock, EVERY eligibility read
+ -- below — all later, separate statements — is guaranteed to see whatever
+ -- that writer just committed. Only the lock acquisition and the
+ -- clock_timestamp() sampling move; the exclusion precedence itself
+ -- (validUntil -> quiet_hours -> destination_policy -> sender -> head) is
+ -- unchanged. This function and destination_policy() MUST stay VOLATILE
+ -- (never STABLE) — STABLE would pin the snapshot for the whole function
+ -- call and silently revert this fix. Never FOR UPDATE on heads/versions or
+ -- any suppression table, matching the prepare/worker lock inversion note;
+ -- and never take head FOR UPDATE before a sender write-lock in any future
+ -- caller — that specific order is the one shape that can deadlock against
+ -- this function's own sender-then-head lock order.
+ SELECT * INTO sender FROM public.provider_sender_numbers WHERE org_id=o AND provider='sendillo' AND phone_e164=item->'recipient'->>'from' FOR SHARE;
+ SELECT * INTO head FROM public.inbox_inbound_heads WHERE org_id=o AND conversation_id=(item->'target'->>'id')::uuid FOR SHARE;
+ IF (item->>'validUntil')::timestamptz<=clock_timestamp() THEN RETURN 'conversation_window_expired';END IF;
+ qh:=inbox_reply_preparation.quiet_hours(item->>'state',clock_timestamp());
+ IF qh->>'ok' IS DISTINCT FROM 'true' THEN
+  IF qh->>'reason'='unknown_state' THEN RETURN 'unknown_state';ELSE RETURN 'outside_window';END IF;
+ END IF;
+ policy_result:=inbox_reply_preparation.destination_policy(o,item->'recipient'->>'to',(item->'recipient'->>'contactId')::uuid,true);
+ IF policy_result->>'exclusion' IS NOT NULL THEN RETURN policy_result->>'exclusion';END IF;
+ IF sender.status IS DISTINCT FROM 'active' THEN RETURN 'sender_unavailable';END IF;
+ IF head.revision::text IS DISTINCT FROM item->'dependencies'->>'head' THEN RETURN 'inbound_changed';END IF;
+ RETURN NULL;
+END $$;""")
+ sql(r'''CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
+BEGIN
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
+ END IF;
+ frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
+ recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+ IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
+ ev:=inbox_reply_send.item_current(o,frozen);
+ IF ev IS NOT NULL THEN
+  UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','skipped','reason',ev);
+ END IF;
+ token:=gen_random_uuid();
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+  ev:=inbox_reply_send.item_current(o,frozen);
+  IF ev IS NOT NULL THEN RAISE EXCEPTION 'stale after marker' USING ERRCODE='IR001';END IF;
+ EXCEPTION
+  WHEN SQLSTATE 'IR001' THEN
+   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+   RETURN jsonb_build_object('kind','skipped','reason',ev);
+  WHEN unique_violation THEN
+   GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+   IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+   ELSE RAISE;
+   END IF;
+ END;
+ RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
+END $$;''')
+
+ # === P2.3 per-operation cap race: two real connections, observed lock-wait.
+ # The winner holds the operations row's FOR NO KEY UPDATE lock (acquired
+ # inside its own INSERT's trigger) open via a transaction wrapped in
+ # pg_sleep; the loser's own trigger invocation must genuinely block on that
+ # SAME row (observed wait_event_type=Lock) before it ever gets to compute
+ # the cap check, then raises INBOX_REPLY_RECIPIENT_LIMIT once it unblocks
+ # and sees the winner's now-committed row. Cap temporarily lowered to 1
+ # (equivalent in shape to racing for the 50th slot, without needing 50 real
+ # conversations).
+ sql("CREATE OR REPLACE FUNCTION inbox_reply_preparation.recipient_limit() RETURNS integer LANGUAGE sql IMMUTABLE SET search_path='' AS $lim$ SELECT 1 $lim$;")
+ capA_recipient=sql(f"SELECT jsonb_build_object('contactId',value->'recipient'->>'contactId','from',value->'recipient'->>'from','to',value->'recipient'->>'to','renderedBody',value->'recipient'->>'renderedBody')::text FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{cap_prep_id}' AND value->>'id'='{cap_item_a}'")
+ capB_recipient=sql(f"SELECT jsonb_build_object('contactId',value->'recipient'->>'contactId','from',value->'recipient'->>'from','to',value->'recipient'->>'to','renderedBody',value->'recipient'->>'renderedBody')::text FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{cap_prep_id}' AND value->>'id'='{cap_item_b}'")
+ nA='cap-a-'+str(uuid.uuid4());nB='cap-b-'+str(uuid.uuid4())
+ insA=f"SET application_name='{nA}';BEGIN;INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) SELECT '{org}',gen_random_uuid(),'{cap_op_id}','{cap_prep_id}','{cap_item_a}',1,(r->>'contactId')::uuid,r->>'from',r->>'to',inbox_reply_send.body_hash(r->>'renderedBody',r->>'from',r->>'to'),'approved' FROM (SELECT '{capA_recipient}'::jsonb r) s;SELECT pg_sleep(2);COMMIT;"
+ insB=f"SET application_name='{nB}';INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) SELECT '{org}',gen_random_uuid(),'{cap_op_id}','{cap_prep_id}','{cap_item_b}',1,(r->>'contactId')::uuid,r->>'from',r->>'to',inbox_reply_send.body_hash(r->>'renderedBody',r->>'from',r->>'to'),'approved' FROM (SELECT '{capB_recipient}'::jsonb r) s;"
+ pA=start(insA);children=[pA]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nA}' AND wait_event='PgSleep')",'P2.3 winner did not hold the operations row lock')
+ pB=start(insB);children=[pA,pB]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nB}' AND wait_event_type='Lock')",'P2.3 loser did not actually block on the operations row lock')
+ outA,errA=pA.communicate(timeout=12);children=[pB]
+ outB,errB=pB.communicate(timeout=12);children=[]
+ count_after=sql(f"SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id='{org}' AND operation_id='{cap_op_id}'")
+ need(count_after=='1',f'P2.3 expected exactly 1 distinct item admitted under the cap, got {count_after}')
+ cap_winners=[pA.returncode==0,pB.returncode==0]
+ need(cap_winners==[True,False],f'P2.3 expected the lock-holder (A) to win and the blocked insert (B) to lose: A rc={pA.returncode} err={errA!r}; B rc={pB.returncode} err={errB!r}')
+ need('INBOX_REPLY_RECIPIENT_LIMIT' in errB,f'P2.3 loser did not fail on the recipient-limit cap: {errB}')
+ checks.append('P2.3 positive case: two real connections — the winner held the operations row'"'"'s FOR NO KEY UPDATE lock open (observed pg_stat_activity PgSleep) while the loser'"'"'s own INSERT trigger invocation genuinely blocked on that same row (observed wait_event_type=Lock) before computing the cap check; once the winner committed, the loser unblocked and correctly raised INBOX_REPLY_RECIPIENT_LIMIT')
+
+ # Positive control: without the FOR NO KEY UPDATE serialization, both
+ # concurrent inserts can read the same pre-insert count and both pass.
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.guard_attempt() RETURNS trigger LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE frozen jsonb;recomputed text;
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Immutable send attempt';END IF;
+ IF TG_OP='INSERT' THEN
+  IF NEW.state<>'approved' THEN RAISE EXCEPTION 'Invalid initial send attempt state';END IF;
+  IF NEW.generation<>0 OR NEW.receipt_version<>0 OR NEW.lease_until IS NOT NULL OR NEW.dispatch_started_at IS NOT NULL OR NEW.dispatch_token IS NOT NULL OR NEW.provider_reference IS NOT NULL OR NEW.provider_status IS NOT NULL OR NEW.evidence IS NOT NULL THEN
+   RAISE EXCEPTION 'Invalid initial send attempt fields';
+  END IF;
+  -- MUTATION: FOR NO KEY UPDATE dropped — plain existence check, no lock.
+  IF NOT EXISTS(SELECT 1 FROM inbox_reply_send.operations WHERE org_id=NEW.org_id AND id=NEW.operation_id AND preparation_id=NEW.preparation_id) THEN
+   RAISE EXCEPTION 'Attempt preparation does not match operation';
+  END IF;
+  frozen:=inbox_reply_send.frozen_item(NEW.org_id,NEW.preparation_id,NEW.item_id);
+  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+  IF NEW.contact_id IS DISTINCT FROM (frozen->'recipient'->>'contactId')::uuid
+     OR NEW.from_e164 IS DISTINCT FROM frozen->'recipient'->>'from'
+     OR NEW.to_e164 IS DISTINCT FROM frozen->'recipient'->>'to'
+     OR NEW.body_hash IS DISTINCT FROM recomputed THEN
+   RAISE EXCEPTION 'Attempt does not match frozen recipient';
+  END IF;
+  IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=NEW.org_id AND operation_id=NEW.operation_id AND item_id<>NEW.item_id)+1>inbox_reply_preparation.recipient_limit() THEN
+   RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';
+  END IF;
+  -- Deterministic race window: without FOR NO KEY UPDATE nothing blocks a
+  -- concurrent second trigger invocation from also reading the same
+  -- pre-insert count before either commits. A real two-connection race can
+  -- still resolve serially by sheer process-launch timing, so this sleep
+  -- widens the window enough that both connections' count reads are
+  -- guaranteed to overlap — it does not change what the missing lock does
+  -- or does not prevent, only makes the race deterministic to observe.
+  PERFORM pg_sleep(1);
+  RETURN NEW;
+ END IF;
+ RAISE EXCEPTION 'unused in this proof (UPDATE/DELETE path)';
+END $mut$;""")
+ sql("CREATE OR REPLACE FUNCTION inbox_reply_preparation.recipient_limit() RETURNS integer LANGUAGE sql IMMUTABLE SET search_path='' AS $lim$ SELECT 2 $lim$;")
+ # Whichever of A/B lost the positive-case race above never committed (its
+ # item_id is still unattempted); C was never touched either. Race the
+ # LOSER's item and C concurrently under the now-broken (no FOR NO KEY
+ # UPDATE) trigger, cap raised to 2 to admit both on top of the winner's
+ # already-committed 1 — if the serialization is really gone, both
+ # concurrent inserts read count=1, each computes 1+1=2<=2, and both
+ # commit: 3 distinct items under a cap of 2, the real overrun this fix
+ # prevents.
+ cap_loser_item=cap_item_b if cap_winners[0] else cap_item_a
+ capB_recipient=sql(f"SELECT jsonb_build_object('contactId',value->'recipient'->>'contactId','from',value->'recipient'->>'from','to',value->'recipient'->>'to','renderedBody',value->'recipient'->>'renderedBody')::text FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{cap_prep_id}' AND value->>'id'='{cap_loser_item}'")
+ capC_recipient=sql(f"SELECT jsonb_build_object('contactId',value->'recipient'->>'contactId','from',value->'recipient'->>'from','to',value->'recipient'->>'to','renderedBody',value->'recipient'->>'renderedBody')::text FROM inbox_reply_review.preparations p,jsonb_array_elements(p.items) value WHERE p.id='{cap_prep_id}' AND value->>'id'='{cap_item_c}'")
+ insB2=f"INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) SELECT '{org}',gen_random_uuid(),'{cap_op_id}','{cap_prep_id}','{cap_loser_item}',1,(r->>'contactId')::uuid,r->>'from',r->>'to',inbox_reply_send.body_hash(r->>'renderedBody',r->>'from',r->>'to'),'approved' FROM (SELECT '{capB_recipient}'::jsonb r) s"
+ insC=f"INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) SELECT '{org}',gen_random_uuid(),'{cap_op_id}','{cap_prep_id}','{cap_item_c}',1,(r->>'contactId')::uuid,r->>'from',r->>'to',inbox_reply_send.body_hash(r->>'renderedBody',r->>'from',r->>'to'),'approved' FROM (SELECT '{capC_recipient}'::jsonb r) s"
+ pB2=start(insB2);pC=start(insC);children=[pB2,pC]
+ outB2,errB2=pB2.communicate(timeout=12);outC,errC=pC.communicate(timeout=12);children=[]
+ need(pB2.returncode==0 and pC.returncode==0,f'P2.3 control did not actually reproduce the overrun (expected both to commit): B rc={pB2.returncode} err={errB2!r}; C rc={pC.returncode} err={errC!r}')
+ count_broken=sql(f"SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id='{org}' AND operation_id='{cap_op_id}'")
+ need(count_broken=='3',f'P2.3 control expected 3 distinct items to overrun a cap of 2, got {count_broken}')
+ checks.append(f'P2.3 positive control: with FOR NO KEY UPDATE removed from the INSERT trigger, two real connections concurrently inserting different items (B, C) into the same operation under a cap of 2 BOTH commit — {count_broken} distinct items admitted, one past the cap — the exact overrun the fix prevents')
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.guard_attempt() RETURNS trigger LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE frozen jsonb;recomputed text;
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Immutable send attempt';END IF;
+ IF TG_OP='INSERT' THEN
+  IF NEW.state<>'approved' THEN RAISE EXCEPTION 'Invalid initial send attempt state';END IF;
+  IF NEW.generation<>0 OR NEW.receipt_version<>0 OR NEW.lease_until IS NOT NULL OR NEW.dispatch_started_at IS NOT NULL OR NEW.dispatch_token IS NOT NULL OR NEW.provider_reference IS NOT NULL OR NEW.provider_status IS NOT NULL OR NEW.evidence IS NOT NULL THEN
+   RAISE EXCEPTION 'Invalid initial send attempt fields';
+  END IF;
+  PERFORM 1 FROM inbox_reply_send.operations WHERE org_id=NEW.org_id AND id=NEW.operation_id AND preparation_id=NEW.preparation_id FOR NO KEY UPDATE;
+  IF NOT FOUND THEN
+   RAISE EXCEPTION 'Attempt preparation does not match operation';
+  END IF;
+  frozen:=inbox_reply_send.frozen_item(NEW.org_id,NEW.preparation_id,NEW.item_id);
+  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+  IF NEW.contact_id IS DISTINCT FROM (frozen->'recipient'->>'contactId')::uuid
+     OR NEW.from_e164 IS DISTINCT FROM frozen->'recipient'->>'from'
+     OR NEW.to_e164 IS DISTINCT FROM frozen->'recipient'->>'to'
+     OR NEW.body_hash IS DISTINCT FROM recomputed THEN
+   RAISE EXCEPTION 'Attempt does not match frozen recipient';
+  END IF;
+  IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=NEW.org_id AND operation_id=NEW.operation_id AND item_id<>NEW.item_id)+1>inbox_reply_preparation.recipient_limit() THEN
+   RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';
+  END IF;
+  RETURN NEW;
+ END IF;
+ IF NEW.org_id IS DISTINCT FROM OLD.org_id OR NEW.id IS DISTINCT FROM OLD.id OR NEW.operation_id IS DISTINCT FROM OLD.operation_id
+    OR NEW.preparation_id IS DISTINCT FROM OLD.preparation_id OR NEW.item_id IS DISTINCT FROM OLD.item_id
+    OR NEW.attempt_ordinal IS DISTINCT FROM OLD.attempt_ordinal OR NEW.prior_attempt_id IS DISTINCT FROM OLD.prior_attempt_id
+    OR NEW.contact_id IS DISTINCT FROM OLD.contact_id OR NEW.from_e164 IS DISTINCT FROM OLD.from_e164
+    OR NEW.to_e164 IS DISTINCT FROM OLD.to_e164 OR NEW.body_hash IS DISTINCT FROM OLD.body_hash
+    OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+  RAISE EXCEPTION 'Immutable send attempt identity';
+ END IF;
+ IF NEW.generation<OLD.generation OR NEW.receipt_version<OLD.receipt_version THEN RAISE EXCEPTION 'Send attempt counters may not decrease';END IF;
+ IF OLD.dispatch_started_at IS NOT NULL AND NEW.dispatch_started_at IS DISTINCT FROM OLD.dispatch_started_at THEN RAISE EXCEPTION 'dispatch_started_at is immutable once set';END IF;
+ IF OLD.dispatch_token IS NOT NULL AND NEW.dispatch_token IS DISTINCT FROM OLD.dispatch_token THEN RAISE EXCEPTION 'dispatch_token is immutable once set';END IF;
+ NEW.updated_at:=clock_timestamp();
+ CASE
+  WHEN OLD.state='approved' AND NEW.state='claimed' THEN NULL;
+  WHEN OLD.state='claimed' AND NEW.state='claimed' THEN
+   IF NEW.generation<=OLD.generation THEN RAISE EXCEPTION 'Reclaim must strictly increase generation';END IF;
+  WHEN OLD.state='claimed' AND NEW.state='dispatch_started' THEN
+   IF NEW.dispatch_started_at IS NULL OR NEW.dispatch_token IS NULL THEN RAISE EXCEPTION 'Dispatch marker must be set exactly once here';END IF;
+  WHEN OLD.state='claimed' AND NEW.state='skipped_ineligible' THEN NULL;
+  WHEN OLD.state='dispatch_started' AND NEW.state IN ('provider_accepted','uncertain','confirmed_not_submitted') THEN NULL;
+  WHEN OLD.state='uncertain' AND NEW.state='provider_accepted' THEN NULL;
+  WHEN OLD.state='provider_accepted' AND NEW.state IN ('delivered','delivery_failed') THEN NULL;
+  ELSE RAISE EXCEPTION 'Invalid send attempt transition: % -> %',OLD.state,NEW.state;
+ END CASE;
+ RETURN NEW;
+END $$;""")
+ sql("CREATE OR REPLACE FUNCTION inbox_reply_preparation.recipient_limit() RETURNS integer LANGUAGE sql IMMUTABLE SET search_path='' AS $$ SELECT 50 $$;")
+
+ # === Race#1 (R3-1): the marker UPDATE itself can block on the D-6(5)
+ # sender-inflight index; a suppression committing during THAT block must
+ # still be caught before a token is ever handed out. Item X and Y share the
+ # one configured sender.
+ item13,_=fetch_item(prep_id,13);item14,_=fetch_item(prep_id,14)
+ attX=insert_attempt(org,op_id,prep_id,item13);attY=insert_attempt(org,op_id,prep_id,item14)
+ sql(f"SELECT inbox_reply_send.claim('{org}','{attX}',60)")
+ sql(f"SELECT inbox_reply_send.claim('{org}','{attY}',60)")
+ nX='r1-x-'+str(uuid.uuid4());nY='r1-y-'+str(uuid.uuid4())
+ # A holds an UNCOMMITTED marker for X open, then ROLLS BACK — this both
+ # forces B's own marker attempt for Y to genuinely block on the same
+ # sender-inflight index entry (observed lock-wait) and, on rollback, undoes
+ # X's marker cleanly (X reverts to 'claimed', its own separately-committed
+ # claim() untouched).
+ connA=start(f"SET application_name='{nX}';BEGIN;SELECT inbox_reply_send.start_dispatch('{org}','{attX}',1);SELECT pg_sleep(3);ROLLBACK;");children=[connA]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nX}' AND wait_event='PgSleep')",'Race#1 A did not hold its uncommitted marker open')
+ connB=start(f"SET application_name='{nY}';SELECT inbox_reply_send.start_dispatch('{org}','{attY}',1);");children=[connA,connB]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nY}' AND wait_event_type='Lock')",'Race#1 B did not actually block on the sender-inflight index')
+ # Conn C: commit a suppression for Y's destination WHILE B is blocked on
+ # the marker — the exact gap R3-1 closes.
+ destY=sql(f"SELECT to_e164 FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{attY}'")
+ sql(f"INSERT INTO sms_phone_suppressions(org_id,channel,phone_e164,source) VALUES('{org}','sms','{destY}','owned_prd_concurrency_race1')")
+ outA,errA=connA.communicate(timeout=12);children=[connB]
+ need(connA.returncode==0,f'Race#1 A (rollback) unexpectedly failed: {errA}')
+ outB,errB=connB.communicate(timeout=12);children=[]
+ need(connB.returncode==0,f'Race#1 B unexpectedly failed: {errB}')
+ need('"kind": "skipped"' in outB,f'Race#1 B did not skip after the post-marker recheck: {outB}')
+ need('"token"' not in outB,f'Race#1 B leaked a token despite skipping: {outB}')
+ rowY=sql(f"SELECT state,dispatch_token IS NULL,dispatch_started_at IS NULL FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{attY}'")
+ need(rowY=='skipped_ineligible|t|t',f'Race#1 row Y not cleanly rolled back to skipped_ineligible: {rowY}')
+ race1_reason=json.loads(outB).get('reason')
+ checks.append(f'Race#1 positive case: two real connections — B'"'"'s marker UPDATE for Y genuinely blocked on the D-6(5) sender-inflight index (observed wait_event_type=Lock) while A held an uncommitted marker for X on the same sender; a suppression committed by a third connection during that block was still caught by the post-marker recheck once B unblocked (A rolled back) — B returned {{kind:skipped, reason:{race1_reason}}}, row Y ended skipped_ineligible with no token and no dispatch_started_at')
+
+ # Sub-test: the SAME marker-block mechanism, but A COMMITS instead of
+ # rolling back — B must still get the sanitized SENDER_BUSY, exactly as #8
+ # proved via a different setup; this confirms the block-then-catch path
+ # also holds when reached via a marker-vs-marker race rather than a
+ # pre-check-bypassing race.
+ item15,_=fetch_item(prep_id,15);item16,_=fetch_item(prep_id,16)
+ attXp=insert_attempt(org,op_id,prep_id,item15);attYp=insert_attempt(org,op_id,prep_id,item16)
+ sql(f"SELECT inbox_reply_send.claim('{org}','{attXp}',60)")
+ sql(f"SELECT inbox_reply_send.claim('{org}','{attYp}',60)")
+ nXp='r1c-x-'+str(uuid.uuid4());nYp='r1c-y-'+str(uuid.uuid4())
+ connAc=start(f"SET application_name='{nXp}';BEGIN;SELECT inbox_reply_send.start_dispatch('{org}','{attXp}',1);SELECT pg_sleep(2);COMMIT;");children=[connAc]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nXp}' AND wait_event='PgSleep')",'Race#1 (A-commits) A did not hold its uncommitted marker open')
+ connBc=start(f"SET application_name='{nYp}';SELECT inbox_reply_send.start_dispatch('{org}','{attYp}',1);");children=[connAc,connBc]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nYp}' AND wait_event_type='Lock')",'Race#1 (A-commits) B did not actually block on the sender-inflight index')
+ outAc,errAc=connAc.communicate(timeout=12);children=[connBc]
+ need(connAc.returncode==0 and '"kind": "dispatch"' in outAc,f'Race#1 (A-commits) A unexpected result: rc={connAc.returncode} out={outAc!r} err={errAc!r}')
+ outBc,errBc=connBc.communicate(timeout=12);children=[]
+ need(connBc.returncode!=0,f'Race#1 (A-commits) B unexpectedly succeeded: {outBc!r}')
+ need('INBOX_REPLY_SENDER_BUSY' in errBc,f'Race#1 (A-commits) B did not fail on the sanitized sender guard: {errBc}')
+ need('DETAIL' not in errBc and 'duplicate key' not in errBc.lower(),f'Race#1 (A-commits) B leaked raw constraint detail: {errBc}')
+ rowYp=sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{attYp}'")
+ need(rowYp=='claimed',f'Race#1 (A-commits) row Y unexpectedly mutated by the failed marker attempt: {rowYp}')
+ checks.append('Race#1 (A-commits branch): the same marker-vs-marker block, but A commits instead of rolling back — B'"'"'s blocked marker UPDATE resumes into a genuine unique_violation and receives the sanitized INBOX_REPLY_SENDER_BUSY (55P03, no raw DETAIL); row Y is left untouched (still claimed) since nothing in B'"'"'s aborted statement ever committed')
+ tokXp=json.loads(outAc)['token']
+ sql(f"SELECT inbox_reply_send.persist('{org}','{attXp}','{tokXp}',jsonb_build_object('kind','accepted','externalId','PROV-CONC-R1C'))")
+
+ # Positive control: strip the post-marker recheck (round-2 shape) and
+ # repeat the rollback-branch race on a fresh pair — this time the
+ # suppression is MISSED and B wrongly dispatches with a token.
+ item17,_=fetch_item(prep_id,17);item18,_=fetch_item(prep_id,18)
+ attXpp=insert_attempt(org,op_id,prep_id,item17);attYpp=insert_attempt(org,op_id,prep_id,item18)
+ sql(f"SELECT inbox_reply_send.claim('{org}','{attXpp}',60)")
+ sql(f"SELECT inbox_reply_send.claim('{org}','{attYpp}',60)")
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
+BEGIN
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
+ END IF;
+ frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
+ recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+ IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
+ -- MUTATION (pre-round-3): only the pre-marker check; no post-marker recheck.
+ ev:=inbox_reply_send.item_current(o,frozen);
+ IF ev IS NOT NULL THEN
+  UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','skipped','reason',ev);
+ END IF;
+ token:=gen_random_uuid();
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+ EXCEPTION WHEN unique_violation THEN
+  GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+  IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+  ELSE RAISE;
+  END IF;
+ END;
+ RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
+END $mut$;""")
+ nXpp='r1m-x-'+str(uuid.uuid4());nYpp='r1m-y-'+str(uuid.uuid4())
+ connApp=start(f"SET application_name='{nXpp}';BEGIN;SELECT inbox_reply_send.start_dispatch('{org}','{attXpp}',1);SELECT pg_sleep(3);ROLLBACK;");children=[connApp]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nXpp}' AND wait_event='PgSleep')",'Race#1 control A did not hold its uncommitted marker open')
+ connBpp=start(f"SET application_name='{nYpp}';SELECT inbox_reply_send.start_dispatch('{org}','{attYpp}',1);");children=[connApp,connBpp]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nYpp}' AND wait_event_type='Lock')",'Race#1 control B did not actually block on the sender-inflight index')
+ destYpp=sql(f"SELECT to_e164 FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{attYpp}'")
+ sql(f"INSERT INTO sms_phone_suppressions(org_id,channel,phone_e164,source) VALUES('{org}','sms','{destYpp}','owned_prd_concurrency_race1_control')")
+ outApp,errApp=connApp.communicate(timeout=12);children=[connBpp]
+ need(connApp.returncode==0,f'Race#1 control A (rollback) unexpectedly failed: {errApp}')
+ outBpp,errBpp=connBpp.communicate(timeout=12);children=[]
+ need(connBpp.returncode==0 and '"kind": "dispatch"' in outBpp,f'Race#1 control did not actually reproduce the miss (expected B to wrongly dispatch): rc={connBpp.returncode} out={outBpp!r} err={errBpp!r}')
+ checks.append('Race#1 positive control: with the post-marker recheck stripped from start_dispatch (round-2 shape), the IDENTICAL marker-block race is MISSED — B wrongly returns {kind:dispatch} with a token despite the suppression committed during its lock wait, confirming the post-marker recheck in the real function is what makes the positive case above actually work')
+ tokYpp=json.loads(outBpp)['token']
+ sql(f"SELECT inbox_reply_send.persist('{org}','{attYpp}','{tokYpp}',jsonb_build_object('kind','not_attempted','reason','cancelled_before_dispatch'))")
+ sql(r'''CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
+BEGIN
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
+ END IF;
+ frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
+ recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+ IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
+ ev:=inbox_reply_send.item_current(o,frozen);
+ IF ev IS NOT NULL THEN
+  UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','skipped','reason',ev);
+ END IF;
+ token:=gen_random_uuid();
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+  ev:=inbox_reply_send.item_current(o,frozen);
+  IF ev IS NOT NULL THEN RAISE EXCEPTION 'stale after marker' USING ERRCODE='IR001';END IF;
+ EXCEPTION
+  WHEN SQLSTATE 'IR001' THEN
+   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+   RETURN jsonb_build_object('kind','skipped','reason',ev);
+  WHEN unique_violation THEN
+   GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+   IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+   ELSE RAISE;
+   END IF;
+ END;
+ RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
+END $$;''')
+
+ # === Race#2 (R3-2/R3-2b): validUntil expiring WHILE start_dispatch is
+ # blocked on the head-row lock. Each sub-item's frozen validUntil is
+ # tampered (owner bypass on the immutable preparations row, exactly like
+ # the established P-GATE tamper pattern) to 2 seconds out; a 3-second
+ # head-lock hold guarantees the window has expired by the time the
+ # blocked call resumes.
+ def tamper_valid_until(item_id,seconds):
+  sql("ALTER TABLE inbox_reply_review.preparations DISABLE TRIGGER immutable_reply_preparation")
+  sql(f"UPDATE inbox_reply_review.preparations p2u SET items=(SELECT jsonb_agg(CASE WHEN value->>'id'='{item_id}' THEN jsonb_set(value,'{{validUntil}}',to_jsonb((clock_timestamp()+interval '{seconds} seconds')::text)) ELSE value END) FROM jsonb_array_elements(p2u.items) value) WHERE p2u.id='{prep_id}'")
+  sql("ALTER TABLE inbox_reply_review.preparations ENABLE TRIGGER immutable_reply_preparation")
+
+ # --- Z1: real (unmutated) functions. B must skip cleanly, no marker.
+ item19,conv19=fetch_item(prep_id,19)
+ attZ1=insert_attempt(org,op_id,prep_id,item19)
+ sql(f"SELECT inbox_reply_send.claim('{org}','{attZ1}',60)")
+ tamper_valid_until(item19,2)
+ nZ1w='r2z1-w-'+str(uuid.uuid4());nZ1r='r2z1-r-'+str(uuid.uuid4())
+ wZ1=start(f"SET application_name='{nZ1w}';BEGIN;SELECT revision FROM inbox_inbound_heads WHERE org_id='{org}' AND conversation_id='{conv19}' FOR UPDATE;SELECT pg_sleep(3);COMMIT;");children=[wZ1]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nZ1w}' AND wait_event='PgSleep')",'Race#2 Z1 writer did not hold the head lock')
+ rZ1=start(f"SET application_name='{nZ1r}';SELECT inbox_reply_send.start_dispatch('{org}','{attZ1}',1);");children=[wZ1,rZ1]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nZ1r}' AND wait_event_type='Lock')",'Race#2 Z1 reader did not actually wait on the head lock')
+ finish(wZ1,'Race#2 Z1 writer');children=[rZ1]
+ outZ1=finish(rZ1,'Race#2 Z1 reader');children=[]
+ need('"kind": "skipped"' in outZ1 and 'conversation_window_expired' in outZ1,f'Race#2 Z1 did not skip on expiry: {outZ1}')
+ need('"token"' not in outZ1,f'Race#2 Z1 leaked a token: {outZ1}')
+ rowZ1=sql(f"SELECT state,dispatch_started_at IS NULL FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{attZ1}'")
+ need(rowZ1=='skipped_ineligible|t',f'Race#2 Z1 row not cleanly skipped with no marker: {rowZ1}')
+ checks.append('Race#2 Z1 (positive case): conn A held the inbound-head row FOR UPDATE for 3s while item Z1'"'"'s 2s window expired underneath; conn B'"'"'s start_dispatch blocked on that same head lock (observed wait_event_type=Lock), and once unblocked evaluated validUntil AFTER the wait (R3-2) — skipped_ineligible/conversation_window_expired, no marker ever written, no token')
+
+ # --- Mutate item_current (revert to pre-round-2 order: time checks and
+ # destination_policy evaluated before any lock) AND start_dispatch (strip
+ # the round-3 post-marker recheck entirely) — the full pre-round-3 function
+ # bodies. This pairing is reused for both Z2 and Z3 below; they differ only
+ # in whether the trigger's R3-2b check is present.
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.item_current(o uuid,item jsonb) RETURNS text LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE qh jsonb;policy_result jsonb;sender public.provider_sender_numbers;head public.inbox_inbound_heads;
+BEGIN
+ -- MUTATION (pre-round-2 order): time checks evaluated before any lock.
+ IF (item->>'validUntil')::timestamptz<=clock_timestamp() THEN RETURN 'conversation_window_expired';END IF;
+ qh:=inbox_reply_preparation.quiet_hours(item->>'state',clock_timestamp());
+ IF qh->>'ok' IS DISTINCT FROM 'true' THEN
+  IF qh->>'reason'='unknown_state' THEN RETURN 'unknown_state';ELSE RETURN 'outside_window';END IF;
+ END IF;
+ policy_result:=inbox_reply_preparation.destination_policy(o,item->'recipient'->>'to',(item->'recipient'->>'contactId')::uuid,true);
+ IF policy_result->>'exclusion' IS NOT NULL THEN RETURN policy_result->>'exclusion';END IF;
+ SELECT * INTO sender FROM public.provider_sender_numbers WHERE org_id=o AND provider='sendillo' AND phone_e164=item->'recipient'->>'from' FOR SHARE;
+ IF sender.status IS DISTINCT FROM 'active' THEN RETURN 'sender_unavailable';END IF;
+ SELECT * INTO head FROM public.inbox_inbound_heads WHERE org_id=o AND conversation_id=(item->'target'->>'id')::uuid FOR SHARE;
+ IF head.revision::text IS DISTINCT FROM item->'dependencies'->>'head' THEN RETURN 'inbound_changed';END IF;
+ RETURN NULL;
+END $mut$;""")
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
+BEGIN
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
+ END IF;
+ frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
+ recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+ IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
+ -- MUTATION (pre-round-3): only the pre-marker check; no post-marker recheck.
+ ev:=inbox_reply_send.item_current(o,frozen);
+ IF ev IS NOT NULL THEN
+  UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','skipped','reason',ev);
+ END IF;
+ token:=gen_random_uuid();
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+ EXCEPTION WHEN unique_violation THEN
+  GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+  IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+  ELSE RAISE;
+  END IF;
+ END;
+ RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
+END $mut$;""")
+
+ # --- Z2 (positive control): trigger's R3-2b check ALSO removed. With
+ # BOTH function-level defenses (item_current order, start_dispatch
+ # recheck) AND the trigger-level defense gone, the marker is written with
+ # dispatch_started_at genuinely past validUntil and returned to the caller.
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.guard_attempt() RETURNS trigger LANGUAGE plpgsql SET search_path='' AS $mut$
+DECLARE frozen jsonb;recomputed text;
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Immutable send attempt';END IF;
+ IF TG_OP='INSERT' THEN
+  IF NEW.state<>'approved' THEN RAISE EXCEPTION 'Invalid initial send attempt state';END IF;
+  IF NEW.generation<>0 OR NEW.receipt_version<>0 OR NEW.lease_until IS NOT NULL OR NEW.dispatch_started_at IS NOT NULL OR NEW.dispatch_token IS NOT NULL OR NEW.provider_reference IS NOT NULL OR NEW.provider_status IS NOT NULL OR NEW.evidence IS NOT NULL THEN
+   RAISE EXCEPTION 'Invalid initial send attempt fields';
+  END IF;
+  PERFORM 1 FROM inbox_reply_send.operations WHERE org_id=NEW.org_id AND id=NEW.operation_id AND preparation_id=NEW.preparation_id FOR NO KEY UPDATE;
+  IF NOT FOUND THEN
+   RAISE EXCEPTION 'Attempt preparation does not match operation';
+  END IF;
+  frozen:=inbox_reply_send.frozen_item(NEW.org_id,NEW.preparation_id,NEW.item_id);
+  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+  IF NEW.contact_id IS DISTINCT FROM (frozen->'recipient'->>'contactId')::uuid
+     OR NEW.from_e164 IS DISTINCT FROM frozen->'recipient'->>'from'
+     OR NEW.to_e164 IS DISTINCT FROM frozen->'recipient'->>'to'
+     OR NEW.body_hash IS DISTINCT FROM recomputed THEN
+   RAISE EXCEPTION 'Attempt does not match frozen recipient';
+  END IF;
+  IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=NEW.org_id AND operation_id=NEW.operation_id AND item_id<>NEW.item_id)+1>inbox_reply_preparation.recipient_limit() THEN
+   RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';
+  END IF;
+  RETURN NEW;
+ END IF;
+ IF NEW.org_id IS DISTINCT FROM OLD.org_id OR NEW.id IS DISTINCT FROM OLD.id OR NEW.operation_id IS DISTINCT FROM OLD.operation_id
+    OR NEW.preparation_id IS DISTINCT FROM OLD.preparation_id OR NEW.item_id IS DISTINCT FROM OLD.item_id
+    OR NEW.attempt_ordinal IS DISTINCT FROM OLD.attempt_ordinal OR NEW.prior_attempt_id IS DISTINCT FROM OLD.prior_attempt_id
+    OR NEW.contact_id IS DISTINCT FROM OLD.contact_id OR NEW.from_e164 IS DISTINCT FROM OLD.from_e164
+    OR NEW.to_e164 IS DISTINCT FROM OLD.to_e164 OR NEW.body_hash IS DISTINCT FROM OLD.body_hash
+    OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+  RAISE EXCEPTION 'Immutable send attempt identity';
+ END IF;
+ IF NEW.generation<OLD.generation OR NEW.receipt_version<OLD.receipt_version THEN RAISE EXCEPTION 'Send attempt counters may not decrease';END IF;
+ IF OLD.dispatch_started_at IS NOT NULL AND NEW.dispatch_started_at IS DISTINCT FROM OLD.dispatch_started_at THEN RAISE EXCEPTION 'dispatch_started_at is immutable once set';END IF;
+ IF OLD.dispatch_token IS NOT NULL AND NEW.dispatch_token IS DISTINCT FROM OLD.dispatch_token THEN RAISE EXCEPTION 'dispatch_token is immutable once set';END IF;
+ NEW.updated_at:=clock_timestamp();
+ CASE
+  WHEN OLD.state='approved' AND NEW.state='claimed' THEN NULL;
+  WHEN OLD.state='claimed' AND NEW.state='claimed' THEN
+   IF NEW.generation<=OLD.generation THEN RAISE EXCEPTION 'Reclaim must strictly increase generation';END IF;
+  -- MUTATION: R3-2b window-expiry check removed from this edge.
+  WHEN OLD.state='claimed' AND NEW.state='dispatch_started' THEN
+   IF NEW.dispatch_started_at IS NULL OR NEW.dispatch_token IS NULL THEN RAISE EXCEPTION 'Dispatch marker must be set exactly once here';END IF;
+  WHEN OLD.state='claimed' AND NEW.state='skipped_ineligible' THEN NULL;
+  WHEN OLD.state='dispatch_started' AND NEW.state IN ('provider_accepted','uncertain','confirmed_not_submitted') THEN NULL;
+  WHEN OLD.state='uncertain' AND NEW.state='provider_accepted' THEN NULL;
+  WHEN OLD.state='provider_accepted' AND NEW.state IN ('delivered','delivery_failed') THEN NULL;
+  ELSE RAISE EXCEPTION 'Invalid send attempt transition: % -> %',OLD.state,NEW.state;
+ END CASE;
+ RETURN NEW;
+END $mut$;""")
+ item20,conv20=fetch_item(prep_id,20)
+ attZ2=insert_attempt(org,op_id,prep_id,item20)
+ sql(f"SELECT inbox_reply_send.claim('{org}','{attZ2}',60)")
+ tamper_valid_until(item20,2)
+ nZ2w='r2z2-w-'+str(uuid.uuid4());nZ2r='r2z2-r-'+str(uuid.uuid4())
+ wZ2=start(f"SET application_name='{nZ2w}';BEGIN;SELECT revision FROM inbox_inbound_heads WHERE org_id='{org}' AND conversation_id='{conv20}' FOR UPDATE;SELECT pg_sleep(3);COMMIT;");children=[wZ2]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nZ2w}' AND wait_event='PgSleep')",'Race#2 Z2 writer did not hold the head lock')
+ rZ2=start(f"SET application_name='{nZ2r}';SELECT inbox_reply_send.start_dispatch('{org}','{attZ2}',1);");children=[wZ2,rZ2]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nZ2r}' AND wait_event_type='Lock')",'Race#2 Z2 reader did not actually wait on the head lock')
+ finish(wZ2,'Race#2 Z2 writer');children=[rZ2]
+ outZ2=finish(rZ2,'Race#2 Z2 reader');children=[]
+ need('"kind": "dispatch"' in outZ2,f'Race#2 Z2 control did not reproduce the bad marker (expected a wrongly-issued token): {outZ2}')
+ rowZ2=sql(f"SELECT dispatch_started_at>=(inbox_reply_send.frozen_item('{org}','{prep_id}','{item20}')->>'validUntil')::timestamptz FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{attZ2}'")
+ need(rowZ2=='t',f'Race#2 Z2 marker was not actually written past validUntil: {rowZ2}')
+ checks.append('Race#2 Z2 (positive control): with item_current'"'"'s time-check reorder reverted, start_dispatch'"'"'s post-marker recheck stripped, AND the trigger'"'"'s R3-2b window check removed — all three defenses gone — the marker is written and returned to the caller with dispatch_started_at genuinely past the frozen validUntil')
+ tokZ2=json.loads(outZ2)['token']
+ sql(f"SELECT inbox_reply_send.persist('{org}','{attZ2}','{tokZ2}',jsonb_build_object('kind','not_attempted','reason','cancelled_before_dispatch'))")
+
+ # --- Z3: restore ONLY the trigger (R3-2b back) — item_current and
+ # start_dispatch stay broken (same mutated bodies as Z2). Proves the
+ # trigger alone, independent of any function-body bug, makes a stale-time
+ # marker unwritable: the marker UPDATE itself raises
+ # INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER (an uncaught SQLSTATE in
+ # start_dispatch's savepoint block, by design — only IR001 and
+ # unique_violation are caught), aborting the whole call; the row is left
+ # exactly as it was before the call (claimed).
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.guard_attempt() RETURNS trigger LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE frozen jsonb;recomputed text;
+BEGIN
+ IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Immutable send attempt';END IF;
+ IF TG_OP='INSERT' THEN
+  IF NEW.state<>'approved' THEN RAISE EXCEPTION 'Invalid initial send attempt state';END IF;
+  IF NEW.generation<>0 OR NEW.receipt_version<>0 OR NEW.lease_until IS NOT NULL OR NEW.dispatch_started_at IS NOT NULL OR NEW.dispatch_token IS NOT NULL OR NEW.provider_reference IS NOT NULL OR NEW.provider_status IS NOT NULL OR NEW.evidence IS NOT NULL THEN
+   RAISE EXCEPTION 'Invalid initial send attempt fields';
+  END IF;
+  -- Serialize per-operation admission: FOR NO KEY UPDATE (not FOR UPDATE —
+  -- stays compatible with the attempts FK's KEY SHARE lock and never fires
+  -- operations' own immutable_row trigger) makes two concurrent inserts
+  -- against the same operation queue behind each other, so the distinct-
+  -- item-count cap below can never be raced past 50 by two inserts that
+  -- both read "49" before either commits.
+  PERFORM 1 FROM inbox_reply_send.operations WHERE org_id=NEW.org_id AND id=NEW.operation_id AND preparation_id=NEW.preparation_id FOR NO KEY UPDATE;
+  IF NOT FOUND THEN
+   RAISE EXCEPTION 'Attempt preparation does not match operation';
+  END IF;
+  -- P-GATE 4: frozen_item raises on a missing row or exclusion IS NOT NULL.
+  -- This makes such a row uninsertable regardless of any caller mistake.
+  frozen:=inbox_reply_send.frozen_item(NEW.org_id,NEW.preparation_id,NEW.item_id);
+  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+  IF NEW.contact_id IS DISTINCT FROM (frozen->'recipient'->>'contactId')::uuid
+     OR NEW.from_e164 IS DISTINCT FROM frozen->'recipient'->>'from'
+     OR NEW.to_e164 IS DISTINCT FROM frozen->'recipient'->>'to'
+     OR NEW.body_hash IS DISTINCT FROM recomputed THEN
+   RAISE EXCEPTION 'Attempt does not match frozen recipient';
+  END IF;
+  -- D-5/D-9 recipient_limit: the operation's distinct item_id count (this
+  -- insert included) must never exceed the D5 bulk-reply cap.
+  IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=NEW.org_id AND operation_id=NEW.operation_id AND item_id<>NEW.item_id)+1>inbox_reply_preparation.recipient_limit() THEN
+   RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';
+  END IF;
+  RETURN NEW;
+ END IF;
+ -- UPDATE: immutable identity columns, monotonic counters, one-time markers,
+ -- then the transition matrix itself.
+ IF NEW.org_id IS DISTINCT FROM OLD.org_id OR NEW.id IS DISTINCT FROM OLD.id OR NEW.operation_id IS DISTINCT FROM OLD.operation_id
+    OR NEW.preparation_id IS DISTINCT FROM OLD.preparation_id OR NEW.item_id IS DISTINCT FROM OLD.item_id
+    OR NEW.attempt_ordinal IS DISTINCT FROM OLD.attempt_ordinal OR NEW.prior_attempt_id IS DISTINCT FROM OLD.prior_attempt_id
+    OR NEW.contact_id IS DISTINCT FROM OLD.contact_id OR NEW.from_e164 IS DISTINCT FROM OLD.from_e164
+    OR NEW.to_e164 IS DISTINCT FROM OLD.to_e164 OR NEW.body_hash IS DISTINCT FROM OLD.body_hash
+    OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+  RAISE EXCEPTION 'Immutable send attempt identity';
+ END IF;
+ IF NEW.generation<OLD.generation OR NEW.receipt_version<OLD.receipt_version THEN RAISE EXCEPTION 'Send attempt counters may not decrease';END IF;
+ IF OLD.dispatch_started_at IS NOT NULL AND NEW.dispatch_started_at IS DISTINCT FROM OLD.dispatch_started_at THEN RAISE EXCEPTION 'dispatch_started_at is immutable once set';END IF;
+ IF OLD.dispatch_token IS NOT NULL AND NEW.dispatch_token IS DISTINCT FROM OLD.dispatch_token THEN RAISE EXCEPTION 'dispatch_token is immutable once set';END IF;
+ NEW.updated_at:=clock_timestamp();
+ CASE
+  WHEN OLD.state='approved' AND NEW.state='claimed' THEN NULL;
+  -- Reclaim: generation strictly increases; CHECK((dispatch_started_at IS
+  -- NULL)=(state IN (...,'claimed',...))) already guarantees the marker is
+  -- still unset on both sides of a live 'claimed' state.
+  WHEN OLD.state='claimed' AND NEW.state='claimed' THEN
+   IF NEW.generation<=OLD.generation THEN RAISE EXCEPTION 'Reclaim must strictly increase generation';END IF;
+  WHEN OLD.state='claimed' AND NEW.state='dispatch_started' THEN
+   IF NEW.dispatch_started_at IS NULL OR NEW.dispatch_token IS NULL THEN RAISE EXCEPTION 'Dispatch marker must be set exactly once here';END IF;
+   -- R3-2b defense-in-depth (same D-3/P-GATE-4 pattern as the INSERT path,
+   -- which already pays this one-row frozen_item() read): a marker whose
+   -- own timestamp is already past the frozen conversation window is
+   -- unwritable regardless of any function-body bug in start_dispatch.
+   IF NEW.dispatch_started_at>=(inbox_reply_send.frozen_item(NEW.org_id,NEW.preparation_id,NEW.item_id)->>'validUntil')::timestamptz THEN
+    RAISE EXCEPTION 'INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER';
+   END IF;
+  WHEN OLD.state='claimed' AND NEW.state='skipped_ineligible' THEN NULL;
+  WHEN OLD.state='dispatch_started' AND NEW.state IN ('provider_accepted','uncertain','confirmed_not_submitted') THEN NULL;
+  WHEN OLD.state='uncertain' AND NEW.state='provider_accepted' THEN NULL;
+  WHEN OLD.state='provider_accepted' AND NEW.state IN ('delivered','delivery_failed') THEN NULL;
+  ELSE RAISE EXCEPTION 'Invalid send attempt transition: % -> %',OLD.state,NEW.state;
+ END CASE;
+ RETURN NEW;
+END $$;""")
+ item21,conv21=fetch_item(prep_id,21)
+ attZ3=insert_attempt(org,op_id,prep_id,item21)
+ sql(f"SELECT inbox_reply_send.claim('{org}','{attZ3}',60)")
+ tamper_valid_until(item21,2)
+ nZ3w='r2z3-w-'+str(uuid.uuid4());nZ3r='r2z3-r-'+str(uuid.uuid4())
+ wZ3=start(f"SET application_name='{nZ3w}';BEGIN;SELECT revision FROM inbox_inbound_heads WHERE org_id='{org}' AND conversation_id='{conv21}' FOR UPDATE;SELECT pg_sleep(3);COMMIT;");children=[wZ3]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nZ3w}' AND wait_event='PgSleep')",'Race#2 Z3 writer did not hold the head lock')
+ rZ3=start(f"SET application_name='{nZ3r}';SELECT inbox_reply_send.start_dispatch('{org}','{attZ3}',1);");children=[wZ3,rZ3]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nZ3r}' AND wait_event_type='Lock')",'Race#2 Z3 reader did not actually wait on the head lock')
+ finish(wZ3,'Race#2 Z3 writer');children=[rZ3]
+ outZ3,errZ3=rZ3.communicate(timeout=12);children=[]
+ need(rZ3.returncode!=0,f'Race#2 Z3 unexpectedly succeeded (trigger should have blocked the marker): {outZ3!r}')
+ need('INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER' in errZ3,f'Race#2 Z3 did not fail via the trigger'"'"'s R3-2b check: {errZ3}')
+ rowZ3=sql(f"SELECT state,dispatch_started_at IS NULL FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{attZ3}'")
+ need(rowZ3=='claimed|t',f'Race#2 Z3 row was mutated despite the trigger raising: {rowZ3}')
+ checks.append('Race#2 Z3 (R3-2b isolation): with item_current and start_dispatch STILL broken exactly as in Z2, restoring ONLY the trigger'"'"'s R3-2b check is sufficient — the marker UPDATE itself raises INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER (an uncaught SQLSTATE, by design — only IR001/unique_violation are caught), aborting the call; the row is left exactly as it was (claimed), proving the trigger-level defense is independent of every function-body defense')
+
+ # Restore item_current and start_dispatch to the real (round-3) bodies.
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.item_current(o uuid,item jsonb) RETURNS text LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE qh jsonb;policy_result jsonb;sender public.provider_sender_numbers;head public.inbox_inbound_heads;
+BEGIN
+ -- INVARIANT: the last eligibility read happens after the last statement
+ -- that can WAIT in the transaction; the marker UPDATE is the last
+ -- statement that can wait, so item_current runs once MORE after it
+ -- returns (see start_dispatch). Inside this function that same invariant
+ -- means BOTH canonical FOR SHARE locks — sender, then head — are acquired
+ -- FIRST, and only then are ALL FIVE eligibility facts evaluated (including
+ -- validUntil and quiet_hours, which round 2 left evaluated before the
+ -- locks — a concurrent writer racing the head/sender lock while this
+ -- function is mid-wait was still invisible to a validUntil/quiet_hours
+ -- check already made from an earlier statement). Each plpgsql statement
+ -- takes a fresh snapshot under READ COMMITTED, so if a concurrent writer
+ -- holds either row locked (e.g. touching it as part of committing a
+ -- suppression) we block here, and once we unblock, EVERY eligibility read
+ -- below — all later, separate statements — is guaranteed to see whatever
+ -- that writer just committed. Only the lock acquisition and the
+ -- clock_timestamp() sampling move; the exclusion precedence itself
+ -- (validUntil -> quiet_hours -> destination_policy -> sender -> head) is
+ -- unchanged. This function and destination_policy() MUST stay VOLATILE
+ -- (never STABLE) — STABLE would pin the snapshot for the whole function
+ -- call and silently revert this fix. Never FOR UPDATE on heads/versions or
+ -- any suppression table, matching the prepare/worker lock inversion note;
+ -- and never take head FOR UPDATE before a sender write-lock in any future
+ -- caller — that specific order is the one shape that can deadlock against
+ -- this function's own sender-then-head lock order.
+ SELECT * INTO sender FROM public.provider_sender_numbers WHERE org_id=o AND provider='sendillo' AND phone_e164=item->'recipient'->>'from' FOR SHARE;
+ SELECT * INTO head FROM public.inbox_inbound_heads WHERE org_id=o AND conversation_id=(item->'target'->>'id')::uuid FOR SHARE;
+ IF (item->>'validUntil')::timestamptz<=clock_timestamp() THEN RETURN 'conversation_window_expired';END IF;
+ qh:=inbox_reply_preparation.quiet_hours(item->>'state',clock_timestamp());
+ IF qh->>'ok' IS DISTINCT FROM 'true' THEN
+  IF qh->>'reason'='unknown_state' THEN RETURN 'unknown_state';ELSE RETURN 'outside_window';END IF;
+ END IF;
+ policy_result:=inbox_reply_preparation.destination_policy(o,item->'recipient'->>'to',(item->'recipient'->>'contactId')::uuid,true);
+ IF policy_result->>'exclusion' IS NOT NULL THEN RETURN policy_result->>'exclusion';END IF;
+ IF sender.status IS DISTINCT FROM 'active' THEN RETURN 'sender_unavailable';END IF;
+ IF head.revision::text IS DISTINCT FROM item->'dependencies'->>'head' THEN RETURN 'inbound_changed';END IF;
+ RETURN NULL;
+END $$;""")
+ sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
+BEGIN
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
+ END IF;
+ frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
+ recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+ IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ -- P2.4 fast path (kept) — a cheap pre-check that avoids running item_current
+ -- at all when the sender is obviously already busy. The real fence is the
+ -- unique index guarding the marker UPDATE below.
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
+ -- Pre-marker cheap skip: returns without ever touching the sender-inflight
+ -- index when the item is already visibly ineligible. This does NOT
+ -- satisfy the invariant below by itself — see the post-marker recheck.
+ ev:=inbox_reply_send.item_current(o,frozen);
+ IF ev IS NOT NULL THEN
+  UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','skipped','reason',ev);
+ END IF;
+ token:=gen_random_uuid();
+ -- INVARIANT: the last eligibility read happens after the last statement
+ -- that can WAIT in the transaction; the marker UPDATE is the last
+ -- statement that can wait (it can block on the D-6(5) sender-inflight
+ -- unique index), so item_current runs once MORE after it returns — inside
+ -- this same savepoint-shaped EXCEPTION block, so a stale-at-marker result
+ -- rolls the marker/token back in-tx rather than ever being returned to a
+ -- caller. The pre-marker call above is a cheap optimization only; this one
+ -- is the actual gate. frozen need not be re-read (preparations are
+ -- immutable) and the outer attempt row's FOR UPDATE lock is retained
+ -- throughout — only the marker write itself rolls back.
+ BEGIN
+  UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+  -- The LAST read, after the marker's own wait. `ev` is reassigned here (not
+  -- reused from the pre-marker call above) so a caught IR001 below records
+  -- the FRESH reason as evidence.
+  ev:=inbox_reply_send.item_current(o,frozen);
+  IF ev IS NOT NULL THEN RAISE EXCEPTION 'stale after marker' USING ERRCODE='IR001';END IF;
+ EXCEPTION
+  WHEN SQLSTATE 'IR001' THEN
+   -- The marker UPDATE above rolled back to this block's implicit savepoint:
+   -- state, dispatch_started_at and dispatch_token are all back to their
+   -- pre-BEGIN ('claimed') values, so this UPDATE's OLD.state='claimed' is a
+   -- listed trigger edge, exactly like the pre-marker skip path.
+   UPDATE inbox_reply_send.attempts SET state='skipped_ineligible',lease_until=NULL,evidence=ev,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+   RETURN jsonb_build_object('kind','skipped','reason',ev);
+  WHEN unique_violation THEN
+   -- P2.4: the fast pre-check above can miss a same-instant competitor (it
+   -- only sees already-committed dispatch_started rows). The D-6(5) unique
+   -- index on (org_id,from_e164) WHERE state='dispatch_started' is the real
+   -- fence; a unique_violation here is only ever this specific race —
+   -- anything else re-raises unchanged. The 55P03 carries no DETAIL/HINT so
+   -- the raw 23505 detail (which would include the phone number) never
+   -- leaks. Deliberately no WHEN OTHERS here: any other error must abort
+   -- the whole transaction, never be swallowed by this block.
+   GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
+   IF cn='inbox_reply_send_sender_inflight' THEN RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+   ELSE RAISE;
+   END IF;
+ END;
+ -- Body is read VERBATIM from the frozen row (P-GATE 3/R4) — never copied
+ -- into this table, never re-rendered, never re-parsed as template syntax.
+ RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
+END $$;""")
+except Exception:
+ for c in children:
+  if c.poll() is None:c.terminate();c.wait(timeout=5)
+ if installed:
+  sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;")
+ raise
+need(len(checks)==18,f'Expected 18 check groups, got {len(checks)}')
+# Only the private schemas are dropped — per the established
+# inbox-reply-preparation/recipient-concurrency.py precedent, the uniquely
+# marked synthetic canonical rows (organizations/contacts/properties/
+# messages under 'Owned PR-D concurrency %') are left in the owned fixture.
+sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;")
+need(sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespace('inbox_reply_preparation') IS NULL AND to_regnamespace('inbox_reply_review') IS NULL AND to_regnamespace('inbox_reply_send') IS NULL")=='t','Owned schema cleanup failed')
+(P/'concurrency-evidence.json').write_text(json.dumps({
+ 'sources_sha256':{str(path.relative_to(P.parent)):hashlib.sha256(path.read_bytes()).hexdigest() for path in sources},
+ 'setup_sha256':hashlib.sha256((P/'concurrency-setup.sql').read_bytes()).hexdigest(),
+ 'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+ 'owned_org_id':org,
+ 'checks':checks,
+ 'cleanup':'Private inbox_reply_* schemas and the two public wrapper functions removed; uniquely marked synthetic organizations/contacts/properties/messages rows retained in the owned fixture (same precedent as inbox-reply-preparation/recipient-concurrency.py)',
+ 'limitations':['Two-real-connection proofs for #1 double-claim, #2 stale-fence and #3 reclaim-after-dispatch, plus a genuine two-connection race for #8 sender one-in-flight; every other mutation-first obligation is single-connection in run.py']
+},indent=2)+'\n')
+print(f'PR-D concurrency: all {len(checks)} two-real-connection lock-wait proofs passed; private schemas removed, synthetic canonical rows retained')
