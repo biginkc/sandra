@@ -5,6 +5,7 @@ import { ChevronDown, ChevronRight, Search } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { PageHeader } from "@/components/page-header"
 import { cn } from "@/lib/utils"
 import { MyLeadsMetrics } from "./metrics"
 import { StickyMyLeadsMetrics } from "./sticky-metrics"
@@ -217,13 +218,12 @@ export function MyLeadsQueue({
   }
 
   return (
-    <div className="flex w-full flex-col gap-6">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-[26px] leading-tight font-bold tracking-tight text-foreground">My Leads</h1>
-          <p className="text-sm text-muted-foreground">{selectedRepLabel || "Your queue"} · Acquisitions</p>
-        </div>
-        <div className="flex max-w-full flex-wrap items-center gap-2.5">
+    <div className="flex w-full flex-col gap-8">
+      <PageHeader
+        breadcrumb={[{ label: "Workspace" }, { label: "My Leads" }]}
+        title="My Leads"
+        description={`${selectedRepLabel || "Your queue"} · Acquisitions`}
+        actions={<div className="flex max-w-full flex-wrap items-center gap-2.5">
           {canSelectRep && <>
           <label className="sr-only" htmlFor="my-leads-rep">
             Acquisitions member
@@ -247,8 +247,8 @@ export function MyLeadsQueue({
 
           </>}
 
-        </div>
-      </header>
+        </div>}
+      />
 
       <div ref={expandedMetricsRef}><MyLeadsMetrics kpis={kpis} /></div>
       <StickyMyLeadsMetrics kpis={kpis} expandedRef={expandedMetricsRef} repLabel={selectedRepLabel} />

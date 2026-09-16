@@ -3,46 +3,15 @@
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 22px;
+  gap: 32px;
   color: #1c1917;
 }
 
-.headerRow {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  flex-wrap: wrap;
-}
-
-.titleBlock,
 .leadArea {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 6px;
-}
-
-.crumb {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #78716c;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .14em;
-  text-transform: uppercase;
-}
-
-.crumbCurrent { color: #1c1917; }
-
-.heading {
-  margin: 0;
-  color: #1c1917;
-  font-size: clamp(25px, 3vw, 30px);
-  font-weight: 800;
-  line-height: 1.1;
-  letter-spacing: -.02em;
 }
 
 .headerActions {

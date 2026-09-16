@@ -19,6 +19,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/page-header";
 import {
   calculateClosr,
   DEFAULT_DECISION,
@@ -605,14 +606,10 @@ export default function CalculatorClient({
 
   return (
     <div className={styles.workspace} data-testid="calculator-workspace">
-      <div className={styles.headerRow}>
-        <div className={styles.titleBlock}>
-          <div className={styles.crumb}>
-            <span>Calculators</span>
-            <span>/</span>
-            <span className={styles.crumbCurrent}>{savedSnapshot ? `Revision v${savedSnapshot.version}` : "New calculation"}</span>
-          </div>
-          <h1 className={styles.heading}>Offer Calculator</h1>
+      <PageHeader
+        breadcrumb={[{ label: "Workspace" }, { label: "Calculators" }]}
+        title="Offer Calculator"
+        context={
           <div className={styles.leadArea}>
             {lead ? (
               <div className={styles.leadChip} data-testid="attached-lead">
@@ -702,8 +699,8 @@ export default function CalculatorClient({
               </div>
             )}
           </div>
-        </div>
-        <div className={styles.headerActions}>
+        }
+        actions={<div className={styles.headerActions}>
           <div className={styles.actionButtons}>
             <Button type="button" variant="outline" size="sm" onClick={() => setGuideOpen(true)}>
               <CircleHelp size={15} aria-hidden="true" /> Guide
@@ -719,8 +716,8 @@ export default function CalculatorClient({
             <span><i className={`${styles.legendSwatch} ${styles.editableSwatch}`} />Blue: editable</span>
             <span><i className={`${styles.legendSwatch} ${styles.resultSwatch}`} />Yellow: calculated</span>
           </div>
-        </div>
-      </div>
+        </div>}
+      />
 
       {(saveError || saveSuccess || Object.keys(draftErrors).length > 0) && (
         <div className={saveError || Object.keys(draftErrors).length > 0 ? styles.errorBanner : styles.successBanner} role={saveError || Object.keys(draftErrors).length > 0 ? "alert" : "status"}>

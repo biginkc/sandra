@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client';
 import type { LibraryCall, LibraryFile, LibraryResult } from '@/lib/recordings/data';
 import type { RecordingScope, SearchParams } from '@/lib/recordings/filters';
 import { TIME_ZONE } from '@/lib/recordings/filters';
+import { PageHeader } from '@/components/page-header';
 
 const field = 'mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm';
 const button = 'rounded-lg border px-4 py-2 text-sm font-medium hover:bg-muted disabled:opacity-50';
@@ -84,8 +85,12 @@ export function RecordingLibrary({ result, scope, values }: { result: LibraryRes
   const next = new URLSearchParams();
   for (const [key,v] of Object.entries(values)) if (key !== 'cursor' && v) for (const item of Array.isArray(v) ? v : [v]) next.append(key,item);
   if (result.nextCursor) next.set('cursor',result.nextCursor);
-  return <div className="w-full space-y-6">
-    <header><h1 className="text-3xl font-semibold tracking-tight">{scope === 'owner' ? 'Recordings' : 'My Recordings'}</h1><p className="mt-2 text-muted-foreground">{scope === 'owner' ? 'Browse recordings across BMH Group.' : 'Recordings from calls attributed to you.'} Dates are shown in Central time.</p></header>
+  return <>
+    <PageHeader
+      breadcrumb={[{ label: 'Workspace' }, { label: scope === 'owner' ? 'Recordings' : 'My Recordings' }]}
+      title={scope === 'owner' ? 'Recordings' : 'My Recordings'}
+      description={<>{scope === 'owner' ? 'Browse recordings across BMH Group.' : 'Recordings from calls attributed to you.'} Dates are shown in Central time.</>}
+    />
     <form key={JSON.stringify(values)} action={base} onSubmit={event => {
       event.preventDefault(); const data = new FormData(event.currentTarget); const query = new URLSearchParams();
       for (const [key,v] of data) if (typeof v === 'string' && v) query.append(key,v);
@@ -119,5 +124,5 @@ export function RecordingLibrary({ result, scope, values }: { result: LibraryRes
     <p role="status" className="text-sm text-muted-foreground">{result.total} matching calls · Newest first · Up to 50 per page</p>
     <div className="space-y-4" aria-busy={pending}>{result.rows.map(call => <CallCard key={call.id} call={call} scope={scope} />)}{!result.rows.length && <p className="rounded-xl border p-8 text-center text-muted-foreground">No recordings match these filters. Try All statuses or a wider date range.</p>}</div>
     {result.nextCursor && <Link className={button} href={`${base}?${next}`} prefetch={false}>Next 50 calls</Link>}
-  </div>;
+  </>;
 }

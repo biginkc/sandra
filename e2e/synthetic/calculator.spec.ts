@@ -8,7 +8,7 @@ import fixtures from '../../src/lib/calculators/worksheet-fixtures.json';
 import type {CalculatorInputs} from '../../src/lib/calculators/types';
 let js='',css='';
 test.beforeAll(async()=>{
-  const build=await esbuild.build({entryPoints:['e2e/synthetic/fixtures/calculator-harness.tsx'],bundle:true,platform:'browser',format:'iife',jsx:'automatic',alias:{'@':path.resolve('src')},define:{'process.env.NODE_ENV':'"test"'},write:false,outdir:'/tmp/closr-synthetic'});
+  const build=await esbuild.build({entryPoints:['e2e/synthetic/fixtures/calculator-harness.tsx'],bundle:true,platform:'browser',format:'iife',jsx:'automatic',alias:{'@':path.resolve('src')},define:{'process.env.NODE_ENV':'"test"','process.env.__NEXT_ROUTER_BASEPATH':'""'},write:false,outdir:'/tmp/closr-synthetic'});
   js=build.outputFiles.find(f=>f.path.endsWith('.js'))!.text;
   css=(await postcss([tailwindcss()]).process(readFileSync('src/app/globals.css','utf8'),{from:path.resolve('src/app/globals.css')})).css+'\n'+build.outputFiles.filter(f=>f.path.endsWith('.css')).map(f=>f.text).join('\n');
 });
