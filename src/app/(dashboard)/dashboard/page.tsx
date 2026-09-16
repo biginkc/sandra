@@ -4,6 +4,7 @@ import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { getCallerMemberships } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { EMPTY_SENDILLO_SMS_HEALTH } from "@/lib/messages/sendillo-health";
 import { getStoredSkipTraceBalance } from "@/lib/skip-trace/balance";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -45,6 +46,7 @@ export default async function DashboardPage() {
   );
   const isOwner =
     callerMemberships.length === 1 && callerMemberships[0].role === "owner";
+  const showMessagesAndLeads = canAccessMessagesAndLeadsBoard(memberships);
 
   // listUsers() always fetches the whole team; it has no assignee-id filter.
   // Start it with the dashboard data and filter the result after the batch.
@@ -139,14 +141,23 @@ export default async function DashboardPage() {
           className="space-y-6"
           data-testid="overview-daily-work"
         >
-          <NeedsAttentionStrip needs={summary.needs_attention} />
+          <NeedsAttentionStrip
+            needs={summary.needs_attention}
+            showMessagesAndLeads={showMessagesAndLeads}
+          />
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
-            <TasksPanel {...myTasks} currentUserId={user.id} nowMs={nowMs} />
+            <TasksPanel
+              {...myTasks}
+              currentUserId={user.id}
+              nowMs={nowMs}
+              showMessagesAndLeads={showMessagesAndLeads}
+            />
             <ThreadsNeedingAttention
               threads={summary.threads_needing_attention}
               totalCount={escalatedTotal}
               nowMs={nowMs}
+              showMessagesAndLeads={showMessagesAndLeads}
             />
           </div>
         </section>
@@ -172,7 +183,10 @@ export default async function DashboardPage() {
         ) : null}
 
         <section aria-label="Workspace activity" className="space-y-6">
-          <QuickActions isAdmin={isAdmin} />
+          <QuickActions
+            isAdmin={isAdmin}
+            showMessagesAndLeads={showMessagesAndLeads}
+          />
           <ActivityFeed events={summary.recent_activity} />
         </section>
       </div>

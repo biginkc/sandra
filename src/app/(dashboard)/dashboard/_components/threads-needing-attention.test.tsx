@@ -32,4 +32,17 @@ describe("<ThreadsNeedingAttention />", () => {
       "/messages?filter=escalated",
     );
   });
+
+  it("hides the shared thread summary for restricted Acquisitions members", () => {
+    const { container } = render(
+      <ThreadsNeedingAttention
+        threads={[thread]}
+        totalCount={1}
+        nowMs={Date.parse("2026-06-22T14:00:00Z")}
+        showMessagesAndLeads={false}
+      />,
+    );
+
+    expect(container).toBeEmptyDOMElement();
+  });
 });

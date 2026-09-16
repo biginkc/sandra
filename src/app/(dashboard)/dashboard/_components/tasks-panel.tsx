@@ -18,6 +18,8 @@ type Props = MyTasksResult & {
   currentUserId: string;
   /** Request-captured instant shared with the Overview greeting/date. */
   nowMs: number;
+  /** Contact-only tasks otherwise link into the shared Messages workspace. */
+  showMessagesAndLeads?: boolean;
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -83,6 +85,7 @@ export function TasksPanel(props: Props) {
   }
 
   const { nowMs } = props;
+  const showMessagesAndLeads = props.showMessagesAndLeads ?? true;
 
   return (
     <div
@@ -112,6 +115,7 @@ export function TasksPanel(props: Props) {
           timezone={timezone}
           nowMs={nowMs}
           currentUserId={currentUserId}
+          showMessagesAndLeads={showMessagesAndLeads}
         />
       ) : null}
       {today.length > 0 ? (
@@ -122,6 +126,7 @@ export function TasksPanel(props: Props) {
           timezone={timezone}
           nowMs={nowMs}
           currentUserId={currentUserId}
+          showMessagesAndLeads={showMessagesAndLeads}
         />
       ) : null}
       {upcoming.length > 0 ? (
@@ -132,6 +137,7 @@ export function TasksPanel(props: Props) {
           timezone={timezone}
           nowMs={nowMs}
           currentUserId={currentUserId}
+          showMessagesAndLeads={showMessagesAndLeads}
         />
       ) : null}
     </div>
@@ -140,9 +146,11 @@ export function TasksPanel(props: Props) {
 
 /** href for a task row, or null when there's nothing to link to (a fully
  *  unlinked personal block). */
-function taskHref(t: TaskRow): string | null {
+function taskHref(t: TaskRow, showMessagesAndLeads: boolean): string | null {
   if (t.property_id) return `/leads/${t.property_id}`;
-  if (t.contact_id) return `/messages?thread=${t.contact_id}`;
+  if (t.contact_id && showMessagesAndLeads) {
+    return `/messages?thread=${t.contact_id}`;
+  }
   return null;
 }
 
@@ -181,6 +189,7 @@ function Section({
   timezone,
   nowMs,
   currentUserId,
+  showMessagesAndLeads,
 }: {
   label: string;
   tasks: TaskRow[];
@@ -188,6 +197,7 @@ function Section({
   timezone: string;
   nowMs: number;
   currentUserId: string;
+  showMessagesAndLeads: boolean;
 }) {
   return (
     <div className="mb-4 last:mb-0">
@@ -202,7 +212,7 @@ function Section({
       </div>
       <ul className="divide-border divide-y">
         {tasks.map((t) => {
-          const href = taskHref(t);
+          const href = taskHref(t, showMessagesAndLeads);
           const primary = taskPrimaryLabel(t);
           const isAppointment = t.type === "appointment";
           const isDncLocked = t.is_dnc_locked;

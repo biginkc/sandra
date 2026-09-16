@@ -1,4 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { fetchInboxDetail } from "@/app/(dashboard)/messages/inbox-detail-data";
 
 export const dynamic = "force-dynamic";
@@ -14,6 +16,9 @@ export async function GET(request: Request) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return Response.json({ error: "Sign in to read messages." }, { status: 401, headers });
   try {
+    if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) {
+      return Response.json({ error: "Not found" }, { status: 404, headers });
+    }
     // Uses the caller's session and the same org isolation and fail-closed
     // consent/suppression reads as the full server-rendered Messages page.
     const detail = await fetchInboxDetail(supabase, threadId);

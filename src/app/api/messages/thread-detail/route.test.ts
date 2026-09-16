@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ createClient: vi.fn(), fetchDetail: vi.fn(), getUser: vi.fn() }));
+const mocks = vi.hoisted(() => ({ createClient: vi.fn(), fetchDetail: vi.fn(), getUser: vi.fn(), memberships: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
 vi.mock("@/app/(dashboard)/messages/inbox-detail-data", () => ({ fetchInboxDetail: mocks.fetchDetail }));
 import { GET } from "./route";
 const id = "11111111-1111-4111-8111-111111111111";
@@ -9,6 +10,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
   mocks.getUser.mockResolvedValue({ data: { user: { id: "viewer" } } });
+  mocks.memberships.mockResolvedValue([{ user_id: "viewer", org_id: "org-1", role: "member", acquisitions_enabled: false, access_status: "active" }]);
 });
 describe("conversation detail endpoint", () => {
   it("rejects invalid identifiers before querying", async () => {
@@ -26,6 +28,14 @@ describe("conversation detail endpoint", () => {
     expect(await response.json()).toEqual({ detail: { threadId: id } });
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(mocks.fetchDetail).toHaveBeenCalledWith(await mocks.createClient(), id);
+  });
+  it("denies conversation detail to an active Acquisitions member", async () => {
+    mocks.memberships.mockResolvedValue([{ user_id: "viewer", org_id: "org-1", role: "member", acquisitions_enabled: true, access_status: "active" }]);
+
+    const response = await GET(request());
+
+    expect(response.status).toBe(404);
+    expect(mocks.fetchDetail).not.toHaveBeenCalled();
   });
   it("does not disclose inaccessible conversations or internal errors", async () => {
     mocks.fetchDetail.mockResolvedValue(null);
