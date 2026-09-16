@@ -217,7 +217,7 @@ export function MyLeadsQueue({
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 px-4 py-6 lg:px-8">
+    <div className="flex w-full flex-col gap-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex flex-col gap-1">
           <h1 className="text-[26px] leading-tight font-bold tracking-tight text-foreground">My Leads</h1>
@@ -290,7 +290,7 @@ export function MyLeadsQueue({
           />
         ))}
       </div>
-    </main>
+    </div>
   )
 }
 
