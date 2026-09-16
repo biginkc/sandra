@@ -275,6 +275,38 @@ describe("<TasksPanel />", () => {
     expect(link).not.toBeNull();
   });
 
+  it("leaves a contact-only row unlinked when shared workspace access is restricted", () => {
+    const { container } = render(
+      <TasksPanel
+        status="success"
+        overdue={[]}
+        today={[
+          makeRow({
+            id: "restricted-contact",
+            title: "Call the owner",
+            property_id: null,
+            contact_id: "contact-abc",
+            address: null,
+            city: null,
+            state: null,
+          }),
+        ]}
+        upcoming={[]}
+        timezone={TZ}
+        currentUserId={VIEWER_ID}
+        nowMs={Date.now()}
+        showMessagesAndLeads={false}
+      />,
+    );
+
+    expect(
+      container.querySelector("a[href='/messages?thread=contact-abc']"),
+    ).toBeNull();
+    expect(
+      screen.getByTestId("task-row-restricted-contact-unlinked"),
+    ).toBeInTheDocument();
+  });
+
   it("keeps exact-contact DNC work visible on its truthful Messages route but exposes no mutation controls", () => {
     const { container } = render(
       <TasksPanel

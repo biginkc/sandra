@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createClient,
+  getCallerMembershipsOrThrow,
   pauseContactEnrollments,
   qualifyProperty,
   recordLeadEvent,
@@ -10,6 +11,7 @@ const {
   revalidatePath,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
+  getCallerMembershipsOrThrow: vi.fn(),
   pauseContactEnrollments: vi.fn(),
   qualifyProperty: vi.fn(),
   recordLeadEvent: vi.fn(),
@@ -28,6 +30,7 @@ vi.mock("@/lib/events", () => ({
 vi.mock("@/lib/messaging/consent", () => ({ recordConsentEvent }));
 vi.mock("@/lib/sequences/enrollment", () => ({ pauseContactEnrollments }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow }));
 
 import {
   confirmAiDispositionReview,
@@ -45,6 +48,9 @@ beforeEach(() => {
   responseQueue = [];
   updatePayloads = [];
   createClient.mockResolvedValue(makeSupabase("actor-1"));
+  getCallerMembershipsOrThrow.mockResolvedValue([
+    { user_id: "actor-1", org_id: "org-1", role: "member", acquisitions_enabled: false },
+  ]);
   qualifyProperty.mockResolvedValue({ status: "qualified" });
   recordConsentEvent.mockResolvedValue({
     inserted: true,
@@ -89,6 +95,20 @@ describe("confirmAiDispositionReview", () => {
         tags: { surface: "confirm_ai_disposition_review_revalidate" },
       }),
     );
+  });
+
+  it("denies confirmation to an active Acquisitions member", async () => {
+    getCallerMembershipsOrThrow.mockResolvedValue([
+      { user_id: "actor-1", org_id: "org-1", role: "member", acquisitions_enabled: true },
+    ]);
+
+    const result = await confirmAiDispositionReview("review-1");
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Messages workspace access is unavailable",
+    });
+    expect(responseQueue).toEqual([]);
   });
 });
 
@@ -343,6 +363,20 @@ describe("moveMessageThreadToLead", () => {
     expect(result).toEqual({ ok: true, alreadyQualified: true });
     expect(revalidatePath).toHaveBeenCalledWith("/messages");
     expect(revalidatePath).toHaveBeenCalledWith("/leads/property-1");
+  });
+
+  it("denies message-thread promotion to an active Acquisitions member", async () => {
+    getCallerMembershipsOrThrow.mockResolvedValue([
+      { user_id: "actor-1", org_id: "org-1", role: "member", acquisitions_enabled: true },
+    ]);
+
+    const result = await moveMessageThreadToLead("property-1");
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Messages workspace access is unavailable.",
+    });
+    expect(qualifyProperty).not.toHaveBeenCalled();
   });
 });
 

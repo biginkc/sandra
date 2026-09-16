@@ -1,4 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createInboxReadRepository, InboxReadError, type InboxReadClient } from "@/lib/inbox/read-api";
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 export async function GET(request: Request, { params }: { params: Promise<{ conversationId: string }> }) {
@@ -11,6 +13,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ conv
     if (before !== null && !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(before)) throw new InboxReadError(400);
     const { conversationId } = await params;
     const client = await createClient();
+    if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) throw new InboxReadError(404);
     const data = await createInboxReadRepository(client as unknown as InboxReadClient).detail(query.get("orgId")!, conversationId, AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]), query.get("before") ?? undefined);
     return Response.json(data, { headers });
   } catch (error) {
