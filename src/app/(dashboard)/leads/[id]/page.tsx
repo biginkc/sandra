@@ -820,7 +820,6 @@ export default async function LeadDetailPage({
         </h2>
         <div className="grid min-w-0 items-start gap-[14px] xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="min-w-0 space-y-3">
-            <Suspense fallback={<p className="text-sm text-muted-foreground">Loading saved calculations…</p>}><LeadCalculationsSection propertyId={lead.id} /></Suspense>
             <LeadActivityTimeline
               key={lead.id}
               propertyId={lead.id}
@@ -889,6 +888,7 @@ export default async function LeadDetailPage({
               loadError={esign.filesError}
               downloadAction={downloadLeadFileAction}
             />
+            <Suspense fallback={<p className="text-sm text-muted-foreground">Loading saved calculations…</p>}><LeadCalculationsSection propertyId={lead.id} /></Suspense>
             <Section title="Homeowner" compact>
               {lead.homeowner ? (
                 <>
