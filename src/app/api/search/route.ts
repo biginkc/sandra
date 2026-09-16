@@ -34,7 +34,7 @@ export async function GET(request: Request) {
     return Response.json(err({ code: "SEARCH_FAILED", message: "Search unavailable" }), { status: 500, headers });
   }
   const results = (data ?? []).flatMap(row => {
-    if (row.entity_type === "thread" && !sharedWorkspaceAccess && !row.property_id) return [];
+    if (row.entity_type !== "property" && !sharedWorkspaceAccess && !row.property_id) return [];
     return [{
     type: row.entity_type,
     key: `${row.entity_type}-${row.entity_type === "thread" ? row.conversation_id : row.entity_id}`,

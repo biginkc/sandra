@@ -12,14 +12,17 @@ describe("global search route", () => {
   it("trims and caps the query", async () => { await GET(request(`  ${"a".repeat(110)}  `)); expect(rpc).toHaveBeenCalledWith("search_global", { q: "a".repeat(100), per_type: 5 }); });
   it("reports a missing RPC once and degrades", async () => { rpc.mockResolvedValue({ error: { code: "PGRST202" } }); const response = await GET(request()); expect(response.status).toBe(200); expect(await response.json()).toEqual({ results: [], degraded: true }); expect(reportError).toHaveBeenCalledTimes(1); });
   it("surfaces other database errors", async () => { rpc.mockResolvedValue({ error: { code: "42883" } }); const response = await GET(request()); expect(response.status).toBe(500); expect(await response.json()).toEqual({ ok: false, error: { code: "SEARCH_FAILED", message: "Search unavailable" } }); });
-  it("returns property-backed thread hits to restricted members and omits orphan threads", async () => {
+  it("returns accessible lead hits to restricted members and omits conversation-only contacts and threads", async () => {
     memberships.mockResolvedValue([{ user_id: "user", org_id: "org-1", role: "member", acquisitions_enabled: true, access_status: "active" }]);
     rpc.mockResolvedValue({ data: [
       { entity_type: "thread", entity_id: "m1", conversation_id: "c1", property_id: "p1", title: "Property thread", subtitle: "", matched_field: "phone" },
       { entity_type: "thread", entity_id: "m2", conversation_id: "c2", property_id: null, title: "Orphan thread", subtitle: "", matched_field: "phone" },
+      { entity_type: "owner", entity_id: "o1", conversation_id: "c3", property_id: null, title: "Conversation-only contact", subtitle: "", matched_field: "phone" },
+      { entity_type: "owner", entity_id: "o2", conversation_id: "c4", property_id: "p2", title: "Lead contact", subtitle: "", matched_field: "phone" },
+      { entity_type: "property", entity_id: "p3", property_id: null, title: "Lead", subtitle: "", matched_field: "address" },
     ], error: null });
     const { results } = await (await GET(request())).json();
-    expect(results.map((row: { href: string }) => row.href)).toEqual(["/leads/p1"]);
+    expect(results.map((row: { href: string }) => row.href)).toEqual(["/leads/p1", "/leads/p2", "/leads/p3"]);
   });
   it("keeps property-backed thread hits in Messages for owners and other members", async () => {
     rpc.mockResolvedValue({ data: [
