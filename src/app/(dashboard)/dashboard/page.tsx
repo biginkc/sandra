@@ -187,7 +187,10 @@ export default async function DashboardPage() {
             isAdmin={isAdmin}
             showMessagesAndLeads={showMessagesAndLeads}
           />
-          <ActivityFeed events={summary.recent_activity} />
+          <ActivityFeed
+            events={summary.recent_activity}
+            showMessagesAndLeads={showMessagesAndLeads}
+          />
         </section>
       </div>
     </Page>

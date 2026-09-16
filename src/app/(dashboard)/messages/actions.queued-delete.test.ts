@@ -4,15 +4,18 @@ const {
   createClient,
   createContactFromUnknownHelper,
   createPropertyAndResolve,
+  getCallerMembershipsOrThrow,
   recordLeadEvent,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
   createContactFromUnknownHelper: vi.fn(),
   createPropertyAndResolve: vi.fn(),
+  getCallerMembershipsOrThrow: vi.fn(),
   recordLeadEvent: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow }));
 vi.mock("@/lib/events", () => ({
   LEAD_EVENT_TYPES: {
     LEAD_CREATED: "lead_created",
@@ -80,6 +83,9 @@ const PROPERTY_ID = "22222222-2222-4222-8222-222222222222";
 describe("deleteQueuedMessage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getCallerMembershipsOrThrow.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member", acquisitions_enabled: false },
+    ]);
   });
 
   it("records a body-free event only after a queued property message is deleted", async () => {
@@ -151,11 +157,35 @@ describe("deleteQueuedMessage", () => {
     });
     expect(recordLeadEvent).not.toHaveBeenCalled();
   });
+
+  it("denies queued deletion to an active Acquisitions member", async () => {
+    getCallerMembershipsOrThrow.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member", acquisitions_enabled: true },
+    ]);
+    const { client, deleteRow } = makeClient({
+      row: { id: MESSAGE_ID, property_id: PROPERTY_ID },
+    });
+    createClient.mockResolvedValue(client);
+
+    const result = await deleteQueuedMessage(MESSAGE_ID);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "MESSAGES_WORKSPACE_ACCESS",
+        message: "Messages workspace access is unavailable.",
+      },
+    });
+    expect(deleteRow).not.toHaveBeenCalled();
+  });
 });
 
 describe("message property creation activity", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getCallerMembershipsOrThrow.mockResolvedValue([
+      { user_id: "user-1", org_id: "org-1", role: "member", acquisitions_enabled: false },
+    ]);
   });
 
   it("records a lead-created event after unknown-sender triage succeeds", async () => {

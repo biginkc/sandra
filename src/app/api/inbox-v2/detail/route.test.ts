@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "./route";
-const mocks = vi.hoisted(() => ({ create: vi.fn(), getUser: vi.fn(), membership: vi.fn(), read: vi.fn() }));
+const mocks = vi.hoisted(() => ({ create: vi.fn(), getUser: vi.fn(), memberships: vi.fn(), read: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.create }));
-vi.mock("@/lib/auth/memberships", () => ({ getSingleActiveMembership: mocks.membership }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
 vi.mock("@/lib/inbox-v2/read-detail", () => ({ readInboxDetail: mocks.read }));
 const id = "123e4567-e89b-12d3-a456-426614174000";
 const request = (suffix = "") => new Request(`http://localhost/api/inbox-v2/detail?conversationId=${id}${suffix}`);
@@ -13,7 +13,7 @@ beforeEach(() => {
   vi.stubEnv("INBOX_TIMING_ENABLED", undefined);
   mocks.create.mockResolvedValue({ auth: { getUser: mocks.getUser } });
   mocks.getUser.mockResolvedValue({ data: { user: { id: "member" } }, error: null });
-  mocks.membership.mockResolvedValue({ ok: true, membership: { user_id: "member", org_id: "org" } });
+  mocks.memberships.mockResolvedValue([{ user_id: "member", org_id: "org", role: "member", acquisitions_enabled: false }]);
   mocks.read.mockResolvedValue({ status: "ready", conversationId: id, messages: [] });
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
@@ -34,12 +34,22 @@ describe("flagged Inbox detail GET", () => {
   it("requires authenticated user and matching unambiguous membership", async () => {
     mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
     expect((await GET(request())).status).toBe(401);
-    expect(mocks.membership).not.toHaveBeenCalled();
+    expect(mocks.memberships).not.toHaveBeenCalled();
     mocks.getUser.mockResolvedValue({ data: { user: { id: "member" } }, error: null });
-    mocks.membership.mockResolvedValue({ ok: false, reason: "ambiguous" });
+    mocks.memberships.mockResolvedValue([]);
     expect((await GET(request())).status).toBe(403);
-    mocks.membership.mockResolvedValue({ ok: true, membership: { user_id: "someone-else", org_id: "org" } });
+    mocks.memberships.mockResolvedValue([
+      { user_id: "someone-else", org_id: "org", role: "member", acquisitions_enabled: false },
+      { user_id: "member", org_id: "org", role: "member", acquisitions_enabled: false },
+    ]);
     expect((await GET(request())).status).toBe(403);
+    expect(mocks.read).not.toHaveBeenCalled();
+  });
+  it("denies an active Acquisitions member before reading detail", async () => {
+    mocks.memberships.mockResolvedValue([
+      { user_id: "member", org_id: "org", role: "member", acquisitions_enabled: true },
+    ]);
+    expect((await GET(request())).status).toBe(404);
     expect(mocks.read).not.toHaveBeenCalled();
   });
   it("passes session organization and validated limit, with private no-store success", async () => {

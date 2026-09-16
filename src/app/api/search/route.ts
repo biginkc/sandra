@@ -34,6 +34,11 @@ export async function GET(request: Request) {
     return Response.json(err({ code: "SEARCH_FAILED", message: "Search unavailable" }), { status: 500, headers });
   }
   const results = (data ?? []).flatMap(row => {
+    // A property-backed thread is still a Messages result. Restricted
+    // Acquisitions members may discover the property through owner/contact
+    // or property hits, but must not receive any shared-thread result (and
+    // therefore must not receive its message subtitle/preview).
+    if (!sharedWorkspaceAccess && row.entity_type === "thread") return [];
     if (row.entity_type !== "property" && !sharedWorkspaceAccess && !row.property_id) return [];
     return [{
     type: row.entity_type,

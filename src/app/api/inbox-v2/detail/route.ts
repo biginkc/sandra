@@ -1,5 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
-import { getSingleActiveMembership } from "@/lib/auth/memberships";
+import {
+  getCallerMembershipsOrThrow,
+} from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { validateInboxReadRequest } from "@/lib/inbox-v2/read-contract";
 import { readInboxDetail } from "@/lib/inbox-v2/read-detail";
 
@@ -52,9 +55,10 @@ async function readResponse(request: Request) {
     const client = await createClient();
     const { data, error } = await client.auth.getUser();
     if (error || !data.user) return failure(401, "Authentication required");
-    const membership = await getSingleActiveMembership();
-    if (!membership.ok || membership.membership.user_id !== data.user.id) return failure(403, "Access unavailable");
-    const result = await readInboxDetail(client, membership.membership.org_id, validated.value);
+    const memberships = await getCallerMembershipsOrThrow();
+    if (memberships.length !== 1 || memberships[0]?.user_id !== data.user.id) return failure(403, "Access unavailable");
+    if (!canAccessMessagesAndLeadsBoard(memberships)) return failure(404, "Not found");
+    const result = await readInboxDetail(client, memberships[0].org_id, validated.value);
     if (result.status !== "ready") return failure(result.status === "unavailable" ? 404 : 500, "Conversation unavailable");
     return Response.json(result, { headers });
   } catch {

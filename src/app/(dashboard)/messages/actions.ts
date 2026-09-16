@@ -36,6 +36,7 @@ import {
   releaseQueuedMessage,
   type SendSmsOutcome,
 } from "@/lib/messaging/send";
+import { assertMessagesWorkspaceAccess } from "./workspace-access";
 
 export type ReleaseQueuedPayload = { outcome: SendSmsOutcome };
 
@@ -50,6 +51,7 @@ export async function releaseMessage(
 ): Promise<Result<ReleaseQueuedPayload>> {
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     const outcome = await releaseQueuedMessage(supabase, messageId);
     return ok({ outcome });
   } catch (e) {
@@ -87,6 +89,7 @@ export async function updateQueuedMessage(
   }
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     // Guard: only touch rows currently queued. A concurrent release
     // can't race us because of the status='queued' filter.
     const { error, data } = await supabase
@@ -140,6 +143,7 @@ export async function deleteQueuedMessage(
         error: { code: "NOT_SIGNED_IN", message: "Not signed in." },
       };
     }
+    await assertMessagesWorkspaceAccess();
     const { error, data } = await supabase
       .from("messages")
       .delete()
@@ -193,6 +197,7 @@ export async function matchUnknownSenderAction(
 ): Promise<Result<{ updated: number }>> {
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     return await matchUnknownSenderHelper({ supabase, fromAddress, contactId });
   } catch (e) {
     reportError(e, {
@@ -229,6 +234,7 @@ export async function createContactFromUnknownAction(input: {
         error: { code: "NOT_SIGNED_IN", message: "Not signed in." },
       };
     }
+    await assertMessagesWorkspaceAccess();
     const result = await createContactFromUnknownHelper({ supabase, ...input });
     if (result.ok) {
       await recordLeadEvent({
@@ -263,6 +269,7 @@ export async function mergeUnknownSenderToPropertyAction(input: {
 }): Promise<Result<{ contactId: string }>> {
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     return await mergeUnknownSenderToPropertyHelper({ supabase, ...input });
   } catch (e) {
     reportError(e, {
@@ -299,6 +306,7 @@ export async function searchPropertiesForMatch(
   if (trimmed.length < 2) return ok([]);
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     const like = `*${trimmed.replace(/[%_*]/g, "")}*`;
     const { data, error } = await supabase
       .from("properties")
@@ -339,6 +347,7 @@ export async function listResolveCandidatesAction(input: {
 }): Promise<Result<ResolveCandidateProperty[]>> {
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     const candidates = await listResolverCandidatePropertiesForContact(
       supabase,
       input,
@@ -364,6 +373,7 @@ export async function resolveThreadToPropertyAction(input: {
 }): Promise<Result<{ updated: number; conversationId: string }>> {
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     return await resolveThreadToExistingProperty({ supabase, ...input });
   } catch (e) {
     reportError(e, {
@@ -403,6 +413,7 @@ export async function createPropertyAndResolveAction(input: {
         error: { code: "NOT_SIGNED_IN", message: "Not signed in." },
       };
     }
+    await assertMessagesWorkspaceAccess();
     const result = await createPropertyAndResolve({ supabase, ...input });
     if (result.ok) {
       await recordLeadEvent({
@@ -439,6 +450,7 @@ export async function fetchUnknownSenderThread(
 ): Promise<Result<MessageRow[]>> {
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     const { data, error } = await supabase
       .from("messages")
       .select("*")
@@ -467,6 +479,7 @@ export async function dismissUnknownSenderAction(
 ): Promise<Result<{ updated: number }>> {
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     return await dismissUnknownSenderHelper({ supabase, fromAddress });
   } catch (e) {
     reportError(e, {
@@ -495,6 +508,7 @@ export async function searchContactsForMatch(
   if (trimmed.length < 2) return ok([]);
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     // PostgREST `.or()` filter for the fuzzy search across multiple cols.
     // Inside `.or()` the wildcard for `ilike` is `*`, NOT the SQL `%` —
     // `%` lands as a literal character match and never hits anything.
@@ -553,6 +567,7 @@ export async function restoreDismissedSenderAction(
 ): Promise<Result<{ updated: number }>> {
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     return await restoreDismissedSenderHelper({ supabase, fromAddress });
   } catch (e) {
     reportError(e, {
@@ -589,6 +604,7 @@ export type QueueStats = {
 export async function getQueueStats(): Promise<Result<QueueStats>> {
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
     const stats = await getOutboundSmsMetrics(supabase);
 
     return ok({
@@ -635,6 +651,7 @@ export async function listQueuedPage(
 ): Promise<Result<QueuedPage>> {
   try {
     const supabase = await createClient();
+    await assertMessagesWorkspaceAccess();
 
     let query = supabase
       .from("messages")
