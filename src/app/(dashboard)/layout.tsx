@@ -21,7 +21,7 @@ import { getCallerMemberships } from "@/lib/auth/memberships";
 import { canViewMyLeads } from "@/lib/my-leads/access";
 import { canViewCalculators } from "@/lib/calculators/access";
 import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
-import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
+import { canAccessMessagesAndLeadsBoard, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
 
@@ -44,9 +44,12 @@ export default async function DashboardLayout({
   ]);
   const acquisitionRoster =
     rosterResult.status === "fulfilled" ? rosterResult.value : null;
+  const restrictedAcquisitionMember =
+    surfaceMembershipsResult.status === "fulfilled" &&
+    shouldRestrictMessagesAndLeadsBoard(surfaceMembershipsResult.value);
   const showMyLeads = Boolean(
-    acquisitionRoster &&
-      canViewMyLeads(acquisitionRoster.roster, acquisitionRoster.viewer.userId, acquisitionRoster.viewer.isOwner),
+    restrictedAcquisitionMember || (acquisitionRoster &&
+      canViewMyLeads(acquisitionRoster.roster, acquisitionRoster.viewer.userId, acquisitionRoster.viewer.isOwner)),
   );
   const initialAcquisitionBadge =
     showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value : null;
