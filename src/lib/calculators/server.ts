@@ -35,9 +35,8 @@ function presentLead(row: LeadRow): CalculatorLead {
 export const getCalculatorLead = cache(async (id: string): Promise<CalculatorLead> => {
   if (!UUID.test(id)) throw new Error('Lead not found.');
   const v = await calculatorViewer();
-  let q = v.client.from('properties').select(LEAD_COLUMNS).eq('id',id).eq('org_id',v.orgId).is('deleted_at',null).neq('status','prospect');
-  if (!v.isOwner) q=q.eq('assigned_user_id',v.userId);
-  const {data,error}=await q.maybeSingle();
+  const {data,error}=await v.client.from('properties').select(LEAD_COLUMNS)
+    .eq('id',id).eq('org_id',v.orgId).is('deleted_at',null).maybeSingle();
   if(error || !data) throw new Error('Lead unavailable or access denied.');
   return presentLead(data as unknown as LeadRow);
 });
@@ -50,23 +49,24 @@ export const getReadableCalculatorLead = cache(async (id:string):Promise<Calcula
 });
 export async function searchLeads(query: string): Promise<CalculatorLead[]> {
   const v = await calculatorViewer();
-  const term=query.trim().slice(0,120).replace(/[%,_*()."\\]/g,' ').trim();
-  // Search address and seller independently, then apply the same property scope.
-  let contactIds:string[]=[];
-  if(term) {
-    const words=term.split(/\s+/).filter(Boolean);
-    let cq=v.client.from('contacts').select('id').eq('org_id',v.orgId);
-    for(const word of words) cq=cq.or(`first_name.ilike.%${word}%,last_name.ilike.%${word}%`);
-    const {data,error}=await cq.limit(100);
-    if(error) throw new Error('Lead search failed. Please retry.');
-    contactIds=(data??[]).map(c=>c.id);
-  }
-  let q=v.client.from('properties').select(LEAD_COLUMNS).eq('org_id',v.orgId).is('deleted_at',null).neq('status','prospect');
-  if(!v.isOwner) q=q.eq('assigned_user_id',v.userId);
-  if(term) q=q.or(`address.ilike.%${term}%${contactIds.length?`,homeowner_contact_id.in.(${contactIds.join(',')})`:''}`);
-  const {data,error}=await q.order('address').limit(30);
+  const term=query.trim().slice(0,100);
+  if(term.length<3) return [];
+
+  // Reuse the global search ranking and matching rules. Property hits support
+  // address search; property-backed owner hits preserve seller-name search.
+  const {data:hits,error:searchError}=await v.client.rpc('search_global',{q:term,per_type:5});
+  if(searchError) throw new Error('Lead search failed. Please retry.');
+  const propertyIds=[...new Set((hits??[]).flatMap(hit=>
+    hit.entity_type==='property'?[hit.entity_id]
+      :hit.entity_type==='owner'&&hit.property_id?[hit.property_id]:[],
+  ))];
+  if(propertyIds.length===0) return [];
+
+  const {data,error}=await v.client.from('properties').select(LEAD_COLUMNS)
+    .eq('org_id',v.orgId).is('deleted_at',null).in('id',propertyIds);
   if(error) throw new Error('Lead search failed. Please retry.');
-  return (data??[]).map(row=>presentLead(row as unknown as LeadRow));
+  const byId=new Map((data??[]).map(row=>[row.id,presentLead(row as unknown as LeadRow)]));
+  return propertyIds.flatMap(id=>{const lead=byId.get(id);return lead?[lead]:[];});
 }
 export async function getCalculation(id:string): Promise<CalculatorSnapshot> {
   if(!UUID.test(id)) throw new Error('Calculation not found.');

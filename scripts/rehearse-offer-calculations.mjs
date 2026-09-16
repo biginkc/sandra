@@ -15,6 +15,7 @@ const port = 7600 + Math.floor(Math.random() * 250);
 const migrations = [
   fileURLToPath(new URL("../supabase/migrations/20260916090000_offer_calculations.sql", import.meta.url)),
   fileURLToPath(new URL("../supabase/migrations/20260916100000_offer_calculations_owner_access.sql", import.meta.url)),
+  fileURLToPath(new URL("../supabase/migrations/20260916153000_offer_calculations_shared_search_scope.sql", import.meta.url)),
 ];
 let started = false;
 
@@ -299,11 +300,10 @@ try {
   expectEqual(revision.version, 2, "revision version");
   expectEqual(revision.parent_id, first.id, "revision parent");
 
-  expectRejected(
+  const unassignedProperty = JSON.parse(psql(
     saveSql({ userId: ids.rep, propertyId: ids.propertyA2, requestId: requestJ, requestHash: "3".repeat(64) }),
-    /STALE_ASSIGNMENT/,
-    "non-owner assignment is enforced",
-  );
+  ));
+  expectEqual(unassignedProperty.property_id, ids.propertyA2, "acquisitions member may save on unassigned property");
   expectRejected(
     saveSql({ propertyId: ids.propertyA2, requestId: requestK, requestHash: "4".repeat(64), parentId: first.id }),
     /INVALID_PARENT/,
@@ -373,10 +373,11 @@ try {
   expectRejected(saveSql({ propertyId: ids.propertyB, requestId: requestE, requestHash: hashE }), /FORBIDDEN/, "cross-org property");
 
   psql(`update public.properties set status='prospect' where id='${ids.propertyA}';`);
-  expectRejected(saveSql({ requestId: requestF, requestHash: "f".repeat(64) }), /NOT_FOUND/, "prospect lead rejected");
+  const prospectProperty = JSON.parse(psql(saveSql({ requestId: requestF, requestHash: "f".repeat(64) })));
+  expectEqual(prospectProperty.property_id, ids.propertyA, "global-search prospect property may save");
   psql(`update public.properties set status='new_lead', deleted_at=now() where id='${ids.propertyA}';`);
   expectRejected(saveSql({ requestId: requestG, requestHash: hashA }), /NOT_FOUND/, "deleted lead rejected");
-  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.reader}'; select count(*) from public.offer_calculations;`), "0", "deleted lead hidden from read scope");
+  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.reader}'; select count(*) from public.offer_calculations where property_id='${ids.propertyA}';`), "0", "deleted lead hidden from read scope");
   psql(`update public.properties set deleted_at=null where id='${ids.propertyA}';`);
 
   // An event failure aborts both writes in one transaction.
@@ -404,9 +405,9 @@ try {
 
   // Authenticated read scope: all active same-org members with lead access
   // can read the saved history, including the non-acquisition reader.
-  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.owner}'; select count(*) from public.offer_calculations;`), "7", "owner read scope");
-  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.rep}'; select count(*) from public.offer_calculations;`), "7", "assigned rep read scope");
-  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.reader}'; select count(*) from public.offer_calculations;`), "7", "non-acquisition member lead read scope");
+  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.owner}'; select count(*) from public.offer_calculations;`), "9", "owner read scope");
+  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.rep}'; select count(*) from public.offer_calculations;`), "9", "assigned rep read scope");
+  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.reader}'; select count(*) from public.offer_calculations;`), "9", "non-acquisition member lead read scope");
 
   // The latest merge wrapper repoints calculation rows before deleting the
   // loser, preserving series/version and the event source identity.
