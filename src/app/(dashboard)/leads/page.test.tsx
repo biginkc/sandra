@@ -19,7 +19,10 @@ const {
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
-vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships }));
+vi.mock("@/lib/auth/memberships", () => ({
+  getCallerMemberships,
+  getCallerMembershipsOrThrow: getCallerMemberships,
+}));
 vi.mock("@/lib/auth/team-roster", () => ({
   loadOrgTeamMembers,
   loadTeamMembersForOrgs,

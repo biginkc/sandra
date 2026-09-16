@@ -5,7 +5,7 @@ import { notFound } from "next/navigation";
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { LEAD_SOURCES } from "@/lib/leads/sources";
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
@@ -47,7 +47,7 @@ export default async function LeadsPage({
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  const memberships = await getCallerMemberships();
+  const memberships = await getCallerMembershipsOrThrow();
   if (!canAccessMessagesAndLeadsBoard(memberships)) {
     notFound();
   }

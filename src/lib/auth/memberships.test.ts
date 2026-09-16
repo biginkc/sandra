@@ -8,6 +8,8 @@ vi.mock("@/lib/supabase/server", () => ({ createClient }));
 
 import {
   getCallerMemberships,
+  getCallerMembershipsOrThrow,
+  readCallerMemberships,
   resolveSingleActiveMembership,
 } from "./memberships";
 
@@ -153,6 +155,22 @@ describe("getCallerMemberships", () => {
 
     await expect(getCallerMemberships()).resolves.toEqual([]);
     expect(select).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes a membership query failure to retryable surface callers", async () => {
+    vi.stubEnv("E2E_AUTH_BYPASS", "");
+    const { select } = mockMembershipClient([
+      { data: null, error: { code: "PGRST000", message: "temporary database failure" } },
+      { data: null, error: { code: "PGRST000", message: "temporary database failure" } },
+    ]);
+    await expect(readCallerMemberships()).resolves.toMatchObject({
+      memberships: [],
+      error: { code: "PGRST000" },
+    });
+    await expect(getCallerMembershipsOrThrow()).rejects.toMatchObject({
+      name: "MembershipLookupError",
+    });
+    expect(select).toHaveBeenCalledTimes(2);
   });
 });
 

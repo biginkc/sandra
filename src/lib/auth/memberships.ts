@@ -28,12 +28,21 @@ type MembershipReader = {
   };
 };
 
-export async function getCallerMemberships(): Promise<Membership[]> {
+export type CallerMembershipsResult =
+  | { memberships: Membership[]; error: null }
+  | { memberships: []; error: { code?: string; message?: string } };
+
+/**
+ * Preserve the legacy array API for existing callers while exposing lookup
+ * failures to security-sensitive surfaces. An empty result is a valid denial;
+ * a failed query must remain distinguishable so those surfaces can retry.
+ */
+export async function readCallerMemberships(): Promise<CallerMembershipsResult> {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return [];
+  if (!user) return { memberships: [], error: null };
 
   const callerMemberships = (memberships: Membership[] | null): Membership[] =>
     (memberships ?? []).filter((membership) => membership.user_id === user.id);
@@ -43,16 +52,18 @@ export async function getCallerMemberships(): Promise<Membership[]> {
     const legacy = await reader
       .from("memberships")
       .select("user_id, org_id, role, acquisitions_enabled");
-    if (!legacy.error) return callerMemberships(legacy.data);
+    if (!legacy.error) return { memberships: callerMemberships(legacy.data), error: null };
 
     // The acquisition designation migration may lag in a local legacy
     // database. Preserve the pre-designation membership shape there; the
     // access helper then keeps the existing behavior for that schema.
-    if (!isMissingAcquisitionDesignationColumnError(legacy.error)) return [];
+    if (!isMissingAcquisitionDesignationColumnError(legacy.error)) return { memberships: [], error: legacy.error };
     const preAcquisition = await reader
       .from("memberships")
       .select("user_id, org_id, role");
-    return preAcquisition.error ? [] : callerMemberships(preAcquisition.data);
+    return preAcquisition.error
+      ? { memberships: [], error: preAcquisition.error }
+      : { memberships: callerMemberships(preAcquisition.data), error: null };
   }
 
   const { data, error } = await reader
@@ -61,9 +72,10 @@ export async function getCallerMemberships(): Promise<Membership[]> {
       "user_id, org_id, role, acquisitions_enabled, access_status, access_expires_at, deletion_prepared_at",
     );
   if (!error) {
-    return callerMemberships(data).filter((membership) =>
-      hasActiveSandraAccess(membership),
-    );
+    return {
+      memberships: callerMemberships(data).filter((membership) => hasActiveSandraAccess(membership)),
+      error: null,
+    };
   }
 
   // Pull-request E2E runs intentionally use the shared project before the
@@ -77,18 +89,37 @@ export async function getCallerMemberships(): Promise<Membership[]> {
     (!isMissingHugoAccessColumnError(error) &&
       !isMissingAcquisitionDesignationColumnError(error))
   ) {
-    return [];
+    return { memberships: [], error };
   }
 
   const legacy = await reader
     .from("memberships")
     .select("user_id, org_id, role, acquisitions_enabled");
-  if (!legacy.error) return callerMemberships(legacy.data);
-  if (!isMissingAcquisitionDesignationColumnError(legacy.error)) return [];
+  if (!legacy.error) return { memberships: callerMemberships(legacy.data), error: null };
+  if (!isMissingAcquisitionDesignationColumnError(legacy.error)) return { memberships: [], error: legacy.error };
   const preAcquisition = await reader
     .from("memberships")
     .select("user_id, org_id, role");
-  return preAcquisition.error ? [] : callerMemberships(preAcquisition.data);
+  return preAcquisition.error
+    ? { memberships: [], error: preAcquisition.error }
+    : { memberships: callerMemberships(preAcquisition.data), error: null };
+}
+
+export async function getCallerMemberships(): Promise<Membership[]> {
+  return (await readCallerMemberships()).memberships;
+}
+
+export class MembershipLookupError extends Error {
+  constructor(public readonly cause: { code?: string; message?: string }) {
+    super("Membership access could not be verified. Please retry.");
+    this.name = "MembershipLookupError";
+  }
+}
+
+export async function getCallerMembershipsOrThrow(): Promise<Membership[]> {
+  const result = await readCallerMemberships();
+  if (result.error) throw new MembershipLookupError(result.error);
+  return result.memberships;
 }
 
 function isMissingAcquisitionDesignationColumnError(error: unknown): boolean {

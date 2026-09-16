@@ -23,7 +23,7 @@ export const calculatorReader = cache(async () => {
 export const calculatorViewer = cache(async () => {
   const viewer = await calculatorReader();
   const { roster } = await getAcquisitionRoster();
-  if (!canViewCalculators(roster, viewer.userId)) throw new Error('Calculators are available to the Acquisitions group.');
+  if (!canViewCalculators(roster, viewer.userId, viewer.isOwner)) throw new Error('Calculators are available to the Acquisitions group.');
   return viewer;
 });
 const LEAD_COLUMNS = 'id,address,city,state,status,homeowner:contacts!properties_homeowner_contact_id_fkey(first_name,last_name)';

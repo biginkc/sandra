@@ -11,7 +11,10 @@ vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 vi.mock("next/cache", () => ({ revalidatePath }));
 vi.mock("@/lib/errors/report", () => ({ reportError: vi.fn() }));
-vi.mock("@/lib/auth/memberships", () => ({ getCallerMemberships }));
+vi.mock("@/lib/auth/memberships", () => ({
+  getCallerMemberships,
+  getCallerMembershipsOrThrow: getCallerMemberships,
+}));
 vi.mock("./board-query", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./board-query")>();
   return { ...actual, fetchLeadBoardData };
@@ -126,12 +129,11 @@ describe("loadLeadBoardAction validation", () => {
     expect(fetchLeadBoardData.mock.calls[0]?.[4]).toEqual(["new_lead"]);
   });
 
-  it("fails soft to an undecorated board when no active membership is available", async () => {
+  it("denies the board when no active membership is available", async () => {
     createClient.mockResolvedValue({
       auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) },
     });
     getCallerMemberships.mockResolvedValue([]);
-    fetchLeadBoardData.mockResolvedValue({ leads: [{ id: "lead-1", latestContract: null }] });
     const input = {
       filters: {
         search: "", ownership: "all" as const, motivation: "all" as const, urgency: "all" as const,
@@ -141,13 +143,23 @@ describe("loadLeadBoardAction validation", () => {
 
     const result = await loadLeadBoardAction(input);
 
-    expect(result).toEqual({ ok: true, data: { leads: [{ id: "lead-1", latestContract: null }] } });
-    expect(fetchLeadBoardData).toHaveBeenCalledWith(
-      expect.anything(),
-      input.filters,
-      expect.objectContaining({ orgIds: [] }),
-      {},
-      expect.any(Array),
-    );
+    expect(result).toEqual({ ok: false, error: { code: "FORBIDDEN", message: "You do not have access to the Leads board." } });
+    expect(fetchLeadBoardData).not.toHaveBeenCalled();
+  });
+
+  it("returns a retryable failure when membership lookup fails", async () => {
+    createClient.mockResolvedValue({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }) },
+    });
+    getCallerMemberships.mockRejectedValue(new Error("membership outage"));
+    const result = await loadLeadBoardAction({
+      filters: {
+        search: "", ownership: "all", motivation: "all", urgency: "all",
+        attention: null, hotOnly: false, noActiveSequence: false, skipTraced: null,
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ error: { code: "UNKNOWN" } });
+    expect(fetchLeadBoardData).not.toHaveBeenCalled();
   });
 });

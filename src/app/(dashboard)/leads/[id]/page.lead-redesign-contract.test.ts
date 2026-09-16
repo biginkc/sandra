@@ -85,6 +85,13 @@ describe("Lead Detail v2 integration contract", () => {
     expect(source).toContain('data-testid="permanent-dnc-lock"');
   });
 
+  it("keeps an active Acquisitions detail on My Leads while retaining inline messaging", () => {
+    expect(source).toContain("const isAcquisitionMember = shouldRestrictMessagesAndLeadsBoard(");
+    expect(source).toContain("collection.href");
+    expect(source).toContain("collection.label");
+    expect(source).toContain("<InlineReply");
+  });
+
   it("marks lead messages read on open and includes call fallback time", () => {
     expect(source).toContain("await markMessagesReadForProperty(lead.id)");
     expect(

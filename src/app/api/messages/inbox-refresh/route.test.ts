@@ -1,10 +1,12 @@
 import { beforeEach, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ user: vi.fn(), page: vi.fn(), unknown: vi.fn() }));
+const mocks = vi.hoisted(() => ({ user: vi.fn(), memberships: vi.fn(), page: vi.fn(), unknown: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: async () => ({ auth: { getUser: mocks.user } }) }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
 vi.mock("@/lib/messages/list-threads", () => ({ listThreadPage: mocks.page }));
 vi.mock("@/lib/messages/list-unknown-senders", () => ({ listUnknownSenders: mocks.unknown }));
 import { GET } from "./route";
 beforeEach(() => { vi.clearAllMocks(); mocks.user.mockResolvedValue({ data: { user: { id: "viewer" } } });
+  mocks.memberships.mockResolvedValue([{ user_id: "viewer", org_id: "org-1", role: "member", acquisitions_enabled: false, access_status: "active" }]);
   mocks.page.mockResolvedValue({ threads: [], counts: { all: 5 }, page: 1 });
   mocks.unknown.mockResolvedValue([{ isDismissed: false }, { isDismissed: true }, { isDismissed: false }]);
 });
@@ -20,6 +22,19 @@ it("does not read inbox data without authentication", async () => {
   mocks.user.mockResolvedValue({ data: { user: null } });
   const response = await GET(new Request("https://example.test/api/messages/inbox-refresh"));
   expect(response.status).toBe(401); expect(mocks.page).not.toHaveBeenCalled(); expect(mocks.unknown).not.toHaveBeenCalled();
+});
+it("denies the shared inbox to an active Acquisitions member", async () => {
+  mocks.memberships.mockResolvedValue([{ user_id: "viewer", org_id: "org-1", role: "member", acquisitions_enabled: true, access_status: "active" }]);
+  const response = await GET(new Request("https://example.test/api/messages/inbox-refresh"));
+  expect(response.status).toBe(404);
+  expect(mocks.page).not.toHaveBeenCalled();
+  expect(mocks.unknown).not.toHaveBeenCalled();
+});
+it("returns a retryable error when membership lookup fails", async () => {
+  mocks.memberships.mockRejectedValue(new Error("temporary membership outage"));
+  const response = await GET(new Request("https://example.test/api/messages/inbox-refresh"));
+  expect(response.status).toBe(503);
+  expect(mocks.page).not.toHaveBeenCalled();
 });
 it("does not replace old counts with partial success", async () => {
   mocks.unknown.mockRejectedValue(new Error("private provider details"));

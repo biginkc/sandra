@@ -1,4 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { listThreadPage, type ThreadPageFilter } from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 import { parseInboxFilter, normalizeInboxFilterForUser, isThreadFilter } from "@/app/(dashboard)/messages/inbox-filter-resolve";
@@ -13,6 +15,10 @@ export async function GET(request: Request) {
     const client = await createClient();
     const { data: { user } } = await client.auth.getUser();
     if (!user) return Response.json({ error: "Sign in to read messages." }, { status: 401, headers });
+    const memberships = await getCallerMembershipsOrThrow();
+    if (!canAccessMessagesAndLeadsBoard(memberships)) {
+      return Response.json({ error: "Not found" }, { status: 404, headers });
+    }
     const params = new URL(request.url).searchParams;
     const filter = normalizeInboxFilterForUser(parseInboxFilter(params.get("filter") ?? undefined), user.id);
     if (!isThreadFilter(filter)) return Response.json({ error: "Invalid inbox filter." }, { status: 400, headers });

@@ -33,6 +33,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 vi.mock("@/lib/auth/memberships", () => ({
   getCallerMemberships: mocks.getCallerMemberships,
+  getCallerMembershipsOrThrow: mocks.getCallerMemberships,
   getSingleActiveMembership: vi.fn().mockResolvedValue({
     ok: false,
     reason: "missing",

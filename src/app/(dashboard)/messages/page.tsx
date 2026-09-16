@@ -1,7 +1,7 @@
 import { createInboxServerTiming } from "@/lib/inbox-v2/server-timing";
 import { createClient } from "@/lib/supabase/server";
 import {
-  getCallerMemberships,
+  getCallerMembershipsOrThrow,
   getSingleActiveMembership,
 } from "@/lib/auth/memberships";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
@@ -97,7 +97,7 @@ async function renderMessagesPage(
     const { data: { user: currentUser } } = await supabase.auth.getUser();
     return { supabase, currentUser };
   });
-  const memberships = await getCallerMemberships();
+  const memberships = await getCallerMembershipsOrThrow();
   if (!canAccessMessagesAndLeadsBoard(memberships)) {
     notFound();
   }

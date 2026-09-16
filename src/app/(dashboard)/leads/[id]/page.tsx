@@ -202,7 +202,9 @@ export default async function LeadDetailPage({
   }
   const collection = leadDetailCollection(
     isAcquisitionMember,
-    lead.status === "prospect" ? "prospect" : "lead",
+    // Non-Acquisitions prospect details historically return to Leads. The
+    // stage-aware destination remains for the locked DNC detail below.
+    isAcquisitionMember && lead.status === "prospect" ? "prospect" : "lead",
   );
   const acquisitionHistory=await loadLeadAcquisitionHistory(lead.id);
   const training = lead.is_training;
@@ -1271,10 +1273,9 @@ function LockedDncPropertyDetail({
   mode: "prospect" | "lead";
   isAcquisitionMember: boolean;
 }) {
-  const stageCollectionHref = mode === "prospect" ? "/properties" : "/leads";
-  const stageCollectionLabel = mode === "prospect" ? "Prospects" : "Leads";
-  const collectionHref = isAcquisitionMember ? "/my-leads" : stageCollectionHref;
-  const collectionLabel = isAcquisitionMember ? "My Leads" : stageCollectionLabel;
+  const collection = leadDetailCollection(isAcquisitionMember, mode);
+  const collectionHref = collection.href;
+  const collectionLabel = collection.label;
   const recordLabel = mode === "prospect" ? "prospect" : "lead";
   const zillowHref = zillowUrl({
     address: lead.address,
