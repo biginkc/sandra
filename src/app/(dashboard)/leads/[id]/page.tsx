@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
 
@@ -78,6 +79,7 @@ import { AddNoteComposer } from "./notes-feed";
 import { SendForSignature } from "./send-for-signature";
 import { ContractsCard } from "./contracts-card";
 import { LeadFilesCard } from "./lead-files-card";
+import { LeadCalculationsSection } from "./lead-calculations-section";
 import { loadLeadEsignPageModel } from "./lead-esign-bindings";
 import {
   downloadLeadFileAction,
@@ -818,6 +820,7 @@ export default async function LeadDetailPage({
         </h2>
         <div className="grid min-w-0 items-start gap-[14px] xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="min-w-0 space-y-3">
+            <Suspense fallback={<p className="text-sm text-muted-foreground">Loading saved calculations…</p>}><LeadCalculationsSection propertyId={lead.id} /></Suspense>
             <LeadActivityTimeline
               key={lead.id}
               propertyId={lead.id}

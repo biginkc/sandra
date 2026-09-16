@@ -31,14 +31,15 @@
     "verify:leads-urgency-sql": "LC_ALL=C bash scripts/rehearse-leads-urgency-paging.sh",
     "verify:migrate-prod-ref-guard": "bash scripts/assert-ref-is-main-or-ancestor.test.sh",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run verify:esign-atomic-packet && npm run verify:esign-essentials-rehearsal && npm run typecheck && npm run test && npm run test:rtl",
+    "verify": "npm run verify:esign-atomic-packet && npm run verify:esign-essentials-rehearsal && npm run verify:calculators-migration && npm run typecheck && npm run test && npm run test:rtl",
     "filters:characterize:pass1": "tsx scripts/properties-filter-characterization.ts",
     "prepare": "husky",
     "smoke:sequences-prod": "tsx scripts/smoke-sequences-prod.ts",
     "smoke:ai-happy-prod": "tsx scripts/smoke-ai-responder-happy-prod.ts",
     "smoke:ai-escalation-prod": "tsx scripts/smoke-ai-responder-escalation-prod.ts",
     "smoke:stop-prod": "tsx scripts/smoke-stop-keyword-prod.ts",
-    "smoke:sendillo-webhook-prod": "tsx scripts/smoke-sendillo-webhook-prod.ts"
+    "smoke:sendillo-webhook-prod": "tsx scripts/smoke-sendillo-webhook-prod.ts",
+    "verify:calculators-migration": "LC_ALL=C node scripts/rehearse-offer-calculations.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",

@@ -1,0 +1,194 @@
+[
+  {
+    "name": "01-original",
+    "inputs": {
+      "asIs": 255000,
+      "listingPercentage": 0.9,
+      "profit": 20000,
+      "flatFee": 150,
+      "attorney": 995,
+      "titleInsurance": 500,
+      "efile": 35,
+      "recording": 25,
+      "taxStamps": 200,
+      "pictures": 300,
+      "other": 500,
+      "repairs": 0,
+      "arv": 175000,
+      "rehab": 50000
+    },
+    "worksheet": {
+      "B5": 10200.0,
+      "B17": 196595.0,
+      "B19": 167105.75,
+      "B21": 147446.25,
+      "B23": 131718.65,
+      "B26": 229500.0,
+      "E21": 32500.0,
+      "E22": 42500.0,
+      "E23": 52500.0,
+      "E24": 62500.0,
+      "E26": 72500.0
+    }
+  },
+  {
+    "name": "02-ordinary",
+    "inputs": {
+      "asIs": 300000,
+      "listingPercentage": 0.95,
+      "profit": 25000,
+      "flatFee": 200,
+      "attorney": 1200,
+      "titleInsurance": 800,
+      "efile": 40,
+      "recording": 50,
+      "taxStamps": 450,
+      "pictures": 350,
+      "other": 600,
+      "repairs": 3000,
+      "arv": 400000,
+      "rehab": 60000
+    },
+    "worksheet": {
+      "B5": 12000.0,
+      "B17": 241310.0,
+      "B19": 205113.5,
+      "B21": 180982.5,
+      "B23": 161677.7,
+      "B26": 285000.0,
+      "E21": 180000.0,
+      "E22": 190000.0,
+      "E23": 200000.0,
+      "E24": 210000.0,
+      "E26": 220000.0
+    }
+  },
+  {
+    "name": "03-decimals",
+    "inputs": {
+      "asIs": 287654.32,
+      "listingPercentage": 0.9375,
+      "profit": 23456.78,
+      "flatFee": 175.25,
+      "attorney": 1099.99,
+      "titleInsurance": 678.43,
+      "efile": 37.5,
+      "recording": 28.75,
+      "taxStamps": 456.78,
+      "pictures": 325.5,
+      "other": 789.12,
+      "repairs": 4321.09,
+      "arv": 398765.43,
+      "rehab": 56789.12
+    },
+    "worksheet": {
+      "B5": 11506.1728,
+      "B17": 226800.5622,
+      "B19": 192780.47787,
+      "B21": 170100.42165,
+      "B23": 151956.376674,
+      "B26": 269675.925,
+      "E21": 182346.681,
+      "E22": 192346.681,
+      "E23": 202346.681,
+      "E24": 212346.681,
+      "E26": 222346.681
+    }
+  },
+  {
+    "name": "04-zero-repairs",
+    "inputs": {
+      "asIs": 180000,
+      "listingPercentage": 1,
+      "profit": 10000,
+      "flatFee": 150,
+      "attorney": 995,
+      "titleInsurance": 500,
+      "efile": 35,
+      "recording": 25,
+      "taxStamps": 200,
+      "pictures": 300,
+      "other": 0,
+      "repairs": 0,
+      "arv": 240000,
+      "rehab": 0
+    },
+    "worksheet": {
+      "B5": 7200.0,
+      "B17": 160595.0,
+      "B19": 136505.75,
+      "B21": 120446.25,
+      "B23": 107598.65,
+      "B26": 180000.0,
+      "E21": 128000.0,
+      "E22": 138000.0,
+      "E23": 148000.0,
+      "E24": 158000.0,
+      "E26": 168000.0
+    }
+  },
+  {
+    "name": "05-blank-repairs",
+    "inputs": {
+      "asIs": 180000,
+      "listingPercentage": 1,
+      "profit": 10000,
+      "flatFee": 150,
+      "attorney": 995,
+      "titleInsurance": 500,
+      "efile": 35,
+      "recording": 25,
+      "taxStamps": 200,
+      "pictures": 300,
+      "other": null,
+      "repairs": null,
+      "arv": 240000,
+      "rehab": null
+    },
+    "worksheet": {
+      "B5": 7200.0,
+      "B17": 160595.0,
+      "B19": 136505.75,
+      "B21": 120446.25,
+      "B23": 107598.65,
+      "B26": 180000.0,
+      "E21": 128000.0,
+      "E22": 138000.0,
+      "E23": 148000.0,
+      "E24": 158000.0,
+      "E26": 168000.0
+    }
+  },
+  {
+    "name": "06-negative-results",
+    "inputs": {
+      "asIs": 40000,
+      "listingPercentage": 0.9,
+      "profit": 30000,
+      "flatFee": 150,
+      "attorney": 995,
+      "titleInsurance": 500,
+      "efile": 35,
+      "recording": 25,
+      "taxStamps": 200,
+      "pictures": 300,
+      "other": 500,
+      "repairs": 15000,
+      "arv": 100000,
+      "rehab": 90000
+    },
+    "worksheet": {
+      "B5": 1600.0,
+      "B17": -13305.0,
+      "B19": -11309.25,
+      "B21": -9978.75,
+      "B23": -8914.35,
+      "B26": 36000.0,
+      "E21": -60000.0,
+      "E22": -50000.0,
+      "E23": -40000.0,
+      "E24": -30000.0,
+      "E26": -20000.0
+    }
+  }
+]

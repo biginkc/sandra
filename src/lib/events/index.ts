@@ -4,6 +4,7 @@ import type { Json, TablesInsert } from "@/lib/supabase/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const LEAD_EVENT_TYPES = {
+  CALCULATION_SAVED: "calculation_saved",
   LEAD_CREATED: "lead_created",
   QUALIFIED: "qualified",
   REVERTED_TO_PROSPECT: "reverted_to_prospect",
