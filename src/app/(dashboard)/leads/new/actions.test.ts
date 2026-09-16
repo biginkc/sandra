@@ -1,15 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createLead, createClient, createAdminClient, redirect } = vi.hoisted(
+const {
+  createLead,
+  createClient,
+  createAdminClient,
+  getCallerMembershipsOrThrow,
+  redirect,
+} = vi.hoisted(
   () => ({
     createLead: vi.fn(),
     createClient: vi.fn(),
     createAdminClient: vi.fn(),
+    getCallerMembershipsOrThrow: vi.fn(),
     redirect: vi.fn(),
   }),
 );
 
 vi.mock("@/lib/leads/create", () => ({ createLead }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient }));
 vi.mock("next/navigation", () => ({ redirect }));
@@ -72,6 +80,17 @@ function adminMembershipResult({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getCallerMembershipsOrThrow.mockResolvedValue([
+    {
+      user_id: "user-me",
+      org_id: "org-1",
+      role: "member",
+      acquisitions_enabled: false,
+      access_status: "active",
+      access_expires_at: null,
+      deletion_prepared_at: null,
+    },
+  ]);
   createClient.mockResolvedValue(cookieClient());
   createAdminClient.mockReturnValue(adminMembershipResult());
   redirect.mockImplementation((url: string) => {
@@ -117,6 +136,32 @@ describe("submitNewLead", () => {
 });
 
 describe("createLeadFromForm quick-entry fields", () => {
+  it("denies an Acquisitions member before any lead or workspace reads", async () => {
+    getCallerMembershipsOrThrow.mockResolvedValue([
+      {
+        user_id: "user-me",
+        org_id: "org-1",
+        role: "member",
+        acquisitions_enabled: true,
+        access_status: "active",
+        access_expires_at: null,
+        deletion_prepared_at: null,
+      },
+    ]);
+
+    const result = await createLeadFromForm(baseInput);
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "FORBIDDEN",
+        message: "Lead creation is unavailable for this workspace role.",
+      },
+    });
+    expect(createAdminClient).not.toHaveBeenCalled();
+    expect(createLead).not.toHaveBeenCalled();
+  });
+
   it("persists the current-user assignee and motivation through createLead", async () => {
     const result = await createLeadFromForm({
       ...baseInput,

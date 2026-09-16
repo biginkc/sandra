@@ -7,6 +7,8 @@ import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
 import { LEAD_PHONE_UNVERIFIED_NOTICE } from "@/lib/leads/notices";
 import type { LeadSource } from "@/lib/leads/sources";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -53,6 +55,16 @@ export async function createLeadFromForm(
       return {
         ok: false,
         error: { code: "AUTH", message: "Sign in required." },
+      };
+    }
+
+    if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) {
+      return {
+        ok: false,
+        error: {
+          code: "FORBIDDEN",
+          message: "Lead creation is unavailable for this workspace role.",
+        },
       };
     }
 

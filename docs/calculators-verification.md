@@ -27,6 +27,17 @@ Synthetic persistence is a test double; its pass does not establish production p
 
 Astra medium and Claude Opus 5 reviewed the implementation. Findings fixed during review include decimal keystroke loss, misleading expense label, missing yellow calculated cells, validation bounds, retry/revision lock order, missing source checksum, redundant lead-page queries, history pagination and percentage preservation. Final approval and deployment identifiers are recorded in the PR/release report.
 
-## Production test access
+## Production verification
 
-The configured test account may be an active owner without Acquisitions membership and should retain calculator access. The canary also accepts an active Acquisitions member. At preparation time, configured credentials did not complete Hugo sign-in and Chrome had no active session. Production verification is not claimed until a valid authorized session is available.
+Production verification completed on September 16, 2026 against `https://sandra.bmhgroupkc.com` after PR #623 deployed. An authenticated owner session exercised the real calculator UI and production persistence path with one marked, assigned canary lead. The lead had no contact information or messages, and AI responder remained disabled.
+
+- Six independent worksheet fixtures matched all 66 displayed outputs, including decimal, blank, zero-repair, negative-result and half-cent-boundary cases.
+- The acceptance fixture matched all 11 outputs: as-is $255,000, 90% listing, $20,000 desired profit, default expenses, ARV $350,000 and rehab $50,000.
+- Listing percentage unlock, edit and relock worked in the UI.
+- Standalone attach/search/detach and lead-origin automatic attachment both worked with their expected provenance.
+- A real rejected save retained every entered field, exposed Retry save, and succeeded after the owned canary was restored.
+- Saved v1 and v2 snapshots remained immutable, reopened with their original inputs and results, and produced separate lead timeline events.
+- The lead stayed in `new_lead`, its assignment and AI setting did not change, and no message or offer was sent.
+- Cleanup soft-deleted only the exact marked canary lead. Its two immutable calculation snapshots and events remain as verification evidence.
+
+The live session was an owner session. Acquisitions-role access is covered by focused authorization, route, API and component tests plus the complete Playwright golden-path gate; no Acquisitions production login was available for an additional visual pass.
