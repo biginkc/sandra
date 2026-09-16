@@ -24,7 +24,6 @@ function unavailableState() {
       <div role="alert" className="text-destructive text-sm">
         <span>My Leads is temporarily unavailable. </span>
         {/* Reload the document so Retry reruns the failed server reads even on this same URL. */}
-        {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
         <a href="/my-leads" className="font-bold underline underline-offset-4">
           Retry
         </a>
