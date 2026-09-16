@@ -1,17 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "./route";
-const mocks = vi.hoisted(() => ({ create: vi.fn(), rpc: vi.fn() }));
+const mocks = vi.hoisted(() => ({ create: vi.fn(), rpc: vi.fn(), getUser: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.create }));
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const authority = { user_id: id, session_id: id, org_id: id, access_epoch: "1", expires_at: "2030-01-01T00:00:00Z", session_active: true, active_membership_count: 1 };
 const counts = { all: 3, mine: 1, unassigned: 2, unread: 1, escalated: 0, dispo: 0, needs_outcome: 0, unknown: 0, dismissed: 0 };
-beforeEach(() => { vi.clearAllMocks(); mocks.create.mockResolvedValue({ rpc: mocks.rpc }); });
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.create.mockResolvedValue({ rpc: mocks.rpc, auth: { getUser: mocks.getUser } });
+  mocks.getUser.mockResolvedValue({ data: { user: { id } } });
+  vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", id);
+});
 afterEach(() => vi.unstubAllEnvs());
 const request = (query = `orgId=${id}&view=all`) => new Request(`https://example.com/api/inbox/counts?${query}`);
 describe("independent Inbox counts route", () => {
   it("defaults closed before client creation", async () => {
     vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", undefined);
     expect((await GET(request())).status).toBe(404); expect(mocks.create).not.toHaveBeenCalled();
+  });
+  it("returns 404 and never calls the counts RPC for a user outside the pilot allowlist (GL-4/G5)", async () => {
+    vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1");
+    mocks.getUser.mockResolvedValue({ data: { user: { id: "not-piloted-user" } } });
+    expect((await GET(request())).status).toBe(404); expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+  // MUTATION: removing the pilot check in route.ts makes this fail — the
+  // out-of-cohort user would reach inbox_counts_v2 and get 200.
+  it("returns 404 when the allowlist is empty (default = nobody)", async () => {
+    vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", undefined);
+    expect((await GET(request())).status).toBe(404); expect(mocks.rpc).not.toHaveBeenCalled();
   });
   it("uses actual repository with independent counts RPC and exposes unknown freshness honestly", async () => {
     vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1");
