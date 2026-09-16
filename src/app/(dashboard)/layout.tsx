@@ -18,6 +18,7 @@ import { NotificationsBell } from "@/components/notifications-bell";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "@/components/softphone/softphone-provider";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { canViewMyLeads } from "@/lib/my-leads/access";
+import { canViewCalculators } from "@/lib/calculators/access";
 import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
 import { createClient } from "@/lib/supabase/server";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
@@ -46,6 +47,7 @@ export default async function DashboardLayout({
   );
   const initialAcquisitionBadge =
     showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value : null;
+  const showCalculators = Boolean(acquisitionRoster && canViewCalculators(acquisitionRoster.roster, acquisitionRoster.viewer.userId));
 
   return (
     <SoftphoneProvider>
@@ -105,6 +107,7 @@ export default async function DashboardLayout({
           />
         </Link>
         <DashboardSidebar
+          showCalculators={showCalculators}
           showMyLeads={showMyLeads}
           showRecordings={recordingAccess?.owner}
           showMyRecordings={recordingAccess?.mine}
@@ -121,6 +124,7 @@ export default async function DashboardLayout({
 
       <div className="nav-field fixed inset-x-0 top-16 z-30 border-b border-white/10 md:hidden">
         <DashboardMobileNav
+          showCalculators={showCalculators}
           showMyLeads={showMyLeads}
           showRecordings={recordingAccess?.owner}
           showMyRecordings={recordingAccess?.mine}

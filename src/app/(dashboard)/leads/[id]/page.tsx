@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
 
@@ -78,6 +79,7 @@ import { AddNoteComposer } from "./notes-feed";
 import { SendForSignature } from "./send-for-signature";
 import { ContractsCard } from "./contracts-card";
 import { LeadFilesCard } from "./lead-files-card";
+import { LeadCalculationsSection } from "./lead-calculations-section";
 import { loadLeadEsignPageModel } from "./lead-esign-bindings";
 import {
   downloadLeadFileAction,
@@ -886,6 +888,7 @@ export default async function LeadDetailPage({
               loadError={esign.filesError}
               downloadAction={downloadLeadFileAction}
             />
+            <Suspense fallback={<p className="text-sm text-muted-foreground">Loading saved calculations…</p>}><LeadCalculationsSection propertyId={lead.id} /></Suspense>
             <Section title="Homeowner" compact>
               {lead.homeowner ? (
                 <>
