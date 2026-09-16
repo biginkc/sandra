@@ -68,8 +68,19 @@ const ITEMS: readonly Item[] = [
   { href: "/jobs", label: "Jobs", icon: Briefcase },
 ];
 
-function visibleItems(showMyLeads: boolean, showRecordings: boolean, showMyRecordings: boolean, showCalculators: boolean): readonly Item[] {
-  const items = ITEMS.filter(item => (item.href !== "/my-leads" || showMyLeads) && (item.href !== "/calculators" || showCalculators));
+function visibleItems(
+  showMyLeads: boolean,
+  showRecordings: boolean,
+  showMyRecordings: boolean,
+  showCalculators: boolean,
+  showMessagesAndLeads: boolean,
+): readonly Item[] {
+  const items = ITEMS.filter(
+    (item) =>
+      (item.href !== "/my-leads" || showMyLeads) &&
+      (item.href !== "/calculators" || showCalculators) &&
+      ((item.href !== "/messages" && item.href !== "/leads") || showMessagesAndLeads),
+  );
   const recordings: Item[] = [];
   if (showRecordings) recordings.push({ href: "/owner/recordings", label: "Recordings", icon: Headphones });
   if (showMyRecordings) recordings.push({ href: "/my-recordings", label: "My Recordings", icon: Headphones });
@@ -94,6 +105,7 @@ export function DashboardSidebar({
   showMyLeads = true,
   showRecordings = false,
   showMyRecordings = false,
+  showMessagesAndLeads = true,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
 }: {
@@ -101,11 +113,18 @@ export function DashboardSidebar({
   showMyLeads?: boolean;
   showRecordings?: boolean;
   showMyRecordings?: boolean;
+  showMessagesAndLeads?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
 }) {
   const pathname = usePathname();
-  const items = visibleItems(showMyLeads, showRecordings, showMyRecordings, showCalculators);
+  const items = visibleItems(
+    showMyLeads,
+    showRecordings,
+    showMyRecordings,
+    showCalculators,
+    showMessagesAndLeads,
+  );
 
   const isActive = (item: Item): boolean => {
     if (pathname === item.href) return true;
@@ -148,6 +167,7 @@ export function DashboardMobileNav({
   showMyLeads = true,
   showRecordings = false,
   showMyRecordings = false,
+  showMessagesAndLeads = true,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
 }: {
@@ -155,11 +175,18 @@ export function DashboardMobileNav({
   showMyLeads?: boolean;
   showRecordings?: boolean;
   showMyRecordings?: boolean;
+  showMessagesAndLeads?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
 }) {
   const pathname = usePathname();
-  const items = visibleItems(showMyLeads, showRecordings, showMyRecordings, showCalculators);
+  const items = visibleItems(
+    showMyLeads,
+    showRecordings,
+    showMyRecordings,
+    showCalculators,
+    showMessagesAndLeads,
+  );
 
   const isActiveHref = (href: string): boolean =>
     pathname === href || pathname.startsWith(href + "/");

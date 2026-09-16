@@ -14,6 +14,10 @@ const mocks = vi.hoisted(() => ({
   canonicalizeThreadId: vi.fn(),
   createClient: vi.fn(),
   createAdminClient: vi.fn(),
+  getCallerMemberships: vi.fn(),
+  notFound: vi.fn(() => {
+    throw new Error("notFound");
+  }),
   redirect: vi.fn((url: string) => {
     throw new Error(`redirect:${url}`);
   }),
@@ -25,6 +29,14 @@ vi.mock("@/lib/supabase/server", () => ({
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: mocks.createAdminClient,
+}));
+
+vi.mock("@/lib/auth/memberships", () => ({
+  getCallerMemberships: mocks.getCallerMemberships,
+  getSingleActiveMembership: vi.fn().mockResolvedValue({
+    ok: false,
+    reason: "missing",
+  }),
 }));
 
 vi.mock("@/lib/messages/list-threads", () => ({
@@ -101,6 +113,7 @@ vi.mock("@/lib/messages/threading", () => ({
 }));
 
 vi.mock("next/navigation", () => ({
+  notFound: mocks.notFound,
   redirect: mocks.redirect,
 }));
 
@@ -159,13 +172,24 @@ describe("MessagesPage filter-count boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.effectivePage = null;
-    mocks.createClient.mockResolvedValue({
+  mocks.createClient.mockResolvedValue({
       auth: {
         getUser: vi.fn(async () => ({
           data: { user: { id: "user-1" } },
         })),
       },
     });
+    mocks.getCallerMemberships.mockResolvedValue([
+      {
+        user_id: "user-1",
+        org_id: "org-1",
+        role: "member",
+        acquisitions_enabled: false,
+        access_status: "active",
+        access_expires_at: null,
+        deletion_prepared_at: null,
+      },
+    ]);
     mocks.createAdminClient.mockReturnValue({
       auth: {
         admin: {
@@ -231,6 +255,65 @@ describe("MessagesPage filter-count boundary", () => {
     expect(element.props.filterCounts.unread).toBe(1);
     expect(element.props.filterCounts.needs_outcome).toBe(1);
     expect(element.props.hiddenDncCount).toBe(2);
+  });
+
+  it("denies the entire Messages workspace to an active Acquisitions member before data reads", async () => {
+    mocks.getCallerMemberships.mockResolvedValue([
+      {
+        user_id: "user-1",
+        org_id: "org-1",
+        role: "member",
+        acquisitions_enabled: true,
+        access_status: "active",
+        access_expires_at: null,
+        deletion_prepared_at: null,
+      },
+    ]);
+
+    await expect(
+      MessagesPage({ searchParams: Promise.resolve({}) }),
+    ).rejects.toThrow("notFound");
+    expect(mocks.listThreads).not.toHaveBeenCalled();
+    expect(mocks.listQueuedPage).not.toHaveBeenCalled();
+  });
+
+  it("denies the Messages workspace when no active caller membership resolves", async () => {
+    mocks.getCallerMemberships.mockResolvedValue([]);
+
+    await expect(
+      MessagesPage({ searchParams: Promise.resolve({}) }),
+    ).rejects.toThrow("notFound");
+    expect(mocks.listThreads).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Messages workspace available to owners and non-Acquisitions members", async () => {
+    for (const membership of [
+      {
+        user_id: "owner-1",
+        org_id: "org-1",
+        role: "owner" as const,
+        acquisitions_enabled: false,
+        access_status: "active",
+        access_expires_at: null,
+        deletion_prepared_at: null,
+      },
+      {
+        user_id: "user-1",
+        org_id: "org-1",
+        role: "member" as const,
+        acquisitions_enabled: false,
+        access_status: "active",
+        access_expires_at: null,
+        deletion_prepared_at: null,
+      },
+    ]) {
+      mocks.getCallerMemberships.mockResolvedValue([membership]);
+      mocks.listThreads.mockResolvedValue([]);
+      await expect(
+        MessagesPage({ searchParams: Promise.resolve({}) }),
+      ).resolves.toBeTruthy();
+      expect(mocks.notFound).not.toHaveBeenCalled();
+    }
   });
 
   it("treats Sandra Dispo as pending AI review work, including DNC reviews", async () => {
@@ -360,7 +443,8 @@ describe("MessagesPage filter-count boundary", () => {
     expect(redirected.searchParams.get("hideDnc")).toBe("0");
     expect(redirected.searchParams.get("preserved")).toBe("yes");
     expect(redirected.search).not.toContain("filter=handled");
-    expect(mocks.createClient).not.toHaveBeenCalled();
+    expect(mocks.createClient).toHaveBeenCalled();
+    expect(mocks.listThreads).not.toHaveBeenCalled();
   });
 
   it("normalizes signed-out Mine and Unassigned filters to All counts", async () => {

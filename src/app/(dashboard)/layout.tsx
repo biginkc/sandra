@@ -17,9 +17,11 @@ import { JobFailureNotifier } from "@/components/job-failure-notifier";
 import { NotificationsBell } from "@/components/notifications-bell";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "@/components/softphone/softphone-provider";
 import { isAdminEmail } from "@/lib/auth/allowlist";
+import { getCallerMemberships } from "@/lib/auth/memberships";
 import { canViewMyLeads } from "@/lib/my-leads/access";
 import { canViewCalculators } from "@/lib/calculators/access";
 import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
 
@@ -35,9 +37,10 @@ export default async function DashboardLayout({
   if (!user) redirect("/login");
   const showAdmin = isAdminEmail(user.email);
   const recordingAccess = await recordingViewer().catch(() => null);
-  const [rosterResult, badgeResult] = await Promise.allSettled([
+  const [rosterResult, badgeResult, surfaceMembershipsResult] = await Promise.allSettled([
     getAcquisitionRoster(),
     getAcquisitionBadge(),
+    getCallerMemberships(),
   ]);
   const acquisitionRoster =
     rosterResult.status === "fulfilled" ? rosterResult.value : null;
@@ -48,6 +51,9 @@ export default async function DashboardLayout({
   const initialAcquisitionBadge =
     showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value : null;
   const showCalculators = Boolean(acquisitionRoster && canViewCalculators(acquisitionRoster.roster, acquisitionRoster.viewer.userId));
+  const showMessagesAndLeads =
+    surfaceMembershipsResult.status === "fulfilled" &&
+    canAccessMessagesAndLeadsBoard(surfaceMembershipsResult.value);
 
   return (
     <SoftphoneProvider>
@@ -108,6 +114,7 @@ export default async function DashboardLayout({
         </Link>
         <DashboardSidebar
           showCalculators={showCalculators}
+          showMessagesAndLeads={showMessagesAndLeads}
           showMyLeads={showMyLeads}
           showRecordings={recordingAccess?.owner}
           showMyRecordings={recordingAccess?.mine}
@@ -125,6 +132,7 @@ export default async function DashboardLayout({
       <div className="nav-field fixed inset-x-0 top-16 z-30 border-b border-white/10 md:hidden">
         <DashboardMobileNav
           showCalculators={showCalculators}
+          showMessagesAndLeads={showMessagesAndLeads}
           showMyLeads={showMyLeads}
           showRecordings={recordingAccess?.owner}
           showMyRecordings={recordingAccess?.mine}

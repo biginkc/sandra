@@ -6,12 +6,16 @@ const {
   getCallerMemberships,
   loadOrgTeamMembers,
   loadTeamMembersForOrgs,
+  notFound,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
   fetchLeadBoardData: vi.fn(),
   getCallerMemberships: vi.fn(),
   loadOrgTeamMembers: vi.fn(),
   loadTeamMembersForOrgs: vi.fn(),
+  notFound: vi.fn(() => {
+    throw new Error("notFound");
+  }),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
@@ -20,6 +24,7 @@ vi.mock("@/lib/auth/team-roster", () => ({
   loadOrgTeamMembers,
   loadTeamMembersForOrgs,
 }));
+vi.mock("next/navigation", () => ({ notFound }));
 vi.mock("./board-query", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./board-query")>();
   return { ...actual, fetchLeadBoardData };
@@ -53,6 +58,12 @@ beforeEach(() => {
         order: vi.fn().mockReturnValue({
           order: vi.fn().mockResolvedValue({ data: [] }),
         }),
+        in: vi.fn((_column: string, ids: string[]) =>
+          Promise.resolve({
+            data: ids.map((id) => ({ id, name: `Org ${id}` })),
+            error: null,
+          }),
+        ),
       }),
     }),
   });
@@ -94,15 +105,59 @@ describe("LeadsPage organization context", () => {
     );
   });
 
-  it("keeps the board usable but undecorated when no active membership resolves", async () => {
+  it("denies the Leads board when no active caller membership resolves", async () => {
     getCallerMemberships.mockResolvedValue([]);
 
-    await LeadsPage({ searchParams: Promise.resolve({}) });
+    await expect(
+      LeadsPage({ searchParams: Promise.resolve({}) }),
+    ).rejects.toThrow("notFound");
 
-    expect(fetchLeadBoardData).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      expect.objectContaining({ orgIds: [] }),
+    expect(fetchLeadBoardData).not.toHaveBeenCalled();
+  });
+
+  it("denies the Leads board to an active Acquisitions member before board reads", async () => {
+    getCallerMemberships.mockResolvedValue([
+      {
+        user_id: "user-1",
+        org_id: "org-1",
+        role: "member",
+        acquisitions_enabled: true,
+        access_status: "active",
+        access_expires_at: null,
+        deletion_prepared_at: null,
+      },
+    ]);
+
+    await expect(LeadsPage({ searchParams: Promise.resolve({}) })).rejects.toThrow(
+      "notFound",
     );
+    expect(fetchLeadBoardData).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "owner",
+      {
+        user_id: "owner-1",
+        org_id: "org-1",
+        role: "owner" as const,
+        acquisitions_enabled: false,
+      },
+    ],
+    [
+      "non-Acquisitions member",
+      {
+        user_id: "user-1",
+        org_id: "org-1",
+        role: "member" as const,
+        acquisitions_enabled: false,
+      },
+    ],
+  ])("keeps the Leads board available to an %s", async (_label, membership) => {
+    getCallerMemberships.mockResolvedValue([membership]);
+
+    await expect(LeadsPage({ searchParams: Promise.resolve({}) })).resolves.toBeTruthy();
+    expect(notFound).not.toHaveBeenCalled();
+    expect(fetchLeadBoardData).toHaveBeenCalled();
   });
 });
