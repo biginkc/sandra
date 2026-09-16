@@ -84,7 +84,7 @@ export function RecordingLibrary({ result, scope, values }: { result: LibraryRes
   const next = new URLSearchParams();
   for (const [key,v] of Object.entries(values)) if (key !== 'cursor' && v) for (const item of Array.isArray(v) ? v : [v]) next.append(key,item);
   if (result.nextCursor) next.set('cursor',result.nextCursor);
-  return <div className="mx-auto w-full max-w-7xl space-y-6 p-5 md:p-8">
+  return <div className="w-full space-y-6">
     <header><h1 className="text-3xl font-semibold tracking-tight">{scope === 'owner' ? 'Recordings' : 'My Recordings'}</h1><p className="mt-2 text-muted-foreground">{scope === 'owner' ? 'Browse recordings across BMH Group.' : 'Recordings from calls attributed to you.'} Dates are shown in Central time.</p></header>
     <form key={JSON.stringify(values)} action={base} onSubmit={event => {
       event.preventDefault(); const data = new FormData(event.currentTarget); const query = new URLSearchParams();
