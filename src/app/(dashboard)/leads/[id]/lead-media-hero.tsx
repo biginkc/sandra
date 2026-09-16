@@ -13,12 +13,16 @@ export function LeadMediaHero({
   address,
   locationLine,
   homeownerName,
+  collectionHref = "/leads",
+  collectionLabel = "Leads",
   actions,
 }: {
   media: LeadMediaPresentation;
   address: string;
   locationLine: string;
   homeownerName: string | null;
+  collectionHref?: "/leads" | "/properties" | "/my-leads";
+  collectionLabel?: "Leads" | "Prospects" | "My Leads";
   actions: React.ReactNode;
 }) {
   const description = [locationLine, homeownerName].filter(Boolean).join(" · ");
@@ -80,8 +84,8 @@ export function LeadMediaHero({
         >
           <span>Workspace</span>
           <span aria-hidden>/</span>
-          <Link href="/leads" className="hover:text-foreground">
-            Leads
+          <Link href={collectionHref} className="hover:text-foreground">
+            {collectionLabel}
           </Link>
           <span aria-hidden>/</span>
           <span className="text-foreground break-words">{address}</span>
@@ -195,10 +199,10 @@ export function LeadMediaHero({
             <span>Workspace</span>
             <span aria-hidden>/</span>
             <Link
-              href="/leads"
+              href={collectionHref}
               className="transition-colors hover:text-white"
             >
-              Leads
+              {collectionLabel}
             </Link>
             <span aria-hidden>/</span>
             <span className="break-words text-white">{address}</span>

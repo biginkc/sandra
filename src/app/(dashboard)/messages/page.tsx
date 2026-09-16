@@ -1,15 +1,19 @@
 import { createInboxServerTiming } from "@/lib/inbox-v2/server-timing";
 import { createClient } from "@/lib/supabase/server";
-import { getSingleActiveMembership } from "@/lib/auth/memberships";
+import {
+  getCallerMembershipsOrThrow,
+  getSingleActiveMembership,
+} from "@/lib/auth/memberships";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
 import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import {
   listThreadPage,
   type ThreadPageFilter,
 } from "@/lib/messages/list-threads";
 import { listUnknownSenders } from "@/lib/messages/list-unknown-senders";
 import { canonicalizeThreadId } from "@/lib/messages/threading";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
 import { markMessagesReadForThread } from "../leads/actions";
 
@@ -78,11 +82,6 @@ async function renderMessagesPage(
   const sp = await searchParams;
   const rawFilter = firstSearchParam(sp.filter);
   const search = (firstSearchParam(sp.search) ?? "").trim().slice(0, 100);
-  if (rawFilter === "handled") {
-    const canonical = searchParamsToUrlParams(sp);
-    canonical.set("filter", "dispo");
-    redirect(`/messages?${canonical.toString()}`);
-  }
 
   const activeTab = firstSearchParam(sp.tab) === "outbox" ? "outbox" : "inbox";
   timing.setSurface(activeTab);
@@ -98,6 +97,15 @@ async function renderMessagesPage(
     const { data: { user: currentUser } } = await supabase.auth.getUser();
     return { supabase, currentUser };
   });
+  const memberships = await getCallerMembershipsOrThrow();
+  if (!canAccessMessagesAndLeadsBoard(memberships)) {
+    notFound();
+  }
+  if (rawFilter === "handled") {
+    const canonical = searchParamsToUrlParams(sp);
+    canonical.set("filter", "dispo");
+    redirect(`/messages?${canonical.toString()}`);
+  }
   const currentUserId = currentUser?.id ?? null;
   const effectiveFilter = normalizeInboxFilterForUser(filter, currentUserId);
 

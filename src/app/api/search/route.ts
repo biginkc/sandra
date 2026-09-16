@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { reportError } from "@/lib/errors/report";
 import { err } from "@/lib/errors/result";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 
 const headers = { "Cache-Control": "no-store" };
 
@@ -10,6 +12,12 @@ export async function GET(request: Request) {
   if (!user) return Response.json(err({ code: "UNAUTHORIZED", message: "Authentication required" }), { status: 401, headers });
   const q = (new URL(request.url).searchParams.get("q") ?? "").trim().slice(0, 100);
   if (q.length < 3) return Response.json({ results: [] }, { headers });
+  let sharedWorkspaceAccess: boolean;
+  try {
+    sharedWorkspaceAccess = canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow());
+  } catch {
+    return Response.json(err({ code: "SEARCH_ACCESS_UNAVAILABLE", message: "Search unavailable" }), { status: 503, headers });
+  }
   const { data, error } = await supabase.rpc("search_global", { q, per_type: 5 });
   if (error) {
     // Avoid logging query values, quoted literals, URLs, or control characters.
@@ -25,7 +33,9 @@ export async function GET(request: Request) {
     if (error.code === "PGRST202") return Response.json({ results: [], degraded: true }, { headers });
     return Response.json(err({ code: "SEARCH_FAILED", message: "Search unavailable" }), { status: 500, headers });
   }
-  const results = (data ?? []).map(row => ({
+  const results = (data ?? []).flatMap(row => {
+    if (row.entity_type !== "property" && !sharedWorkspaceAccess && !row.property_id) return [];
+    return [{
     type: row.entity_type,
     key: `${row.entity_type}-${row.entity_type === "thread" ? row.conversation_id : row.entity_id}`,
     title: row.title,
@@ -33,7 +43,8 @@ export async function GET(request: Request) {
     matchedField: row.matched_field,
     href: row.entity_type === "property" ? `/leads/${row.entity_id}`
       : row.entity_type === "owner" && row.property_id ? `/leads/${row.property_id}`
-        : `/messages?thread=${row.conversation_id}`,
-  }));
+        : !sharedWorkspaceAccess && row.property_id ? `/leads/${row.property_id}` : `/messages?thread=${row.conversation_id}`,
+    }];
+  });
   return Response.json({ results }, { headers });
 }

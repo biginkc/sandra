@@ -8,6 +8,8 @@ vi.mock("@/lib/supabase/server", () => ({ createClient }));
 
 import {
   getCallerMemberships,
+  getCallerMembershipsOrThrow,
+  readCallerMemberships,
   resolveSingleActiveMembership,
 } from "./memberships";
 
@@ -31,6 +33,9 @@ function mockMembershipClient(responses: MembershipResponse | MembershipResponse
     select.mockResolvedValueOnce(response);
   }
   createClient.mockResolvedValue({
+    auth: {
+      getUser: vi.fn().mockResolvedValue({ data: { user: { id: "user-1" } } }),
+    },
     from: vi.fn(() => ({ select })),
   });
   return { select };
@@ -59,7 +64,9 @@ describe("getCallerMemberships", () => {
 
     await expect(getCallerMemberships()).resolves.toEqual([activeMembership]);
     expect(select).toHaveBeenCalledOnce();
-    expect(select).toHaveBeenCalledWith("user_id, org_id, role");
+    expect(select).toHaveBeenCalledWith(
+      "user_id, org_id, role, acquisitions_enabled",
+    );
   });
 
   it("filters inactive memberships after the Hugo access query succeeds", async () => {
@@ -78,8 +85,21 @@ describe("getCallerMemberships", () => {
     await expect(getCallerMemberships()).resolves.toEqual([activeMembership]);
     expect(select).toHaveBeenCalledTimes(1);
     expect(select).toHaveBeenCalledWith(
-      "user_id, org_id, role, access_status, access_expires_at, deletion_prepared_at",
+      "user_id, org_id, role, acquisitions_enabled, access_status, access_expires_at, deletion_prepared_at",
     );
+  });
+
+  it("ignores an owner row belonging to another caller when a legacy RLS policy exposes a roster", async () => {
+    const { select } = mockMembershipClient({
+      data: [
+        activeMembership,
+        { ...activeMembership, user_id: "another-user", role: "owner" },
+      ],
+      error: null,
+    });
+
+    await expect(getCallerMemberships()).resolves.toEqual([activeMembership]);
+    expect(select).toHaveBeenCalledOnce();
   });
 
   it("uses the legacy membership shape only for local E2E when Hugo columns are absent", async () => {
@@ -98,6 +118,27 @@ describe("getCallerMemberships", () => {
     );
 
     await expect(getCallerMemberships()).resolves.toEqual([activeMembership]);
+    expect(select).toHaveBeenNthCalledWith(
+      2,
+      "user_id, org_id, role, acquisitions_enabled",
+    );
+  });
+
+  it("preserves the pre-designation membership shape when its column is absent", async () => {
+    vi.stubEnv("NEXT_PUBLIC_HUGO_SSO", "");
+    const { select } = mockMembershipClient([
+      {
+        data: null,
+        error: {
+          code: "PGRST204",
+          message:
+            "Could not find the 'acquisitions_enabled' column of 'memberships' in the schema cache",
+        },
+      },
+      { data: [activeMembership], error: null },
+    ]);
+
+    await expect(getCallerMemberships()).resolves.toEqual([activeMembership]);
     expect(select).toHaveBeenNthCalledWith(2, "user_id, org_id, role");
   });
 
@@ -114,6 +155,22 @@ describe("getCallerMemberships", () => {
 
     await expect(getCallerMemberships()).resolves.toEqual([]);
     expect(select).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes a membership query failure to retryable surface callers", async () => {
+    vi.stubEnv("E2E_AUTH_BYPASS", "");
+    const { select } = mockMembershipClient([
+      { data: null, error: { code: "PGRST000", message: "temporary database failure" } },
+      { data: null, error: { code: "PGRST000", message: "temporary database failure" } },
+    ]);
+    await expect(readCallerMemberships()).resolves.toMatchObject({
+      memberships: [],
+      error: { code: "PGRST000" },
+    });
+    await expect(getCallerMembershipsOrThrow()).rejects.toMatchObject({
+      name: "MembershipLookupError",
+    });
+    expect(select).toHaveBeenCalledTimes(2);
   });
 });
 

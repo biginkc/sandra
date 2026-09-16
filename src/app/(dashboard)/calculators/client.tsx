@@ -763,7 +763,7 @@ export default function CalculatorClient({
                 onClick={() => setListingLocked((locked) => !locked)}
               >
                 {listingLocked ? <Lock size={11} aria-hidden="true" /> : <LockKeyholeOpen size={11} aria-hidden="true" />}
-                {listingLocked ? "fixed" : "editable"}
+                {listingLocked ? "locked" : "editable"}
               </button>
             </span>
             <span className={`${styles.rowValue} ${listingLocked ? styles.lockedValue : styles.editableValue}`}>

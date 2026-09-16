@@ -2,7 +2,7 @@
 
 ## Who can use it
 
-Active Acquisitions group members can open **Calculators**, create calculations, and save revisions. Owners also need Acquisitions membership. Any active teammate who can access the lead can read its saved calculations and timeline entries.
+Active Acquisitions group members can open **Calculators**, create calculations, and save revisions. Active owners retain calculator access even without the Acquisitions designation. Non-owner access still requires the organization's calculator workflow to be enabled. Any active teammate who can access the lead can read its saved calculations and timeline entries.
 
 ## Calculate an offer
 

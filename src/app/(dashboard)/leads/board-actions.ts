@@ -4,7 +4,8 @@ import { revalidatePath } from "next/cache";
 
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
@@ -64,7 +65,10 @@ export async function loadLeadBoardAction(
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
-    const memberships = await getCallerMemberships();
+    const memberships = await getCallerMembershipsOrThrow();
+    if (!canAccessMessagesAndLeadsBoard(memberships)) {
+      return { ok: false, error: { code: "FORBIDDEN", message: "You do not have access to the Leads board." } };
+    }
     const orgIds = memberships.map((membership) => membership.org_id);
 
     let assigneeId: string | null = null;

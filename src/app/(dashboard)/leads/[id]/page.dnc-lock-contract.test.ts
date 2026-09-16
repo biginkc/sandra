@@ -31,9 +31,7 @@ describe("locked property detail", () => {
 
   it("contains no mutation or contact controls", () => {
     expect(lockedView).toContain("PERMANENT DO NOT CONTACT");
-    expect(lockedView).toContain(
-      'mode === "prospect" ? "/properties" : "/leads"',
-    );
+    expect(lockedView).toContain("leadDetailCollection(isAcquisitionMember, mode)");
     expect(lockedView).not.toContain("DeleteLeadButton");
     expect(lockedView).not.toContain("LeadStatusWidget");
     expect(lockedView).not.toContain("SmsComposer");

@@ -2,7 +2,7 @@
 
 ## Contract
 
-- Workspace and saves require active Acquisitions membership, including owners.
+- Workspace and saves require an active owner or active Acquisitions membership. Owners bypass the Acquisitions designation and workflow toggle; non-owners remain behind the organization's workflow flag.
 - Saved calculation views follow existing active same-organization lead access.
 - Listing percentage starts at 90%, can be unlocked, and is retained per snapshot. Commission stays at 4% of as-is value.
 - All eleven working worksheet outputs retain intermediate precision. Broken source B16 is excluded.
@@ -29,4 +29,4 @@ Astra medium and Claude Opus 5 reviewed the implementation. Findings fixed durin
 
 ## Production test access
 
-The configured test account is an active owner without Acquisitions membership. It must be denied calculator access. Enabling that existing account for a test requires explicit authorization and restoration; alternatively use an existing Acquisitions member. At preparation time, configured credentials did not complete Hugo sign-in and Chrome had no active session. Production verification is not claimed until a valid authorized session is available.
+The configured test account may be an active owner without Acquisitions membership and should retain calculator access. The canary also accepts an active Acquisitions member. At preparation time, configured credentials did not complete Hugo sign-in and Chrome had no active session. Production verification is not claimed until a valid authorized session is available.

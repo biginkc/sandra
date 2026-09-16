@@ -10,8 +10,13 @@ import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { getCallerMemberships } from "@/lib/auth/memberships";
 import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
+import {
+  leadDetailCollection,
+  shouldRestrictMessagesAndLeadsBoard,
+} from "@/lib/auth/surface-access";
 import { leadNoticeMessage } from "@/lib/leads/notices";
 import { createClient } from "@/lib/supabase/server";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
@@ -130,6 +135,9 @@ export default async function LeadDetailPage({
   const { id } = await params;
   const warning = leadNoticeMessage((await searchParams)?.notice);
   const supabase = await createClient();
+  const isAcquisitionMember = shouldRestrictMessagesAndLeadsBoard(
+    await getCallerMemberships(),
+  );
   const { data, error } = await supabase
     .from("properties")
     .select(
@@ -147,6 +155,7 @@ export default async function LeadDetailPage({
     .maybeSingle();
 
   if (error) {
+    const collection = leadDetailCollection(isAcquisitionMember);
     console.error("[leads] detail fetch failed", {
       message: error.message,
       code: error.code,
@@ -156,7 +165,7 @@ export default async function LeadDetailPage({
         <PageHeader
           breadcrumb={[
             { label: "Workspace" },
-            { label: "Leads", href: "/leads" },
+            { label: collection.label, href: collection.href },
             { label: "Error" },
           ]}
           title="Lead"
@@ -187,9 +196,16 @@ export default async function LeadDetailPage({
         prevId={prevId}
         nextId={nextId}
         mode={lockedMode}
+        isAcquisitionMember={isAcquisitionMember}
       />
     );
   }
+  const collection = leadDetailCollection(
+    isAcquisitionMember,
+    // Non-Acquisitions prospect details historically return to Leads. The
+    // stage-aware destination remains for the locked DNC detail below.
+    isAcquisitionMember && lead.status === "prospect" ? "prospect" : "lead",
+  );
   const acquisitionHistory=await loadLeadAcquisitionHistory(lead.id);
   const training = lead.is_training;
   const esign: Awaited<ReturnType<typeof loadLeadEsignPageModel>> = training
@@ -723,6 +739,8 @@ export default async function LeadDetailPage({
         address={lead.address}
         locationLine={locationLine}
         homeownerName={homeownerName}
+        collectionHref={collection.href}
+        collectionLabel={collection.label}
         actions={heroActions}
       />
       <DealSnapshotStrip lead={lead} />
@@ -1163,6 +1181,7 @@ export default async function LeadDetailPage({
                   <fieldset disabled={training} inert={training || undefined} className="contents"><DeleteLeadButton
                     propertyId={lead.id}
                     address={lead.address}
+                    redirectHref={collection.href}
                   /></fieldset>
                 </div>
               </div>
@@ -1246,14 +1265,17 @@ function LockedDncPropertyDetail({
   prevId,
   nextId,
   mode,
+  isAcquisitionMember,
 }: {
   lead: DetailedLead;
   prevId: string | null;
   nextId: string | null;
   mode: "prospect" | "lead";
+  isAcquisitionMember: boolean;
 }) {
-  const collectionHref = mode === "prospect" ? "/properties" : "/leads";
-  const collectionLabel = mode === "prospect" ? "Prospects" : "Leads";
+  const collection = leadDetailCollection(isAcquisitionMember, mode);
+  const collectionHref = collection.href;
+  const collectionLabel = collection.label;
   const recordLabel = mode === "prospect" ? "prospect" : "lead";
   const zillowHref = zillowUrl({
     address: lead.address,

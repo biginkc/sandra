@@ -12,16 +12,17 @@ import { deletePropertiesBulk } from "../actions";
 type Props = {
   propertyId: string;
   address: string;
+  redirectHref?: "/leads" | "/properties" | "/my-leads";
 };
 
 /**
  * PageHeader actions-slot button to soft-delete a lead from
  * /leads/[id]. Reuses `deletePropertiesBulk([propertyId])` (admin guard
  * inside the server action) — no new server action introduced. On
- * success, routes to /leads since the property is now soft-deleted and
- * a refresh on this page would 404.
+ * success, routes to the caller's detail collection since the property is
+ * now soft-deleted and a refresh on this page would 404.
  */
-export function DeleteLeadButton({ propertyId, address }: Props) {
+export function DeleteLeadButton({ propertyId, address, redirectHref = "/leads" }: Props) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
 
@@ -38,7 +39,7 @@ export function DeleteLeadButton({ propertyId, address }: Props) {
         fallbackMessage: `Could not delete ${address}`,
       });
       if (result.ok) {
-        router.push("/leads");
+        router.push(redirectHref);
       }
     });
   };

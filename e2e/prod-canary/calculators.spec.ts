@@ -134,14 +134,13 @@ test.describe("production calculator canary", () => {
     address = `${env.label} Calculator ${runId} 901 Calculator Ct`;
 
     const membership = await table(supabase, "memberships")
-      .select("access_status, access_expires_at, deletion_prepared_at, acquisitions_enabled")
+      .select("role, access_status, access_expires_at, deletion_prepared_at, acquisitions_enabled")
       .eq("org_id", orgId)
       .eq("user_id", userId)
       .maybeSingle();
     if (membership.error) throw new Error(`Could not verify calculator membership: ${membership.error.message}`);
-    expect(membership.data).toEqual(
-      expect.objectContaining({ access_status: "active", acquisitions_enabled: true }),
-    );
+    expect(membership.data).toEqual(expect.objectContaining({ access_status: "active" }));
+    expect(membership.data?.role === "owner" || membership.data?.acquisitions_enabled === true).toBe(true);
     expect(membership.data?.deletion_prepared_at ?? null).toBeNull();
     expect(membership.data?.access_expires_at == null || new Date(String(membership.data.access_expires_at)) > new Date()).toBe(true);
 
@@ -203,6 +202,33 @@ test.describe("production calculator canary", () => {
         await expect(page.getByTestId(testId)).toHaveText(dollars(fixture.worksheet[cell]));
       }
     }
+
+    // Explicit acceptance scenario: the production UI must preserve the
+    // worksheet's wholesale anchors for ARV $350,000 and investor rehab
+    // $50,000, independent of the six source worksheet fixtures above.
+    const acceptanceInputs = {
+      asIs: 175000,
+      listingPercentage: 0.9,
+      profit: 20000,
+      flatFee: 150,
+      attorney: 995,
+      titleInsurance: 500,
+      efile: 35,
+      recording: 25,
+      taxStamps: 200,
+      pictures: 300,
+      other: 500,
+      repairs: 0,
+      arv: 350000,
+      rehab: 50000,
+    } as (typeof fixtures)[number]["inputs"];
+    await enterFixture(page, acceptanceInputs);
+    await expect(page.getByTestId("result-arv70")).toHaveText(dollars(245000));
+    await expect(page.getByTestId("result-investor")).toHaveText(dollars(195000));
+    await expect(page.getByTestId("result-fee40000")).toHaveText(dollars(155000));
+    await expect(page.getByTestId("result-fee30000")).toHaveText(dollars(165000));
+    await expect(page.getByTestId("result-fee20000")).toHaveText(dollars(175000));
+    await expect(page.getByTestId("result-fee10000")).toHaveText(dollars(185000));
 
     await page.getByRole("button", { name: "Attach a lead", exact: true }).click();
     const search = page.getByRole("textbox", { name: "Search leads by address or name", exact: true });

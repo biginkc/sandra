@@ -376,6 +376,23 @@ describe("<LeadMediaHero />", () => {
     expect(screen.getByText(/Street View unavailable/)).toBeVisible();
   });
 
+  it("supports a My Leads breadcrumb for an Acquisitions member", () => {
+    render(
+      <LeadMediaHero
+        {...shared}
+        collectionHref="/my-leads"
+        collectionLabel="My Leads"
+        media={{ kind: "flat", reason: "missing-location" }}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "My Leads" })).toHaveAttribute(
+      "href",
+      "/my-leads",
+    );
+    expect(screen.queryByRole("link", { name: "Leads" })).toBeNull();
+  });
+
   it("keeps linked hero actions visibly focused without clipping their pill", () => {
     render(
       <LeadMediaHero

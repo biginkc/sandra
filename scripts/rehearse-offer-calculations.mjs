@@ -12,9 +12,10 @@ import { Client } from "pg";
 const cluster = mkdtempSync(join(tmpdir(), "sandra-offer-calculations-"));
 const socketDir = mkdtempSync("/tmp/socs-");
 const port = 7600 + Math.floor(Math.random() * 250);
-const migration = fileURLToPath(
-  new URL("../supabase/migrations/20260916090000_offer_calculations.sql", import.meta.url),
-);
+const migrations = [
+  fileURLToPath(new URL("../supabase/migrations/20260916090000_offer_calculations.sql", import.meta.url)),
+  fileURLToPath(new URL("../supabase/migrations/20260916100000_offer_calculations_owner_access.sql", import.meta.url)),
+];
 let started = false;
 
 const ids = {
@@ -91,6 +92,9 @@ const hashB = "b".repeat(64);
 const hashC = "c".repeat(64);
 const hashD = "d".repeat(64);
 const hashE = "e".repeat(64);
+const hashF = "f".repeat(64);
+const hashM = "3".repeat(64);
+const hashN = "4".repeat(64);
 const hashH = "1".repeat(64);
 const hashI = "2".repeat(64);
 const hashL = "5".repeat(64);
@@ -107,6 +111,8 @@ const requestI = "90000000-0000-4000-8000-000000000009";
 const requestJ = "90000000-0000-4000-8000-000000000010";
 const requestK = "90000000-0000-4000-8000-000000000011";
 const requestL = "90000000-0000-4000-8000-000000000012";
+const requestM = "90000000-0000-4000-8000-000000000013";
+const requestN = "90000000-0000-4000-8000-000000000014";
 
 const service = "set role service_role; set request.jwt.claim.role='service_role';";
 const actor = (userId) => `${service} select public.fn_save_offer_calculation('${userId}',`;
@@ -246,7 +252,9 @@ try {
     grant select, update on public.properties to service_role;
   `);
 
-  run("psql", ["-h", socketDir, "-p", String(port), "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-f", migration], { stdio: "ignore" });
+  for (const migration of migrations) {
+    run("psql", ["-h", socketDir, "-p", String(port), "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-f", migration], { stdio: "ignore" });
+  }
 
   // Authenticated clients cannot execute the write RPC or mutate snapshots.
   expectRejected(
@@ -261,8 +269,17 @@ try {
   );
 
   psql(`update public.memberships set acquisitions_enabled=false where user_id='${ids.owner}' and org_id='${ids.orgA}';`);
-  expectRejected(saveSql({ requestId: requestA, requestHash: hashA }), /FORBIDDEN/, "non-acquisition owner save denied");
-  psql(`update public.memberships set acquisitions_enabled=true where user_id='${ids.owner}' and org_id='${ids.orgA}';`);
+  const ownerWithoutAcquisitions = JSON.parse(psql(saveSql({ requestId: requestA, requestHash: hashA })));
+  expectEqual(ownerWithoutAcquisitions.created_by, ids.owner, "owner without acquisitions designation may save");
+  psql(`update public.acquisition_org_settings set my_leads_enabled=false where org_id='${ids.orgA}';`);
+  const ownerWithoutWorkflow = JSON.parse(psql(saveSql({ requestId: requestM, requestHash: hashM })));
+  expectEqual(ownerWithoutWorkflow.created_by, ids.owner, "owner may save with workflow disabled");
+  psql(`update public.acquisition_org_settings set my_leads_enabled=true where org_id='${ids.orgA}';`);
+  expectRejected(
+    saveSql({ userId: ids.reader, propertyId: ids.propertyA2, requestId: requestN, requestHash: hashN }),
+    /FORBIDDEN/,
+    "non-acquisition member save denied",
+  );
 
   const first = JSON.parse(psql(saveSql({ requestId: requestA, requestHash: hashA })));
   expectEqual(first.version, 1, "first calculation version");
@@ -300,8 +317,8 @@ try {
   ]);
   const concurrentVersions = concurrent.map((value) => JSON.parse(value).version).sort((a, b) => a - b);
   expectEqual(JSON.stringify(concurrentVersions), JSON.stringify([3, 4]), "concurrent revision versions");
-  expectEqual(psql(`select count(*) from public.offer_calculations where property_id='${ids.propertyA}'`), "4", "concurrent rows");
-  expectEqual(psql(`select count(*) from public.lead_events where event_type='calculation_saved' and property_id='${ids.propertyA}'`), "4", "concurrent events");
+  expectEqual(psql(`select count(*) from public.offer_calculations where property_id='${ids.propertyA}'`), "5", "concurrent rows");
+  expectEqual(psql(`select count(*) from public.lead_events where event_type='calculation_saved' and property_id='${ids.propertyA}'`), "5", "concurrent events");
 
   // Replay and revision overlap on the same lead. Both paths must complete
   // without a snapshot/property lock inversion; the revision gets the next
@@ -387,9 +404,9 @@ try {
 
   // Authenticated read scope: all active same-org members with lead access
   // can read the saved history, including the non-acquisition reader.
-  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.owner}'; select count(*) from public.offer_calculations;`), "6", "owner read scope");
-  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.rep}'; select count(*) from public.offer_calculations;`), "6", "assigned rep read scope");
-  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.reader}'; select count(*) from public.offer_calculations;`), "6", "non-acquisition member lead read scope");
+  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.owner}'; select count(*) from public.offer_calculations;`), "7", "owner read scope");
+  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.rep}'; select count(*) from public.offer_calculations;`), "7", "assigned rep read scope");
+  expectEqual(psql(`set role authenticated; set request.jwt.claim.role='authenticated'; set request.jwt.claim.sub='${ids.reader}'; select count(*) from public.offer_calculations;`), "7", "non-acquisition member lead read scope");
 
   // The latest merge wrapper repoints calculation rows before deleting the
   // loser, preserving series/version and the event source identity.
