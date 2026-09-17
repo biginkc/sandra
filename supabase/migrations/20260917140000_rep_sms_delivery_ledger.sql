@@ -270,6 +270,19 @@ begin
     if v_l.state<>'sending' or v_id is null then
       raise exception 'ACCEPTED_REQUIRES_SENDING_AND_PROVIDER_ID' using errcode='40001';
     end if;
+    -- Provider message ids are global within a provider account. Return a
+    -- deterministic collision result before the unique index can abort the
+    -- worker transaction and leave delivery reconciliation ambiguous.
+    if exists(
+      select 1 from public.rep_sms_delivery_ledger other
+      where lower(other.provider)=lower(v_l.provider)
+        and other.provider_account_id=v_l.provider_account_id
+        and other.provider_message_id=v_id
+        and other.id is distinct from v_l.id
+    ) then
+      return jsonb_build_object('ok',false,'receiptId',v_l.id,'state',v_l.state,
+        'reason','provider_message_id_already_bound','providerMessageIdAlreadyBound',true);
+    end if;
     update public.rep_sms_delivery_ledger set state='accepted',provider_message_id=v_id,
       provider_status=nullif(btrim(p_provider_status),''),provider_error=null where id=v_l.id;
   elsif p_state='failed_not_dispatched' then
@@ -332,6 +345,27 @@ begin
     if v_l.message_id is null
       or p_metadata->>'messageId' is distinct from v_l.message_id::text then
       return jsonb_build_object('ok',false,'matched',false,'identityMismatch',true);
+    end if;
+    -- Provider message ids are scoped by provider account globally. Do this
+    -- check before the update so a cross-org collision is a safe no-op rather
+    -- than a unique-index exception that leaves callback processing ambiguous.
+    if v_l.provider_message_id is null and exists(
+      select 1 from public.rep_sms_delivery_ledger other
+      where lower(other.provider)=lower(btrim(p_provider))
+        and other.provider_account_id=btrim(p_provider_account_id)
+        and other.provider_message_id=btrim(p_provider_message_id)
+        and other.id is distinct from v_l.id
+    ) then
+      return jsonb_build_object('ok',false,'matched',false,'identityMismatch',true,
+        'providerMessageIdAlreadyBound',true);
+    end if;
+    -- An unknown receipt with no provider id has no evidence tying this
+    -- callback to the original request. The exact receipt/message overload
+    -- is only a bridge for an in-flight send and must not settle an
+    -- ambiguous row from tenant or message payload fields alone.
+    if v_l.state='unknown' and v_l.provider_message_id is null then
+      return jsonb_build_object('ok',false,'matched',false,
+        'reason','provider_message_id_missing');
     end if;
   else
     select * into v_l from public.rep_sms_delivery_ledger

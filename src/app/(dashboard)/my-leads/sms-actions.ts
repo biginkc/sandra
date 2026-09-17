@@ -91,6 +91,43 @@ function resultReason(value: Record<string, unknown>, fallback: string): string 
   return fallback;
 }
 
+/**
+ * Close a generic SMS recovery draft only after the browser has received the
+ * provider outcome. The context read supplies the server-owned actor/contact
+ * scope and exact key; the service RPC repeats that scope before changing the
+ * ledger, so a receipt or forged key cannot close another lead's recovery.
+ */
+export async function acknowledgeRepSmsSubmission(input: {
+  propertyId: string;
+  idempotencyKey: string;
+}) {
+  try {
+    const context = await readRepSmsContext(input.propertyId);
+    if (context.submission && context.submission.key !== input.idempotencyKey) {
+      throw new Error("The saved SMS request changed. Refresh before acknowledging the send.");
+    }
+    const admin = createAdminClient() as unknown as {
+      rpc(name: string, args: Record<string, unknown>): Promise<ObligationRpc>;
+    };
+    const result = await admin.rpc("fn_ack_rep_sms_delivery_draft", {
+      p_org_id: context.orgId,
+      p_actor_id: context.actorId,
+      p_property_id: input.propertyId,
+      p_contact_id: context.contactId,
+      p_submission_key: input.idempotencyKey,
+    });
+    const acknowledged = recordValue(result.data);
+    if (result.error || !acknowledged || acknowledged.ok !== true) {
+      throw new Error(
+        result.error?.message ?? resultReason(acknowledged ?? {}, "The SMS acknowledgement could not be recorded."),
+      );
+    }
+    return ok(acknowledged);
+  } catch (error) {
+    return errFromUnknown(error, "TEXTING_UNAVAILABLE");
+  }
+}
+
 async function persistResumedResult(
   admin: { rpc(name: string, input: Record<string, unknown>): Promise<ObligationRpc> },
   obligationId: string,

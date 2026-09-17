@@ -2,8 +2,8 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-const mocks = vi.hoisted(() => ({ load: vi.fn(), send: vi.fn() }))
-vi.mock("./sms-actions", () => ({ loadRepSmsContext: mocks.load, sendRepSms: mocks.send }))
+const mocks = vi.hoisted(() => ({ load: vi.fn(), send: vi.fn(), acknowledge: vi.fn() }))
+vi.mock("./sms-actions", () => ({ loadRepSmsContext: mocks.load, sendRepSms: mocks.send, acknowledgeRepSmsSubmission: mocks.acknowledge }))
 
 import { RepSmsComposer } from "./rep-sms-composer"
 
@@ -34,6 +34,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   window.localStorage.clear()
   mocks.send.mockResolvedValue({ ok: true, data: { outcome: { status: "sent", messageId: "message-1", externalId: "provider-1" } } })
+  mocks.acknowledge.mockResolvedValue({ ok: true, data: { ok: true, state: "accepted" } })
 })
 
 describe("RepSmsComposer obligation resume", () => {
@@ -147,12 +148,92 @@ describe("RepSmsComposer obligation resume", () => {
     expect(window.localStorage.getItem("sandra:rep-sms:submission:org-1:rep-1:property-1")).toBeNull()
   })
 
+  it("keeps the exact generic draft when the browser acknowledgement is lost", async () => {
+    mocks.load.mockResolvedValue({ ok: true, data: genericContext() })
+    mocks.send.mockResolvedValue({ ok: true, data: { outcome: { status: "sent", messageId: "message-1", externalId: "provider-1" } } })
+    mocks.acknowledge.mockResolvedValue({ ok: false, error: { message: "acknowledgement unavailable" } })
+    const user = userEvent.setup()
+    render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    const remainder = await screen.findByLabelText("Editable message remainder")
+    await user.type(remainder, "Please text Maria a time that works.")
+    await user.click(screen.getByRole("button", { name: "Send text" }))
+
+    await waitFor(() => expect(screen.getByText(/could not record the acknowledgement/)).toBeInTheDocument())
+    const key = mocks.send.mock.calls[0][0].idempotencyKey
+    expect(mocks.acknowledge).toHaveBeenCalledWith({ propertyId: "property-1", idempotencyKey: key })
+    expect(window.localStorage.getItem("sandra:rep-sms:submission:org-1:rep-1:property-1")).toContain(key)
+    expect(screen.getByRole("button", { name: "Reconcile saved send" })).toBeInTheDocument()
+  })
+
+  it("restores the service-owned draft after browser storage loss and keeps its exact request", async () => {
+    mocks.load.mockResolvedValueOnce({ ok: true, data: genericContext() })
+    mocks.send.mockReset()
+    mocks.send.mockResolvedValueOnce({
+      ok: true,
+      data: { outcome: { status: "provider_unknown", messageId: "receipt-1", error: "receipt unavailable" } },
+    }).mockResolvedValueOnce({
+      ok: true,
+      data: { outcome: { status: "sent", messageId: "message-1", externalId: "provider-1" } },
+    })
+    const user = userEvent.setup()
+    const first = render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    const remainder = await screen.findByLabelText("Editable message remainder")
+    await user.type(remainder, "Please text Maria a time that works.")
+    await user.click(screen.getByRole("button", { name: "Send text" }))
+    await waitFor(() => expect(screen.getByText("Pending reconciliation")).toBeInTheDocument())
+    const firstRequest = mocks.send.mock.calls[0][0]
+    const firstKey = firstRequest.idempotencyKey
+    expect(firstKey).toMatch(/^[0-9a-f-]{36}$/i)
+
+    // Simulate storage eviction or a private-browsing storage policy. The
+    // server ledger remains authoritative and is supplied on the next load.
+    window.localStorage.clear()
+    first.unmount()
+    mocks.load.mockResolvedValue({
+      ok: true,
+      data: {
+        ...genericContext(),
+        submission: {
+          key: firstKey,
+          receiptId: "receipt-1",
+          state: "delivered",
+          assignmentId: "sender-1",
+          from: "+18163706846",
+          to: "+18165550123",
+          body: savedComposition.body,
+          composition: savedComposition,
+          providerMessageId: "provider-1",
+          providerError: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    })
+    render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reconcile saved send" })).toBeInTheDocument())
+    expect(screen.getByLabelText("Editable message remainder")).toHaveValue(savedComposition.remainder)
+    expect(screen.getByLabelText("Editable message remainder")).toBeDisabled()
+    expect(screen.getByText("From:").parentElement).toHaveTextContent("+1 (816) 370-6846")
+    await user.click(screen.getByRole("button", { name: "Reconcile saved send" }))
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(2))
+    expect(mocks.send.mock.calls[1][0]).toEqual(expect.objectContaining({
+      idempotencyKey: firstKey,
+      assignmentId: "sender-1",
+      to: "+18165550123",
+      composition: expect.objectContaining({ remainder: savedComposition.remainder }),
+    }))
+  })
+
   it("fails closed when a scoped saved send no longer has its exact sender assignment", async () => {
     const savedAt = Date.now()
     window.localStorage.setItem("sandra:rep-sms:submission:org-1:rep-1:property-1", JSON.stringify({
       key: "saved-key",
       orgId: "org-1",
       actorId: "rep-1",
+      contactId: "contact-1",
       createdAt: savedAt,
       assignmentId: "sender-removed",
       from: "+18163706846",
@@ -173,6 +254,7 @@ describe("RepSmsComposer obligation resume", () => {
       key: "expired-key",
       orgId: "org-1",
       actorId: "rep-1",
+      contactId: "contact-1",
       createdAt: Date.now() - 25 * 60 * 60 * 1000,
       assignmentId: "sender-1",
       from: "+18163706846",

@@ -24,6 +24,13 @@ const fact: AcquisitionHistoryFact = {
   recordingUrl: "javascript:alert(1)",
   callActivityId: null,
 };
+const obligationFact: AcquisitionHistoryFact = {
+  ...fact,
+  id: "with-follow-up",
+  followUpObligationId: "obligation-1",
+  followUpStatus: "required",
+  followUpMessage: "Choose a text template before sending.",
+};
 const initial: AcquisitionHistoryResult = {
   ok: true,
   page: {
@@ -56,10 +63,38 @@ describe("acquisition history rendering and recovery", () => {
   it("renders literal note, actor, real timestamp and no unsafe recording link", () => {
     render(<AcquisitionHistoryCard fact={fact} actor="Rep A" />);
     expect(screen.getByText("No answer")).toBeInTheDocument();
-    expect(screen.getByText("Follow-up required")).toBeInTheDocument();
+    expect(screen.queryByText("Follow-up required")).not.toBeInTheDocument();
     expect(screen.getByText(fact.note!)).toBeInTheDocument();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.getByText(/Rep A/)).toBeInTheDocument();
+  });
+  it("renders the follow-up badge for a no-answer with a durable obligation", () => {
+    render(<AcquisitionHistoryCard fact={obligationFact} actor="Rep A" />);
+
+    expect(screen.getByText("Follow-up required")).toBeInTheDocument();
+    expect(screen.getByText("Choose a text template before sending.")).toBeInTheDocument();
+  });
+  it("does not show a provider-reconciled status without a durable obligation", () => {
+    render(
+      <AcquisitionHistoryCard
+        fact={{ ...fact, id: "provider-reconciled", followUpStatus: "delivered" }}
+        actor="Rep A"
+      />,
+    );
+
+    expect(screen.queryByText(/Follow-up/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/required/)).not.toBeInTheDocument();
+  });
+  it("does not invent required when an obligation has no status enrichment", () => {
+    render(
+      <AcquisitionHistoryCard
+        fact={{ ...fact, id: "status-missing", followUpObligationId: "obligation-2", followUpStatus: null }}
+        actor="Rep A"
+      />,
+    );
+
+    expect(screen.getByText("Follow-up status unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Follow-up required")).not.toBeInTheDocument();
   });
   it("retains loaded facts after page failure and retries first page", async () => {
     load

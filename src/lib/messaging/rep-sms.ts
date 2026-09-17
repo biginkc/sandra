@@ -50,6 +50,27 @@ export type RepSmsPendingObligation = {
   toNumber: string | null;
 };
 
+/**
+ * A generic manual SMS draft that has reached the service-owned delivery
+ * ledger.  The browser may lose its localStorage copy, so recovery must use
+ * this immutable server record and keep the original key, body, sender, and
+ * recipient together.
+ */
+export type RepSmsPendingSubmission = {
+  key: string;
+  receiptId: string;
+  state: string;
+  assignmentId: string;
+  from: string;
+  to: string;
+  body: string;
+  composition: Record<string, unknown> | null;
+  providerMessageId: string | null;
+  providerError: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
 export type RepSmsObligationFence = {
   obligationId: string;
   claimToken: string;
@@ -89,6 +110,8 @@ export type RepSmsContext = {
   compositionPolicyVersion?: number | null;
   /** Pending durable work must be resumed by id through the fenced RPC path. */
   obligation?: RepSmsPendingObligation | null;
+  /** Generic send recovery is separate from no-answer obligations. */
+  submission?: RepSmsPendingSubmission | null;
 };
 
 type RawRepSmsContext = Omit<RepSmsContext, "senders"> & {
@@ -107,6 +130,7 @@ type RawRepSmsContext = Omit<RepSmsContext, "senders"> & {
   composition_policy_version?: number | null;
   compositionPolicyVersion?: number | null;
   obligation?: Partial<RepSmsPendingObligation> | null;
+  submission?: unknown;
 };
 
 function normalizeContext(raw: unknown): RepSmsContext {
@@ -135,6 +159,36 @@ function normalizeContext(raw: unknown): RepSmsContext {
         toNumber: typeof rawObligation.toNumber === "string" ? rawObligation.toNumber : null,
       }
     : null;
+  const rawSubmission = value.submission;
+  const submissionValue = rawSubmission && typeof rawSubmission === "object" && !Array.isArray(rawSubmission)
+    ? rawSubmission as Record<string, unknown>
+    : null;
+  const submissionComposition = submissionValue?.composition && typeof submissionValue.composition === "object" && !Array.isArray(submissionValue.composition)
+    ? submissionValue.composition as Record<string, unknown>
+    : null;
+  const submission = submissionValue
+    && typeof submissionValue.key === "string"
+    && typeof submissionValue.receiptId === "string"
+    && typeof submissionValue.state === "string"
+    && typeof submissionValue.assignmentId === "string"
+    && typeof submissionValue.from === "string"
+    && typeof submissionValue.to === "string"
+    && typeof submissionValue.body === "string"
+    ? {
+        key: submissionValue.key,
+        receiptId: submissionValue.receiptId,
+        state: submissionValue.state,
+        assignmentId: submissionValue.assignmentId,
+        from: submissionValue.from,
+        to: submissionValue.to,
+        body: submissionValue.body,
+        composition: submissionComposition,
+        providerMessageId: typeof submissionValue.providerMessageId === "string" ? submissionValue.providerMessageId : null,
+        providerError: typeof submissionValue.providerError === "string" ? submissionValue.providerError : null,
+        createdAt: typeof submissionValue.createdAt === "string" ? submissionValue.createdAt : null,
+        updatedAt: typeof submissionValue.updatedAt === "string" ? submissionValue.updatedAt : null,
+      }
+    : null;
   return {
     orgId: value.orgId,
     actorId: value.actorId,
@@ -142,6 +196,7 @@ function normalizeContext(raw: unknown): RepSmsContext {
     provider: contextProvider,
     compositionPolicyVersion: policyVersion,
     obligation,
+    submission,
     senders: value.senders.map((sender) => ({
       id: sender.id,
       number: sender.number ?? sender.phone_e164 ?? "",
@@ -172,20 +227,32 @@ export async function readRepSmsContext(propertyId: string): Promise<RepSmsConte
     );
   }
   const context = normalizeContext(data);
-  const { data: contact, error: contactError } = context.contactId
+  const { data: submissionData, error: submissionError } = await client.rpc("fn_get_rep_sms_delivery_draft", {
+    p_property_id: propertyId,
+  });
+  if (submissionError) {
+    throw new Error("Texting recovery could not be loaded. Please retry.");
+  }
+  const rawSubmissionEnvelope = submissionData && typeof submissionData === "object" && !Array.isArray(submissionData)
+    ? submissionData as Record<string, unknown>
+    : null;
+  const recoveredContext = rawSubmissionEnvelope && Object.prototype.hasOwnProperty.call(rawSubmissionEnvelope, "draft")
+    ? normalizeContext({ ...context, submission: rawSubmissionEnvelope.draft })
+    : context;
+  const { data: contact, error: contactError } = recoveredContext.contactId
     ? await client
         .from("contacts")
         .select(
           "phone_1,phone_1_type,phone_2,phone_2_type,phone_3,phone_3_type",
         )
-        .eq("id", context.contactId)
+        .eq("id", recoveredContext.contactId)
         .maybeSingle()
     : { data: null, error: null };
   if (contactError) {
     throw new Error("Could not load the lead phone number. Please retry.");
   }
   return {
-    ...context,
+    ...recoveredContext,
     phone: selectBestSmsPhone(contact)?.phone ?? null,
   };
 }
@@ -437,15 +504,16 @@ async function claimRepSmsDeliveryLedger(input: {
   propertyId: string;
   toNumber: string;
   body: string;
+  composition: RepSmsComposition;
   submissionKey: string;
-}): Promise<{ authority: RepSmsDeliveryReceiptAuthority } | { outcome: SendSmsOutcome }> {
+}): Promise<{ authority: RepSmsDeliveryReceiptAuthority } | { outcome: SendSmsOutcome; receiptId?: string }> {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.submissionKey)) {
     throw new Error("A stable SMS submission key is required. Refresh the composer before sending.");
   }
   const admin = createAdminClient() as unknown as {
     rpc(name: string, args: Record<string, unknown>): Promise<RepSmsDeliveryLedgerRpc>;
   };
-  const result = await admin.rpc("fn_claim_rep_sms_delivery", {
+  const result = await admin.rpc("fn_claim_rep_sms_delivery_with_composition", {
     p_org_id: input.context.orgId,
     p_actor_id: input.context.actorId,
     p_submission_key: input.submissionKey,
@@ -458,13 +526,14 @@ async function claimRepSmsDeliveryLedger(input: {
     p_from_number: normalizePhone(input.sender.number) ?? input.sender.number.trim(),
     p_to_number: input.toNumber,
     p_body: input.body,
+    p_composition: input.composition,
   });
   if (result.error) throw new Error(result.error.message ?? "SMS reservation could not be confirmed.");
   const record = ledgerRecord(result.data);
   if (!record) throw new Error("SMS reservation returned an invalid response. Refresh before sending.");
   if (record.ok !== true) {
     const replay = replayRepSmsLedger(record);
-    if (replay) return { outcome: replay };
+    if (replay) return { outcome: replay, receiptId: ledgerString(record.receiptId) ?? undefined };
     throw new Error(ledgerString(record.reason) ?? "The previous SMS request is already in progress. Refresh before sending.");
   }
   const receiptId = ledgerString(record.receiptId);
@@ -573,9 +642,12 @@ export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSm
         propertyId: input.propertyId,
         toNumber,
         body: composition.finalBody,
+        composition,
         submissionKey: input.idempotencyKey?.trim() ?? "",
       });
-      if ("outcome" in claim) return claim.outcome;
+      if ("outcome" in claim) {
+        return claim.outcome;
+      }
       deliveryAuthority = claim.authority;
     }
   }

@@ -14,6 +14,7 @@ const sql=q=>run('psql',['-h',socket,'-p',String(port),'-U','postgres','-v','ON_
 const migration=name=>sql(readFileSync(new URL('../supabase/migrations/'+name,import.meta.url),'utf8'));
 const id=n=>`10000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const org=id(1),rep=id(2),other=id(3),owner=id(4),property=id(10);
+const otherOrg=id(50),otherOrgRep=id(51),otherOrgOwner=id(52),otherOrgProperty=id(53),otherOrgContact=id(54),otherOrgEpisode=id(55);
 const auth=`select set_config('request.jwt.claim.sub','${rep}',false); set role authenticated;`;
 const kpi=()=>JSON.parse(sql(`${auth} select public.fn_get_acquisition_kpis('${org}','${rep}',date_trunc('day',now())-interval '1 day',date_trunc('day',now())+interval '1 day');`).split('\n').at(-1));
 let started=false;
@@ -44,9 +45,9 @@ try {
  create function hugo_has_active_org_access(uuid) returns boolean language sql stable as $$select true$$;
  create function acquisition_working_deadline(timestamptz) returns timestamptz language sql as $$select $1+interval '4 hours'$$;
  create function my_leads_command_hash(text,uuid,uuid,jsonb) returns text language sql as $$select md5($1||$2::text||$3::text||$4::text)$$;
- insert into auth.users values('${rep}'),('${other}'),('${owner}');insert into organizations values('${org}');
- insert into memberships(org_id,user_id,role) values('${org}','${rep}','member'),('${org}','${owner}','owner');
- insert into acquisition_org_settings values('${org}',true);
+ insert into auth.users values('${rep}'),('${other}'),('${owner}'),('${otherOrgRep}'),('${otherOrgOwner}');insert into organizations values('${org}'),('${otherOrg}');
+ insert into memberships(org_id,user_id,role) values('${org}','${rep}','member'),('${org}','${owner}','owner'),('${otherOrg}','${otherOrgRep}','member'),('${otherOrg}','${otherOrgOwner}','owner');
+ insert into acquisition_org_settings values('${org}',true),('${otherOrg}',true);
  grant usage on schema auth to authenticated;grant execute on function auth.uid() to authenticated;
  `);
  migration('20260912110000_acquisition_read_model.sql');
@@ -58,9 +59,10 @@ try {
  migration('20260917100000_rep_sms_obligations.sql');
  migration('20260917110000_rep_sms_obligation_read_models.sql');
  migration('20260917120000_rep_sms_delivery_completion_fence.sql');
- migration('20260917130000_rep_sms_idempotency.sql');
- migration('20260917140000_rep_sms_delivery_ledger.sql');
- migration('20260917150000_sendillo_status_reconciliation_retry.sql');
+migration('20260917130000_rep_sms_idempotency.sql');
+migration('20260917140000_rep_sms_delivery_ledger.sql');
+migration('20260917150000_sendillo_status_reconciliation_retry.sql');
+ migration('20260917160000_rep_sms_durable_draft_recovery.sql');
  assert.equal(sql("select count(*) from pg_indexes where schemaname='public' and indexname='messages_outbound_sms_idempotency_idx'"),'1');
  assert.equal(sql("select count(*) from pg_tables where schemaname='public' and tablename='rep_sms_delivery_ledger'"),'1');
  assert.equal(sql("select count(*) from information_schema.role_table_grants where table_schema='public' and table_name='rep_sms_delivery_ledger' and grantee in ('anon','authenticated','service_role')"),'0');
@@ -78,10 +80,17 @@ try {
  insert into contacts(id,org_id,first_name,last_name,phone_1) values('${id(12)}','${org}','Home','Owner','+18165551234');
  update properties set homeowner_contact_id='${id(12)}',status='contacted' where id='${property}';
  insert into acquisition_assignment_episodes(id,org_id,property_id,assignee_user_id,assigned_at,initialized_at,eligible,episode_kind)
-   values('${id(11)}','${org}','${property}','${rep}',now()-interval '1 hour',now()-interval '1 hour',true,'live');`);
+   values('${id(11)}','${org}','${property}','${rep}',now()-interval '1 hour',now()-interval '1 hour',true,'live');
+ insert into properties(id,org_id,assigned_user_id,address,status) values('${otherOrgProperty}','${otherOrg}','${otherOrgRep}','2 Test St','contacted');
+ insert into contacts(id,org_id,first_name,last_name,phone_1) values('${otherOrgContact}','${otherOrg}','Other','Owner','+18165551235');
+ update properties set assigned_user_id='${otherOrgRep}',homeowner_contact_id='${otherOrgContact}' where id='${otherOrgProperty}';
+ insert into acquisition_assignment_episodes(id,org_id,property_id,assignee_user_id,assigned_at,initialized_at,eligible,episode_kind)
+   values('${otherOrgEpisode}','${otherOrg}','${otherOrgProperty}','${otherOrgRep}',now()-interval '1 hour',now()-interval '1 hour',true,'live');`);
  sql(`insert into acquisition_queue_states(property_id,org_id,stage,version) values('${property}','${org}','contacted',1)`);
+ sql(`insert into acquisition_queue_states(property_id,org_id,stage,version) values('${otherOrgProperty}','${otherOrg}','contacted',1)`);
  const as=(user,query)=>sql(`select set_config('request.jwt.claim.sub','${user}',false);set role authenticated;${query}`).split('\n').at(-1);
- const set=(user=rep,phone='+18163706846',def=true,active=true)=>`select fn_set_rep_sms_sender('${org}','${user}','sendillo','${phone}','account-1','sender-${user}','Rep phone',${def},${active})`;
+ const setFor=(orgId,user=rep,phone='+18163706846',def=true,active=true,account='account-1')=>`select fn_set_rep_sms_sender('${orgId}','${user}','sendillo','${phone}','${account}','sender-${user}','Rep phone',${def},${active})`;
+ const set=(user=rep,phone='+18163706846',def=true,active=true)=>setFor(org,user,phone,def,active);
  const setWithoutAccount=(user=rep,phone='+18163706846',def=true,active=true)=>`select fn_set_rep_sms_sender('${org}','${user}','sendillo','${phone}',null,'sender-${user}','Rep phone',${def},${active})`;
  const context=()=>JSON.parse(as(rep,`select fn_get_rep_sms_context('${property}')`));
  assert.throws(()=>as(rep,set()));
@@ -90,6 +99,15 @@ try {
  as(owner,set());
  as(owner,set(rep,'+18165550001',true));
  as(owner,set(other,'+18163706846',true));
+ as(otherOrgOwner,setFor(otherOrg,otherOrgRep,'+18165550002',true,true,'account-1'));
+ const otherOrgSenderId=sql(`select id from rep_sms_sender_assignments where org_id='${otherOrg}' and user_id='${otherOrgRep}' and active and grant_status='active' limit 1`);
+ const otherOrgSenderProviderId=sql(`select provider_sender_id from rep_sms_sender_assignments where id='${otherOrgSenderId}'`);
+ const otherOrgSenderPhone=sql(`select phone_e164 from rep_sms_sender_assignments where id='${otherOrgSenderId}'`);
+ const otherOrgAttemptId=id(56);
+ sql(`insert into acquisition_attempts(id,org_id,property_id,assignment_episode_id,actor_user_id,attempt_kind,source,outcome,occurred_at,idempotency_key)
+   values('${otherOrgAttemptId}','${otherOrg}','${otherOrgProperty}','${otherOrgEpisode}','${otherOrgRep}','outreach','manual','no_answer',now(), '${id(57)}');`);
+ const otherOrgObligationId=sql(`select id from rep_sms_obligations where org_id='${otherOrg}' and attempt_id='${otherOrgAttemptId}'`);
+ assert.match(otherOrgObligationId,/^[0-9a-f-]{36}$/);
  assert.equal(context().senders.length,2);
  assert.equal(context().senders[0].number,'+18165550001');
  assert.equal(context().senders.filter(s=>s.isDefault).length,1);
@@ -108,10 +126,10 @@ try {
  for (const [change,restore] of [
  [`update memberships set acquisitions_enabled=false where user_id='${rep}'`,`update memberships set acquisitions_enabled=true where user_id='${rep}'`],
  [`update memberships set access_status='suspended' where user_id='${rep}'`,`update memberships set access_status='active' where user_id='${rep}'`],
- [`update acquisition_org_settings set my_leads_enabled=false`,`update acquisition_org_settings set my_leads_enabled=true`],
- [`update properties set assigned_user_id='${other}'`,`update properties set assigned_user_id='${rep}'`],
+ [`update acquisition_org_settings set my_leads_enabled=false where org_id='${org}'`,`update acquisition_org_settings set my_leads_enabled=true where org_id='${org}'`],
+ [`update properties set assigned_user_id='${other}' where id='${property}'`,`update properties set assigned_user_id='${rep}' where id='${property}'`],
  [`update properties set is_dnc_locked=true`,`update properties set is_dnc_locked=false`],
- [`update acquisition_assignment_episodes set ended_at=now()`,`update acquisition_assignment_episodes set ended_at=null`],
+ [`update acquisition_assignment_episodes set ended_at=now() where id='${id(11)}'`,`update acquisition_assignment_episodes set ended_at=null where id='${id(11)}'`],
  ]) {sql(change);assert.throws(context);sql(restore);}
  sql(`update acquisition_queue_states set archived_at=now() where property_id='${property}'`);
  assert.throws(context);sql('update acquisition_queue_states set archived_at=null');
@@ -121,9 +139,10 @@ try {
  assert.throws(()=>as(owner,set()));
  sql(`update memberships set access_status='active' where user_id='${rep}'`);
  assert.equal(context().senders.length,1);
- const logInput=(key,version)=>JSON.stringify({propertyId:property,expectedEpisodeId:id(11),expectedQueueVersion:version,
+ const logInputFor=(propertyId,episodeId,key,version)=>JSON.stringify({propertyId,expectedEpisodeId:episodeId,expectedQueueVersion:version,
    expectedSharedStatus:'contacted',idempotencyKey:key,occurredAt:new Date().toISOString(),source:'manual',kind:'outreach',outcome:'no_answer',smsBody:'Checking in',
    followUp:{policyVersion:1,introId:'mel-standard',introVersion:1,templateId:'no-answer-callback',templateVersion:1,initialRemainder:'Checking in',remainder:'Checking in',body:'Checking in'}}).replaceAll("'","''");
+ const logInput=(key,version)=>logInputFor(property,id(11),key,version);
  // Finalization path: an existing provider-backed attempt gets a durable
  // obligation in the same way as the direct/manual logger.
  sql(`insert into call_activities(id,org_id,property_id,operator_user_id,provider,jitter_attempt_id,provider_call_id)
@@ -181,6 +200,9 @@ try {
  assert.equal(claim.state,'sending');
  assert.equal(claim.providerAccountId,'account-1');
  assert.equal(Number(claim.claimGeneration),1);
+ const otherOrgClaim=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${otherOrg}','${otherOrgObligationId}','${otherOrgRep}','${composition}'::jsonb)`));
+ assert.equal(otherOrgClaim.state,'sending');
+ assert.equal(otherOrgClaim.providerAccountId,'account-1');
 const fence=JSON.parse(sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${claim.obligationId}','${claim.claimToken}',${claim.claimGeneration},'${rep}')`));
 assert.equal(fence.ok,true);
 assert.equal(fence.providerAccountId,'account-1');
@@ -194,14 +216,45 @@ sql(`update contacts set phone_1='+18165551234',phone_2=null,phone_3=null where 
 const refenced=JSON.parse(sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${claim.obligationId}','${claim.claimToken}',${claim.claimGeneration},'${rep}')`));
 assert.equal(refenced.ok,true);
 assert.throws(()=>sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${claim.obligationId}','${id(99)}',${claim.claimGeneration},'${rep}')`));
-const accepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${claim.obligationId}','${claim.claimToken}','accepted','provider-1','accepted',null,null,'{}')`));
-assert.equal(accepted.state,'accepted');
-const wrongAccount=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','wrong-account','provider-1','delivered','delivered',null,'{}')`));
+ const accepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${claim.obligationId}','${claim.claimToken}','accepted','provider-1','accepted',null,null,'{}')`));
+ assert.equal(accepted.state,'accepted');
+ // Provider message identity is global within a provider account. A callback
+ // naming another tenant's already-bound id must be rejected before the
+ // unique index can raise, and the second obligation must stay untouched.
+ const crossOrgCollision=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-1','delivered','delivered',null,'{"messageOrgId":"${otherOrg}"}','${otherOrg}','${otherOrgObligationId}')`));
+ assert.equal(crossOrgCollision.matched,false);
+ assert.equal(crossOrgCollision.messageIdAlreadyBound,true);
+ assert.equal(as(otherOrgRep,`select state from rep_sms_obligations where id='${otherOrgObligationId}'`),'sending');
+ assert.equal(as(otherOrgRep,`select coalesce(provider_message_id,'<null>') from rep_sms_obligations where id='${otherOrgObligationId}'`),'<null>');
+ const crossOrgResultCollision=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${otherOrgObligationId}','${otherOrgClaim.claimToken}','accepted','provider-1','accepted',null,null,'{}')`));
+ assert.equal(crossOrgResultCollision.ok,false);
+ assert.equal(crossOrgResultCollision.providerMessageIdAlreadyBound,true);
+ assert.equal(crossOrgResultCollision.reason,'provider_message_id_already_bound');
+ assert.equal(as(otherOrgRep,`select state from rep_sms_obligations where id='${otherOrgObligationId}'`),'sending');
+ const wrongAccount=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','wrong-account','provider-1','delivered','delivered',null,'{}')`));
 assert.equal(wrongAccount.matched,false);
-const delivered=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-1','delivered','delivered',null,'{}')`));
-assert.equal(delivered.state,'delivered');
-assert.equal(as(rep,`select count(*) from rep_sms_obligation_audit where obligation_id='${claim.obligationId}'`),'5');
-// A provider receipt can arrive while the fenced row is still `sending`,
+ const delivered=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-1','delivered','delivered',null,'{}')`));
+ assert.equal(delivered.state,'delivered');
+ assert.equal(as(rep,`select count(*) from rep_sms_obligation_audit where obligation_id='${claim.obligationId}'`),'5');
+ // An unknown obligation with no provider id has no callback evidence. It
+ // must remain unmatched even when a legacy callback or the explicit
+ // obligation-id overload supplies the same tenant, provider account, sender,
+ // recipient, and body in metadata.
+ const unknownVersion=sql(`select version from acquisition_queue_states where org_id='${org}' and property_id='${property}'`);
+ const unknownAttempt=JSON.parse(as(rep,`select fn_log_acquisition_attempt('${logInput(id(26),unknownVersion)}'::jsonb)`));
+ const unknownObligationId=as(rep,`select id from rep_sms_obligations where attempt_id='${unknownAttempt.attemptId}'`);
+ const unknownClaim=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${org}','${unknownObligationId}','${rep}','${composition}'::jsonb)`));
+ const unknownResult=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${unknownObligationId}','${unknownClaim.claimToken}','unknown',null,null,'provider request timed out',null,'{}')`));
+ assert.equal(unknownResult.state,'unknown');
+ const unknownMetadata=JSON.stringify({messageOrgId:org,fromNumber:'+18163706846',toNumber:'+18165551234',body:"Hey, this is Mel, Maria's assistant. Checking in"}).replaceAll("'","''");
+ const unknownLegacy=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-unknown','delivered','delivered',null,'${unknownMetadata}')`));
+ assert.equal(unknownLegacy.matched,false);
+ const unknownExact=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-unknown','delivered','delivered',null,'${unknownMetadata}','${org}','${unknownObligationId}')`));
+ assert.equal(unknownExact.matched,false);
+ assert.equal(unknownExact.reason,'provider_message_id_missing');
+ assert.equal(as(rep,`select state from rep_sms_obligations where id='${unknownObligationId}'`),'unknown');
+ assert.equal(as(rep,`select coalesce(provider_message_id,'<null>') from rep_sms_obligations where id='${unknownObligationId}'`),'<null>');
+ // A provider receipt can arrive while the fenced row is still `sending`,
 // before fn_record_rep_sms_obligation_result has written provider_message_id.
 // The exact org + obligation + provider + account path must bind that id and
 // settle the row exactly once.
@@ -274,9 +327,80 @@ const ledgerMessage=id(72);
 sql(`set role service_role; insert into messages(id,org_id,channel,direction,property_id,contact_id,body,status,from_address,to_address,provider) values('${ledgerMessage}','${org}','sms','outbound','${property}','${id(12)}','Ledger text','pending','${senderPhone}','+18165551234','sendillo')`);
 const ledgerSending=JSON.parse(sql(`set role service_role; select fn_mark_rep_sms_delivery_sending('${ledgerClaim.receiptId}','${ledgerClaim.claimToken}',${ledgerClaim.claimGeneration},'${ledgerMessage}')`));
 assert.equal(ledgerSending.state,'sending');
-const ledgerAccepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_result('${ledgerClaim.receiptId}','${ledgerClaim.claimToken}',${ledgerClaim.claimGeneration},'accepted','ledger-provider-1','queued',null)`));
-assert.equal(ledgerAccepted.state,'accepted');
-const forgedLedgerCallback=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_ledger_callback('sendillo','account-1','ledger-provider-1','delivered','delivered',null,'{"messageId":"${id(71)}"}','${org}','${ledgerClaim.receiptId}')`));
+ const ledgerAccepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_result('${ledgerClaim.receiptId}','${ledgerClaim.claimToken}',${ledgerClaim.claimGeneration},'accepted','ledger-provider-1','queued',null)`));
+ assert.equal(ledgerAccepted.state,'accepted');
+ // Close the legacy ledger fixture before creating the separate durable
+ // recovery fixture; the same lead/contact scope permits only one unresolved
+ // generic send at a time.
+ const legacyLedgerAck=JSON.parse(sql(`set role service_role; select fn_ack_rep_sms_delivery_draft('${org}','${rep}','${property}','${id(12)}','${ledgerKey}')`));
+ assert.equal(legacyLedgerAck.ok,true);
+ // Durable generic drafts remain open after provider acceptance until the
+ // browser acknowledges the result on a later request. This models a lost
+ // action response/localStorage reload and proves a competing browser key
+ // replays the same receipt instead of reserving another send.
+ const durableKey=id(76);
+ const durableComposition=JSON.stringify({introId:'mel-standard',introVersion:1,remainder:'Durable draft text'});
+ const durableClaim=JSON.parse(sql(`set role service_role; select fn_claim_rep_sms_delivery_with_composition('${org}','${rep}','${durableKey}','${property}','${id(12)}','${senderId}','sendillo','account-1','${senderProviderId}','${senderPhone}','+18165551234','Durable draft text','${durableComposition}'::jsonb)`));
+ assert.equal(durableClaim.ok,true);
+ assert.equal(sql(`select composition->>'remainder' from rep_sms_delivery_ledger where id='${durableClaim.receiptId}'`),'Durable draft text');
+ const durableMessage=id(77);
+ sql(`set role service_role; insert into messages(id,org_id,channel,direction,property_id,contact_id,body,status,from_address,to_address,provider) values('${durableMessage}','${org}','sms','outbound','${property}','${id(12)}','Durable draft text','pending','${senderPhone}','+18165551234','sendillo')`);
+ const durableSending=JSON.parse(sql(`set role service_role; select fn_mark_rep_sms_delivery_sending('${durableClaim.receiptId}','${durableClaim.claimToken}',${durableClaim.claimGeneration},'${durableMessage}')`));
+ assert.equal(durableSending.state,'sending');
+ const durableAccepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_result('${durableClaim.receiptId}','${durableClaim.claimToken}',${durableClaim.claimGeneration},'accepted','durable-provider-1','queued',null)`));
+ assert.equal(durableAccepted.state,'accepted');
+ // Delivery can win the race before the browser receives the accepted
+ // response. It remains recoverable until the later acknowledgement.
+ const durableDelivered=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_ledger_callback('sendillo','account-1','durable-provider-1','delivered','delivered',null,'{"messageId":"${durableMessage}"}','${org}','${durableClaim.receiptId}')`));
+ assert.equal(durableDelivered.state,'delivered');
+ assert.equal(sql(`select recovery_open from rep_sms_delivery_ledger where id='${durableClaim.receiptId}'`),'t');
+ const durableDraft=JSON.parse(as(rep,`select fn_get_rep_sms_delivery_draft('${property}')`));
+ assert.equal(durableDraft.draft.key,durableKey);
+ assert.equal(durableDraft.draft.receiptId,durableClaim.receiptId);
+ assert.equal(durableDraft.draft.body,'Durable draft text');
+ const competingDurableClaim=JSON.parse(sql(`set role service_role; select fn_claim_rep_sms_delivery_with_composition('${org}','${rep}','${id(78)}','${property}','${id(12)}','${senderId}','sendillo','account-1','${senderProviderId}','${senderPhone}','+18165551234','Durable draft text','${durableComposition}'::jsonb)`));
+ assert.equal(competingDurableClaim.ok,false);
+ assert.equal(competingDurableClaim.receiptId,durableClaim.receiptId);
+ assert.equal(competingDurableClaim.state,'delivered');
+ assert.equal(sql("select has_function_privilege('authenticated','public.fn_get_rep_sms_delivery_draft(uuid)','execute')"),'t');
+ assert.equal(sql("select has_function_privilege('authenticated','public.fn_ack_rep_sms_delivery_draft(uuid,uuid,uuid,uuid,uuid)','execute')"),'f');
+ assert.equal(sql("select has_function_privilege('service_role','public.fn_ack_rep_sms_delivery_draft(uuid,uuid,uuid,uuid,uuid)','execute')"),'t');
+ assert.throws(()=>as(rep,`select fn_ack_rep_sms_delivery_draft('${org}','${rep}','${property}','${id(12)}','${durableKey}')`),/permission denied/);
+ const durableAck=JSON.parse(sql(`set role service_role; select fn_ack_rep_sms_delivery_draft('${org}','${rep}','${property}','${id(12)}','${durableKey}')`));
+ assert.equal(durableAck.ok,true);
+ assert.equal(sql(`select recovery_open from rep_sms_delivery_ledger where id='${durableClaim.receiptId}'`),'f');
+ const durableAckReplay=JSON.parse(sql(`set role service_role; select fn_ack_rep_sms_delivery_draft('${org}','${rep}','${property}','${id(12)}','${durableKey}')`));
+ assert.equal(durableAckReplay.ok,true);
+ assert.equal(durableAckReplay.alreadyClosed,true);
+ const otherOrgLedgerKey=id(74);
+ const otherOrgLedgerClaim=JSON.parse(sql(`set role service_role; select fn_claim_rep_sms_delivery('${otherOrg}','${otherOrgRep}','${otherOrgLedgerKey}','${otherOrgProperty}','${otherOrgContact}','${otherOrgSenderId}','sendillo','account-1','${otherOrgSenderProviderId}','${otherOrgSenderPhone}','+18165551235','Other ledger text')`));
+ assert.equal(otherOrgLedgerClaim.ok,true);
+ const otherOrgLedgerMessage=id(75);
+ sql(`set role service_role; insert into messages(id,org_id,channel,direction,property_id,contact_id,body,status,from_address,to_address,provider) values('${otherOrgLedgerMessage}','${otherOrg}','sms','outbound','${otherOrgProperty}','${otherOrgContact}','Other ledger text','pending','${otherOrgSenderPhone}','+18165551235','sendillo')`);
+ const otherOrgLedgerSending=JSON.parse(sql(`set role service_role; select fn_mark_rep_sms_delivery_sending('${otherOrgLedgerClaim.receiptId}','${otherOrgLedgerClaim.claimToken}',${otherOrgLedgerClaim.claimGeneration},'${otherOrgLedgerMessage}')`));
+ assert.equal(otherOrgLedgerSending.state,'sending');
+ // The delivery ledger has the same global provider-account identity rule as
+ // obligations. A second tenant cannot bind the provider id already used by
+ // the primary tenant, even through the exact receipt callback overload.
+ const otherOrgLedgerCollision=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_ledger_callback('sendillo','account-1','ledger-provider-1','delivered','delivered',null,'{"messageId":"${otherOrgLedgerMessage}"}','${otherOrg}','${otherOrgLedgerClaim.receiptId}')`));
+ assert.equal(otherOrgLedgerCollision.matched,false);
+ assert.equal(otherOrgLedgerCollision.identityMismatch,true);
+ assert.equal(otherOrgLedgerCollision.providerMessageIdAlreadyBound,true);
+ assert.equal(sql(`select state from rep_sms_delivery_ledger where id='${otherOrgLedgerClaim.receiptId}'`),'sending');
+ assert.equal(sql(`select coalesce(provider_message_id,'<null>') from rep_sms_delivery_ledger where id='${otherOrgLedgerClaim.receiptId}'`),'<null>');
+ const otherOrgLedgerResultCollision=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_result('${otherOrgLedgerClaim.receiptId}','${otherOrgLedgerClaim.claimToken}',${otherOrgLedgerClaim.claimGeneration},'accepted','ledger-provider-1','queued',null)`));
+ assert.equal(otherOrgLedgerResultCollision.ok,false);
+ assert.equal(otherOrgLedgerResultCollision.providerMessageIdAlreadyBound,true);
+ assert.equal(otherOrgLedgerResultCollision.reason,'provider_message_id_already_bound');
+ assert.equal(sql(`select state from rep_sms_delivery_ledger where id='${otherOrgLedgerClaim.receiptId}'`),'sending');
+ const otherOrgLedgerUnknown=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_result('${otherOrgLedgerClaim.receiptId}','${otherOrgLedgerClaim.claimToken}',${otherOrgLedgerClaim.claimGeneration},'unknown',null,null,'provider request timed out')`));
+ assert.equal(otherOrgLedgerUnknown.state,'unknown');
+ const otherOrgLedgerUnknownCallback=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_ledger_callback('sendillo','account-1','ledger-unknown','delivered','delivered',null,'{"messageId":"${otherOrgLedgerMessage}","from":"${otherOrgSenderPhone}","to":"+18165551235","body":"Other ledger text"}','${otherOrg}','${otherOrgLedgerClaim.receiptId}')`));
+ assert.equal(otherOrgLedgerUnknownCallback.matched,false);
+ assert.equal(otherOrgLedgerUnknownCallback.reason,'provider_message_id_missing');
+ assert.equal(sql(`select state from rep_sms_delivery_ledger where id='${otherOrgLedgerClaim.receiptId}'`),'unknown');
+ assert.equal(sql(`select coalesce(provider_message_id,'<null>') from rep_sms_delivery_ledger where id='${otherOrgLedgerClaim.receiptId}'`),'<null>');
+ const forgedLedgerCallback=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_ledger_callback('sendillo','account-1','ledger-provider-1','delivered','delivered',null,'{"messageId":"${id(71)}"}','${org}','${ledgerClaim.receiptId}')`));
 assert.equal(forgedLedgerCallback.identityMismatch,true);
 const ledgerCallback=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_ledger_callback('sendillo','account-1','ledger-provider-1','delivered','delivered',null,'{"messageId":"${ledgerMessage}"}','${org}','${ledgerClaim.receiptId}')`));
 assert.equal(ledgerCallback.state,'delivered');
@@ -286,13 +410,42 @@ const failedKey=id(73);
 const failedClaim=JSON.parse(sql(`set role service_role; select fn_claim_rep_sms_delivery('${org}','${rep}','${failedKey}','${property}','${id(12)}','${senderId}','sendillo','account-1','${senderProviderId}','${senderPhone}','+18165551234','Retry ledger text')`));
 const failedResult=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_result('${failedClaim.receiptId}','${failedClaim.claimToken}',${failedClaim.claimGeneration},'failed_not_dispatched',null,null,'authorization failed before provider request')`));
 assert.equal(failedResult.state,'failed_not_dispatched');
-const failedRetry=JSON.parse(sql(`set role service_role; select fn_claim_rep_sms_delivery('${org}','${rep}','${failedKey}','${property}','${id(12)}','${senderId}','sendillo','account-1','${senderProviderId}','${senderPhone}','+18165551234','Retry ledger text')`));
-assert.equal(failedRetry.ok,true);assert.equal(Number(failedRetry.claimGeneration),2);
+ const failedRetry=JSON.parse(sql(`set role service_role; select fn_claim_rep_sms_delivery('${org}','${rep}','${failedKey}','${property}','${id(12)}','${senderId}','sendillo','account-1','${senderProviderId}','${senderPhone}','+18165551234','Retry ledger text')`));
+ assert.equal(failedRetry.ok,true);assert.equal(Number(failedRetry.claimGeneration),2);
+ // RLS must isolate every browser-readable rep-SMS relation in both
+ // directions. The delivery ledger is service-only, so authenticated users
+ // must be denied there rather than receiving another tenant's rows.
+ for (const table of ['rep_sms_sender_assignments','rep_sms_rollout_enrollments','rep_sms_obligations','rep_sms_obligation_audit']) {
+   assert.equal(as(rep,`select count(*) from ${table} where org_id='${otherOrg}'`),'0',`${table} leaked other-org rows to primary rep`);
+   assert.equal(as(otherOrgRep,`select count(*) from ${table} where org_id='${org}'`),'0',`${table} leaked primary-org rows to other-org rep`);
+ }
+ assert.throws(()=>as(rep,`select count(*) from rep_sms_delivery_ledger where org_id='${otherOrg}'`),/permission denied/);
+ assert.throws(()=>as(otherOrgRep,`select count(*) from rep_sms_delivery_ledger where org_id='${org}'`),/permission denied/);
+ // Reassignment invalidates both pre-claim and post-claim paths. A former
+ // actor cannot acquire a fresh claim, and a claim acquired before transfer
+ // cannot cross the final provider dispatch fence afterward.
+ const formerVersion=sql(`select version from acquisition_queue_states where org_id='${org}' and property_id='${property}'`);
+ const formerAttempt=JSON.parse(as(rep,`select fn_log_acquisition_attempt('${logInput(id(76),formerVersion)}'::jsonb)`));
+ const formerObligationId=as(rep,`select id from rep_sms_obligations where attempt_id='${formerAttempt.attemptId}'`);
+ sql(`update properties set assigned_user_id='${other}' where id='${property}'; update acquisition_assignment_episodes set ended_at=now() where id='${id(11)}'`);
+ const formerClaim=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${org}','${formerObligationId}','${rep}','${composition}'::jsonb)`));
+ assert.equal(formerClaim.state,'blocked');
+ assert.equal(formerClaim.reason,'current_assignment_changed');
+ sql(`update properties set assigned_user_id='${rep}' where id='${property}'; update acquisition_assignment_episodes set ended_at=null where id='${id(11)}'`);
+ const staleVersion=sql(`select version from acquisition_queue_states where org_id='${org}' and property_id='${property}'`);
+ const staleAttempt=JSON.parse(as(rep,`select fn_log_acquisition_attempt('${logInput(id(77),staleVersion)}'::jsonb)`));
+ const staleObligationId=as(rep,`select id from rep_sms_obligations where attempt_id='${staleAttempt.attemptId}'`);
+ const staleClaim=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${org}','${staleObligationId}','${rep}','${composition}'::jsonb)`));
+ assert.equal(staleClaim.state,'sending');
+ sql(`update properties set assigned_user_id='${other}' where id='${property}'; update acquisition_assignment_episodes set ended_at=now() where id='${id(11)}'`);
+ assert.throws(()=>sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${staleClaim.obligationId}','${staleClaim.claimToken}',${staleClaim.claimGeneration},'${rep}')`),/DISPATCH_FENCE_REJECTED: current_assignment_changed/);
+ sql(`update properties set assigned_user_id='${rep}' where id='${property}'; update acquisition_assignment_episodes set ended_at=null where id='${id(11)}'`);
  // A current assignee can read outstanding history, while the original actor
  // remains visible for audit. This tests the transfer side of RLS directly.
  sql(`update properties set assigned_user_id='${other}' where id='${property}'`);
- assert.equal(as(other,`select count(*) from rep_sms_obligations where org_id='${org}'`),'6');
- assert.equal(as(rep,`select count(*) from rep_sms_obligations where org_id='${org}'`),'6');
+ const primaryObligationCount=sql(`select count(*) from rep_sms_obligations where org_id='${org}'`);
+ assert.equal(as(other,`select count(*) from rep_sms_obligations where org_id='${org}'`),primaryObligationCount);
+ assert.equal(as(rep,`select count(*) from rep_sms_obligations where org_id='${org}'`),primaryObligationCount);
  sql(`update properties set assigned_user_id='${rep}' where id='${property}'`);
  // Once authorization has durably reached `sending`, an expired claim is
  // ambiguous because the provider may already have received the request.

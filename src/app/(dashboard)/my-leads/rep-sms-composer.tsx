@@ -15,8 +15,8 @@ import {
   type RepSmsComposition,
 } from "@/lib/messaging/rep-sms-composition"
 
-import type { RepSmsContext } from "@/lib/messaging/rep-sms"
-import { loadRepSmsContext, sendRepSms } from "./sms-actions"
+import type { RepSmsContext, RepSmsPendingSubmission } from "@/lib/messaging/rep-sms"
+import { acknowledgeRepSmsSubmission, loadRepSmsContext, sendRepSms } from "./sms-actions"
 
 /** The fixed identity used by Acquisitions texts. The remainder stays editable. */
 export const REP_SMS_INTRO = DEFAULT_REP_SMS_INTRODUCTION.body
@@ -57,6 +57,7 @@ type StoredRepSmsSubmission = {
   /** The sender and destination reviewed for this exact provider request. */
   orgId: string
   actorId: string
+  contactId: string
   createdAt: number
   assignmentId: string
   from: string
@@ -85,7 +86,7 @@ function clearLegacyRepSmsSubmission(propertyId: string): void {
   try { window.localStorage.removeItem(legacyRepSmsSubmissionStorageKey(propertyId)) } catch { /* best effort */ }
 }
 
-function readStoredRepSmsSubmission(orgId: string, actorId: string, propertyId: string): StoredRepSmsSubmission | null {
+function readStoredRepSmsSubmission(orgId: string, actorId: string, propertyId: string, contactId: string | null): StoredRepSmsSubmission | null {
   if (typeof window === "undefined") return null
   const key = repSmsSubmissionStorageKey(orgId, actorId, propertyId)
   try {
@@ -95,7 +96,7 @@ function readStoredRepSmsSubmission(orgId: string, actorId: string, propertyId: 
     const raw = window.localStorage.getItem(key)
     if (!raw) return null
     const value = JSON.parse(raw) as Partial<StoredRepSmsSubmission>
-    const validIdentity = value.orgId === orgId && value.actorId === actorId
+    const validIdentity = value.orgId === orgId && value.actorId === actorId && value.contactId === contactId
     const validTimestamp = typeof value.createdAt === "number" && Number.isFinite(value.createdAt) && value.createdAt > 0 && Date.now() - value.createdAt <= REP_SMS_SUBMISSION_TTL_MS
     const validRoute = typeof value.assignmentId === "string" && Boolean(value.assignmentId.trim()) && typeof value.from === "string" && Boolean(value.from.trim()) && typeof value.to === "string" && Boolean(value.to.trim())
     if (!value || typeof value.key !== "string" || !value.key.trim() || !value.composition || typeof value.composition !== "object" || !validIdentity || !validTimestamp || !validRoute) {
@@ -114,6 +115,7 @@ function readStoredRepSmsSubmission(orgId: string, actorId: string, propertyId: 
       composition,
       orgId,
       actorId,
+      contactId: contactId ?? "",
       createdAt: value.createdAt as number,
       assignmentId: value.assignmentId as string,
       from: value.from as string,
@@ -132,6 +134,45 @@ function writeStoredRepSmsSubmission(orgId: string, actorId: string, propertyId:
   } catch {
     // Private browsing or a full storage quota must not block a send. The
     // server key still protects the current request while this tab remains.
+  }
+}
+
+function restoreDurableRepSmsSubmission(
+  orgId: string,
+  actorId: string,
+  contactId: string,
+  draft: RepSmsPendingSubmission,
+): StoredRepSmsSubmission | null {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(draft.key) ||
+    !draft.key.trim() ||
+    !draft.receiptId.trim() ||
+    !draft.assignmentId.trim() ||
+    !draft.from.trim() ||
+    !draft.to.trim() ||
+    !draft.body.trim()
+  ) return null
+  try {
+    // The server ledger stores the full structured composition.  The body is
+    // the immutable fallback for a row created before that field existed;
+    // either path reconstructs the approved introduction and exact editable
+    // remainder without trusting browser state.
+    const composition = composeRepSms(draft.composition ?? { body: draft.body })
+    if (composition.finalBody !== draft.body.trim()) return null
+    const createdAt = draft.createdAt ? Date.parse(draft.createdAt) : NaN
+    return {
+      key: draft.key,
+      composition,
+      orgId,
+      actorId,
+      contactId,
+      createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
+      assignmentId: draft.assignmentId,
+      from: draft.from,
+      to: draft.to,
+    }
+  } catch {
+    return null
   }
 }
 
@@ -279,8 +320,32 @@ export function RepSmsComposer({
           setSendState({ status: "resume", message: "Saved follow-up ready to resume through its original obligation." })
         } else if (obligation && REVIEW_ONLY_OBLIGATION_STATES.has(obligation.status)) {
           setSendState({ status: "unknown", message: `${obligation.blockedReason ?? `Saved follow-up is ${obligation.status.replaceAll("_", " ")}.`} Automatic retry is disabled; review or close the obligation.` })
+        } else if (result.data.submission) {
+          const durable = restoreDurableRepSmsSubmission(result.data.orgId, result.data.actorId, result.data.contactId ?? "", result.data.submission)
+          if (!durable) {
+            setRestoredSubmissionBlocked(true)
+            setSendState({ status: "unknown", message: "The saved SMS request could not be reconstructed safely. Review text history before sending again." })
+            return
+          }
+          const savedSender = result.data.senders.find((candidate) => candidate.id === durable.assignmentId)
+          // A server-owned recovery row must keep the same sender assignment
+          // and number. Never fall back to a new default under its old key.
+          if (!savedSender || savedSender.number !== durable.from) {
+            setRestoredSubmissionBlocked(true)
+            setSendState({ status: "unknown", message: "The saved send cannot be safely restored because its exact texting number is no longer assigned. Ask an owner to restore that assignment, then retry." })
+            return
+          }
+          submission.current = durable
+          setSenderId(savedSender.id)
+          setIntroId(durable.composition.introId)
+          setSelectedTemplateId(durable.composition.templateId ?? "")
+          setRemainder(durable.composition.remainder)
+          const stateMessage = result.data.submission.state === "accepted" || result.data.submission.state === "delivered"
+            ? "A previous SMS was accepted by the provider. Reconcile the saved send before starting another message."
+            : "A previous SMS request needs reconciliation. The exact sender, recipient, and message are preserved."
+          setSendState({ status: "resume", message: stateMessage })
         } else {
-          const stored = readStoredRepSmsSubmission(result.data.orgId, result.data.actorId, propertyId)
+          const stored = readStoredRepSmsSubmission(result.data.orgId, result.data.actorId, propertyId, result.data.contactId)
           if (stored) {
             const savedSender = result.data.senders.find((sender) => sender.id === stored.assignmentId)
             // A browser retry can outlive an owner changing or revoking the
@@ -381,6 +446,7 @@ export function RepSmsComposer({
           composition: submittedComposition,
           orgId: context?.orgId ?? "",
           actorId: context?.actorId ?? "",
+          contactId: context?.contactId ?? "",
           createdAt: Date.now(),
           assignmentId: sender.id,
           from: sender.number,
@@ -423,11 +489,26 @@ export function RepSmsComposer({
           ? { ...next, message: `${detail} Your draft is preserved.` }
           : next)
         if (next.status === "accepted" || next.status === "delivered") {
-          if (!resumableObligationId) clearSubmission()
+          const messageId = "messageId" in result.data.outcome && typeof result.data.outcome.messageId === "string"
+            ? result.data.outcome.messageId
+            : undefined
+          if (!resumableObligationId) {
+            // The ledger intentionally stays recoverable until this later
+            // request succeeds. If the original action response was lost,
+            // reload uses the server draft and the same key instead of
+            // creating a second provider request.
+            const acknowledged = await acknowledgeRepSmsSubmission({ propertyId, idempotencyKey })
+            if (!acknowledged.ok) {
+              setSendState({ status: "unknown", message: "The SMS was accepted, but Sandra could not record the acknowledgement. The exact send is preserved; reconcile it before starting another message." })
+              if (onSent) onSent(messageId)
+              return
+            }
+            clearSubmission()
+          }
           setRemainder((current) => current === remainder ? "" : current)
           setSelectedTemplateId("")
           if (onSent) {
-            onSent("messageId" in result.data.outcome && typeof result.data.outcome.messageId === "string" ? result.data.outcome.messageId : undefined)
+            onSent(messageId)
           }
           if (resumableObligationId) {
             // The accepted obligation is intentionally omitted by the context

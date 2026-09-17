@@ -15,7 +15,7 @@ vi.mock("@/lib/messaging/rep-sms", async () => {
   return { ...actual, readRepSmsContext: mocks.readContext, dispatchRepSms: mocks.dispatch }
 })
 
-import { sendRepSms } from "./sms-actions"
+import { acknowledgeRepSmsSubmission, sendRepSms } from "./sms-actions"
 
 const composition = {
   introId: "mel-maria-assistant-1",
@@ -43,6 +43,39 @@ beforeEach(() => {
 })
 
 describe("resumed rep SMS obligations", () => {
+  it("acknowledges a generic send only through its server-owned submission scope", async () => {
+    const key = "11111111-1111-4111-8111-111111111111"
+    mocks.readContext.mockResolvedValue({
+      ...baseContext("none"),
+      obligation: null,
+      submission: {
+        key,
+        receiptId: "receipt-1",
+        state: "accepted",
+        assignmentId: "sender-1",
+        from: "+18163706846",
+        to: "+18165550123",
+        body: composition.initialBody,
+        composition,
+        providerMessageId: "provider-1",
+        providerError: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    })
+
+    const result = await acknowledgeRepSmsSubmission({ propertyId: "property-1", idempotencyKey: key })
+
+    expect(result).toEqual({ ok: true, data: { ok: true, state: "accepted" } })
+    expect(mocks.adminRpc).toHaveBeenCalledWith("fn_ack_rep_sms_delivery_draft", {
+      p_org_id: "org-1",
+      p_actor_id: "rep-1",
+      p_property_id: "property-1",
+      p_contact_id: "contact-1",
+      p_submission_key: key,
+    })
+  })
+
   it("strips a forged internal fence from the public generic-send payload", async () => {
     mocks.readContext.mockResolvedValue({ ...baseContext("required"), obligation: null })
     mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "message-1", externalId: "provider-1" })

@@ -113,14 +113,26 @@ begin
       and v_o.provider_message_id is distinct from v_provider_message_id then
       return jsonb_build_object('ok',false,'matched',false,'messageIdMismatch',true);
     end if;
+    -- Provider message ids are scoped by provider account, not tenant. Check
+    -- every organization before binding an id so a cross-org collision is a
+    -- safe no-op instead of surfacing a unique-index error or stealing a
+    -- receipt from another tenant.
     if exists(
       select 1 from public.rep_sms_obligations other
-      where other.org_id=p_org_id and other.provider=v_o.provider
+      where other.provider=v_o.provider
         and other.provider_account_id=v_provider_account_id
         and other.provider_message_id=v_provider_message_id
         and other.id is distinct from v_o.id
     ) then
       return jsonb_build_object('ok',false,'matched',false,'messageIdAlreadyBound',true);
+    end if;
+    -- An expired/ambiguous obligation with no provider id has no evidence
+    -- tying this callback to the original send. The explicit obligation-id
+    -- overload is only a race bridge for an in-flight send; it must not turn
+    -- an unknown null-id row into a matched delivery based on tenant or
+    -- message payload fields alone.
+    if v_o.state='unknown' and v_o.provider_message_id is null then
+      return jsonb_build_object('ok',false,'matched',false,'reason','provider_message_id_missing');
     end if;
     if v_o.provider_message_id is null then
       update public.rep_sms_obligations

@@ -698,6 +698,19 @@ begin
     raise exception 'FAILURE_REQUIRES_REASON' using errcode='22023';
   end if;
   v_id:=nullif(btrim(coalesce(p_provider_message_id,v_o.provider_message_id,'')),'');
+  -- Provider message ids are global within a provider account. Return a
+  -- deterministic collision result before the unique index can abort the
+  -- worker transaction and leave callback reconciliation ambiguous.
+  if p_state='accepted' and exists(
+    select 1 from public.rep_sms_obligations other
+    where other.provider is not distinct from v_o.provider
+      and other.provider_account_id=v_o.provider_account_id
+      and other.provider_message_id=v_id
+      and other.id is distinct from v_o.id
+  ) then
+    return jsonb_build_object('ok',false,'obligationId',v_o.id,'state',v_o.state,
+      'reason','provider_message_id_already_bound','providerMessageIdAlreadyBound',true);
+  end if;
   v_claim_state:=case when p_state='accepted' then 'complete' else 'unclaimed' end;
   v_accepted:=case when p_state='accepted' then v_now else v_o.accepted_at end;
   v_delivered:=v_o.delivered_at;
