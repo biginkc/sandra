@@ -70,6 +70,41 @@ BEGIN
  IF o IS NULL OR requester IS NULL OR k IS NULL OR preparation_id IS NULL THEN RAISE EXCEPTION 'Invalid accept identity';END IF;
  -- 2. Admission: keeps accept inert while the flag/admission are off.
  PERFORM inbox_reply_review.require_admission();
+ -- Astra round-3 finding: an identical retry (same org,requester,key,
+ -- preparation) that starts before the winner commits, then gets delayed
+ -- past prep.expires_at by ANY lock wait further down (e.g. item_current's
+ -- sender/head FOR SHARE), would reach the expiry check below BEFORE the
+ -- winner's row was visible to its own step-3 pre-check — raising a
+ -- spurious INBOX_REPLY_PREPARATION_EXPIRED for a request that was, in
+ -- fact, already accepted. A client retrying after a dropped response must
+ -- ALWAYS get the operation back, never a spurious expiry.
+ --
+ -- Fix (authoritative serialization, taken as the FIRST locking step, right
+ -- after admission and BEFORE step 3): a transaction-scoped advisory lock
+ -- keyed on (org,requester,key). Two identical-key accepts now serialize
+ -- completely — the second blocks HERE until the first commits (the xact
+ -- lock auto-releases at commit/rollback), so its step-3 pre-check
+ -- authoritatively sees the committed operation and replays it before ever
+ -- reaching the expiry check. Expiry then only ever rejects a GENUINELY
+ -- unaccepted preparation (no competing operation for this exact key). This
+ -- also subsumes the insert-time unique-violation race the exception
+ -- handler below resolves — that handler stays as defense in depth, never
+ -- the primary mechanism.
+ --
+ -- pg_advisory_XACT_lock (not the session-scoped variant): the lock must
+ -- release automatically at this transaction's end, never require an
+ -- explicit unlock call this function doesn't make. Keyed by (org,requester,
+ -- key) only — DIFFERENT keys never contend, so unrelated accepts are
+ -- unaffected; identical keys always serialize. Taken first (before every
+ -- other lock in this function — require_admission()'s FOR SHARE,
+ -- authorize()'s access-epoch FOR SHARE, item_current()'s sender/head FOR
+ -- SHARE), so there is no lock-order inversion with any of them: this
+ -- advisory lock is never acquired AFTER a row lock in the same
+ -- transaction, only before. The expiry read itself stays exactly where it
+ -- was — the LAST statement before the insert, after every row-lock-
+ -- capable statement — so the expiry-after-locks invariant is unchanged;
+ -- this advisory lock is additional, not a replacement.
+ PERFORM pg_advisory_xact_lock(hashtextextended(o::text||':'||requester::text||':'||k::text,0));
  -- 3. Idempotent-replay resolution, before any insert.
  SELECT * INTO existing_op FROM inbox_reply_send.operations WHERE org_id=o AND requester_id=requester AND idempotency_key=k;
  IF FOUND THEN

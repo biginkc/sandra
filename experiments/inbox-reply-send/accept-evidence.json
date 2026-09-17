@@ -6,10 +6,10 @@
   "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
   "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
   "inbox-reply-send/attempts.sql": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9",
-  "inbox-reply-send/accept.sql": "81fc1830498e59792e880a89c7bd801179030ca1360dbb54a0644e9e886dba2a",
+  "inbox-reply-send/accept.sql": "375fcb63bdd59e14168f49b05e46ab33f2f4f55c04e72ea5242b4165f6a54621",
   "inbox-reply-send/public-api.sql": "4d5e1c7d76bd3464ca12c68d0a173bc6a58c3bc1e743d2e6f69b0b57da79fe0e"
  },
- "runner_sha256": "b077b6a7d3c261ba000408f596af848cac95aeb1d908d76c1088257773b0599b",
+ "runner_sha256": "7e028b51bc3b1cd82f48bc570e4d24385eefc0aa7b91c26dc4ea69d98ef41607",
  "checks": [
   "constraint-name ground truth: pg_constraint confirms operations UNIQUE(org_id,preparation_id)='operations_org_id_preparation_id_key' and UNIQUE(org_id,requester_id,idempotency_key)='operations_org_id_requester_id_idempotency_key_key' match accept.sql's exception-mapping literals exactly",
   "accept happy path: 1 operation, 3 attempts (approved), 1 outbox row",
@@ -33,6 +33,9 @@
   "concurrency #10d: a REAL lock wait (observed) on the sender row delays accept() past its preparation's expires_at -> still rejects with INBOX_REPLY_PREPARATION_EXPIRED (time-after-locks), zero rows, sanitized",
   "MUTATION watched fail: the OLD name-routed exception block makes the same-key race's LOSER wrongly raise INBOX_REPLY_PREPARATION_ACCEPTED instead of replaying the winner's operationId",
   "RESTORED and re-verified byte-exact against source; concurrency #10e: the SAME same-key race now returns the IDENTICAL operationId to both the winner and the loser (regardless of which operations unique index Postgres reports first), exactly one operation/attempt/outbox row total",
+  "MUTATION watched fail: without the advisory lock, an identical retry racing behind the winner (delayed past expires_at) wrongly raises INBOX_REPLY_PREPARATION_EXPIRED instead of replaying the winner's operationId",
+  "RESTORED and re-verified byte-exact against source; concurrency #10f: the expiry-boundary idempotency race \u2014 an identical retry genuinely blocked on the advisory lock (observed) while expires_at lapses underneath it still replays the winner's operationId, exactly one operation/attempt/outbox row total",
+  "non-regression (already proven above by tests #5 and #10d, both against the fixed code with the advisory lock installed): a genuinely-unaccepted expired preparation with NO competing operation for its key still raises INBOX_REPLY_PREPARATION_EXPIRED \u2014 the advisory lock does not over-correct",
   "final state: accept/recover/operation_status all byte-exact against accept.sql source"
  ]
 }

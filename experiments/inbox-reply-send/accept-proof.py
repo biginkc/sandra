@@ -509,6 +509,49 @@ try:
  need((opsE,attsE,outboxE)==(0,0,0),f'#10d a lock-delayed accept past expiry must create ZERO rows: {(opsE,attsE,outboxE)}')
  record('concurrency #10d: a REAL lock wait (observed) on the sender row delays accept() past its preparation\'s expires_at -> still rejects with INBOX_REPLY_PREPARATION_EXPIRED (time-after-locks), zero rows, sanitized')
 
+ # Shared mutation text: the round-3 advisory-lock block (top of the
+ # function, right after admission). #10e's mutant strips it too, because
+ # WITH it present, two identical-key connections fully serialize before
+ # ever reaching the exception-handler code #10e targets — masking that
+ # bug entirely. #10f's mutant strips ONLY this block (keeping the round-2
+ # exception-handler fix), to isolate the round-3 fix specifically.
+ advisory_lock_block=""" -- Astra round-3 finding: an identical retry (same org,requester,key,
+ -- preparation) that starts before the winner commits, then gets delayed
+ -- past prep.expires_at by ANY lock wait further down (e.g. item_current's
+ -- sender/head FOR SHARE), would reach the expiry check below BEFORE the
+ -- winner's row was visible to its own step-3 pre-check — raising a
+ -- spurious INBOX_REPLY_PREPARATION_EXPIRED for a request that was, in
+ -- fact, already accepted. A client retrying after a dropped response must
+ -- ALWAYS get the operation back, never a spurious expiry.
+ --
+ -- Fix (authoritative serialization, taken as the FIRST locking step, right
+ -- after admission and BEFORE step 3): a transaction-scoped advisory lock
+ -- keyed on (org,requester,key). Two identical-key accepts now serialize
+ -- completely — the second blocks HERE until the first commits (the xact
+ -- lock auto-releases at commit/rollback), so its step-3 pre-check
+ -- authoritatively sees the committed operation and replays it before ever
+ -- reaching the expiry check. Expiry then only ever rejects a GENUINELY
+ -- unaccepted preparation (no competing operation for this exact key). This
+ -- also subsumes the insert-time unique-violation race the exception
+ -- handler below resolves — that handler stays as defense in depth, never
+ -- the primary mechanism.
+ --
+ -- pg_advisory_XACT_lock (not the session-scoped variant): the lock must
+ -- release automatically at this transaction's end, never require an
+ -- explicit unlock call this function doesn't make. Keyed by (org,requester,
+ -- key) only — DIFFERENT keys never contend, so unrelated accepts are
+ -- unaffected; identical keys always serialize. Taken first (before every
+ -- other lock in this function — require_admission()'s FOR SHARE,
+ -- authorize()'s access-epoch FOR SHARE, item_current()'s sender/head FOR
+ -- SHARE), so there is no lock-order inversion with any of them: this
+ -- advisory lock is never acquired AFTER a row lock in the same
+ -- transaction, only before. The expiry read itself stays exactly where it
+ -- was — the LAST statement before the insert, after every row-lock-
+ -- capable statement — so the expiry-after-locks invariant is unchanged;
+ -- this advisory lock is additional, not a replacement.
+ PERFORM pg_advisory_xact_lock(hashtextextended(o::text||':'||requester::text||':'||k::text,0));
+"""
+
  # #10e (Astra round-2 BLOCKER 1): the identical-request race. Two real
  # connections both call accept() with the EXACT SAME (org,requester,key,
  # preparation) — a genuine same-key retry racing itself, not two different
@@ -598,7 +641,12 @@ try:
     END IF;
 """
  need(new_block in real_body,'#10e mutation anchor (new combined branch) not found in current source — has accept.sql drifted?')
- mutant=real_body.replace(new_block,old_buggy_block)
+ need(advisory_lock_block in real_body,'#10e mutation anchor (advisory lock block) not found in current source — has accept.sql drifted?')
+ # Strip the round-3 advisory lock TOO: with it present, two identical-key
+ # connections fully serialize before either ever reaches the insert/
+ # exception-handler code at all, which would mask the round-2 bug this
+ # test targets. Isolating #10e means reverting to the pre-round-3 state.
+ mutant=real_body.replace(new_block,old_buggy_block).replace(advisory_lock_block,'')
  need(mutant!=real_body,'#10e mutation produced no change')
  sql(mutant)
  winner_op,loser_outcome=samekey_race(oG,uG,kG,prepG)
@@ -617,6 +665,78 @@ try:
  opsG2,attsG2,outboxG2=counts(oG2)
  need((opsG2,attsG2,outboxG2)==(1,1,1),f'#10e fixed code: the race must still produce exactly ONE operation total: {(opsG2,attsG2,outboxG2)}')
  record('RESTORED and re-verified byte-exact against source; concurrency #10e: the SAME same-key race now returns the IDENTICAL operationId to both the winner and the loser (regardless of which operations unique index Postgres reports first), exactly one operation/attempt/outbox row total')
+
+ # #10f (Astra round-3 BLOCKER: expiry-boundary idempotency race). An
+ # identical retry that starts BEFORE the winner commits, then is delayed
+ # (by a lock wait) until AFTER the preparation's expires_at has lapsed,
+ # must STILL replay the winner's operationId — never a spurious
+ # INBOX_REPLY_PREPARATION_EXPIRED. The advisory lock added above is the
+ # authoritative fix: the retry blocks on IT (observable, first statement),
+ # so it can never reach its own expiry check before the winner's step-3
+ # pre-check has a chance to see the committed operation.
+ def samekey_expiry_race(oI,uI,kI,prepI,expect_lock_wait):
+  """Winner (A) holds an in-flight accept for (oI,uI,kI,prepI); the
+  preparation is pushed past its own expires_at WHILE A is still
+  uncommitted; an identical retry (B) then attempts the SAME accept.
+  Returns (winner_op_id, ('ok',op_id)|('error',message))."""
+  claimsI=json.dumps({'sub':uI,'role':'authenticated','session_id':SESS[uI],'exp':4102444800})
+  wnameI='pr-e-expiryrace-writer-'+str(uuid.uuid4())
+  writerI=start(f"SET application_name='{wnameI}';BEGIN;SET LOCAL request.jwt.claims='{claimsI}';SELECT inbox_reply_send.accept('{oI}','{uI}','{kI}','{prepI}');SELECT pg_sleep(3);COMMIT;")
+  wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wnameI}' AND wait_event='PgSleep')",'#10f writer did not hold its in-flight (uncommitted) operation')
+  # Push the preparation past its own expiry WHILE the winner is still
+  # in-flight — models "delayed past expires_at" for the retry regardless
+  # of exactly which statement does the delaying.
+  sql(f"ALTER TABLE inbox_reply_review.preparations DISABLE TRIGGER immutable_reply_preparation;"
+      f"UPDATE inbox_reply_review.preparations SET expires_at=clock_timestamp()-interval '1 second' WHERE id='{prepI}';"
+      f"ALTER TABLE inbox_reply_review.preparations ENABLE TRIGGER immutable_reply_preparation;")
+  rnameI='pr-e-expiryrace-retry-'+str(uuid.uuid4())
+  retryI=start(f"SET application_name='{rnameI}';BEGIN;SET LOCAL request.jwt.claims='{claimsI}';SELECT inbox_reply_send.accept('{oI}','{uI}','{kI}','{prepI}');COMMIT;")
+  if expect_lock_wait:
+   wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{rnameI}' AND wait_event_type='Lock')",'#10f retry did not genuinely block on the advisory lock')
+  winner_out=finish(writerI,'#10f writer (A) should commit cleanly')
+  winner_op=json.loads(winner_out.split('\n',1)[0])['operation_id']
+  out,err=retryI.communicate(timeout=12)
+  if retryI.returncode==0:
+   return winner_op,('ok',json.loads(out.strip().split('\n',1)[0])['operation_id'])
+  else:
+   return winner_op,('error',err)
+
+ # MUTATION-FIRST: remove the advisory lock (revert to the round-2 source,
+ # before this fix) and watch the SAME race reproduce Astra's exact bug —
+ # the retry has nothing to block on, races ahead of the winner's commit,
+ # and independently reaches the (already-lapsed) expiry check.
+ restore_fn('inbox_reply_send.accept')
+ real_body=real_fn('inbox_reply_send.accept')
+ need(advisory_lock_block in real_body,'#10f mutation anchor (advisory lock block) not found in current source — has accept.sql drifted?')
+ mutant=real_body.replace(advisory_lock_block,'')
+ need(mutant!=real_body,'#10f mutation produced no change')
+ sql(mutant)
+ oI,uI,kI,prepI,_,_=make_org_and_prep('+157255',n=1)
+ winner_opI,retry_outcomeI=samekey_expiry_race(oI,uI,kI,prepI,expect_lock_wait=False)
+ need(retry_outcomeI[0]=='error' and 'INBOX_REPLY_PREPARATION_EXPIRED' in retry_outcomeI[1],
+  f'#10f mutant should have reproduced Astra\'s exact bug (retry wrongly raises PREPARATION_EXPIRED instead of replaying winner operationId {winner_opI}); got {retry_outcomeI}')
+ record('MUTATION watched fail: without the advisory lock, an identical retry racing behind the winner (delayed past expires_at) wrongly raises INBOX_REPLY_PREPARATION_EXPIRED instead of replaying the winner\'s operationId')
+
+ # Restore the FIXED code and re-run the IDENTICAL race: the retry now
+ # genuinely blocks on the advisory lock (observed via pg_stat_activity),
+ # then replays the winner's operationId once unblocked — never reaching
+ # its own expiry check.
+ restore_and_verify('inbox_reply_send.accept')
+ oI2,uI2,kI2,prepI2,_,_=make_org_and_prep('+158255',n=1)
+ winner_opI2,retry_outcomeI2=samekey_expiry_race(oI2,uI2,kI2,prepI2,expect_lock_wait=True)
+ need(retry_outcomeI2[0]=='ok',f'#10f fixed code: retry should replay (idempotent), got error: {retry_outcomeI2}')
+ need(retry_outcomeI2[1]==winner_opI2,f'#10f fixed code: retry returned a DIFFERENT operationId ({retry_outcomeI2[1]}) than the winner ({winner_opI2})')
+ opsI2,attsI2,outboxI2=counts(oI2)
+ need((opsI2,attsI2,outboxI2)==(1,1,1),f'#10f fixed code: the expiry-boundary race must still produce exactly ONE operation total: {(opsI2,attsI2,outboxI2)}')
+ record('RESTORED and re-verified byte-exact against source; concurrency #10f: the expiry-boundary idempotency race — an identical retry genuinely blocked on the advisory lock (observed) while expires_at lapses underneath it still replays the winner\'s operationId, exactly one operation/attempt/outbox row total')
+
+ # Non-regression: a GENUINELY unaccepted (no competing operation) expired
+ # preparation must STILL raise PREPARATION_EXPIRED — the advisory lock
+ # must never over-correct into accepting past-expiry preparations outright.
+ # Already covered by test #5 (single-connection) and #10d (two-connection,
+ # lock-delayed) earlier in this run, both executed against this SAME fixed
+ # code; re-affirmed here for the record.
+ record('non-regression (already proven above by tests #5 and #10d, both against the fixed code with the advisory lock installed): a genuinely-unaccepted expired preparation with NO competing operation for its key still raises INBOX_REPLY_PREPARATION_EXPIRED — the advisory lock does not over-correct')
 
  for fn in ['inbox_reply_send.accept','inbox_reply_send.recover','inbox_reply_send.operation_status']:
   assert_body_matches(fn)
