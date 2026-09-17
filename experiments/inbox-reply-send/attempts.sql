@@ -35,8 +35,15 @@
 --    see the exact same (stale) data as the pre-marker call and silently
 --    miss a suppression committed during the marker's lock-wait — reverting
 --    R3 without any code path looking broken. item_current() and
---    start_dispatch() both assert READ COMMITTED and raise
---    INBOX_REPLY_UNSUPPORTED_ISOLATION (0A000) otherwise. THIS IS A BINDING
+--    start_dispatch() both assert READ COMMITTED, as their VERY FIRST
+--    statement (before any lock — start_dispatch's assert precedes its own
+--    FOR UPDATE, so a REPEATABLE READ/SERIALIZABLE caller is rejected
+--    immediately rather than left blocking toward a lock timeout), and raise
+--    INBOX_REPLY_UNSUPPORTED_ISOLATION (0A000) otherwise. guard_attempt()'s
+--    claimed->dispatch_started (marker) transition asserts the SAME thing
+--    independently (R5): a caller that writes the marker via a direct
+--    UPDATE, bypassing start_dispatch entirely, has no function-body assert
+--    to catch it, so the trigger itself closes that hole. THIS IS A BINDING
 --    CONTRACT ON PR-F: the reply worker MUST call start_dispatch() (and thus
 --    item_current()) under READ COMMITTED — Postgres's default — and must
 --    never raise the isolation level for that connection/transaction, in the
@@ -211,6 +218,19 @@ BEGIN
    IF NEW.generation<=OLD.generation THEN RAISE EXCEPTION 'Reclaim must strictly increase generation';END IF;
   WHEN OLD.state='claimed' AND NEW.state='dispatch_started' THEN
    IF NEW.dispatch_started_at IS NULL OR NEW.dispatch_token IS NULL THEN RAISE EXCEPTION 'Dispatch marker must be set exactly once here';END IF;
+   -- R5 defense-in-depth (same pattern as the R3-2b window-expiry check
+   -- immediately below): the marker edge is the ONE transition whose
+   -- correctness depends on start_dispatch's post-marker eligibility
+   -- recheck taking a fresh READ COMMITTED snapshot. A caller that bypasses
+   -- start_dispatch entirely (a direct UPDATE) has no function-body assert
+   -- to catch it, so the trigger itself rejects the marker write outright
+   -- under any other isolation level — independent of any function-body
+   -- bug, and independent of start_dispatch's own assert. Deliberately NOT
+   -- applied to any other transition: claim/skip/persist edges do not carry
+   -- this eligibility-snapshot dependency.
+   IF current_setting('transaction_isolation')<>'read committed' THEN
+    RAISE EXCEPTION 'INBOX_REPLY_UNSUPPORTED_ISOLATION' USING ERRCODE='0A000';
+   END IF;
    -- R3-2b defense-in-depth (same D-3/P-GATE-4 pattern as the INSERT path,
    -- which already pays this one-row frozen_item() read): a marker whose
    -- own timestamp is already past the frozen conversation window is
@@ -335,17 +355,21 @@ END $$;
 CREATE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;ev text;token uuid;cn text;
 BEGIN
+ -- R4/R5 (binding, isolation contract, same as item_current): this MUST be
+ -- the very first statement, before the FOR UPDATE row lock below. Under
+ -- REPEATABLE READ/SERIALIZABLE a caller sharing a sender with an
+ -- in-flight dispatch would otherwise block on the attempt row's FOR
+ -- UPDATE (or the sender-inflight index later) and surface as a lock
+ -- timeout instead of a clean, immediate rejection — belt-and-suspenders
+ -- with the item_current assert, since a caller could theoretically
+ -- bypass item_current entirely. Reading current_setting() needs no lock.
+ IF current_setting('transaction_isolation')<>'read committed' THEN
+  RAISE EXCEPTION 'INBOX_REPLY_UNSUPPORTED_ISOLATION' USING ERRCODE='0A000';
+ END IF;
  PERFORM inbox_reply_review.require_admission();
  SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
  IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
   RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
- END IF;
- -- R4 (binding, isolation contract, same as item_current): fail fast, before
- -- any write, if a future caller ever invokes start_dispatch outside READ
- -- COMMITTED — belt-and-suspenders with the item_current assert, since a
- -- caller could theoretically bypass item_current entirely.
- IF current_setting('transaction_isolation')<>'read committed' THEN
-  RAISE EXCEPTION 'INBOX_REPLY_UNSUPPORTED_ISOLATION' USING ERRCODE='0A000';
  END IF;
  frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');

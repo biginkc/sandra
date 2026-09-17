@@ -18,7 +18,7 @@ for path in sources:
     if hashlib.sha256(path.read_bytes()).hexdigest()!=concurrency['sources_sha256'][key]:raise SystemExit(f'Stale concurrency.py evidence: {key}')
 if hashlib.sha256((p/'concurrency-setup.sql').read_bytes()).hexdigest()!=concurrency['setup_sha256']:raise SystemExit('Stale evidence: concurrency-setup.sql')
 if hashlib.sha256((p/'concurrency.py').read_bytes()).hexdigest()!=concurrency['runner_sha256']:raise SystemExit('Stale evidence: concurrency.py')
-if len(concurrency['checks'])!=22:raise SystemExit('Expected twenty-two concurrency.py proof groups')
+if len(concurrency['checks'])!=26:raise SystemExit('Expected twenty-six concurrency.py proof groups')
 
 # Cross-binding: both evidence files must be reporting on the SAME attempts.sql.
 if manifest['sources']['inbox-reply-send/attempts.sql']!=concurrency['sources_sha256']['inbox-reply-send/attempts.sql']:
@@ -33,4 +33,4 @@ if manifest['sources']['inbox-reply-send/attempts.sql']!=concurrency['sources_sh
 # from attempts.sql and read back pg_get_functiondef() on the live database
 # before each positive control, so a stale restore fails loudly inside the
 # harness run itself rather than silently passing this hash check.
-print('PR-D send-attempt ledger evidence (run.py + concurrency.py) matches its exact source; 48 proof groups bound')
+print('PR-D send-attempt ledger evidence (run.py + concurrency.py) matches its exact source; 52 proof groups bound')

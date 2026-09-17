@@ -73,6 +73,17 @@ def restore_fn(qualified_name):
  """Reinstall the exact candidate definition of qualified_name from
  attempts.sql (never a hand-typed copy)."""
  sql(real_fn(qualified_name))
+def real_fn_minus_block(qualified_name,start_marker,num_lines):
+ """Same as real_fn, but with the num_lines-line block starting at the
+ single line containing start_marker removed — used ONLY for a deliberate
+ block-removed mutation, so every OTHER line (including later rounds'
+ additions) still matches the candidate exactly; only the one intended
+ block is missing."""
+ lines=real_fn(qualified_name).split('\n')
+ idxs=[i for i,l in enumerate(lines) if start_marker in l]
+ if len(idxs)!=1:raise RuntimeError(f'real_fn_minus_block: {start_marker!r} found {len(idxs)} times (expected 1) in {qualified_name}')
+ idx=idxs[0]
+ return '\n'.join(lines[:idx]+lines[idx+num_lines:])
 def assert_installed(qualified_name,*needles):
  """Runtime guard against a stale restore: read back what's ACTUALLY
  installed (pg_get_functiondef), not what we intended to install, and fail
@@ -168,6 +179,12 @@ END $mut$;""")
  need(sql(f"SELECT generation FROM inbox_reply_send.attempts WHERE id='{a2}'")=='2','#1-mut expected exactly two stacked generation bumps (the double-claim)')
  checks.append('#1 mutation: claim() redefined without FOR UPDATE — the reader still blocks on the writer row lock (its own UPDATE has no state re-check), but on unblocking it blindly re-applies the transition: both connections report {kind:claimed} for the same row, generation double-bumped to 2 — the real double-claim the FOR UPDATE + reclaim predicate prevents; restored below')
  restore_fn('inbox_reply_send.claim')
+ # P2/R5 assert_installed equivalent (same pattern as run.py's claim
+ # restores): read back what is ACTUALLY installed and fail loudly if the
+ # dispatch_started_at IS NULL reclaim guard is missing, so a stale/hand-
+ # inlined restore can never silently ship a claim() missing a later
+ # round's fix.
+ assert_installed('inbox_reply_send.claim','dispatch_started_at IS NULL')
  # Reconfirm the restored guard blocks again on a third fresh row (a7 held
  # in reserve for exactly this).
  wname3='dc-restore-writer-'+str(uuid.uuid4());rname3='dc-restore-reader-'+str(uuid.uuid4())
@@ -532,7 +549,7 @@ END $mut$;""")
  need(count_broken=='3',f'P2.3 control expected 3 distinct items to overrun a cap of 2, got {count_broken}')
  checks.append(f'P2.3 positive control: with FOR NO KEY UPDATE removed from the INSERT trigger, two real connections concurrently inserting different items (B, C) into the same operation under a cap of 2 BOTH commit — {count_broken} distinct items admitted, one past the cap — the exact overrun the fix prevents')
  restore_fn('inbox_reply_send.guard_attempt')
- assert_installed('inbox_reply_send.guard_attempt','INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER')
+ assert_installed('inbox_reply_send.guard_attempt','INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER','INBOX_REPLY_UNSUPPORTED_ISOLATION')
  sql("CREATE OR REPLACE FUNCTION inbox_reply_preparation.recipient_limit() RETURNS integer LANGUAGE sql IMMUTABLE SET search_path='' AS $$ SELECT 50 $$;")
 
  # === Race#1 (R3-1): the marker UPDATE itself can block on the D-6(5)
@@ -816,7 +833,7 @@ END $mut$;""")
  # unique_violation are caught), aborting the whole call; the row is left
  # exactly as it was before the call (claimed).
  restore_fn('inbox_reply_send.guard_attempt')
- assert_installed('inbox_reply_send.guard_attempt','INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER')
+ assert_installed('inbox_reply_send.guard_attempt','INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER','INBOX_REPLY_UNSUPPORTED_ISOLATION')
  item21,conv21=fetch_item(prep_id,21)
  attZ3=insert_attempt(org,op_id,prep_id,item21)
  sql(f"SELECT inbox_reply_send.claim('{org}','{attZ3}',60)")
@@ -887,14 +904,19 @@ END $mut$;""")
  need(rowY4=='claimed|t|t',f'R4b: row Y mutated despite the isolation assert raising: {rowY4}')
  checks.append("R4b (Codex's exact repro, real connections): B opened a genuine REPEATABLE READ transaction and called start_dispatch for Y (sharing X's sender) while A held an uncommitted marker for X — B raised INBOX_REPLY_UNSUPPORTED_ISOLATION immediately (before ever blocking on the sender-inflight index), row Y untouched (still claimed, no marker, no token); A's rollback is independent of B's outcome")
 
- # --- R4c: MUTATION — remove the isolation assert from both item_current()
- # and start_dispatch() (revert to the round-3 bodies) and rerun the IDENTICAL
- # R4b race. Without the assert, B genuinely blocks on the sender-inflight
- # index (like Race#1), and once A rolls back, B's post-marker item_current()
- # call reuses B's OWN pinned REPEATABLE READ snapshot — taken before C's
- # suppression committed — so it does NOT see the suppression and wrongly
- # dispatches with a token to a now-suppressed destination: the exact defect
- # Codex reproduced.
+ # --- R4c: MUTATION — remove the isolation assert from item_current(),
+ # start_dispatch() (revert to the round-3 bodies), AND guard_attempt()'s
+ # marker-edge trigger check (the R5 defense-in-depth added independently
+ # of these two — without also stripping it, the trigger now closes this
+ # hole on its own before B ever reaches the sender-inflight index, which
+ # would prevent this mutation from reproducing the underlying race at
+ # all) — then rerun the IDENTICAL R4b race. With all three guards gone, B
+ # genuinely blocks on the sender-inflight index (like Race#1), and once A
+ # rolls back, B's post-marker item_current() call reuses B's OWN pinned
+ # REPEATABLE READ snapshot — taken before C's suppression committed — so
+ # it does NOT see the suppression and wrongly dispatches with a token to
+ # a now-suppressed destination: the exact defect Codex reproduced.
+ sql(real_fn_minus_block('inbox_reply_send.guard_attempt',"IF current_setting('transaction_isolation')<>'read committed' THEN",3))
  sql(r"""CREATE OR REPLACE FUNCTION inbox_reply_send.item_current(o uuid,item jsonb) RETURNS text LANGUAGE plpgsql SET search_path='' AS $mut$
 DECLARE qh jsonb;policy_result jsonb;sender public.provider_sender_numbers;head public.inbox_inbound_heads;
 BEGIN
@@ -964,17 +986,20 @@ END $mut$;""")
  need(connA4m.returncode==0,f'R4c A (rollback) unexpectedly failed: {errA4m}')
  outB4m,errB4m=connB4m.communicate(timeout=12);children=[]
  need(connB4m.returncode==0 and '"kind": "dispatch"' in outB4m,f'R4c did not actually reproduce the REPEATABLE READ defect (expected B to wrongly dispatch): rc={connB4m.returncode} out={outB4m!r} err={errB4m!r}')
- checks.append("R4c (mutation, reproduces Codex's exact defect): with the isolation assert stripped from item_current() and start_dispatch() (round-3 shape), B's REPEATABLE READ transaction genuinely blocks on the sender-inflight index while A holds an uncommitted marker; once A rolls back, B's post-marker item_current() reuses B's OWN pinned pre-suppression snapshot and does NOT see the suppression C committed during the block — B wrongly returns {kind:dispatch} with a token to a now-suppressed destination; restored below")
+ checks.append("R4c (mutation, reproduces Codex's exact defect): with the isolation assert stripped from item_current(), start_dispatch() (round-3 shape), AND guard_attempt()'s marker-edge trigger check (R5), B's REPEATABLE READ transaction genuinely blocks on the sender-inflight index while A holds an uncommitted marker; once A rolls back, B's post-marker item_current() reuses B's OWN pinned pre-suppression snapshot and does NOT see the suppression C committed during the block — B wrongly returns {kind:dispatch} with a token to a now-suppressed destination; restored below")
  tokY4m=json.loads(outB4m)['token']
  sql(f"SELECT inbox_reply_send.persist('{org}','{attY4m}','{tokY4m}',jsonb_build_object('kind','not_attempted','reason','cancelled_before_dispatch'))")
 
- # --- R4d: restore both functions from the candidate and reconfirm the
- # IDENTICAL race (fresh pair) is caught again — this time by B raising
- # INBOX_REPLY_UNSUPPORTED_ISOLATION rather than ever reaching the marker.
+ # --- R4d: restore all three functions from the candidate and reconfirm
+ # the IDENTICAL race (fresh pair) is caught again — this time by B
+ # raising INBOX_REPLY_UNSUPPORTED_ISOLATION rather than ever reaching the
+ # marker.
  restore_fn('inbox_reply_send.item_current')
  restore_fn('inbox_reply_send.start_dispatch')
+ restore_fn('inbox_reply_send.guard_attempt')
  assert_installed('inbox_reply_send.item_current','INBOX_REPLY_UNSUPPORTED_ISOLATION')
  assert_installed('inbox_reply_send.start_dispatch','IR001','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+ assert_installed('inbox_reply_send.guard_attempt','INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER','INBOX_REPLY_UNSUPPORTED_ISOLATION')
  item27,_=fetch_item(prep_id,27);item28,_=fetch_item(prep_id,28)
  attX4d=insert_attempt(org,op_id,prep_id,item27);attY4d=insert_attempt(org,op_id,prep_id,item28)
  sql(f"SELECT inbox_reply_send.claim('{org}','{attX4d}',60)")
@@ -990,13 +1015,112 @@ END $mut$;""")
  need(rowY4d=='claimed|t|t',f'R4d: row Y mutated despite the restored isolation assert: {rowY4d}')
  checks.append('R4d (restore): with the candidate item_current()/start_dispatch() reinstalled (via restore_fn, re-extracted from attempts.sql, and confirmed installed via assert_installed), the identical race on a fresh pair is caught again — B raises INBOX_REPLY_UNSUPPORTED_ISOLATION before ever reaching the marker, row untouched; the READ COMMITTED path used by every other check in this file remains unaffected')
 
+ # === R5a: start_dispatch's isolation assert must be its FIRST statement,
+ # before the FOR UPDATE row lock — proven with a genuine two-connection
+ # lock-wait, not a single-connection SQL trick. Mutation reproduces the
+ # exact round-4 shape (assert relocated to just before frozen:=, i.e.
+ # AFTER the FOR UPDATE + STALE_CLAIM check): a REPEATABLE READ caller
+ # sharing the row with an in-flight lock-holder now blocks on the row
+ # lock and is eventually rejected by lock_timeout (55P03), not a clean
+ # immediate isolation error — the round-4 hole R5 closes.
+ item29,_=fetch_item(prep_id,29)
+ att29=insert_attempt(org,op_id,prep_id,item29)
+ sql(f"SELECT inbox_reply_send.claim('{org}','{att29}',60)")
+ sd_body=real_fn('inbox_reply_send.start_dispatch')
+ m=re.search(r" IF current_setting\('transaction_isolation'\)<>'read committed' THEN\n  RAISE EXCEPTION 'INBOX_REPLY_UNSUPPORTED_ISOLATION' USING ERRCODE='0A000';\n END IF;\n",sd_body)
+ if not m:raise RuntimeError('R5a: could not locate start_dispatch pre-lock isolation assert to relocate')
+ sd_block=m.group(0)
+ sd_without=sd_body[:m.start()]+sd_body[m.end():]
+ sd_anchor=' frozen:=inbox_reply_send.frozen_item('
+ sd_idx=sd_without.index(sd_anchor)
+ round4_shape=sd_without[:sd_idx]+sd_block+sd_without[sd_idx:]
+ need(round4_shape!=sd_body and round4_shape.count(sd_block)==1,'R5a: relocated mutation malformed')
+ sql(round4_shape)
+ nA5a='r5a-lockholder-'+str(uuid.uuid4())
+ connA5a=start(f"SET application_name='{nA5a}';BEGIN;SELECT * FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att29}' FOR UPDATE;SELECT pg_sleep(11);ROLLBACK;");children=[connA5a]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nA5a}' AND wait_event='PgSleep')",'R5a lock-holder did not reach sleep')
+ nB5a='r5a-caller-'+str(uuid.uuid4())
+ t0=time.monotonic()
+ connB5a=start(f"SET application_name='{nB5a}';BEGIN ISOLATION LEVEL REPEATABLE READ;SELECT inbox_reply_send.start_dispatch('{org}','{att29}',1);COMMIT;");children=[connA5a,connB5a]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nB5a}' AND wait_event_type='Lock')",'R5a mutation: B did not actually block on the FOR UPDATE row lock (mutation had no effect)')
+ outB5a,errB5a=connB5a.communicate(timeout=15);elapsed5a=time.monotonic()-t0;children=[connA5a]
+ need(connB5a.returncode!=0 and ('lock timeout' in errB5a or '55P03' in errB5a) and 'INBOX_REPLY_UNSUPPORTED_ISOLATION' not in errB5a,f'R5a mutation did not reproduce the round-4 hole (expected a lock_timeout, not a clean isolation rejection): rc={connB5a.returncode} out={outB5a!r} err={errB5a!r}')
+ need(elapsed5a>=9,f'R5a mutation: B returned in {elapsed5a:.1f}s — too fast to have genuinely waited toward lock_timeout')
+ finish(connA5a,'R5a lock-holder (rollback)');children=[]
+ row29=sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att29}'")
+ need(row29=='claimed',f'R5a mutation: row unexpectedly mutated: {row29}')
+ checks.append(f"R5a (mutation, reproduces the round-4 hole): with start_dispatch's isolation assert relocated to its round-4 position (after the FOR UPDATE row lock, before frozen:=), a REPEATABLE READ caller B sharing attempt 29's row with a lock-holder A genuinely blocks on the row lock ({elapsed5a:.1f}s) and is ultimately rejected by lock_timeout (55P03), NOT a clean immediate INBOX_REPLY_UNSUPPORTED_ISOLATION — the exact defect the R5 reordering closes; row left untouched")
+
+ # --- R5a restore: reinstall the candidate (assert-first) definition and
+ # reconfirm on the SAME still-claimed row that B is now rejected
+ # IMMEDIATELY, without ever attempting the row lock, even while A still
+ # holds it.
+ restore_fn('inbox_reply_send.start_dispatch')
+ assert_installed('inbox_reply_send.start_dispatch','IR001','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+ nA5a2='r5a-restore-lockholder-'+str(uuid.uuid4())
+ connA5a2=start(f"SET application_name='{nA5a2}';BEGIN;SELECT * FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att29}' FOR UPDATE;SELECT pg_sleep(3);ROLLBACK;");children=[connA5a2]
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nA5a2}' AND wait_event='PgSleep')",'R5a restore lock-holder did not reach sleep')
+ nB5a2='r5a-restore-caller-'+str(uuid.uuid4())
+ t1=time.monotonic()
+ connB5a2=start(f"SET application_name='{nB5a2}';BEGIN ISOLATION LEVEL REPEATABLE READ;SELECT inbox_reply_send.start_dispatch('{org}','{att29}',1);COMMIT;");children=[connA5a2,connB5a2]
+ outB5a2,errB5a2=connB5a2.communicate(timeout=8);elapsed5a2=time.monotonic()-t1;children=[connA5a2]
+ need(connB5a2.returncode!=0 and 'INBOX_REPLY_UNSUPPORTED_ISOLATION' in errB5a2,f'R5a restore: B under REPEATABLE READ did not raise the clean isolation error: rc={connB5a2.returncode} out={outB5a2!r} err={errB5a2!r}')
+ need(elapsed5a2<2,f'R5a restore: B took {elapsed5a2:.1f}s — it should have been rejected immediately, before ever attempting the row lock A holds')
+ finish(connA5a2,'R5a restore lock-holder (rollback)');children=[]
+ row29b=sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att29}'")
+ need(row29b=='claimed',f'R5a restore: row unexpectedly mutated: {row29b}')
+ checks.append(f"R5a (restore): with the candidate start_dispatch reinstalled (assert-first, before the FOR UPDATE), the identical setup — A holding the row lock — no longer makes B wait at all: B is rejected with INBOX_REPLY_UNSUPPORTED_ISOLATION in {elapsed5a2:.1f}s, well before A even releases the lock, proving the assert now runs before any lock attempt; row still untouched (reused by R5b below)")
+
+ # === R5b: guard_attempt's marker-edge isolation check independently
+ # closes the direct-UPDATE bypass — a caller that never goes through
+ # start_dispatch at all. Mutation removes ONLY that 3-line IF block from
+ # guard_attempt (R3-2b's window-expiry check and every other edge left
+ # untouched) and reproduces the bypass: a raw UPDATE under REPEATABLE
+ # READ now succeeds where it must be rejected.
+ item30,_=fetch_item(prep_id,30)
+ att30=insert_attempt(org,op_id,prep_id,item30)
+ sql(f"SELECT inbox_reply_send.claim('{org}','{att30}',60)")
+ sql(real_fn_minus_block('inbox_reply_send.guard_attempt',"IF current_setting('transaction_isolation')<>'read committed' THEN",3))
+ failed=False;err30m=None
+ try:
+  sql(f"BEGIN ISOLATION LEVEL REPEATABLE READ;UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=gen_random_uuid(),lease_until=NULL WHERE org_id='{org}' AND id='{att30}';COMMIT;")
+ except RuntimeError as e:
+  failed=True;err30m=str(e)
+ need(not failed,f'R5b mutation: the direct-UPDATE marker write under REPEATABLE READ was unexpectedly still rejected after removing the trigger isolation check: {err30m}')
+ row30m=sql(f"SELECT state,dispatch_token IS NOT NULL FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att30}'")
+ need(row30m=='dispatch_started|t',f'R5b mutation: expected the bypassing direct UPDATE to actually commit the marker: {row30m}')
+ checks.append("R5b (mutation, direct-UPDATE bypass): with the 3-line isolation IF block removed from guard_attempt's claimed->dispatch_started edge (R3-2b's window-expiry check and every other edge left intact), a raw UPDATE that writes the dispatch marker directly — bypassing start_dispatch entirely — now succeeds under REPEATABLE READ, proving this is the one hole start_dispatch's own assert cannot close by itself")
+ # Resolve att30 so it stops holding the sender-inflight slot before the
+ # restore leg below claims that same sender again on att29.
+ tok30m=sql(f"SELECT dispatch_token FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att30}'")
+ sql(f"SELECT inbox_reply_send.persist('{org}','{att30}','{tok30m}',jsonb_build_object('kind','not_attempted','reason','cancelled_before_dispatch'))")
+ restore_fn('inbox_reply_send.guard_attempt')
+ assert_installed('inbox_reply_send.guard_attempt','INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+
+ # --- R5b restore: on att29's still-claimed row (left untouched by R5a),
+ # the same direct-UPDATE bypass under REPEATABLE READ is rejected again,
+ # and the identical UPDATE under READ COMMITTED — the worker's actual
+ # isolation level — proceeds normally.
+ failed=False;err29r=None
+ try:
+  sql(f"BEGIN ISOLATION LEVEL REPEATABLE READ;UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=gen_random_uuid(),lease_until=NULL WHERE org_id='{org}' AND id='{att29}';COMMIT;")
+ except RuntimeError as e:
+  failed=True;err29r=str(e)
+ need(failed and 'INBOX_REPLY_UNSUPPORTED_ISOLATION' in err29r,f'R5b restore: direct-UPDATE marker write under REPEATABLE READ was not rejected: failed={failed} err={err29r}')
+ row29c=sql(f"SELECT state,dispatch_started_at IS NULL,dispatch_token IS NULL FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att29}'")
+ need(row29c=='claimed|t|t',f'R5b restore: row unexpectedly mutated by the rejected REPEATABLE READ UPDATE: {row29c}')
+ sql(f"UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=gen_random_uuid(),lease_until=NULL WHERE org_id='{org}' AND id='{att29}'")
+ row29d=sql(f"SELECT state,dispatch_token IS NOT NULL FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att29}'")
+ need(row29d=='dispatch_started|t',f'R5b restore: the same direct UPDATE under (default) READ COMMITTED was unexpectedly blocked: {row29d}')
+ checks.append("R5b (restore): with the candidate guard_attempt reinstalled, the identical direct-UPDATE marker write is rejected again under REPEATABLE READ with INBOX_REPLY_UNSUPPORTED_ISOLATION (row untouched), while the SAME UPDATE under the default READ COMMITTED isolation — the worker's actual contract — proceeds normally and commits the marker")
+
 except Exception:
  for c in children:
   if c.poll() is None:c.terminate();c.wait(timeout=5)
  if installed:
   sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;")
  raise
-need(len(checks)==22,f'Expected 22 check groups, got {len(checks)}')
+need(len(checks)==26,f'Expected 26 check groups, got {len(checks)}')
 # Only the private schemas are dropped — per the established
 # inbox-reply-preparation/recipient-concurrency.py precedent, the uniquely
 # marked synthetic canonical rows (organizations/contacts/properties/

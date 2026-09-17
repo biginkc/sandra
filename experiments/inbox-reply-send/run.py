@@ -583,7 +583,48 @@ END $mut$;
  -- Resolve item19's wrongly-dispatched attempt so it stops holding the
  -- sender lock, then restore the real start_dispatch.
  PERFORM inbox_reply_send.persist(o,att19,(a->>'token')::uuid,jsonb_build_object('kind','not_attempted','reason','cancelled_before_dispatch'));
+ -- R5 meta-test: prove the assert_installed-equivalent guard immediately
+ -- below actually catches a stale restore, not merely that a correct
+ -- restore passes it. Stage a literal round-3-shape start_dispatch (no
+ -- IR001 savepoint recheck, no isolation assert at all — this guard did
+ -- not exist before round 5, and a stale restore here previously shipped
+ -- silently) and confirm the SAME guard text raises.
+ CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $stale$
+DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;token uuid;
+BEGIN
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
+ END IF;
+ frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
+ recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');
+ IF row.body_hash IS DISTINCT FROM recomputed THEN RAISE EXCEPTION 'INBOX_REPLY_FROZEN_MISMATCH';END IF;
+ IF EXISTS(SELECT 1 FROM inbox_reply_send.attempts WHERE org_id=o AND from_e164=row.from_e164 AND state='dispatch_started' AND id<>row.id) THEN
+  RAISE EXCEPTION 'INBOX_REPLY_SENDER_BUSY' USING ERRCODE='55P03';
+ END IF;
+ token:=gen_random_uuid();
+ UPDATE inbox_reply_send.attempts SET state='dispatch_started',dispatch_started_at=clock_timestamp(),dispatch_token=token,lease_until=NULL WHERE org_id=o AND id=attempt_id;
+ RETURN jsonb_build_object('kind','dispatch','token',token,'from',row.from_e164,'to',row.to_e164,'body',frozen->'recipient'->>'renderedBody');
+END $stale$;
+ failed:=false;
+ BEGIN
+  IF pg_get_functiondef('inbox_reply_send.start_dispatch'::regproc) NOT LIKE '%IR001%' OR pg_get_functiondef('inbox_reply_send.start_dispatch'::regproc) NOT LIKE '%INBOX_REPLY_UNSUPPORTED_ISOLATION%' THEN
+   RAISE EXCEPTION 'assert_installed: start_dispatch is missing IR001 or INBOX_REPLY_UNSUPPORTED_ISOLATION after restore — stale/hand-inlined definition installed instead of the candidate';
+  END IF;
+ EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM LIKE 'assert_installed:%' THEN failed:=true;ELSE RAISE;END IF;
+ END;
+ IF NOT failed THEN RAISE EXCEPTION 'R5 meta-test: assert_installed did not trip on a staged stale (round-3-shape) start_dispatch restore — the guard is a no-op';END IF;
  @@RESTORE_START_DISPATCH@@
+ -- P2/R5 assert_installed equivalent: read back what is ACTUALLY installed
+ -- (not what we intended to install) and fail loudly if either the R3-1
+ -- post-marker savepoint recheck (IR001) or the R4/R5 isolation assert is
+ -- missing — a stale round-3-shape restore here previously let the whole
+ -- suite pass silently (Codex round-5 finding).
+ IF pg_get_functiondef('inbox_reply_send.start_dispatch'::regproc) NOT LIKE '%IR001%' OR pg_get_functiondef('inbox_reply_send.start_dispatch'::regproc) NOT LIKE '%INBOX_REPLY_UNSUPPORTED_ISOLATION%' THEN
+  RAISE EXCEPTION 'assert_installed: start_dispatch is missing IR001 or INBOX_REPLY_UNSUPPORTED_ISOLATION after restore — stale/hand-inlined definition installed instead of the candidate';
+ END IF;
  INSERT INTO sms_phone_suppressions(org_id,channel,phone_e164,source) VALUES(o,'sms',item20->'recipient'->>'to','owned_prd_test');
  INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state)
   VALUES(o,gen_random_uuid(),op_id,prep_id,(item20->>'id')::uuid,1,(item20->'recipient'->>'contactId')::uuid,item20->'recipient'->>'from',item20->'recipient'->>'to',inbox_reply_send.body_hash(item20->'recipient'->>'renderedBody',item20->'recipient'->>'from',item20->'recipient'->>'to'),'approved')
@@ -724,7 +765,44 @@ END $mut$;
   failed:=false;BEGIN PERFORM inbox_reply_send.start_dispatch(o,att22,(b->>'generation')::bigint);EXCEPTION WHEN raise_exception THEN IF SQLERRM='INBOX_REPLY_STALE_CLAIM' THEN failed:=true;ELSE RAISE;END IF;END;
   IF NOT failed THEN RAISE EXCEPTION 'A lying re-entry produced a second token';END IF;
   IF (SELECT dispatch_token FROM inbox_reply_send.attempts WHERE org_id=o AND id=att22)<>tok22 THEN RAISE EXCEPTION 'dispatch_token changed under the lying mutation';END IF;
+  -- R5 meta-test: prove the assert_installed-equivalent guard immediately
+  -- below actually catches a stale restore. Stage a literal round-3-shape
+  -- claim() (missing the dispatch_started_at IS NULL reclaim guard) and
+  -- confirm the SAME guard text raises before the real restore runs.
+  CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $stale$
+DECLARE row inbox_reply_send.attempts;new_generation bigint;
+BEGIN
+ IF seconds IS NULL OR seconds NOT BETWEEN 1 AND 300 THEN RAISE EXCEPTION 'Invalid lease';END IF;
+ PERFORM inbox_reply_review.require_admission();
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;
+ IF row.state='approved' OR (row.state='claimed' AND row.lease_until<=clock_timestamp()) THEN
+  UPDATE inbox_reply_send.attempts SET state='claimed',generation=generation+1,lease_until=clock_timestamp()+make_interval(secs=>seconds) WHERE org_id=o AND id=attempt_id RETURNING generation INTO new_generation;
+  RETURN jsonb_build_object('kind','claimed','generation',new_generation::text);
+ ELSIF row.state='claimed' THEN
+  RETURN jsonb_build_object('kind','busy');
+ ELSIF row.state='dispatch_started' THEN
+  UPDATE inbox_reply_send.attempts SET state='uncertain',evidence='reentered_without_result',lease_until=NULL,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;
+  RETURN jsonb_build_object('kind','existing','state','uncertain');
+ ELSE
+  RETURN jsonb_build_object('kind','existing','state',row.state);
+ END IF;
+END $stale$;
+  failed:=false;
+  BEGIN
+   IF pg_get_functiondef('inbox_reply_send.claim'::regproc) NOT LIKE '%dispatch_started_at IS NULL%' THEN
+    RAISE EXCEPTION 'assert_installed: claim is missing the dispatch_started_at IS NULL reclaim guard after restore — stale/hand-inlined definition installed instead of the candidate';
+   END IF;
+  EXCEPTION WHEN raise_exception THEN
+   IF SQLERRM LIKE 'assert_installed:%' THEN failed:=true;ELSE RAISE;END IF;
+  END;
+  IF NOT failed THEN RAISE EXCEPTION 'R5 meta-test: assert_installed did not trip on a staged stale claim restore at CLAIM_1 — the guard is a no-op';END IF;
 @@RESTORE_CLAIM_1@@
+  -- P2/R5 assert_installed equivalent (Codex round-5 finding: this restore
+  -- previously had no installed-definition check at all).
+  IF pg_get_functiondef('inbox_reply_send.claim'::regproc) NOT LIKE '%dispatch_started_at IS NULL%' THEN
+   RAISE EXCEPTION 'assert_installed: claim is missing the dispatch_started_at IS NULL reclaim guard after restore — stale/hand-inlined definition installed instead of the candidate';
+  END IF;
   b:=inbox_reply_send.claim(o,att22);
   IF b->>'kind'<>'existing' OR b->>'state'<>'uncertain' THEN RAISE EXCEPTION 'Restored claim() re-entry mismatch: %',b;END IF;
   a:=inbox_reply_send.persist(o,att22,tok22,jsonb_build_object('kind','accepted','externalId','PROV-22'));
@@ -766,17 +844,20 @@ BEGIN
 END $mut$;
  b:=inbox_reply_send.claim(o,att23);
  IF b->>'kind'<>'claimed' OR b->>'generation'<>'3' THEN RAISE EXCEPTION 'item23 reclaim under mutated predicate mismatch: %',b;END IF;
-CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+ -- R5 meta-test: prove the assert_installed-equivalent guard immediately
+ -- below actually catches a stale restore. The claim() installed above
+ -- (the #3 mutation) still contains the needle text in its own MUTATION
+ -- comment, so it does NOT trip the guard — stage a clean round-3-shape
+ -- claim() (guard code actually absent, no comment either) and confirm
+ -- the SAME guard text raises against it before the real restore runs.
+ CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $stale2$
 DECLARE row inbox_reply_send.attempts;new_generation bigint;
 BEGIN
  IF seconds IS NULL OR seconds NOT BETWEEN 1 AND 300 THEN RAISE EXCEPTION 'Invalid lease';END IF;
  PERFORM inbox_reply_review.require_admission();
  SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
  IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;
- IF (SELECT count(DISTINCT item_id) FROM inbox_reply_send.attempts WHERE org_id=o AND operation_id=row.operation_id)>inbox_reply_preparation.recipient_limit() THEN
-  RAISE EXCEPTION 'INBOX_REPLY_RECIPIENT_LIMIT';
- END IF;
- IF row.state='approved' OR (row.state='claimed' AND row.lease_until<=clock_timestamp() AND row.dispatch_started_at IS NULL) THEN
+ IF row.state='approved' OR (row.state='claimed' AND row.lease_until<=clock_timestamp()) THEN
   UPDATE inbox_reply_send.attempts SET state='claimed',generation=generation+1,lease_until=clock_timestamp()+make_interval(secs=>seconds) WHERE org_id=o AND id=attempt_id RETURNING generation INTO new_generation;
   RETURN jsonb_build_object('kind','claimed','generation',new_generation::text);
  ELSIF row.state='claimed' THEN
@@ -787,7 +868,22 @@ BEGIN
  ELSE
   RETURN jsonb_build_object('kind','existing','state',row.state);
  END IF;
-END $$;
+END $stale2$;
+ failed:=false;
+ BEGIN
+  IF pg_get_functiondef('inbox_reply_send.claim'::regproc) NOT LIKE '%dispatch_started_at IS NULL%' THEN
+   RAISE EXCEPTION 'assert_installed: claim is missing the dispatch_started_at IS NULL reclaim guard after restore — stale/hand-inlined definition installed instead of the candidate';
+  END IF;
+ EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM LIKE 'assert_installed:%' THEN failed:=true;ELSE RAISE;END IF;
+ END;
+ IF NOT failed THEN RAISE EXCEPTION 'R5 meta-test: assert_installed did not trip on the still-staged stale claim restore at CLAIM_2 — the guard is a no-op';END IF;
+@@RESTORE_CLAIM_2@@
+ -- P2/R5 assert_installed equivalent (Codex round-5 finding: this was a
+ -- hand-typed literal restore with no installed-definition check at all).
+ IF pg_get_functiondef('inbox_reply_send.claim'::regproc) NOT LIKE '%dispatch_started_at IS NULL%' THEN
+  RAISE EXCEPTION 'assert_installed: claim is missing the dispatch_started_at IS NULL reclaim guard after restore — stale/hand-inlined definition installed instead of the candidate';
+ END IF;
  RAISE NOTICE '#3 dispatch_started_at-clause mutation (confirmed no-op under the D-5 CHECK; restored) OK';
 
  -- #4: remove ONE trigger edge (uncertain->provider_accepted), not the
@@ -809,13 +905,13 @@ END $$;
   IF NOT failed THEN RAISE EXCEPTION 'Removing the uncertain->provider_accepted edge did not block persist()';END IF;
   IF (SELECT state FROM inbox_reply_send.attempts WHERE org_id=o AND id=att24)<>'uncertain' THEN RAISE EXCEPTION 'item24 row mutated despite the blocked trigger edge';END IF;
 @@RESTORE_GUARD_ATTEMPT@@
-  -- P2 (round 4): assert_installed equivalent — read back what is ACTUALLY
-  -- installed after the restore (not what we intended to install) and fail
-  -- loudly if the R3-2b window-expiry edge is missing, so a stale/hand-
-  -- inlined restore can never silently ship a guard_attempt() that is
-  -- missing a later round's fix.
-  IF pg_get_functiondef('inbox_reply_send.guard_attempt'::regproc) NOT LIKE '%INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER%' THEN
-   RAISE EXCEPTION 'assert_installed: guard_attempt is missing INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER after restore — stale/hand-inlined definition installed instead of the candidate';
+  -- P2 (round 4/5): assert_installed equivalent — read back what is
+  -- ACTUALLY installed after the restore (not what we intended to install)
+  -- and fail loudly if the R3-2b window-expiry edge or the R5 marker-edge
+  -- isolation assert is missing, so a stale/hand-inlined restore can never
+  -- silently ship a guard_attempt() that is missing a later round's fix.
+  IF pg_get_functiondef('inbox_reply_send.guard_attempt'::regproc) NOT LIKE '%INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER%' OR pg_get_functiondef('inbox_reply_send.guard_attempt'::regproc) NOT LIKE '%INBOX_REPLY_UNSUPPORTED_ISOLATION%' THEN
+   RAISE EXCEPTION 'assert_installed: guard_attempt is missing INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER or INBOX_REPLY_UNSUPPORTED_ISOLATION after restore — stale/hand-inlined definition installed instead of the candidate';
   END IF;
   a:=inbox_reply_send.persist(o,att24,tok24,jsonb_build_object('kind','accepted','externalId','PROV-24'));
   IF a->>'state'<>'provider_accepted' THEN RAISE EXCEPTION 'item24 final persist mismatch after trigger restore: %',a;END IF;
@@ -835,6 +931,7 @@ ROLLBACK;
 test=test.replace('@@RESTORE_START_DISPATCH@@',real_fn('inbox_reply_send.start_dispatch'))
 test=test.replace('@@RESTORE_PERSIST@@',real_fn('inbox_reply_send.persist'))
 test=test.replace('@@RESTORE_CLAIM_1@@',real_fn('inbox_reply_send.claim'))
+test=test.replace('@@RESTORE_CLAIM_2@@',real_fn('inbox_reply_send.claim'))
 test=test.replace('@@MUTATE_GUARD_ATTEMPT_MINUS_EDGE@@',real_fn_minus_edge('inbox_reply_send.guard_attempt',"uncertain' AND NEW.state='provider_accepted'"))
 test=test.replace('@@RESTORE_GUARD_ATTEMPT@@',real_fn('inbox_reply_send.guard_attempt'))
 if '@@' in test:raise RuntimeError('Unsubstituted @@...@@ placeholder remains in test SQL')

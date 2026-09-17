@@ -1,7 +1,7 @@
 DO $setup$
 DECLARE
  o uuid:=gen_random_uuid();u uuid:=gen_random_uuid();sess uuid:=gen_random_uuid();s uuid:=gen_random_uuid();
- n integer:=28;i integer;cids uuid[];pids uuid[];ctids uuid[];targets jsonb:='[]';drafts jsonb:='[]';
+ n integer:=30;i integer;cids uuid[];pids uuid[];ctids uuid[];targets jsonb:='[]';drafts jsonb:='[]';
  capture jsonb;freeze_result jsonb;prep_id uuid;items jsonb;op_id uuid:=gen_random_uuid();k uuid:=gen_random_uuid();
  chosen_state text;itemv jsonb;
  -- Second, isolated small preparation+operation (P2.3): a clean 0-attempts
