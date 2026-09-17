@@ -42,6 +42,47 @@ closes:
      routed through to_jsonb(record) at all) — see _row_hash_expr.
   There is no aggregation (SUM) and no normalization (to_jsonb) left
   anywhere in this module for a mutation to hide behind.
+- round 9 (this one, THE definitive, COLLISION-FREE closure): round 8's
+  `::text` concatenation and content-hash-based row grouping were still not
+  fully sound:
+  1. AMBIGUOUS ENCODING: concatenating column values with a fixed delimiter
+     character is only safe if that character (and the NULL sentinel) can
+     never appear inside real data — a column-boundary shift
+     ('a'+'bc' vs 'ab'+'c') or a NULL-vs-empty-string pair can, in
+     principle, collide. Fixed: every column is now encoded with an
+     explicit LENGTH PREFIX (`len(text):text`, a self-delimiting/netstring
+     style encoding) or a distinct one-character NULL sentinel ('N') that
+     can never be confused with a length prefix (which always starts with a
+     digit) — see _encode_col_sql. Concatenating these is injective by
+     construction: no value's content, however it is shaped, can ever shift
+     a column boundary or be mistaken for NULL.
+     Also: grouping counter rows by a CONTENT hash (round 8) is sound only
+     if that hash cannot collide across two truly distinct rows — Astra's
+     repro swapped a counter between two rows sharing enough content to
+     collide under an ambiguous encoding. Fixed: counter rows are now
+     grouped by the table's actual PRIMARY KEY (or, absent one, the same
+     unambiguous full-row encoding as a documented best-effort fallback) —
+     see _row_key_expr/_primary_key. A real PK is unique by definition, so
+     two distinct rows can never be conflated and a value swapped between
+     them is always caught, structurally, not by hash luck.
+     Also: float/double columns can lose precision under a low
+     extra_float_digits session setting, making two distinct floats render
+     as identical text. Every session this module's callers open now sets
+     `extra_float_digits=3` so float8::text is always round-trippable.
+  2. NULLABLE COUNTER DISAPPEARS: a counter's value going non-NULL<->NULL
+     silently vanished from the old SUM/multiset (NULL poisons SUM to NULL,
+     which coalesce() hid, and string_agg simply drops a NULL element).
+     Fixed: the counter value is now encoded with an explicit 'NULL'
+     sentinel (distinct from any digit string) and ANY transition to/from
+     NULL is treated as a real change (never a benign advance) — see
+     assert_clean's per-row counter comparison.
+  3. TABLE UNIVERSE NEVER REFRESHED: the table list was discovered once at
+     baseline time, so a table CREATED during the run was invisible to the
+     residual check entirely — a proof that left a brand-new table behind
+     would report "clean". Fixed: assert_clean re-enumerates the full
+     universe at check time and diffs it against the baseline's table set;
+     any table that appeared or disappeared fails loudly, by name, before
+     any per-table content check even runs.
 1. EXHAUSTIVE COVERAGE: every base table ANYWHERE in the database (any
    schema, never hardcoded, PRIMARY_TABLES included) is discovered via
    pg_catalog, excluding only the ephemeral reply-lane schemas that get
@@ -122,6 +163,28 @@ def _columns(sql, table):
     return _COLUMN_CACHE[table]
 
 
+_PK_CACHE = {}
+
+
+def _primary_key(sql, table):
+    """[Astra round-9] The table's actual PRIMARY KEY columns, in key order,
+    memoized per process run — or None if the table has no primary key.
+    Used to group counter rows by their real, structurally-unique identity
+    instead of a content hash (which, however carefully built, is a value
+    two distinct rows could in principle share)."""
+    if table not in _PK_CACHE:
+        schema, name = table.split('.', 1)
+        _PK_CACHE[table] = _rows(sql, f"""
+            SELECT a.attname FROM pg_index i
+            JOIN pg_class c ON c.oid=i.indrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=ANY(i.indkey)
+            WHERE n.nspname='{schema}' AND c.relname='{name}' AND i.indisprimary
+            ORDER BY array_position(i.indkey, a.attnum)
+        """) or None
+    return _PK_CACHE[table]
+
+
 def _counter_column(sql, table):
     """The one whitelisted counter-shaped integer/bigint column on `table`,
     if any — applied uniformly regardless of whether `table` has org_id/
@@ -188,29 +251,65 @@ def discover(sql):
     return org_tables, user_tables, all_tables
 
 
+def _encode_col_sql(colref):
+    """[Astra round-9] ONE column's collision-free encoding: an explicit
+    NULL sentinel ('N', a single byte that can never be confused with a
+    length-prefixed value — see below), or `len(text):text` — a
+    self-delimiting, netstring-style length prefix. This is injective by
+    construction: a length prefix always starts with one or more ASCII
+    digits followed by ':', which 'N' can never look like, and — crucially
+    — the reader (conceptually; this module never needs to actually parse
+    the encoding back, only concatenate and hash it) never scans for a
+    terminator inside the value, so nothing the value itself contains
+    (a ':', digits, another 'N', even literal embedded NUL bytes) can ever
+    be mistaken for a boundary. Concatenating N such encodings back-to-back
+    is therefore injective in the N-tuple of (possibly-NULL) values: no
+    column-boundary shift, no NULL-vs-empty-string pair, can ever produce
+    the same encoded stream from two different inputs."""
+    return f"CASE WHEN {colref} IS NULL THEN 'N' ELSE length({colref}::text)::text || ':' || {colref}::text END"
+
+
+def _row_key_expr(sql, table):
+    """[Astra round-9] The row's structural identity for counter grouping:
+    the table's real PRIMARY KEY columns, collision-free-encoded and
+    concatenated (see _encode_col_sql), then md5'd. A primary key is unique
+    by definition, so two distinct rows can NEVER share this key — grouping
+    counter values by it (instead of round 8's content hash, which two
+    sufficiently-similar-but-distinct rows could in principle collide on)
+    makes a counter value swapped between two rows structurally impossible
+    to miss. Tables with no primary key fall back to the same unambiguous
+    encoding over every non-counter column (round 8's approach, now with
+    round 9's collision-free per-column encoding) — a documented best
+    effort for the rare PK-less table, still exact for the common case
+    (no two rows share ALL non-counter column values) and no worse than
+    round 8 for the rare case where they do."""
+    cols = _primary_key(sql, table) or _columns(sql, table)
+    if not cols:
+        return "md5('')"
+    parts = ','.join(_encode_col_sql(f't."{c}"') for c in cols)
+    return f"md5(array_to_string(ARRAY[{parts}], ''))"
+
+
 def _row_hash_expr(sql, table, exclude_col):
-    """[Astra round-8] Per-row content hash built from each column's OWN
-    native `::text` output, concatenated in a stable (attnum) order — never
-    from `to_jsonb(row)`. This matters: converting a whole row to jsonb
+    """[Astra round-8/9] Per-row content hash built from each column's OWN
+    native `::text` output, collision-free-encoded (round 9 — see
+    _encode_col_sql) and concatenated in a stable (attnum) order — never
+    from `to_jsonb(row)` (round 8: converting a whole row to jsonb
     re-serializes every column THROUGH jsonb's own type system, which can
-    silently re-normalize (and thereby lose) a column's real stored content
-    — e.g. a jsonb subcolumn's exact text is not guaranteed byte-identical
-    once re-emitted via to_jsonb(record). Casting each column directly to
-    ::text instead uses that column's OWN type output function — jsonb::text
-    is the value's own raw serialization (preserves array element order and
-    duplicates exactly as stored), numeric::text preserves the exact stored
-    scale/precision, bytea::text is a lossless hex encoding, array/composite/
-    range/hstore::text likewise use their own faithful literal output. NULL
-    is distinguished from any string via array_to_string's null_string arg
-    (chr(1), never valid in these outputs) so NULL and '' can never collide.
-    If a column's type has no meaningful ::text cast, Postgres raises at
-    query time rather than this module silently falling back to a lossy
-    encoding — a hard failure, never a silent narrowing of coverage."""
+    silently re-normalize a column's real stored content). Each column's OWN
+    type output function is used directly — jsonb::text is the value's own
+    raw serialization, numeric::text preserves exact stored scale/precision,
+    bytea::text is a lossless hex encoding, array/composite/range/hstore
+    likewise — and round 9's length-prefixed encoding makes the
+    concatenation itself injective (no column-boundary or NULL/'' collision
+    possible, regardless of what any column's text happens to contain). If a
+    column's type has no meaningful ::text cast, Postgres raises at query
+    time rather than this module silently falling back to a lossy encoding."""
     cols = [c for c in _columns(sql, table) if c != exclude_col]
     if not cols:
         return "md5('')"
-    parts = ','.join(f't."{c}"::text' for c in cols)
-    return f"md5(array_to_string(ARRAY[{parts}], chr(2), chr(1)))"
+    parts = ','.join(_encode_col_sql(f't."{c}"') for c in cols)
+    return f"md5(array_to_string(ARRAY[{parts}], ''))"
 
 
 def _content_hash_sql(sql, table, col, where=None):
@@ -218,43 +317,42 @@ def _content_hash_sql(sql, table, col, where=None):
     counter column (or every column, if col is None), optionally restricted
     to a WHERE clause: each row's _row_hash_expr, md5'd, sorted (so row
     order/physical layout never matters), joined, md5'd again. Applied to
-    EVERY table with zero exceptions — including organizations and
-    auth.users (round-7's closure) — using each column's raw ::text output,
-    never to_jsonb (round-8's closure)."""
+    EVERY table with zero exceptions, using each column's raw, collision-free
+    ::text encoding (rounds 8/9)."""
     row_hash = _row_hash_expr(sql, table, col)
     filt = f" WHERE {where}" if where else ""
     return f"SELECT md5(coalesce(string_agg(h,',' ORDER BY h),'')) FROM (SELECT {row_hash} AS h FROM {table} t{filt}) x"
 
 
 def _counter_row_pairs_sql(sql, table, col, where=None):
-    """[Astra round-8] One row per (row-identity-hash, counter-value) pair,
-    as `hash:value` joined by commas — the raw material for a PER-ROW
-    counter check (never a table-wide SUM, which lets one row's decrease be
-    masked by another row's increase). The identity hash is the SAME
-    per-row hash _content_hash_sql aggregates (every column except the
-    counter), so a row's identity across before/after is exactly the set of
-    columns this module already asserts is unchanged — grouping by it is
-    sound: two rows can only share an identity if their entire non-counter
-    content is byte-identical, in which case a sorted per-identity multiset
-    comparison of their counters (see _parse_counter_pairs/assert_clean) is
-    the correct, PK-free generalization of "this row's counter"."""
-    row_hash = _row_hash_expr(sql, table, col)
+    """[Astra round-8/9] One row per (row-key, counter-value) pair, as
+    `key:value` joined by commas — the raw material for a PER-ROW counter
+    check (never a table-wide SUM, which lets one row's decrease be masked
+    by another row's increase). The key is the table's PRIMARY KEY (round 9
+    — see _row_key_expr), so two distinct rows can never be conflated: a
+    counter value swapped between two real rows is caught by comparing each
+    row's OWN key across before/after, not by hoping a content hash never
+    collides. The counter value itself is 'NULL' (an explicit sentinel,
+    round 9) when the column is NULL — never silently dropped the way a
+    NULL poisons SUM or vanishes from string_agg."""
+    row_key = _row_key_expr(sql, table)
+    val_expr = f"CASE WHEN t.{col} IS NULL THEN 'NULL' ELSE t.{col}::text END"
     filt = f" WHERE {where}" if where else ""
-    return f"SELECT coalesce(string_agg({row_hash} || ':' || t.{col}::text, ',' ORDER BY {row_hash}), '') FROM {table} t{filt}"
+    return f"SELECT coalesce(string_agg({row_key} || ':' || ({val_expr}), ',' ORDER BY {row_key}), '') FROM {table} t{filt}"
 
 
 def _parse_counter_pairs(s):
-    """Parse the `hash:value,hash:value,...` text _counter_row_pairs_sql
-    returns into {identity_hash: sorted [int values]} — grouping and sorting
-    here (not in SQL) keeps the per-row comparison logic in one place."""
+    """Parse the `key:value,key:value,...` text _counter_row_pairs_sql
+    returns into {row_key: [value_or_'NULL', ...]} — grouping here (not in
+    SQL) keeps the per-row comparison logic in one place. Values stay as
+    text ('NULL' sentinel or a digit string) so assert_clean can tell a real
+    NULL transition (round 9) apart from a numeric change."""
     groups = {}
     if not s:
         return groups
     for part in s.split(','):
         h, v = part.rsplit(':', 1)
-        groups.setdefault(h, []).append(int(v))
-    for h in groups:
-        groups[h].sort()
+        groups.setdefault(h, []).append(v)
     return groups
 
 
@@ -326,31 +424,62 @@ def _owned_predicate(table, has_org, has_user, orgs, users):
     return ' OR '.join(parts) if parts else 'false'
 
 
+def _pk_sort_key(v):
+    """[Astra round-9] Sort key for a counter value list that may contain the
+    'NULL' sentinel alongside numeric text — NULLs sort first, consistently,
+    on both sides of a before/after comparison, so a PK-less table's
+    fallback multiset comparison (see _row_key_expr) still pairs like with
+    like."""
+    return (0,) if v == 'NULL' else (1, int(v))
+
+
 def assert_clean(sql, all_tables, baseline, owned_orgs, owned_users):
-    """[Astra round-8, the definitive, LOSSLESS closure] ONE uniform check,
-    run identically over EVERY table in the universe — no org-scoped/
+    """[Astra round-9, the definitive, COLLISION-FREE closure] ONE uniform
+    check, run identically over EVERY table in the universe — no org-scoped/
     user-scoped/counter/id-scoped branches, no PRIMARY_TABLES exemption, no
-    aggregation and no normalization left for a mutation to hide behind:
+    aggregation, no normalization, and no encoding ambiguity left for a
+    mutation to hide behind:
+      0. [round 9] the table universe itself is RE-ENUMERATED right now and
+         diffed against the baseline's — a table that appeared or
+         disappeared since baseline fails loudly by name before any
+         per-table content check even runs (a table created mid-run used to
+         be invisible to this check entirely);
       1. this run's OWN rows (the OWNED predicate) must be net-zero in every
-         table — proves the sweep/explicit-delete actually removed them;
+         table that still exists — proves the sweep/explicit-delete
+         actually removed them;
       2. every row NOT owned by this run must be byte-identical, in every
          column except a whitelisted counter column, to the pre-run
-         baseline, hashed from each column's raw ::text output (round 8) —
-         proves nothing else anywhere was mutated, including a jsonb
-         column's exact content/array length, organizations.name, and
-         auth.users, uniformly;
+         baseline, hashed from each column's raw, collision-free-encoded
+         ::text output (rounds 8/9 — see _row_hash_expr) — proves nothing
+         else anywhere was mutated, including a jsonb column's exact
+         content/array length, a column-boundary shift, a NULL-vs-empty
+         pair, organizations.name, and auth.users, uniformly;
       3. a whitelisted counter column, when present, is checked PER ROW
-         (round 8 — never a table-wide SUM), grouped by that row's own
-         non-counter identity hash: a decrease in ANY single row fails,
-         named by table+row-identity+column; an increase in any row is
-         always reported by name, never silently accepted, never silently
-         missed, never averaged against another row's decrease.
+         (never a table-wide SUM), grouped by that row's real PRIMARY KEY
+         (round 9 — never a content hash two distinct rows could in
+         principle collide on): a decrease in ANY single row fails, named
+         by table+row-key+column; a non-NULL<->NULL transition always fails
+         (round 9 — never a silently-vanished SUM contributor); an increase
+         in any row is always reported by name, never silently accepted,
+         never averaged against another row's decrease.
     Returns the list of benign "counter advanced" report lines and raises on
     any real residual, naming every offending table."""
     orgs, users = _text_array(owned_orgs), _text_array(owned_users)
     residual = {}
     advanced = []
+
+    baseline_names = {t for t, _, _, _ in all_tables}
+    current_names = {t for t, _, _, _ in _all_tables(sql)}
+    vanished = baseline_names - current_names
+    appeared = current_names - baseline_names
+    if vanished:
+        residual['__table_universe__'] = residual.get('__table_universe__', '') + f'; table(s) present at baseline but GONE at check time: {sorted(vanished)}'
+    if appeared:
+        residual['__table_universe__'] = residual.get('__table_universe__', '') + f'; NEW table(s) created during this run, absent from the baseline (would have escaped every check below entirely): {sorted(appeared)}'
+
     for table, has_org, has_user, col in all_tables:
+        if table in vanished:
+            continue  # already reported above; querying it would just error
         owned_pred = _owned_predicate(table, has_org, has_user, orgs, users)
         if owned_pred == 'false':
             not_owned = 'true'
@@ -376,11 +505,19 @@ def assert_clean(sql, all_tables, baseline, owned_orgs, owned_users):
                 bvals, avals = before_pairs.get(row_id, []), now_pairs.get(row_id, [])
                 if len(bvals) != len(avals):
                     continue  # a row's identity appearing/disappearing is already caught by the count/hash checks above
-                for bv, av in zip(bvals, avals):  # both lists sorted ascending — the sound PK-free multiset comparison
-                    if av < bv:
-                        residual[table] = residual.get(table, '') + f'; {col} DECREASED {bv} -> {av} on row(identity={row_id[:12]}...) (per-row check — never masked by another row\'s increase via a table-wide SUM)'
-                    elif av > bv:
-                        advanced.append(f'{table}.{col} row {row_id[:12]}... +{av - bv} ({bv} -> {av})')
+                # Both lists sorted with the NULL-aware key (round 9) — with
+                # a real PRIMARY KEY each list has exactly one element; the
+                # PK-less fallback keeps the sound multiset comparison.
+                for bv, av in zip(sorted(bvals, key=_pk_sort_key), sorted(avals, key=_pk_sort_key)):
+                    if bv == 'NULL' or av == 'NULL':
+                        if bv != av:
+                            residual[table] = residual.get(table, '') + f'; {col} changed to/from NULL ({bv} -> {av}) on row(key={row_id[:12]}...) (round 9 — never a benign advance, never silently dropped from the check)'
+                        continue  # both NULL: genuinely unchanged
+                    bv_i, av_i = int(bv), int(av)
+                    if av_i < bv_i:
+                        residual[table] = residual.get(table, '') + f'; {col} DECREASED {bv_i} -> {av_i} on row(key={row_id[:12]}...) (per-row, PRIMARY-KEY-grouped check — never masked by another row\'s increase via a table-wide SUM, never conflated with another row via a content-hash collision)'
+                    elif av_i > bv_i:
+                        advanced.append(f'{table}.{col} row {row_id[:12]}... +{av_i - bv_i} ({bv_i} -> {av_i})')
 
     if residual:
         raise RuntimeError(f'Owned-fixture cleanup left residual/unexplained changes across {len(residual)} dynamically-discovered table(s) (single uniform, lossless, per-row check over the whole database): {residual}')

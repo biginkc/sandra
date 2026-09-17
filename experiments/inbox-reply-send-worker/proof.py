@@ -30,11 +30,11 @@ CMD = D + ['exec', '-i', N, 'psql', '-XqAt', '-U', 'postgres', '-d', 'postgres',
 def need(v, label):
     if not v: raise RuntimeError(label)
 def sql(q, timeout=20, check=True):
-    r = subprocess.run(CMD, input="SET statement_timeout='15s'; SET lock_timeout='10s'; BEGIN;" + q.rstrip() + ";COMMIT;", text=True, capture_output=True, timeout=timeout)
+    r = subprocess.run(CMD, input="SET statement_timeout='15s'; SET lock_timeout='10s'; SET extra_float_digits=3; BEGIN;" + q.rstrip() + ";COMMIT;", text=True, capture_output=True, timeout=timeout)
     if check: need(r.returncode == 0, r.stderr)
     return r if not check else r.stdout.strip()
 def sql_fail(q, timeout=20):
-    r = subprocess.run(CMD, input="SET statement_timeout='15s'; SET lock_timeout='10s'; BEGIN;" + q.rstrip() + ";COMMIT;", text=True, capture_output=True, timeout=timeout)
+    r = subprocess.run(CMD, input="SET statement_timeout='15s'; SET lock_timeout='10s'; SET extra_float_digits=3; BEGIN;" + q.rstrip() + ";COMMIT;", text=True, capture_output=True, timeout=timeout)
     need(r.returncode != 0, f'expected failure but succeeded: {r.stdout}')
     return r.stderr
 def start(q):
@@ -44,7 +44,7 @@ def start(q):
     must keep its access-epoch FOR SHARE lock alive (by not committing)
     while a second, real connection attempts a conflicting UPDATE."""
     p = subprocess.Popen(CMD, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    p.stdin.write("SET statement_timeout='15s'; SET lock_timeout='10s';" + q); p.stdin.flush()
+    p.stdin.write("SET statement_timeout='15s'; SET lock_timeout='10s'; SET extra_float_digits=3;" + q); p.stdin.flush()
     return p
 def wait_for(query, label, deadline_s=10):
     deadline = time.monotonic() + deadline_s

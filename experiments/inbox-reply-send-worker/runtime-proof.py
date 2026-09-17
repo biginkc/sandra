@@ -44,7 +44,7 @@ def run(args, input=None, timeout=60):
 def docker(*args, timeout=60): return run(D + list(args), timeout=timeout)
 def sql(q, timeout=20, check=True):
     cmd = D + ['exec', '-i', N, 'psql', '-XqAt', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1']
-    r = subprocess.run(cmd, input="SET statement_timeout='15s'; SET lock_timeout='10s'; BEGIN;" + q.rstrip() + ";COMMIT;", text=True, capture_output=True, timeout=timeout)
+    r = subprocess.run(cmd, input="SET statement_timeout='15s'; SET lock_timeout='10s'; SET extra_float_digits=3; BEGIN;" + q.rstrip() + ";COMMIT;", text=True, capture_output=True, timeout=timeout)
     if check and r.returncode: raise RuntimeError(r.stderr)
     return r.stdout.strip()
 
