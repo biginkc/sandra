@@ -105,6 +105,7 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: build-only-local-anon-key
           MESSAGING_PROVIDER: mock
           NEXT_FONT_GOOGLE_MOCKED_RESPONSES: ${{ github.workspace }}/tests/sequence-readiness/google-fonts-mock.cjs
+          NEXT_FONT_GOOGLE_TURBOPACK_MOCKED_RESPONSES: "1"
           NEXT_TELEMETRY_DISABLED: "1"
         run: npm run build
 

@@ -368,19 +368,24 @@ describe("enrollLead (integration)", () => {
       });
       expect(memberOutcome.status).toBe("enrolled");
 
-      const foreignMemberOutcome = await enrollLead(clientForUser(memberB.jwt), {
-        sequenceId,
-        propertyId: ownerLead.propertyId,
-        enrolledByUserId: memberB.userId,
-      });
-      expect(foreignMemberOutcome.status).toBe("sequence_not_found");
+      // RLS hides the foreign lead before enrollLead can reach its sequence
+      // lookup. Preserve that fail-closed behavior rather than converting the
+      // thrown not-found into a success-like status.
+      await expect(
+        enrollLead(clientForUser(memberB.jwt), {
+          sequenceId,
+          propertyId: ownerLead.propertyId,
+          enrolledByUserId: memberB.userId,
+        }),
+      ).rejects.toThrow("Lead not found.");
 
-      const foreignOwnerOutcome = await enrollLead(clientForUser(ownerB.jwt), {
-        sequenceId,
-        propertyId: memberLead.propertyId,
-        enrolledByUserId: ownerB.userId,
-      });
-      expect(foreignOwnerOutcome.status).toBe("sequence_not_found");
+      await expect(
+        enrollLead(clientForUser(ownerB.jwt), {
+          sequenceId,
+          propertyId: memberLead.propertyId,
+          enrolledByUserId: ownerB.userId,
+        }),
+      ).rejects.toThrow("Lead not found.");
     } finally {
       for (const user of [memberB, ownerB, memberA, ownerA]) {
         if (user) await supabase.auth.admin.deleteUser(user.userId);

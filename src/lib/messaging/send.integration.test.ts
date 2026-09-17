@@ -49,6 +49,7 @@ async function seed(params: {
   phone2Type?: "mobile" | "landline" | "unknown";
   state?: string;
   withConsent?: boolean;
+  consentOccurredAt?: Date;
 }): Promise<{ contactId: string; propertyId: string }> {
   const phone1 = params.phone === undefined ? "+18165559999" : params.phone;
   const { data: contact } = await supabase
@@ -79,6 +80,7 @@ async function seed(params: {
       channel: "sms",
       eventType: "opt_in_marketing_written",
       source: "integration-test",
+      occurredAt: params.consentOccurredAt,
     });
   }
   return { contactId: contact!.id, propertyId: property!.id };
@@ -460,16 +462,18 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("blocks with blocked_terminal_dispo when contact has opted out after opt-in", async () => {
-    const { contactId, propertyId } = await seed({ withConsent: true });
+    const optInAt = new Date("2026-08-01T12:00:00.000Z");
+    const optOutAt = new Date("2026-08-01T12:00:01.000Z");
+    const { contactId, propertyId } = await seed({
+      withConsent: true,
+      consentOccurredAt: optInAt,
+    });
     const optOut = await recordConsentEvent(supabase, {
       contactId,
       channel: "sms",
       eventType: "opt_out",
       source: "integration-test-opt-out",
-      // Keep the opt-out strictly later than seed()'s opt-in. PostgreSQL
-      // timestamps can otherwise tie and leave latest-event ordering to the
-      // query's secondary plan order.
-      occurredAt: new Date(Date.now() + 1000),
+      occurredAt: optOutAt,
     });
     expect(optOut.inserted).toBe(true);
     const outcome = await sendSmsToContact(supabase, {

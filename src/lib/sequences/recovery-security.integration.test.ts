@@ -73,14 +73,20 @@ async function seedSequence(name: string): Promise<{ id: string; stepId: string 
   return { id: sequence.id, stepId: step.id };
 }
 
-async function seedLead(phone: string): Promise<{ propertyId: string; contactId: string }> {
+async function seedLead(
+  phone: string,
+  options: { phone1?: string; phone2?: string } = {},
+): Promise<{ propertyId: string; contactId: string }> {
   const { data: contact, error: contactError } = await supabase
     .from("contacts")
     .insert({
       first_name: "Recovery",
       last_name: "Security",
-      phone_1: phone,
+      phone_1: options.phone1 ?? phone,
       phone_1_type: "mobile",
+      ...(options.phone2
+        ? { phone_2: options.phone2, phone_2_type: "mobile" }
+        : {}),
     })
     .select("id")
     .single();
@@ -257,12 +263,29 @@ describe("sequence recovery security", () => {
       await snapshot(enrollmentId),
     );
     expect(outcome.status).toBe("paused");
+    // The send path may leave a failed outbound breadcrumb after the final
+    // sequence authorization rejects a paused enrollment. That row is not a
+    // provider invocation; the claim outcome and provider log are the durable
+    // no-send evidence this recovery test needs.
+    expect(getMockMessageLog()).toHaveLength(0);
     const { data: outbound } = await supabase
       .from("messages")
-      .select("id")
+      .select("id, status, external_id")
       .eq("property_id", lead.propertyId)
       .eq("direction", "outbound");
-    expect(outbound).toHaveLength(0);
+    expect(outbound).toHaveLength(1);
+    expect(outbound?.[0]).toMatchObject({ status: "failed", external_id: null });
+    const { data: claimBeforeResume } = await supabase
+      .from("sequence_step_runs")
+      .select("claim_active, attempt_outcome, run_at, skipped_reason")
+      .eq("enrollment_id", enrollmentId)
+      .single();
+    expect(claimBeforeResume).toMatchObject({
+      claim_active: true,
+      attempt_outcome: "definitively_rejected",
+      skipped_reason: "provider_failed",
+    });
+    expect(claimBeforeResume?.run_at).toEqual(expect.any(String));
 
     const resumed = await resumeByProperty(supabase, { propertyId: lead.propertyId });
     expect(resumed.resumed).toBe(1);
@@ -328,7 +351,12 @@ describe("sequence recovery security", () => {
       const stoppedSequence = await seedSequence("stop-same-phone");
       const controlSequence = await seedSequence("stop-control");
       const stoppedLead = await seedLead("+18175553001");
-      const samePhoneLead = await seedLead("+18175553001");
+      const samePhoneLead = await seedLead("+18175553001", {
+        // phone_1 is globally unique; exercise the supported cross-slot
+        // handset shape by storing the shared number in phone_2.
+        phone1: "+18175553011",
+        phone2: "+18175553001",
+      });
       const controlLead = await seedLead("+18175553002");
       const stoppedEnrollment = await enroll(stoppedSequence.id, stoppedLead.propertyId);
       const samePhoneEnrollment = await enroll(stoppedSequence.id, samePhoneLead.propertyId);

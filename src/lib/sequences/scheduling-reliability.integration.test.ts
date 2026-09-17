@@ -252,16 +252,30 @@ function clientWithNextStepSelectFailure(
   const baseFrom = base.from.bind(base);
   let stepReads = 0;
   client.from = ((table: string) => {
+    stepReads += table === "sequence_steps" ? 1 : 0;
+    if (table === "sequence_steps" && stepReads === 2) {
+      // Keep the first current-step SELECT real. The second SELECT is the
+      // post-provider advance lookup, so return the same awaitable shape as
+      // PostgREST with a deterministic database error at that boundary.
+      return {
+        select: () => ({
+          eq: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({
+                data: null,
+                error: { message: "injected next-step SELECT failure" },
+              }),
+            }),
+          }),
+        }),
+      } as never;
+    }
     const builder = baseFrom(table as never) as unknown as Record<string, unknown>;
     if (table !== "sequence_steps") return builder as never;
     return new Proxy(builder, {
       get(target, property, receiver) {
         if (property === "maybeSingle") {
           return async (...args: unknown[]) => {
-            stepReads += 1;
-            if (stepReads === 2) {
-              return { data: null, error: { message: "injected next-step SELECT failure" } };
-            }
             return Reflect.apply(
               target[property] as (...values: unknown[]) => unknown,
               target,
@@ -594,7 +608,7 @@ describe("native quiet-hours and explicit recovery", () => {
     const blocked = await runSequenceTick(supabase);
     providerOff.mockRestore();
 
-    expect(blocked.outcomes.paused).toBe(1);
+    expect(blocked.outcomes.failed).toBe(1);
     expect(getMockMessageLog()).toHaveLength(0);
     expect(await loadEnrollment(enrollmentId)).toMatchObject({
       status: "paused",
