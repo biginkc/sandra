@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createInboxSavedActionRepository, resolveSavedInboxActionSnapshot, savedActionReferenceFromRaw, isReviewReplySavedDefinition, buildReplyHandoffRaw, InboxSavedActionApiError, type InboxSavedActionClient } from "./saved-action-api";
+import { createInboxSavedActionRepository, resolveSavedInboxActionSnapshot, savedActionReferenceFromRaw, isReviewReplySavedDefinition, buildReplyHandoffPayload, InboxSavedActionApiError, type InboxSavedActionClient } from "./saved-action-api";
 import { InvalidInboxActionError } from "./action-definition";
 
 const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -91,20 +91,18 @@ describe("review_reply hand-off (never auto-send)", () => {
     it("MUTATION: a review_reply step mixed with another step is NOT treated as the hand-off shape (would otherwise smuggle a second, unreviewed effect through the reply lane)", () => {
         expect(isReviewReplySavedDefinition({ version: 1, steps: [{ type: "review_reply", text: "Hi" }, { type: "assign", userId: null }] } as never)).toBe(false);
     });
-    it("builds a reply-prepare payload carrying the saved text as template, and the ORIGINAL request's targets/idempotencyKey", () => {
-        const raw = JSON.stringify({ idempotencyKey: id(4), targets: [{ kind: "conversation", id: id(5) }], savedAction: { id: id(1), version: 1 } });
+    it("builds a reply-prepare payload from the ALREADY-VALIDATED idempotencyKey/targets (never a re-parse of the raw body) plus the saved text as template", () => {
         const definition = { version: 1 as const, steps: [{ type: "review_reply" as const, text: "Hi {{first_name}}" }] };
-        const built = JSON.parse(buildReplyHandoffRaw(raw, definition));
+        const built = JSON.parse(buildReplyHandoffPayload(id(4), [{ kind: "conversation", id: id(5) }], definition));
         expect(built).toEqual({ idempotencyKey: id(4), targets: [{ kind: "conversation", id: id(5) }], template: "Hi {{first_name}}" });
     });
     it("MUTATION: refuses to build a hand-off payload for a non-review_reply (or multi-step) definition — this is the only gate that keeps a metadata definition out of the reply lane and vice versa", () => {
-        expect(() => buildReplyHandoffRaw("{}", outcomeDefinition as never)).toThrow(InvalidInboxActionError);
-        expect(() => buildReplyHandoffRaw("{}", { version: 1, steps: [{ type: "review_reply", text: "a" }, { type: "review_reply", text: "b" }] } as never)).toThrow(InvalidInboxActionError);
+        expect(() => buildReplyHandoffPayload(id(4), [], outcomeDefinition as never)).toThrow(InvalidInboxActionError);
+        expect(() => buildReplyHandoffPayload(id(4), [], { version: 1, steps: [{ type: "review_reply", text: "a" }, { type: "review_reply", text: "b" }] } as never)).toThrow(InvalidInboxActionError);
     });
     it("never includes an 'accept'/'send' field — the hand-off can only ever reach reply PREPARE, not accept", () => {
-        const raw = JSON.stringify({ idempotencyKey: id(4), targets: [{ kind: "conversation", id: id(5) }], savedAction: { id: id(1), version: 1 } });
         const definition = { version: 1 as const, steps: [{ type: "review_reply" as const, text: "Hi" }] };
-        const built = JSON.parse(buildReplyHandoffRaw(raw, definition));
+        const built = JSON.parse(buildReplyHandoffPayload(id(4), [{ kind: "conversation", id: id(5) }], definition));
         expect(Object.keys(built).sort()).toEqual(["idempotencyKey", "targets", "template"]);
     });
 });

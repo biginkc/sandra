@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/types";
 import { parseInboxActionIntent, parseInboxActionDefinition, InvalidInboxActionError, type InboxActionAuthContext, type SavedInboxActionSnapshot } from "./action-definition";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
-import { resolveSavedInboxActionSnapshot, savedActionReferenceFromRaw, isReviewReplySavedDefinition, buildReplyHandoffRaw, InboxSavedActionApiError, type InboxSavedActionClient } from "./saved-action-api";
+import { resolveSavedInboxActionSnapshot, savedActionReferenceFromRaw, isReviewReplySavedDefinition, buildReplyHandoffPayload, InboxSavedActionApiError, type InboxSavedActionClient } from "./saved-action-api";
 import { createInboxReplyRepository, InboxReplyApiError, type InboxReplyClient } from "./reply-api";
 import type { PreparedInboxReply } from "./reply-api-contract";
 import type { InboxActionRecovery, InboxAssigneeChoice, AcceptedInboxAction, InboxActionExclusion, InboxMetadataStep, InboxOperationStatus, InboxStepState, PreparedInboxAction, PreparedInboxActionItem } from "./action-api-contract";
@@ -104,9 +104,6 @@ export function createInboxActionRepository(client: InboxActionClient) {
             // Saved-action lookup glue: resolve a browser {id,version} reference
             // to the exact stored immutable snapshot via an authorized DB lookup
             // (never trust client-supplied definition text for a saved action).
-            // A review_reply-typed saved action hands off to the bulk-reply
-            // prepare lane and is NEVER passed into the metadata action seam —
-            // it can never reach accept/send from here.
             let saved: SavedInboxActionSnapshot | undefined;
             const reference = savedActionReferenceFromRaw(raw);
             if (reference) {
@@ -116,16 +113,15 @@ export function createInboxActionRepository(client: InboxActionClient) {
                     if (error instanceof InboxSavedActionApiError) throw new InboxActionApiError(error.status, error.code);
                     throw error;
                 }
-                if (isReviewReplySavedDefinition(saved.definition)) {
-                    try {
-                        return await createInboxReplyRepository(client as unknown as InboxReplyClient).prepare(buildReplyHandoffRaw(raw, saved.definition), signal);
-                    } catch (error) {
-                        if (error instanceof InboxReplyApiError) throw new InboxActionApiError(error.status, error.code);
-                        if (error instanceof InvalidInboxActionError) throw new InboxActionApiError(400, "invalid_action");
-                        throw error;
-                    }
-                }
             }
+            // The ONE envelope validator for every request this endpoint
+            // accepts — saved or inline, metadata-bound or about to be handed
+            // off to reply prepare. Nothing below this point is reachable with
+            // an invalid/oversized/malformed/duplicate-keyed envelope: that is
+            // rejected here, identically, before any routing decision is made
+            // (Astra round-1 blocker #2: the review_reply hand-off must not
+            // bypass this — it no longer does, since the hand-off below only
+            // ever runs after `parsed` exists).
             let parsed: ReturnType<typeof parseInboxActionIntent>;
             try {
                 parsed = parseInboxActionIntent(raw, authContext, saved);
@@ -134,6 +130,21 @@ export function createInboxActionRepository(client: InboxActionClient) {
                 if (error instanceof InvalidInboxActionError)
                     throw new InboxActionApiError(400, "invalid_action");
                 throw error;
+            }
+            // A review_reply-typed saved action hands off to the bulk-reply
+            // prepare lane and is NEVER passed into the metadata action seam —
+            // it can never reach accept/send from here. Built from `parsed`'s
+            // already-validated targets/idempotencyKey (never a re-parse of
+            // the raw body), and independently re-validated again by
+            // reply-api.ts's own parseInboxReplyPrepareRequest.
+            if (saved && isReviewReplySavedDefinition(saved.definition)) {
+                try {
+                    return await createInboxReplyRepository(client as unknown as InboxReplyClient).prepare(buildReplyHandoffPayload(parsed.idempotencyKey, parsed.input.targets, saved.definition), signal);
+                } catch (error) {
+                    if (error instanceof InboxReplyApiError) throw new InboxActionApiError(error.status, error.code);
+                    if (error instanceof InvalidInboxActionError) throw new InboxActionApiError(400, "invalid_action");
+                    throw error;
+                }
             }
             need(parsed.input.definition.steps.length <= 2, 400);
             need(parsed.input.definition.steps.every((step, index) => step.type === "assign" || (step.type === "outcome" && step.value !== "dnc" && index === 0)), 400);
