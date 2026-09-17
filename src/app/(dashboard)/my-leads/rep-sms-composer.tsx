@@ -40,6 +40,12 @@ type RepSmsComposerProps = {
   replyToPhone?: string | null
   /** Optional curated catalog override for tests or a future rollout variant. */
   templates?: readonly RepSmsTemplate[]
+  /**
+   * Places the trigger in a shared action toolbar while keeping an expanded
+   * composer on its own full-width row. The inline layout remains the default
+   * for surfaces that use the composer as a standalone block.
+   */
+  placement?: "inline" | "action"
 }
 
 type SendState = {
@@ -255,6 +261,7 @@ export function RepSmsComposer({
   onSent,
   replyToPhone = null,
   templates: providedTemplates,
+  placement = "inline",
 }: RepSmsComposerProps) {
   const [open, setOpen] = useState(false)
   const [activated, setActivated] = useState(false)
@@ -547,16 +554,19 @@ export function RepSmsComposer({
     setSendState({ status: "resume", message: "Draft retained. Review the text history, then send again when it is safe." })
   }
 
-  return <div className="space-y-2" data-testid="rep-sms-composer">
+  const actionPlacement = placement === "action"
+
+  return <div className={actionPlacement ? "contents" : "space-y-2"} data-testid="rep-sms-composer">
     <Button
       type="button"
       variant="outline"
+      size={actionPlacement ? "sm" : "default"}
       onClick={() => { setActivated(true); setOpen((value) => !value) }}
       aria-expanded={open}
     >
       {open ? "Hide text" : "Text lead"}
     </Button>
-    {activated && <div hidden={!open} className="space-y-4 rounded-lg border bg-background p-3">
+    {activated && <div hidden={!open} className={actionPlacement ? "basis-full min-w-0 space-y-4 rounded-lg border bg-background p-3" : "space-y-4 rounded-lg border bg-background p-3"}>
       {error ? <div role="alert" className="flex items-center justify-between gap-2 text-sm text-destructive">{error}<Button type="button" variant="outline" onClick={() => setRetry((value) => value + 1)}>Retry</Button></div> : !context ? <p role="status">Loading your texting numbers…</p> : !context.senders.length ? <p className="text-sm">No texting number is assigned to you. Ask an owner to add one in Manage Acquisitions.</p> : <>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="flex flex-col gap-1 text-sm" htmlFor={`rep-sms-sender-${propertyId}`}>

@@ -102,6 +102,8 @@ export function LeadMediaHero({
           <div
             className={`flex min-w-0 flex-wrap items-center gap-2 [&_[data-testid=call-lead-button]]:border-slate-900 [&_[data-testid=call-lead-button]]:bg-slate-900 [&_[data-testid=call-lead-button]]:text-white [&_button]:min-h-9 ${actionFocusClasses}`}
             data-testid="lead-media-actions"
+            role="group"
+            aria-label="Lead actions"
           >
             {actions}
           </div>
@@ -217,6 +219,8 @@ export function LeadMediaHero({
         <div
           className={`flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9 [&_button]:border-white/80 [&_button]:bg-white/95 [&_button]:text-slate-950 [&_button]:shadow-sm [&_button]:hover:bg-white ${actionFocusClasses}`}
           data-testid="lead-media-actions"
+          role="group"
+          aria-label="Lead actions"
         >
           {actions}
         </div>

@@ -284,11 +284,6 @@ export function MyLeadQueueRow({
           )}
         </div>
 
-        <RepSmsComposer
-          propertyId={row.propertyId}
-          onSent={() => { onRetryDetails(); onDetailChanged?.(); }}
-        />
-
         <MyLeadSmsStrip
           state={detailState ?? { status: "loading" }}
           onRetry={onRetryDetails}
@@ -368,49 +363,56 @@ export function MyLeadQueueRow({
             onLoadDetailPage={onLoadDetailPage}
           />
 
-      <div className="flex flex-wrap items-center gap-2.5 border-t border-[#f0eeec] px-4 pt-4 dark:border-border">
-        <Button
-          type="button"
-          variant="default"
-          size="sm"
-          onClick={(event) => {
-            event.stopPropagation()
-            onStageAction(primaryAction.action, row)
-          }}
-        >
-          <ArrowRight className="size-[15px]" aria-hidden="true" />
-          {primaryAction.label}
-        </Button>
-        <Link href={`/leads/${row.propertyId}`} prefetch={false} className={buttonVariants({ variant: "outline", size: "sm" })}>Open lead</Link>
-        {row.zillowHref && (
-          <a
-            href={row.zillowHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            className={buttonVariants({ variant: "outline", size: "sm", className: "border-[#bfdbfe] text-[#1d4ed8] dark:border-blue-900 dark:text-blue-300" })}
-          >
-            <ExternalLink aria-hidden="true" /> Open in Zillow
-          </a>
-        )}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2 px-4 pt-2.5 pb-4">
-        {secondaryActions.map(({ action, label, danger }) => (
+      <div data-testid={`my-lead-actions-${row.propertyId}`} role="group" aria-label="Lead actions">
+        <div className="flex flex-wrap items-center gap-2.5 border-t border-[#f0eeec] px-4 pt-4 dark:border-border">
           <Button
-            key={action}
             type="button"
-            variant={danger ? "destructive" : "outline"}
+            variant="default"
             size="sm"
-            className={cn(!danger && "border-[#e5e1df] bg-background text-muted-foreground hover:text-foreground dark:border-border", danger && "ml-auto")}
             onClick={(event) => {
               event.stopPropagation()
-              onStageAction(action, row)
+              onStageAction(primaryAction.action, row)
             }}
           >
-            {action === "start-call" && <Phone className="size-[13px]" aria-hidden="true" />}
-            {label}
+            <ArrowRight className="size-[15px]" aria-hidden="true" />
+            {primaryAction.label}
           </Button>
-        ))}
+          <Link href={`/leads/${row.propertyId}`} prefetch={false} className={buttonVariants({ variant: "outline", size: "sm" })}>Open lead</Link>
+          {row.zillowHref && (
+            <a
+              href={row.zillowHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={buttonVariants({ variant: "outline", size: "sm", className: "border-[#bfdbfe] text-[#1d4ed8] dark:border-blue-900 dark:text-blue-300" })}
+            >
+              <ExternalLink aria-hidden="true" /> Open in Zillow
+            </a>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 px-4 pt-2.5 pb-4">
+          <RepSmsComposer
+            propertyId={row.propertyId}
+            placement="action"
+            onSent={() => { onRetryDetails(); onDetailChanged?.(); }}
+          />
+          {secondaryActions.map(({ action, label, danger }) => (
+            <Button
+              key={action}
+              type="button"
+              variant={danger ? "destructive" : "outline"}
+              size="sm"
+              className={cn(!danger && "border-[#e5e1df] bg-background text-muted-foreground hover:text-foreground dark:border-border", danger && "ml-auto")}
+              onClick={(event) => {
+                event.stopPropagation()
+                onStageAction(action, row)
+              }}
+            >
+              {action === "start-call" && <Phone className="size-[13px]" aria-hidden="true" />}
+              {label}
+            </Button>
+          ))}
+        </div>
       </div>
       </>}
       </div>

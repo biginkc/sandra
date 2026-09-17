@@ -38,6 +38,23 @@ beforeEach(() => {
 })
 
 describe("RepSmsComposer obligation resume", () => {
+  it("uses the shared action-toolbar placement without changing the trigger behavior", async () => {
+    const user = userEvent.setup()
+    mocks.load.mockResolvedValue({ ok: true, data: genericContext() })
+    render(
+      <div className="flex flex-wrap">
+        <RepSmsComposer propertyId="property-1" placement="action" />
+      </div>,
+    )
+
+    const composer = screen.getByTestId("rep-sms-composer")
+    expect(composer).toHaveClass("contents")
+    expect(screen.getByRole("button", { name: "Text lead" })).toHaveClass("h-8")
+
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    expect(await screen.findByLabelText("Send from")).toBeVisible()
+  })
+
   it("restores a saved failed dispatch and submits its exact obligation", async () => {
     mocks.load.mockResolvedValue({ ok: true, data: context("failed_not_dispatched") })
     const user = userEvent.setup()

@@ -384,6 +384,24 @@ describe("MyLeadsQueue", () => {
     expect(row.queryByRole("button", { name: "Log attempt" })).not.toBeInTheDocument()
   })
 
+  it("groups the Text lead trigger with the other lead actions", async () => {
+    const user = userEvent.setup()
+    render(<MyLeadsQueue {...buildProps()} />)
+
+    const row = within(screen.getByTestId("my-lead-row-property-1"))
+    await user.click(row.getByRole("button", { name: "Show details for 1 Main Street" }))
+
+    const details = await row.findByRole("region", { name: "Lead details" })
+    const actions = row.getByTestId("my-lead-actions-property-1")
+    const composer = within(actions).getByTestId("rep-sms-composer")
+    const textTrigger = within(actions).getByRole("button", { name: "Text lead" })
+
+    expect(actions).toContainElement(composer)
+    expect(composer).toHaveClass("contents")
+    expect(textTrigger).toHaveClass("h-8")
+    expect(details.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   it("describes the contacted gate without claiming the seller was reached", async () => {
     const user = userEvent.setup()
     render(<MyLeadsQueue {...buildProps()} />)
