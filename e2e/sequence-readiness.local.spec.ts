@@ -194,7 +194,7 @@ async function enrollInSequence(
   await option.click({ timeout: 5_000 });
 }
 
-async function clickAndAwaitServerAction(
+async function clickAndAwaitActionResponse(
   page: Page,
   button: Locator,
 ): Promise<void> {
@@ -208,19 +208,56 @@ async function clickAndAwaitServerAction(
     ),
     button.click(),
   ]);
-  expect((await response.finished())).toBeNull();
   expect(response.ok()).toBe(true);
 }
 
-async function addStatusStep(page: Page, expectedStepNumber = 1): Promise<void> {
+async function waitForPersistedStep(
+  admin: ReturnType<typeof adminClient>,
+  sequenceId: string,
+  stepIndex: number,
+  actionType: "send_sms" | "change_status",
+): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const { data, error } = await admin
+          .from("sequence_steps")
+          .select("id, sequence_id, step_index, action_type")
+          .eq("sequence_id", sequenceId)
+          .eq("step_index", stepIndex)
+          .maybeSingle();
+        if (error) throw error;
+        return data;
+      },
+      { timeout: 10_000 },
+    )
+    .toMatchObject({
+      sequence_id: sequenceId,
+      step_index: stepIndex,
+      action_type: actionType,
+    });
+}
+
+async function addStatusStep(
+  page: Page,
+  sequenceId: string,
+  expectedStepNumber = 1,
+): Promise<void> {
   await page.getByRole("button", { name: /^add step$/i }).click();
   const dialog = page.getByRole("dialog");
   const selects = dialog.getByRole("combobox");
   await selects.nth(1).selectOption("change_status");
   await selects.nth(2).selectOption("contacted");
-  await clickAndAwaitServerAction(
+  await clickAndAwaitActionResponse(
     page,
     dialog.getByRole("button", { name: /^add step$/i }),
+  );
+  await expect(dialog).toBeHidden({ timeout: 10_000 });
+  await waitForPersistedStep(
+    adminClient(),
+    sequenceId,
+    expectedStepNumber - 1,
+    "change_status",
   );
   await expect(
     page.getByRole("heading", {
@@ -230,16 +267,22 @@ async function addStatusStep(page: Page, expectedStepNumber = 1): Promise<void> 
   ).toBeVisible();
 }
 
-async function addSmsStep(page: Page, body: string): Promise<void> {
+async function addSmsStep(
+  page: Page,
+  sequenceId: string,
+  body: string,
+): Promise<void> {
   await page.getByRole("button", { name: /^add step$/i }).click();
   const dialog = page.getByRole("dialog");
   const selects = dialog.getByRole("combobox");
   await selects.nth(1).selectOption("send_sms");
   await dialog.getByLabel("Message body").fill(body);
-  await clickAndAwaitServerAction(
+  await clickAndAwaitActionResponse(
     page,
     dialog.getByRole("button", { name: /^add step$/i }),
   );
+  await expect(dialog).toBeHidden({ timeout: 10_000 });
+  await waitForPersistedStep(adminClient(), sequenceId, 0, "send_sms");
   await expect(
     page.getByRole("heading", { name: "Step 1", exact: true }),
   ).toBeVisible();
@@ -546,22 +589,23 @@ test.describe("sequence readiness — local browser contract", () => {
   test("create/edit/enroll then persist pause, resume, cancel, and reload", async ({
     page,
   }) => {
-    // This flow intentionally crosses several DB-backed routes; allow the
-    // cold Webpack dev server to compile them without changing the bounded
-    // 10-second readiness assertions below.
+    // This flow intentionally crosses several DB-backed routes. The browser
+    // config prebuilds the Webpack production server before this bounded flow
+    // starts, so these assertions measure the app actions rather than route
+    // compilation.
     test.setTimeout(120_000);
     const admin = adminClient();
     await signIn(page);
 
     const sequenceName = `Browser readiness ${Date.now()}`;
     const sequenceId = await createSequence(page, sequenceName);
-    await addStatusStep(page);
+    await addStatusStep(page, sequenceId);
 
     await page.getByLabel("Description").fill("Edited local description");
-    // The editor uses startTransition around this server action. CI6 captured
-    // an aborted edit POST during the following navigation, so settle the
-    // response before checking persistence or leaving the route.
-    await clickAndAwaitServerAction(
+    // The editor uses startTransition around this server action. The response
+    // headers/status only confirm the action request was accepted; the DB poll
+    // below is the authoritative completion check before reload/navigation.
+    await clickAndAwaitActionResponse(
       page,
       page.getByRole("button", { name: /^save$/i }).first(),
     );
@@ -645,8 +689,8 @@ test.describe("sequence readiness — local browser contract", () => {
     const sequenceName = `Browser SMS ${Date.now()}`;
     const sequenceId = await createSequence(page, sequenceName);
     const body = "Hello from the local sequence readiness lane";
-    await addSmsStep(page, body);
-    await addStatusStep(page, 2);
+    await addSmsStep(page, sequenceId, body);
+    await addStatusStep(page, sequenceId, 2);
     const { propertyId } = await seedLead(admin, "sms");
 
     await gotoLeadPage(page, propertyId);
