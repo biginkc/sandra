@@ -74,6 +74,7 @@ function setupClient() {
 beforeEach(() => {
   vi.resetAllMocks();
   vi.stubEnv("MESSAGING_PROVIDER", "sendillo");
+  vi.stubEnv("SENDILLO_ORG_ID", "org-1");
   setupClient();
   mocks.provider.mockReturnValue({ providerId: "sendillo" });
   mocks.sendSmsToContact.mockResolvedValue({
@@ -200,5 +201,39 @@ describe("dispatchRepSms durable generic reservation", () => {
       p_submission_key: freshKey,
     }));
     expect(mocks.adminRpc).toHaveBeenCalledTimes(4);
+  });
+
+  it("rejects a cross-organization context before claiming a delivery or calling the provider", async () => {
+    const client = setupClient();
+    client.rpc.mockImplementation(((name: string) => Promise.resolve(
+      name === "fn_get_rep_sms_context"
+        ? {
+            data: { ...contextData, orgId: "org-2" },
+            error: null,
+          }
+        : { data: { draft: null }, error: null },
+    )) as never);
+
+    await expect(dispatchRepSms({
+      propertyId: "property-2",
+      assignmentId: "sender-1",
+      idempotencyKey: "11111111-1111-4111-8111-111111111111",
+      composition,
+    })).rejects.toThrow("Sendillo texting is not available for this organization.");
+    expect(mocks.adminRpc).not.toHaveBeenCalled();
+    expect(mocks.sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before a provider dispatch when the Sendillo organization scope is missing", async () => {
+    vi.stubEnv("SENDILLO_ORG_ID", "");
+
+    await expect(dispatchRepSms({
+      propertyId: "property-1",
+      assignmentId: "sender-1",
+      idempotencyKey: "11111111-1111-4111-8111-111111111111",
+      composition,
+    })).rejects.toThrow("Sendillo texting organization scope is not configured.");
+    expect(mocks.adminRpc).not.toHaveBeenCalled();
+    expect(mocks.sendSmsToContact).not.toHaveBeenCalled();
   });
 });

@@ -25,6 +25,7 @@ import {
   evaluateSuppression,
   type SuppressionDecision,
 } from "./suppression";
+import { assertSendilloOrganizationScope } from "./rep-sms-scope";
 
 /**
  * Core "send one outbound SMS" operation. Called from the lead-detail
@@ -456,6 +457,20 @@ export async function sendSmsToContact(
     if (propertyLookup.error) return { status: "db_error", error: propertyLookup.error.message };
     if (!propertyLookup.data) return { status: "property_not_found" };
     preloadedProperty = propertyLookup.data;
+    try {
+      // Check the tenant before replaying a service-owned keyed submission.
+      // A replay must never become a cross-tenant visibility side channel
+      // merely because it does not issue a second provider request.
+      assertSendilloOrganizationScope(
+        preloadedProperty.org_id,
+        manualDispatch?.provider.providerId,
+      );
+    } catch (e) {
+      return {
+        status: "db_error",
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
     idempotencyChecked = true;
     const existing = await loadRepSmsIdempotencyRow(
       supabase,
@@ -525,6 +540,17 @@ export async function sendSmsToContact(
   const resolved = resolveProvider();
   if (!("providerId" in resolved)) return resolved;
   const provider = resolved;
+  try {
+    // The provider key is application-scoped.  Bind every property-backed
+    // Sendillo send to the single configured organization before any sender
+    // lookup or pending row can cross that provider boundary.
+    assertSendilloOrganizationScope(propertyResult.data.org_id, provider.providerId);
+  } catch (e) {
+    return preserveRepSmsPreDispatchFailure(input, {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
 
   const consentState = await getConsentState(supabase, input.contactId, "sms");
   const suppression = evaluateSuppression({
@@ -914,6 +940,15 @@ async function queueForLater(
   }
   if (!propertyResult.data) return { status: "property_not_found" };
 
+  try {
+    assertSendilloOrganizationScope(propertyResult.data.org_id, providerId);
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+
   const suppression = evaluateSuppression({
     outreachDispo: propertyResult.data.outreach_dispo,
     consentState,
@@ -1084,6 +1119,14 @@ export async function releaseQueuedMessage(
     return { status: "db_error", error: fetchError.message };
   }
   if (!msg) return { status: "contact_not_found" };
+  try {
+    assertSendilloOrganizationScope(msg.org_id, provider.providerId);
+  } catch (e) {
+    return {
+      status: "db_error",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
   await assertNotTrainingTarget(supabase, { propertyId: msg.property_id, contactId: msg.contact_id });
   // Only queued rows can be released. Anything else is likely a
   // double-click or a stale auto-send tick — treat as a no-op by
@@ -1941,6 +1984,19 @@ async function resolveOutboundFromAddress(
   supabase: SupabaseClient<Database>,
   args: ResolveFromArgs,
 ): Promise<ResolveFromResult> {
+  try {
+    // Sender resolution may query provider-backed inventory or campaign
+    // snapshots.  Apply the same tenant fence before those reads.
+    assertSendilloOrganizationScope(args.orgId, args.provider.providerId);
+  } catch (e) {
+    return {
+      ok: false,
+      outcome: {
+        status: "db_error",
+        error: e instanceof Error ? e.message : String(e),
+      },
+    };
+  }
   const supportsInventory = providerSupportsSenderInventory(args.provider);
   let fromAddress: string | null = null;
   let fromSource: "explicit" | "sticky" | "campaign" | "default" | null = null;

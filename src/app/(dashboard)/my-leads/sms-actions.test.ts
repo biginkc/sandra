@@ -1,21 +1,33 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const mocks = vi.hoisted(() => ({
   readContext: vi.fn(),
   dispatch: vi.fn(),
   adminRpc: vi.fn(),
+  memberships: vi.fn(),
+  provider: {
+    providerId: "sendillo",
+    listPurchasedNumbers: vi.fn(),
+  },
 }))
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }))
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({ rpc: mocks.adminRpc }) }))
-vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: vi.fn() }))
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }))
 vi.mock("@/lib/auth/access-state", () => ({ hasActiveSandraAccess: vi.fn(() => true) }))
 vi.mock("@/lib/messaging/rep-sms", async () => {
   const actual = await vi.importActual<typeof import("@/lib/messaging/rep-sms")>("@/lib/messaging/rep-sms")
-  return { ...actual, readRepSmsContext: mocks.readContext, dispatchRepSms: mocks.dispatch }
+  return {
+    ...actual,
+    readRepSmsContext: mocks.readContext,
+    dispatchRepSms: mocks.dispatch,
+    providerForRepSms: () => mocks.provider,
+  }
 })
 
-import { acknowledgeRepSmsSubmission, sendRepSms } from "./sms-actions"
+import { acknowledgeRepSmsSubmission, loadRepSmsNumbers, loadRepSmsSenderInventory, saveRepSmsSender, sendRepSms } from "./sms-actions"
+
+const ORIGINAL_SENDILLO_ORG_ID = process.env.SENDILLO_ORG_ID
 
 const composition = {
   introId: "mel-maria-assistant-1",
@@ -39,7 +51,158 @@ const baseContext = (status: string) => ({
 
 beforeEach(() => {
   vi.resetAllMocks()
+  process.env.SENDILLO_ORG_ID = "org-1"
+  mocks.memberships.mockResolvedValue([{ org_id: "org-1", role: "owner" }])
   mocks.adminRpc.mockResolvedValue({ data: { ok: true, state: "accepted" }, error: null })
+})
+
+afterEach(() => {
+  if (ORIGINAL_SENDILLO_ORG_ID === undefined) delete process.env.SENDILLO_ORG_ID
+  else process.env.SENDILLO_ORG_ID = ORIGINAL_SENDILLO_ORG_ID
+})
+
+describe("rep SMS sender inventory diagnostics", () => {
+  it("returns eligible options plus precise nonsecret reasons for every ineligible Sendillo number", async () => {
+    mocks.provider.listPurchasedNumbers.mockResolvedValue([
+      {
+        phoneE164: "+18162939379",
+        providerAccountId: null,
+        providerNumberId: null,
+        status: null,
+        messagingStatus: null,
+        raw: { secret: "must-never-cross-server-action", accountToken: "redacted" },
+      },
+      {
+        phoneE164: "+18163780213",
+        providerAccountId: "account-2",
+        providerNumberId: "number-2",
+        status: "inactive",
+        messagingStatus: "pending",
+        raw: { providerSecret: "redacted" },
+      },
+      {
+        phoneE164: "+18164876883",
+        providerAccountId: "account-3",
+        providerNumberId: "number-3",
+        status: "active",
+        messagingStatus: "active",
+        raw: { providerSecret: "redacted" },
+      },
+    ])
+
+    const result = await loadRepSmsSenderInventory("org-1")
+
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        eligible: [{ number: "+18164876883", ownerName: "Sendillo", ownerType: "sendillo", status: "active" }],
+        ineligible: [
+          {
+            number: "+18162939379",
+            reasons: [
+              "missing_account_identity",
+              "missing_number_identity",
+              "number_status_missing",
+              "messaging_status_missing",
+            ],
+          },
+          {
+            number: "+18163780213",
+            reasons: ["number_status_not_active", "messaging_status_not_active"],
+          },
+        ],
+      },
+    })
+    const serialized = JSON.stringify(result)
+    expect(serialized).not.toContain("must-never-cross-server-action")
+    expect(serialized).not.toContain("providerSecret")
+  })
+
+  it("keeps the legacy eligible-number action array-shaped for existing callers", async () => {
+    mocks.provider.listPurchasedNumbers.mockResolvedValue([
+      {
+        phoneE164: "+18164876899",
+        providerAccountId: "account-9",
+        providerNumberId: "number-9",
+        status: "active",
+        messagingStatus: "active",
+        raw: {},
+      },
+      {
+        phoneE164: "+18164876883",
+        providerAccountId: null,
+        providerNumberId: "number-8",
+        status: "active",
+        messagingStatus: "active",
+        raw: {},
+      },
+    ])
+
+    const result = await loadRepSmsNumbers("org-1")
+
+    expect(result).toEqual({
+      ok: true,
+      data: [{ number: "+18164876899", ownerName: "Sendillo", ownerType: "sendillo", status: "active" }],
+    })
+  })
+
+  it("does not disclose the configured provider catalog to an owner of another organization", async () => {
+    mocks.memberships.mockResolvedValue([
+      { org_id: "org-1", role: "owner" },
+      { org_id: "org-2", role: "owner" },
+    ])
+
+    const result = await loadRepSmsSenderInventory("org-2")
+
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({
+        code: "AUTHORIZATION",
+        message: "Sendillo texting is not available for this organization.",
+      }),
+    })
+    expect(mocks.provider.listPurchasedNumbers).not.toHaveBeenCalled()
+  })
+
+  it("fails closed when the single-tenant Sendillo organization scope is missing", async () => {
+    delete process.env.SENDILLO_ORG_ID
+
+    const result = await loadRepSmsSenderInventory("org-1")
+
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({
+        code: "CONFIGURATION",
+        message: "Sendillo texting organization scope is not configured. Set SENDILLO_ORG_ID before assigning numbers.",
+      }),
+    })
+    expect(mocks.provider.listPurchasedNumbers).not.toHaveBeenCalled()
+  })
+
+  it("does not assign a provider sender to an owner of another organization", async () => {
+    mocks.memberships.mockResolvedValue([
+      { org_id: "org-1", role: "owner" },
+      { org_id: "org-2", role: "owner" },
+    ])
+
+    const result = await saveRepSmsSender({
+      orgId: "org-2",
+      userId: "rep-2",
+      number: "+18164876899",
+      label: "Sendillo",
+      isDefault: true,
+      active: true,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      error: expect.objectContaining({
+        code: "AUTHORIZATION",
+        message: "Sendillo texting is not available for this organization.",
+      }),
+    })
+    expect(mocks.provider.listPurchasedNumbers).not.toHaveBeenCalled()
+  })
 })
 
 describe("resumed rep SMS obligations", () => {

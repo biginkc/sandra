@@ -35,6 +35,12 @@ export class SendilloMessagingProvider implements MessagingProvider {
     private readonly apiKey: string,
     private readonly fromNumber: string | null,
     private readonly webhookSecret?: string | null,
+    /**
+     * Stable nonsecret identity for this configured Sendillo connection. It
+     * is deliberately separate from the bearer key: keys rotate, while
+     * grants and provider callbacks must continue to fence the same account.
+     */
+    private readonly configuredAccountId?: string | null,
   ) {}
 
   getDefaultFromNumber(): string | null {
@@ -289,18 +295,24 @@ export class SendilloMessagingProvider implements MessagingProvider {
         continue;
       }
       const providerAccountId =
-        readString(entry, "providerAccountId") ??
-        readString(entry, "provider_account_id") ??
-        readString(entry, "accountId") ??
-        readString(entry, "account_id") ??
-        readString(entry, "account", "id") ??
-        readString(entry, "account", "accountId");
+        readStringOrNumber(entry, "providerAccountId") ??
+        readStringOrNumber(entry, "provider_account_id") ??
+        readStringOrNumber(entry, "accountId") ??
+        readStringOrNumber(entry, "account_id") ??
+        readStringOrNumber(entry, "account", "id") ??
+        readStringOrNumber(entry, "account", "accountId") ??
+        this.configuredAccountId?.trim() ??
+        null;
       numbers.push({
         phoneE164: phone,
         ...(providerAccountId ? { providerAccountId } : {}),
         providerNumberId:
-          readString(entry, "id") ?? readString(entry, "numberId"),
-        status: readString(entry, "status"),
+          readStringOrNumber(entry, "id") ??
+          readStringOrNumber(entry, "numberId"),
+        status:
+          readString(entry, "numberStatus") ??
+          readString(entry, "number_status") ??
+          readString(entry, "status"),
         messagingStatus:
           readString(entry, "messagingStatus") ??
           readString(entry, "messaging_status") ??
@@ -322,7 +334,8 @@ export class SendilloMessagingProvider implements MessagingProvider {
     const campaigns: ProviderCampaignSummary[] = [];
     for (const entry of entries) {
       const externalId =
-        readString(entry, "id") ?? readString(entry, "campaignId");
+        readStringOrNumber(entry, "id") ??
+        readStringOrNumber(entry, "campaignId");
       if (!externalId) {
         reportMalformedCatalogEntry(entry, "campaigns", "missing id");
         continue;
@@ -533,6 +546,7 @@ export function sendilloFromEnvWithOptions(options: { requireDefaultFrom?: boole
   const apiKey = process.env.SENDILLO_API_KEY;
   const fromNumber = process.env.SENDILLO_FROM_NUMBER?.trim() || null;
   const webhookSecret = process.env.SENDILLO_WEBHOOK_SECRET ?? null;
+  const configuredAccountId = sendilloConfiguredAccountId();
   if (!apiKey || (options.requireDefaultFrom !== false && !fromNumber)) {
     throw new ConfigurationError(
       options.requireDefaultFrom === false
@@ -540,7 +554,21 @@ export function sendilloFromEnvWithOptions(options: { requireDefaultFrom?: boole
         : "Sendillo credentials missing. Set SENDILLO_API_KEY and SENDILLO_FROM_NUMBER in .env.local.",
     );
   }
-  return new SendilloMessagingProvider(apiKey, fromNumber, webhookSecret);
+  return new SendilloMessagingProvider(apiKey, fromNumber, webhookSecret, configuredAccountId);
+}
+
+/**
+ * Return the configured identity for the Sendillo connection. The first name
+ * is canonical; the second is retained as a deployment compatibility alias
+ * for operators who already call the value a provider account id. Neither
+ * value is a credential and neither is derived from the API key.
+ */
+export function sendilloConfiguredAccountId(): string | null {
+  return (
+    process.env.SENDILLO_CONNECTION_ID?.trim() ||
+    process.env.SENDILLO_PROVIDER_ACCOUNT_ID?.trim() ||
+    null
+  );
 }
 
 function reportMalformedCatalogEntry(
@@ -559,9 +587,9 @@ function reportMalformedCatalogEntry(
         label,
         reason,
         providerEntryId:
-          readString(entry, "id") ??
-          readString(entry, "numberId") ??
-          readString(entry, "campaignId") ??
+          readStringOrNumber(entry, "id") ??
+          readStringOrNumber(entry, "numberId") ??
+          readStringOrNumber(entry, "campaignId") ??
           null,
       },
     },
@@ -613,6 +641,24 @@ function readString(value: unknown, ...path: string[]): string | null {
     current = (current as JsonObject)[key];
   }
   return typeof current === "string" && current.length > 0 ? current : null;
+}
+
+/**
+ * Provider ids are documented as opaque values, but Sendillo's live catalog
+ * returns purchased-number and campaign ids as JSON numbers. Convert only
+ * strings and safe integers so a malformed numeric value cannot become an
+ * unstable or misleading provider identity through implicit coercion.
+ */
+function readStringOrNumber(value: unknown, ...path: string[]): string | null {
+  let current: unknown = value;
+  for (const key of path) {
+    if (!current || typeof current !== "object") return null;
+    current = (current as JsonObject)[key];
+  }
+  if (typeof current === "string" && current.length > 0) return current;
+  return typeof current === "number" && Number.isSafeInteger(current)
+    ? String(current)
+    : null;
 }
 
 function stringArrayValue(value: unknown, key: string): string[] | null {

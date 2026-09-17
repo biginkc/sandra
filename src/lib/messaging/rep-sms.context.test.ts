@@ -9,6 +9,8 @@ const body = "Hey, this is Mel, Maria's assistant.\n\nPlease text Maria a time t
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.stubEnv("MESSAGING_PROVIDER", "sendillo");
+  vi.stubEnv("SENDILLO_ORG_ID", "org-1");
 });
 
 describe("readRepSmsContext generic SMS recovery", () => {
@@ -99,5 +101,50 @@ describe("readRepSmsContext generic SMS recovery", () => {
       remainder: "Please text Maria a time that works.",
     }));
     expect(context.phone).toBe("+18165550123");
+  });
+
+  it("rejects a Sendillo context whose property organization is outside the configured scope", async () => {
+    const client = {
+      rpc: vi.fn(() => Promise.resolve({
+        data: {
+          orgId: "org-2",
+          actorId: "rep-1",
+          contactId: null,
+          provider: "sendillo",
+          senders: [],
+          obligation: null,
+        },
+        error: null,
+      })),
+    };
+    createClient.mockResolvedValue(client);
+
+    await expect(readRepSmsContext("property-2")).rejects.toThrow(
+      "Sendillo texting is not available for this organization.",
+    );
+    expect(client.rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed before loading draft or contact data when Sendillo scope is missing", async () => {
+    vi.stubEnv("SENDILLO_ORG_ID", "");
+    const client = {
+      rpc: vi.fn(() => Promise.resolve({
+        data: {
+          orgId: "org-1",
+          actorId: "rep-1",
+          contactId: null,
+          provider: "sendillo",
+          senders: [],
+          obligation: null,
+        },
+        error: null,
+      })),
+    };
+    createClient.mockResolvedValue(client);
+
+    await expect(readRepSmsContext("property-1")).rejects.toThrow(
+      "Sendillo texting organization scope is not configured.",
+    );
+    expect(client.rpc).toHaveBeenCalledTimes(1);
   });
 });

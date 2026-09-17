@@ -9,6 +9,7 @@ import { start } from "workflow/api";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
 import { dispatchRepSms, readRepSmsContext } from "@/lib/messaging/rep-sms";
+import { assertSendilloOrganizationScope } from "@/lib/messaging/rep-sms-scope";
 import { getCallerMemberships, getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
 export type { TeamMember } from "@/lib/auth/team-member";
@@ -2092,6 +2093,19 @@ export async function listFromNumbers(): Promise<Result<DialpadFromOption[]>> {
     const provider = getMessagingProvider();
     if (!provider || !provider.listFromNumbers) {
       return ok([]);
+    }
+    if (provider.providerId === "sendillo") {
+      // This legacy owner composer has no property argument at catalog-read
+      // time. Only expose the app-scoped catalog when the caller belongs to
+      // the configured tenant; otherwise return an empty, non-leaking list.
+      const configuredOrgId = process.env.SENDILLO_ORG_ID?.trim() || null;
+      assertSendilloOrganizationScope(
+        configuredOrgId ?? memberships[0]?.org_id,
+        provider.providerId,
+      );
+      if (!configuredOrgId || !memberships.some((m) => m.org_id === configuredOrgId)) {
+        return ok([]);
+      }
     }
     const numbers = await provider.listFromNumbers();
     return ok(numbers);
