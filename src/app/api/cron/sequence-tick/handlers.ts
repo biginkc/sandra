@@ -35,6 +35,14 @@ import type { Database, Json } from "@/lib/supabase/types";
  */
 
 const BATCH_SIZE = 100;
+/**
+ * A full page of retained claims must not hide the first independently due
+ * enrollment behind it. Look ahead by at most one normal page; the regular
+ * work page remains capped at BATCH_SIZE and the elapsed-time guard still
+ * wins over this bounded fairness scan. Retained rows beyond this cap remain
+ * fenced and wait for stale-claim reconciliation or a later tick.
+ */
+const RETAINED_CLAIM_LOOKAHEAD_ROWS = BATCH_SIZE;
 /** Max queued-message releases per tick. The elapsed-time budget below is
  *  still the hard safety rail; this cap lets healthy runs catch up faster
  *  while stopping cleanly before the platform can kill the invocation. */
@@ -121,29 +129,107 @@ export async function runSequenceTick(
   let budgetExhausted = false;
 
   const nowIso = new Date().toISOString();
-  const { data: due, error } = await supabase
-    .from("sequence_enrollments")
-    .select(
-      "id, org_id, sequence_id, property_id, contact_id, current_step_index, enrolled_by_user_id, status",
-    )
-    .eq("status", "active")
-    .not("next_run_at", "is", null)
-    .lte("next_run_at", nowIso)
-    .order("next_run_at", { ascending: true })
-    .limit(BATCH_SIZE);
-
-  if (error) throw new Error(`fetch due enrollments failed: ${error.message}`);
-
   const outcomes: Record<string, number> = {};
   let processed = 0;
-  for (const enrollment of due ?? []) {
+  type DueEnrollment = Parameters<typeof processEnrollmentTick>[1] & {
+    next_run_at: string | null;
+  };
+  type DueCursor = Pick<DueEnrollment, "next_run_at" | "id">;
+
+  const fetchDuePage = async (cursor: DueCursor | null): Promise<DueEnrollment[]> => {
+    let query = supabase
+      .from("sequence_enrollments")
+      .select(
+        "id, org_id, sequence_id, property_id, contact_id, current_step_index, enrolled_by_user_id, status, next_run_at",
+      )
+      .eq("status", "active")
+      .not("next_run_at", "is", null)
+      .lte("next_run_at", nowIso);
+    if (cursor) {
+      query = query.or(
+        `next_run_at.gt.${cursor.next_run_at},and(next_run_at.eq.${cursor.next_run_at},id.gt.${cursor.id})`,
+      );
+    }
+    const { data, error } = await query
+      .order("next_run_at", { ascending: true })
+      .order("id", { ascending: true })
+      .limit(BATCH_SIZE);
+    if (error) throw new Error(`fetch due enrollments failed: ${error.message}`);
+    return (data ?? []) as DueEnrollment[];
+  };
+
+  let due = await fetchDuePage(null);
+  let cursor: DueCursor | null = null;
+  let lookaheadRows = 0;
+  let scanningRetainedPage = false;
+  let stopFairnessScan = false;
+
+  while (due.length > 0 && !stopFairnessScan) {
+    let pageAllRetained = due.length === BATCH_SIZE;
+    for (const enrollment of due) {
+      if (!withinBudget()) {
+        budgetExhausted = true;
+        stopFairnessScan = true;
+        break;
+      }
+      let outcome: Awaited<ReturnType<typeof processEnrollmentTick>>;
+      try {
+        outcome = await processEnrollmentTick(supabase, enrollment);
+      } catch (error) {
+        // Keep the claim's unknown state intact: a throw may have occurred
+        // after the provider-intent fence, so this worker must never infer a
+        // safe retry. Isolate the row so one malformed/template/provider
+        // failure cannot abort the rest of the due batch.
+        reportError(error, {
+          tags: { surface: "cron_sequence_tick_enrollment" },
+          extra: { enrollmentId: enrollment.id },
+        });
+        outcome = {
+          status: "failed",
+          enrollmentId: enrollment.id,
+          message: error instanceof Error ? error.message : "sequence tick failed",
+        };
+      }
+      outcomes[outcome.status] = (outcomes[outcome.status] ?? 0) + 1;
+      processed += 1;
+      cursor = { next_run_at: enrollment.next_run_at, id: enrollment.id };
+
+      if (outcome.status !== "skipped_already_claimed") {
+        pageAllRetained = false;
+        // Once a lookahead reaches independent work, leave the rest of that
+        // page for the next tick; only retained claims may be inspected past
+        // the normal batch boundary.
+        if (scanningRetainedPage) {
+          stopFairnessScan = true;
+          break;
+        }
+      }
+      if (scanningRetainedPage) {
+        lookaheadRows += 1;
+        if (lookaheadRows >= RETAINED_CLAIM_LOOKAHEAD_ROWS) {
+          stopFairnessScan = true;
+          break;
+        }
+      }
+    }
+
+    if (
+      stopFairnessScan ||
+      !pageAllRetained ||
+      due.length < BATCH_SIZE ||
+      lookaheadRows >= RETAINED_CLAIM_LOOKAHEAD_ROWS ||
+      !cursor
+    ) {
+      break;
+    }
     if (!withinBudget()) {
       budgetExhausted = true;
       break;
     }
-    const outcome = await processEnrollmentTick(supabase, enrollment);
-    outcomes[outcome.status] = (outcomes[outcome.status] ?? 0) + 1;
-    processed += 1;
+    const nextPage = await fetchDuePage(cursor);
+    if (nextPage.length === 0) break;
+    due = nextPage;
+    scanningRetainedPage = true;
   }
 
   const stalePendingFailed = await failStalePendingProviderAttempts(

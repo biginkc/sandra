@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 
 import { createTestClient } from "@tests/integration/client";
-import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
+import {
+  BMH_ORG_ID,
+  clientForUser,
+  createOrgUser,
+  getCanonicalTestOrgId,
+  seedTwoOrgs,
+  TEST_ORG_B_ID,
+} from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 
 import {
@@ -53,6 +61,7 @@ async function seedSequence(opts: {
 
 async function seedPropertyWithConsent(opts: {
   phone?: string | null;
+  phoneType?: "mobile" | "landline";
   optIn?: boolean;
   address?: string;
   state?: string;
@@ -65,7 +74,7 @@ async function seedPropertyWithConsent(opts: {
         first_name: "Enrollee",
         last_name: "Test",
         phone_1: opts.phone,
-        phone_1_type: "mobile",
+        phone_1_type: opts.phoneType ?? "mobile",
       })
       .select("id")
       .single();
@@ -171,6 +180,23 @@ describe("enrollLead (integration)", () => {
     expect(outcome.status).toBe("no_phone");
   });
 
+  it("rejects a lead whose only phone is a landline", async () => {
+    const seqId = await seedSequence({
+      name: "LandlineOnly",
+      steps: [{ delay: 0, body: "x" }],
+    });
+    const { propertyId } = await seedPropertyWithConsent({
+      phone: "+18165550007",
+      phoneType: "landline",
+    });
+
+    const outcome = await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId,
+    });
+    expect(outcome.status).toBe("landline_phone");
+  });
+
   it("rejects a lead whose contact is opted out", async () => {
     const seqId = await seedSequence({
       name: "OptedOut",
@@ -230,6 +256,24 @@ describe("enrollLead (integration)", () => {
     expect(outcome.status).toBe("sequence_inactive");
   });
 
+  it("rejects enrollment on an inactive but unarchived sequence", async () => {
+    const seqId = await seedSequence({
+      name: "InactiveOnly",
+      steps: [{ delay: 0, body: "x" }],
+      active: false,
+      archived: false,
+    });
+    const { propertyId } = await seedPropertyWithConsent({
+      phone: "+18165550008",
+    });
+
+    const outcome = await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId,
+    });
+    expect(outcome.status).toBe("sequence_inactive");
+  });
+
   it("rejects enrollment on a sequence with zero steps", async () => {
     const orgId = await getOrgId();
     const { data: seq } = await supabase
@@ -270,6 +314,78 @@ describe("enrollLead (integration)", () => {
       propertyId,
     });
     expect(second.status).toBe("enrolled");
+  });
+
+  it("enrolls through authenticated owner/member clients and blocks cross-org attempts", async () => {
+    await seedTwoOrgs(supabase);
+    type OrgUser = Awaited<ReturnType<typeof createOrgUser>>;
+    let ownerA: OrgUser | null = null;
+    let memberA: OrgUser | null = null;
+    let ownerB: OrgUser | null = null;
+    let memberB: OrgUser | null = null;
+    try {
+      // The owner must exist before the member in each organization because
+      // the membership trigger preserves a final active owner.
+      ownerA = await createOrgUser(supabase, {
+        orgId: BMH_ORG_ID,
+        email: `sequence-enroll-owner-a-${randomUUID()}@example.test`,
+        role: "owner",
+      });
+      memberA = await createOrgUser(supabase, {
+        orgId: BMH_ORG_ID,
+        email: `sequence-enroll-member-a-${randomUUID()}@example.test`,
+        role: "member",
+      });
+      ownerB = await createOrgUser(supabase, {
+        orgId: TEST_ORG_B_ID,
+        email: `sequence-enroll-owner-b-${randomUUID()}@example.test`,
+        role: "owner",
+      });
+      memberB = await createOrgUser(supabase, {
+        orgId: TEST_ORG_B_ID,
+        email: `sequence-enroll-member-b-${randomUUID()}@example.test`,
+        role: "member",
+      });
+
+      const sequenceId = await seedSequence({
+        name: "Authenticated enrollment",
+        steps: [{ delay: 0, body: "authenticated enrollment" }],
+      });
+      const ownerLead = await seedPropertyWithConsent({ phone: "+18165550009" });
+      const memberLead = await seedPropertyWithConsent({ phone: "+18165550010" });
+
+      const ownerOutcome = await enrollLead(clientForUser(ownerA.jwt), {
+        sequenceId,
+        propertyId: ownerLead.propertyId,
+        enrolledByUserId: ownerA.userId,
+      });
+      expect(ownerOutcome.status).toBe("enrolled");
+
+      const memberOutcome = await enrollLead(clientForUser(memberA.jwt), {
+        sequenceId,
+        propertyId: memberLead.propertyId,
+        enrolledByUserId: memberA.userId,
+      });
+      expect(memberOutcome.status).toBe("enrolled");
+
+      const foreignMemberOutcome = await enrollLead(clientForUser(memberB.jwt), {
+        sequenceId,
+        propertyId: ownerLead.propertyId,
+        enrolledByUserId: memberB.userId,
+      });
+      expect(foreignMemberOutcome.status).toBe("sequence_not_found");
+
+      const foreignOwnerOutcome = await enrollLead(clientForUser(ownerB.jwt), {
+        sequenceId,
+        propertyId: memberLead.propertyId,
+        enrolledByUserId: ownerB.userId,
+      });
+      expect(foreignOwnerOutcome.status).toBe("sequence_not_found");
+    } finally {
+      for (const user of [memberB, ownerB, memberA, ownerA]) {
+        if (user) await supabase.auth.admin.deleteUser(user.userId);
+      }
+    }
   });
 });
 
@@ -560,5 +676,43 @@ describe("resumeEnrollment (integration)", () => {
         },
       },
     ]);
+  });
+
+  it("permanent STOP transitions an already paused enrollment and records the terminal pause", async () => {
+    const seqId = await seedSequence({
+      name: "PausedStop",
+      steps: [{ delay: 0, body: "x" }],
+    });
+    const { propertyId } = await seedPropertyWithConsent({
+      phone: "+18165550033",
+    });
+    const enrolled = await enrollLead(supabase, {
+      sequenceId: seqId,
+      propertyId,
+    });
+    if (enrolled.status !== "enrolled") throw new Error("enroll failed");
+
+    await pausePropertyEnrollments(supabase, {
+      propertyId,
+      reason: "call_in_progress",
+    });
+    expect(
+      (await pausePropertyEnrollments(supabase, {
+        propertyId,
+        reason: "consent_revoked",
+        permanent: true,
+      })).paused,
+    ).toBe(1);
+
+    const { data: row } = await supabase
+      .from("sequence_enrollments")
+      .select("status, pause_reason, next_run_at")
+      .eq("id", enrolled.enrollmentId)
+      .single();
+    expect(row).toEqual({
+      status: "opted_out",
+      pause_reason: "consent_revoked",
+      next_run_at: null,
+    });
   });
 });

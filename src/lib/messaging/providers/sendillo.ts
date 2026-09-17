@@ -165,7 +165,11 @@ export class SendilloMessagingProvider implements MessagingProvider {
           {
             status: response.status,
             response: parsed,
-            ...(response.status >= 500 ? { ambiguousDelivery: true } : {}),
+            ...(response.status >= 500
+              ? { ambiguousDelivery: true }
+              : response.status === 400
+                ? { definitiveRejection: true }
+                : {}),
           },
         );
       }

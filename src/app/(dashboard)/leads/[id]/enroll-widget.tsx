@@ -10,6 +10,7 @@ import {
   enrollLeadInSequence,
   listPropertyEnrollments,
   listSequences,
+  retrySequenceStepAction,
   resumeEnrollmentAction,
 } from "@/app/(dashboard)/sequences/actions";
 
@@ -21,6 +22,12 @@ type Enrollment = {
   current_step_index: number;
   next_run_at: string | null;
   sequence: { id: string; name: string };
+  current_run: {
+    id: string;
+    attempt_outcome: string;
+    failure_reason: string | null;
+    message_id: string | null;
+  } | null;
 };
 
 /**
@@ -107,6 +114,16 @@ export function EnrollInSequenceWidget({ propertyId }: { propertyId: string }) {
     });
   };
 
+  const onRetry = (enrollmentId: string) => {
+    startTransition(async () => {
+      const r = await callAction(retrySequenceStepAction(enrollmentId), {
+        successMessage: "Retry scheduled",
+        fallbackMessage: "Could not safely retry this step",
+      });
+      if (r.ok) await refreshEnrollments();
+    });
+  };
+
   const activeOrPaused = enrollments.filter(
     (e) => e.status === "active" || e.status === "paused",
   );
@@ -176,14 +193,29 @@ export function EnrollInSequenceWidget({ propertyId }: { propertyId: string }) {
               </span>
               <div className="flex items-center gap-1">
                 {e.status === "paused" && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => onResume(e.id)}
-                    disabled={pending}
-                  >
-                    Resume
-                  </Button>
+                  e.pause_reason === "provider_failed" ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => onRetry(e.id)}
+                      disabled={pending}
+                    >
+                      Retry step
+                    </Button>
+                  ) : e.pause_reason === "reconciliation_required" ? (
+                    <span className="text-amber-700" title="Cancel is the safe terminal action; delivery is never retried from this state.">
+                      Reconcile delivery · claim {e.current_run?.id ?? "unavailable"} · outcome {e.current_run?.attempt_outcome ?? "unknown"} · {e.current_run?.failure_reason ?? "provider delivery outcome is unknown"}
+                    </span>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => onResume(e.id)}
+                      disabled={pending}
+                    >
+                      Resume
+                    </Button>
+                  )
                 )}
                 <Button
                   variant="ghost"

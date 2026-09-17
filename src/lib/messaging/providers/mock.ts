@@ -97,6 +97,67 @@ export type MockPendingReply = {
   id: string;
 };
 
+/**
+ * Browser acceptance runs cannot inspect this module's in-process simulation
+ * log from Playwright. In the explicitly opt-in disposable lane, publish a
+ * redacted send receipt to its loopback ledger instead. Every guard below is
+ * required so production and ordinary tests never gain a network side effect.
+ */
+async function recordDisposableBrowserSend(input: {
+  externalId: string;
+  to: string;
+  body: string;
+  failReason?: MockFailReason;
+}): Promise<void> {
+  if (
+    process.env.SEQUENCE_READINESS_MOCK_PROVIDER_LEDGER !== "1" ||
+    process.env.E2E_DISPOSABLE_DATABASE !== "1" ||
+    process.env.NODE_ENV === "production"
+  ) {
+    return;
+  }
+  const token = process.env.SEQUENCE_READINESS_LEDGER_TOKEN;
+  const rawLedgerUrl = process.env.SEQUENCE_READINESS_LEDGER_URL;
+  if (!token || !rawLedgerUrl) return;
+
+  let ledgerUrl: URL;
+  try {
+    ledgerUrl = new URL(rawLedgerUrl);
+  } catch {
+    return;
+  }
+  if (
+    ledgerUrl.protocol !== "http:" ||
+    ledgerUrl.hostname !== "127.0.0.1" ||
+    ledgerUrl.port !== "3558" ||
+    ledgerUrl.pathname !== "/ledger"
+  ) {
+    return;
+  }
+
+  try {
+    await fetch(`${ledgerUrl.origin}${ledgerUrl.pathname}/events`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        kind: "mock-provider-send",
+        provider: "mock",
+        externalId: input.externalId,
+        to: input.to,
+        bodyHash: simpleHash(input.body),
+        bodyLength: input.body.length,
+        failReason: input.failReason ?? null,
+      }),
+      signal: AbortSignal.timeout(500),
+    });
+  } catch {
+    // Ledger availability must never change mock-provider behavior.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Module-level state (shared across all MockMessagingProvider instances)
 // ---------------------------------------------------------------------------
@@ -312,6 +373,12 @@ export class MockMessagingProvider implements MessagingProvider {
       createdAt,
       failReason: failReason ?? undefined,
       input,
+    });
+    await recordDisposableBrowserSend({
+      externalId,
+      to: input.to,
+      body: input.body,
+      failReason: failReason ?? undefined,
     });
 
     if (failReason === "generic") {

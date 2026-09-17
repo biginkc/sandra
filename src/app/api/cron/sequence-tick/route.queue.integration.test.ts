@@ -8,6 +8,7 @@ import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
 import {
   getMockMessageLog,
+  MockMessagingProvider,
   resetMockState,
 } from "@/lib/messaging/providers/mock";
 import {
@@ -17,10 +18,12 @@ import {
 
 import { DRAIN_BATCH_SIZE, runSequenceTick } from "./handlers";
 import type { Json } from "@/lib/supabase/types";
+import type { SmsOutboundInput, SmsSendResult } from "@/lib/messaging/types";
 
 const supabase = createTestClient();
 
 const SAFE_NOW = new Date("2026-04-23T18:00:00Z");
+const originalMockSend = MockMessagingProvider.prototype.sendSms;
 
 async function getOrgId(): Promise<string> {
   return getCanonicalTestOrgId(supabase);
@@ -134,6 +137,7 @@ describe("runSequenceTick — queue drain (integration)", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -467,6 +471,112 @@ describe("runSequenceTick — queue drain (integration)", () => {
       .eq("status", "queued");
     expect(count).toBe(2);
     expect(getMockMessageLog()).toHaveLength(0);
+  });
+
+  it("lets two real clients race one queued claim but invokes the provider once", async () => {
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165550119",
+    });
+    const msgId = await seedQueuedMessage({
+      propertyId,
+      contactId,
+      toPhone: "+18165550119",
+      scheduledFor: new Date(SAFE_NOW.getTime() - 60 * 60_000),
+      body: "synchronized queued claim",
+    });
+
+    let releaseProvider!: () => void;
+    let providerStarted!: () => void;
+    const providerReached = new Promise<void>((resolve) => {
+      providerStarted = resolve;
+    });
+    const providerRelease = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const providerSpy = vi
+      .spyOn(MockMessagingProvider.prototype, "sendSms")
+      .mockImplementation(async function (
+        this: MockMessagingProvider,
+        input: SmsOutboundInput,
+      ): Promise<SmsSendResult> {
+        providerStarted();
+        await providerRelease;
+        return originalMockSend.call(this, input);
+      });
+
+    const first = runSequenceTick(createTestClient());
+    await providerReached;
+    const second = runSequenceTick(createTestClient());
+    await second;
+    releaseProvider();
+    const [firstSummary] = await Promise.all([first]);
+
+    expect(firstSummary.drained).toBe(1);
+    expect(providerSpy).toHaveBeenCalledTimes(1);
+    expect(getMockMessageLog()).toHaveLength(1);
+    const { data: message } = await supabase
+      .from("messages")
+      .select("status")
+      .eq("id", msgId)
+      .single();
+    expect(message?.status).toBe("sent");
+  });
+
+  it("stops after an in-flight provider call crosses the budget and leaves later rows queued", async () => {
+    const { propertyId, contactId } = await seedLead({
+      phone: "+18165550120",
+    });
+    const scheduledFor = new Date(SAFE_NOW.getTime() - 60 * 60_000);
+    const firstId = await seedQueuedMessage({
+      propertyId,
+      contactId,
+      toPhone: "+18165550120",
+      scheduledFor,
+      body: "budget in-flight first",
+    });
+    const secondId = await seedQueuedMessage({
+      propertyId,
+      contactId,
+      toPhone: "+18165550120",
+      scheduledFor,
+      body: "budget in-flight second",
+    });
+
+    let releaseProvider!: () => void;
+    let providerStarted!: () => void;
+    const providerReached = new Promise<void>((resolve) => {
+      providerStarted = resolve;
+    });
+    const providerRelease = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    vi.spyOn(MockMessagingProvider.prototype, "sendSms").mockImplementation(
+      async function (
+        this: MockMessagingProvider,
+        input: SmsOutboundInput,
+      ): Promise<SmsSendResult> {
+        providerStarted();
+        await providerRelease;
+        return originalMockSend.call(this, input);
+      },
+    );
+
+    const tick = runSequenceTick(supabase, { budgetMs: 1_000 });
+    await providerReached;
+    vi.setSystemTime(new Date(SAFE_NOW.getTime() + 2_000));
+    releaseProvider();
+    const summary = await tick;
+
+    expect(summary.drained).toBe(1);
+    expect(summary.budgetExhausted).toBe(true);
+    expect(getMockMessageLog()).toHaveLength(1);
+    const { data: messages } = await supabase
+      .from("messages")
+      .select("id, status")
+      .in("id", [firstId, secondId]);
+    expect(messages).toHaveLength(2);
+    expect(messages?.filter((message) => message.status === "sent")).toHaveLength(1);
+    expect(messages?.filter((message) => message.status === "queued")).toHaveLength(1);
   });
 
   it("defers blocked head-of-queue rows so eligible messages behind them still release", async () => {

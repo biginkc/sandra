@@ -226,7 +226,8 @@ describe("CalculatorClient", () => {
     await user.click(screen.getByRole("button", { name: /attach a lead/i }));
     await user.type(screen.getByRole("textbox", { name: /search leads/i }), "Charlotte");
     await waitFor(() => expect(searchLeads).toHaveBeenCalled());
-    await user.click(screen.getByRole("button", { name: /4312 charlotte/i }));
+    const leadResult = await screen.findByRole("button", { name: /4312 charlotte/i });
+    await user.click(leadResult);
 
     await user.click(screen.getByRole("button", { name: /save to lead/i }));
     await screen.findByRole("button", { name: /retry save/i });
