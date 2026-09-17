@@ -155,16 +155,23 @@ export function isReviewReplySavedDefinition(definition: InboxActionDefinition):
     return definition.steps.length === 1 && definition.steps[0].type === "review_reply";
 }
 
-/** Builds the reply-prepare wire payload (idempotencyKey + targets from the
- * ORIGINAL request, template = the saved review_reply step's frozen text)
- * for hand-off to reply-api.ts's existing prepare(). This only ever reaches
- * reply PREPARE, never accept/send — review_reply saved actions still
- * require the normal reviewed-reply accept step; nothing here can send. */
-export function buildReplyHandoffRaw(raw: string, definition: InboxActionDefinition): string {
+/** Builds the reply-prepare wire payload from ALREADY-VALIDATED values only:
+ * `idempotencyKey`/`targets` must come from parseInboxActionIntent's parsed
+ * result (the SAME hardened envelope validator — exact required-key set,
+ * duplicate-decoded-key rejection, uuid/target shape+bounds — a normal
+ * saved-action or inline request goes through), never from an ad-hoc
+ * re-parse of the raw request body. This is what makes the review_reply
+ * hand-off go through the identical envelope validation as every other
+ * request this endpoint accepts, instead of bypassing it: an
+ * invalid/oversized/malformed envelope never reaches this function at all
+ * — parseInboxActionIntent already rejected it upstream with
+ * InvalidInboxActionError. The rebuilt payload is still independently
+ * re-validated by reply-api.ts's own parseInboxReplyPrepareRequest
+ * (idempotencyKey/targets/template total-DTO check), so nothing here
+ * skips that check either — it is layered validation, not a substitute for
+ * it. Only ever reaches reply PREPARE, never accept/send — review_reply
+ * saved actions still require the normal reviewed-reply accept step. */
+export function buildReplyHandoffPayload(idempotencyKey: string, targets: readonly { kind: "conversation" | "unknown_sender_group"; id: string }[], definition: InboxActionDefinition): string {
     if (!isReviewReplySavedDefinition(definition)) throw new InvalidInboxActionError();
-    let value: unknown;
-    try { value = JSON.parse(raw); } catch { throw new InvalidInboxActionError(); }
-    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new InvalidInboxActionError();
-    const request = value as Record<string, unknown>;
-    return JSON.stringify({ idempotencyKey: request.idempotencyKey, targets: request.targets, template: definition.steps[0].text });
+    return JSON.stringify({ idempotencyKey, targets, template: definition.steps[0].text });
 }
