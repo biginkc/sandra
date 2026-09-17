@@ -221,9 +221,6 @@ export function AcquisitionAttemptDialog({
     if (source === "sandra" && !availableCalls.some(call => call.id === callActivityId)) {
       nextFieldErrors.callActivityId = "Choose the Sandra call you want to record an outcome for."
     }
-    if (source === "dialpad" && !recordingUrl.trim()) {
-      nextFieldErrors.recordingUrl = "Attach the DialPad recording link."
-    }
     const followUp = outcome === "no_answer"
       ? (() => {
           if (!selectedTemplate) nextFieldErrors.followUpTemplate = "Choose a curated follow-up template."
