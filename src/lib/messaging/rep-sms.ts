@@ -55,6 +55,11 @@ export type RepSmsObligationFence = {
   claimToken: string;
   claimGeneration: number;
   actorId: string;
+  /** Server-created binding for the exact outbound request this claim owns. */
+  propertyId: string;
+  assignmentId: string;
+  toNumber: string;
+  compositionFingerprint: string;
 };
 
 export type RepSmsContext = {
@@ -331,9 +336,54 @@ function compositionFromInput(input: DispatchRepSmsInput): RepSmsComposition {
   return composeRepSms(supplied);
 }
 
+/**
+ * The claim token fences the durable row, while this binding fences the
+ * request assembled around it. Keeping the request identity in the fence
+ * catches an internal caller accidentally pairing a valid claim with another
+ * lead, sender, recipient, or edited payload before it reaches the provider.
+ */
+export function repSmsCompositionFingerprint(composition: RepSmsComposition): string {
+  return JSON.stringify({
+    policyVersion: composition.policyVersion,
+    introId: composition.introId,
+    introVersion: composition.introVersion,
+    templateId: composition.templateId,
+    templateVersion: composition.templateVersion,
+    templateOrigin: composition.templateOrigin,
+    initialRemainder: composition.initialRemainder,
+    remainder: composition.remainder,
+    initialBody: composition.initialBody,
+    finalBody: composition.finalBody,
+  });
+}
+
+export function createRepSmsObligationFence(input: {
+  obligationId: string;
+  claimToken: string;
+  claimGeneration: number;
+  actorId: string;
+  propertyId: string;
+  assignmentId: string;
+  toNumber: string;
+  composition: RepSmsComposition;
+}): RepSmsObligationFence {
+  return {
+    obligationId: input.obligationId,
+    claimToken: input.claimToken,
+    claimGeneration: input.claimGeneration,
+    actorId: input.actorId,
+    propertyId: input.propertyId,
+    assignmentId: input.assignmentId,
+    toNumber: normalizePhone(input.toNumber) ?? input.toNumber.trim(),
+    compositionFingerprint: repSmsCompositionFingerprint(input.composition),
+  };
+}
+
 export type DispatchRepSmsInput = {
   propertyId: string;
   assignmentId: string;
+  /** Stable browser submission key for a free-form/manual send. */
+  idempotencyKey?: string | null;
   /** Compatibility input. New callers should use `composition`. */
   body?: string | null;
   to?: string | null;
@@ -370,6 +420,12 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
     throw new Error(
       "The saved SMS follow-up changed. Refresh and resume the current follow-up before sending.",
     );
+  }
+  // A generic rep text has no durable obligation row to fence a retry. Require
+  // the same tenant-scoped key that sendSmsToContact persists before crossing
+  // the provider boundary; obligation resumes use the obligation id below.
+  if (!input.obligationFence && !input.idempotencyKey?.trim()) {
+    throw new Error("A stable SMS submission key is required. Refresh the composer before sending.");
   }
   const provider = providerForRepSms();
   const sender = context.senders.find((candidate) => candidate.id === input.assignmentId);
@@ -411,7 +467,12 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
   };
   const client = await createClient();
   if (fence && (!fence.obligationId || !fence.claimToken || !fence.actorId
-    || !Number.isInteger(fence.claimGeneration) || fence.claimGeneration < 1)) {
+    || !Number.isInteger(fence.claimGeneration) || fence.claimGeneration < 1
+    || fence.propertyId !== input.propertyId
+    || fence.assignmentId !== sender.id
+    || !to
+    || !samePhone(fence.toNumber, normalizePhone(to) ?? to)
+    || fence.compositionFingerprint !== repSmsCompositionFingerprint(composition))) {
     throw new Error("The saved follow-up fence is invalid. Refresh before sending.");
   }
   return sendSmsToContact(
@@ -424,6 +485,7 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
       from: senderNumber,
       to,
       metadata,
+      idempotencyKey: fence?.obligationId ?? input.idempotencyKey ?? null,
     },
     {
       provider,

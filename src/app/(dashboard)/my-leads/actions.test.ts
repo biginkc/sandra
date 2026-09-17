@@ -3,7 +3,13 @@ const mocks=vi.hoisted(()=>({viewer:vi.fn(),rpc:vi.fn(),adminRpc:vi.fn(),dispatc
 vi.mock('next/cache',()=>({revalidatePath:mocks.revalidate}));
 vi.mock('@/lib/errors/report',()=>({reportError:mocks.report}));
 vi.mock('@/lib/supabase/admin',()=>({createAdminClient:()=>({rpc:mocks.adminRpc})}));
-vi.mock('@/lib/messaging/rep-sms',()=>({dispatchRepSms:mocks.dispatch}));
+vi.mock('@/lib/messaging/rep-sms',()=>({
+  dispatchRepSms:mocks.dispatch,
+  createRepSmsObligationFence:(input:{obligationId:string;claimToken:string;claimGeneration:number;actorId:string;propertyId:string;assignmentId:string;toNumber:string;composition:unknown})=>({
+    obligationId:input.obligationId,claimToken:input.claimToken,claimGeneration:input.claimGeneration,actorId:input.actorId,
+    propertyId:input.propertyId,assignmentId:input.assignmentId,toNumber:input.toNumber,compositionFingerprint:'test-fingerprint',
+  }),
+}));
 vi.mock('@/lib/my-leads/queries',()=>({myLeadsViewer:mocks.viewer,getAcquisitionQueue:vi.fn(),getAcquisitionKpis:vi.fn(),getAcquisitionDetail:vi.fn()}));
 vi.mock('@/lib/my-leads/settings',()=>({setAcquisitionDesignation:vi.fn(),setAcquisitionSettings:vi.fn()}));
 import { getAcquisitionKpis, getAcquisitionQueue } from '@/lib/my-leads/queries';
@@ -67,7 +73,7 @@ it('records a no-answer attempt, claims the exact obligation, and persists provi
   expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'accepted',message:null}});
   expect(mocks.rpc).toHaveBeenCalledWith('fn_log_acquisition_attempt',{p_input:expect.objectContaining({orgId:'actual-org',smsBody:'Hey, this is Mel, Maria\'s assistant.\n\nMaria wasn\'t able to reach you. What time would work for her to call you back?'} )});
   expect(mocks.adminRpc).toHaveBeenNthCalledWith(1,'fn_claim_authorize_rep_sms_obligation',expect.objectContaining({p_obligation_id:'obligation-1',p_actor_id:'actor'}));
-  expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({propertyId:'lead',assignmentId:'sender-1',to:'+18165550123',obligationFence:{obligationId:'obligation-1',claimToken:'claim-1',claimGeneration:1,actorId:'actor'}}));
+  expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({propertyId:'lead',assignmentId:'sender-1',to:'+18165550123',obligationFence:expect.objectContaining({obligationId:'obligation-1',claimToken:'claim-1',claimGeneration:1,actorId:'actor',propertyId:'lead',assignmentId:'sender-1',toNumber:'+18165550123'})}));
   expect(mocks.adminRpc).toHaveBeenNthCalledWith(2,'fn_record_rep_sms_obligation_result',expect.objectContaining({p_obligation_id:'obligation-1',p_claim_token:'claim-1',p_state:'accepted',p_provider_message_id:'provider-message'}));
 });
 

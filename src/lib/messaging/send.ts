@@ -54,6 +54,105 @@ export const PROVIDER_PENDING_STALE_MS = 15 * 60_000;
 const PROVIDER_TRANSIENT_DEFER_MS = 5 * 60_000;
 const PROVIDER_TRANSIENT_MAX_DEFER_ATTEMPTS = 3;
 
+type RepSmsIdempotencyRow = {
+  id: string;
+  org_id: string;
+  property_id: string | null;
+  contact_id: string | null;
+  body: string;
+  status: string;
+  external_id: string | null;
+  error_message: string | null;
+  from_address: string | null;
+  to_address: string | null;
+  metadata: Json | null;
+};
+
+function normalizeMaybePhone(value: string | null | undefined): string | null {
+  if (!value?.trim()) return null;
+  return normalizePhone(value) ?? value.trim();
+}
+
+function repSmsIdempotencyConflict(
+  row: RepSmsIdempotencyRow,
+  input: SendSmsInput,
+): string | null {
+  if (row.property_id !== input.propertyId) return "lead";
+  if (row.contact_id !== input.contactId) return "contact";
+  if (row.body !== input.body) return "message body";
+  const requestedTo = normalizeMaybePhone(input.to);
+  if (requestedTo && normalizeMaybePhone(row.to_address) !== requestedTo) return "recipient";
+  const requestedFrom = normalizeMaybePhone(input.from);
+  if (requestedFrom && normalizeMaybePhone(row.from_address) !== requestedFrom) return "sender";
+  return null;
+}
+
+function repSmsIdempotencyReplay(
+  row: RepSmsIdempotencyRow,
+  input: SendSmsInput,
+): SendSmsOutcome {
+  const conflict = repSmsIdempotencyConflict(row, input);
+  if (conflict) {
+    return {
+      status: "db_error",
+      error: `SMS idempotency key was already used for a different ${conflict}. Start a new message before sending.`,
+    };
+  }
+  if (row.status === "sent" || row.status === "delivered") {
+    if (row.external_id) {
+      return { status: "sent", messageId: row.id, externalId: row.external_id };
+    }
+    // A terminal row without the provider receipt is still ambiguous. Keep
+    // the key held so a reload cannot issue a second provider request while
+    // an operator or webhook reconciles the missing external id.
+    return {
+      status: "provider_unknown",
+      messageId: row.id,
+      error: row.error_message ?? "The previous SMS was accepted without a provider receipt.",
+    };
+  }
+  if (row.status === "queued") return { status: "queued", messageId: row.id };
+  const metadata = row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+    ? row.metadata as Record<string, unknown>
+    : null;
+  if (row.status === "pending" || metadata?.providerOutcome === "provider_unknown") {
+    return {
+      status: "provider_unknown",
+      messageId: row.id,
+      error: row.error_message ?? "A previous SMS request is still being reconciled.",
+    };
+  }
+  if (row.status === "failed") {
+    return {
+      status: "provider_failed",
+      messageId: row.id,
+      error: row.error_message ?? "The previous SMS request failed before completion.",
+    };
+  }
+  return {
+    status: "db_error",
+    messageId: row.id,
+    error: `The previous SMS request has an unsupported state (${row.status}). Review text history before retrying.`,
+  };
+}
+
+async function loadRepSmsIdempotencyRow(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  idempotencyKey: string,
+): Promise<{ row: RepSmsIdempotencyRow | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id,org_id,property_id,contact_id,body,status,external_id,error_message,from_address,to_address,metadata")
+    .eq("org_id", orgId)
+    .eq("channel", "sms")
+    .eq("direction", "outbound")
+    .eq("idempotency_key", idempotencyKey)
+    .maybeSingle();
+  if (error) return { row: null, error: error.message };
+  return { row: data as RepSmsIdempotencyRow | null, error: null };
+}
+
 export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
   | { status: "queued"; messageId: string }
@@ -215,6 +314,8 @@ export type SendSmsInput = {
    * still validate it against the approved sender catalog before any send.
    */
   allowDefaultFromWhenNoSticky?: boolean;
+  /** Tenant-scoped replay key for a manual rep SMS submission. */
+  idempotencyKey?: string | null;
 };
 
 export async function sendSmsToContact(
@@ -226,32 +327,66 @@ export async function sendSmsToContact(
   if (manualDispatch && (input.origin !== "manual" || input.queueOnly || input.campaignId)) {
     throw new Error("Assigned senders support immediate manual messages only.");
   }
-  // 1. Resolve provider.
-  let provider;
-  try {
-    provider = manualDispatch?.provider ?? getMessagingProvider();
-  } catch (e) {
-    if (e instanceof ConfigurationError) {
-      return {
-        status: "blocked_provider_off",
-        reason: e.message,
-      };
-    }
-    throw e;
+  const idempotencyKey = input.idempotencyKey?.trim() || null;
+  if (input.idempotencyKey != null && !idempotencyKey) {
+    return { status: "db_error", error: "SMS idempotency key cannot be blank." };
   }
-  if (!provider) {
-    return {
-      status: "blocked_provider_off",
-      reason:
-        "Messaging is off — set MESSAGING_PROVIDER in .env.local to enable it.",
-    };
+  if (idempotencyKey && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
+    return { status: "db_error", error: "SMS idempotency key is invalid." };
+  }
+
+  const resolveProvider = (): MessagingProvider | SendSmsOutcome => {
+    try {
+      const provider = manualDispatch?.provider ?? getMessagingProvider();
+      return provider ?? {
+        status: "blocked_provider_off",
+        reason: "Messaging is off — set MESSAGING_PROVIDER in .env.local to enable it.",
+      };
+    } catch (e) {
+      if (e instanceof ConfigurationError) {
+        return { status: "blocked_provider_off", reason: e.message };
+      }
+      throw e;
+    }
+  };
+
+  // Resolve an existing keyed submission before provider configuration. A
+  // completed send must remain replayable when a later page load is missing
+  // provider configuration; replaying a durable receipt never needs a second
+  // provider request.
+  let preloadedProperty: {
+    id: string;
+    org_id: string;
+    state: string;
+    outreach_dispo: string | null;
+  } | null = null;
+  let idempotencyChecked = false;
+  if (idempotencyKey) {
+    const propertyLookup = await supabase
+      .from("properties")
+      .select("id, org_id, state, outreach_dispo")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (propertyLookup.error) return { status: "db_error", error: propertyLookup.error.message };
+    if (!propertyLookup.data) return { status: "property_not_found" };
+    preloadedProperty = propertyLookup.data;
+    idempotencyChecked = true;
+    const existing = await loadRepSmsIdempotencyRow(
+      supabase,
+      propertyLookup.data.org_id,
+      idempotencyKey,
+    );
+    if (existing.error) return { status: "db_error", error: existing.error };
+    if (existing.row) return repSmsIdempotencyReplay(existing.row, input);
   }
 
   // QUEUE-ONLY shortcut — skip consent + quiet-hours checks (they'll
   // run at release time), skip the provider call, just persist a
   // `status='queued'` breadcrumb.
   if (input.queueOnly) {
-    return queueForLater(supabase, provider.providerId, input);
+    const resolved = resolveProvider();
+    if (!("providerId" in resolved)) return resolved;
+    return queueForLater(supabase, resolved.providerId, input);
   }
 
   const campaignPause = await blockIfCampaignPaused(
@@ -267,11 +402,13 @@ export async function sendSmsToContact(
       .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
       .eq("id", input.contactId)
       .maybeSingle(),
-    supabase
-      .from("properties")
-      .select("id, org_id, state, outreach_dispo")
-      .eq("id", input.propertyId)
-      .maybeSingle(),
+    preloadedProperty
+      ? Promise.resolve({ data: preloadedProperty, error: null })
+      : supabase
+        .from("properties")
+        .select("id, org_id, state, outreach_dispo")
+        .eq("id", input.propertyId)
+        .maybeSingle(),
   ]);
 
   if (contactResult.error) {
@@ -282,6 +419,26 @@ export async function sendSmsToContact(
     return { status: "db_error", error: propertyResult.error.message };
   }
   if (!propertyResult.data) return { status: "property_not_found" };
+
+  // Resolve an existing submission before current consent or quiet-hour
+  // state. A replay is a read of the original durable outcome; it must never
+  // create a second provider request or turn a completed send into a new
+  // blocked attempt after the lead changes. The keyed fast path above handles
+  // provider-off reloads; this check covers callers whose initial property
+  // read did not use it.
+  if (idempotencyKey && !idempotencyChecked) {
+    const existing = await loadRepSmsIdempotencyRow(
+      supabase,
+      propertyResult.data.org_id,
+      idempotencyKey,
+    );
+    if (existing.error) return { status: "db_error", error: existing.error };
+    if (existing.row) return repSmsIdempotencyReplay(existing.row, input);
+  }
+
+  const resolved = resolveProvider();
+  if (!("providerId" in resolved)) return resolved;
+  const provider = resolved;
 
   const consentState = await getConsentState(supabase, input.contactId, "sms");
   const suppression = evaluateSuppression({
@@ -393,6 +550,7 @@ export async function sendSmsToContact(
       campaign_id: input.campaignId ?? null,
       contact_id: input.contactId,
       property_id: input.propertyId,
+      idempotency_key: idempotencyKey,
       conversation_id: conversationId,
       from_address: fromAddress,
       to_address: normalizedToPhone,
@@ -408,6 +566,16 @@ export async function sendSmsToContact(
     .select("id")
     .single();
   if (insertError || !pending) {
+    if (insertError?.code === "23505" && idempotencyKey) {
+      const existing = await loadRepSmsIdempotencyRow(
+        supabase,
+        propertyResult.data.org_id,
+        idempotencyKey,
+      );
+      if (!existing.error && existing.row) {
+        return repSmsIdempotencyReplay(existing.row, input);
+      }
+    }
     return {
       status: "db_error",
       error: insertError?.message ?? "failed to insert pending message",

@@ -2532,6 +2532,7 @@ export type Database = {
           from_address: string | null
           id: string
           inbound_intent_id: string | null
+          idempotency_key: string | null
           metadata: Json | null
           org_id: string
           property_id: string | null
@@ -2561,6 +2562,7 @@ export type Database = {
           from_address?: string | null
           id?: string
           inbound_intent_id?: string | null
+          idempotency_key?: string | null
           metadata?: Json | null
           org_id?: string
           property_id?: string | null
@@ -2590,6 +2592,7 @@ export type Database = {
           from_address?: string | null
           id?: string
           inbound_intent_id?: string | null
+          idempotency_key?: string | null
           metadata?: Json | null
           org_id?: string
           property_id?: string | null

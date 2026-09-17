@@ -103,7 +103,7 @@ export class SendilloMessagingProvider implements MessagingProvider {
       );
     }
 
-    let response: Response;
+    let response: Response | undefined;
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
@@ -141,7 +141,65 @@ export class SendilloMessagingProvider implements MessagingProvider {
         redirect: "error",
         cache: "no-store",
       });
+      // Keep response-body consumption inside the same deadline/error wrapper
+      // as fetch. Headers prove that Sendillo answered, but a stream reset
+      // while reading the body does not prove whether it accepted the SMS.
+      const text = await response.text();
+      const parsed = safeParseJson(text);
+      if (!response.ok) {
+        const errorMessage = extractErrorMessage(parsed) || text || response.statusText;
+        // A 5xx does not prove non-delivery — the provider can accept and
+        // send before erroring — so it carries ambiguousDelivery for callers
+        // (rep-sms) that must never retry an unproven non-send. 4xx semantics
+        // are documented rejections and stay definitively retryable. The
+        // seller-facing path reads only `status` (unchanged behavior).
+        throw new ProviderError(
+          `Sendillo ${response.status}: ${errorMessage}`,
+          "sendillo",
+          {
+            status: response.status,
+            response: parsed,
+            ...(response.status >= 500 ? { ambiguousDelivery: true } : {}),
+          },
+        );
+      }
+
+      const externalId =
+        readString(parsed, "data", "messageId") ??
+        readString(parsed, "messageId") ??
+        readString(parsed, "data", "id") ??
+        readString(parsed, "id");
+      if (!externalId) {
+        // Codex round 12 (finding 1): Sendillo returned a 2xx — the request
+        // definitely reached them and they accepted it — but the response
+        // carried no id we can reconcile against later. This is "accepted
+        // without a provable receipt," the SAME class of uncertainty as a
+        // transport failure mid-flight or an abort: the message plausibly
+        // went out, we just can't confirm it durably. `acceptedWithoutId`
+        // routes this to `aborted_ambiguous` in `sendRepSmsReminder`, not the
+        // confirmed-non-delivery `provider_error` a genuine `!response.ok`
+        // rejection gets.
+        throw new ProviderError(
+          "Sendillo send succeeded but response had no messageId",
+          "sendillo",
+          { response: parsed, acceptedWithoutId: true },
+        );
+      }
+
+      return {
+        externalId,
+        providerStatus:
+          readString(parsed, "data", "status") ??
+          readString(parsed, "status") ??
+          "accepted",
+        raw: parsed,
+      };
     } catch (e) {
+      // Preserve deliberate ProviderError classifications above. Any other
+      // error after headers were received (especially Response.text()) is
+      // ambiguous: Sendillo may already have accepted the request even
+      // though this process could not finish reading its receipt.
+      if (e instanceof ProviderError) throw e;
       // Codex round 9 (finding 1): preserve abort provenance. `e.name` is
       // "AbortError" whether THIS method's own internal timeout fired or
       // the caller's `opts.signal` fired (both abort the same
@@ -163,66 +221,21 @@ export class SendilloMessagingProvider implements MessagingProvider {
       // it to `aborted_ambiguous` alongside an actual abort, rather than
       // the ordinary `provider_error` (which callers treat as a confirmed,
       // safely-retryable non-delivery).
-      throw new ProviderError(
-        e instanceof Error ? e.message : String(e),
-        "sendillo",
-        isAbort ? { isAbort: true } : { transportFailure: true },
-      );
+      const details = response
+        ? {
+            status: response.status,
+            bodyReadFailure: true,
+            ambiguousDelivery: true,
+            ...(isAbort ? { isAbort: true } : {}),
+          }
+        : isAbort
+          ? { isAbort: true }
+          : { transportFailure: true };
+      throw new ProviderError(e instanceof Error ? e.message : String(e), "sendillo", details);
     } finally {
       clearTimeout(timeout);
       opts.signal?.removeEventListener("abort", onExternalAbort);
     }
-
-    const text = await response.text();
-    const parsed = safeParseJson(text);
-    if (!response.ok) {
-      const errorMessage = extractErrorMessage(parsed) || text || response.statusText;
-      // A 5xx does not prove non-delivery — the provider can accept and
-      // send before erroring — so it carries ambiguousDelivery for callers
-      // (rep-sms) that must never retry an unproven non-send. 4xx semantics
-      // are documented rejections and stay definitively retryable. The
-      // seller-facing path reads only `status` (unchanged behavior).
-      throw new ProviderError(
-        `Sendillo ${response.status}: ${errorMessage}`,
-        "sendillo",
-        {
-          status: response.status,
-          response: parsed,
-          ...(response.status >= 500 ? { ambiguousDelivery: true } : {}),
-        },
-      );
-    }
-
-    const externalId =
-      readString(parsed, "data", "messageId") ??
-      readString(parsed, "messageId") ??
-      readString(parsed, "data", "id") ??
-      readString(parsed, "id");
-    if (!externalId) {
-      // Codex round 12 (finding 1): Sendillo returned a 2xx — the request
-      // definitely reached them and they accepted it — but the response
-      // carried no id we can reconcile against later. This is "accepted
-      // without a provable receipt," the SAME class of uncertainty as a
-      // transport failure mid-flight or an abort: the message plausibly
-      // went out, we just can't confirm it durably. `acceptedWithoutId`
-      // routes this to `aborted_ambiguous` in `sendRepSmsReminder`, not the
-      // confirmed-non-delivery `provider_error` a genuine `!response.ok`
-      // rejection gets.
-      throw new ProviderError(
-        "Sendillo send succeeded but response had no messageId",
-        "sendillo",
-        { response: parsed, acceptedWithoutId: true },
-      );
-    }
-
-    return {
-      externalId,
-      providerStatus:
-        readString(parsed, "data", "status") ??
-        readString(parsed, "status") ??
-        "accepted",
-      raw: parsed,
-    };
   }
 
   /**

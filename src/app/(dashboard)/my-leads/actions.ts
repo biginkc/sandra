@@ -4,7 +4,7 @@ import { reportError } from '@/lib/errors/report';
 import type { Json } from '@/lib/supabase/types';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { composeRepSms, type RepSmsComposition, type RepSmsCompositionInput } from '@/lib/messaging/rep-sms-composition';
-import { dispatchRepSms } from '@/lib/messaging/rep-sms';
+import { createRepSmsObligationFence, dispatchRepSms } from '@/lib/messaging/rep-sms';
 import { getAcquisitionQueue,getAcquisitionKpis,getAcquisitionDetail,myLeadsViewer,type DetailGroup } from '@/lib/my-leads/queries';
 import { setAcquisitionDesignation,setAcquisitionSettings } from '@/lib/my-leads/settings';
 import type { SetAcquisitionDesignationInput,SetAcquisitionSettingsInput } from '@/lib/my-leads/types';
@@ -183,12 +183,16 @@ async function finishNoAnswerFollowUp(args: {
       propertyId: String(args.input.propertyId),
       assignmentId: claimRecord.assignmentId,
       to: claimRecord.toNumber,
-      obligationFence: {
+      obligationFence: createRepSmsObligationFence({
         obligationId,
         claimToken: claimRecord.claimToken,
         claimGeneration: claimRecord.claimGeneration,
         actorId: args.viewer.userId,
-      },
+        propertyId: String(args.input.propertyId),
+        assignmentId: claimRecord.assignmentId,
+        toNumber: claimRecord.toNumber,
+        composition: args.composition,
+      }),
       composition: args.composition,
     });
   } catch (error) {

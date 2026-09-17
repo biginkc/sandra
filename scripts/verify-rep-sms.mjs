@@ -27,6 +27,7 @@ try {
  create table memberships(org_id uuid,user_id uuid,role text default 'member',access_status text default 'active',deletion_prepared_at timestamptz,access_expires_at timestamptz,acquisitions_enabled boolean default true);
  create table acquisition_org_settings(org_id uuid primary key,my_leads_enabled boolean);
  create table contacts(id uuid,org_id uuid,first_name text,last_name text,phone_1 text,phone_2 text,phone_3 text,do_not_contact boolean);
+ create table messages(id uuid primary key default gen_random_uuid(),org_id uuid,channel text,direction text,property_id uuid,contact_id uuid,body text not null,status text default 'pending',external_id text,error_message text,from_address text,to_address text,metadata jsonb);
  create table properties(id uuid primary key,org_id uuid,assigned_user_id uuid,address text,city text,state text,zip text,status text default 'contacted',motivation_level text,homeowner_contact_id uuid,deleted_at timestamptz,is_dnc_locked boolean default false,unique(id,org_id));
  create table acquisition_assignment_episodes(id uuid primary key,org_id uuid,property_id uuid,assignee_user_id uuid,assigned_at timestamptz,initialized_at timestamptz default now(),ended_at timestamptz,eligible boolean default false,episode_kind text default 'live',first_call_started_at timestamptz,unique(id,property_id,org_id));
  create table acquisition_queue_states(property_id uuid,org_id uuid,stage text,version bigint default 1,stage_entered_at timestamptz default now(),motivation_kind text,motivation_text text,archived_at timestamptz,updated_at timestamptz default now());
@@ -55,6 +56,9 @@ try {
  migration('20260913100000_my_leads_metrics.sql');
  migration('20260917100000_rep_sms_obligations.sql');
  migration('20260917110000_rep_sms_obligation_read_models.sql');
+ migration('20260917120000_rep_sms_delivery_completion_fence.sql');
+ migration('20260917130000_rep_sms_idempotency.sql');
+ assert.equal(sql("select count(*) from pg_indexes where schemaname='public' and indexname='messages_outbound_sms_idempotency_idx'"),'1');
  sql(`grant select on memberships,properties to authenticated;
  insert into memberships(org_id,user_id,role) values('${org}','${other}','member');
  insert into properties(id,org_id,assigned_user_id,address,status) values('${property}','${org}','${rep}','1 Test St','contacted');
@@ -195,11 +199,38 @@ assert.equal(lateAccepted.state,'delivered');
 assert.equal(lateAccepted.duplicate,true);
 const racedReplay=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-raced','delivered','delivered',null,'{}','${org}','${raceObligationId}')`));
 assert.equal(racedReplay.duplicate,true);
+// A delivery failure callback can win before the accepted-result write. It is
+// terminal provider evidence, so the claim token remains an immutable
+// completion fence and the late accepted result must return that stored state.
+const failureVersion=sql(`select version from acquisition_queue_states where org_id='${org}' and property_id='${property}'`);
+const failureAttempt=JSON.parse(as(rep,`select fn_log_acquisition_attempt('${logInput(id(24),failureVersion)}'::jsonb)`));
+const failureObligationId=as(rep,`select id from rep_sms_obligations where attempt_id='${failureAttempt.attemptId}'`);
+const failureClaim=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${org}','${failureObligationId}','${rep}','${composition}'::jsonb)`));
+const earlyFailure=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-early-failure','delivery_failed','failed','carrier rejected','{}','${org}','${failureObligationId}')`));
+assert.equal(earlyFailure.state,'delivery_failed');
+assert.equal(as(rep,`select state from rep_sms_obligations where id='${failureObligationId}'`),'delivery_failed');
+assert.equal(as(rep,`select claim_state from rep_sms_obligations where id='${failureObligationId}'`),'complete');
+const lateAcceptedAfterFailure=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${failureObligationId}','${failureClaim.claimToken}','accepted','provider-early-failure','accepted',null,null,'{}')`));
+assert.equal(lateAcceptedAfterFailure.state,'delivery_failed');
+assert.equal(lateAcceptedAfterFailure.duplicate,true);
+const failureReplay=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-early-failure','delivery_failed','failed','carrier rejected','{}','${org}','${failureObligationId}')`));
+assert.equal(failureReplay.duplicate,true);
+// Owner retry from a proven pre-dispatch failure must remain a legal draft
+// transition and therefore be claimable again after the owner correction.
+const retryVersion=sql(`select version from acquisition_queue_states where org_id='${org}' and property_id='${property}'`);
+const retryAttempt=JSON.parse(as(rep,`select fn_log_acquisition_attempt('${logInput(id(25),retryVersion)}'::jsonb)`));
+const retryObligationId=as(rep,`select id from rep_sms_obligations where attempt_id='${retryAttempt.attemptId}'`);
+const retryClaim=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${org}','${retryObligationId}','${rep}','${composition}'::jsonb)`));
+const failedNotDispatched=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${retryObligationId}','${retryClaim.claimToken}','failed_not_dispatched',null,'not_sent','request was not dispatched',null,'{}')`));
+assert.equal(failedNotDispatched.state,'failed_not_dispatched');
+const ownerRetry=JSON.parse(as(owner,`select fn_owner_correct_rep_sms_obligation('${retryObligationId}','retry','verified pre-dispatch failure')`));
+assert.equal(ownerRetry.state,'draft');
+assert.equal(as(rep,`select state from rep_sms_obligations where id='${retryObligationId}'`),'draft');
  // A current assignee can read outstanding history, while the original actor
  // remains visible for audit. This tests the transfer side of RLS directly.
  sql(`update properties set assigned_user_id='${other}' where id='${property}'`);
- assert.equal(as(other,`select count(*) from rep_sms_obligations where org_id='${org}'`),'4');
- assert.equal(as(rep,`select count(*) from rep_sms_obligations where org_id='${org}'`),'4');
+ assert.equal(as(other,`select count(*) from rep_sms_obligations where org_id='${org}'`),'6');
+ assert.equal(as(rep,`select count(*) from rep_sms_obligations where org_id='${org}'`),'6');
  sql(`update properties set assigned_user_id='${rep}' where id='${property}'`);
  // Once authorization has durably reached `sending`, an expired claim is
  // ambiguous because the provider may already have received the request.

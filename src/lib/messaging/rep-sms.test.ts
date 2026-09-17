@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { repSmsCatalogOptionIsEligible } from "./rep-sms";
+import {
+  createRepSmsObligationFence,
+  repSmsCatalogOptionIsEligible,
+  repSmsCompositionFingerprint,
+} from "./rep-sms";
+import { composeRepSms } from "./rep-sms-composition";
 
 function sendilloNumber(overrides: Record<string, unknown> = {}) {
   return {
@@ -31,5 +36,37 @@ describe("rep SMS sender catalog eligibility", () => {
     ["missing provider account identity", { providerAccountId: null }],
   ])("rejects %s", (_label, overrides) => {
     expect(repSmsCatalogOptionIsEligible(sendilloNumber(overrides))).toBe(false);
+  });
+});
+
+describe("rep SMS obligation fences", () => {
+  it("binds the server-created claim to the exact lead, sender, recipient, and composition", () => {
+    const composition = composeRepSms({
+      introId: "mel-maria-assistant-1",
+      introVersion: 1,
+      templateId: "no-answer-callback-time",
+      templateVersion: 1,
+      remainder: "Maria wasn't able to reach you. What time would work for her to call you back?",
+    });
+
+    expect(createRepSmsObligationFence({
+      obligationId: "obligation-1",
+      claimToken: "claim-1",
+      claimGeneration: 2,
+      actorId: "rep-1",
+      propertyId: "property-1",
+      assignmentId: "sender-1",
+      toNumber: "+1 (816) 555-0123",
+      composition,
+    })).toEqual({
+      obligationId: "obligation-1",
+      claimToken: "claim-1",
+      claimGeneration: 2,
+      actorId: "rep-1",
+      propertyId: "property-1",
+      assignmentId: "sender-1",
+      toNumber: "+18165550123",
+      compositionFingerprint: repSmsCompositionFingerprint(composition),
+    });
   });
 });

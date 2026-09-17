@@ -439,7 +439,7 @@ describe('stale form recovery',()=>{
     // confirmed terminal result.
     expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
   });
-  it('reuses the opening idempotency key after a lost response and an edited retry', async()=>{
+  it('replays the original command payload after a lost response even if the draft is edited', async()=>{
     const user=userEvent.setup();
     mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:snapshot('106 Fixture Lane'),kpis});
@@ -460,7 +460,11 @@ describe('stale form recovery',()=>{
     await user.click(screen.getByRole('button',{name:'Save attempt'}));
     await waitFor(()=>expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
     expect(mocks.submitMyLeadCommand.mock.calls[0][1]).toMatchObject({note:'Original draft'});
-    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({note:'Edited after response loss'});
+    // The key and payload are an inseparable replay pair. The visible draft
+    // may have been edited after the response was lost, but sending that edit
+    // under the original key would be rejected by the SQL receipt hash.
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({note:'Original draft'});
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).not.toMatchObject({note:'Edited after response loss'});
     expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
   });
   it('ignores recovery finishing after cancellation and reopening the same lead',async()=>{

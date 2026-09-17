@@ -13,6 +13,7 @@ import {
   readRepSmsContext,
   repSmsCatalogOptionIsEligible,
   dispatchRepSms,
+  createRepSmsObligationFence,
   type DispatchRepSmsInput,
 } from "@/lib/messaging/rep-sms";
 import { composeRepSms, type RepSmsCompositionInput } from "@/lib/messaging/rep-sms-composition";
@@ -25,21 +26,48 @@ export async function loadRepSmsContext(propertyId: string) {
   }
 }
 
-export async function sendRepSms(input: DispatchRepSmsInput & { obligationId?: string | null }) {
+type PublicSendRepSmsInput = Omit<DispatchRepSmsInput, "obligationFence"> & {
+  obligationId?: string | null;
+};
+
+function safeDispatchInput(input: PublicSendRepSmsInput): DispatchRepSmsInput {
+  // Server actions are reachable with forged runtime payloads even when their
+  // TypeScript input omits a field. Pick every public field explicitly so a
+  // browser cannot smuggle an internal claim fence into the generic dispatch
+  // path or into resumeRepSms.
+  return {
+    propertyId: input.propertyId,
+    assignmentId: input.assignmentId,
+    idempotencyKey: input.idempotencyKey,
+    body: input.body,
+    to: input.to,
+    composition: input.composition,
+    introId: input.introId,
+    introVersion: input.introVersion,
+    templateId: input.templateId,
+    templateVersion: input.templateVersion,
+    initialRemainder: input.initialRemainder,
+    remainder: input.remainder,
+    initialBody: input.initialBody,
+  };
+}
+
+export async function sendRepSms(input: PublicSendRepSmsInput) {
   try {
+    const safeInput = safeDispatchInput(input);
     // A no-answer follow-up is durable. Resume that exact obligation after a
     // reload instead of falling back to the generic manual sender.
     const obligationId = typeof input.obligationId === "string" ? input.obligationId.trim() : "";
     if (obligationId) {
-      return ok({ outcome: await resumeRepSms({ ...input, obligationId }) });
+      return ok({ outcome: await resumeRepSms({ ...safeInput, obligationId }) });
     }
-    const context = await readRepSmsContext(input.propertyId);
+    const context = await readRepSmsContext(safeInput.propertyId);
     if (context.obligation) {
       throw new Error(
         "This lead has a saved SMS follow-up. Resume the exact saved follow-up before sending another message.",
       );
     }
-    return ok({ outcome: await dispatchRepSms(input) });
+    return ok({ outcome: await dispatchRepSms(safeInput) });
   } catch (error) {
     return errFromUnknown(error, "TEXTING_UNAVAILABLE");
   }
@@ -145,11 +173,18 @@ async function resumeRepSms(input: DispatchRepSmsInput & { obligationId: string 
       // The database claim owns the recipient. Ignore any stale browser hint.
       to: claimRecord.toNumber,
       obligationFence: {
-        obligationId: obligation.id,
-        claimToken: claimRecord.claimToken,
-        claimGeneration: claimRecord.claimGeneration,
-        actorId: context.actorId,
+        ...createRepSmsObligationFence({
+          obligationId: obligation.id,
+          claimToken: claimRecord.claimToken,
+          claimGeneration: claimRecord.claimGeneration,
+          actorId: context.actorId,
+          propertyId: input.propertyId,
+          assignmentId: claimRecord.assignmentId,
+          toNumber: claimRecord.toNumber,
+          composition,
+        }),
       },
+      idempotencyKey: obligation.id,
       composition,
     });
   } catch (error) {

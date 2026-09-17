@@ -28,8 +28,11 @@ const context = (status: string) => ({
   obligation: { id: "obligation-1", attemptId: "attempt-1", status, messageBody: savedComposition.body, composition: savedComposition, blockedReason: status === "blocked" ? "sender_grant_missing" : null, senderAssignmentId: "sender-1", fromNumber: "+18163706846", toNumber: "+18165550123" },
 })
 
+const genericContext = () => ({ ...context("none"), obligation: null })
+
 beforeEach(() => {
   vi.resetAllMocks()
+  window.localStorage.clear()
   mocks.send.mockResolvedValue({ ok: true, data: { outcome: { status: "sent", messageId: "message-1", externalId: "provider-1" } } })
 })
 
@@ -95,5 +98,71 @@ describe("RepSmsComposer obligation resume", () => {
     const template = await screen.findByLabelText("Curated follow-up template")
     expect(template).toHaveAttribute("aria-describedby", "rep-sms-template-error-property-1")
     expect(screen.getByText(/Choose a follow-up template before sending/)).toBeInTheDocument()
+  })
+
+  it("locks a resumed obligation to its captured sender assignment and number", async () => {
+    const data = context("failed_not_dispatched") as any
+    data.senders = [
+      ...data.senders,
+      { id: "sender-2", number: "+18165550000", label: "Other", isDefault: true, provider: "sendillo", providerSenderId: "provider-sender-2", grantStatus: "active", compositionPolicyVersion: 1 },
+    ]
+    data.senders[0].isDefault = false
+    mocks.load.mockResolvedValue({ ok: true, data })
+    const user = userEvent.setup()
+    render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+
+    const sender = await screen.findByLabelText("Send from")
+    expect(sender).toHaveValue("sender-1")
+    expect(sender).toBeDisabled()
+    expect(screen.getByText("From:").parentElement).toHaveTextContent("+1 (816) 370-6846")
+  })
+
+  it("persists a generic submission key and reconciles it after a response-loss reload", async () => {
+    mocks.load.mockResolvedValue({ ok: true, data: genericContext() })
+    mocks.send.mockReset()
+    mocks.send
+      .mockResolvedValueOnce({ ok: true, data: { outcome: { status: "provider_unknown", messageId: "message-1", error: "receipt unavailable" } } })
+      .mockResolvedValueOnce({ ok: true, data: { outcome: { status: "sent", messageId: "message-1", externalId: "provider-1" } } })
+    const user = userEvent.setup()
+    const first = render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    const remainder = await screen.findByLabelText("Editable message remainder")
+    await user.type(remainder, "Please text Maria a time that works.")
+    await user.click(screen.getByRole("button", { name: "Send text" }))
+    await waitFor(() => expect(screen.getByText("Pending reconciliation")).toBeInTheDocument())
+    expect(remainder).toBeDisabled()
+    const firstKey = mocks.send.mock.calls[0][0].idempotencyKey
+    expect(firstKey).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(window.localStorage.getItem("sandra:rep-sms:submission:property-1")).toContain(firstKey)
+
+    first.unmount()
+    render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Reconcile saved send" })).toHaveLength(1))
+    expect(screen.getByLabelText("Editable message remainder")).toHaveValue("Please text Maria a time that works.")
+    await user.click(screen.getByRole("button", { name: "Reconcile saved send" }))
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(2))
+    expect(mocks.send.mock.calls[1][0].idempotencyKey).toBe(firstKey)
+    expect(window.localStorage.getItem("sandra:rep-sms:submission:property-1")).toBeNull()
+  })
+
+  it("refreshes authoritative context after an obligation is accepted before a new manual send", async () => {
+    mocks.load
+      .mockResolvedValueOnce({ ok: true, data: context("failed_not_dispatched") })
+      .mockResolvedValueOnce({ ok: true, data: genericContext() })
+    const user = userEvent.setup()
+    render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    await screen.findByRole("button", { name: "Send resumed draft" })
+    await user.click(screen.getByRole("button", { name: "Send resumed draft" }))
+    await waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(2))
+    const remainder = screen.getByLabelText("Editable message remainder")
+    await user.type(remainder, "A new manual message after the saved follow-up.")
+    await user.click(screen.getByRole("button", { name: "Send text" }))
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(2))
+    expect(mocks.send.mock.calls[0][0].obligationId).toBe("obligation-1")
+    expect(mocks.send.mock.calls[1][0].obligationId).toBeNull()
+    expect(mocks.send.mock.calls[1][0].idempotencyKey).toMatch(/^[0-9a-f-]{36}$/i)
   })
 })

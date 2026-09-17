@@ -161,6 +161,31 @@ describe("SendilloMessagingProvider.sendSms", () => {
     });
   });
 
+  it("marks a response-body read failure ambiguous after Sendillo returned headers", async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      text: vi.fn().mockRejectedValue(new Error("response stream reset")),
+    } as unknown as Response);
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await expect(
+      provider.sendSms({ to: "+18165551234", body: "hello there" }),
+    ).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      details: expect.objectContaining({
+        status: 200,
+        bodyReadFailure: true,
+        ambiguousDelivery: true,
+      }),
+    });
+  });
+
   // Codex round 9 (finding 1): the internal DEFAULT_SEND_TIMEOUT_MS timer
   // aborts the SAME controller as an external opts.signal — no caller
   // signal is passed at all here, so this proves the internal timer alone

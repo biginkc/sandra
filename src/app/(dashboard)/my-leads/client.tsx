@@ -80,7 +80,15 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   };
   const [detailRevision,setDetailRevision]=useState(0);
   const [recipient,setRecipient]=useState(roster.settings.recipientId??'');const [settingsBusy,setSettingsBusy]=useState(false);
-  const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<{key:string}|null>(null);
+  type OpeningSubmission = {
+    key: string;
+    // Once the request may have crossed the RPC boundary, keep the exact
+    // payload that was sent with the key. A retry must replay this pair even
+    // if the form was edited while the response was unavailable.
+    payload: Record<string, Json> | null;
+    uncertain: boolean;
+  };
+  const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<OpeningSubmission|null>(null);
   const serverScopeKey=member;
   const previousServerScope=useRef(serverScopeKey);
   const refresh=useCallback(async(background=false)=>{
@@ -189,15 +197,32 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     const row=recoveredRow.current?.opening===dialog?recoveredRow.current.row:dialog.row;
     setRecovery(null);
     // A command's idempotency key belongs to the opened submission, not to
-    // the current draft contents. If the response is lost, the rep may edit
-    // the draft before retrying; retaining the key lets the server replay the
-    // original command outcome instead of creating a second attempt. The key
-    // is cleared only when this opening is explicitly closed/replaced or a
-    // confirmed terminal result closes it.
-    if(!submission.current)submission.current={key:crypto.randomUUID()};
-    const input=JSON.parse(JSON.stringify({...payload,propertyId:row.propertyId,expectedEpisodeId:row.assignmentEpisodeId,
+    // the current draft contents. Before the RPC is known to have crossed its
+    // boundary, a deterministic rejection may be retried with refreshed
+    // queue metadata. Once transport or confirmation is uncertain, however,
+    // the original payload and key become one immutable replay pair. This is
+    // what prevents an edited draft from producing SQL IDEMPOTENCY_CONFLICT.
+    if(!submission.current)submission.current={key:crypto.randomUUID(),payload:null,uncertain:false};
+    const command=dialog.action as Parameters<typeof submitMyLeadCommand>[0];
+    const nextInput=JSON.parse(JSON.stringify({...payload,propertyId:row.propertyId,expectedEpisodeId:row.assignmentEpisodeId,
       expectedQueueVersion:row.queueVersion,expectedSharedStatus:row.sharedStatus,idempotencyKey:submission.current.key})) as Record<string,Json>;
-    const result=await submitMyLeadCommand(dialog.action as Parameters<typeof submitMyLeadCommand>[0],input);
+    const input=submission.current.uncertain&&submission.current.payload
+      ? submission.current.payload
+      : nextInput;
+    submission.current.payload=input;
+    let result: Awaited<ReturnType<typeof submitMyLeadCommand>>;
+    try {
+      result=await submitMyLeadCommand(command,input);
+    } catch(error) {
+      // A rejected server action can mean the request reached Postgres but its
+      // response did not reach the browser. Retain the exact request so the
+      // next click is a server-side replay instead of a second mutation.
+      submission.current.uncertain=true;
+      throw error;
+    }
+    if(!result.ok&&result.message==='The update was not confirmed. Retry with the same form.') {
+      submission.current.uncertain=true;
+    }
     if(!result.ok&&'code' in result&&(result.code==='FORBIDDEN'||result.code==='STALE_STATE')&&activeDialog.current===dialog)setRecovery({opening:dialog,message:result.message,blocked:true,busy:false});
     if(result.ok){
       // Publish the refresh barrier before closing so a rapid next click is retained

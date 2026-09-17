@@ -57,7 +57,7 @@ function chain(result: { data: unknown; error: { message: string } | null }) {
 /** Fake Supabase client whose `.from(table)` hands back the next queued
  *  chain for that table (FIFO per table) — lets a test script exactly
  *  which result each successive call to the same table should return. */
-function fakeSupabase(queues: Record<string, Array<{ data: unknown; error: { message: string } | null }>>) {
+function fakeSupabase(queues: Record<string, Array<{ data: unknown; error: { message: string; code?: string } | null }>>) {
   return {
     from: (table: string) => {
       const q = queues[table];
@@ -244,6 +244,145 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
 
     expect(provider.sendSms).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ status: "sent", messageId: "msg-2" });
+  });
+});
+
+describe("sendSmsToContact — rep SMS idempotency replay", () => {
+  const idempotencyKey = "11111111-1111-4111-8111-111111111111";
+  const existing = (overrides: Record<string, unknown> = {}) => ({
+    id: "message-existing",
+    org_id: PROPERTY_ROW.org_id,
+    property_id: PROPERTY_ID,
+    contact_id: CONTACT_ID,
+    body: "hello",
+    status: "sent",
+    external_id: "provider-existing",
+    error_message: null,
+    from_address: "+18165551234",
+    to_address: CONTACT_ROW.phone_1,
+    metadata: null,
+    ...overrides,
+  });
+
+  it("replays a completed submission without calling the provider again", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [{ data: existing(), error: null }],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+      idempotencyKey,
+    });
+
+    expect(outcome).toEqual({ status: "sent", messageId: "message-existing", externalId: "provider-existing" });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("replays a completed submission even when provider configuration is unavailable on reload", async () => {
+    vi.mocked(getMessagingProvider).mockClear();
+    vi.mocked(getMessagingProvider).mockImplementation(() => null);
+    const supabase = fakeSupabase({
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [{ data: existing(), error: null }],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+      idempotencyKey,
+    });
+
+    expect(outcome).toEqual({ status: "sent", messageId: "message-existing", externalId: "provider-existing" });
+    expect(getMessagingProvider).not.toHaveBeenCalled();
+  });
+
+  it("holds a pending submission as provider_unknown rather than issuing a duplicate request", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [{ data: existing({ status: "pending", external_id: null }), error: null }],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+      idempotencyKey,
+    });
+
+    expect(outcome).toEqual({
+      status: "provider_unknown",
+      messageId: "message-existing",
+      error: "A previous SMS request is still being reconciled.",
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("rejects a replay with a changed body before any provider call", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [{ data: existing(), error: null }],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "edited after response loss",
+      from: "+18165551234",
+      idempotencyKey,
+    });
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      error: "SMS idempotency key was already used for a different message body. Start a new message before sending.",
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("wins an insert race by replaying the winner instead of sending twice", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [
+        { data: null, error: null },
+        { data: null, error: { message: "duplicate key", code: "23505" } },
+        { data: existing(), error: null },
+        { data: null, error: null },
+      ],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+      idempotencyKey,
+    });
+
+    expect(outcome).toEqual({ status: "sent", messageId: "message-existing", externalId: "provider-existing" });
+    expect(provider.sendSms).not.toHaveBeenCalled();
   });
 });
 

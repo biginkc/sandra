@@ -43,6 +43,28 @@ beforeEach(() => {
 })
 
 describe("resumed rep SMS obligations", () => {
+  it("strips a forged internal fence from the public generic-send payload", async () => {
+    mocks.readContext.mockResolvedValue({ ...baseContext("required"), obligation: null })
+    mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "message-1", externalId: "provider-1" })
+
+    const forgedInput = {
+      propertyId: "property-1",
+      assignmentId: "sender-1",
+      composition,
+      obligationFence: {
+        obligationId: "other-lead-obligation",
+        claimToken: "forged-token",
+        claimGeneration: 99,
+        actorId: "other-rep",
+      },
+    } as unknown as Parameters<typeof sendRepSms>[0]
+
+    const result = await sendRepSms(forgedInput)
+
+    expect(result).toEqual({ ok: true, data: { outcome: { status: "sent", messageId: "message-1", externalId: "provider-1" } } })
+    expect(mocks.dispatch).toHaveBeenCalledWith(expect.not.objectContaining({ obligationFence: expect.anything() }))
+  })
+
   it("rejects a generic send while any saved obligation is outstanding", async () => {
     mocks.readContext.mockResolvedValue(baseContext("required"))
 
@@ -75,7 +97,7 @@ describe("resumed rep SMS obligations", () => {
     expect(mocks.adminRpc).toHaveBeenNthCalledWith(1, "fn_claim_authorize_rep_sms_obligation", expect.objectContaining({
       p_org_id: "org-1", p_obligation_id: "obligation-1", p_actor_id: "rep-1",
     }))
-    expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ assignmentId: "sender-1", to: "+18165550123", obligationFence: { obligationId: "obligation-1", claimToken: "claim-1", claimGeneration: 1, actorId: "rep-1" } }))
+    expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ assignmentId: "sender-1", to: "+18165550123", obligationFence: expect.objectContaining({ obligationId: "obligation-1", claimToken: "claim-1", claimGeneration: 1, actorId: "rep-1", propertyId: "property-1", assignmentId: "sender-1", toNumber: "+18165550123", compositionFingerprint: expect.any(String) }) }))
     expect(mocks.adminRpc).toHaveBeenNthCalledWith(2, "fn_record_rep_sms_obligation_result", expect.objectContaining({
       p_obligation_id: "obligation-1", p_claim_token: "claim-1", p_state: "accepted", p_provider_message_id: "provider-1",
     }))

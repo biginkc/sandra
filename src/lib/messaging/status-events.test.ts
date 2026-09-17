@@ -265,6 +265,58 @@ describe("applyMessageStatusEvent", () => {
     });
   });
 
+  it("bridges an early delivery failure with the exact durable obligation identity", async () => {
+    const row = message({
+      metadata: {
+        repSms: {
+          provider: "sendillo",
+          providerAccountId: "account-from-message",
+          obligationId: "10000000-0000-4000-8000-000000000126",
+        },
+      } as Json,
+    });
+    const rpc = vi.fn(async () => ({
+      data: {
+        ok: true,
+        matched: true,
+        state: "delivery_failed",
+        duplicate: false,
+      },
+      error: null,
+    }));
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
+    const { supabase } = makeSupabase({
+      messages: [row],
+      updatedRows: [{ id: row.id }],
+    });
+
+    await expect(
+      applyMessageStatusEvent(supabase, "sendillo", {
+        kind: "failed",
+        externalId: "provider-message-early-failure",
+        timestamp: new Date("2026-06-24T15:01:00.000Z"),
+        errorMessage: "Carrier rejected recipient",
+      }),
+    ).resolves.toBe("updated");
+
+    expect(rpc).toHaveBeenCalledWith("fn_record_rep_sms_delivery", {
+      p_provider: "sendillo",
+      p_provider_account_id: "account-from-message",
+      p_provider_message_id: "provider-message-early-failure",
+      p_state: "delivery_failed",
+      p_provider_status: "failed",
+      p_provider_error: "Carrier rejected recipient",
+      p_metadata: {
+        source: "sendillo_status_webhook",
+        messageId: "msg-1",
+        messageOrgId: "org-1",
+        eventTimestamp: "2026-06-24T15:01:00.000Z",
+      },
+      p_org_id: "org-1",
+      p_obligation_id: "10000000-0000-4000-8000-000000000126",
+    });
+  });
+
   it("does not call the rep bridge for ordinary messages or trust callback fields", async () => {
     const row = message({
       metadata: {
