@@ -649,7 +649,7 @@ export default async function LeadDetailPage({
         restrictionLabel={isAcquisitionMember ? acquisitionSmsPresentation.consentLabel : smsPresentation.consentLabel}
         restrictionDetail={isAcquisitionMember ? acquisitionSmsPresentation.consentDetail : smsPresentation.consentDetail}
       >
-        <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <LeadRepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} /> : <SmsComposer
+        <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <LeadRepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} placement="action" /> : <SmsComposer
           propertyId={lead.id}
           homeownerContactId={lead.homeowner?.id ?? null}
           homeownerPhone={homeownerSmsPhone}

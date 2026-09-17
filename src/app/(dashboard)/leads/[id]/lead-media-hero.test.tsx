@@ -60,6 +60,8 @@ const actionFocusClasses = [
 
 function expectVisibleActionFocus() {
   const actions = screen.getByTestId("lead-media-actions");
+  expect(actions).toHaveRole("group");
+  expect(actions).toHaveAccessibleName("Lead actions");
   for (const className of actionFocusClasses) {
     expect(actions.className).toContain(className);
   }
