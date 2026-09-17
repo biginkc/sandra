@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { adminClient, ensureTestUser, resetTenantTables } from "../fixtures";
 import { seedQueuedMessage } from "./seed";
-import { captureRowEvidence, readMatrixResults, recordRowOutcome } from "./results";
+import { captureRowEvidence, purgeRowOutcomes, readMatrixResults, recordRowOutcome } from "./results";
 
 /**
  * Outbox regression boundary (O01-O10) — the acceptance matrix's explicit
@@ -35,16 +35,28 @@ const ROW_OWNERSHIP: Record<string, string[]> = {
   "O01 — queued cards render with totals": ["O01"],
   "O03/O07 — send one and delete a queued message": ["O03", "O07"],
   "O06 — edit queued text, save, then cancel leaves original": ["O06"],
-  "O02/O04/O05 — Send next, auto-send start/pause, cadence input": ["O02", "O04", "O05"],
+  "O04/O05 — auto-send start/pause, cadence input": ["O04", "O05"],
+  "O02 — Send next releases the head-of-queue message via that click alone": ["O02"],
   "O08/O09 — load more queue rows advances the page, loaded total updates": ["O08", "O09"],
   "O10 — a failed initial queue read recovers via Retry": ["O10"],
 };
+
+test.beforeEach(async ({}, testInfo) => {
+  // Astra round-3 finding #2: a retried attempt must never let an
+  // earlier attempt's "pass" for the same row survive if THIS (possibly
+  // final) attempt fails before re-recording it. Purge any prior
+  // recordings for this test's owned rows before the attempt runs, so by
+  // the time afterEach checks "already recorded", it can only see
+  // outcomes from THIS attempt.
+  const ids = ROW_OWNERSHIP[testInfo.title] ?? [];
+  purgeRowOutcomes(ids);
+});
 
 test.afterEach(async ({}, testInfo) => {
   const ids = ROW_OWNERSHIP[testInfo.title] ?? [];
   const alreadyRecorded = new Set(readMatrixResults().map((r) => r.id));
   for (const id of ids) {
-    if (alreadyRecorded.has(id)) continue; // the test body already recorded a genuine outcome for this row
+    if (alreadyRecorded.has(id)) continue; // the test body already recorded a genuine outcome for THIS attempt
     if (testInfo.status === "skipped") {
       recordRowOutcome({ id, status: "skip", evidence: `test skipped (no explicit reason recorded for ${id})` });
     } else {
@@ -137,12 +149,15 @@ test("O06 — edit queued text, save, then cancel leaves original", async ({ pag
   recordRowOutcome({ id: "O06", status: "pass", evidence });
 });
 
-test("O02/O04/O05 — Send next, auto-send start/pause, cadence input", async ({ page }) => {
-  // "earlier" is due first (ascending scheduled_for) — Send next must
-  // release THIS specific message, which is what the DB-status check
-  // below actually proves.
-  const earlier = await seedQueuedMessage(admin, { addressTag: "ACC-O0245-A", body: "o0245 body one", scheduledForOffsetMin: -2 });
-  await seedQueuedMessage(admin, { addressTag: "ACC-O0245-B", body: "o0245 body two", scheduledForOffsetMin: -1 });
+test("O04/O05 — auto-send start/pause, cadence input", async ({ page }) => {
+  // These two rows only assert UI control state (button labels, input
+  // value) — NOT which message ends up sent — so it's safe for them to
+  // share a test even though clicking "Auto-send" fires a real send
+  // (queue-panel.tsx's auto-send effect sends immediately on start, not
+  // just on the cadence tick). That immediate send is exactly why O02
+  // is NOT in this test — see the O02 test below.
+  await seedQueuedMessage(admin, { addressTag: "ACC-O045-A", body: "o045 body one", scheduledForOffsetMin: -2 });
+  await seedQueuedMessage(admin, { addressTag: "ACC-O045-B", body: "o045 body two", scheduledForOffsetMin: -1 });
 
   await page.goto("/messages?tab=outbox");
   await expect(page.getByTestId("outbox-card-list")).toBeVisible();
@@ -163,22 +178,57 @@ test("O02/O04/O05 — Send next, auto-send start/pause, cadence input", async ({
   await expect(page.getByRole("button", { name: /^Auto-send$/ })).toBeVisible();
   const o04Evidence = await captureRowEvidence(page, "O04");
   recordRowOutcome({ id: "O04", status: "pass", evidence: o04Evidence });
+});
 
-  // O02 — Send next releases the head-of-queue message. Card
-  // disappearance is corroborating, not the proof — the proof is the
-  // targeted message's own row transitioning to status="sent".
+test("O02 — Send next releases the head-of-queue message via that click alone", async ({ page }) => {
+  // Isolated on purpose (Astra round-3 finding #1): a prior combined
+  // O02/O04/O05 test clicked "Auto-send" (O04) before "Send next" (O02).
+  // queue-panel.tsx's auto-send effect fires an immediate send the
+  // moment autoOn becomes true — not only on the cadence tick — so that
+  // earlier click had ALREADY sent the head-of-queue message before
+  // "Send next" was ever clicked, and O02's assertion passed for the
+  // wrong reason (it would have passed even with the "Send next" click
+  // deleted from the test). This test never touches cadence or
+  // auto-send at all — the ONLY control that can transition this
+  // message to "sent" is the "Send next" click itself.
+  //
+  // Full isolation, not just "don't click auto-send": this suite's
+  // earlier tests (O01/O03/O07/O06/O04/O05) leave their own leftover
+  // queued rows in the shared DB (test.describe.configure({mode:
+  // "serial"}) means one beforeAll for the whole file, not a reset per
+  // test). Resetting here makes `target` the ONLY queued row in
+  // existence when "Send next" is clicked — no ambiguity about which
+  // row is "head of queue", and nothing else in the whole DB state
+  // could account for it becoming "sent" besides this click.
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+  const target = await seedQueuedMessage(admin, { addressTag: "ACC-O02-ONLY", body: "o02 isolated body", scheduledForOffsetMin: -2 });
+
+  await page.goto("/messages?tab=outbox");
   const sendNext = page.getByRole("button", { name: "Send next" });
   await expect(sendNext).toBeEnabled();
-  await sendNext.click();
+
+  // eslint-disable-next-line no-constant-condition -- verification toggle, see comment below
+  const CLICK_SEND_NEXT = true;
+  // Proof this test actually isolates the requirement (Astra round-3):
+  // with CLICK_SEND_NEXT flipped to false, nothing else in this test can
+  // send `target` — the poll below times out and the test FAILS. Verified
+  // manually before restoring this to `true`; left as a literal (not a
+  // runtime env toggle) so it can't accidentally ship flipped.
+  if (CLICK_SEND_NEXT) {
+    await sendNext.click();
+  }
+
   await expect
     .poll(async () => {
-      const { data } = await admin.from("messages").select("status").eq("id", earlier.id).maybeSingle();
+      const { data } = await admin.from("messages").select("status").eq("id", target.id).maybeSingle();
       return data?.status ?? null;
     }, { timeout: 15_000 })
     .toBe("sent");
-  await expect(page.getByTestId(`outbox-card-${earlier.id}`)).toHaveCount(0, { timeout: 15_000 });
-  const o02Evidence = await captureRowEvidence(page, "O02");
-  recordRowOutcome({ id: "O02", status: "pass", evidence: o02Evidence });
+  await expect(page.getByTestId(`outbox-card-${target.id}`)).toHaveCount(0, { timeout: 15_000 });
+
+  const evidence = await captureRowEvidence(page, "O02");
+  recordRowOutcome({ id: "O02", status: "pass", evidence });
 });
 
 test("O08/O09 — load more queue rows advances the page, loaded total updates", async ({ page }) => {

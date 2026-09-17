@@ -94,8 +94,20 @@ function sanitizeForTableCell(value: string, maxLength = 300): string {
   return escaped.length > maxLength ? `${escaped.slice(0, maxLength)}…` : escaped;
 }
 
+// A table cell's content, escape-aware: either a backslash-escaped pair
+// (`\|`, `\\`, or any other `\x`) or any single character that is not an
+// unescaped pipe/newline. Astra round-3 finding #3: sanitizeForTableCell
+// below escapes literal `|` as `\|` so it renders correctly in Markdown —
+// but a naive `[^|\n]*` column matcher doesn't know `\|` isn't a real
+// delimiter, so on the NEXT rewrite it misreads that escaped pipe as an
+// extra column boundary and corrupts the row. Matching `\\.` first (regex
+// alternation is ordered) consumes the backslash together with whatever
+// follows it as one unit, so an escaped pipe is skipped over instead of
+// ending the cell early.
+const CELL = String.raw`(?:\\.|[^|\\\n])*`;
+
 function replaceRow(content: string, id: string, status: string, evidence: string): string {
-  const rowRegex = new RegExp(`(\\|\\s*${id}\\s*\\|(?:[^|\\n]*\\|){3})[^|\\n]*\\|[^|\\n]*\\|`);
+  const rowRegex = new RegExp(`(\\|\\s*${id}\\s*\\|(?:${CELL}\\|){3})${CELL}\\|${CELL}\\|`);
   if (!rowRegex.test(content)) {
     throw new Error(`writeMatrixRows: row ${id} not found in acceptance-matrix.md`);
   }

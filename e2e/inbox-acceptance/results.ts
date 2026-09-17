@@ -40,6 +40,31 @@ export function recordRowOutcome(result: RowOutcome): void {
   fs.writeFileSync(RESULTS_FILE, JSON.stringify(existing, null, 2), "utf8");
 }
 
+/**
+ * Remove any previously recorded outcomes for the given row ids (Astra
+ * round-3 finding #2). Playwright retries re-run a WHOLE test from
+ * scratch on failure — retries are only enabled in CI
+ * (`retries: process.env.CI ? 2 : 0`), but when they are, an attempt
+ * that passes and records "pass" for its rows, then fails on a LATER
+ * unrelated assertion, triggers a full retry. Without this purge, the
+ * retry's own outcomes would sit ALONGSIDE the first attempt's stale
+ * "pass" entries, and if the retry fails before reaching one of those
+ * rows' assertions again, afterEach's "already recorded" check would
+ * see the first attempt's leftover pass and skip backfilling a fail —
+ * silently keeping a pass that does not reflect the test's true final
+ * result. Call this at the START of every attempt (test.beforeEach)
+ * for the ids that attempt owns, so only THIS attempt's outcomes can
+ * ever be present for those ids by the time afterEach runs.
+ */
+export function purgeRowOutcomes(ids: readonly string[]): void {
+  if (ids.length === 0) return;
+  const existing = readMatrixResults();
+  const idSet = new Set(ids);
+  const filtered = existing.filter((r) => !idSet.has(r.id));
+  fs.mkdirSync(path.dirname(RESULTS_FILE), { recursive: true });
+  fs.writeFileSync(RESULTS_FILE, JSON.stringify(filtered, null, 2), "utf8");
+}
+
 export function readMatrixResults(): RowOutcome[] {
   if (!fs.existsSync(RESULTS_FILE)) return [];
   return JSON.parse(fs.readFileSync(RESULTS_FILE, "utf8"));
@@ -52,9 +77,8 @@ export function hasRecordedOutcome(id: string): boolean {
 /**
  * Capture a durable screenshot for a passing row (Astra round-2 finding
  * #1: Evidence cells must link a real run artifact, not the source spec
- * file). Written under test-results/ (which the config's `trace: "on"` /
- * `screenshot: "on"` settings also populate per-test), returned as a
- * repo-relative path suitable for the matrix's Evidence column.
+ * file). Written under test-results/, returned as a repo-relative path
+ * suitable for the matrix's Evidence column.
  */
 export async function captureRowEvidence(page: Page, id: string): Promise<string> {
   fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
