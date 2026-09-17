@@ -721,7 +721,51 @@ BEGIN
 END $mut$;
   b:=inbox_reply_send.persist(o,att21,gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','PROV-WRONG-TOKEN'));
   IF b->>'state'<>'provider_accepted' THEN RAISE EXCEPTION 'Mutation did not actually drop token equality: %',b;END IF;
+  -- R6 meta-test: prove the assert_installed-equivalent guard immediately
+  -- below actually catches a stale restore, not merely that a correct
+  -- restore passes it. Stage a literal round-3-shape persist() (no
+  -- null/missing-kind rejection, no not_attempted evidence-enum bounding —
+  -- this is the exact B1/B2 defect the candidate closes) and confirm the
+  -- SAME guard text raises. Before round 6 this restore site had no
+  -- assert_installed readback at all, so a stale definition here passed
+  -- the whole suite silently (Codex Astra round-5 finding).
+  CREATE OR REPLACE FUNCTION inbox_reply_send.persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $stale_persist$
+DECLARE row inbox_reply_send.attempts;kind text;reference text;v bigint;
+BEGIN
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR token IS NULL OR row.dispatch_token IS DISTINCT FROM token THEN RAISE EXCEPTION 'INBOX_REPLY_STALE_TOKEN';END IF;
+ kind:=result->>'kind';
+ IF row.state='dispatch_started' THEN
+  IF kind='accepted' THEN
+   reference:=result->>'externalId';
+   UPDATE inbox_reply_send.attempts SET state='provider_accepted',provider_reference=reference,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','provider_accepted','receipt_version',v::text);
+  ELSE
+   UPDATE inbox_reply_send.attempts SET state='confirmed_not_submitted',evidence=left(coalesce(kind,'unknown'),128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','confirmed_not_submitted','receipt_version',v::text);
+  END IF;
+ END IF;
+ RAISE EXCEPTION 'unused in this proof';
+END $stale_persist$;
+  failed:=false;
+  BEGIN
+   IF pg_get_functiondef('inbox_reply_send.persist'::regproc) NOT LIKE '%Invalid dispatch result%' OR pg_get_functiondef('inbox_reply_send.persist'::regproc) NOT LIKE '%local_not_attempted:%' THEN
+    RAISE EXCEPTION 'assert_installed: persist is missing the Invalid dispatch result null/kind rejection or the local_not_attempted: evidence prefix after restore — stale/hand-inlined definition installed instead of the candidate';
+   END IF;
+  EXCEPTION WHEN raise_exception THEN
+   IF SQLERRM LIKE 'assert_installed:%' THEN failed:=true;ELSE RAISE;END IF;
+  END;
+  IF NOT failed THEN RAISE EXCEPTION 'R6 meta-test: assert_installed did not trip on a staged stale (round-3-shape) persist restore — the guard is a no-op';END IF;
 @@RESTORE_PERSIST@@
+  -- P2/R6 assert_installed equivalent: read back what is ACTUALLY installed
+  -- (not what we intended to install) and fail loudly if either the B1
+  -- null/missing-kind rejection ('Invalid dispatch result') or the B2
+  -- not_attempted evidence-enum bounding ('local_not_attempted:') is
+  -- missing — a stale round-3-shape restore here previously let the whole
+  -- suite pass silently (Codex Astra round-5 finding).
+  IF pg_get_functiondef('inbox_reply_send.persist'::regproc) NOT LIKE '%Invalid dispatch result%' OR pg_get_functiondef('inbox_reply_send.persist'::regproc) NOT LIKE '%local_not_attempted:%' THEN
+   RAISE EXCEPTION 'assert_installed: persist is missing the Invalid dispatch result null/kind rejection or the local_not_attempted: evidence prefix after restore — stale/hand-inlined definition installed instead of the candidate';
+  END IF;
   failed:=false;BEGIN PERFORM inbox_reply_send.persist(o,att21,gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','PROV-SHOULD-FAIL'));EXCEPTION WHEN raise_exception THEN IF SQLERRM='INBOX_REPLY_STALE_TOKEN' THEN failed:=true;ELSE RAISE;END IF;END;
   IF NOT failed THEN RAISE EXCEPTION 'Restored persist() still accepts a wrong token';END IF;
   RAISE NOTICE '#9 token-equality mutation (dropped, then restored) OK';
