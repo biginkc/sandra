@@ -73,9 +73,10 @@ need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_se
 # [Astra round-3] Dynamic, exhaustive-by-construction residual discovery —
 # see owned_cleanup.py's module docstring. MUST run before anything else
 # writes a row, so COUNTER_BASELINE reflects the true pre-run state.
-ORG_TABLES, USER_TABLES, COUNTER_TABLES = owned_cleanup.discover(sql)
+ORG_TABLES, USER_TABLES, COUNTER_TABLES, ID_TABLES = owned_cleanup.discover(sql)
 COUNTER_BASELINE = owned_cleanup.snapshot_counters(sql, COUNTER_TABLES)
-print(f'Discovered {len(ORG_TABLES)} org_id-scoped + {len(USER_TABLES)} user_id-scoped + {len(COUNTER_TABLES)} counter table(s) to verify residual-free at cleanup')
+BASELINE_HASHES = owned_cleanup.snapshot_baseline_hashes(sql, ID_TABLES)
+print(f'Discovered {len(ORG_TABLES)} org_id-scoped + {len(USER_TABLES)} user_id-scoped + {len(COUNTER_TABLES)} counter table(s) to verify residual-free at cleanup, plus {len(ID_TABLES)} id-scoped table(s) baselined for content-hash verification')
 
 sources = [P.parent / 'inbox-reply-boundary/context.sql', P.parent / 'inbox-reply-preparation/recipient.sql', P.parent / 'inbox-reply-preparation/batch.sql',
            P.parent / 'inbox-reply-review/setup.sql', P.parent / 'inbox-reply-review/public-api.sql', P.parent / 'inbox-reply-send/attempts.sql',
@@ -281,8 +282,12 @@ finally:
         # dynamically-discovered org_id/user_id-scoped table anywhere in the
         # database, plus the counter/cursor tables against their baseline.
         advanced = owned_cleanup.assert_zero_residual(sql, ORG_TABLES, USER_TABLES, COUNTER_TABLES, COUNTER_BASELINE, [owned_org], [owned_user])
+        # [Astra round-6] Independent, additional check: every id-scoped
+        # table's pre-existing (non-owned) rows must be byte-identical to
+        # their pre-run baseline.
+        owned_cleanup.assert_baseline_unchanged(sql, ID_TABLES, BASELINE_HASHES, [owned_org], [owned_user])
         # [Astra round-4] Honest accounting, never a blanket "zero residual".
-        print(f'Exhaustive dynamic residual check passed: zero synthetic rows across {len(ORG_TABLES)} org-scoped + {len(USER_TABLES)} user-scoped table(s)' + (f'; serialization counters advanced monotonically: {"; ".join(advanced)}' if advanced else '; no counter table changed'))
+        print(f'Exhaustive dynamic residual check passed: zero synthetic rows across {len(ORG_TABLES)} org-scoped + {len(USER_TABLES)} user-scoped table(s); baseline content byte-identical across {len(ID_TABLES)} id-scoped table(s)' + (f'; serialization counters advanced monotonically: {"; ".join(advanced)}' if advanced else '; no counter table changed'))
     need(sql("SELECT to_regnamespace('inbox_reply_send') IS NULL", check=False) == 't', 'inbox_reply_send schema not dropped')
     need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_send_worker')", check=False) == 't', 'inbox_reply_send_worker role not dropped')
     print('Cleanup verified: containers/volume/image removed, schemas and worker role dropped, zero residual owned rows')

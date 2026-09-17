@@ -66,9 +66,12 @@ need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_se
 # [Astra round-3] Dynamic, exhaustive-by-construction residual discovery —
 # see owned_cleanup.py's module docstring. MUST run before anything else
 # writes a row, so counter_baseline reflects the true pre-run state.
-ORG_TABLES, USER_TABLES, COUNTER_TABLES = owned_cleanup.discover(sql)
+ORG_TABLES, USER_TABLES, COUNTER_TABLES, ID_TABLES = owned_cleanup.discover(sql)
 COUNTER_BASELINE = owned_cleanup.snapshot_counters(sql, COUNTER_TABLES)
-print(f'Discovered {len(ORG_TABLES)} org_id-scoped + {len(USER_TABLES)} user_id-scoped + {len(COUNTER_TABLES)} counter table(s) to verify residual-free at cleanup')
+# [Astra round-6] MUST run before any org/user this run will ever create
+# exists — every row in every id-scoped table is a "baseline" row right now.
+BASELINE_HASHES = owned_cleanup.snapshot_baseline_hashes(sql, ID_TABLES)
+print(f'Discovered {len(ORG_TABLES)} org_id-scoped + {len(USER_TABLES)} user_id-scoped + {len(COUNTER_TABLES)} counter table(s) to verify residual-free at cleanup, plus {len(ID_TABLES)} id-scoped table(s) baselined for content-hash verification')
 
 CLEANUP = ("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);"
            "DROP FUNCTION IF EXISTS public.inbox_accept_reply(uuid,uuid);DROP FUNCTION IF EXISTS public.inbox_recover_reply(uuid,uuid);DROP FUNCTION IF EXISTS public.inbox_reply_operation_status(uuid);"
@@ -649,12 +652,21 @@ finally:
         # tables checked against their pre-run baseline. This is what
         # actually catches a table nobody thought to name.
         advanced = owned_cleanup.assert_zero_residual(sql, ORG_TABLES, USER_TABLES, COUNTER_TABLES, COUNTER_BASELINE, OWNED_ORGS, OWNED_USERS)
+        # [Astra round-6, the definitive closure] Independent of (and in
+        # addition to) the scoped-count-zero check above: every id-scoped
+        # table's PRE-EXISTING (non-owned) rows must be byte-identical to
+        # their pre-run baseline — catches a mutation to a baseline row that
+        # the scoped-count check alone (which only proves THIS run's own
+        # rows are gone) can never see.
+        owned_cleanup.assert_baseline_unchanged(sql, ID_TABLES, BASELINE_HASHES, OWNED_ORGS, OWNED_USERS)
         # [Astra round-4] Honest accounting, never a blanket "zero residual":
         # zero SYNTHETIC rows across every org/user-scoped table (real,
-        # asserted above), and any shared serialization/version counter this
-        # run's own writes advanced is named explicitly here — it holds no
-        # synthetic rows and is never forced backward.
-        print(f'Exhaustive dynamic residual check passed: zero synthetic rows across {len(ORG_TABLES)} org-scoped + {len(USER_TABLES)} user-scoped table(s)' + (f'; serialization counters advanced monotonically: {"; ".join(advanced)}' if advanced else '; no counter table changed'))
+        # asserted above), zero baseline-content drift across every
+        # id-scoped table (round-6, asserted above), and any shared
+        # serialization/version counter this run's own writes advanced is
+        # named explicitly here — it holds no synthetic rows and is never
+        # forced backward.
+        print(f'Exhaustive dynamic residual check passed: zero synthetic rows across {len(ORG_TABLES)} org-scoped + {len(USER_TABLES)} user-scoped table(s); baseline content byte-identical across {len(ID_TABLES)} id-scoped table(s)' + (f'; serialization counters advanced monotonically: {"; ".join(advanced)}' if advanced else '; no counter table changed'))
     need(sql("SELECT to_regnamespace('inbox_reply_send') IS NULL") == 't', 'inbox_reply_send schema not dropped')
     need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_send_worker')") == 't', 'inbox_reply_send_worker role not dropped')
     print(f'Cleanup verified: zero residual rows across {len(OWNED_ORGS)} owned orgs / {len(OWNED_USERS)} owned users; schemas and worker role dropped')

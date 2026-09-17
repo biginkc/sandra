@@ -1,13 +1,32 @@
-"""[Astra round-3/4] Dynamic, exhaustive-by-construction, and HONEST residual
-verification, shared by proof.py and runtime-proof.py. Cleanup has now missed
-leaked tables three times by hand-maintained enumeration (access_epochs;
-message_capture.*/operation_domain.*; inbox_t2_policy.versions/parent.work/
-maintained.queue/projection_proof.dirty), and round 4 found the counter-table
-discovery itself was too narrow — public.hugo_owner_guard_serialization (a
-shared, cross-fixture serialization counter the round-2 owner-guard trigger
-dance advances on every memberships DISABLE/ENABLE TRIGGER cycle) was outside
-the old `inbox_t2_*`/`inbox_operation_domain` schema pattern, so it was never
-even snapshotted, and the printed "zero net residual" was FALSE. This module:
+"""[Astra round-3/4/5/6 — round 6 is the DEFINITIVE, FINAL closure] Dynamic,
+exhaustive-by-construction, and HONEST residual verification, shared by
+proof.py and runtime-proof.py. History of what this module closes:
+- round 3: leaked tables missed by hand-maintained enumeration (access_epochs;
+  message_capture.*/operation_domain.*; inbox_t2_policy.versions/parent.work/
+  maintained.queue/projection_proof.dirty).
+- round 4: the counter-table discovery itself was too narrow —
+  public.hugo_owner_guard_serialization (a shared, cross-fixture
+  serialization counter the round-2 owner-guard trigger dance advances on
+  every memberships DISABLE/ENABLE TRIGGER cycle) was outside the old
+  `inbox_t2_*`/`inbox_operation_domain` schema pattern, never even
+  snapshotted, and the printed "zero net residual" was FALSE.
+- round 5: the counter/shared check only compared row count + one counter
+  column's SUM — a synthetic content swap in any OTHER column of a
+  counter/shared table (e.g. hugo_owner_guard_serialization.guard_key, or
+  the uuid in inbox_t2_capture_boundary.generation.generation) passed
+  silently.
+- round 6 (this one): round 5's content hash was applied only to the
+  "neither org_id nor user_id" counter/shared set — an id-scoped table's
+  PRE-EXISTING (non-synthetic) baseline rows were never hashed at all, only
+  proven "this run's own rows are gone" (assert_zero_residual's scoped
+  count). Astra's repro: seed a baseline row in inbox_t2_policy.versions,
+  create+delete this run's own owned row (net zero), then mutate the
+  baseline row's entity_key — row count and the revision sum both unchanged,
+  so the round-5 checks saw nothing. Closed by applying the SAME per-row
+  content-hash machinery to EVERY id-scoped table too (id_tables,
+  PRIMARY_TABLES included), baselined before any synthetic id exists and
+  re-verified, after cleanup, over exactly the rows NOT owned by this run —
+  see assert_baseline_unchanged. This module:
 
 1. EXHAUSTIVE COVERAGE, not enumeration: every base table ANYWHERE in the
    database (any schema, never hardcoded) with an org_id or user_id column is
@@ -137,23 +156,80 @@ def _counter_tables(sql):
     return out
 
 
+def _counter_column(sql, table):
+    """The one recognized counter-shaped integer/bigint column on `table`, if
+    any — same detection COUNTER_COLUMN_PATTERN_SQL uses for the "neither
+    org_id nor user_id" counter set, now also applied to id-scoped tables
+    (e.g. inbox_t2_policy.versions.revision) so a legitimate monotonic
+    counter advance on an unrelated baseline row is never mistaken for the
+    kind of content mutation this module exists to catch."""
+    schema, name = table.split('.', 1)
+    rows = _rows(sql, f"""
+        SELECT a.attname FROM pg_attribute a
+        JOIN pg_class c ON c.oid=a.attrelid
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE c.relkind='r' AND n.nspname='{schema}' AND c.relname='{name}'
+          AND a.attnum>0 AND NOT a.attisdropped AND {COUNTER_COLUMN_PATTERN_SQL}
+          AND format_type(a.atttypid,a.atttypmod) IN ('integer','bigint','smallint')
+        ORDER BY a.attnum LIMIT 1
+    """)
+    return rows[0] if rows else None
+
+
+def _id_tables(sql):
+    """[Astra round-6] EVERY table anywhere in the database (any schema,
+    PRIMARY_TABLES INCLUDED this time — round 6's own escape was an id-scoped
+    table) with an org_id and/or user_id column. Returns
+    [(table, has_org, has_user, counter_column_or_None)] — used for the
+    baseline content-hash check, which is independent of (and a superset of)
+    the synthetic-id scoped-count check sweep_delete/assert_zero_residual
+    already do on the org_tables/user_tables subset (PRIMARY_TABLES
+    excluded)."""
+    exclude_schemas = ','.join(f"'{s}'" for s in EPHEMERAL_SCHEMAS)
+    rows = _rows(sql, f"""
+        SELECT n.nspname||'.'||c.relname||'|'||
+          bool_or(a.attname='org_id')||'|'||bool_or(a.attname='user_id')
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid=a.attrelid
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE c.relkind='r' AND a.attnum>0 AND NOT a.attisdropped
+          AND a.attname IN ('org_id','user_id')
+          AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname<>'information_schema'
+          AND n.nspname NOT IN ({exclude_schemas})
+        GROUP BY n.nspname,c.relname ORDER BY 1
+    """)
+    out = []
+    for r in rows:
+        table, has_org, has_user = r.split('|')
+        out.append((table, has_org == 'true', has_user == 'true', _counter_column(sql, table)))
+    return out
+
+
 def discover(sql):
     """Dynamic table discovery — call ONCE, before installing anything, so
-    the caller can snapshot counter_tables' baseline before any writes.
-    Returns (org_tables, user_tables, counter_tables) where counter_tables is
-    a list of (table, counter_column_or_None)."""
-    return _scoped_tables(sql, 'org_id'), _scoped_tables(sql, 'user_id'), _counter_tables(sql)
+    the caller can snapshot baselines before any writes. Returns
+    (org_tables, user_tables, counter_tables, id_tables):
+    - org_tables/user_tables: PRIMARY_TABLES-excluded, for sweep_delete +
+      the synthetic-id scoped-count check (unchanged since round 3).
+    - counter_tables: tables with NEITHER org_id NOR user_id (round 4),
+      each (table, counter_column_or_None).
+    - id_tables [round 6]: EVERY org_id/user_id-bearing table, PRIMARY_TABLES
+      INCLUDED, each (table, has_org, has_user, counter_column_or_None) — the
+      universe for the baseline content-hash check."""
+    return _scoped_tables(sql, 'org_id'), _scoped_tables(sql, 'user_id'), _counter_tables(sql), _id_tables(sql)
 
 
-def _content_hash_sql(table, col):
-    """[Astra round-5] One table-level digest over EVERY column except the
-    recognized counter column (or every column, if col is None): per-row
-    `to_jsonb(row) - col`, md5'd, sorted (so row order/physical layout never
-    matters), joined, md5'd again. Generic — needs no column list, no primary
-    key, and works identically whether the table has a counter column or not
-    (jsonb `-` on a key that doesn't exist is a no-op)."""
+def _content_hash_sql(table, col, where=None):
+    """[Astra round-5/6] One table-level digest over EVERY column except the
+    recognized counter column (or every column, if col is None), optionally
+    restricted to a WHERE clause: per-row `to_jsonb(row) - col`, md5'd,
+    sorted (so row order/physical layout never matters), joined, md5'd again.
+    Generic — needs no column list, no primary key, and works identically
+    whether the table has a counter column or not (jsonb `-` on a key that
+    doesn't exist is a no-op)."""
     drop = f" - '{col}'" if col else ""
-    return f"SELECT md5(coalesce(string_agg(h,',' ORDER BY h),'')) FROM (SELECT md5((to_jsonb(t){drop})::text) AS h FROM {table} t) x"
+    filt = f" WHERE {where}" if where else ""
+    return f"SELECT md5(coalesce(string_agg(h,',' ORDER BY h),'')) FROM (SELECT md5((to_jsonb(t){drop})::text) AS h FROM {table} t{filt}) x"
 
 
 def snapshot_counters(sql, counter_tables):
@@ -168,6 +244,33 @@ def snapshot_counters(sql, counter_tables):
         content_hash = sql(_content_hash_sql(table, col))
         snapshot[table] = (count, value, content_hash)
     return snapshot
+
+
+def snapshot_baseline_hashes(sql, id_tables):
+    """[Astra round-6] MUST be called before any org/user id this run will
+    ever use exists — every row in every id-scoped table is, by definition,
+    a pre-existing "baseline" row at this point, so the hash is computed
+    over the WHOLE table, no filter needed. The counter column (if any) is
+    excluded from the hash exactly as for counter_tables, so a legitimate
+    monotonic advance on a baseline row (e.g. inbox_t2_policy.versions.revision
+    ticking up from unrelated concurrent activity elsewhere in this shared
+    fixture) is never mistaken for the content mutation this exists to
+    catch."""
+    return {table: sql(_content_hash_sql(table, col)) for table, _, _, col in id_tables}
+
+
+def _not_owned_filter(has_org, has_user, orgs, users):
+    """Row-inclusion predicate: true for a row that does NOT belong to any of
+    this run's own synthetic ids — i.e. exactly the "baseline" rows the
+    pre-run snapshot covered. NULL-safe via coalesce to a sentinel that can
+    never equal a real synthetic uuid, so a legitimately-NULL org_id/user_id
+    row is always treated as baseline (never excluded)."""
+    parts = []
+    if has_org:
+        parts.append(f"coalesce(org_id::text,'~NULL~')<>ALL({orgs})")
+    if has_user:
+        parts.append(f"coalesce(user_id::text,'~NULL~')<>ALL({users})")
+    return ' AND '.join(parts) if parts else 'true'
 
 
 def _text_array(ids):
@@ -256,3 +359,40 @@ def assert_zero_residual(sql, org_tables, user_tables, counter_tables, counter_b
     if residual:
         raise RuntimeError(f'Owned-fixture cleanup left residual rows/unexplained changes across {len(residual)} dynamically-discovered table(s) (exhaustive check, not a hand-maintained list): {residual}')
     return advanced
+
+
+def assert_baseline_unchanged(sql, id_tables, baseline_hashes, owned_orgs, owned_users):
+    """[Astra round-6, the definitive closure] For EVERY id-scoped table
+    (PRIMARY_TABLES included), re-hash every row that is NOT one of this
+    run's own synthetic ids (i.e. exactly the rows the pre-run baseline
+    covered) and assert it is byte-identical to that baseline. This is
+    independent of, and strictly additional to, assert_zero_residual's own
+    scoped-count-is-zero check: that check only proves this run's OWN rows
+    are gone; this one proves nothing else in the table was touched at all —
+    the exact gap Astra's round-6 repro exploited (seed a baseline row,
+    create+delete this run's own row net-zero, then mutate the baseline
+    row's non-id, non-counter column — row count and any counter unchanged,
+    so the round-5 checks alone saw nothing).
+
+    A recognized counter column's own legitimate advance on a baseline row
+    (rare, but real — see snapshot_baseline_hashes) is excluded from the
+    hash exactly as counter_tables handles it, so this never double-reports
+    the same class of change assert_zero_residual already reports for the
+    counter/shared set; the id-scoped counter's own value is not otherwise
+    tracked here (unlike counter_tables, where it is the one permitted kind
+    of delta) — it is simply excluded from what "unchanged" means, matching
+    Astra's own repro framing ("row count + revision-sum unchanged").
+
+    Fails loudly, by table, on ANY hash mismatch — there is no longer a
+    table category (id-scoped or not, counter or not) whose persistent
+    content this module does not verify byte-for-byte."""
+    orgs, users = _text_array(owned_orgs), _text_array(owned_users)
+    residual = {}
+    for table, has_org, has_user, col in id_tables:
+        before = baseline_hashes.get(table, '?')
+        where = _not_owned_filter(has_org, has_user, orgs, users)
+        now = sql(_content_hash_sql(table, col, where))
+        if before != '?' and now != before:
+            residual[table] = f'baseline (non-owned) row content changed — hash {before} -> {now} (a mutation in a pre-existing row, outside this run\'s own synthetic ids, in a non-counter column)'
+    if residual:
+        raise RuntimeError(f'Owned-fixture cleanup: baseline content changed in {len(residual)} id-scoped table(s) outside this run\'s own synthetic rows (round-6 exhaustive content check): {residual}')
