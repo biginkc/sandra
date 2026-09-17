@@ -59,6 +59,7 @@ test('environment manifest records production UNKNOWN and the complete clock aud
   assert.match(source, /fixtureOrg:\s*CANONICAL_FIXTURE_ORG/);
   assert.match(source, /postgrestVersion:\s*postgrestVersionFromStatus\(status\)/);
   assert.match(source, /providerContractCoverage:\s*\{/);
+  assert.match(source, /attempt:\s*'\* attempt'/);
   for (const sourcePath of [
     'src/lib/sequences/enrollment.ts',
     'src/lib/messaging/send.ts',
@@ -67,10 +68,15 @@ test('environment manifest records production UNKNOWN and the complete clock aud
   }
   for (const predicate of [
     'enrollment_first_due',
+    'tick_due_and_budget',
+    'native_claim_stale_cutoff',
+    'quiet_hours',
+    'direct_quiet_deferral',
     'next_step_due',
     'queue_pending_stale_sweep',
     'queue_due_and_pending_age',
     'queue_retry_backoff',
+    'sequence_audit_defaults',
     'provider_intent_timestamp',
     'retry_resume_schedule',
     'stale_claim_reconciliation',

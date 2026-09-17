@@ -104,7 +104,8 @@ const CLOCK_AUDIT = [
     relatedFunction: 'deferQueuedMessage',
     predicate: 'provider transient retry nextRetryAt/scheduled_for',
     clock: 'application Date / Date.now()',
-    contract: /PROVIDER_TRANSIENT_DEFER_MS\s*=\s*5\s*\*\s*60_000[\s\S]*now\.getTime\(\)\s*\+\s*PROVIDER_TRANSIENT_DEFER_MS[\s\S]*Date\.now\(\)\s*\+\s*PROVIDER_TRANSIENT_DEFER_MS/,
+    contract: /PROVIDER_TRANSIENT_DEFER_MS\s*=\s*5\s*\*\s*60_000[\s\S]*now\.getTime\(\)\s*\+\s*PROVIDER_TRANSIENT_DEFER_MS\s*\*\s*attempt[\s\S]*Date\.now\(\)\s*\+\s*PROVIDER_TRANSIENT_DEFER_MS/,
+    attempt: '* attempt',
   },
   {
     id: 'sequence_audit_defaults',
@@ -113,7 +114,7 @@ const CLOCK_AUDIT = [
     function: 'sequence_step_runs.created_at default',
     predicate: 'audit row creation timestamp',
     clock: 'PostgreSQL now()',
-    contract: /create table(?: public)? sequence_step_runs[\s\S]*created_at timestamptz not null default now\(\)/,
+    contract: /create table sequence_step_runs\s*\([^;]*?created_at timestamptz not null default now\(\)\s*\);/,
   },
   {
     id: 'provider_intent_timestamp',
