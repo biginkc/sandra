@@ -620,7 +620,12 @@ describe("native quiet-hours and explicit recovery", () => {
       skipped_reason: "provider_failed",
     });
 
-    expect((await resumeEnrollment(supabase, enrollmentId)).status).toBe("resumed");
+    const ordinaryResume = await resumeEnrollment(supabase, enrollmentId);
+    expect(ordinaryResume.status).toBe("reconciliation_required");
+    expect(getMockMessageLog()).toHaveLength(0);
+
+    const explicitRetry = await retrySequenceStep(supabase, enrollmentId);
+    expect(explicitRetry.status).toBe("retried");
     const repairedSchedule = await loadEnrollment(enrollmentId);
     expect(repairedSchedule.next_run_at).not.toBeNull();
     setApplicationTimeAfterPersistedDue(repairedSchedule.next_run_at!);
