@@ -16,8 +16,8 @@ const SUPABASE_CLI_VERSION = "2.116.0";
 const LOOPBACK_API_URL = "http://127.0.0.1:54321";
 const LOOPBACK_DB_URL = "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
 // Supabase composes service names from the project name with a realtime
-// prefix. Keep a conservative 45-character project bound for generated names
-// while preserving the unique suffix; this does not prove a startup cause.
+// prefix. Keep a 45-character generated-name bound while preserving the unique
+// suffix; this does not prove a startup cause.
 const MAX_SUPABASE_PROJECT_NAME_LENGTH = 45;
 const SUPABASE_EXCLUDES = [
   "studio",
@@ -206,8 +206,11 @@ const mutationDefinitions = {
       file: "e2e/sequence-readiness.local.spec.ts",
       pattern: "create/edit/enroll then persist pause, resume, cancel, and reload",
       expectedFullName: /create\/edit\/enroll then persist pause, resume, cancel, and reload/,
-      expectedFailure: /(?:Edited local description|description|persist|reload)/i,
-      expectedFailureMarker: ".toBe(\"Edited local description\");",
+      expectedFailure: /Expected:\s*\"Edited local description\"[\s\S]*Received:\s*\"Local browser persistence contract\"/i,
+      expectedFailureMarkers: [
+        "await expect\n      .poll(async () => {\n        const { data, error } = await admin",
+        ".toBe(\"Edited local description\");",
+      ],
     },
     controls: [
       {
@@ -424,9 +427,15 @@ function reportFailureMessages(report) {
   return reportAssertions(report).flatMap((assertion) => assertion.failureMessages ?? []);
 }
 
+const ANSI_ESCAPE_PATTERN = new RegExp(String.fromCharCode(27) + "\\[[0-?]*[ -/]*[@-~]", "g");
+
+function stripAnsi(value) {
+  return String(value ?? "").replace(ANSI_ESCAPE_PATTERN, "");
+}
+
 function hasAssertionDiagnostic(messages, runner = "vitest") {
   return messages.some((message) => {
-    const firstLine = String(message).split(/\r?\n/, 1)[0].trim();
+    const firstLine = stripAnsi(message).split(/\r?\n/, 1)[0].trim();
     if (/^(?:TypeError|ReferenceError|SyntaxError):/i.test(firstLine)) return false;
     if (runner === "playwright") {
       return /^Error:\s*expect(?:\(|[.(]).*\.(?:to|not)[A-Za-z]*/i.test(firstLine);
@@ -551,18 +560,19 @@ async function assertOneAssertionFailure(result, label, expectedFailure, expecte
   }
   const messages = reportFailureMessages(result.report);
   if (messages.length === 0) throw new Error(`${label}: failure had no assertion diagnostics`);
-  if (!hasAssertionDiagnostic(messages, spec.runner ?? "vitest")) {
+  const normalizedMessages = messages.map(stripAnsi);
+  if (!hasAssertionDiagnostic(normalizedMessages, spec.runner ?? "vitest")) {
     throw new Error(`${label}: failure was a plain thrown error rather than a matcher assertion`);
   }
   const infrastructure = /failed to load|cannot find module|transform failed|unexpected token|syntaxerror|compile|econnrefused|connection refused|startup|timed out|no test files/i;
-  if (messages.some((message) => infrastructure.test(message))) {
+  if (normalizedMessages.some((message) => infrastructure.test(message))) {
     throw new Error(`${label}: mutation produced infrastructure/compile failure instead of assertion failure`);
   }
   const fixtureErrorNull = /(?:error|insert|update|delete).{0,100}(?:to be null|toBeNull|to be `null`)/is;
-  if (messages.some((message) => fixtureErrorNull.test(message))) {
+  if (normalizedMessages.some((message) => fixtureErrorNull.test(message))) {
     throw new Error(`${label}: failure matches a fixture/database-error null assertion rather than the mutation contract`);
   }
-  if (expectedFailure && !messages.some((message) => expectedFailure.test(message))) {
+  if (expectedFailure && !normalizedMessages.some((message) => expectedFailure.test(message))) {
     throw new Error(`${label}: failure did not match the expected mutation assertion`);
   }
   await assertFailureAtSelectedAssertion(result, label, spec, options.sourceRoot);
@@ -674,14 +684,115 @@ async function selfTestMutationFailureClassification(realReport) {
   return selectedFailure ? "actual-report" : "representative-fixture";
 }
 
+async function selfTestBrowserMutationFailureClassification(realReport) {
+  const spec = mutationDefinitions["ui-persistence-dropped"].target;
+  const source = await readFile(path.join(root, spec.file), "utf8");
+  const markers = assertionMarkers(spec);
+  const markerIndexes = markers.map((marker) => source.indexOf(marker));
+  if (markerIndexes.some((index) => index < 0)) {
+    throw new Error("UI persistence mutation self-test marker is missing from the source");
+  }
+  const markerLines = markerIndexes.map((index) => sourceLineAt(source, index));
+  const representativeMessage = (firstLine, line = markerLines[0]) =>
+    `${firstLine}\n    at /tmp/sequence-mutation/${spec.file}:${line}:5`;
+  const selectedFailure = reportAssertions(realReport).find((assertion) =>
+    (assertion.status === "failed" || assertion.failed === true) &&
+      spec.expectedFullName.test(assertion.fullName ?? ""),
+  );
+  const report = selectedFailure
+    ? realReport
+    : {
+        success: false,
+        numTotalTests: 1,
+        numFailedTests: 1,
+        setupFailures: 0,
+        testResults: [{
+          assertionResults: [{
+            fullName: "sequence-readiness.local.spec.ts sequence readiness — local browser contract create/edit/enroll then persist pause, resume, cancel, and reload",
+            status: "failed",
+            failureMessages: [representativeMessage(
+              "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: \"Edited local description\"\nReceived: \"Local browser persistence contract\"",
+            )],
+          }],
+        }],
+      };
+  const result = { exitCode: 1, report };
+  await assertOneAssertionFailure(
+    result,
+    "UI persistence mutation assertion",
+    spec.expectedFailure,
+    spec.expectedFullName,
+    spec,
+    { sourceRoot: root },
+  );
+
+  const withMessage = (message) => {
+    const mutated = cloneJson(report);
+    mutated.testResults[0].assertionResults[0].failureMessages = [message];
+    return { exitCode: 1, report: mutated };
+  };
+  await expectRejected(
+    "UI persistence wrong assertion line",
+    () => assertOneAssertionFailure(
+      withMessage(representativeMessage(
+        "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: \"Edited local description\"\nReceived: \"Local browser persistence contract\"",
+        markerLines[0] - 1,
+      )),
+      "UI persistence wrong line",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /failed assertion did not point/,
+  );
+  await expectRejected(
+    "UI persistence plain thrown error",
+    () => assertOneAssertionFailure(
+      withMessage(representativeMessage("Error: persistence fixture unavailable")),
+      "UI persistence plain throw",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /plain thrown error/,
+  );
+  await expectRejected(
+    "UI persistence navigation error",
+    () => assertOneAssertionFailure(
+      withMessage(representativeMessage("Error: page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:3557")),
+      "UI persistence navigation failure",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /plain thrown error/,
+  );
+  await expectRejected(
+    "UI persistence whole-test timeout",
+    () => assertOneAssertionFailure(
+      withMessage(representativeMessage("Error: Test timeout of 120000ms exceeded.")),
+      "UI persistence whole-test timeout",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /plain thrown error/,
+  );
+  return selectedFailure ? "actual-report" : "representative-fixture";
+}
+
 function selfTestMutationProjectName() {
-  const longest = createMutationProjectName(
+  const truncatedName = createMutationProjectName(
     "final-authorization-removed",
     2286,
     "mu5jxjdm",
   );
-  if (longest.length > MAX_SUPABASE_PROJECT_NAME_LENGTH ||
-      !longest.endsWith("-2286-mu5jxjdm")) {
+  if (truncatedName.length > MAX_SUPABASE_PROJECT_NAME_LENGTH ||
+      !truncatedName.endsWith("-2286-mu5jxjdm")) {
     throw new Error("Mutation project-name self-test did not preserve the bounded unique suffix");
   }
   const otherPid = createMutationProjectName(
@@ -689,10 +800,10 @@ function selfTestMutationProjectName() {
     2287,
     "mu5jxjdm",
   );
-  if (longest === otherPid) {
+  if (truncatedName === otherPid) {
     throw new Error("Mutation project-name self-test collapsed distinct PID values");
   }
-  return { longest, otherPid };
+  return { truncatedName, otherPid };
 }
 
 function parseStatusJson(stdout) {
@@ -863,6 +974,23 @@ async function checkCurrentPatch(mutation) {
   })}`);
 }
 
+function parseParserInput(contents) {
+  let document;
+  try {
+    document = JSON.parse(contents);
+  } catch {
+    document = null;
+  }
+  const record = document?.runner && document?.report
+    ? document
+    : document?.commands?.find((command) => command.label === "mutant-target")
+      ?? document?.tests?.mutant?.target;
+  if (record?.report) return { runner: record.runner ?? "vitest", report: record.report };
+  if (document?.suites) return { runner: "playwright", report: parsePlaywrightReport(contents, "") };
+  const vitest = parseVitestReport(contents, "");
+  return vitest ? { runner: "vitest", report: vitest } : null;
+}
+
 async function selfTestParser(reportPath) {
   await validateMutationMarkers({
     name: "all mutation contracts",
@@ -871,12 +999,15 @@ async function selfTestParser(reportPath) {
       mutation.target,
     ]),
   });
-  const realReport = parseVitestReport(await readFile(reportPath, "utf8"), "");
+  const parserInput = parseParserInput(await readFile(reportPath, "utf8"));
+  const realReport = parserInput?.report;
   if (!realReport || realReport.numTotalTests < 1) {
-    throw new Error("Parser self-test could not normalize the real Vitest report");
+    throw new Error("Parser self-test could not normalize the real test report");
   }
   const projectNameCheck = selfTestMutationProjectName();
-  const mutationClassification = await selfTestMutationFailureClassification(realReport);
+  const mutationClassification = parserInput.runner === "playwright"
+    ? await selfTestBrowserMutationFailureClassification(realReport)
+    : await selfTestMutationFailureClassification(realReport);
   if (realReport.numFailedTests > 0) {
     if (realReport.numFailedTests !== 1 || realReport.setupFailures !== 0) {
       throw new Error("Parser self-test misclassified the real assertion failure as setup/infrastructure failure");
@@ -976,8 +1107,9 @@ async function selfTestParser(reportPath) {
     throw new Error("Parser self-test did not recognize the representative Playwright matcher diagnostic");
   }
   console.log(`[sequence-mutation] PARSER_CHECK ${JSON.stringify({
-    realVitestTests: realReport.numTotalTests,
-    realVitestFailures: realReport.numFailedTests,
+    realRunner: parserInput.runner,
+    realTests: realReport.numTotalTests,
+    realFailures: realReport.numFailedTests,
     skippedNormalization: passingWithSkipped.numTotalTests,
     failureNormalization: selectedFailure.numFailedTests,
     setupFailureNormalization: setupFailure.setupFailures,

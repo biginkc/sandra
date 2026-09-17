@@ -57,7 +57,15 @@ test('sequence mutation harness forwards only the approved image registry overri
   assert.match(source, /if \(imageRegistry === "ghcr\.io"\) baseEnv\.SUPABASE_INTERNAL_IMAGE_REGISTRY/);
   assert.match(source, /imageRegistry: imageRegistry \|\| "cli-default"/);
   assert.match(source, /expectedFailure: \/\(\?:completed\|current_step_index\|next_run_at\|length of 3\|to match object\)\/i/);
-  assert.match(source, /const mutationClassification = await selfTestMutationFailureClassification\(realReport\);/);
+  assert.match(source, /expectedFailure: \/Expected:\\s\*\\\"Edited local description\\\"\[\\s\\S\]\*Received:/);
+  assert.match(source, /expectedFailureMarkers: \[\s*\"await expect\\n\s+\.poll\(async \(\) => \{\\n\s+const \{ data, error \} = await admin\",\s*\"\.toBe\(\\\"Edited local description\\\"\);\"/s);
+  assert.match(source, /function stripAnsi\(value\)/);
+  assert.match(source, /const normalizedMessages = messages\.map\(stripAnsi\);/);
+  assert.match(source, /async function selfTestBrowserMutationFailureClassification\(realReport\)/);
+  assert.match(source, /parserInput\.runner === \"playwright\"/);
+  assert.match(source, /UI persistence whole-test timeout/);
+  assert.match(source, /const mutationClassification = parserInput\.runner === \"playwright\"/);
+  assert.match(source, /selfTestMutationFailureClassification\(realReport\)/);
   assert.match(source, /mutationClassification,/);
   assert.match(source, /return selectedFailure \? "actual-report" : "representative-fixture";/);
   assert.match(source, /must be exactly ghcr\.io when set/);
@@ -87,8 +95,8 @@ test('sequence mutation project names cap the label while preserving uniqueness'
   assert.match(source, /function createMutationProjectName\(mutation, pid, timestamp\)/);
   assert.match(source, /createMutationProjectName\(\s*args\.mutation,\s*process\.pid,\s*Date\.now\(\)\.toString\(36\),/);
   assert.match(source, /const projectNameCheck = selfTestMutationProjectName\(\);/);
-  assert.match(source, /longest\.endsWith\("-2286-mu5jxjdm"\)/);
-  assert.match(source, /if \(longest === otherPid\)/);
+  assert.match(source, /truncatedName\.endsWith\("-2286-mu5jxjdm"\)/);
+  assert.match(source, /if \(truncatedName === otherPid\)/);
   assert.match(source, /projectNameCheck,/);
 });
 
