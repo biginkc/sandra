@@ -58,6 +58,23 @@ NODE22_BIN = '/opt/homebrew/opt/node@22/bin'
 NODE_ENV = {**os.environ, 'PATH': NODE22_BIN + ':' + os.environ.get('PATH', '')}
 REPO_ROOT = P.parent.parent
 
+# [Astra e2e gate, finding B1 — THE crux] A durable, proof-owned send log
+# (a plain file, NOT the merged double's own process-local state — see
+# synthetic-cli.mjs's own header) that survives every CLI process boundary
+# for the whole run. Every real transport invocation appends exactly one
+# line here, keyed by whatever identity the caller passes (normally the
+# ledger attempt_id). send_count(key) below is the actual no-double-send
+# evidence this proof asserts against — never inferred from SQL state,
+# externalId equality (which can collide across processes — see the CLI
+# shim's header), or receipt counts alone.
+SEND_LOG = P / '.send-log.jsonl'
+if SEND_LOG.exists(): SEND_LOG.unlink()
+
+
+def send_count(key):
+    if not SEND_LOG.exists(): return 0
+    return sum(1 for line in SEND_LOG.read_text().splitlines() if line.strip() and json.loads(line)['key'] == key)
+
 
 def need(v, label):
     if not v: raise RuntimeError(label)
@@ -254,6 +271,32 @@ def call_wrapper_fail(reference, terminal, payload='{}'):
     return sql_fail(q)
 
 
+def send(from_, to, body, key, override=None):
+    """The ONE call site that invokes the REAL synthetic transport for an
+    actual send. Always logs to SEND_LOG under `key` (see send_count) —
+    every boundary's "was this actually sent more than once" question is
+    answered by counting THIS log, never by inspecting SQL state alone."""
+    payload = {'mode': 'send', 'from': from_, 'to': to, 'body': body, 'key': key, 'logPath': str(SEND_LOG)}
+    if override: payload['override'] = override
+    return synth(payload)
+
+
+def dispatch_attempt(o, att, override=None, key=None):
+    """The full composed per-attempt dispatch step, reused by Section A and
+    every crash-boundary: worker_claim -> worker_start_dispatch (marker) ->
+    REAL synthetic transport call (send, logged) -> worker_persist. Returns
+    (provider_result, persist_result, token)."""
+    claim = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o}','{att}',60)::text;"))
+    need(claim['kind'] == 'claimed', f'dispatch_attempt: worker_claim should claim an approved attempt, got {claim}')
+    dispatch_result = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o}','{att}',{claim['generation']})::text;"))
+    need(dispatch_result['kind'] == 'dispatch', f'dispatch_attempt: worker_start_dispatch should dispatch, got {dispatch_result}')
+    token = dispatch_result['token']
+    need(state_of(o, att) == 'dispatch_started', 'dispatch_attempt: ledger marker not committed before the provider call')
+    provider_result = send(dispatch_result['from'], dispatch_result['to'], dispatch_result['body'], key or att, override)
+    persist_result = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{o}','{att}','{token}',{jsonb_literal(provider_result)})::text;"))
+    return provider_result, persist_result, token
+
+
 def synthetic_callback(external_id, terminal):
     """Build the REAL synthetic callback envelope via buildSyntheticReplyCallback
     (TS, merged), then translate it the way the reply-status ingress route
@@ -286,34 +329,26 @@ try:
     need(len(att_ids) == 3, f'A.1 operation_attempts() should enumerate all 3 tip attempts, got {len(att_ids)}')
     att_accept, att_uncertain, att_not_attempted = att_ids
 
-    # --- A.2 worker dispatch loop, one attempt per scripted outcome ---
-    def dispatch(att, override):
-        r = row_of(oA, att)
-        claim = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{oA}','{att}',60)::text;"))
-        need(claim['kind'] == 'claimed', f'A.2 worker_claim should claim an approved attempt, got {claim}')
-        gen = claim['generation']
-        dispatch_result = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{oA}','{att}',{gen})::text;"))
-        need(dispatch_result['kind'] == 'dispatch', f'A.2 worker_start_dispatch should dispatch, got {dispatch_result}')
-        token = dispatch_result['token']
-        need(state_of(oA, att) == 'dispatch_started', 'A.2 ledger marker not committed before the provider call')
-        provider_result = synth({'mode': 'send', 'from': dispatch_result['from'], 'to': dispatch_result['to'], 'body': dispatch_result['body'], **({'override': override} if override else {})})
-        persist_result = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oA}','{att}','{token}',{jsonb_literal(provider_result)})::text;"))
-        return provider_result, persist_result, token
-
-    provider_a, persist_a, token_a = dispatch(att_accept, None)  # default override -> accepted
+    # --- A.2 worker dispatch loop, one attempt per scripted outcome, via
+    # dispatch_attempt() (the ONE shared composed-dispatch helper every
+    # boundary in Section B reuses) ---
+    provider_a, persist_a, token_a = dispatch_attempt(oA, att_accept)  # default override -> accepted
     need(provider_a['kind'] == 'accepted', f'A.2a synthetic double should default to accepted, got {provider_a}')
     need(persist_a['state'] == 'provider_accepted', f'A.2a expected provider_accepted, got {persist_a}')
-    record('A.2a attempt 1: claim -> worker_start_dispatch (marker) -> REAL synthetic double (accepted) -> persist -> provider_accepted')
+    need(send_count(att_accept) == 1, f'A.2a exactly one real transport call expected, got {send_count(att_accept)}')
+    record('A.2a attempt 1: claim -> worker_start_dispatch (marker) -> REAL synthetic double (accepted) -> persist -> provider_accepted; send-log confirms exactly 1 real transport call')
 
-    provider_u, persist_u, token_u = dispatch(att_uncertain, {'kind': 'uncertain', 'reason': 'transport_or_timeout'})
+    provider_u, persist_u, token_u = dispatch_attempt(oA, att_uncertain, override={'kind': 'uncertain', 'reason': 'transport_or_timeout'})
     need(provider_u['kind'] == 'uncertain', f'A.2b synthetic double override did not take effect: {provider_u}')
     need(persist_u['state'] == 'uncertain', f'A.2b expected uncertain, got {persist_u}')
-    record('A.2b attempt 2: scripted synthetic uncertain (transport_or_timeout) -> persist -> uncertain (awaits callback, no retry)')
+    need(send_count(att_uncertain) == 1, f'A.2b exactly one real transport call expected, got {send_count(att_uncertain)}')
+    record('A.2b attempt 2: scripted synthetic uncertain (transport_or_timeout) -> persist -> uncertain (awaits callback, no retry); send-log confirms exactly 1 real transport call')
 
-    provider_n, persist_n, token_n = dispatch(att_not_attempted, {'kind': 'not_attempted', 'reason': 'cancelled_before_dispatch'})
+    provider_n, persist_n, token_n = dispatch_attempt(oA, att_not_attempted, override={'kind': 'not_attempted', 'reason': 'cancelled_before_dispatch'})
     need(provider_n['kind'] == 'not_attempted', f'A.2c synthetic double override did not take effect: {provider_n}')
     need(persist_n['state'] == 'confirmed_not_submitted', f'A.2c expected confirmed_not_submitted, got {persist_n}')
-    record('A.2c attempt 3: scripted synthetic not_attempted (cancelled_before_dispatch) -> persist -> confirmed_not_submitted')
+    need(send_count(att_not_attempted) == 1, f'A.2c exactly one real transport call expected, got {send_count(att_not_attempted)}')
+    record('A.2c attempt 3: scripted synthetic not_attempted (cancelled_before_dispatch) -> persist -> confirmed_not_submitted; send-log confirms exactly 1 real transport call')
 
     need(sql(f"SELECT inbox_reply_send.operation_dispatch_complete('{oA}','{opA}')") == 't', 'A.3 operation should be dispatch-complete: no attempt left in approved/claimed/dispatch_started')
     record('A.3 operation_dispatch_complete: true once every attempt reached a post-dispatch state')
@@ -412,18 +447,19 @@ try:
     record('b1.4 RESTORED and re-verified byte-exact against source; the lease guard blocks the double pickup again')
 
     # Drain b1's two operations to completion so cleanup's residual check
-    # starts from a clean dispatch-complete state.
+    # starts from a clean dispatch-complete state — and, since the outbox
+    # layer was JUST proven double-pickable under mutation, confirm the
+    # SEPARATE attempt-level ledger guard (claim()'s busy/existing branches)
+    # still holds the line: even with two outbox pickups in flight, the
+    # actual send-log count per attempt stays at exactly 1.
     for o_, op_, att_list in [(oB1, opB1, attempts_of(oB1, opB1)), (oB1b, opB1b, attempts_of(oB1b, opB1b))]:
         for att_ in att_list:
-            claim_ = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o_}','{att_}',60)::text;"))
-            need(claim_['kind'] == 'claimed', f'B1 drain: worker_claim unexpected {claim_}')
-            d_ = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o_}','{att_}',{claim_['generation']})::text;"))
-            need(d_['kind'] == 'dispatch', f'B1 drain: worker_start_dispatch unexpected {d_}')
-            pr_ = synth({'mode': 'send', 'from': d_['from'], 'to': d_['to'], 'body': d_['body']})
-            sql(f"SELECT inbox_reply_send.worker_persist('{o_}','{att_}','{d_['token']}',{jsonb_literal(pr_)})::text;")
+            dispatch_attempt(o_, att_)
+            need(send_count(att_) == 1, f'B1 drain: exactly one real transport call expected per attempt, got {send_count(att_)}')
         batch_ = json.loads(sql("SELECT inbox_reply_send.claim_dispatch_batch(20)::text;"))
         entry_ = next((e for e in batch_ if e['operation_id'] == op_), None)
         if entry_: sql(f"SELECT inbox_reply_send.ack_dispatch('{o_}','{op_}',{entry_['generation']})")
+    record('b1.5: even after the outbox-level mutation proved a double pickup, driving BOTH resulting operations to completion shows the attempt-level ledger guard (claim()) still limits each attempt to exactly 1 real transport call (send-log evidence, not inference)')
 
     # --- B2: crash between the dispatch marker (dispatch_started committed)
     # and the provider call. Re-entry must NEVER issue a second token or make
@@ -451,26 +487,23 @@ try:
     need('INBOX_REPLY_STALE_CLAIM' in stale, f'B2 a second worker_start_dispatch on the re-entered attempt must be rejected, got: {stale}')
     record('b2.1: real invariant — worker_claim re-entry on a dispatch_started attempt settles it to uncertain, keeps the SAME dispatch_token (no second token), and a further worker_start_dispatch is rejected (no second marker, no second provider call possible)')
 
-    # MUTATION: make claim()'s dispatch_started branch re-claim instead of
-    # settling to uncertain — watch the SEPARATE transition-guard trigger
-    # (attempts.sql, independent of claim()'s own body) still block the
-    # resulting dispatch_started->claimed UPDATE outright (defense in depth:
-    # even a buggy claim() cannot resurrect a second dispatch), then restore.
-    restore_fn('inbox_reply_send.claim')
-    real_claim_fn = real_fn('inbox_reply_send.claim')
-    needle2 = ("ELSIF row.state='dispatch_started' THEN\n"
-               "  -- Re-entry after a crash/redeploy between the dispatch marker and any\n"
-               "  -- result: label uncertain, never re-claim (never a second token).\n"
-               "  UPDATE inbox_reply_send.attempts SET state='uncertain',evidence='reentered_without_result',lease_until=NULL,receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id;\n"
-               "  RETURN jsonb_build_object('kind','existing','state','uncertain');")
-    need(needle2 in real_claim_fn, 'B2 mutation anchor not found (source drifted)')
-    mutant_claim_fn = real_claim_fn.replace(needle2,
-        "ELSIF row.state='dispatch_started' THEN\n"
-        "  -- MUTATED for proof: wrongly re-claim a dispatch_started row instead of settling to uncertain.\n"
-        "  UPDATE inbox_reply_send.attempts SET state='claimed',generation=generation+1,lease_until=clock_timestamp()+make_interval(secs=>seconds) WHERE org_id=o AND id=attempt_id RETURNING generation INTO new_generation;\n"
-        "  RETURN jsonb_build_object('kind','claimed','generation',new_generation::text);")
-    need(mutant_claim_fn != real_claim_fn, 'B2 mutation produced no change')
-    sql(mutant_claim_fn)
+    # MUTATION [Astra e2e gate, finding B3 — B2 must show a REAL failure of
+    # the no-double-send invariant, not merely a surviving trigger backstop].
+    # A fresh attempt: marker committed, the REAL provider call is made
+    # (send #1, logged) — modeling "the send genuinely happened, then the
+    # process crashed before persist() ever ran". The transition-guard
+    # trigger (guard_reply_send_attempt) is the ONE thing standing between
+    # this and a second dispatch: its CASE has no dispatch_started->claimed
+    # edge, so nothing in this codebase can normally rewind a marker.
+    # Disable that trigger for one direct UPDATE — simulating a caller that
+    # bypasses the guard entirely — and rewind the row back to 'claimed'
+    # (dispatch_started_at/dispatch_token cleared, generation bumped, exactly
+    # the shape a legitimate claim() would have produced). Re-enable the
+    # trigger, then call the REAL, unmutated worker_start_dispatch again: it
+    # now legitimately sees a 'claimed' row and issues a SECOND token — the
+    # worker then makes a SECOND real provider call (send #2, logged, same
+    # attempt-id key). This is the invariant genuinely failing: send_count
+    # goes from 1 to 2.
     oB2b, uB2b, kB2b, prepB2b, _, _ = make_org_and_prep('+162256', n=1)
     resultB2b = json.loads(call_accept(oB2b, uB2b, kB2b, prepB2b))
     opB2b = resultB2b['operation_id']
@@ -478,19 +511,49 @@ try:
     claimB2b = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{oB2b}','{attB2b}',60)::text;"))
     dispatchB2b = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{oB2b}','{attB2b}',{claimB2b['generation']})::text;"))
     need(dispatchB2b['kind'] == 'dispatch', 'B2 mutant setup: expected dispatch')
-    mutant_reentry_err = sql_fail(f"SELECT inbox_reply_send.worker_claim('{oB2b}','{attB2b}',60)::text;")
-    need('Invalid send attempt transition' in mutant_reentry_err, f'B2 MUTATION did not actually reach the trigger backstop: {mutant_reentry_err}')
-    record("b2.2 MUTATION watched fail (at the trigger, defense-in-depth): claim()'s own body was made to wrongly re-claim a dispatch_started row, but the SEPARATE transition-guard trigger (independent of claim()'s body) rejects the resulting dispatch_started->claimed write outright — a second dispatch/second token is structurally impossible even with a buggy claim() body")
-    need(state_of(oB2b, attB2b) == 'dispatch_started', 'B2 mutant: the rejected re-claim must not have changed the attempt state')
-    restore_and_verify('inbox_reply_send.claim')
-    reentry_restored = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{oB2b}','{attB2b}',60)::text;"))
-    need(reentry_restored == {'kind': 'existing', 'state': 'uncertain'}, f'B2 restored claim() re-entry mismatch: {reentry_restored}')
-    record('b2.3 RESTORED and re-verified byte-exact against source; re-entry settles to uncertain again')
+    providerB2b_1 = send(dispatchB2b['from'], dispatchB2b['to'], dispatchB2b['body'], attB2b)
+    need(send_count(attB2b) == 1, f'B2 mutant setup: expected exactly 1 send before the bypass, got {send_count(attB2b)}')
 
-    # Finish b2's two uncertain attempts so cleanup starts clean (accepted,
-    # no callback needed — leaving them uncertain is itself the real, correct
-    # terminal-ish end state and is fine to leave as-is for cleanup, which
-    # sweeps rows by ownership, not by state).
+    def rewind_marker(o, att, disable_trigger):
+        stmt = f"UPDATE inbox_reply_send.attempts SET state='claimed',dispatch_started_at=NULL,dispatch_token=NULL,generation=generation+1,lease_until=clock_timestamp()+interval '60 seconds' WHERE org_id='{o}' AND id='{att}';"
+        if disable_trigger:
+            sql(f"ALTER TABLE inbox_reply_send.attempts DISABLE TRIGGER guard_reply_send_attempt; {stmt} ALTER TABLE inbox_reply_send.attempts ENABLE TRIGGER guard_reply_send_attempt;")
+        else:
+            return sql_fail(stmt)
+
+    rewind_marker(oB2b, attB2b, disable_trigger=True)
+    need(state_of(oB2b, attB2b) == 'claimed', 'B2 bypass: row did not actually rewind to claimed')
+    rewound_gen = row_of(oB2b, attB2b)['generation']
+    dispatchB2b_2 = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{oB2b}','{attB2b}',{rewound_gen})::text;"))
+    need(dispatchB2b_2['kind'] == 'dispatch', f'B2 bypass: the REAL (unmutated) worker_start_dispatch should now issue a second token, got {dispatchB2b_2}')
+    need(dispatchB2b_2['token'] != dispatchB2b['token'], 'B2 bypass: expected a genuinely NEW dispatch token on the second dispatch')
+    providerB2b_2 = send(dispatchB2b_2['from'], dispatchB2b_2['to'], dispatchB2b_2['body'], attB2b)
+    need(send_count(attB2b) == 2, f'B2 MUTATION watched fail: expected send_count to reach 2 (a genuine double send) after bypassing the transition-guard trigger, got {send_count(attB2b)}')
+    record('b2.2 MUTATION watched fail (a REAL failure of the invariant, not just a backstop): with the transition-guard trigger disabled for one direct UPDATE, a dispatch_started marker was rewound to claimed, the REAL (unmutated) worker_start_dispatch issued a genuinely NEW second token, and the REAL synthetic transport was invoked a SECOND time — send_count for this attempt reached 2, the exact no-double-send failure this whole boundary exists to prevent')
+    sql(f"SELECT inbox_reply_send.worker_persist('{oB2b}','{attB2b}','{dispatchB2b_2['token']}',{jsonb_literal(providerB2b_2)})::text;")
+
+    # RESTORE: the trigger function itself was never modified — only its
+    # enforcement was defeated for one statement by disabling it. "Restore"
+    # here means: attempt the IDENTICAL rewind UPDATE again, this time WITH
+    # the trigger enabled (its normal, always-on state) — it must reject the
+    # write outright, and no third send can ever happen for this attempt.
+    oB2c, uB2c, kB2c, prepB2c, _, _ = make_org_and_prep('+162257', n=1)
+    resultB2c = json.loads(call_accept(oB2c, uB2c, kB2c, prepB2c))
+    opB2c = resultB2c['operation_id']
+    attB2c = attempts_of(oB2c, opB2c)[0]
+    provider_c, persist_c, token_c = dispatch_attempt(oB2c, attB2c)
+    need(send_count(attB2c) == 1, 'B2 restore setup: expected exactly 1 send')
+    blocked = rewind_marker(oB2c, attB2c, disable_trigger=False)
+    # The SAME trigger function (guard_attempt) rejects this — its
+    # immutability check on dispatch_started_at fires before its CASE
+    # statement would even be reached, so either message proves the guard.
+    need('Invalid send attempt transition' in blocked or 'dispatch_started_at is immutable' in blocked, f'B2 RESTORED: the same rewind attempt must be rejected by the (never-modified, always-on) transition-guard trigger, got: {blocked}')
+    need(state_of(oB2c, attB2c) in ('dispatch_started', 'provider_accepted', 'delivered'), 'B2 restore: the rejected rewind must not have changed the attempt state')
+    need(send_count(attB2c) == 1, f'B2 RESTORED and re-verified: send_count stays at 1 — the guard, back in force, blocks the exact bypass that produced a double send above')
+    record('b2.3 RESTORED and re-verified: with the transition-guard trigger enabled (its normal state — never itself modified), the identical rewind UPDATE that succeeded under the bypass is rejected outright (INBOX_REPLY invalid-transition), and send_count for a fresh attempt stays at exactly 1')
+
+    # b2b's over-dispatched attempt (send_count=2) and b2c's normal attempt
+    # are left as-is for cleanup, which sweeps rows by ownership, not state.
 
     # --- B3: crash between provider-accepted and persist. Re-delivering the
     # SAME (token, result) to persist() must be idempotent. ---
@@ -500,39 +563,95 @@ try:
     attB3 = attempts_of(oB3, opB3)[0]
     claimB3 = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{oB3}','{attB3}',60)::text;"))
     dispatchB3 = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{oB3}','{attB3}',{claimB3['generation']})::text;"))
-    providerB3 = synth({'mode': 'send', 'from': dispatchB3['from'], 'to': dispatchB3['to'], 'body': dispatchB3['body']})
+    providerB3 = send(dispatchB3['from'], dispatchB3['to'], dispatchB3['body'], attB3)
     need(providerB3['kind'] == 'accepted', f'B3 setup: expected accepted, got {providerB3}')
+    need(send_count(attB3) == 1, f'B3 setup: exactly one real transport call expected, got {send_count(attB3)}')
     result_json = jsonb_literal(providerB3)
     persist1 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB3}','{attB3}','{dispatchB3['token']}',{result_json})::text;"))
     need(persist1['state'] == 'provider_accepted', f'B3 first persist unexpected: {persist1}')
     rv1 = row_of(oB3, attB3)['receipt_version']
     # "Crash between provider-accepted and persist" — the client that got the
     # provider's accepted result never learned its own persist() call
-    # committed (response lost) and retries the EXACT SAME call.
+    # committed (response lost) and retries the EXACT SAME call. The
+    # transport is NEVER called again (this is a persist-layer retry, not a
+    # new send) — send_count must stay at 1 throughout.
     persist2 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB3}','{attB3}','{dispatchB3['token']}',{result_json})::text;"))
     rv2 = row_of(oB3, attB3)['receipt_version']
     need(persist2['state'] == 'provider_accepted' and rv1 == rv2, f'B3 a retried persist() with the identical token+result must be a no-op: rv {rv1} -> {rv2}, result {persist2}')
-    record('b3: a persist() call retried with the identical (token, result) after a "lost response" crash is idempotent — same state, receipt_version unchanged, no second write')
+    need(send_count(attB3) == 1, f'B3 a retried persist() must never call the transport again, send_count still expected 1, got {send_count(attB3)}')
+    record('b3.1: a persist() call retried with the identical (token, result) after a "lost response" crash is idempotent — same state, receipt_version unchanged, no second write, send-log confirms zero additional transport calls')
+
+    # MUTATION [Astra e2e gate, finding B3]: persist()'s own idempotent
+    # no-op (an identical repeated 'accepted' result on an already
+    # provider_accepted/terminal row) is the SOLE thing preventing a retried
+    # persist() from re-applying its write every time. Replace that no-op
+    # with a real (trigger-bypassing — a same-state UPDATE has no listed
+    # transition-guard edge, so a naive re-apply would otherwise be blocked
+    # by that SEPARATE guard too, masking this specific bug) re-write that
+    # bumps receipt_version on every retry, and watch a second persist()
+    # call with the SAME (token, result) double-bump it — a real loss of
+    # idempotency, not a hypothetical.
+    restore_fn('inbox_reply_send.persist')
+    real_persist_fn = real_fn('inbox_reply_send.persist')
+    needle3 = ("   IF reference IS NOT DISTINCT FROM row.provider_reference THEN\n"
+               "    RETURN jsonb_build_object('state',row.state,'receipt_version',row.receipt_version::text);\n"
+               "   ELSE\n"
+               "    RAISE EXCEPTION 'INBOX_REPLY_CONTRADICTORY_RECEIPT';\n"
+               "   END IF;")
+    need(needle3 in real_persist_fn, 'B3 mutation anchor not found (source drifted)')
+    mutant_persist_fn = real_persist_fn.replace(needle3,
+        "   IF reference IS NOT DISTINCT FROM row.provider_reference THEN\n"
+        "    -- MUTATED for proof: lose idempotency, re-apply the write on every retry\n"
+        "    -- (bypassing the SEPARATE transition-guard trigger, which has no\n"
+        "    -- same-state edge and would otherwise itself block this).\n"
+        "    ALTER TABLE inbox_reply_send.attempts DISABLE TRIGGER guard_reply_send_attempt;\n"
+        "    UPDATE inbox_reply_send.attempts SET receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;\n"
+        "    ALTER TABLE inbox_reply_send.attempts ENABLE TRIGGER guard_reply_send_attempt;\n"
+        "    RETURN jsonb_build_object('state',row.state,'receipt_version',v::text);\n"
+        "   ELSE\n"
+        "    RAISE EXCEPTION 'INBOX_REPLY_CONTRADICTORY_RECEIPT';\n"
+        "   END IF;")
+    need(mutant_persist_fn != real_persist_fn, 'B3 mutation produced no change')
+    sql(mutant_persist_fn)
+    persist3 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB3}','{attB3}','{dispatchB3['token']}',{result_json})::text;"))
+    rv3 = row_of(oB3, attB3)['receipt_version']
+    need(rv3 == rv1 + 1, f'B3 MUTATION watched fail: expected receipt_version to double-bump ({rv1} -> {rv1 + 1}) under the mutant, got {rv1} -> {rv3}')
+    record(f'b3.2 MUTATION watched fail: with idempotency removed from persist(), an identical retried call re-applies its write — receipt_version bumped again ({rv1} -> {rv3}) on a call that should have been a pure no-op')
+    restore_and_verify('inbox_reply_send.persist')
+    persist4 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB3}','{attB3}','{dispatchB3['token']}',{result_json})::text;"))
+    rv4 = row_of(oB3, attB3)['receipt_version']
+    need(rv4 == rv3, f'B3 RESTORED: a retried persist() must be a no-op again, got rv {rv3} -> {rv4}')
+    record('b3.3 RESTORED and re-verified byte-exact against source; the retried persist() is idempotent again')
+
     reference_b3, terminal_b3 = synthetic_callback(providerB3['externalId'], 'delivered')
     cbB3 = call_wrapper(reference_b3, terminal_b3)
     need(cbB3['kind'] == 'reconciled' and state_of(oB3, attB3) == 'delivered', 'B3 cleanup callback failed')
 
     # --- B4: callback arrives BEFORE persist (persist not yet run — the
     # attempt has no provider_reference to match against). Held in
-    # unmatched_callbacks; drained exactly once persist binds the reference. ---
+    # unmatched_callbacks; drained exactly once persist binds the reference.
+    # [Astra e2e gate, finding B2] The send step drives the REAL synthetic
+    # transport (send(), same seam as Section A/B1-B3) — the provider's own
+    # externalId is what the callback references, exactly as it would be in
+    # the real ingress route; nothing here is hand-injected. ---
     oB4, uB4, kB4, prepB4, _, _ = make_org_and_prep('+164255', n=1)
     resultB4 = json.loads(call_accept(oB4, uB4, kB4, prepB4))
     opB4 = resultB4['operation_id']
     attB4 = attempts_of(oB4, opB4)[0]
     claimB4 = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{oB4}','{attB4}',60)::text;"))
     dispatchB4 = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{oB4}','{attB4}',{claimB4['generation']})::text;"))
-    external_id_b4 = f"synthetic_{dispatchB4['to']}_prescripted"
-    ref_b4, terminal_b4 = synthetic_callback(external_id_b4, 'delivered')
+    # The REAL provider call happens now — the send genuinely occurred — but
+    # persist() has not run yet (the "crash"): the provider's callback can
+    # reach us before our own DB write recording its reference does.
+    providerB4 = send(dispatchB4['from'], dispatchB4['to'], dispatchB4['body'], attB4)
+    need(providerB4['kind'] == 'accepted', f'B4 setup: expected accepted, got {providerB4}')
+    need(send_count(attB4) == 1, f'B4 setup: exactly one real transport call expected, got {send_count(attB4)}')
+    ref_b4, terminal_b4 = synthetic_callback(providerB4['externalId'], 'delivered')
     early = call_wrapper(ref_b4, terminal_b4)
     need(early['kind'] == 'stored_unmatched', f'B4 a callback arriving before persist must be held, got {early}')
     need(sql(f"SELECT count(*) FROM inbox_reply_send.unmatched_callbacks WHERE provider='sendillo' AND provider_reference='{ref_b4}'") == '1', 'B4 held callback row missing')
-    record('b4.1: a callback arriving BEFORE persist (no provider_reference to match yet) is durably stored in unmatched_callbacks, never discarded')
-    persist_b4 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB4}','{attB4}','{dispatchB4['token']}',{jsonb_literal({'kind': 'accepted', 'externalId': ref_b4, 'status': 'sent'})})::text;"))
+    record('b4.1: a callback arriving BEFORE persist (no provider_reference to match yet, for the SAME real send that just happened) is durably stored in unmatched_callbacks, never discarded')
+    persist_b4 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB4}','{attB4}','{dispatchB4['token']}',{jsonb_literal(providerB4)})::text;"))
     need(persist_b4['state'] == 'provider_accepted', f'B4 persist did not bind the pre-arrived reference: {persist_b4}')
     drain1 = json.loads(sql(f"SELECT inbox_reply_send.drain_unmatched('sendillo','{ref_b4}')::text;"))
     need(drain1['drained'] is True and drain1['result']['state'] == 'delivered', f'B4 drain did not reconcile the held callback: {drain1}')
@@ -541,7 +660,48 @@ try:
     drain2 = json.loads(sql(f"SELECT inbox_reply_send.drain_unmatched('sendillo','{ref_b4}')::text;"))
     need(drain2['drained'] is False, f'B4 a second drain of an already-consumed reference must be a no-op: {drain2}')
     need(row_of(oB4, attB4)['receipt_version'] == rv_after_drain, 'B4 second drain double-applied')
-    record('b4.2: once persist() binds the reference, the held callback drains and applies EXACTLY ONCE — a second drain is a clean no-op')
+    need(send_count(attB4) == 1, f'B4 resolving the held callback must never call the transport again, got {send_count(attB4)}')
+    record('b4.2: once persist() binds the reference, the held callback drains and applies EXACTLY ONCE — a second drain is a clean no-op; send-log confirms zero additional transport calls')
+
+    # MUTATION [Astra e2e gate, finding B3]: the wrapper's "store the
+    # unmatched callback durably" step (the INSERT into unmatched_callbacks)
+    # is the SOLE thing standing between an early callback and it being lost
+    # forever. Replace it with a silent discard (no INSERT), then replay the
+    # exact same scenario on a fresh attempt: the callback for the real send
+    # now vanishes — persist() still binds the reference, but drain finds
+    # nothing to drain, and the attempt is durably STRANDED at
+    # provider_accepted, never reaching delivered. This is the real,
+    # observable "stranded/lost callback" failure this boundary exists to
+    # prevent.
+    restore_fn('public.inbox_reply_reconcile_callback')
+    real_wrapper_fn = real_fn('public.inbox_reply_reconcile_callback')
+    needle4 = ("  INSERT INTO inbox_reply_send.unmatched_callbacks AS u(provider,provider_reference,terminal_status,payload)\n"
+               "   VALUES(in_provider,in_external_id,in_terminal,in_payload) ON CONFLICT (provider,provider_reference) DO NOTHING;\n"
+               "  RETURN jsonb_build_object('kind','stored_unmatched');")
+    need(needle4 in real_wrapper_fn, 'B4 mutation anchor not found (source drifted)')
+    mutant_wrapper_fn = real_wrapper_fn.replace(needle4, "  -- MUTATED for proof: silently discard instead of storing durably.\n  RETURN jsonb_build_object('kind','discarded');")
+    need(mutant_wrapper_fn != real_wrapper_fn, 'B4 mutation produced no change')
+    sql(mutant_wrapper_fn)
+    oB4b, uB4b, kB4b, prepB4b, _, _ = make_org_and_prep('+164256', n=1)
+    resultB4b = json.loads(call_accept(oB4b, uB4b, kB4b, prepB4b))
+    opB4b = resultB4b['operation_id']
+    attB4b = attempts_of(oB4b, opB4b)[0]
+    claimB4b = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{oB4b}','{attB4b}',60)::text;"))
+    dispatchB4b = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{oB4b}','{attB4b}',{claimB4b['generation']})::text;"))
+    providerB4b = send(dispatchB4b['from'], dispatchB4b['to'], dispatchB4b['body'], attB4b)
+    ref_b4b, terminal_b4b = synthetic_callback(providerB4b['externalId'], 'delivered')
+    mutant_early = call_wrapper(ref_b4b, terminal_b4b)
+    need(mutant_early == {'kind': 'discarded'}, f'B4 MUTATION did not actually discard the early callback: {mutant_early}')
+    sql(f"SELECT inbox_reply_send.worker_persist('{oB4b}','{attB4b}','{dispatchB4b['token']}',{jsonb_literal(providerB4b)})::text;")
+    mutant_drain = json.loads(sql(f"SELECT inbox_reply_send.drain_unmatched('sendillo','{ref_b4b}')::text;"))
+    need(mutant_drain == {'drained': False, 'reason': 'no_holding_row'}, f'B4 MUTATION: drain should find nothing (the callback was discarded, never stored), got {mutant_drain}')
+    need(state_of(oB4b, attB4b) == 'provider_accepted', f'B4 MUTATION watched fail: the attempt is STRANDED at provider_accepted — its delivery callback was lost, never delivered')
+    record('b4.3 MUTATION watched fail: with the durable-store step removed from the wrapper, an early callback for a REAL send is silently discarded — persist() still binds the reference, but nothing is left to drain, and the attempt is durably STRANDED at provider_accepted, never reaching delivered')
+    restore_and_verify('public.inbox_reply_reconcile_callback')
+    restored_early = call_wrapper(ref_b4b, terminal_b4b)
+    need(restored_early['kind'] == 'reconciled' and restored_early['result']['state'] == 'delivered', f'B4 RESTORED: a redelivered callback against the (now-persisted) attempt should reconcile directly, got {restored_early}')
+    need(state_of(oB4b, attB4b) == 'delivered', 'B4 RESTORED: the previously-stranded attempt should now be recoverable via a callback redelivery')
+    record('b4.4 RESTORED and re-verified byte-exact against source; a fresh replay of the exact scenario (early callback -> stored -> persist -> drain) reaches delivered, not stranded')
 
     # --- B5: duplicate callback + out-of-order terminal (delivery_failed
     # after delivered). First-terminal-wins; a contradiction is rejected as
@@ -552,7 +712,7 @@ try:
     attB5 = attempts_of(oB5, opB5)[0]
     claimB5 = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{oB5}','{attB5}',60)::text;"))
     dispatchB5 = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{oB5}','{attB5}',{claimB5['generation']})::text;"))
-    providerB5 = synth({'mode': 'send', 'from': dispatchB5['from'], 'to': dispatchB5['to'], 'body': dispatchB5['body']})
+    providerB5 = send(dispatchB5['from'], dispatchB5['to'], dispatchB5['body'], attB5)
     sql(f"SELECT inbox_reply_send.worker_persist('{oB5}','{attB5}','{dispatchB5['token']}',{jsonb_literal(providerB5)})::text;")
     ref_b5, term_b5_delivered = synthetic_callback(providerB5['externalId'], 'delivered')
     first = call_wrapper(ref_b5, term_b5_delivered)
@@ -567,47 +727,156 @@ try:
     contradiction = call_wrapper(ref_b5, term_b5_failed)
     need(contradiction == {'kind': 'rejected', 'code': 'INBOX_REPLY_CONTRADICTORY_RECEIPT'}, f'B5 out-of-order contradiction should be rejected as a normal result, got {contradiction}')
     need(state_of(oB5, attB5) == 'delivered' and row_of(oB5, attB5)['receipt_version'] == rv_b5, 'B5 contradictory out-of-order callback flipped the terminal row')
-    record('b5.2: an out-of-order contradictory terminal (delivery_failed arriving after delivered) is rejected as a normal RPC result (never a thrown exception that could abort an unrelated write sharing the transaction) — first-terminal-wins, idempotent')
+    need(send_count(attB5) == 1, f'B5 no callback traffic should ever trigger a second real send, got {send_count(attB5)}')
+    record('b5.2: an out-of-order contradictory terminal (delivery_failed arriving after delivered) is rejected as a normal RPC result (never a thrown exception that could abort an unrelated write sharing the transaction) — first-terminal-wins, idempotent; send-log confirms zero additional transport calls')
+
+    # MUTATION [Astra e2e gate, finding B3]: reconcile_delivery's own
+    # first-terminal-wins precedence guard is the ONE thing distinguishing
+    # "reject the contradiction" from "silently flip the terminal state".
+    # Remove it (the ledger's own guard_reply_send_attempt trigger is a
+    # SEPARATE defense against delivered->delivery_failed, so it is disabled
+    # for the duration of this single mutated call, to isolate and prove
+    # reconcile_delivery's OWN guard specifically — the same isolation
+    # technique the merged callback-proof.py itself uses for this exact
+    # function), then watch a genuinely contradictory second terminal
+    # silently overwrite the row.
+    restore_fn('inbox_reply_send.reconcile_delivery')
+    oB5b, uB5b, kB5b, prepB5b, _, _ = make_org_and_prep('+165256', n=1)
+    resultB5b = json.loads(call_accept(oB5b, uB5b, kB5b, prepB5b))
+    opB5b = resultB5b['operation_id']
+    attB5b = attempts_of(oB5b, opB5b)[0]
+    provider_b5b, persist_b5b, token_b5b = dispatch_attempt(oB5b, attB5b)
+    ref_b5b, term_b5b_delivered = synthetic_callback(provider_b5b['externalId'], 'delivered')
+    call_wrapper(ref_b5b, term_b5b_delivered)
+    need(state_of(oB5b, attB5b) == 'delivered', 'B5 mutant setup: expected delivered before the mutation')
+    sql('ALTER TABLE inbox_reply_send.attempts DISABLE TRIGGER guard_reply_send_attempt;')
+    mutant_reconcile_fn = r"""
+CREATE OR REPLACE FUNCTION inbox_reply_send.reconcile_delivery(o uuid,provider text,provider_reference text,terminal text,payload jsonb) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_reply_send.attempts;v bigint;
+BEGIN
+ IF o IS NULL OR provider IS DISTINCT FROM 'sendillo' OR provider_reference IS NULL OR btrim(provider_reference)='' OR terminal NOT IN ('delivered','delivery_failed') OR jsonb_typeof(payload) IS DISTINCT FROM 'object' THEN
+  RAISE EXCEPTION 'INBOX_REPLY_INVALID_CALLBACK';
+ END IF;
+ SELECT * INTO row FROM inbox_reply_send.attempts a WHERE a.org_id=o AND a.provider_reference=reconcile_delivery.provider_reference FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_CALLBACK_UNMATCHED';END IF;
+ -- MUTATED for proof: precedence guard removed — any provider_accepted-or-
+ -- terminal row is blindly overwritten to whatever terminal just arrived.
+ UPDATE inbox_reply_send.attempts SET state=terminal,receipt_version=receipt_version+1 WHERE org_id=o AND id=row.id RETURNING receipt_version INTO v;
+ RETURN jsonb_build_object('state',terminal,'receipt_version',v::text,'applied',true);
+END $$;
+"""
+    sql(mutant_reconcile_fn)
+    flipped = call_wrapper(ref_b5b, 'delivery_failed')
+    need(state_of(oB5b, attB5b) == 'delivery_failed', f'B5 MUTATION watched fail: expected the contradictory callback to silently flip the row, but it stayed {state_of(oB5b, attB5b)}')
+    record('b5.3 MUTATION watched fail: with the first-terminal-wins precedence guard removed from reconcile_delivery, a contradictory out-of-order callback silently FLIPS an already-delivered attempt to delivery_failed — the exact terminal-state corruption this boundary exists to prevent')
+    sql('ALTER TABLE inbox_reply_send.attempts ENABLE TRIGGER guard_reply_send_attempt;')
+    restore_and_verify('inbox_reply_send.reconcile_delivery')
+    # A fresh attempt/reference for the re-verify: ref_b5b's own
+    # (provider,event_type,external_id) pair is now already 'processed' for
+    # BOTH terminals (the happy path + the mutation each drove one) in
+    # callback_receipts, so replaying either terminal on it would short-
+    # circuit at the wrapper's OWN idempotency layer (kind:'already_processed')
+    # before ever reaching reconcile_delivery — a different, unrelated
+    # invariant. A new reference isolates the ONE thing being re-verified.
+    oB5c, uB5c, kB5c, prepB5c, _, _ = make_org_and_prep('+165257', n=1)
+    resultB5c = json.loads(call_accept(oB5c, uB5c, kB5c, prepB5c))
+    opB5c = resultB5c['operation_id']
+    attB5c = attempts_of(oB5c, opB5c)[0]
+    provider_b5c, _, _ = dispatch_attempt(oB5c, attB5c)
+    ref_b5c, term_b5c = synthetic_callback(provider_b5c['externalId'], 'delivered')
+    call_wrapper(ref_b5c, term_b5c)
+    need(state_of(oB5c, attB5c) == 'delivered', 'B5 reverify setup: expected delivered')
+    reverified = call_wrapper(ref_b5c, 'delivery_failed')
+    need(reverified == {'kind': 'rejected', 'code': 'INBOX_REPLY_CONTRADICTORY_RECEIPT'}, f'B5 RESTORED: the restored guard should reject this contradiction again, got {reverified}')
+    need(state_of(oB5c, attB5c) == 'delivered', 'B5 RESTORED: the contradiction must not have flipped the row')
+    record('b5.4 RESTORED and re-verified byte-exact against source; the precedence guard is back in force on a fresh reference')
 
     # --- B6: an uncertain attempt stays uncertain, is never auto-retried
     # (structurally — the live-attempt unique index forbids a successor while
     # non-terminal), and a callback that later resolves it (a delayed
     # provider result eventually reporting accepted) is durably held/drained
     # exactly like B4 — the documented limitation is "no auto-retry", not
-    # "the callback is lost". ---
+    # "the callback is lost".
+    # [Astra e2e gate, finding B2] The initial dispatch drives the REAL
+    # synthetic transport (dispatch_attempt(), same seam as Section
+    # A/B1-B5) scripted to uncertain — never a hand-injected result. Keyed
+    # by item_id (not attempt_id) here specifically: the concern this
+    # boundary guards against is "the same logical recipient sent twice",
+    # which spans a successor attempt with a DIFFERENT attempt_id — an
+    # attempt-id-keyed count would miss that. ---
     oB6, uB6, kB6, prepB6, _, _ = make_org_and_prep('+166255', n=1)
     resultB6 = json.loads(call_accept(oB6, uB6, kB6, prepB6))
     opB6 = resultB6['operation_id']
     attB6 = attempts_of(oB6, opB6)[0]
-    claimB6 = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{oB6}','{attB6}',60)::text;"))
-    dispatchB6 = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{oB6}','{attB6}',{claimB6['generation']})::text;"))
-    persist_uncertain = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB6}','{attB6}','{dispatchB6['token']}',{jsonb_literal({'kind': 'uncertain', 'reason': 'transport_or_timeout'})})::text;"))
+    itemB6 = sql(f"SELECT item_id FROM inbox_reply_send.attempts WHERE org_id='{oB6}' AND id='{attB6}'")
+    provider_b6, persist_uncertain, token_b6 = dispatch_attempt(oB6, attB6, override={'kind': 'uncertain', 'reason': 'transport_or_timeout'}, key=itemB6)
+    need(provider_b6['kind'] == 'uncertain', f'B6 setup: synthetic double override did not take effect: {provider_b6}')
     need(persist_uncertain['state'] == 'uncertain', f'B6 setup: expected uncertain, got {persist_uncertain}')
+    need(send_count(itemB6) == 1, f'B6 setup: exactly one real transport call expected for this item, got {send_count(itemB6)}')
     # No automatic retry: a fresh successor attempt for the SAME
     # (preparation,item) is structurally blocked while the live row is
     # 'uncertain' (D-6(1) live-attempt partial unique — only
-    # rejected_unsent/confirmed_not_submitted permit a successor).
-    itemB6 = sql(f"SELECT item_id FROM inbox_reply_send.attempts WHERE org_id='{oB6}' AND id='{attB6}'")
-    # A well-formed successor row (attempt_ordinal+1, prior_attempt_id set —
+    # rejected_unsent/confirmed_not_submitted permit a successor). A
+    # well-formed successor row (attempt_ordinal+1, prior_attempt_id set —
     # the real shape a retry-after-confirmed_not_submitted/rejected_unsent
-    # would take) still hits the D-6(1) live-attempt partial unique index,
-    # because the live row (attB6) is 'uncertain', which is NOT one of the
-    # two states (rejected_unsent/confirmed_not_submitted) that free it.
+    # would take) still hits this index.
     dup_attempt_err = sql_fail(f"INSERT INTO inbox_reply_send.attempts(org_id,operation_id,preparation_id,item_id,attempt_ordinal,prior_attempt_id,contact_id,from_e164,to_e164,body_hash,state) "
                                 f"SELECT org_id,operation_id,preparation_id,item_id,attempt_ordinal+1,id,contact_id,from_e164,to_e164,body_hash,'approved' FROM inbox_reply_send.attempts WHERE org_id='{oB6}' AND id='{attB6}';")
     need('duplicate key' in dup_attempt_err.lower() or '23505' in dup_attempt_err, f'B6 a successor attempt while the live row is uncertain should be structurally blocked, got: {dup_attempt_err}')
     record('b6.1: while an attempt is uncertain, no successor attempt for the same item can even be inserted (live-attempt unique index) — structurally no auto-retry, matching the documented limitation')
     # A delayed callback resolving it later is durably held, exactly like B4.
-    external_id_b6 = f"synthetic_{dispatchB6['to']}_delayed"
+    external_id_b6 = f"synthetic_{token_b6}_delayed"
     ref_b6, term_b6 = synthetic_callback(external_id_b6, 'delivered')
     early_b6 = call_wrapper(ref_b6, term_b6)
     need(early_b6['kind'] == 'stored_unmatched', f'B6 expected the delayed callback to be held unmatched, got {early_b6}')
-    persist_late = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB6}','{attB6}','{dispatchB6['token']}',{jsonb_literal({'kind': 'accepted', 'externalId': ref_b6, 'status': 'sent'})})::text;"))
+    persist_late = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB6}','{attB6}','{token_b6}',{jsonb_literal({'kind': 'accepted', 'externalId': ref_b6, 'status': 'sent'})})::text;"))
     need(persist_late['state'] == 'provider_accepted', f'B6 a delayed accepted result from uncertain must still bind, got {persist_late}')
     drain_b6 = json.loads(sql(f"SELECT inbox_reply_send.drain_unmatched('sendillo','{ref_b6}')::text;"))
     need(drain_b6['drained'] is True and drain_b6['result']['state'] == 'delivered', f'B6 delayed drain failed: {drain_b6}')
     need(state_of(oB6, attB6) == 'delivered', 'B6 attempt not delivered after the delayed resolve')
-    record("b6.2: the documented limitation is precisely scoped — an uncertain attempt's LATER delayed provider result (accepted) still binds, and its already-held callback still drains and delivers exactly once; nothing about being uncertain loses the callback, only auto-retry is withheld")
+    need(send_count(itemB6) == 1, f'B6 resolving the delayed result/callback must never call the transport again, got {send_count(itemB6)}')
+    record("b6.2: the documented limitation is precisely scoped — an uncertain attempt's LATER delayed provider result (accepted) still binds, and its already-held callback still drains and delivers exactly once; nothing about being uncertain loses the callback, only auto-retry is withheld; send-log confirms exactly 1 real transport call for the whole lifecycle")
+
+    # MUTATION [Astra e2e gate, finding B3]: the D-6(1) live-attempt unique
+    # index (inbox_reply_send_live_attempt) is the SOLE structural guard
+    # proven in b6.1. Drop it on a fresh item stuck in 'uncertain', insert a
+    # well-formed successor attempt (now legal), and drive THAT successor
+    # through a REAL second dispatch — watch send_count for the SAME item_id
+    # reach 2, a genuine double send to the same logical recipient. Restore
+    # the index and reverify a successor is blocked again.
+    oB6b, uB6b, kB6b, prepB6b, _, _ = make_org_and_prep('+166256', n=1)
+    resultB6b = json.loads(call_accept(oB6b, uB6b, kB6b, prepB6b))
+    opB6b = resultB6b['operation_id']
+    attB6b = attempts_of(oB6b, opB6b)[0]
+    itemB6b = sql(f"SELECT item_id FROM inbox_reply_send.attempts WHERE org_id='{oB6b}' AND id='{attB6b}'")
+    dispatch_attempt(oB6b, attB6b, override={'kind': 'uncertain', 'reason': 'transport_or_timeout'}, key=itemB6b)
+    need(send_count(itemB6b) == 1, 'B6 mutant setup: expected exactly 1 send before the index drop')
+    sql('DROP INDEX inbox_reply_send.inbox_reply_send_live_attempt;')
+    successor_id = sql(f"INSERT INTO inbox_reply_send.attempts(org_id,operation_id,preparation_id,item_id,attempt_ordinal,prior_attempt_id,contact_id,from_e164,to_e164,body_hash,state) "
+                        f"SELECT org_id,operation_id,preparation_id,item_id,attempt_ordinal+1,id,contact_id,from_e164,to_e164,body_hash,'approved' FROM inbox_reply_send.attempts WHERE org_id='{oB6b}' AND id='{attB6b}' RETURNING id::text;")
+    need(successor_id, 'B6 MUTATION did not actually let a successor attempt through — index drop had no effect')
+    dispatch_attempt(oB6b, successor_id, key=itemB6b)  # default override -> accepted; the second real send
+    need(send_count(itemB6b) == 2, f'B6 MUTATION watched fail: expected a genuine SECOND real transport call to the same item (send_count -> 2) once the live-attempt guard was dropped, got {send_count(itemB6b)}')
+    record('b6.3 MUTATION watched fail: with the live-attempt unique index dropped, a successor attempt for an item still uncertain was insertable and was driven through a REAL second dispatch — send_count for that item reached 2, a genuine double send to the same logical recipient (the exact failure the "no auto-retry while uncertain" invariant exists to prevent)')
+    # Both attB6b (uncertain) and successor_id (provider_accepted) now
+    # "live" for the SAME (org,preparation,item) — exactly the duplicate
+    # the index exists to forbid, and exactly why it must be recreated. To
+    # recreate it, the duplicate has to be resolved first; there is no
+    # legal ledger transition from 'uncertain' to one of the two states the
+    # real index predicate excludes, so — purely to clean up this proof-
+    # induced duplicate before restoring the guard, not as part of any
+    # assertion — the original attempt is force-settled out of the live set
+    # via a direct, trigger-bypassed UPDATE (the row is synthetic proof data
+    # that gets swept regardless of state either way).
+    sql(f"ALTER TABLE inbox_reply_send.attempts DISABLE TRIGGER guard_reply_send_attempt; "
+        f"UPDATE inbox_reply_send.attempts SET state='confirmed_not_submitted' WHERE org_id='{oB6b}' AND id='{attB6b}'; "
+        f"ALTER TABLE inbox_reply_send.attempts ENABLE TRIGGER guard_reply_send_attempt;")
+    sql('CREATE UNIQUE INDEX inbox_reply_send_live_attempt ON inbox_reply_send.attempts(org_id,preparation_id,item_id) WHERE state NOT IN (\'rejected_unsent\',\'confirmed_not_submitted\');')
+    reblocked = sql_fail(f"INSERT INTO inbox_reply_send.attempts(org_id,operation_id,preparation_id,item_id,attempt_ordinal,prior_attempt_id,contact_id,from_e164,to_e164,body_hash,state) "
+                          f"SELECT org_id,operation_id,preparation_id,item_id,attempt_ordinal+2,id,contact_id,from_e164,to_e164,body_hash,'approved' FROM inbox_reply_send.attempts WHERE org_id='{oB6b}' AND id='{successor_id}';")
+    need('duplicate key' in reblocked.lower() or '23505' in reblocked, f'B6 RESTORED: a third successor attempt should be blocked again, got: {reblocked}')
+    need(send_count(itemB6b) == 2, 'B6 RESTORED: send_count for this item must stay at 2 (no third send became possible)')
+    record('b6.4 RESTORED and re-verified: with the live-attempt unique index recreated (byte-identical to the merged DDL), a further successor attempt is blocked again — send_count for this item stays at exactly 2, no third send')
 
     print(f'\nALL {len(checks)} CHECKS PASSED (Section A composed lifecycle + Section B six crash boundaries)')
     evidence = {
@@ -646,4 +915,8 @@ finally:
         advanced = owned_cleanup.assert_clean(sql, ALL_TABLES, BASELINE, OWNED_ORGS, OWNED_USERS)
         print(f'Exhaustive dynamic residual check passed: zero synthetic rows AND byte-identical baseline content across all {len(ALL_TABLES)} discovered table(s) database-wide' + (f'; whitelisted counters advanced monotonically: {"; ".join(advanced)}' if advanced else '; no counter column changed'))
     need(sql("SELECT to_regnamespace('inbox_reply_send') IS NULL") == 't', 'inbox_reply_send schema not dropped')
-    print('Cleanup verified: zero residual rows, ephemeral schemas dropped')
+    # The proof-owned send-log fixture (a plain file, never a merged
+    # artifact) is deleted too — nothing about this proof's own bookkeeping
+    # should survive the run either.
+    if SEND_LOG.exists(): SEND_LOG.unlink()
+    print('Cleanup verified: zero residual rows, ephemeral schemas dropped, send-log fixture removed')
