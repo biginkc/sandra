@@ -2,55 +2,57 @@
 
 Baseline e5fce2d; implementation worktree 269d44ca. This matrix records requirements, not passing tests. See approved development plan for exact new behavior and feature gates.
 
-| ID | Existing capability | Treatment | Evidence |
-|---|---|---|---|
-| F01 | Inbox / Outbox tabs | Preserve; verify on new Inbox | Not run |
-| F02 | Search messages | Preserve; verify on new Inbox | Not run |
-| F03 | Inbox filters | Preserve; verify on new Inbox | Not run |
-| F04 | Needs Outcome | Preserve; verify on new Inbox | Not run |
-| F05 | Hide DNC & tests | Preserve; verify on new Inbox | Not run |
-| F06 | Pagination and ordering | Preserve; verify on new Inbox | Not run |
-| F07 | Open and close a conversation | Preserve; verify on new Inbox | Not run |
-| F08 | Read message history | Preserve; verify on new Inbox | Not run |
-| F09 | Automatic mark-read | Preserve; verify on new Inbox | Not run |
-| F10 | Conversation identity/context | Preserve; verify on new Inbox | Not run |
-| F11 | AI status indicators | Preserve; verify on new Inbox | Not run |
-| F12 | Open record / copy links | Preserve; verify on new Inbox | Not run |
-| F13 | Call | Preserve; verify on new Inbox | Not run |
-| F14 | New Message | Preserve; verify on new Inbox | Not run |
-| A01 | Wrong number | Preserve; verify on new Inbox | Not run |
-| A02 | Bad / disconnected # | Preserve; verify on new Inbox | Not run |
-| A03 | Not interested | Preserve; verify on new Inbox | Not run |
-| A04 | Follow up | Preserve; verify on new Inbox | Not run |
-| A05 | Needs sequence | Preserve; verify on new Inbox | Not run |
-| A06 | SMS opt-out | Preserve; verify on new Inbox | Not run |
-| A07 | Permanent DNC unavailable here | Existing disabled permanent DNC; new command gated | Not run |
-| A08 | Move to Lead | Preserve; verify on new Inbox | Not run |
-| A09 | Book appt | Preserve individual workflow | Not run |
-| A10 | Assign to me / teammate | Preserve; verify on new Inbox | Not run |
-| A11 | Unassign | Preserve; verify on new Inbox | Not run |
-| A12 | Confirm Sandra disposition | Preserve individual workflow | Not run |
-| A13 | Correct an AI disposition | Preserve individual workflow | Not run |
-| R01 | Write/edit a reply | Preserve; verify on new Inbox | Not run |
-| R02 | Insert a template | Preserve; verify on new Inbox | Not run |
-| R03 | Send SMS / Cmd-Ctrl-Enter | Preserve; verify on new Inbox | Not run |
-| R04 | Use the conversation's reply route | Preserve; verify on new Inbox | Not run |
-| R05 | Restriction and route-change handling | Preserve; verify on new Inbox | Not run |
-| U01 | View unknown sender thread | Preserve individual workflow | Not run |
-| U02 | Merge with existing contact | Preserve individual workflow | Not run |
-| U03 | Merge with existing property | Preserve individual workflow | Not run |
-| U04 | Create new lead | Preserve individual workflow | Not run |
-| U05 | Dismiss unknown sender | Preserve; add explicit snapshot-scoped bulk operation | Not run |
-| U06 | Restore dismissed sender | Preserve; add explicit snapshot-scoped bulk operation | Not run |
-| U07 | Resolve known contact to an existing property | Preserve individual workflow | Not run |
-| U08 | Create property and resolve | Preserve individual workflow | Not run |
-| O01 | Inspect queued message cards | Unchanged Outbox regression boundary | Not run |
-| O02 | Send next | Unchanged Outbox regression boundary | Not run |
-| O03 | Send one queued message | Unchanged Outbox regression boundary | Not run |
-| O04 | Start / pause auto-send | Unchanged Outbox regression boundary | Not run |
-| O05 | Set cadence | Unchanged Outbox regression boundary | Not run |
-| O06 | Edit queued text / save / cancel | Unchanged Outbox regression boundary | Not run |
-| O07 | Delete queued message | Unchanged Outbox regression boundary | Not run |
-| O08 | Load more queue rows | Unchanged Outbox regression boundary | Not run |
-| O09 | Queue totals and timing | Unchanged Outbox regression boundary | Not run |
-| O10 | Recover failed queue reads | Unchanged Outbox regression boundary | Not run |
+**Harness (DoD#2 acceptance slice, lane2/acceptance-harness):** `Required verification` is authored spec text — the concrete, faithful pass condition derived from each row's Existing capability + Treatment, not invented product behavior. `Status` and `Evidence` are written by `e2e/inbox-acceptance/*.spec.ts` via `playwright.inbox-acceptance.config.ts`; a row only flips out of "Not run" with a linked trace/screenshot from a real run. Rows whose UI is not wired into `/inbox` yet (reply composer, unknown-sender resolution actions, Move-to-Lead/Book-appt, individual dispo correction, detail header/banners, empty/error/mobile) are marked `blocked: UI build + mock sign-off` — that UI is a separate, Jarrad-mock-gated follow-up PR. O01–O10 exercise the unchanged `/messages?tab=outbox` Outbox, not `/inbox`.
+
+| ID | Existing capability | Treatment | Required verification | Status | Evidence |
+|---|---|---|---|---|---|
+| F01 | Inbox / Outbox tabs | Preserve; verify on new Inbox | `/inbox` has no Inbox/Outbox tab UI — the new workspace is a single filtered view; Outbox stays on the unchanged `/messages` route. No tab control exists to preserve on `/inbox` itself. | blocked: UI build + mock sign-off — no tab affordance exists on /inbox by design; Outbox tab is exercised separately via O01-O10 on /messages | Not run |
+| F02 | Search messages | Preserve; verify on new Inbox | On `/inbox`, typing into the "Search conversations" field and submitting reloads the workset via `/api/inbox/worksets` and the visible rows reflect the search term (a seeded thread matching the term is present; one that doesn't match is absent). | Not run | Not run |
+| F03 | Inbox filters | Preserve; verify on new Inbox | Changing the "View" select (e.g. to `unread`) reloads the workset for that view and the row list changes to match — a thread outside the filter is no longer shown. | Not run | Not run |
+| F04 | Needs Outcome | Preserve; verify on new Inbox | Selecting the `needs_outcome` view shows conversations with no recorded outcome and excludes a seeded thread that already has one. | Not run | Not run |
+| F05 | Hide DNC & tests | Preserve; verify on new Inbox | The "Hide DNC and test conversations" checkbox, when unchecked, re-includes a seeded DNC/test-tagged thread that is excluded when checked (the default). | Not run | Not run |
+| F06 | Pagination and ordering | Preserve; verify on new Inbox | Rows render most-recent-activity-first (a thread with a newer message appears before one with an older message), and "Next 500" advances the cursor when more than the resident page exists. | Not run | Not run |
+| F07 | Open and close a conversation | Preserve; verify on new Inbox | Clicking "Open {name}" opens the detail pane for that conversation; "Close conversation details" closes it and returns focus to the list. | Not run | Not run |
+| F08 | Read message history | Preserve; verify on new Inbox | The opened detail pane's "Conversation history" section renders the seeded inbound and outbound message bodies in order. | Not run | Not run |
+| F09 | Automatic mark-read | Preserve; verify on new Inbox | Opening a conversation with an unread inbound message triggers `/api/inbox/read-acknowledgments` and the row's "Unread" badge clears after the acknowledgment completes. | Not run | Not run |
+| F10 | Conversation identity/context | Preserve; verify on new Inbox | Each row and the opened detail pane's header show the contact's name and property/context label from the seeded data (not a placeholder). | Not run | Not run |
+| F11 | AI status indicators | Preserve; verify on new Inbox | No AI status indicator (outcome/escalation badge equivalent) is rendered anywhere in the `/inbox` workspace UI today — `WorkspaceRow.outcomeLabel` is wired but no seeded-AI-status fixture or assertion exists yet. | blocked: UI build + mock sign-off — indicator plumbing exists in the row model but no verified rendering/fixture path | Not run |
+| F12 | Open record / copy links | Preserve; verify on new Inbox | No "open record" / "copy link" control exists in the `/inbox` detail pane (`conversation-history.tsx` renders only history + read-status; no header actions menu). | blocked: UI build + mock sign-off | Not run |
+| F13 | Call | Preserve; verify on new Inbox | No call-initiation control exists in the `/inbox` workspace (`inbox-workspace.tsx` action rail is bulk-metadata only; no per-conversation call action wired). | blocked: UI build + mock sign-off | Not run |
+| F14 | New Message | Preserve; verify on new Inbox | No "new message" / start-conversation control exists on `/inbox` or `/inbox/overview`. | blocked: UI build + mock sign-off | Not run |
+| A01 | Wrong number | Preserve; verify on new Inbox | With one conversation selected, the "Wrong number" bulk action prepares, reviews, and accepts; the operation receipt reports it applied ("succeeded") and does not fabricate a pass — a real `/api/inbox/actions/*` round trip. | Not run | Not run |
+| A02 | Bad / disconnected # | Preserve; verify on new Inbox | Same flow as A01 for the "Bad number" bulk outcome action. | Not run | Not run |
+| A03 | Not interested | Preserve; verify on new Inbox | Same flow as A01 for the "Not interested" bulk outcome action. | Not run | Not run |
+| A04 | Follow up | Preserve; verify on new Inbox | No bulk or individual "Follow up" outcome/action exists today — the wired outcomes are wrong_number/bad_number/not_interested/needs_sequence/nurture/opted_out, none of which is a faithful match for "Follow up" without inventing a mapping. | blocked: UI build + mock sign-off — no faithful existing-capability match; do not guess the mapping | Not run |
+| A05 | Needs sequence | Preserve; verify on new Inbox | Same flow as A01 for the "Needs sequence" bulk outcome action (sets the outcome only; does not enroll a sequence, per the action's own description text). | Not run | Not run |
+| A06 | SMS opt-out | Preserve; verify on new Inbox | Same flow as A01 for the "SMS opt-out" bulk outcome action. | Not run | Not run |
+| A07 | Permanent DNC unavailable here | Existing disabled permanent DNC; new command gated | With a conversation selected, no "Permanent DNC" action id appears anywhere in the action rail's button list — the gate holds by omission, matching "unavailable here." | Not run | Not run |
+| A08 | Move to Lead | Preserve; verify on new Inbox | `moveMessageThreadToLead` exists as a library function but is not imported/wired into any `/inbox` action or detail-pane control. | blocked: UI build + mock sign-off — reuse-only wiring deferred to the mock-gated follow-up PR per the architect brief | Not run |
+| A09 | Book appt | Preserve individual workflow | `BookAppointmentPopover` exists as a component but is not imported/wired into the `/inbox` detail pane. | blocked: UI build + mock sign-off | Not run |
+| A10 | Assign to me / teammate | Preserve; verify on new Inbox | With a conversation selected, the "Assign" bulk action's configuration dialog lists assignee choices from `/api/inbox/actions/assignees`; choosing one, reviewing, and applying results in a completed receipt. | Not run | Not run |
+| A11 | Unassign | Preserve; verify on new Inbox | With an assigned conversation selected, "Clear assignment" prepares/reviews/accepts and the operation receipt reports completion. | Not run | Not run |
+| A12 | Confirm Sandra disposition | Preserve individual workflow | No per-conversation "confirm disposition" control exists in the `/inbox` detail pane — only the bulk-outcome actions in the action rail, which are a selection-level operation, not the individual-workflow confirmation this row describes. | blocked: UI build + mock sign-off | Not run |
+| A13 | Correct an AI disposition | Preserve individual workflow | Same gap as A12 — no per-conversation AI-disposition correction control exists yet. | blocked: UI build + mock sign-off | Not run |
+| R01 | Write/edit a reply | Preserve; verify on new Inbox | `InlineReply` exists as a component but is not imported/wired into the `/inbox` detail pane (`activity` slot shows "Replies and remaining individual tools are being connected" today). | blocked: UI build + mock sign-off | Not run |
+| R02 | Insert a template | Preserve; verify on new Inbox | `TemplatePicker` exists as a component but is not wired into `/inbox` (no composer is mounted there yet). | blocked: UI build + mock sign-off | Not run |
+| R03 | Send SMS / Cmd-Ctrl-Enter | Preserve; verify on new Inbox | No send control exists on `/inbox` to exercise — depends on R01. | blocked: UI build + mock sign-off | Not run |
+| R04 | Use the conversation's reply route | Preserve; verify on new Inbox | `reply-route.ts` (prepare/accept) exists but nothing on `/inbox` calls it yet; depends on R01's composer wiring. See the sendSmsFromLead flag below — the follow-up PR must route through here, not the legacy default. | blocked: UI build + mock sign-off | Not run |
+| R05 | Restriction and route-change handling | Preserve; verify on new Inbox | No composer means no restriction/route-change UI to verify; depends on R01. | blocked: UI build + mock sign-off | Not run |
+| U01 | View unknown sender thread | Preserve individual workflow | `unknown-sender-history.tsx` exists as a component but is not mounted from the `/inbox` detail pane for `unknown_sender_group` targets — opening one today shows "Unknown sender details are not connected to this preview yet." | blocked: UI build + mock sign-off | Not run |
+| U02 | Merge with existing contact | Preserve individual workflow | Depends on U01's detail view being wired; no merge-with-contact control exists on `/inbox` yet. | blocked: UI build + mock sign-off | Not run |
+| U03 | Merge with existing property | Preserve individual workflow | Depends on U01; no merge-with-property control exists on `/inbox` yet. | blocked: UI build + mock sign-off | Not run |
+| U04 | Create new lead | Preserve individual workflow | Depends on U01; no create-lead-from-unknown-sender control exists on `/inbox` yet. | blocked: UI build + mock sign-off | Not run |
+| U05 | Dismiss unknown sender | Preserve; add explicit snapshot-scoped bulk operation | The Treatment itself says "add" — this explicit snapshot-scoped bulk dismiss operation does not exist in `use-metadata-actions.tsx`'s action list (assign/outcome-and-assignment/6 outcomes/unassign only). Net-new behavior, not yet built. | blocked: UI build + mock sign-off — Treatment specifies new behavior not yet implemented | Not run |
+| U06 | Restore dismissed sender | Preserve; add explicit snapshot-scoped bulk operation | Same gap as U05 — the restore counterpart does not exist yet either. | blocked: UI build + mock sign-off — Treatment specifies new behavior not yet implemented | Not run |
+| U07 | Resolve known contact to an existing property | Preserve individual workflow | Depends on U01/detail-pane wiring; no such resolution control exists on `/inbox` yet. | blocked: UI build + mock sign-off | Not run |
+| U08 | Create property and resolve | Preserve individual workflow | Depends on U01/detail-pane wiring; no such control exists on `/inbox` yet. | blocked: UI build + mock sign-off | Not run |
+| O01 | Inspect queued message cards | Unchanged Outbox regression boundary | On `/messages?tab=outbox`, seeded queued rows render as `outbox-card-{id}` cards inside `outbox-card-list`, showing the message body and destination. | pass (2026-09-17T17:17:16.288Z) |  e2e/inbox-acceptance/outbox.spec.ts::O01 |
+| O02 | Send next | Unchanged Outbox regression boundary | The "Auto-send" control starts the cadence-driven send loop; toggling it on transitions the panel into an active auto-send state (button state changes, e.g. becomes disabled/labeled per the existing component contract) without a real provider call (`MESSAGING_PROVIDER=mock`). | pass (2026-09-17T17:17:16.288Z) |  e2e/inbox-acceptance/outbox.spec.ts::O02-O05 |
+| O03 | Send one queued message | Unchanged Outbox regression boundary | Clicking "Send" on a specific queued card releases that message — the card is removed from `outbox-card-list` after the action completes. | pass (2026-09-17T17:17:16.288Z) |  e2e/inbox-acceptance/outbox.spec.ts::O03 |
+| O04 | Start / pause auto-send | Unchanged Outbox regression boundary | Clicking "Auto-send" starts the loop; clicking it again pauses it — the control's pressed/active state toggles both ways. | pass (2026-09-17T17:17:16.288Z) |  e2e/inbox-acceptance/outbox.spec.ts::O02-O05 |
+| O05 | Set cadence | Unchanged Outbox regression boundary | The "Cadence" input accepts a numeric value (e.g. 30) and retains it, matching the existing component's documented default/contract. | pass (2026-09-17T17:17:16.288Z) |  e2e/inbox-acceptance/outbox.spec.ts::O02-O05 |
+| O06 | Edit queued text / save / cancel | Unchanged Outbox regression boundary | Clicking "Edit" on a queued card exposes an editable "Message body" field; changing it and saving persists the new body; canceling discards the change and the original body remains. | pass (2026-09-17T17:17:16.288Z) |  e2e/inbox-acceptance/outbox.spec.ts::O06 |
+| O07 | Delete queued message | Unchanged Outbox regression boundary | Clicking "Delete" on a queued card removes it from `outbox-card-list` and the row no longer renders after the action completes. | pass (2026-09-17T17:17:16.288Z) |  e2e/inbox-acceptance/outbox.spec.ts::O07 |
+| O08 | Load more queue rows | Unchanged Outbox regression boundary | With more queued rows than one page, `queue-load-more-sentinel` is present; scrolling it into view (or the existing load trigger) loads additional rows and the "N of M loaded" count increases. | pass (2026-09-17T17:17:16.288Z) |  e2e/inbox-acceptance/outbox.spec.ts::O08 |
+| O09 | Queue totals and timing | Unchanged Outbox regression boundary | The panel shows a queued-count summary (e.g. "N queued") and a "N of M loaded" total that reflects the seeded row count. | pass (2026-09-17T17:17:16.288Z) |  e2e/inbox-acceptance/outbox.spec.ts::O01 |
+| O10 | Recover failed queue reads | Unchanged Outbox regression boundary | On a simulated load failure, `queue-load-failure` renders with a "Retry" affordance; clicking it re-attempts the load and, once it succeeds, `queue-load-failure` is gone and rows render. | Not run | Not run |
