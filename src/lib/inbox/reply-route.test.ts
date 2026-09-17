@@ -1,12 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ createClient: vi.fn(), prepare: vi.fn() }));
+const mocks = vi.hoisted(() => ({ createClient: vi.fn(), prepare: vi.fn(), accept: vi.fn(), recover: vi.fn(), status: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
-vi.mock("./reply-api", async (importOriginal) => ({ ...await importOriginal<typeof import("./reply-api")>(), createInboxReplyRepository: () => ({ prepare: mocks.prepare }) }));
+vi.mock("./reply-api", async (importOriginal) => ({ ...await importOriginal<typeof import("./reply-api")>(), createInboxReplyRepository: () => ({ prepare: mocks.prepare, accept: mocks.accept, recover: mocks.recover, status: mocks.status }) }));
 import { POST as prepare } from "@/app/api/inbox/replies/prepare/route";
+import { POST as accept } from "@/app/api/inbox/replies/accept/route";
+import { GET as recover } from "@/app/api/inbox/replies/recover/route";
+import { GET as statusRoute } from "@/app/api/inbox/replies/[operationId]/route";
 import { InboxReplyApiError } from "./reply-api";
 const id = "abcdef00-0000-4000-8000-000000000001";
 const request = (body: string, headers: Record<string, string> = {}) => new Request("http://localhost/api/inbox/replies/prepare", { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
-beforeEach(() => { vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "1"); vi.clearAllMocks(); mocks.createClient.mockResolvedValue({}); mocks.prepare.mockResolvedValue({ preparationId: id, idempotencyKey: id, inputHash: "a".repeat(64), expiresAt: "2026-09-14T00:00:00Z", items: [], recipientCount: 0, blockers: ["empty"] }); });
+beforeEach(() => {
+  vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "1"); vi.clearAllMocks(); mocks.createClient.mockResolvedValue({});
+  mocks.prepare.mockResolvedValue({ preparationId: id, idempotencyKey: id, inputHash: "a".repeat(64), expiresAt: "2026-09-14T00:00:00Z", items: [], recipientCount: 0, blockers: ["empty"] });
+  mocks.accept.mockResolvedValue({ preparationId: id, idempotencyKey: id, operationId: id });
+  mocks.recover.mockResolvedValue({ state: "prepared", preparationId: id, idempotencyKey: id });
+  mocks.status.mockResolvedValue({ operationId: id, preparationId: id, dispatchComplete: false, items: [], receipts: [] });
+});
 afterEach(() => vi.unstubAllEnvs());
 
 describe("disabled-by-default bulk-reply prepare route (obligation 1)", () => {
@@ -103,4 +112,75 @@ it("aborts the reader when the coordinator throws mid-request", async () => {
   const response = await prepare(request("{}"));
   expect(response.status).toBe(503);
   expect(await response.json()).toEqual({ error: "action_unavailable" });
+});
+
+describe("accept route (Lane 1 PR-E)", () => {
+  const acceptRequest = (body: string, headers: Record<string, string> = {}) => new Request("http://localhost/api/inbox/replies/accept", { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
+  it("is disabled-by-default like prepare, with no client/repository call", async () => {
+    vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
+    const response = await accept(acceptRequest("{}"));
+    expect(response.status).toBe(404);
+    expect(mocks.accept).not.toHaveBeenCalled();
+  });
+  it("caps the accept body at 1024 bytes (distinct from prepare's 131072)", async () => {
+    const response = await accept(acceptRequest("a".repeat(1025)));
+    expect(response.status).toBe(413);
+    expect(mocks.accept).not.toHaveBeenCalled();
+  });
+  // MUTATION: reusing prepare's 131072 cap here would let a 1025B body
+  // through to the repository instead of being rejected.
+  it("forwards the exact raw body to accept() and returns 200", async () => {
+    const raw = JSON.stringify({ preparationId: id, idempotencyKey: id });
+    const response = await accept(acceptRequest(raw));
+    expect(response.status).toBe(200);
+    expect(mocks.accept.mock.calls[0][0]).toBe(raw);
+  });
+  it("rejects a query string and cross-site requests before any body read", async () => {
+    const response = await accept(new Request("http://localhost/api/inbox/replies/accept?x=1", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }));
+    expect(response.status).toBe(403);
+    expect(mocks.accept).not.toHaveBeenCalled();
+  });
+});
+
+describe("recover route (Lane 1 PR-E)", () => {
+  const recoverRequest = (query: string) => new Request(`http://localhost/api/inbox/replies/recover${query}`);
+  it("is disabled-by-default", async () => {
+    vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
+    const response = await recover(recoverRequest(`?idempotencyKey=${id}&preparationId=${id}`));
+    expect(response.status).toBe(404);
+    expect(mocks.recover).not.toHaveBeenCalled();
+  });
+  it("requires exactly idempotencyKey+preparationId query params, rejecting extras and shortfalls", async () => {
+    for (const query of ["", `?idempotencyKey=${id}`, `?idempotencyKey=${id}&preparationId=${id}&extra=1`, `?foo=${id}&preparationId=${id}`]) {
+      const response = await recover(recoverRequest(query));
+      expect(response.status).toBe(403);
+    }
+    expect(mocks.recover).not.toHaveBeenCalled();
+  });
+  // MUTATION: loosening the exact-2-param check (e.g. `.length < 2`) would
+  // let an extra query param through to the repository.
+  it("passes preparationId and idempotencyKey from the query string in order", async () => {
+    const response = await recover(recoverRequest(`?preparationId=${id}&idempotencyKey=${id}`));
+    expect(response.status).toBe(200);
+    expect(mocks.recover).toHaveBeenCalledWith(id, id, expect.anything());
+  });
+});
+
+describe("status route (Lane 1 PR-E)", () => {
+  it("is disabled-by-default", async () => {
+    vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
+    const response = await statusRoute(new Request("http://localhost/api/inbox/replies/" + id), { params: Promise.resolve({ operationId: id }) });
+    expect(response.status).toBe(404);
+    expect(mocks.status).not.toHaveBeenCalled();
+  });
+  it("passes the operationId path segment through to status()", async () => {
+    const response = await statusRoute(new Request("http://localhost/api/inbox/replies/" + id), { params: Promise.resolve({ operationId: id }) });
+    expect(response.status).toBe(200);
+    expect(mocks.status).toHaveBeenCalledWith(id, expect.anything());
+  });
+  it("rejects any query string on the status route", async () => {
+    const response = await statusRoute(new Request("http://localhost/api/inbox/replies/" + id + "?x=1"), { params: Promise.resolve({ operationId: id }) });
+    expect(response.status).toBe(403);
+    expect(mocks.status).not.toHaveBeenCalled();
+  });
 });

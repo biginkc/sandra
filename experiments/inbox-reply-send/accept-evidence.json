@@ -1,0 +1,41 @@
+{
+ "sources": {
+  "inbox-reply-boundary/context.sql": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+  "inbox-reply-preparation/recipient.sql": "90d1e6d24f954a7ae809962c8f7181a4f9a21b973303163c9655940e4c18cdf1",
+  "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
+  "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
+  "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
+  "inbox-reply-send/attempts.sql": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9",
+  "inbox-reply-send/accept.sql": "375fcb63bdd59e14168f49b05e46ab33f2f4f55c04e72ea5242b4165f6a54621",
+  "inbox-reply-send/public-api.sql": "4d5e1c7d76bd3464ca12c68d0a173bc6a58c3bc1e743d2e6f69b0b57da79fe0e"
+ },
+ "runner_sha256": "7e028b51bc3b1cd82f48bc570e4d24385eefc0aa7b91c26dc4ea69d98ef41607",
+ "checks": [
+  "constraint-name ground truth: pg_constraint confirms operations UNIQUE(org_id,preparation_id)='operations_org_id_preparation_id_key' and UNIQUE(org_id,requester_id,idempotency_key)='operations_org_id_requester_id_idempotency_key_key' match accept.sql's exception-mapping literals exactly",
+  "accept happy path: 1 operation, 3 attempts (approved), 1 outbox row",
+  "idempotent replay: same operationId, zero new rows",
+  "defense in depth: with step 3's pre-check mutated out entirely, the exception handler's OWN relookup (Astra round-2 fix) still replays the same operationId with zero new rows \u2014 the two paths are independently correct",
+  "RESTORED and re-verified byte-exact against source; replay passes again",
+  "key reuse (same key, different preparation, an operation already exists under it) -> INBOX_REPLY_KEY_REUSED, distinct from idempotent replay, sanitized",
+  "operations UNIQUE(org_id,preparation_id) conflict -> INBOX_REPLY_PREPARATION_ACCEPTED, zero extra rows, sanitized (proves the real constraint name, not the bare ELSE)",
+  "expired preparation -> INBOX_REPLY_PREPARATION_EXPIRED, zero rows, sanitized",
+  "subtractive E4: a now-ineligible item is dropped from the attempt set (fresh item_current recheck), operation still created with zero attempts",
+  "MUTATION watched fail: disabling the E4 recheck lets a now-ineligible (sender-suspended) item get an attempt",
+  "RESTORED and re-verified byte-exact against source",
+  "51 eligible recipients -> INBOX_REPLY_RECIPIENT_LIMIT, zero rows created",
+  "concurrent-destination collision -> INBOX_REPLY_DESTINATION_IN_PROGRESS, ZERO new rows from the colliding batch (atomic), no phone number in the error text",
+  "MUTATION watched fail: per-row exception-swallowing insert lets a PARTIAL (2-of-3) batch persist instead of rolling back the whole accept",
+  "RESTORED and re-verified byte-exact against source",
+  "recover(): prepared -> accepted transition; operation_status(): dispatchComplete=false with one pending receipt",
+  "concurrency #10a: two real connections race the SAME destination \u2014 B genuinely blocks on the lock (observed via pg_stat_activity), then loses with INBOX_REPLY_DESTINATION_IN_PROGRESS once A commits; B creates zero rows",
+  "concurrency #10b: same-key replay on a FRESH connection after the first accept already committed -> identical operationId, zero new rows",
+  "concurrency #10c: two real connections accept DIFFERENT destinations in the same org concurrently (both observed reaching pg_sleep simultaneously, i.e. neither blocked on the other) -> BOTH commit, 2 operations/2 attempts/2 outbox rows, no false destination_guard collision",
+  "concurrency #10d: a REAL lock wait (observed) on the sender row delays accept() past its preparation's expires_at -> still rejects with INBOX_REPLY_PREPARATION_EXPIRED (time-after-locks), zero rows, sanitized",
+  "MUTATION watched fail: the OLD name-routed exception block makes the same-key race's LOSER wrongly raise INBOX_REPLY_PREPARATION_ACCEPTED instead of replaying the winner's operationId",
+  "RESTORED and re-verified byte-exact against source; concurrency #10e: the SAME same-key race now returns the IDENTICAL operationId to both the winner and the loser (regardless of which operations unique index Postgres reports first), exactly one operation/attempt/outbox row total",
+  "MUTATION watched fail: without the advisory lock, an identical retry racing behind the winner (delayed past expires_at) wrongly raises INBOX_REPLY_PREPARATION_EXPIRED instead of replaying the winner's operationId",
+  "RESTORED and re-verified byte-exact against source; concurrency #10f: the expiry-boundary idempotency race \u2014 an identical retry genuinely blocked on the advisory lock (observed) while expires_at lapses underneath it still replays the winner's operationId, exactly one operation/attempt/outbox row total",
+  "non-regression (already proven above by tests #5 and #10d, both against the fixed code with the advisory lock installed): a genuinely-unaccepted expired preparation with NO competing operation for its key still raises INBOX_REPLY_PREPARATION_EXPIRED \u2014 the advisory lock does not over-correct",
+  "final state: accept/recover/operation_status all byte-exact against accept.sql source"
+ ]
+}
