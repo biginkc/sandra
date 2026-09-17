@@ -27,6 +27,7 @@ const ORIGINAL_ENV = {
   MESSAGING_PROVIDER: process.env.MESSAGING_PROVIDER,
   SENDILLO_API_KEY: process.env.SENDILLO_API_KEY,
   SENDILLO_FROM_NUMBER: process.env.SENDILLO_FROM_NUMBER,
+  SENDILLO_ORG_ID: process.env.SENDILLO_ORG_ID,
 };
 const SAFE_SEND_WINDOW = new Date("2026-07-02T18:00:00Z");
 
@@ -99,12 +100,16 @@ describe("sendSmsToContact (integration)", () => {
       MOCK_SENDER_PRIMARY,
       MOCK_SENDER_SECONDARY,
     ]);
+    // Sendillo is selected by a handful of release tests below. Keep the
+    // application-scoped provider key fenced to the integration tenant.
+    process.env.SENDILLO_ORG_ID = await getOrgId();
   });
 
   afterEach(() => {
     process.env.MESSAGING_PROVIDER = ORIGINAL_ENV.MESSAGING_PROVIDER;
     process.env.SENDILLO_API_KEY = ORIGINAL_ENV.SENDILLO_API_KEY;
     process.env.SENDILLO_FROM_NUMBER = ORIGINAL_ENV.SENDILLO_FROM_NUMBER;
+    process.env.SENDILLO_ORG_ID = ORIGINAL_ENV.SENDILLO_ORG_ID;
   });
 
   it("happy path: marketing consent + business hours → message row sent", async () => {

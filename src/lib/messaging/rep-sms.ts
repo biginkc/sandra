@@ -11,6 +11,7 @@ import { selectBestSmsPhone, selectSmsPhoneByNumber } from "./sms-phone";
 import { getMessagingProvider } from "./registry";
 import { sendSmsToContact, type RepSmsDeliveryReceiptAuthority, type SendSmsOutcome } from "./send";
 import { sendilloFromEnvWithOptions } from "./providers/sendillo";
+import { assertSendilloOrganizationScope } from "./rep-sms-scope";
 import type { DialpadFromOption, MessagingProvider, ProviderSenderNumber } from "./types";
 import {
   composeRepSms,
@@ -227,6 +228,12 @@ export async function readRepSmsContext(propertyId: string): Promise<RepSmsConte
     );
   }
   const context = normalizeContext(data);
+  // The authenticated RPC scopes the row to the lead's organization, but
+  // Sendillo's bearer key is shared at the application level.  Fence the
+  // returned context before loading its draft, contact, or sender data so an
+  // old grant from another tenant can never reach an app-scoped catalog or
+  // dispatch path.
+  assertSendilloOrganizationScope(context.orgId, context.provider);
   const { data: submissionData, error: submissionError } = await client.rpc("fn_get_rep_sms_delivery_draft", {
     p_property_id: propertyId,
   });
@@ -365,9 +372,14 @@ function samePhone(left: string | null | undefined, right: string): boolean {
 
 async function assertLiveSenderEligibility(
   provider: MessagingProvider,
+  orgId: string,
   senderNumber: string,
   sender?: RepSmsSender,
 ): Promise<void> {
+  // This must happen before the provider catalog request.  The catalog is
+  // fetched with the application-wide Sendillo key and is therefore not a
+  // tenant-neutral lookup.
+  assertSendilloOrganizationScope(orgId, provider.providerId);
   const normalizedSender = normalizePhone(senderNumber) ?? senderNumber.trim();
   if (typeof provider.listPurchasedNumbers === "function") {
     const purchased = await provider.listPurchasedNumbers();
@@ -623,6 +635,7 @@ export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSm
     throw new Error("A stable SMS submission key is required. Refresh the composer before sending.");
   }
   const provider = providerForRepSms();
+  assertSendilloOrganizationScope(context.orgId, provider.providerId);
   const sender = context.senders.find((candidate) => candidate.id === input.assignmentId);
   assertSenderGrant(sender, context, provider);
   if (!context.contactId) throw new Error("Lead has no homeowner contact linked.");
@@ -728,7 +741,7 @@ export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSm
         ) {
           throw new Error("The lead or texting assignment changed. Refresh before sending.");
         }
-        await assertLiveSenderEligibility(provider, senderNumber, freshSender);
+        await assertLiveSenderEligibility(provider, fresh.orgId, senderNumber, freshSender);
         await assertFreshRepSuppression({
           propertyId: input.propertyId,
           contactId,

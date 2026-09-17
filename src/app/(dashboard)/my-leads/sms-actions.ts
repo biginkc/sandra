@@ -17,6 +17,7 @@ import {
   type DispatchRepSmsInput,
 } from "@/lib/messaging/rep-sms";
 import { composeRepSms, type RepSmsCompositionInput } from "@/lib/messaging/rep-sms-composition";
+import { assertSendilloOrganizationScope } from "@/lib/messaging/rep-sms-scope";
 
 export async function loadRepSmsContext(propertyId: string) {
   try {
@@ -322,25 +323,108 @@ function catalogAccountId(entry: ProviderSenderNumber): string | null {
   );
 }
 
+/**
+ * Owner-safe explanation for why a provider sender cannot be granted to a
+ * rep. Keep this vocabulary stable and deliberately free of provider payload
+ * fields: the owner needs to know what to fix, while provider IDs, raw
+ * responses, and credentials must stay server-side.
+ */
+export type RepSmsCatalogIneligibleReason =
+  | "missing_account_identity"
+  | "missing_number_identity"
+  | "number_status_missing"
+  | "number_status_not_active"
+  | "messaging_status_missing"
+  | "messaging_status_not_active";
+
+export type RepSmsCatalogDiagnostic = {
+  number: string;
+  reasons: RepSmsCatalogIneligibleReason[];
+};
+
+export type RepSmsSenderInventory = {
+  eligible: DialpadFromOption[];
+  ineligible: RepSmsCatalogDiagnostic[];
+};
+
+const SENDILLO_ACTIVE_STATUS = "active";
+
+function catalogIneligibleReasons(
+  entry: ProviderSenderNumber,
+): RepSmsCatalogIneligibleReason[] {
+  const reasons: RepSmsCatalogIneligibleReason[] = [];
+  // Mirror repSmsCatalogOptionIsEligible exactly. `catalogAccountId` also
+  // understands legacy raw aliases for the assignment write path, but the
+  // live catalog eligibility predicate requires the normalized field itself.
+  if (!entry.providerAccountId?.trim()) reasons.push("missing_account_identity");
+  if (!entry.providerNumberId?.trim()) reasons.push("missing_number_identity");
+
+  const numberStatus = entry.status?.trim().toLowerCase() ?? "";
+  if (!numberStatus) reasons.push("number_status_missing");
+  else if (numberStatus !== SENDILLO_ACTIVE_STATUS) reasons.push("number_status_not_active");
+
+  const messagingStatus = entry.messagingStatus?.trim().toLowerCase() ?? "";
+  if (!messagingStatus) reasons.push("messaging_status_missing");
+  else if (messagingStatus !== SENDILLO_ACTIVE_STATUS) reasons.push("messaging_status_not_active");
+
+  return reasons;
+}
+
+function safeCatalogNumber(entry: ProviderSenderNumber): string {
+  // The provider adapter has already selected the phone field. Return only
+  // that single display value, never `raw` or any provider identity fields.
+  return entry.phoneE164.trim();
+}
+
+async function readRepSmsSenderInventory(orgId: string): Promise<RepSmsSenderInventory> {
+  const provider = providerForRepSms();
+  // Keep the guard inside the catalog reader as well as at the server-action
+  // boundary. Any future owner UI that reuses this function must prove the
+  // tenant before the app-scoped Sendillo catalog is queried. Passing the
+  // resolved provider id also keeps mocked provider factories deterministic in
+  // tests without weakening the production Sendillo fence.
+  assertSendilloOrganizationScope(orgId, provider.providerId);
+  if (provider.providerId !== REP_SMS_PROVIDER_ID && provider.providerId !== "mock") {
+    throw new Error("Rep texting is available only through Sendillo.");
+  }
+  if (typeof provider.listPurchasedNumbers === "function") {
+    const purchased = await provider.listPurchasedNumbers();
+    const eligible: DialpadFromOption[] = [];
+    const ineligible: RepSmsCatalogDiagnostic[] = [];
+    for (const entry of purchased) {
+      const reasons = catalogIneligibleReasons(entry);
+      if (repSmsCatalogOptionIsEligible(entry)) eligible.push(toFromOption(entry));
+      else ineligible.push({ number: safeCatalogNumber(entry), reasons });
+    }
+    return { eligible, ineligible };
+  }
+  if (typeof provider.listFromNumbers !== "function") {
+    throw new Error("The configured SMS provider cannot list sender numbers.");
+  }
+  return {
+    eligible: (await provider.listFromNumbers()).filter(repSmsCatalogOptionIsEligible),
+    ineligible: [],
+  };
+}
+
 export async function loadRepSmsNumbers(orgId: string) {
   try {
     await requireOwner(orgId);
-    const provider = providerForRepSms();
-    if (provider.providerId !== REP_SMS_PROVIDER_ID && provider.providerId !== "mock") {
-      throw new Error("Rep texting is available only through Sendillo.");
-    }
-    if (typeof provider.listPurchasedNumbers === "function") {
-      const purchased = await provider.listPurchasedNumbers();
-      return ok(
-        purchased
-          .filter(repSmsCatalogOptionIsEligible)
-          .map(toFromOption),
-      );
-    }
-    if (typeof provider.listFromNumbers !== "function") {
-      throw new Error("The configured SMS provider cannot list sender numbers.");
-    }
-    return ok((await provider.listFromNumbers()).filter(repSmsCatalogOptionIsEligible));
+    const inventory = await readRepSmsSenderInventory(orgId);
+    return ok(inventory.eligible);
+  } catch (error) {
+    return errFromUnknown(error, "TEXTING_NUMBERS_UNAVAILABLE");
+  }
+}
+
+/**
+ * Read-only owner diagnostic used by the assignment screen. Assignment and
+ * dispatch still use the live eligibility check and remain fail-closed.
+ */
+export async function loadRepSmsSenderInventory(orgId: string) {
+  try {
+    await requireOwner(orgId);
+    return ok(await readRepSmsSenderInventory(orgId));
   } catch (error) {
     return errFromUnknown(error, "TEXTING_NUMBERS_UNAVAILABLE");
   }
@@ -364,6 +448,10 @@ export async function saveRepSmsSender(input: SaveRepSmsSenderInput) {
   try {
     await requireOwner(input.orgId);
     const provider = providerForRepSms();
+    // Revoke/deactivate is still a Sendillo assignment mutation. Fence every
+    // mutation against the configured tenant, not only active grants, so an
+    // owner cannot use a stale cross-tenant assignment path as a side door.
+    assertSendilloOrganizationScope(input.orgId, provider.providerId);
     const providerId = input.provider?.trim().toLowerCase() || REP_SMS_PROVIDER_ID;
     if (providerId !== provider.providerId || providerId !== REP_SMS_PROVIDER_ID) {
       throw new Error("Rep texting assignments must use Sendillo.");
@@ -437,6 +525,14 @@ export async function saveRepSmsSender(input: SaveRepSmsSenderInput) {
 export async function loadRepSmsAssignments(orgId: string) {
   try {
     await requireOwner(orgId);
+    // This read does not need to instantiate the provider. Let an explicit
+    // mock configuration stay usable locally while still enforcing the
+    // single Sendillo tenant whenever Sendillo is configured (or its key is
+    // present for the implicit configuration).
+    assertSendilloOrganizationScope(
+      orgId,
+      process.env.MESSAGING_PROVIDER?.trim() || undefined,
+    );
     const client = await createClient();
     const { data, error } = await client
       .from("rep_sms_sender_assignments")

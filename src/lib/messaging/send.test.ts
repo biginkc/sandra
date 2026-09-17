@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { ProviderError } from "@/lib/errors/classes";
 
@@ -251,6 +251,88 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
   });
 });
 
+describe("sendSmsToContact — Sendillo organization scope", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function sendilloProvider() {
+    return { ...fakeProvider(), providerId: "sendillo" };
+  }
+
+  function setupSendilloPreflight() {
+    return fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+    });
+  }
+
+  it("blocks a Sendillo dispatch for a property in another organization before inserting or calling the provider", async () => {
+    const provider = sendilloProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.stubEnv("SENDILLO_ORG_ID", "different-org");
+
+    const outcome = await sendSmsToContact(setupSendilloPreflight(), {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+    });
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      error: "Sendillo texting is not available for this organization.",
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("blocks a Sendillo dispatch when tenant scope configuration is missing", async () => {
+    const provider = sendilloProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.stubEnv("SENDILLO_ORG_ID", "");
+
+    const outcome = await sendSmsToContact(setupSendilloPreflight(), {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+    });
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      error: "Sendillo texting organization scope is not configured. Set SENDILLO_ORG_ID before assigning numbers.",
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("blocks a keyed replay from another organization before reading or revealing its ledger row", async () => {
+    const provider = sendilloProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.stubEnv("MESSAGING_PROVIDER", "sendillo");
+    vi.stubEnv("SENDILLO_ORG_ID", "configured-org");
+
+    const supabase = fakeSupabase({
+      properties: [{ data: { ...PROPERTY_ROW, org_id: "other-org" }, error: null }],
+      messages: [{ data: { id: "must-not-be-read" }, error: null }],
+    });
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      idempotencyKey: "11111111-1111-4111-8111-111111111111",
+    });
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      error: "Sendillo texting is not available for this organization.",
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+});
+
 describe("sendSmsToContact — rep SMS idempotency replay", () => {
   const idempotencyKey = "11111111-1111-4111-8111-111111111111";
   const existing = (overrides: Record<string, unknown> = {}) => ({
@@ -391,6 +473,10 @@ describe("sendSmsToContact — rep SMS idempotency replay", () => {
 });
 
 describe("sendSmsToContact — ambiguous Sendillo outcomes", () => {
+  beforeEach(() => {
+    vi.stubEnv("SENDILLO_ORG_ID", PROPERTY_ROW.org_id);
+  });
+
   it.each([
     ["transport", { transportFailure: true }],
     ["timeout", { isAbort: true }],

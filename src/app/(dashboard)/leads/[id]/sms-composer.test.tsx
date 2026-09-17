@@ -73,7 +73,9 @@ describe("SmsComposer provider outcomes", () => {
     expect(mocks.sendSmsFromLead).toHaveBeenCalledOnce();
     await waitFor(() => expect(screen.getByText(/pending reconciliation/i)).toBeVisible());
     expect(screen.getByLabelText("Message")).toHaveValue("Do not duplicate this message");
-    expect(screen.getByRole("button", { name: "Send now" })).toBeDisabled();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Send now" })).toBeDisabled(),
+    );
   });
 
   it("preserves the draft and disables resend while provider reconciliation is pending", async () => {

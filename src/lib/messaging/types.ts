@@ -47,7 +47,7 @@ export type DialpadFromOption = {
 export type ProviderSenderNumber = {
   /** E.164 number the account owns and can send from. */
   phoneE164: string;
-  /** Provider account identity when the catalog exposes it. */
+  /** Provider account identity, or the configured stable connection identity when the catalog omits it. */
   providerAccountId?: string | null;
   /** Provider's stable id for the number, when it exposes one. */
   providerNumberId: string | null;
