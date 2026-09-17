@@ -182,7 +182,9 @@ export async function enrollLead(
 /**
  * Pause every active enrollment for a property with the given reason.
  * Called from:
- *   - the Dialpad inbound webhook on a regular reply (reason='inbound_reply')
+ *   - the inbound webhook on a regular reply (reason='inbound_reply')
+ *   - the inbound webhook on a reply to an audited rep SMS
+ *     (reason='rep_sms_human_takeover')
  *   - the STOP-keyword path (reason='consent_revoked', then caller flips
  *     those rows to 'opted_out' via `status` update — handled here via
  *     the `permanent` flag)
@@ -230,6 +232,37 @@ export async function pausePropertyEnrollments(
     });
   }
   return { paused };
+}
+
+/**
+ * Promote an already-paused inbound reply to the more specific reason that
+ * was discovered after the webhook's fail-safe pause. This is intentionally
+ * narrow: a retry or a concurrent webhook may have paused the row with the
+ * generic inbound reason, and a confirmed rep-SMS takeover must be able to
+ * correct that durable read model without reopening the enrollment.
+ */
+export async function promotePropertyEnrollmentPauseReason(
+  client: SupabaseClient<Database>,
+  params: {
+    propertyId: string;
+    fromReason: PauseReason;
+    reason: PauseReason;
+  },
+): Promise<{ promoted: number }> {
+  const { data: promotedRows, error } = await client
+    .from("sequence_enrollments")
+    .update({
+      pause_reason: params.reason,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("property_id", params.propertyId)
+    .eq("status", "paused")
+    .eq("pause_reason", params.fromReason)
+    .select("id");
+  if (error) {
+    throw new Error(`promotePropertyEnrollmentPauseReason: ${error.message}`);
+  }
+  return { promoted: promotedRows?.length ?? 0 };
 }
 
 /** Resume only the enrollments paused by the softphone's active call. */

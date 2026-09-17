@@ -46,7 +46,10 @@ import {
   dispatchOwnerMessageAdded,
   dispatchOwnerMessageAddedNeedsTriage,
 } from "@/lib/notifications/dispatch";
-import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
+import {
+  pausePropertyEnrollments,
+  promotePropertyEnrollmentPauseReason,
+} from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
 import {
   findRepSmsHumanTakeoverSource,
@@ -332,10 +335,10 @@ export async function handleInboundWebhook(
           provider.providerId,
           ev.externalId,
         );
-        await markInboundSmsIntentSideEffectsComplete(
-          supabase,
-          intentClaim.intentId,
-        );
+        // A semantic duplicate shares the canonical intent's side effects.
+        // Do not mark that intent complete here: the canonical webhook may
+        // still be between message insertion and takeover/sequence pause, and
+        // doing so would make a later canonical retry skip the required work.
         continue;
       }
 
@@ -813,12 +816,20 @@ export async function handleInboundWebhook(
         }
       }
 
-      if (!inboundState.propertyEnrollmentsPausedAt) {
+      // Pause before rep-SMS attribution so a lookup or takeover persistence
+      // failure still leaves the automated sequence fail-safe paused. A
+      // confirmed takeover below promotes this generic reason to the precise
+      // human-handoff reason without reopening the enrollment.
+      let propertyEnrollmentsPauseCompleted = Boolean(
+        inboundState.propertyEnrollmentsPausedAt,
+      );
+      if (!propertyEnrollmentsPauseCompleted) {
         try {
           await pausePropertyEnrollments(supabase, {
             propertyId: effectivePropertyId,
             reason: "inbound_reply",
           });
+          propertyEnrollmentsPauseCompleted = true;
           await markInboundMessageState(supabase, insertOutcome.messageId, {
             propertyEnrollmentsPausedAt: new Date().toISOString(),
           });
@@ -830,6 +841,7 @@ export async function handleInboundWebhook(
             extra: {
               propertyId: effectivePropertyId,
               externalId: ev.externalId,
+              reason: "inbound_reply",
             },
           });
         }
@@ -890,6 +902,26 @@ export async function handleInboundWebhook(
               completedAt: new Date().toISOString(),
             },
           });
+          // The fail-safe pause above may have already changed active rows to
+          // `paused/inbound_reply`. If it failed, rows may still be active.
+          // Cover both states and only then acknowledge the takeover so the
+          // exact reason is durable even across retries or concurrent
+          // deliveries.
+          await pausePropertyEnrollments(supabase, {
+            propertyId: effectivePropertyId,
+            reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+          });
+          await promotePropertyEnrollmentPauseReason(supabase, {
+            propertyId: effectivePropertyId,
+            fromReason: "inbound_reply",
+            reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+          });
+          if (!propertyEnrollmentsPauseCompleted) {
+            await markInboundMessageState(supabase, insertOutcome.messageId, {
+              propertyEnrollmentsPausedAt: new Date().toISOString(),
+            });
+            propertyEnrollmentsPauseCompleted = true;
+          }
           repSmsHumanTakeover = true;
         } catch (e) {
           // The source is confirmed, so an incomplete durable write must not
