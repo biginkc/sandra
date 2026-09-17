@@ -94,6 +94,22 @@ describe("POST /api/webhooks/sendillo/reply-status", () => {
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
+  it("bounds the BYTE size, not the character count — a multi-byte body under the char count but over the byte cap is rejected", async () => {
+    // '€' (U+20AC) is ONE UTF-16 code unit (so .length undercounts it) but
+    // THREE UTF-8 bytes. 30_000 of them: .length === 30_000 (comfortably
+    // under the 64 KiB char-count a buggy check would have measured), but
+    // the real byte size is 90_000 — over the 64 KiB (65_536-byte) cap. A
+    // char-length check would wrongly accept this; the byte-bounded reader
+    // must reject it.
+    const body = "€".repeat(30_000);
+    expect(body.length).toBeLessThan(64 * 1024);
+    expect(Buffer.byteLength(body, "utf8")).toBeGreaterThan(64 * 1024);
+    const response = await POST(req(body));
+    expect(response.status).toBe(413);
+    expect(verifyWebhookSignature).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
   it("surfaces a 500 and reports when the reconcile RPC errors, without swallowing it", async () => {
     rpcMock.mockResolvedValue({ data: null, error: { message: "boom" } });
     const response = await POST(req(JSON.stringify(buildSyntheticReplyCallback("ext-3", "delivered"))));

@@ -14,6 +14,7 @@ from pathlib import Path
 P=Path(__file__).resolve().parent
 sys.path.insert(0,str(P.parent/'inbox-projection'/'fixture'))
 from guards import validate_container,validate_cron
+import owned_cleanup
 if sys.argv[1:]!=['--run-owned-fixture']:raise SystemExit('Explicit owned fixture required')
 D=['docker','--host','unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock'];N='sandra-inbox-projection-t2-db'
 validate_container(json.loads(subprocess.check_output(D+['inspect',N],text=True))[0])
@@ -21,18 +22,30 @@ CMD=D+['exec','-i',N,'psql','-XqAt','-U','postgres','-d','postgres','-v','ON_ERR
 def need(v,label):
  if not v:raise RuntimeError(label)
 def sql(q,timeout=20,check=True):
- r=subprocess.run(CMD,input="SET statement_timeout='15s'; SET lock_timeout='10s'; BEGIN;"+q.rstrip()+";COMMIT;",text=True,capture_output=True,timeout=timeout)
+ r=subprocess.run(CMD,input="SET statement_timeout='15s'; SET lock_timeout='10s'; SET extra_float_digits=3; BEGIN;"+q.rstrip()+";COMMIT;",text=True,capture_output=True,timeout=timeout)
  if check:need(r.returncode==0,r.stderr)
  return r if not check else r.stdout.strip()
 def sql_fail(q,timeout=20):
- r=subprocess.run(CMD,input="SET statement_timeout='15s'; SET lock_timeout='10s'; BEGIN;"+q.rstrip()+";COMMIT;",text=True,capture_output=True,timeout=timeout)
+ r=subprocess.run(CMD,input="SET statement_timeout='15s'; SET lock_timeout='10s'; SET extra_float_digits=3; BEGIN;"+q.rstrip()+";COMMIT;",text=True,capture_output=True,timeout=timeout)
  need(r.returncode!=0,f'expected failure but succeeded: {r.stdout}')
  return r.stderr
 
 validate_cron(sql('SHOW cron.launch_active_jobs'))
 need(sql('SELECT marker FROM inbox_t2_fixture.identity')=='sandra-inbox-projection-t2-owned-synthetic','Wrong fixture')
 need(sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespace('inbox_reply_preparation') IS NULL AND to_regnamespace('inbox_reply_review') IS NULL AND to_regnamespace('inbox_reply_send') IS NULL")=='t','Refusing existing reply schema')
-CLEANUP="DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP FUNCTION IF EXISTS public.inbox_accept_reply(uuid,uuid);DROP FUNCTION IF EXISTS public.inbox_recover_reply(uuid,uuid);DROP FUNCTION IF EXISTS public.inbox_reply_operation_status(uuid);DROP FUNCTION IF EXISTS public.inbox_reply_reconcile_callback(text,text,text,jsonb);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;DROP SCHEMA IF EXISTS inbox_reply_send_scratch CASCADE;"
+
+# [Astra fix-3] Dynamic, exhaustive-by-construction residual discovery — see
+# owned_cleanup.py's module docstring (copied verbatim from
+# experiments/inbox-reply-send-worker/owned_cleanup.py, PR-F's Astra
+# round-9 closure). MUST run before anything else writes a row, so BASELINE
+# reflects the true pre-run state for every table in the single uniform
+# universe (no hand-maintained table list, which round-3-through-9 each
+# proved leaks real tables).
+ORG_TABLES,USER_TABLES,ALL_TABLES=owned_cleanup.discover(sql)
+BASELINE=owned_cleanup.snapshot_baseline(sql,ALL_TABLES)
+print(f'Discovered {len(ALL_TABLES)} table(s) database-wide (uniform content-signature universe) — {len(ORG_TABLES)} org_id-scoped + {len(USER_TABLES)} user_id-scoped for the sweep')
+
+CLEANUP="DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP FUNCTION IF EXISTS public.inbox_accept_reply(uuid,uuid);DROP FUNCTION IF EXISTS public.inbox_recover_reply(uuid,uuid);DROP FUNCTION IF EXISTS public.inbox_reply_operation_status(uuid);DROP FUNCTION IF EXISTS public.inbox_reply_reconcile_callback(text,text,text,jsonb);DROP FUNCTION IF EXISTS public.inbox_reply_sweep_unmatched_callbacks(integer);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;DROP SCHEMA IF EXISTS inbox_reply_send_scratch CASCADE;"
 sql(CLEANUP)
 
 sources=[P.parent/'inbox-reply-boundary/context.sql',P.parent/'inbox-reply-preparation/recipient.sql',P.parent/'inbox-reply-preparation/batch.sql',P.parent/'inbox-reply-review/setup.sql',P.parent/'inbox-reply-review/public-api.sql',P/'attempts.sql',P/'accept.sql',P/'public-api.sql',P/'callback.sql']
@@ -166,10 +179,17 @@ try:
  record('idempotent redelivery of the same terminal status is a no-op (deduped at the receipt-lease layer)')
 
  # === #4 Out-of-order / contradiction ===
- err=call_wrapper_fail('PROV-G-HAPPY-1','delivery_failed')
- need('INBOX_REPLY_CONTRADICTORY_RECEIPT' in err,f'expected CONTRADICTORY_RECEIPT, got: {err}')
- need(state_of(o1,atts1[0])=='delivered','contradictory receipt flipped a terminal row')
- record('out-of-order contradictory terminal (delivered then delivery_failed) rejected, first-terminal-wins')
+ # [Astra fix-1, correctness] A rejected contradiction is a normal,
+ # non-raising RPC result (kind:'rejected'), NOT a thrown SQL exception —
+ # see the wrapper's EXCEPTION block: re-raising here would abort the WHOLE
+ # transaction, which would also undo any earlier drain-first write that
+ # happened to share this same call (proof #5b below). rv/receipt_version
+ # must be untouched either way.
+ rv_before_contradiction=receipt_version_of(o1,atts1[0])
+ contradiction_result=call_wrapper('PROV-G-HAPPY-1','delivery_failed')
+ need(contradiction_result=={'kind':'rejected','code':'INBOX_REPLY_CONTRADICTORY_RECEIPT'},f'expected a rejected/CONTRADICTORY_RECEIPT result, got: {contradiction_result}')
+ need(state_of(o1,atts1[0])=='delivered' and receipt_version_of(o1,atts1[0])==rv_before_contradiction,'contradictory receipt flipped a terminal row')
+ record('out-of-order contradictory terminal (delivered then delivery_failed) rejected as a normal result, first-terminal-wins, no state change')
 
  # === #5 Callback-before-persist: stored, not discarded; then drained exactly once ===
  o3,u3,op3,atts3=make_org_and_prep('+130257',1)
@@ -202,6 +222,103 @@ try:
  need(drain2['drained'] is False and drain2['reason']=='no_holding_row','second drain should be a clean no-op (holding row already consumed)')
  need(receipt_version_of(o3,atts3[0])==rv_after_drain,'second drain double-applied')
  record('callback-before-persist: drain reconciles exactly once; second drain is a no-op')
+
+ # === #5b [Astra fix-1] Held-callback precedence via the WRAPPER itself
+ # (never calling drain_unmatched by hand) — first arrival wins regardless
+ # of persist() timing. Held 'delivered' arrives before persist(); persist()
+ # binds the reference; a LATER 'delivery_failed' arrives on the wrapper's
+ # normal matched path. The wrapper must drain the held 'delivered' FIRST
+ # (making it the winner) and then reject the later 'delivery_failed' as a
+ # contradiction — the REVERSE of what a matched-path-applies-directly bug
+ # would do (which would let delivery_failed win instead). ===
+ o10,u10,op10,atts10=make_org_and_prep('+130264',1)
+ sql(f"SELECT inbox_reply_send.claim('{o10}','{atts10[0]}');")
+ dispatch10=json.loads(sql(f"SELECT inbox_reply_send.start_dispatch('{o10}','{atts10[0]}',1)::text;"))
+ token10=dispatch10['token']
+ held_first=call_wrapper('PROV-G-PRECEDENCE-1','delivered')
+ need(held_first['kind']=='stored_unmatched','expected the first delivered callback to be held unmatched')
+ persisted10=json.loads(sql(f"SELECT inbox_reply_send.persist('{o10}','{atts10[0]}','{token10}',jsonb_build_object('kind','accepted','externalId','PROV-G-PRECEDENCE-1','status','sent'))::text;"))
+ need(persisted10['state']=='provider_accepted','persist did not bind PROV-G-PRECEDENCE-1')
+ # No manual drain_unmatched call here — only a normal second wrapper call,
+ # exactly like a real second webhook delivery.
+ later=call_wrapper('PROV-G-PRECEDENCE-1','delivery_failed')
+ need(later=={'kind':'rejected','code':'INBOX_REPLY_CONTRADICTORY_RECEIPT'},f'held delivered should have been drained first and won, making delivery_failed the contradiction: {later}')
+ need(state_of(o10,atts10[0])=='delivered','the HELD first-arrival (delivered) should have won, not the later delivery_failed')
+ held_row_gone=sql("SELECT count(*) FROM inbox_reply_send.unmatched_callbacks WHERE provider='sendillo' AND provider_reference='PROV-G-PRECEDENCE-1'")
+ need(held_row_gone=='0','the wrapper should have drained (and deleted) the held row as part of resolving the later callback')
+ record('[Astra fix-1] wrapper drains an earlier-held terminal FIRST on the matched path: first arrival (delivered) wins, a later contradictory delivery_failed is rejected — never the reverse')
+
+ # === #5c [Astra fix-1] Durable sweep: a held callback that gets persisted
+ # but NEVER receives a second callback must still reconcile — this is the
+ # gap the wrapper's own drain-first step (5b) cannot close by itself, since
+ # nothing ever calls the wrapper again for this reference. ===
+ o11,u11,op11,atts11=make_org_and_prep('+130265',1)
+ sql(f"SELECT inbox_reply_send.claim('{o11}','{atts11[0]}');")
+ dispatch11=json.loads(sql(f"SELECT inbox_reply_send.start_dispatch('{o11}','{atts11[0]}',1)::text;"))
+ token11=dispatch11['token']
+ held_sweep=call_wrapper('PROV-G-SWEEP-1','delivered')
+ need(held_sweep['kind']=='stored_unmatched','expected the sweep-target callback to be held unmatched')
+ sql(f"SELECT inbox_reply_send.persist('{o11}','{atts11[0]}','{token11}',jsonb_build_object('kind','accepted','externalId','PROV-G-SWEEP-1','status','sent'))::text;")
+ need(state_of(o11,atts11[0])=='provider_accepted','row should still be provider_accepted — nothing has drained it yet')
+ sweep_result=json.loads(sql(f"SET LOCAL ROLE service_role; SELECT public.inbox_reply_sweep_unmatched_callbacks(100)::text; RESET ROLE;"))
+ need(sweep_result['drained']>=1,f'sweep should have drained at least the one now-persisted held reference: {sweep_result}')
+ need(state_of(o11,atts11[0])=='delivered','sweep did not reconcile the held callback once its attempt was persisted')
+ held_row_gone11=sql("SELECT count(*) FROM inbox_reply_send.unmatched_callbacks WHERE provider='sendillo' AND provider_reference='PROV-G-SWEEP-1'")
+ need(held_row_gone11=='0','sweep should have deleted the drained holding row')
+ record('[Astra fix-1] durable sweep drains a held callback once its attempt is persisted, even with no second callback ever arriving')
+ # A second sweep pass over the now-empty holding row is a clean no-op.
+ sweep_result2=json.loads(sql(f"SET LOCAL ROLE service_role; SELECT public.inbox_reply_sweep_unmatched_callbacks(100)::text; RESET ROLE;"))
+ need(sweep_result2['drained']==0 or 'PROV-G-SWEEP-1' not in sql("SELECT coalesce(string_agg(provider_reference,','),'') FROM inbox_reply_send.unmatched_callbacks WHERE provider_reference='PROV-G-SWEEP-1'"),'second sweep should not re-drain an already-consumed reference')
+ record('[Astra fix-1] a second sweep pass never re-drains an already-consumed reference')
+
+ # === #5d [Astra fix-1] Concurrent drains of the SAME reference apply
+ # exactly once — the holding row's FOR UPDATE lock serializes two racing
+ # drains regardless of scheduling; the loser always finds NOT FOUND once
+ # the winner has deleted the row. ===
+ o12,u12,op12,atts12=make_org_and_prep('+130266',1)
+ sql(f"SELECT inbox_reply_send.claim('{o12}','{atts12[0]}');")
+ dispatch12=json.loads(sql(f"SELECT inbox_reply_send.start_dispatch('{o12}','{atts12[0]}',1)::text;"))
+ token12=dispatch12['token']
+ call_wrapper('PROV-G-CONCURRENT-1','delivered')
+ sql(f"SELECT inbox_reply_send.persist('{o12}','{atts12[0]}','{token12}',jsonb_build_object('kind','accepted','externalId','PROV-G-CONCURRENT-1','status','sent'))::text;")
+ rv_before_race=receipt_version_of(o12,atts12[0])
+ import concurrent.futures
+ with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+  futures=[pool.submit(sql,"SELECT inbox_reply_send.drain_unmatched('sendillo','PROV-G-CONCURRENT-1')::text;") for _ in range(2)]
+  race_results=[json.loads(f.result()) for f in futures]
+ drained_true=[r for r in race_results if r['drained'] is True]
+ drained_false=[r for r in race_results if r['drained'] is False]
+ need(len(drained_true)==1 and len(drained_false)==1,f'expected exactly one winner and one no-op, got: {race_results}')
+ need(drained_false[0]['reason']=='no_holding_row','the losing concurrent drain should see the row already gone')
+ need(state_of(o12,atts12[0])=='delivered' and receipt_version_of(o12,atts12[0])==rv_before_race+1,'concurrent drains applied more than once')
+ record('[Astra fix-1] two concurrent drains of the same reference: exactly one applies, the other is a clean no-op, receipt_version advances by exactly 1')
+
+ # === #5e [Astra fix-1] Mutation: reinstall the wrapper WITHOUT the
+ # drain-first step (the original defect this Astra round found — held
+ # callbacks were never reconciled by anything), watch the held terminal
+ # get silently bypassed and the LATER callback wrongly decide the outcome
+ # by itself; restore the exact byte-verified source definition and
+ # reverify first-arrival precedence is back in force. ===
+ o13,u13,op13,atts13=make_org_and_prep('+130267',1)
+ sql(f"SELECT inbox_reply_send.claim('{o13}','{atts13[0]}');")
+ dispatch13=json.loads(sql(f"SELECT inbox_reply_send.start_dispatch('{o13}','{atts13[0]}',1)::text;"))
+ token13=dispatch13['token']
+ call_wrapper('PROV-G-MUTATE-DRAIN-1','delivered')
+ sql(f"SELECT inbox_reply_send.persist('{o13}','{atts13[0]}','{token13}',jsonb_build_object('kind','accepted','externalId','PROV-G-MUTATE-DRAIN-1','status','sent'))::text;")
+ wrapper_defn=real_fn('public.inbox_reply_reconcile_callback')
+ drain_line=" PERFORM inbox_reply_send.drain_unmatched(in_provider,in_external_id);\n"
+ need(drain_line in wrapper_defn,'could not locate the drain-first line to remove for this mutation')
+ mutated_wrapper=wrapper_defn.replace(drain_line,'')
+ sql(mutated_wrapper)
+ mutated_result=call_wrapper('PROV-G-MUTATE-DRAIN-1','delivery_failed')
+ need(mutated_result['kind']=='reconciled' and state_of(o13,atts13[0])=='delivery_failed',f'mutation did not actually remove the drain-first fix: {mutated_result}')
+ held_survives=sql("SELECT count(*) FROM inbox_reply_send.unmatched_callbacks WHERE provider='sendillo' AND provider_reference='PROV-G-MUTATE-DRAIN-1'")
+ need(held_survives=='1','mutation should leave the held delivered row stranded, unreconciled, while delivery_failed wrongly wins')
+ record('mutation: wrapper without the drain-first step lets a later callback wrongly decide the outcome, stranding the held first-arrival (proves the fix, not incidental behavior, enforces precedence)')
+ restore_and_verify('public.inbox_reply_reconcile_callback')
+ # Clean up the mutation-created stranded holding row via the NOW-restored
+ # sweep path (not a manual DELETE) so the restore is exercised end-to-end.
+ sql(f"SET LOCAL ROLE service_role; SELECT public.inbox_reply_sweep_unmatched_callbacks(100)::text; RESET ROLE;")
 
  # === #6 Unique association + collision (never matched by phone) ===
  o4,u4,op4,atts4=make_org_and_prep('+130258',2)
@@ -336,8 +453,8 @@ END $$;
  restore_and_verify('inbox_reply_send.reconcile_delivery')
  # Reverify the RESTORED function rejects a fresh contradiction — reuse
  # org5's already-delivered row (proof #7) rather than manufacture a new one.
- err2=call_wrapper_fail('PROV-G-ORGSCOPE-1','delivery_failed')
- need('INBOX_REPLY_CONTRADICTORY_RECEIPT' in err2,f'restored reconcile_delivery did not reject contradiction: {err2}')
+ err2=call_wrapper('PROV-G-ORGSCOPE-1','delivery_failed')
+ need(err2=={'kind':'rejected','code':'INBOX_REPLY_CONTRADICTORY_RECEIPT'},f'restored reconcile_delivery did not reject contradiction: {err2}')
  record('restore verified byte-exact (assert_body_matches) and the precedence guard is back in force')
 
  print(f'\nALL {len(checks)} PROOF GROUPS PASSED')
@@ -352,6 +469,10 @@ finally:
  if OWNED_ORGS:
   orgs_sql="ARRAY["+','.join(f"'{o}'" for o in OWNED_ORGS)+"]::uuid[]"
   users_sql="ARRAY["+','.join(f"'{u}'" for u in OWNED_USERS)+"]::uuid[]"
+  # PRIMARY tables: deleted explicitly, in the correct FK/trigger order
+  # (owner-guard trigger dance on memberships) — excluded from
+  # owned_cleanup's dynamic discovery (PRIMARY_TABLES) precisely so they
+  # stay hand-ordered here rather than swept generically.
   sql(f"DELETE FROM messages WHERE org_id=ANY({orgs_sql});"
       f"DELETE FROM consent_events WHERE org_id=ANY({orgs_sql});"
       f"DELETE FROM properties WHERE org_id=ANY({orgs_sql});"
@@ -363,6 +484,13 @@ finally:
       f"DELETE FROM auth.users WHERE id=ANY({users_sql});"
       f"ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;"
       f"DELETE FROM organizations WHERE id=ANY({orgs_sql});",check=False)
+  # webhook_events has neither an org_id nor a user_id column (confirmed by
+  # inspection — supabase/migrations/001_initial.sql:287-303), so it is
+  # invisible to owned_cleanup's org/user OWNED predicate entirely; the one
+  # synthetic row this proof inserts into it (namespace-isolation test #9)
+  # is deleted explicitly, by its own synthetic external_id, BEFORE the
+  # uniform residual check below so that check's baseline-vs-now comparison
+  # (which would otherwise see one extra non-owned row) stays clean.
   sql("DELETE FROM webhook_events WHERE provider='sendillo' AND event_type='sms_status_delivered' AND external_id='SHARED-EXTERNAL-ID-ISOLATION';",check=False)
   residual={}
   for label,query in [
@@ -380,5 +508,23 @@ finally:
    n=sql(query)
    if n!='0':residual[label]=n
   if residual:
-   raise RuntimeError(f'Owned-fixture cleanup left residual rows: {residual} (orgs={len(OWNED_ORGS)}, users={len(OWNED_USERS)})')
+   raise RuntimeError(f'Owned-fixture cleanup left residual rows in explicitly-managed PRIMARY tables: {residual} (orgs={len(OWNED_ORGS)}, users={len(OWNED_USERS)})')
+  # [Astra fix-3] EVERYTHING ELSE: a generic, dynamically-discovered sweep
+  # (owned_cleanup.sweep_delete) over every org_id/user_id-scoped table
+  # database-wide, PRIMARY_TABLES excluded (handled by hand above) — not a
+  # hand-maintained list, which the round-3-through-9 history in
+  # owned_cleanup.py's own docstring shows repeatedly missed real tables
+  # (Astra's independent check on this PR found 10 such tables/818 rows).
+  owned_cleanup.sweep_delete(sql,ORG_TABLES,USER_TABLES,OWNED_ORGS,OWNED_USERS)
+  # [Astra fix-3] ONE uniform check over the ENTIRE table universe
+  # (PRIMARY_TABLES included, callback.sql's new tables included, no
+  # category split): this run's own rows are gone everywhere, and every
+  # non-owned row in every table is byte-identical to its pre-run baseline
+  # (content hash from raw ::text output — includes organizations.name,
+  # auth.users, and this PR's own inbox_reply_send.unmatched_callbacks/
+  # callback_receipts uniformly), with whitelisted counters (e.g.
+  # attempts.generation/receipt_version) checked per-row, never by a
+  # table-wide SUM.
+  advanced=owned_cleanup.assert_clean(sql,ALL_TABLES,BASELINE,OWNED_ORGS,OWNED_USERS)
+  print(f'Exhaustive dynamic residual check passed: zero synthetic rows AND byte-identical baseline content across all {len(ALL_TABLES)} discovered table(s) database-wide'+(f'; whitelisted counters advanced monotonically: {"; ".join(advanced)}' if advanced else '; no counter column changed'))
   print(f'Cleanup verified: zero residual rows across {len(OWNED_ORGS)} owned orgs / {len(OWNED_USERS)} owned users')

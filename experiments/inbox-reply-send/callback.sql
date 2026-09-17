@@ -150,6 +150,54 @@ BEGIN
  RETURN jsonb_build_object('drained',true,'result',result);
 END $$;
 
+-- [Astra fix-1] Durable recovery sweep, mirroring the Outbox's cron-driven
+-- reconciliation ARCHITECTURE (src/app/api/cron/sendillo-status-reconciliation/
+-- route.ts — a periodic sweep over rows that never got a second event to
+-- trigger inline reconciliation), never its code or its table. Scans
+-- unmatched_callbacks for a reference that NOW matches a persisted attempt
+-- (the case where a callback arrived before persist(), persist() later
+-- bound the reference, but no SECOND callback ever arrived to trigger the
+-- wrapper's own drain-first step below) and drains each one. Safe to run
+-- repeatedly/concurrently with itself or with the wrapper's own drain call:
+-- drain_unmatched's FOR UPDATE + delete makes a losing concurrent drain of
+-- the SAME reference a clean no-op. Each row's drain runs in its own
+-- exception-isolated block (an implicit savepoint) so one contradictory or
+-- otherwise-failing row (e.g. a held terminal that genuinely conflicts with
+-- one applied through the wrapper's own drain-first path in the interim)
+-- is skipped and left stranded for manual/audit resolution, never aborting
+-- the whole batch — every other candidate in this sweep still gets tried.
+CREATE FUNCTION inbox_reply_send.sweep_unmatched_callbacks(batch_limit integer DEFAULT 100) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE r record;drained_count integer:=0;scanned_count integer:=0;failed_count integer:=0;
+BEGIN
+ IF batch_limit IS NULL OR batch_limit NOT BETWEEN 1 AND 1000 THEN RAISE EXCEPTION 'Invalid batch_limit';END IF;
+ FOR r IN
+  SELECT u.provider,u.provider_reference FROM inbox_reply_send.unmatched_callbacks u
+   WHERE EXISTS(SELECT 1 FROM inbox_reply_send.attempts a WHERE a.provider_reference=u.provider_reference)
+   ORDER BY u.received_at LIMIT batch_limit
+ LOOP
+  scanned_count:=scanned_count+1;
+  BEGIN
+   IF (inbox_reply_send.drain_unmatched(r.provider,r.provider_reference)->>'drained')::boolean THEN
+    drained_count:=drained_count+1;
+   END IF;
+  EXCEPTION WHEN OTHERS THEN
+   failed_count:=failed_count+1;
+  END;
+ END LOOP;
+ RETURN jsonb_build_object('scanned',scanned_count,'drained',drained_count,'failed',failed_count);
+END $$;
+
+-- Service-role wrapper for the sweep, called from a cron route
+-- (src/app/api/cron/inbox-reply-callback-sweep/route.ts) the same way the
+-- Outbox's own cron route calls its reconciliation RPC — CRON_SECRET-gated
+-- at the route layer, service-role at the DB layer, never a user session.
+CREATE FUNCTION public.inbox_reply_sweep_unmatched_callbacks(batch_limit integer DEFAULT 100) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='20s' AS $$
+BEGIN
+ RETURN inbox_reply_send.sweep_unmatched_callbacks(batch_limit);
+END $$;
+REVOKE ALL ON FUNCTION public.inbox_reply_sweep_unmatched_callbacks(integer) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.inbox_reply_sweep_unmatched_callbacks(integer) TO service_role;
+
 -- Public/service wrapper. Mirrors public-api.sql's SECURITY DEFINER idiom,
 -- but granted to service_role only, never authenticated/anon — the caller
 -- is the ingress route's admin client (no user session), not a signed-in
@@ -180,6 +228,18 @@ BEGIN
    VALUES(in_provider,in_external_id,in_terminal,in_payload) ON CONFLICT (provider,provider_reference) DO NOTHING;
   RETURN jsonb_build_object('kind','stored_unmatched');
  END IF;
+
+ -- [Astra fix-1] Drain any EARLIER-held terminal for this SAME reference
+ -- FIRST, before reserving/reconciling the CURRENT callback — so
+ -- first-arrival wins regardless of persist() timing. Without this, a
+ -- callback held before persist() (Astra #5) was never reconciled at all
+ -- (drain_unmatched had no caller), and a genuinely later, different
+ -- terminal arriving on the matched path would apply directly and
+ -- contradict the held first arrival instead of the held one winning.
+ -- unmatched_callbacks' PRIMARY KEY(provider,provider_reference) means at
+ -- most one row can ever be held for this reference, so this is a single,
+ -- targeted drain — never a broad sweep — and a no-op when nothing is held.
+ PERFORM inbox_reply_send.drain_unmatched(in_provider,in_external_id);
 
  -- Reserve/claim, lease-fenced. Try the fast INSERT path first (first-ever
  -- delivery of this exact reply-namespaced event); fall back to a fenced
@@ -220,6 +280,24 @@ BEGIN
    SET processing_status='error',processed_at=clock_timestamp(),error_message=left(SQLERRM,256)
    WHERE c.provider=in_provider AND c.event_type=in_event_type AND c.external_id=in_external_id
      AND c.lease_owner=my_owner AND c.lease_generation=my_generation;
+  -- [Astra fix-1, correctness] A KNOWN business-rule rejection on the
+  -- CURRENT callback (most importantly INBOX_REPLY_CONTRADICTORY_RECEIPT,
+  -- when the drain-first step above already applied an earlier-held
+  -- terminal as the real winner) must NOT re-raise here: re-raising would
+  -- abort this whole function's transaction, which would UNDO the
+  -- drain-first step's already-correct write along with it — durably
+  -- stranding the held first-arrival every time a losing later callback
+  -- retries (a livelock: the provider's webhook retry would replay this
+  -- exact losing callback forever, never letting the winning drain
+  -- persist). Returning a normal, non-raising 'rejected' result instead
+  -- lets THIS statement's failure roll back to its own savepoint (this
+  -- BEGIN block) while the drain's writes, already part of the SAME
+  -- outer transaction, commit normally when the function returns. Any
+  -- OTHER, unrecognized error still re-raises — genuinely unexpected
+  -- failures (constraint violations, connectivity) must still abort loudly.
+  IF SQLERRM IN ('INBOX_REPLY_CONTRADICTORY_RECEIPT','INBOX_REPLY_CALLBACK_UNMATCHED','INBOX_REPLY_INVALID_PERSIST_TRANSITION') THEN
+   RETURN jsonb_build_object('kind','rejected','code',SQLERRM);
+  END IF;
   RAISE;
  END;
 END $$;
@@ -228,11 +306,11 @@ GRANT EXECUTE ON FUNCTION public.inbox_reply_reconcile_callback(text,text,text,j
 
 DO $$ DECLARE t record;BEGIN FOR t IN SELECT tablename FROM pg_tables WHERE schemaname='inbox_reply_send' AND tablename IN ('unmatched_callbacks','callback_receipts') LOOP EXECUTE format('ALTER TABLE inbox_reply_send.%I ENABLE ROW LEVEL SECURITY',t.tablename);END LOOP;END $$;
 REVOKE ALL ON inbox_reply_send.unmatched_callbacks,inbox_reply_send.callback_receipts FROM PUBLIC;
-REVOKE ALL ON FUNCTION inbox_reply_send.reconcile_delivery(uuid,text,text,text,jsonb),inbox_reply_send.drain_unmatched(text,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION inbox_reply_send.reconcile_delivery(uuid,text,text,text,jsonb),inbox_reply_send.drain_unmatched(text,text),inbox_reply_send.sweep_unmatched_callbacks(integer) FROM PUBLIC;
 DO $$ DECLARE r record;BEGIN
  FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('anon','authenticated','service_role') LOOP
   EXECUTE format('REVOKE ALL ON inbox_reply_send.unmatched_callbacks,inbox_reply_send.callback_receipts FROM %I',r.rolname);
-  EXECUTE format('REVOKE ALL ON FUNCTION inbox_reply_send.reconcile_delivery(uuid,text,text,text,jsonb),inbox_reply_send.drain_unmatched(text,text) FROM %I',r.rolname);
+  EXECUTE format('REVOKE ALL ON FUNCTION inbox_reply_send.reconcile_delivery(uuid,text,text,text,jsonb),inbox_reply_send.drain_unmatched(text,text),inbox_reply_send.sweep_unmatched_callbacks(integer) FROM %I',r.rolname);
  END LOOP;
 END $$;
 COMMIT;

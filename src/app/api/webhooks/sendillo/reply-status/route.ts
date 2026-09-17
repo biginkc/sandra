@@ -48,6 +48,44 @@ export const runtime = "nodejs";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
+/**
+ * Reads the request body with a hard BYTE cap enforced while streaming —
+ * never `request.text()` + `.length` (a `.length` check on the decoded
+ * string counts UTF-16 code units, not bytes: a body under the multi-byte
+ * character limit but over the intended byte cap would silently pass).
+ * Mirrors the incremental-read/size-check loop in
+ * ../../../../lib/inbox/reply-provider.ts's own response reader. Cancels
+ * the stream and returns `null` the moment the cap is exceeded, without
+ * ever buffering past it.
+ */
+async function readBoundedBody(request: Request, maxBytes: number): Promise<string | null> {
+  const reader = request.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > maxBytes) {
+        void reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(part.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+}
+
 type ParsedReplyStatus = { externalId: string; terminal: "delivered" | "delivery_failed" };
 
 /**
@@ -86,8 +124,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Messaging provider not configured" }, { status: 503 });
     }
 
-    const rawBody = await request.text();
-    if (rawBody.length > MAX_BODY_BYTES) {
+    const rawBody = await readBoundedBody(request, MAX_BODY_BYTES);
+    if (rawBody === null) {
       return NextResponse.json({ error: "Payload too large" }, { status: 413 });
     }
     const fullUrl = new URL(request.url, `https://${request.headers.get("host") ?? "example.invalid"}`).toString();
