@@ -24,16 +24,35 @@ for i,path in enumerate(sources):
  if i:body=body.replace('\nBEGIN;\n','\n',1)
  parts.append(body)
 # P2 (round 4): every restore-after-mutation below must reinstall the EXACT
-# candidate definition from attempts.sql, never a hand-typed copy that can
-# silently drift from a later round's edit (verify.py's file-hash binding
-# cannot detect an installed-definition mismatch). ATTEMPTS_SQL is read once;
-# every @@RESTORE_*@@ placeholder in `test` below is substituted with the
-# current candidate body extracted straight out of it.
-ATTEMPTS_SQL=(P/'attempts.sql').read_text()
+# candidate definition from the source .sql files, never a hand-typed copy
+# that can silently drift from a later round's edit (verify.py's file-hash
+# binding cannot detect an installed-definition mismatch). ALL_SOURCES_SQL is
+# read once; every @@RESTORE_*@@ placeholder in `test` below is substituted
+# with the current candidate body extracted straight out of it.
+#
+# P7 (round 7, binding): assert_body_matches() below replaces the old
+# assert_installed()'s substring-needle check, which Astra round 6 proved
+# hollow — removing persist()'s null/invalid-kind predicate, or its
+# not_attempted reason-enum predicate, still left the needle strings
+# ('Invalid dispatch result', 'local_not_attempted:') present elsewhere in
+# the body (the object-type check, the evidence assignment), and putting a
+# needle only in a COMMENT also passed. assert_body_matches() instead
+# compares the INSTALLED function's whitespace-normalized body
+# (pg_get_functiondef, read back at runtime — never what we intended to
+# install) against the CANDIDATE's whitespace-normalized body (extracted
+# straight from the source .sql files): any removed, reordered, or
+# comment-relocated code changes the normalized text and trips it, because
+# the WHOLE body must match, not just a substring. See
+# pg_temp.assert_body_matches (installed once, below) for the SQL side.
+ALL_SOURCES_SQL=''.join(s.read_text() for s in sources)
 def real_fn(qualified_name):
- pat=re.compile(r'CREATE FUNCTION\s+'+re.escape(qualified_name)+r'\(.*?\nEND \$\$;\n',re.DOTALL)
- m=pat.search(ATTEMPTS_SQL)
- if not m:raise RuntimeError(f'real_fn: could not extract {qualified_name} from attempts.sql — restore aborted')
+ # Terminator is the first bare "$$;" line after the opening — matches both
+ # a plpgsql body ("...END $$;\n") and a bodyless SQL-language body
+ # ("...$$;\n", no END keyword — e.g. recipient_limit()/require_admission()
+ # style functions living outside attempts.sql).
+ pat=re.compile(r'CREATE FUNCTION\s+'+re.escape(qualified_name)+r'\(.*?\$\$;\n',re.DOTALL)
+ m=pat.search(ALL_SOURCES_SQL)
+ if not m:raise RuntimeError(f'real_fn: could not extract {qualified_name} from source files — restore aborted')
  return 'CREATE OR REPLACE FUNCTION '+m.group(0)[len('CREATE FUNCTION '):]
 def real_fn_minus_edge(qualified_name,edge_marker):
  """Same as real_fn, but with the single CASE line containing edge_marker
@@ -44,6 +63,54 @@ def real_fn_minus_edge(qualified_name,edge_marker):
  kept=[l for l in lines if edge_marker not in l]
  if len(kept)==len(lines):raise RuntimeError(f'real_fn_minus_edge: {edge_marker!r} not found in {qualified_name}')
  return '\n'.join(kept)
+def _extract_body(definition_sql):
+ """Whitespace-normalized text between a dollar-quoted body's delimiters,
+ from either a CREATE [OR REPLACE] FUNCTION statement (every real candidate
+ in this codebase uses the bare '$$' tag) or a pg_get_functiondef()
+ readback (Postgres always tags the body '$function$', regardless of the
+ tag used at CREATE time — verified empirically against this Postgres
+ version). Collapsing whitespace runs to one space and stripping means
+ only a SEMANTIC difference changes the result: removed/reordered code, or
+ a needle relocated into a comment, both change it, because comments are
+ NOT stripped (prosrc keeps them verbatim) — a needle-in-a-comment
+ mutation still shows up as a body difference against the real candidate."""
+ m=re.search(r'AS\s+(\$[A-Za-z0-9_]*\$)(.*)\1',definition_sql,re.DOTALL)
+ if not m:raise RuntimeError(f'_extract_body: no dollar-quoted body found in: {definition_sql[:200]!r}')
+ return re.sub(r'\s+',' ',m.group(2)).strip()
+def candidate_body(qualified_name):
+ """Ground truth for assert_body_matches: qualified_name's own body, read
+ straight from the source .sql files (never pg_get_functiondef, never
+ hand-typed)."""
+ return _extract_body(real_fn(qualified_name))
+def _pg_dquote(text):
+ """Dollar-quote text with a tag guaranteed absent from it."""
+ tag='body';i=0
+ while f'${tag}{i}$' in text:i+=1
+ t=f'{tag}{i}'
+ return f'${t}$'+text+f'${t}$'
+def assert_call(qualified_name):
+ """PL/pgSQL statement calling the pg_temp.assert_body_matches checker
+ (defined below, once, ahead of the DO block) with this function's
+ candidate body embedded as a dollar-quoted literal."""
+ return f"PERFORM pg_temp.assert_body_matches('{qualified_name}',{_pg_dquote(candidate_body(qualified_name))});\n"
+# Installed once, ahead of the DO $test$ block, in the SAME session/
+# transaction (pg_temp persists for the session; this whole run is one
+# psql invocation ending in ROLLBACK). See the P7 docstring above for why
+# a full-body comparison, not a substring needle, is required.
+ASSERT_BODY_MATCHES_FN=r"""
+CREATE FUNCTION pg_temp.assert_body_matches(qualified_name text,expected_body text) RETURNS void LANGUAGE plpgsql AS $checker$
+DECLARE installed_body text;
+BEGIN
+ installed_body:=substring(pg_get_functiondef(qualified_name::regproc) FROM '\$function\$(.*)\$function\$');
+ IF installed_body IS NULL THEN
+  RAISE EXCEPTION 'assert_body_matches: could not extract an installed body for % (pg_get_functiondef tag assumption broken?)',qualified_name;
+ END IF;
+ installed_body:=btrim(regexp_replace(installed_body,'\s+',' ','g'));
+ IF installed_body<>expected_body THEN
+  RAISE EXCEPTION 'assert_body_matches: % installed body does not match its candidate definition in the source .sql files after restore — stale, hand-inlined, or tampered definition installed instead of the exact candidate',qualified_name;
+ END IF;
+END $checker$;
+"""
 test=r"""
 DO $test$
 DECLARE
@@ -502,7 +569,11 @@ BEGIN
    VALUES(o,gen_random_uuid(),op_id,prep_id,(item18->>'id')::uuid,1,(item18->'recipient'->>'contactId')::uuid,item18->'recipient'->>'from',item18->'recipient'->>'to',inbox_reply_send.body_hash(item18->'recipient'->>'renderedBody',item18->'recipient'->>'from',item18->'recipient'->>'to'),'approved');
   EXCEPTION WHEN raise_exception THEN IF SQLERRM='INBOX_REPLY_RECIPIENT_LIMIT' THEN failed:=true;ELSE RAISE;END IF;END;
   IF NOT failed THEN RAISE EXCEPTION 'Recipient limit not enforced at insert (%+1 distinct items admitted)',current_distinct;END IF;
-  CREATE OR REPLACE FUNCTION inbox_reply_preparation.recipient_limit() RETURNS integer LANGUAGE sql IMMUTABLE SET search_path='' AS $$ SELECT 50 $$;
+@@RESTORE_RECIPIENT_LIMIT@@
+  -- P7 (round 7): previously a hand-typed literal restore with NO
+  -- installed-definition check at all (Astra round-6 finding) — assert the
+  -- readback matches the exact candidate before trusting the cap again.
+@@ASSERT_RECIPIENT_LIMIT@@
   -- Now that the real 50-cap is restored, the same insert succeeds.
   INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state)
    VALUES(o,gen_random_uuid(),op_id,prep_id,(item18->>'id')::uuid,1,(item18->'recipient'->>'contactId')::uuid,item18->'recipient'->>'from',item18->'recipient'->>'to',inbox_reply_send.body_hash(item18->'recipient'->>'renderedBody',item18->'recipient'->>'from',item18->'recipient'->>'to'),'approved')
@@ -583,12 +654,10 @@ END $mut$;
  -- Resolve item19's wrongly-dispatched attempt so it stops holding the
  -- sender lock, then restore the real start_dispatch.
  PERFORM inbox_reply_send.persist(o,att19,(a->>'token')::uuid,jsonb_build_object('kind','not_attempted','reason','cancelled_before_dispatch'));
- -- R5 meta-test: prove the assert_installed-equivalent guard immediately
- -- below actually catches a stale restore, not merely that a correct
- -- restore passes it. Stage a literal round-3-shape start_dispatch (no
- -- IR001 savepoint recheck, no isolation assert at all — this guard did
- -- not exist before round 5, and a stale restore here previously shipped
- -- silently) and confirm the SAME guard text raises.
+ -- R7 control #3: prove assert_body_matches immediately below actually
+ -- catches a stale restore, not merely that a correct restore passes it.
+ -- Stage a literal round-3-shape start_dispatch (no IR001 savepoint
+ -- recheck, no isolation assert at all) and confirm the SAME check raises.
  CREATE OR REPLACE FUNCTION inbox_reply_send.start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $stale$
 DECLARE row inbox_reply_send.attempts;frozen jsonb;recomputed text;token uuid;
 BEGIN
@@ -609,22 +678,19 @@ BEGIN
 END $stale$;
  failed:=false;
  BEGIN
-  IF pg_get_functiondef('inbox_reply_send.start_dispatch'::regproc) NOT LIKE '%IR001%' OR pg_get_functiondef('inbox_reply_send.start_dispatch'::regproc) NOT LIKE '%INBOX_REPLY_UNSUPPORTED_ISOLATION%' THEN
-   RAISE EXCEPTION 'assert_installed: start_dispatch is missing IR001 or INBOX_REPLY_UNSUPPORTED_ISOLATION after restore — stale/hand-inlined definition installed instead of the candidate';
-  END IF;
+@@ASSERT_START_DISPATCH@@
  EXCEPTION WHEN raise_exception THEN
-  IF SQLERRM LIKE 'assert_installed:%' THEN failed:=true;ELSE RAISE;END IF;
+  IF SQLERRM LIKE 'assert_body_matches:%' THEN failed:=true;ELSE RAISE;END IF;
  END;
- IF NOT failed THEN RAISE EXCEPTION 'R5 meta-test: assert_installed did not trip on a staged stale (round-3-shape) start_dispatch restore — the guard is a no-op';END IF;
+ IF NOT failed THEN RAISE EXCEPTION 'R7 control #3: assert_body_matches did not trip on a staged stale (round-3-shape) start_dispatch restore — the guard is a no-op';END IF;
  @@RESTORE_START_DISPATCH@@
- -- P2/R5 assert_installed equivalent: read back what is ACTUALLY installed
- -- (not what we intended to install) and fail loudly if either the R3-1
- -- post-marker savepoint recheck (IR001) or the R4/R5 isolation assert is
- -- missing — a stale round-3-shape restore here previously let the whole
- -- suite pass silently (Codex round-5 finding).
- IF pg_get_functiondef('inbox_reply_send.start_dispatch'::regproc) NOT LIKE '%IR001%' OR pg_get_functiondef('inbox_reply_send.start_dispatch'::regproc) NOT LIKE '%INBOX_REPLY_UNSUPPORTED_ISOLATION%' THEN
-  RAISE EXCEPTION 'assert_installed: start_dispatch is missing IR001 or INBOX_REPLY_UNSUPPORTED_ISOLATION after restore — stale/hand-inlined definition installed instead of the candidate';
- END IF;
+ -- P7/R5 real assert: read back what is ACTUALLY installed (not what we
+ -- intended to install) and fail loudly on ANY deviation from the exact
+ -- candidate body — full-body comparison, not a substring needle (Astra
+ -- round-6 finding: a needle check can be defeated by deleting the
+ -- validated predicate while leaving the needle text present elsewhere, or
+ -- moving it into a comment; see run.py's module-level P7 docstring).
+@@ASSERT_START_DISPATCH@@
  INSERT INTO sms_phone_suppressions(org_id,channel,phone_e164,source) VALUES(o,'sms',item20->'recipient'->>'to','owned_prd_test');
  INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state)
   VALUES(o,gen_random_uuid(),op_id,prep_id,(item20->>'id')::uuid,1,(item20->'recipient'->>'contactId')::uuid,item20->'recipient'->>'from',item20->'recipient'->>'to',inbox_reply_send.body_hash(item20->'recipient'->>'renderedBody',item20->'recipient'->>'from',item20->'recipient'->>'to'),'approved')
@@ -652,12 +718,11 @@ END $stale$;
  CREATE OR REPLACE FUNCTION inbox_reply_review.require_admission() RETURNS void LANGUAGE plpgsql SET search_path='' AS $mut$ BEGIN END $mut$;
  b:=inbox_reply_send.claim(o,att3);
  IF b->>'kind' IS NULL THEN RAISE EXCEPTION 'Mutation did not actually bypass admission: %',b;END IF;
- CREATE OR REPLACE FUNCTION inbox_reply_review.require_admission() RETURNS void LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE admitted boolean;
-BEGIN
- SELECT enabled INTO admitted FROM inbox_reply_review.admission WHERE singleton FOR SHARE;
- IF admitted IS DISTINCT FROM true THEN RAISE EXCEPTION 'INBOX_REPLIES_NOT_ENABLED' USING ERRCODE='55000';END IF;
-END $$;
+@@RESTORE_REQUIRE_ADMISSION@@
+ -- P7 (round 7): previously a hand-typed literal restore with NO
+ -- installed-definition check at all (Astra round-6 finding) — assert the
+ -- readback matches the exact candidate before trusting admission gating.
+@@ASSERT_REQUIRE_ADMISSION@@
  failed:=false;BEGIN PERFORM inbox_reply_send.claim(o,att3);EXCEPTION WHEN object_not_in_prerequisite_state THEN IF SQLERRM='INBOX_REPLIES_NOT_ENABLED' THEN failed:=true;ELSE RAISE;END IF;END;
  IF NOT failed THEN RAISE EXCEPTION 'Guard not actually restored (admission)';END IF;
  UPDATE inbox_reply_review.admission SET enabled=true WHERE singleton;
@@ -721,14 +786,96 @@ BEGIN
 END $mut$;
   b:=inbox_reply_send.persist(o,att21,gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','PROV-WRONG-TOKEN'));
   IF b->>'state'<>'provider_accepted' THEN RAISE EXCEPTION 'Mutation did not actually drop token equality: %',b;END IF;
-  -- R6 meta-test: prove the assert_installed-equivalent guard immediately
-  -- below actually catches a stale restore, not merely that a correct
-  -- restore passes it. Stage a literal round-3-shape persist() (no
-  -- null/missing-kind rejection, no not_attempted evidence-enum bounding —
-  -- this is the exact B1/B2 defect the candidate closes) and confirm the
-  -- SAME guard text raises. Before round 6 this restore site had no
-  -- assert_installed readback at all, so a stale definition here passed
-  -- the whole suite silently (Codex Astra round-5 finding).
+  -- R7 control #1 (Astra round-6 finding): stage a persist() with the
+  -- null/invalid-kind predicate AND the not_attempted reason-enum predicate
+  -- BOTH removed, while leaving the needle strings ('Invalid dispatch
+  -- result', 'local_not_attempted:') present elsewhere in the body (the
+  -- object-type check, the evidence assignment) — exactly the shape that
+  -- defeated the old substring-needle assert_installed(). Confirm
+  -- assert_body_matches trips on it (a substring check would NOT have).
+  CREATE OR REPLACE FUNCTION inbox_reply_send.persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $ctrl1$
+DECLARE row inbox_reply_send.attempts;kind text;reference text;reason text;v bigint;
+BEGIN
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR token IS NULL OR row.dispatch_token IS DISTINCT FROM token THEN RAISE EXCEPTION 'INBOX_REPLY_STALE_TOKEN';END IF;
+ -- R7 CONTROL #1: the object-type check below is left intact (needle
+ -- 'Invalid dispatch result' still present), but the null/invalid-kind
+ -- predicate that ALSO used to raise that same text has been deleted.
+ IF jsonb_typeof(result) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION 'Invalid dispatch result';END IF;
+ kind:=result->>'kind';
+ IF row.state='dispatch_started' THEN
+  IF kind='accepted' THEN
+   reference:=result->>'externalId';
+   IF reference IS NULL OR btrim(reference)='' OR octet_length(reference)>512 THEN RAISE EXCEPTION 'Invalid provider reference';END IF;
+   UPDATE inbox_reply_send.attempts SET state='provider_accepted',provider_reference=reference,provider_status=left(result->>'status',128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','provider_accepted','receipt_version',v::text);
+  ELSIF kind='uncertain' THEN
+   reason:=coalesce(result->>'reason','unknown');
+   UPDATE inbox_reply_send.attempts SET state='uncertain',evidence=left(reason,128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','uncertain','receipt_version',v::text);
+  ELSIF kind='not_attempted' THEN
+   -- R7 CONTROL #1: the reason-enum predicate has been deleted, but the
+   -- evidence assignment below (still 'local_not_attempted:') is untouched.
+   reason:=result->>'reason';
+   UPDATE inbox_reply_send.attempts SET state='confirmed_not_submitted',evidence=left('local_not_attempted:'||reason,128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','confirmed_not_submitted','receipt_version',v::text);
+  END IF;
+ END IF;
+ RAISE EXCEPTION 'unused in this proof';
+END $ctrl1$;
+  failed:=false;
+  BEGIN
+@@ASSERT_PERSIST@@
+  EXCEPTION WHEN raise_exception THEN
+   IF SQLERRM LIKE 'assert_body_matches:%' THEN failed:=true;ELSE RAISE;END IF;
+  END;
+  IF NOT failed THEN RAISE EXCEPTION 'R7 control #1: assert_body_matches did not trip on persist with validation removed but needles present elsewhere — the guard is hollow like the substring check it replaces';END IF;
+
+  -- R7 control #2 (Astra round-6 finding): stage a persist() with BOTH
+  -- predicates removed AND the needle strings present ONLY inside a
+  -- comment, never in executable code. Confirm assert_body_matches still
+  -- trips (a substring check would NOT have — this is the literal
+  -- needle-in-a-comment defeat Astra demonstrated).
+  CREATE OR REPLACE FUNCTION inbox_reply_send.persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $ctrl2$
+DECLARE row inbox_reply_send.attempts;kind text;reference text;reason text;v bigint;
+BEGIN
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR token IS NULL OR row.dispatch_token IS DISTINCT FROM token THEN RAISE EXCEPTION 'INBOX_REPLY_STALE_TOKEN';END IF;
+ -- R7 CONTROL #2 (meta-test only): both validating predicates removed
+ -- entirely; the needle text 'Invalid dispatch result' and
+ -- 'local_not_attempted:' appear ONLY in this comment, never in executable
+ -- code, proving the checker cannot be fooled by a comment-only needle.
+ kind:=result->>'kind';
+ IF row.state='dispatch_started' THEN
+  IF kind='accepted' THEN
+   reference:=result->>'externalId';
+   IF reference IS NULL OR btrim(reference)='' OR octet_length(reference)>512 THEN RAISE EXCEPTION 'Invalid provider reference';END IF;
+   UPDATE inbox_reply_send.attempts SET state='provider_accepted',provider_reference=reference,provider_status=left(result->>'status',128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','provider_accepted','receipt_version',v::text);
+  ELSIF kind='uncertain' THEN
+   reason:=coalesce(result->>'reason','unknown');
+   UPDATE inbox_reply_send.attempts SET state='uncertain',evidence=left(reason,128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','uncertain','receipt_version',v::text);
+  ELSIF kind='not_attempted' THEN
+   reason:=result->>'reason';
+   UPDATE inbox_reply_send.attempts SET state='confirmed_not_submitted',evidence=left(coalesce(reason,'unknown'),128),receipt_version=receipt_version+1 WHERE org_id=o AND id=attempt_id RETURNING receipt_version INTO v;
+   RETURN jsonb_build_object('state','confirmed_not_submitted','receipt_version',v::text);
+  END IF;
+ END IF;
+ RAISE EXCEPTION 'unused in this proof';
+END $ctrl2$;
+  failed:=false;
+  BEGIN
+@@ASSERT_PERSIST@@
+  EXCEPTION WHEN raise_exception THEN
+   IF SQLERRM LIKE 'assert_body_matches:%' THEN failed:=true;ELSE RAISE;END IF;
+  END;
+  IF NOT failed THEN RAISE EXCEPTION 'R7 control #2: assert_body_matches did not trip on persist with the needles moved into a comment only — the guard is hollow like the substring check it replaces';END IF;
+
+  -- R7 control #3 (was the round-6 "R6 meta-test"): a literal round-3-shape
+  -- persist() (no null/missing-kind rejection, no not_attempted
+  -- evidence-enum bounding — the exact B1/B2 defect the candidate closes,
+  -- and no needle text anywhere) must still trip the checker.
   CREATE OR REPLACE FUNCTION inbox_reply_send.persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $stale_persist$
 DECLARE row inbox_reply_send.attempts;kind text;reference text;v bigint;
 BEGIN
@@ -749,23 +896,16 @@ BEGIN
 END $stale_persist$;
   failed:=false;
   BEGIN
-   IF pg_get_functiondef('inbox_reply_send.persist'::regproc) NOT LIKE '%Invalid dispatch result%' OR pg_get_functiondef('inbox_reply_send.persist'::regproc) NOT LIKE '%local_not_attempted:%' THEN
-    RAISE EXCEPTION 'assert_installed: persist is missing the Invalid dispatch result null/kind rejection or the local_not_attempted: evidence prefix after restore — stale/hand-inlined definition installed instead of the candidate';
-   END IF;
+@@ASSERT_PERSIST@@
   EXCEPTION WHEN raise_exception THEN
-   IF SQLERRM LIKE 'assert_installed:%' THEN failed:=true;ELSE RAISE;END IF;
+   IF SQLERRM LIKE 'assert_body_matches:%' THEN failed:=true;ELSE RAISE;END IF;
   END;
-  IF NOT failed THEN RAISE EXCEPTION 'R6 meta-test: assert_installed did not trip on a staged stale (round-3-shape) persist restore — the guard is a no-op';END IF;
+  IF NOT failed THEN RAISE EXCEPTION 'R7 control #3: assert_body_matches did not trip on a staged stale (round-3-shape) persist restore — the guard is a no-op';END IF;
 @@RESTORE_PERSIST@@
-  -- P2/R6 assert_installed equivalent: read back what is ACTUALLY installed
-  -- (not what we intended to install) and fail loudly if either the B1
-  -- null/missing-kind rejection ('Invalid dispatch result') or the B2
-  -- not_attempted evidence-enum bounding ('local_not_attempted:') is
-  -- missing — a stale round-3-shape restore here previously let the whole
-  -- suite pass silently (Codex Astra round-5 finding).
-  IF pg_get_functiondef('inbox_reply_send.persist'::regproc) NOT LIKE '%Invalid dispatch result%' OR pg_get_functiondef('inbox_reply_send.persist'::regproc) NOT LIKE '%local_not_attempted:%' THEN
-   RAISE EXCEPTION 'assert_installed: persist is missing the Invalid dispatch result null/kind rejection or the local_not_attempted: evidence prefix after restore — stale/hand-inlined definition installed instead of the candidate';
-  END IF;
+  -- P7/R6 real assert: read back what is ACTUALLY installed (not what we
+  -- intended to install) and fail loudly on ANY deviation from the exact
+  -- candidate body after the real restore.
+@@ASSERT_PERSIST@@
   failed:=false;BEGIN PERFORM inbox_reply_send.persist(o,att21,gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','PROV-SHOULD-FAIL'));EXCEPTION WHEN raise_exception THEN IF SQLERRM='INBOX_REPLY_STALE_TOKEN' THEN failed:=true;ELSE RAISE;END IF;END;
   IF NOT failed THEN RAISE EXCEPTION 'Restored persist() still accepts a wrong token';END IF;
   RAISE NOTICE '#9 token-equality mutation (dropped, then restored) OK';
@@ -809,10 +949,10 @@ END $mut$;
   failed:=false;BEGIN PERFORM inbox_reply_send.start_dispatch(o,att22,(b->>'generation')::bigint);EXCEPTION WHEN raise_exception THEN IF SQLERRM='INBOX_REPLY_STALE_CLAIM' THEN failed:=true;ELSE RAISE;END IF;END;
   IF NOT failed THEN RAISE EXCEPTION 'A lying re-entry produced a second token';END IF;
   IF (SELECT dispatch_token FROM inbox_reply_send.attempts WHERE org_id=o AND id=att22)<>tok22 THEN RAISE EXCEPTION 'dispatch_token changed under the lying mutation';END IF;
-  -- R5 meta-test: prove the assert_installed-equivalent guard immediately
-  -- below actually catches a stale restore. Stage a literal round-3-shape
-  -- claim() (missing the dispatch_started_at IS NULL reclaim guard) and
-  -- confirm the SAME guard text raises before the real restore runs.
+  -- R7 control #3: prove assert_body_matches immediately below actually
+  -- catches a stale restore. Stage a literal round-3-shape claim() (missing
+  -- the dispatch_started_at IS NULL reclaim guard) and confirm the SAME
+  -- check raises before the real restore runs.
   CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $stale$
 DECLARE row inbox_reply_send.attempts;new_generation bigint;
 BEGIN
@@ -834,19 +974,16 @@ BEGIN
 END $stale$;
   failed:=false;
   BEGIN
-   IF pg_get_functiondef('inbox_reply_send.claim'::regproc) NOT LIKE '%dispatch_started_at IS NULL%' THEN
-    RAISE EXCEPTION 'assert_installed: claim is missing the dispatch_started_at IS NULL reclaim guard after restore — stale/hand-inlined definition installed instead of the candidate';
-   END IF;
+@@ASSERT_CLAIM_1@@
   EXCEPTION WHEN raise_exception THEN
-   IF SQLERRM LIKE 'assert_installed:%' THEN failed:=true;ELSE RAISE;END IF;
+   IF SQLERRM LIKE 'assert_body_matches:%' THEN failed:=true;ELSE RAISE;END IF;
   END;
-  IF NOT failed THEN RAISE EXCEPTION 'R5 meta-test: assert_installed did not trip on a staged stale claim restore at CLAIM_1 — the guard is a no-op';END IF;
+  IF NOT failed THEN RAISE EXCEPTION 'R7 control #3: assert_body_matches did not trip on a staged stale claim restore at CLAIM_1 — the guard is a no-op';END IF;
 @@RESTORE_CLAIM_1@@
-  -- P2/R5 assert_installed equivalent (Codex round-5 finding: this restore
-  -- previously had no installed-definition check at all).
-  IF pg_get_functiondef('inbox_reply_send.claim'::regproc) NOT LIKE '%dispatch_started_at IS NULL%' THEN
-   RAISE EXCEPTION 'assert_installed: claim is missing the dispatch_started_at IS NULL reclaim guard after restore — stale/hand-inlined definition installed instead of the candidate';
-  END IF;
+  -- P7/R5 real assert (Codex round-5 finding: this restore previously had
+  -- no installed-definition check at all) — full-body comparison against
+  -- the exact candidate, not a substring needle.
+@@ASSERT_CLAIM_1@@
   b:=inbox_reply_send.claim(o,att22);
   IF b->>'kind'<>'existing' OR b->>'state'<>'uncertain' THEN RAISE EXCEPTION 'Restored claim() re-entry mismatch: %',b;END IF;
   a:=inbox_reply_send.persist(o,att22,tok22,jsonb_build_object('kind','accepted','externalId','PROV-22'));
@@ -888,12 +1025,14 @@ BEGIN
 END $mut$;
  b:=inbox_reply_send.claim(o,att23);
  IF b->>'kind'<>'claimed' OR b->>'generation'<>'3' THEN RAISE EXCEPTION 'item23 reclaim under mutated predicate mismatch: %',b;END IF;
- -- R5 meta-test: prove the assert_installed-equivalent guard immediately
- -- below actually catches a stale restore. The claim() installed above
- -- (the #3 mutation) still contains the needle text in its own MUTATION
- -- comment, so it does NOT trip the guard — stage a clean round-3-shape
- -- claim() (guard code actually absent, no comment either) and confirm
- -- the SAME guard text raises against it before the real restore runs.
+ -- R7 control #3: prove assert_body_matches immediately below actually
+ -- catches a stale restore. The claim() installed above (the #3 mutation)
+ -- still contains the needle text in its own MUTATION comment — a plain
+ -- needle check would have missed it, which is exactly why full-body
+ -- comparison replaces it — but its body is not the candidate body either,
+ -- so assert_body_matches trips regardless of needles. Stage a clean
+ -- round-3-shape claim() (guard code actually absent) too, and confirm the
+ -- SAME check raises against it before the real restore runs.
  CREATE OR REPLACE FUNCTION inbox_reply_send.claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $stale2$
 DECLARE row inbox_reply_send.attempts;new_generation bigint;
 BEGIN
@@ -915,19 +1054,16 @@ BEGIN
 END $stale2$;
  failed:=false;
  BEGIN
-  IF pg_get_functiondef('inbox_reply_send.claim'::regproc) NOT LIKE '%dispatch_started_at IS NULL%' THEN
-   RAISE EXCEPTION 'assert_installed: claim is missing the dispatch_started_at IS NULL reclaim guard after restore — stale/hand-inlined definition installed instead of the candidate';
-  END IF;
+@@ASSERT_CLAIM_2@@
  EXCEPTION WHEN raise_exception THEN
-  IF SQLERRM LIKE 'assert_installed:%' THEN failed:=true;ELSE RAISE;END IF;
+  IF SQLERRM LIKE 'assert_body_matches:%' THEN failed:=true;ELSE RAISE;END IF;
  END;
- IF NOT failed THEN RAISE EXCEPTION 'R5 meta-test: assert_installed did not trip on the still-staged stale claim restore at CLAIM_2 — the guard is a no-op';END IF;
+ IF NOT failed THEN RAISE EXCEPTION 'R7 control #3: assert_body_matches did not trip on the still-staged stale claim restore at CLAIM_2 — the guard is a no-op';END IF;
 @@RESTORE_CLAIM_2@@
- -- P2/R5 assert_installed equivalent (Codex round-5 finding: this was a
- -- hand-typed literal restore with no installed-definition check at all).
- IF pg_get_functiondef('inbox_reply_send.claim'::regproc) NOT LIKE '%dispatch_started_at IS NULL%' THEN
-  RAISE EXCEPTION 'assert_installed: claim is missing the dispatch_started_at IS NULL reclaim guard after restore — stale/hand-inlined definition installed instead of the candidate';
- END IF;
+ -- P7/R5 real assert (Codex round-5 finding: this was a hand-typed literal
+ -- restore with no installed-definition check at all) — full-body
+ -- comparison against the exact candidate, not a substring needle.
+@@ASSERT_CLAIM_2@@
  RAISE NOTICE '#3 dispatch_started_at-clause mutation (confirmed no-op under the D-5 CHECK; restored) OK';
 
  -- #4: remove ONE trigger edge (uncertain->provider_accepted), not the
@@ -949,14 +1085,14 @@ END $stale2$;
   IF NOT failed THEN RAISE EXCEPTION 'Removing the uncertain->provider_accepted edge did not block persist()';END IF;
   IF (SELECT state FROM inbox_reply_send.attempts WHERE org_id=o AND id=att24)<>'uncertain' THEN RAISE EXCEPTION 'item24 row mutated despite the blocked trigger edge';END IF;
 @@RESTORE_GUARD_ATTEMPT@@
-  -- P2 (round 4/5): assert_installed equivalent — read back what is
-  -- ACTUALLY installed after the restore (not what we intended to install)
-  -- and fail loudly if the R3-2b window-expiry edge or the R5 marker-edge
-  -- isolation assert is missing, so a stale/hand-inlined restore can never
-  -- silently ship a guard_attempt() that is missing a later round's fix.
-  IF pg_get_functiondef('inbox_reply_send.guard_attempt'::regproc) NOT LIKE '%INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER%' OR pg_get_functiondef('inbox_reply_send.guard_attempt'::regproc) NOT LIKE '%INBOX_REPLY_UNSUPPORTED_ISOLATION%' THEN
-   RAISE EXCEPTION 'assert_installed: guard_attempt is missing INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER or INBOX_REPLY_UNSUPPORTED_ISOLATION after restore — stale/hand-inlined definition installed instead of the candidate';
-  END IF;
+  -- P7 (round 4/5/7): read back what is ACTUALLY installed after the
+  -- restore (not what we intended to install) and fail loudly on ANY
+  -- deviation from the exact candidate body — full-body comparison, not a
+  -- substring needle, so a stale/hand-inlined restore can never silently
+  -- ship a guard_attempt() missing a later round's fix, and a needle
+  -- relocated into a comment (or left elsewhere after its predicate was
+  -- deleted) cannot slip past this check either.
+@@ASSERT_GUARD_ATTEMPT@@
   a:=inbox_reply_send.persist(o,att24,tok24,jsonb_build_object('kind','accepted','externalId','PROV-24'));
   IF a->>'state'<>'provider_accepted' THEN RAISE EXCEPTION 'item24 final persist mismatch after trigger restore: %',a;END IF;
   RAISE NOTICE '#4 single-edge trigger mutation (uncertain->provider_accepted removed, then restored) OK';
@@ -967,19 +1103,32 @@ END $test$;
 
 ROLLBACK;
 """
-# P2 (round 4): substitute every @@...@@ restore/mutate placeholder with the
-# EXACT candidate definition re-extracted from attempts.sql at run time —
-# never a hand-typed copy baked into the `test` string above, which could
-# silently drift from a later round's edit without this script ever
-# noticing (see the module docstring comment above ATTEMPTS_SQL).
+# P2 (round 4): substitute every @@RESTORE_*@@/@@MUTATE_*@@ placeholder with
+# the EXACT candidate definition re-extracted from the source .sql files at
+# run time — never a hand-typed copy baked into the `test` string above,
+# which could silently drift from a later round's edit without this script
+# ever noticing (see the module docstring comment above ALL_SOURCES_SQL).
+# P7 (round 7): every @@ASSERT_*@@ placeholder is substituted with a call to
+# the SAME assert_body_matches() checker, so every restore site — including
+# recipient_limit and require_admission, which previously had none — is
+# verified against its exact candidate body, not a substring needle.
 test=test.replace('@@RESTORE_START_DISPATCH@@',real_fn('inbox_reply_send.start_dispatch'))
+test=test.replace('@@ASSERT_START_DISPATCH@@',assert_call('inbox_reply_send.start_dispatch'))
 test=test.replace('@@RESTORE_PERSIST@@',real_fn('inbox_reply_send.persist'))
+test=test.replace('@@ASSERT_PERSIST@@',assert_call('inbox_reply_send.persist'))
 test=test.replace('@@RESTORE_CLAIM_1@@',real_fn('inbox_reply_send.claim'))
+test=test.replace('@@ASSERT_CLAIM_1@@',assert_call('inbox_reply_send.claim'))
 test=test.replace('@@RESTORE_CLAIM_2@@',real_fn('inbox_reply_send.claim'))
+test=test.replace('@@ASSERT_CLAIM_2@@',assert_call('inbox_reply_send.claim'))
 test=test.replace('@@MUTATE_GUARD_ATTEMPT_MINUS_EDGE@@',real_fn_minus_edge('inbox_reply_send.guard_attempt',"uncertain' AND NEW.state='provider_accepted'"))
 test=test.replace('@@RESTORE_GUARD_ATTEMPT@@',real_fn('inbox_reply_send.guard_attempt'))
+test=test.replace('@@ASSERT_GUARD_ATTEMPT@@',assert_call('inbox_reply_send.guard_attempt'))
+test=test.replace('@@RESTORE_RECIPIENT_LIMIT@@',real_fn('inbox_reply_preparation.recipient_limit'))
+test=test.replace('@@ASSERT_RECIPIENT_LIMIT@@',assert_call('inbox_reply_preparation.recipient_limit'))
+test=test.replace('@@RESTORE_REQUIRE_ADMISSION@@',real_fn('inbox_reply_review.require_admission'))
+test=test.replace('@@ASSERT_REQUIRE_ADMISSION@@',assert_call('inbox_reply_review.require_admission'))
 if '@@' in test:raise RuntimeError('Unsubstituted @@...@@ placeholder remains in test SQL')
-sql(''.join(parts)+test)
+sql(''.join(parts)+ASSERT_BODY_MATCHES_FN+test)
 if sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespace('inbox_reply_preparation') IS NULL AND to_regnamespace('inbox_reply_review') IS NULL AND to_regnamespace('inbox_reply_send') IS NULL")!='t':raise RuntimeError('Rollback failed')
 (P/'evidence.json').write_text(json.dumps({
  'sources':{str(path.relative_to(P.parent)):hashlib.sha256(path.read_bytes()).hexdigest() for path in sources},

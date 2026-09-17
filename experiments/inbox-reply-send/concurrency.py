@@ -54,24 +54,42 @@ sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP 
 sources=[P.parent/'inbox-reply-boundary/context.sql',P.parent/'inbox-reply-preparation/recipient.sql',P.parent/'inbox-reply-preparation/batch.sql',P.parent/'inbox-reply-review/setup.sql',P.parent/'inbox-reply-review/public-api.sql',P/'attempts.sql']
 setup_sql=(P/'concurrency-setup.sql').read_text()
 # P2 (round 4): every "restore" below must reinstall the EXACT candidate
-# definition from attempts.sql, never a hand-inlined copy that can silently
-# drift from a later round's edit (verify.py's file-hash binding cannot
-# detect an installed-definition mismatch — only this harness's own runtime
-# extraction + assert_installed() below can). ATTEMPTS_SQL is read once, and
-# every restore re-slices the current candidate body straight out of it.
-ATTEMPTS_SQL=(P/'attempts.sql').read_text()
+# definition from the source .sql files, never a hand-inlined copy that can
+# silently drift from a later round's edit (verify.py's file-hash binding
+# cannot detect an installed-definition mismatch — only this harness's own
+# runtime extraction + assert_body_matches() below can). ALL_SOURCES_SQL is
+# read once, and every restore re-slices the current candidate body straight
+# out of it.
+#
+# P7 (round 7, binding): assert_body_matches() replaces the old
+# assert_installed()'s substring-needle check. Astra round 6 proved that
+# hollow: removing persist()'s null/invalid-kind predicate, or its
+# not_attempted reason-enum predicate, still left the needle strings
+# ('Invalid dispatch result', 'local_not_attempted:') present elsewhere in
+# the body (the object-type check, the evidence assignment), and a needle
+# relocated into a COMMENT also passed — a substring check cannot tell code
+# from a comment. assert_body_matches() instead compares the INSTALLED
+# function's whitespace-normalized body (pg_get_functiondef, read back at
+# runtime) against the CANDIDATE's whitespace-normalized body (extracted
+# straight from the source .sql files): any removed, reordered, or
+# comment-relocated code changes the normalized text and trips it, because
+# the WHOLE body must match, not just a substring.
+ALL_SOURCES_SQL=''.join(s.read_text() for s in sources)
 def real_fn(qualified_name):
- """Extract the exact `CREATE FUNCTION <qualified_name>(...) ... END $$;` block
- for a function defined in attempts.sql, and return it as a CREATE OR REPLACE
- so it can be reinstalled as a restore. Raises if the function can't be found
- (fail loud, never silently skip a restore)."""
- pat=re.compile(r'CREATE FUNCTION\s+'+re.escape(qualified_name)+r'\(.*?\nEND \$\$;\n',re.DOTALL)
- m=pat.search(ATTEMPTS_SQL)
- if not m:raise RuntimeError(f'real_fn: could not extract {qualified_name} from attempts.sql — restore aborted')
+ """Extract the exact `CREATE FUNCTION <qualified_name>(...) ... $$;` block
+ for a function defined in the source .sql files, and return it as a CREATE
+ OR REPLACE so it can be reinstalled as a restore. Raises if the function
+ can't be found (fail loud, never silently skip a restore). Terminator is
+ the first bare "$$;" line after the opening — matches both a plpgsql body
+ ("...END $$;\n") and a bodyless SQL-language body ("...$$;\n", no END
+ keyword — e.g. recipient_limit(), which lives outside attempts.sql)."""
+ pat=re.compile(r'CREATE FUNCTION\s+'+re.escape(qualified_name)+r'\(.*?\$\$;\n',re.DOTALL)
+ m=pat.search(ALL_SOURCES_SQL)
+ if not m:raise RuntimeError(f'real_fn: could not extract {qualified_name} from source files — restore aborted')
  return 'CREATE OR REPLACE FUNCTION '+m.group(0)[len('CREATE FUNCTION '):]
 def restore_fn(qualified_name):
- """Reinstall the exact candidate definition of qualified_name from
- attempts.sql (never a hand-typed copy)."""
+ """Reinstall the exact candidate definition of qualified_name from the
+ source .sql files (never a hand-typed copy)."""
  sql(real_fn(qualified_name))
 def real_fn_minus_block(qualified_name,start_marker,num_lines):
  """Same as real_fn, but with the num_lines-line block starting at the
@@ -84,17 +102,36 @@ def real_fn_minus_block(qualified_name,start_marker,num_lines):
  if len(idxs)!=1:raise RuntimeError(f'real_fn_minus_block: {start_marker!r} found {len(idxs)} times (expected 1) in {qualified_name}')
  idx=idxs[0]
  return '\n'.join(lines[:idx]+lines[idx+num_lines:])
-def assert_installed(qualified_name,*needles):
- """Runtime guard against a stale restore: read back what's ACTUALLY
- installed (pg_get_functiondef), not what we intended to install, and fail
- loudly if any required needle is absent. Call this immediately before every
- positive-control case that depends on a just-restored function — a
- hand-inlined restore that silently omitted a later round's fix (e.g. R3-2b's
- window-expiry check, or R4's isolation assert) would otherwise let a stale
- positive control pass for the wrong reason."""
- definition=sql(f"SELECT pg_get_functiondef('{qualified_name}'::regproc)")
- for needle in needles:
-  need(needle in definition,f'assert_installed: {qualified_name} is missing {needle!r} after restore — stale/hand-inlined definition installed instead of the candidate')
+def _extract_body(definition_sql):
+ """Whitespace-normalized text between a dollar-quoted body's delimiters,
+ from either a CREATE [OR REPLACE] FUNCTION statement (every real candidate
+ in this codebase uses the bare '$$' tag) or a pg_get_functiondef()
+ readback (Postgres always tags the body '$function$', regardless of the
+ tag used at CREATE time — verified empirically against this Postgres
+ version). Collapsing whitespace runs to one space and stripping means
+ only a SEMANTIC difference changes the result: removed/reordered code, or
+ a needle relocated into a comment, both change it, because comments are
+ NOT stripped (prosrc keeps them verbatim)."""
+ m=re.search(r'AS\s+(\$[A-Za-z0-9_]*\$)(.*)\1',definition_sql,re.DOTALL)
+ if not m:raise RuntimeError(f'_extract_body: no dollar-quoted body found in: {definition_sql[:200]!r}')
+ return re.sub(r'\s+',' ',m.group(2)).strip()
+def candidate_body(qualified_name):
+ """Ground truth for assert_body_matches: qualified_name's own body, read
+ straight from the source .sql files (never pg_get_functiondef, never
+ hand-typed)."""
+ return _extract_body(real_fn(qualified_name))
+def assert_body_matches(qualified_name):
+ """Runtime guard against a stale restore: compare the INSTALLED function's
+ whitespace-normalized body (pg_get_functiondef — never what we intended to
+ install) against the CANDIDATE body extracted straight from the source
+ .sql files. Call this immediately after every restore that a positive
+ control depends on — a hand-inlined restore that silently omitted a later
+ round's fix, reordered logic, or relocated a needle into a comment would
+ otherwise let a stale positive control pass for the wrong reason."""
+ installed_def=sql(f"SELECT pg_get_functiondef('{qualified_name}'::regproc)")
+ installed_body=_extract_body(installed_def)
+ want=candidate_body(qualified_name)
+ need(installed_body==want,f'assert_body_matches: {qualified_name} installed body does not match its candidate definition in the source .sql files after restore — stale, hand-inlined, or tampered definition installed instead of the exact candidate')
 installed=False;org=None;children=[]
 checks=[]
 try:
@@ -184,7 +221,7 @@ END $mut$;""")
  # dispatch_started_at IS NULL reclaim guard is missing, so a stale/hand-
  # inlined restore can never silently ship a claim() missing a later
  # round's fix.
- assert_installed('inbox_reply_send.claim','dispatch_started_at IS NULL')
+ assert_body_matches('inbox_reply_send.claim')
  # Reconfirm the restored guard blocks again on a third fresh row (a7 held
  # in reserve for exactly this).
  wname3='dc-restore-writer-'+str(uuid.uuid4());rname3='dc-restore-reader-'+str(uuid.uuid4())
@@ -277,7 +314,7 @@ END $mut$;""")
  need('"kind": "dispatch"' in dout2,f'#2-mut the stale generation was still rejected — mutation had no effect: {dout2}')
  checks.append(f'#2 mutation: start_dispatch redefined without the generation=g fence — the ORIGINAL stale generation ({stale_g2}) from before a real reclaim ({winning_g2}) wrongly dispatches; restored below')
  restore_fn('inbox_reply_send.start_dispatch')
- assert_installed('inbox_reply_send.start_dispatch','IR001','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+ assert_body_matches('inbox_reply_send.start_dispatch')
  # a5 is now dispatch_started under the mutated function — free the sender
  # (only one attempt may hold dispatch_started at a time, D-6(5)) before any
  # later section needs it.
@@ -459,8 +496,8 @@ END $mut$;""")
  sql(f"SELECT inbox_reply_send.persist('{org}','{att12}','{tok12}',jsonb_build_object('kind','accepted','externalId','PROV-CONC-P12'))")
  restore_fn('inbox_reply_send.item_current')
  restore_fn('inbox_reply_send.start_dispatch')
- assert_installed('inbox_reply_send.item_current','INBOX_REPLY_UNSUPPORTED_ISOLATION')
- assert_installed('inbox_reply_send.start_dispatch','IR001','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+ assert_body_matches('inbox_reply_send.item_current')
+ assert_body_matches('inbox_reply_send.start_dispatch')
 
  # === P2.3 per-operation cap race: two real connections, observed lock-wait.
  # The winner holds the operations row's FOR NO KEY UPDATE lock (acquired
@@ -549,8 +586,13 @@ END $mut$;""")
  need(count_broken=='3',f'P2.3 control expected 3 distinct items to overrun a cap of 2, got {count_broken}')
  checks.append(f'P2.3 positive control: with FOR NO KEY UPDATE removed from the INSERT trigger, two real connections concurrently inserting different items (B, C) into the same operation under a cap of 2 BOTH commit — {count_broken} distinct items admitted, one past the cap — the exact overrun the fix prevents')
  restore_fn('inbox_reply_send.guard_attempt')
- assert_installed('inbox_reply_send.guard_attempt','INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER','INBOX_REPLY_UNSUPPORTED_ISOLATION')
- sql("CREATE OR REPLACE FUNCTION inbox_reply_preparation.recipient_limit() RETURNS integer LANGUAGE sql IMMUTABLE SET search_path='' AS $$ SELECT 50 $$;")
+ assert_body_matches('inbox_reply_send.guard_attempt')
+ # P7 (round 7): previously a hand-typed literal restore with NO
+ # installed-definition check at all (Astra round-6 finding) — restore via
+ # the exact candidate and assert the readback matches before trusting the
+ # real 50-cap again.
+ restore_fn('inbox_reply_preparation.recipient_limit')
+ assert_body_matches('inbox_reply_preparation.recipient_limit')
 
  # === Race#1 (R3-1): the marker UPDATE itself can block on the D-6(5)
  # sender-inflight index; a suppression committing during THAT block must
@@ -664,7 +706,7 @@ END $mut$;""")
  tokYpp=json.loads(outBpp)['token']
  sql(f"SELECT inbox_reply_send.persist('{org}','{attYpp}','{tokYpp}',jsonb_build_object('kind','not_attempted','reason','cancelled_before_dispatch'))")
  restore_fn('inbox_reply_send.start_dispatch')
- assert_installed('inbox_reply_send.start_dispatch','IR001','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+ assert_body_matches('inbox_reply_send.start_dispatch')
 
  # === Race#2 (R3-2/R3-2b): validUntil expiring WHILE start_dispatch is
  # blocked on the head-row lock. Each sub-item's frozen validUntil is
@@ -833,7 +875,7 @@ END $mut$;""")
  # unique_violation are caught), aborting the whole call; the row is left
  # exactly as it was before the call (claimed).
  restore_fn('inbox_reply_send.guard_attempt')
- assert_installed('inbox_reply_send.guard_attempt','INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+ assert_body_matches('inbox_reply_send.guard_attempt')
  item21,conv21=fetch_item(prep_id,21)
  attZ3=insert_attempt(org,op_id,prep_id,item21)
  sql(f"SELECT inbox_reply_send.claim('{org}','{attZ3}',60)")
@@ -854,8 +896,8 @@ END $mut$;""")
  # Restore item_current and start_dispatch to the real (candidate) bodies.
  restore_fn('inbox_reply_send.item_current')
  restore_fn('inbox_reply_send.start_dispatch')
- assert_installed('inbox_reply_send.item_current','INBOX_REPLY_UNSUPPORTED_ISOLATION')
- assert_installed('inbox_reply_send.start_dispatch','IR001','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+ assert_body_matches('inbox_reply_send.item_current')
+ assert_body_matches('inbox_reply_send.start_dispatch')
 
  # === R4 (round 4): the post-marker recheck's fresh-snapshot guarantee only
  # holds under READ COMMITTED. Under REPEATABLE READ/SERIALIZABLE the whole
@@ -997,9 +1039,9 @@ END $mut$;""")
  restore_fn('inbox_reply_send.item_current')
  restore_fn('inbox_reply_send.start_dispatch')
  restore_fn('inbox_reply_send.guard_attempt')
- assert_installed('inbox_reply_send.item_current','INBOX_REPLY_UNSUPPORTED_ISOLATION')
- assert_installed('inbox_reply_send.start_dispatch','IR001','INBOX_REPLY_UNSUPPORTED_ISOLATION')
- assert_installed('inbox_reply_send.guard_attempt','INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+ assert_body_matches('inbox_reply_send.item_current')
+ assert_body_matches('inbox_reply_send.start_dispatch')
+ assert_body_matches('inbox_reply_send.guard_attempt')
  item27,_=fetch_item(prep_id,27);item28,_=fetch_item(prep_id,28)
  attX4d=insert_attempt(org,op_id,prep_id,item27);attY4d=insert_attempt(org,op_id,prep_id,item28)
  sql(f"SELECT inbox_reply_send.claim('{org}','{attX4d}',60)")
@@ -1013,7 +1055,7 @@ END $mut$;""")
  finish(connA4d,'R4d A (rollback)');children=[]
  rowY4d=sql(f"SELECT state,dispatch_started_at IS NULL,dispatch_token IS NULL FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{attY4d}'")
  need(rowY4d=='claimed|t|t',f'R4d: row Y mutated despite the restored isolation assert: {rowY4d}')
- checks.append('R4d (restore): with the candidate item_current()/start_dispatch() reinstalled (via restore_fn, re-extracted from attempts.sql, and confirmed installed via assert_installed), the identical race on a fresh pair is caught again — B raises INBOX_REPLY_UNSUPPORTED_ISOLATION before ever reaching the marker, row untouched; the READ COMMITTED path used by every other check in this file remains unaffected')
+ checks.append('R4d (restore): with the candidate item_current()/start_dispatch() reinstalled (via restore_fn, re-extracted from the source .sql files, and confirmed installed via assert_body_matches\'s full-body comparison), the identical race on a fresh pair is caught again — B raises INBOX_REPLY_UNSUPPORTED_ISOLATION before ever reaching the marker, row untouched; the READ COMMITTED path used by every other check in this file remains unaffected')
 
  # === R5a: start_dispatch's isolation assert must be its FIRST statement,
  # before the FOR UPDATE row lock — proven with a genuine two-connection
@@ -1056,7 +1098,7 @@ END $mut$;""")
  # IMMEDIATELY, without ever attempting the row lock, even while A still
  # holds it.
  restore_fn('inbox_reply_send.start_dispatch')
- assert_installed('inbox_reply_send.start_dispatch','IR001','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+ assert_body_matches('inbox_reply_send.start_dispatch')
  nA5a2='r5a-restore-lockholder-'+str(uuid.uuid4())
  connA5a2=start(f"SET application_name='{nA5a2}';BEGIN;SELECT * FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att29}' FOR UPDATE;SELECT pg_sleep(3);ROLLBACK;");children=[connA5a2]
  wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{nA5a2}' AND wait_event='PgSleep')",'R5a restore lock-holder did not reach sleep')
@@ -1095,7 +1137,7 @@ END $mut$;""")
  tok30m=sql(f"SELECT dispatch_token FROM inbox_reply_send.attempts WHERE org_id='{org}' AND id='{att30}'")
  sql(f"SELECT inbox_reply_send.persist('{org}','{att30}','{tok30m}',jsonb_build_object('kind','not_attempted','reason','cancelled_before_dispatch'))")
  restore_fn('inbox_reply_send.guard_attempt')
- assert_installed('inbox_reply_send.guard_attempt','INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER','INBOX_REPLY_UNSUPPORTED_ISOLATION')
+ assert_body_matches('inbox_reply_send.guard_attempt')
 
  # --- R5b restore: on att29's still-claimed row (left untouched by R5a),
  # the same direct-UPDATE bypass under REPEATABLE READ is rejected again,
