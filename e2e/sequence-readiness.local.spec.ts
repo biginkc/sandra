@@ -8,6 +8,7 @@ import {
 } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 
 import {
   adminClient,
@@ -44,7 +45,13 @@ async function signIn(
   await page.getByLabel("Email").fill(identity.email);
   await page.getByLabel("Password").fill(identity.password);
   await page.getByRole("button", { name: /^sign in$/i }).click();
-  await page.waitForURL(/\/(dashboard|leads|sequences)/, { timeout: 15_000 });
+  await page.waitForURL(/\/(dashboard|leads|sequences)/, {
+    timeout: 45_000,
+    waitUntil: "domcontentloaded",
+  });
+  await expect(
+    page.getByRole("link", { name: "Sequences", exact: true }),
+  ).toBeVisible({ timeout: 10_000 });
 }
 
 async function waitForLoginFormHydration(page: Page): Promise<void> {
@@ -153,6 +160,42 @@ async function gotoLeadPage(page: Page, propertyId: string): Promise<void> {
   // remained pending. DOMContentLoaded is the useful navigation boundary;
   // callers assert the CTA they need before interacting with the page.
   await page.goto(`/leads/${propertyId}`, { waitUntil: "domcontentloaded" });
+  await waitForLeadWidgetHydration(page);
+}
+
+async function waitForLeadWidgetHydration(page: Page): Promise<void> {
+  await page.waitForFunction(
+    () => {
+      const enrollButton = document.querySelector(
+        '[data-testid="enroll-in-sequence-button"]',
+      );
+      return Boolean(
+        enrollButton &&
+          Object.keys(enrollButton).some((key) => key.startsWith("__reactProps")),
+      );
+    },
+    undefined,
+    { timeout: 10_000 },
+  );
+}
+
+async function enrollInSequence(
+  page: Page,
+  sequenceName: string,
+): Promise<void> {
+  await page.getByTestId("enroll-in-sequence-button").click();
+  const option = page.getByRole("button", {
+    name: new RegExp(`^${sequenceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+  });
+  const emptyState = page.getByText(
+    "No active sequences with steps. Ask an admin to create and activate one before enrolling this lead.",
+    { exact: true },
+  );
+  await expect(option.or(emptyState)).toBeVisible({ timeout: 15_000 });
+  if (await emptyState.isVisible()) {
+    throw new Error(`Sequence picker returned no active steps for ${sequenceName}.`);
+  }
+  await option.click({ timeout: 5_000 });
 }
 
 async function clickAndAwaitServerAction(
@@ -184,7 +227,10 @@ async function addStatusStep(page: Page, expectedStepNumber = 1): Promise<void> 
     dialog.getByRole("button", { name: /^add step$/i }),
   );
   await expect(
-    page.getByRole("heading", { name: `Step ${expectedStepNumber}` }),
+    page.getByRole("heading", {
+      name: `Step ${expectedStepNumber}`,
+      exact: true,
+    }),
   ).toBeVisible();
 }
 
@@ -198,7 +244,9 @@ async function addSmsStep(page: Page, body: string): Promise<void> {
     page,
     dialog.getByRole("button", { name: /^add step$/i }),
   );
-  await expect(page.getByRole("heading", { name: "Step 1" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Step 1", exact: true }),
+  ).toBeVisible();
 }
 
 async function enrollmentStatus(
@@ -237,6 +285,13 @@ type BrowserDiagnostics = {
   pageErrors: string[];
   consoleErrors: string[];
   failedRequests: Array<{ method: string; url: string; error: string | null }>;
+  localActionRequests: Array<{ atMs: number; method: string; url: string }>;
+  localActionResponses: Array<{
+    atMs: number;
+    method: string;
+    status: number;
+    url: string;
+  }>;
   failedLocalScriptResponses: Array<{
     method: string;
     status: number;
@@ -253,6 +308,14 @@ type BrowserDiagnostics = {
       reactFiberPresent: boolean;
     } | null;
     createButtonDisabled: boolean | null;
+    enrollmentWidget: {
+      buttonPresent: boolean;
+      buttonDisabled: boolean | null;
+      reactPropsPresent: boolean;
+      pickerVisible: boolean;
+      emptyStateVisible: boolean;
+      optionTexts: string[];
+    };
   };
 };
 
@@ -290,9 +353,12 @@ function installBrowserDiagnostics(page: Page): void {
     pageErrors: [],
     consoleErrors: [],
     failedRequests: [],
+    localActionRequests: [],
+    localActionResponses: [],
     failedLocalScriptResponses: [],
   };
   browserDiagnostics.set(page, diagnostics);
+  const diagnosticsStartedAt = performance.now();
 
   page.on("pageerror", (error) => {
     recordDiagnostic(diagnostics.pageErrors, diagnosticText(error.message));
@@ -311,8 +377,24 @@ function installBrowserDiagnostics(page: Page): void {
         : null,
     });
   });
+  page.on("request", (request) => {
+    if (request.method() !== "POST" || !isLoopbackHttpUrl(request.url())) return;
+    recordDiagnostic(diagnostics.localActionRequests, {
+      atMs: Math.round(performance.now() - diagnosticsStartedAt),
+      method: request.method(),
+      url: diagnosticUrl(request.url()),
+    });
+  });
   page.on("response", (response) => {
     const request = response.request();
+    if (request.method() === "POST" && isLoopbackHttpUrl(response.url())) {
+      recordDiagnostic(diagnostics.localActionResponses, {
+        atMs: Math.round(performance.now() - diagnosticsStartedAt),
+        method: request.method(),
+        status: response.status(),
+        url: diagnosticUrl(response.url()),
+      });
+    }
     if (request.resourceType() !== "script" || response.status() < 400) return;
     if (!isLoopbackHttpUrl(response.url())) return;
     recordDiagnostic(diagnostics.failedLocalScriptResponses, {
@@ -338,6 +420,11 @@ async function attachBrowserDiagnostics(page: Page, testInfo: TestInfo): Promise
       const form = nameInput?.closest("form");
       const submit = form?.querySelector('button[type="submit"]');
       const reactKeys = nameInput ? Object.keys(nameInput) : [];
+      const enrollButton = document.querySelector(
+        '[data-testid="enroll-in-sequence-button"]',
+      );
+      const picker = document.querySelector("div.bg-popover");
+      const pickerText = picker?.textContent ?? "";
       return {
         readyState: document.readyState,
         scriptCount: document.scripts.length,
@@ -356,8 +443,31 @@ async function attachBrowserDiagnostics(page: Page, testInfo: TestInfo): Promise
           : null,
         createButtonDisabled:
           submit instanceof HTMLButtonElement ? submit.disabled : null,
+        enrollmentWidget: {
+          buttonPresent: Boolean(enrollButton),
+          buttonDisabled:
+            enrollButton instanceof HTMLButtonElement
+              ? enrollButton.disabled
+              : null,
+          reactPropsPresent: Boolean(
+            enrollButton &&
+              Object.keys(enrollButton).some((key) =>
+                key.startsWith("__reactProps"),
+              ),
+          ),
+          pickerVisible: Boolean(picker),
+          emptyStateVisible: pickerText.includes("No active sequences with steps"),
+          optionTexts: picker
+            ? Array.from(picker.querySelectorAll("button"))
+                .map((button) => (button.textContent?.trim() ?? "").slice(0, 200))
+                .filter(Boolean)
+                .slice(0, 20)
+            : [],
+        },
       };
     });
+    diagnostics.dom.enrollmentWidget.optionTexts =
+      diagnostics.dom.enrollmentWidget.optionTexts.map(diagnosticText);
   } catch (error) {
     diagnostics.dom = {
       readyState: "unavailable",
@@ -365,6 +475,14 @@ async function attachBrowserDiagnostics(page: Page, testInfo: TestInfo): Promise
       url: { origin: "[unavailable]", path: "[unavailable]" },
       nameInput: null,
       createButtonDisabled: null,
+      enrollmentWidget: {
+        buttonPresent: false,
+        buttonDisabled: null,
+        reactPropsPresent: false,
+        pickerVisible: false,
+        emptyStateVisible: false,
+        optionTexts: [],
+      },
     };
     recordDiagnostic(
       diagnostics.pageErrors,
@@ -473,12 +591,7 @@ test.describe("sequence readiness — local browser contract", () => {
     const { propertyId } = await seedLead(admin, "enroll");
     await gotoLeadPage(page, propertyId);
     await expect(page.getByTestId("enroll-in-sequence-button")).toBeVisible();
-    await page.getByTestId("enroll-in-sequence-button").click();
-    const option = page.getByRole("button", {
-      name: new RegExp(`^${sequenceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
-    });
-    await expect(option).toBeVisible();
-    await option.click();
+    await enrollInSequence(page, sequenceName);
     await expect
       .poll(() => enrollmentStatus(admin, sequenceId, propertyId), {
         timeout: 10_000,
@@ -542,12 +655,7 @@ test.describe("sequence readiness — local browser contract", () => {
 
     await gotoLeadPage(page, propertyId);
     await expect(page.getByTestId("enroll-in-sequence-button")).toBeVisible();
-    await page.getByTestId("enroll-in-sequence-button").click();
-    await page
-      .getByRole("button", {
-        name: new RegExp(`^${sequenceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
-      })
-      .click();
+    await enrollInSequence(page, sequenceName);
     await expect
       .poll(() => enrollmentStatus(admin, sequenceId, propertyId), {
         timeout: 10_000,
