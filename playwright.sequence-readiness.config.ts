@@ -162,7 +162,7 @@ export default defineConfig({
       // The disposable worktree may use a node_modules symlink into the
       // exact-deps cache. Turbopack rejects that target outside its project
       // root; Next documents --webpack as the supported opt-out for dev.
-      command: "npx next dev --webpack -p 3557",
+      command: "npx next dev --webpack --hostname 127.0.0.1 -p 3557",
       url: `${baseURL}/login`,
       name: "sequence-readiness-app",
       timeout: 120_000,

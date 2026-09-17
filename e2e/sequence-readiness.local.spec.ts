@@ -5,6 +5,7 @@ import {
   type Page,
   type TestInfo,
 } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -44,6 +45,27 @@ async function signIn(
   await page.waitForURL(/\/(dashboard|leads|sequences)/, { timeout: 15_000 });
 }
 
+async function waitForSequenceFormHydration(page: Page): Promise<void> {
+  // Next exposes server markup before React attaches controlled-input props.
+  // Poll that bounded host binding instead of sleeping or retrying an action;
+  // if hydration never completes, failure diagnostics capture the DOM state.
+  await page.waitForFunction(
+    () => {
+      const nameInput = Array.from(document.querySelectorAll("input")).find(
+        (input) =>
+          input.labels?.[0]?.textContent?.trim() === "Name" ||
+          input.placeholder.startsWith('e.g. "First touch'),
+      );
+      return Boolean(
+        nameInput &&
+          Object.keys(nameInput).some((key) => key.startsWith("__reactProps")),
+      );
+    },
+    undefined,
+    { timeout: 10_000 },
+  );
+}
+
 async function seedLead(
   admin: ReturnType<typeof adminClient>,
   suffix: string,
@@ -81,6 +103,7 @@ async function seedLead(
 
 async function createSequence(page: Page, name: string): Promise<string> {
   await page.goto("/sequences/new");
+  await waitForSequenceFormHydration(page);
   const nameInput = page.getByLabel("Name");
   const descriptionInput = page.getByLabel("Description");
   const createButton = page.getByRole("button", { name: /^create$/i });
@@ -160,6 +183,18 @@ type BrowserDiagnostics = {
     status: number;
     url: string;
   }>;
+  dom?: {
+    readyState: string;
+    scriptCount: number;
+    url: { origin: string; path: string };
+    nameInput: {
+      propertyValue: string;
+      attributeValue: string | null;
+      reactPropsPresent: boolean;
+      reactFiberPresent: boolean;
+    } | null;
+    createButtonDisabled: boolean | null;
+  };
 };
 
 const browserDiagnostics = new WeakMap<Page, BrowserDiagnostics>();
@@ -233,8 +268,59 @@ async function attachBrowserDiagnostics(page: Page, testInfo: TestInfo): Promise
   if (testInfo.status === testInfo.expectedStatus) return;
   const diagnostics = browserDiagnostics.get(page);
   if (!diagnostics) return;
+
+  try {
+    diagnostics.dom = await page.evaluate(() => {
+      const nameInput = Array.from(document.querySelectorAll("input")).find(
+        (input) =>
+          input.labels?.[0]?.textContent?.trim() === "Name" ||
+          input.placeholder.startsWith('e.g. "First touch'),
+      );
+      const form = nameInput?.closest("form");
+      const submit = form?.querySelector('button[type="submit"]');
+      const reactKeys = nameInput ? Object.keys(nameInput) : [];
+      return {
+        readyState: document.readyState,
+        scriptCount: document.scripts.length,
+        url: { origin: location.origin, path: location.pathname },
+        nameInput: nameInput
+          ? {
+              propertyValue: nameInput.value.slice(0, 200),
+              attributeValue: nameInput.getAttribute("value")?.slice(0, 200) ?? null,
+              reactPropsPresent: reactKeys.some((key) =>
+                key.startsWith("__reactProps"),
+              ),
+              reactFiberPresent: reactKeys.some((key) =>
+                key.startsWith("__reactFiber"),
+              ),
+            }
+          : null,
+        createButtonDisabled:
+          submit instanceof HTMLButtonElement ? submit.disabled : null,
+      };
+    });
+  } catch (error) {
+    diagnostics.dom = {
+      readyState: "unavailable",
+      scriptCount: 0,
+      url: { origin: "[unavailable]", path: "[unavailable]" },
+      nameInput: null,
+      createButtonDisabled: null,
+    };
+    recordDiagnostic(
+      diagnostics.pageErrors,
+      `diagnostic DOM capture failed: ${diagnosticText(
+        error instanceof Error ? error.message : String(error),
+      )}`,
+    );
+  }
+
+  const body = JSON.stringify(diagnostics, null, 2);
+  const outputPath = testInfo.outputPath("browser-diagnostics.json");
+  await writeFile(outputPath, body, "utf8");
+  process.stderr.write(`[sequence-readiness-browser-diagnostics] ${body}\n`);
   await testInfo.attach("browser-diagnostics", {
-    body: JSON.stringify(diagnostics, null, 2),
+    path: outputPath,
     contentType: "application/json",
   });
 }
