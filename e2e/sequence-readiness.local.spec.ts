@@ -187,14 +187,10 @@ async function enrollInSequence(
   const option = page.getByRole("button", {
     name: new RegExp(`^${sequenceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
   });
-  const emptyState = page.getByText(
-    "No active sequences with steps. Ask an admin to create and activate one before enrolling this lead.",
-    { exact: true },
-  );
-  await expect(option.or(emptyState)).toBeVisible({ timeout: 15_000 });
-  if (await emptyState.isVisible()) {
-    throw new Error(`Sequence picker returned no active steps for ${sequenceName}.`);
-  }
+  // The widget renders its empty-state copy while loadSequences() is still
+  // pending because the initial sequences state is empty. Wait for the
+  // requested option instead; failure diagnostics retain the picker state.
+  await expect(option).toBeVisible({ timeout: 15_000 });
   await option.click({ timeout: 5_000 });
 }
 
