@@ -50,6 +50,37 @@ test('browser-only mode requires browser acceptance and skips Vitest', async () 
   assert.match(source, /testLane:[\s\S]*'browser-only'/);
 });
 
+test('sequence mutation harness forwards only the approved image registry override', async () => {
+  const source = await readFile(path.join(root, 'scripts/run-sequence-reliability-mutations.mjs'), 'utf8');
+  assert.match(source, /const imageRegistry = process\.env\.SUPABASE_INTERNAL_IMAGE_REGISTRY;/);
+  assert.match(source, /imageRegistry && imageRegistry !== "ghcr\.io"/);
+  assert.match(source, /if \(imageRegistry === "ghcr\.io"\) baseEnv\.SUPABASE_INTERNAL_IMAGE_REGISTRY/);
+  assert.match(source, /imageRegistry: imageRegistry \|\| "cli-default"/);
+  assert.match(source, /expectedFailure: \/\(\?:completed\|current_step_index\|next_run_at\|length of 3\|to match object\)\/i/);
+  assert.match(source, /const mutationClassification = await selfTestMutationFailureClassification\(realReport\);/);
+  assert.match(source, /mutationClassification,/);
+  assert.match(source, /return selectedFailure \? "actual-report" : "representative-fixture";/);
+  assert.match(source, /must be exactly ghcr\.io when set/);
+});
+
+test('sequence browser mutations provision and serve one shared E2E identity', async () => {
+  const source = await readFile(path.join(root, 'scripts/run-sequence-reliability-mutations.mjs'), 'utf8');
+  assert.match(source, /const mutationBrowserIdentity = selectedMutation\.target\.runner === "playwright"/);
+  assert.match(source, /Object\.assign\(testEnv, \{[\s\S]*E2E_RUN_SLUG: mutationBrowserIdentity\.runSlug,[\s\S]*E2E_TEST_USER_EMAIL: mutationBrowserIdentity\.email,[\s\S]*E2E_TEST_USER_PASSWORD: mutationBrowserIdentity\.password,[\s\S]*\}\);/);
+  assert.match(source, /const environment = \{[\s\S]*E2E_RUN_SLUG: mutationBrowserIdentity\.runSlug,[\s\S]*E2E_TEST_USER_EMAIL: mutationBrowserIdentity\.email,[\s\S]*E2E_TEST_USER_PASSWORD: mutationBrowserIdentity\.password,[\s\S]*E2E_AUTH_BYPASS/);
+  assert.doesNotMatch(source, /E2E_TEST_USER_EMAIL: `e2e-ci\+\$\{slug\}/);
+  const identityProvisioning = source.indexOf('Object.assign(testEnv, {');
+  const localIdentityNormalization = source.indexOf('delete testEnv.CI;');
+  const githubIdentityNormalization = source.indexOf('delete testEnv.GITHUB_ACTIONS;');
+  const provisionCall = source.lastIndexOf('await provisionOwner();');
+  assert.ok(
+    identityProvisioning >= 0 &&
+      identityProvisioning < localIdentityNormalization &&
+      localIdentityNormalization < githubIdentityNormalization &&
+      githubIdentityNormalization < provisionCall,
+  );
+});
+
 test('environment manifest records production UNKNOWN and the complete clock audit scope', async () => {
   const source = await readFile(path.join(root, 'scripts/run-disposable-canaries.mjs'), 'utf8');
   assert.match(source, /productionEquivalence:\s*\{[\s\S]*status:\s*'UNKNOWN'/);

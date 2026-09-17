@@ -66,7 +66,10 @@ const mutationDefinitions = {
       file: "src/lib/sequences/reliability.integration.test.ts",
       pattern: "fires two SMS steps and a due status-change step",
       expectedFullName: /fires two SMS steps and a due status-change step/,
-      expectedFailure: /(?:completed|current_step_index|next_run_at|length of 3)/i,
+      // Chai abbreviates the actual/expected objects in Vitest's diagnostic
+      // (`expected { …(5) } to match object { status: 'active', …(1) }`),
+      // so the source marker below carries the field-specific contract.
+      expectedFailure: /(?:completed|current_step_index|next_run_at|length of 3|to match object)/i,
       expectedFailureMarker: "expect(enrollment).toMatchObject({ status: \"active\", current_step_index: 1 });",
     },
     controls: [
@@ -460,12 +463,12 @@ async function validateMutationMarkers(mutation) {
   }
 }
 
-async function assertFailureAtSelectedAssertion(result, label, spec) {
+async function assertFailureAtSelectedAssertion(result, label, spec, sourceRoot = worktree) {
   const markers = assertionMarkers(spec);
   if (markers.length === 0) {
     throw new Error(`${label}: mutation manifest is missing an assertion source marker`);
   }
-  const source = await readFile(path.join(worktree, spec.file), "utf8");
+  const source = await readFile(path.join(sourceRoot, spec.file), "utf8");
   const selector = spec.sourcePattern ?? spec.pattern;
   const selectedIndex = source.indexOf(selector);
   if (selectedIndex < 0) {
@@ -516,7 +519,7 @@ function assertOnePassingTest(result, label, expectedFullName) {
   }
 }
 
-async function assertOneAssertionFailure(result, label, expectedFailure, expectedFullName, spec) {
+async function assertOneAssertionFailure(result, label, expectedFailure, expectedFullName, spec, options = {}) {
   if (!result.report || result.report.numTotalTests !== 1 || result.report.numFailedTests !== 1) {
     throw new Error(`${label}: mutation did not produce exactly one selected assertion failure`);
   }
@@ -546,7 +549,113 @@ async function assertOneAssertionFailure(result, label, expectedFailure, expecte
   if (expectedFailure && !messages.some((message) => expectedFailure.test(message))) {
     throw new Error(`${label}: failure did not match the expected mutation assertion`);
   }
-  await assertFailureAtSelectedAssertion(result, label, spec);
+  await assertFailureAtSelectedAssertion(result, label, spec, options.sourceRoot);
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+async function expectRejected(label, callback, messagePattern) {
+  let caught;
+  try {
+    await callback();
+  } catch (error) {
+    caught = error;
+  }
+  if (!caught) throw new Error(`${label}: expected the contract check to reject`);
+  if (messagePattern && !messagePattern.test(String(caught.message))) {
+    throw new Error(`${label}: rejection did not identify the expected contract violation: ${caught.message}`);
+  }
+}
+
+async function selfTestMutationFailureClassification(realReport) {
+  const spec = mutationDefinitions["advancement-suppressed"].target;
+  const source = await readFile(path.join(root, spec.file), "utf8");
+  const markerIndex = source.indexOf(assertionMarkers(spec)[0]);
+  if (markerIndex < 0) throw new Error("advancement mutation self-test marker is missing from the source");
+  const markerLine = sourceLineAt(source, markerIndex);
+  const representativeMessage = (firstLine, line = markerLine) =>
+    `${firstLine}\n    at /tmp/sequence-mutation/${spec.file}:${line}:24`;
+  const selectedFailure = reportAssertions(realReport).find((assertion) =>
+    assertion.status === "failed" && spec.expectedFullName.test(assertion.fullName ?? ""),
+  );
+  const report = selectedFailure
+    ? realReport
+    : {
+        success: false,
+        numTotalTests: 1,
+        numFailedTests: 1,
+        setupFailures: 0,
+        testResults: [{
+          assertionResults: [{
+            fullName: "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+            status: "failed",
+            failureMessages: [representativeMessage("AssertionError: expected { …(5) } to match object { status: 'active', …(1) }")],
+          }],
+        }],
+      };
+  const result = { exitCode: 1, report };
+  await assertOneAssertionFailure(
+    result,
+    "advancement mutation assertion",
+    spec.expectedFailure,
+    spec.expectedFullName,
+    spec,
+    { sourceRoot: root },
+  );
+
+  const withMessage = (message) => {
+    const mutated = cloneJson(report);
+    mutated.testResults[0].assertionResults[0].failureMessages = [message];
+    return { exitCode: 1, report: mutated };
+  };
+  await expectRejected(
+    "advancement wrong assertion line",
+    () => assertOneAssertionFailure(
+      withMessage(
+        representativeMessage(
+          "AssertionError: expected { …(5) } to match object { status: 'active', …(1) }",
+          markerLine - 1,
+        ),
+      ),
+      "advancement wrong line",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /failed assertion did not point/,
+  );
+  await expectRejected(
+    "advancement plain thrown error",
+    () => assertOneAssertionFailure(
+      withMessage(
+        representativeMessage("Error: expected { …(5) } to match object { status: 'active', …(1) }"),
+      ),
+      "advancement plain throw",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /plain thrown error/,
+  );
+  await expectRejected(
+    "advancement infrastructure error",
+    () => assertOneAssertionFailure(
+      withMessage(
+        representativeMessage("AssertionError: expected compile to succeed"),
+      ),
+      "advancement infrastructure",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /infrastructure\/compile failure/,
+  );
+  return selectedFailure ? "actual-report" : "representative-fixture";
 }
 
 function parseStatusJson(stdout) {
@@ -729,6 +838,7 @@ async function selfTestParser(reportPath) {
   if (!realReport || realReport.numTotalTests < 1) {
     throw new Error("Parser self-test could not normalize the real Vitest report");
   }
+  const mutationClassification = await selfTestMutationFailureClassification(realReport);
   if (realReport.numFailedTests > 0) {
     if (realReport.numFailedTests !== 1 || realReport.setupFailures !== 0) {
       throw new Error("Parser self-test misclassified the real assertion failure as setup/infrastructure failure");
@@ -834,6 +944,7 @@ async function selfTestParser(reportPath) {
     failureNormalization: selectedFailure.numFailedTests,
     setupFailureNormalization: setupFailure.setupFailures,
     playwrightTests: playwright.numTotalTests,
+    mutationClassification,
   })}`);
 }
 
@@ -868,6 +979,10 @@ const dockerSocket = await stat(dockerSocketPath).catch(() => null);
 if (!dockerSocket?.isSocket()) {
   throw new Error(`Dedicated Docker socket is missing or is not a Unix socket: ${dockerSocketPath}`);
 }
+const imageRegistry = process.env.SUPABASE_INTERNAL_IMAGE_REGISTRY;
+if (imageRegistry && imageRegistry !== "ghcr.io") {
+  throw new Error("SUPABASE_INTERNAL_IMAGE_REGISTRY must be exactly ghcr.io when set");
+}
 const baseEnv = Object.fromEntries(
   ["PATH", "HOME", "TMPDIR", "CI", "GITHUB_ACTIONS", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]
     .filter((key) => process.env[key])
@@ -875,12 +990,33 @@ const baseEnv = Object.fromEntries(
 );
 baseEnv.DOCKER_HOST = dockerHost;
 baseEnv.CI = "1";
+if (imageRegistry === "ghcr.io") baseEnv.SUPABASE_INTERNAL_IMAGE_REGISTRY = imageRegistry;
 
 if (args.artifactsDir && path.resolve(args.artifactsDir).startsWith(`${root}${path.sep}`)) {
   throw new Error("Artifacts must be outside the current checkout");
 }
 
 const commit = args.commit;
+function createMutationBrowserIdentity() {
+  const useGitHubIdentity =
+    /^[1-9][0-9]*$/.test(process.env.GITHUB_RUN_ID ?? "") &&
+    /^[1-9][0-9]*$/.test(process.env.GITHUB_RUN_ATTEMPT ?? "");
+  if (process.env.GITHUB_ACTIONS === "true" && !useGitHubIdentity) {
+    throw new Error("Mutation browser acceptance requires numeric GitHub run identity.");
+  }
+  const runSlug = useGitHubIdentity
+    ? `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`
+    : `local-${process.pid}-${sha256(`${args.mutation}:${commit}`).slice(0, 12)}`;
+  return {
+    runSlug,
+    email: `e2e-ci+${runSlug}@bmhgroupkc.com`,
+    password: `Mutation-${sha256(`${args.mutation}:${commit}:password`).slice(0, 40)}!Aa9`,
+  };
+}
+
+const mutationBrowserIdentity = selectedMutation.target.runner === "playwright"
+  ? createMutationBrowserIdentity()
+  : null;
 let worktree;
 let stackStarted = false;
 let testEnv;
@@ -893,7 +1029,13 @@ const evidence = {
   name: selectedMutation.name,
   commit,
   sourceRoot: root,
-  docker: { host: dockerHost, project: null, hostedDatabase: false, providerMode: "mock" },
+  docker: {
+    host: dockerHost,
+    project: null,
+    hostedDatabase: false,
+    providerMode: "mock",
+    imageRegistry: imageRegistry || "cli-default",
+  },
   tests: { baselineBefore: [], mutant: [], baselineAfter: [] },
   commands: [],
   preflight: [],
@@ -1063,17 +1205,14 @@ async function restoreMutation() {
 }
 
 function browserTestEnvironment() {
-  const useGitHubIdentity =
-    /^[1-9][0-9]*$/.test(process.env.GITHUB_RUN_ID ?? "") &&
-    /^[1-9][0-9]*$/.test(process.env.GITHUB_RUN_ATTEMPT ?? "");
-  const slug = useGitHubIdentity
-    ? `gha-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`
-    : `local-${process.pid}-${sha256(`${args.mutation}:${commit}`).slice(0, 12)}`;
+  if (!mutationBrowserIdentity) {
+    throw new Error("Browser test environment requested for a non-browser mutation");
+  }
   const environment = {
     ...testEnv,
-    E2E_RUN_SLUG: slug,
-    E2E_TEST_USER_EMAIL: `e2e-ci+${slug}@bmhgroupkc.com`,
-    E2E_TEST_USER_PASSWORD: `Mutation-${sha256(`${args.mutation}:${commit}:password`).slice(0, 40)}!Aa9`,
+    E2E_RUN_SLUG: mutationBrowserIdentity.runSlug,
+    E2E_TEST_USER_EMAIL: mutationBrowserIdentity.email,
+    E2E_TEST_USER_PASSWORD: mutationBrowserIdentity.password,
     E2E_AUTH_BYPASS: "1",
     NEXT_PUBLIC_HUGO_SSO: "0",
     CRON_SECRET: "sequence-readiness-local-cron",
@@ -1340,6 +1479,18 @@ try {
     ADDRESS_VERIFIER_PROVIDER: "mock",
     SKIP_TRACE_PROVIDER: "mock",
   };
+  if (mutationBrowserIdentity) {
+    Object.assign(testEnv, {
+      E2E_RUN_SLUG: mutationBrowserIdentity.runSlug,
+      E2E_TEST_USER_EMAIL: mutationBrowserIdentity.email,
+      E2E_TEST_USER_PASSWORD: mutationBrowserIdentity.password,
+    });
+    // The CLI child keeps CI=1 for its sanitized environment, but a local
+    // mutation identity must reach the E2E guard as a local run. GitHub-run
+    // identities are already fully namespaced and retain the same fields.
+    delete testEnv.CI;
+    delete testEnv.GITHUB_ACTIONS;
+  }
   const preflight = await readPreflight(status.DB_URL, true);
   evidence.preflight.push({ phase: "clean-before-mutation", ...preflight });
   await provisionOwner();
