@@ -27,25 +27,39 @@ even snapshotted, and the printed "zero net residual" was FALSE. This module:
      snapshotted as its VALUE, not just the table's row count — this is what
      the round-4 finding required: catching a value that changed even though
      row count didn't.
-   - otherwise only row count is tracked (there is nothing else generic to
-     check without assuming a schema).
+   - [Astra round-5] EVERY column except that one recognized counter column
+     (or every column, if there is none) is snapshotted as a per-row CONTENT
+     HASH: `to_jsonb(row) - counter_column`, md5'd per row, the per-row
+     hashes sorted and joined so row order never matters, then md5'd again
+     into one table-level digest. Round 4's fix only compared row count + the
+     counter SUM — Astra defeated it by replacing
+     hugo_owner_guard_serialization.guard_key='memberships' with a synthetic
+     value (row count and version both unchanged) and by mutating the uuid
+     in inbox_t2_capture_boundary.generation.generation the same way; both
+     passed silently. The content hash makes ANY byte of ANY non-counter
+     column, in ANY discovered counter/shared table, part of what "unchanged"
+     means — there is no longer a column a mutation can hide in.
 4. HONEST classification at residual time, matching what production
    correctness actually requires (never move a shared serialization counter
    backward — see round 4's own instruction):
-   - row count unchanged AND (no counter column OR its value unchanged):
-     genuinely untouched — silent pass.
-   - row count unchanged AND counter value INCREASED: a benign monotonic
-     serialization/version advance — holds no synthetic rows, so nothing to
-     delete or roll back. Reported EXPLICITLY (not silently folded into "zero
-     residual"), and does not fail the run.
-   - row count changed, OR a counter value DECREASED, OR a table this run's
-     own write-activity touched (pg_stat_user_tables) was never classified as
-     org/user-scoped or counter-shaped at all: FAILS loudly, by name.
+   - row count unchanged AND content hash unchanged AND (no counter column OR
+     its value unchanged): genuinely untouched — silent pass.
+   - row count unchanged AND content hash unchanged AND counter value
+     INCREASED: a benign monotonic serialization/version advance — holds no
+     synthetic rows and mutates nothing else, so nothing to delete or roll
+     back. Reported EXPLICITLY (not silently folded into "zero residual"),
+     and does not fail the run.
+   - row count changed, OR the content hash changed (ANY non-counter column
+     mutated, in ANY row), OR a counter value DECREASED, OR a table this
+     run's own write-activity touched was never classified as org/user-scoped
+     or counter-shaped at all: FAILS loudly, by table (and column, for a
+     counter decrease).
 5. Cleanup SWEEPS every dynamically-discovered org_id/user_id-scoped table
    (not a hand-maintained list), repeated for several passes so a table
    repopulated by another table's AFTER trigger (the round-2 finding) is
    still empty by the last pass — order-independent by construction. Counter
-   tables are NEVER deleted from or reset — see point 4.
+   tables are NEVER deleted from, reset, or otherwise written to by this
+   module — see point 4.
 """
 
 # Tables the caller already deletes explicitly, in the correct FK/trigger
@@ -131,15 +145,28 @@ def discover(sql):
     return _scoped_tables(sql, 'org_id'), _scoped_tables(sql, 'user_id'), _counter_tables(sql)
 
 
+def _content_hash_sql(table, col):
+    """[Astra round-5] One table-level digest over EVERY column except the
+    recognized counter column (or every column, if col is None): per-row
+    `to_jsonb(row) - col`, md5'd, sorted (so row order/physical layout never
+    matters), joined, md5'd again. Generic — needs no column list, no primary
+    key, and works identically whether the table has a counter column or not
+    (jsonb `-` on a key that doesn't exist is a no-op)."""
+    drop = f" - '{col}'" if col else ""
+    return f"SELECT md5(coalesce(string_agg(h,',' ORDER BY h),'')) FROM (SELECT md5((to_jsonb(t){drop})::text) AS h FROM {table} t) x"
+
+
 def snapshot_counters(sql, counter_tables):
-    """Per table: (row_count, counter_value_or_None). counter_value is
-    SUM(counter_column) — NULL-safe via coalesce — only when a counter column
-    was found; None otherwise (nothing generic to compare beyond row count)."""
+    """Per table: (row_count, counter_value_or_None, content_hash).
+    counter_value is SUM(counter_column) — NULL-safe via coalesce — only when
+    a counter column was found; None otherwise. content_hash covers every
+    OTHER column (round-5 — see _content_hash_sql)."""
     snapshot = {}
     for table, col in counter_tables:
         count = sql(f"SELECT count(*) FROM {table}")
         value = sql(f"SELECT coalesce(sum({col}),0) FROM {table}") if col else None
-        snapshot[table] = (count, value)
+        content_hash = sql(_content_hash_sql(table, col))
+        snapshot[table] = (count, value, content_hash)
     return snapshot
 
 
@@ -191,7 +218,7 @@ def assert_zero_residual(sql, org_tables, user_tables, counter_tables, counter_b
 
     advanced = []
     for table, col in counter_tables:
-        before_count, before_value = counter_baseline.get(table, ('?', None))
+        before_count, before_value, before_hash = counter_baseline.get(table, ('?', None, '?'))
         now_count = sql(f"SELECT count(*) FROM {table}")
         now_value = sql(f"SELECT coalesce(sum({col}),0) FROM {table}") if col else None
         if now_count != before_count:
@@ -203,17 +230,27 @@ def assert_zero_residual(sql, org_tables, user_tables, counter_tables, counter_b
             # that isn't actually counter-shaped and was misclassified.
             residual[table] = f'row count changed {before_count} -> {now_count} (a counter/cursor table must never gain or lose rows)'
             continue
+        # [Astra round-5] Content hash over EVERY column except the one
+        # recognized counter column. This is the check that actually closes
+        # the round-5 defeat: a synthetic guard_key/generation-uuid swap
+        # leaves row count AND the counter SUM untouched, but changes this
+        # hash — there is no longer a column such a mutation can hide in.
+        now_hash = sql(_content_hash_sql(table, col))
+        if before_hash != '?' and now_hash != before_hash:
+            residual[table] = f'non-counter column content changed (row-content hash {before_hash} -> {now_hash}, row count unchanged at {now_count}) — a mutation in a non-id, non-counter column, never a benign counter advance'
+            continue
         if col is None:
-            continue  # no counter column and row count unchanged: untouched.
+            continue  # no counter column, row count + full content unchanged: untouched.
         if before_value == '?' or now_value == before_value:
             continue  # unchanged (or no baseline captured — treated as pass, matches original behavior for tables added after baseline, which cannot happen here since discover() runs before any writes)
         if int(now_value) < int(before_value):
             residual[table] = f'{col} DECREASED {before_value} -> {now_value} (never a benign monotonic advance — investigate)'
             continue
-        # int(now_value) > int(before_value): a real, benign, monotonic
-        # serialization/version advance. Holds no synthetic rows (row count
-        # unchanged, confirmed above) — nothing to delete, and per the round-4
-        # instruction this shared counter must NEVER be forced backward.
+        # int(now_value) > int(before_value), row count unchanged, and every
+        # OTHER column's content hash unchanged: a real, benign, monotonic
+        # serialization/version advance with nothing else mutated. Holds no
+        # synthetic rows — nothing to delete, and per the round-4 instruction
+        # this shared counter must NEVER be forced backward.
         advanced.append(f'{table}.{col} +{int(now_value) - int(before_value)} ({before_value} -> {now_value})')
 
     if residual:
