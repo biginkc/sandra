@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "../../src/lib/supabase/types";
-import { DEFAULT_ORG_ID, seedProspects } from "../fixtures";
+import { DEFAULT_ORG_ID, E2E_MOCK_BUSINESS_NUMBER, seedProspects } from "../fixtures";
 import { ensureConversationIdForThread } from "../../src/lib/messages/threading";
 
 /**
@@ -153,7 +153,19 @@ export async function seedQueuedMessage(
       status: "queued",
       property_id: prop.id,
       contact_id: contact.id,
-      from_address: "+18162804181",
+      // A row queued through the app's normal path (queueForLater in
+      // src/lib/messaging/send.ts) always stamps `provider` at insert
+      // time; releaseQueuedMessage then hard-fails any row whose stamped
+      // provider doesn't match the CURRENT provider ("queued message
+      // belongs to provider X, current provider is Y"). A direct INSERT
+      // that skips this stamp is treated as provider "unknown" and always
+      // fails release — exactly the bug the strengthened O02/O03
+      // DB-status assertions (not mere card-disappearance) caught.
+      provider: "mock",
+      // Must be a sender the mock delivery catalog actually knows about
+      // (seedMockDeliveryCatalog registers MOCK_SENDER_PRIMARY) — an
+      // unregistered from_address silently fails at send time too.
+      from_address: E2E_MOCK_BUSINESS_NUMBER,
       to_address: phone,
       body: opts.body,
       scheduled_for: new Date(Date.now() + opts.scheduledForOffsetMin * 60_000).toISOString(),

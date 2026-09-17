@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { adminClient, ensureTestUser, resetTenantTables, TEST_ASSIGNEE_EMAIL } from "../fixtures";
 import { seedAcceptanceThread } from "./seed";
-import { recordMatrixResult, resetResultsFile } from "./results";
+import { recordRowOutcome } from "./results";
 
 /**
  * Inbox acceptance matrix runner — F02-F10 (existing read/search/filter/
@@ -45,7 +45,6 @@ test.skip(true, "Blocked: /inbox backend RPC schema (inbox_authorize_sync) is no
 
 test.beforeAll(async () => {
   admin = adminClient();
-  resetResultsFile();
   await resetTenantTables(admin);
   await ensureTestUser(admin);
   await ensureTestUser(admin, { principal: "assignee" });
@@ -75,7 +74,7 @@ test("F02 — search messages filters the workset", async ({ page }) => {
   await expect(list.getByText(match.contactName)).toBeVisible();
   await expect(list.getByText(noMatch.contactName)).toHaveCount(0);
 
-  recordMatrixResult({ id: "F02", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F02" });
+  recordRowOutcome({ id: "F02", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F02" });
 });
 
 test("F03 — view filter changes the row list", async ({ page }) => {
@@ -101,7 +100,7 @@ test("F03 — view filter changes the row list", async ({ page }) => {
   await expect(list.getByText(unread.contactName)).toBeVisible();
   await expect(list.getByText(readThread.contactName)).toHaveCount(0);
 
-  recordMatrixResult({ id: "F03", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F03" });
+  recordRowOutcome({ id: "F03", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F03" });
 });
 
 test("F04 — needs_outcome view excludes threads with an outcome", async ({ page }) => {
@@ -116,7 +115,7 @@ test("F04 — needs_outcome view excludes threads with an outcome", async ({ pag
   const list = page.getByRole("list", { name: "Inbox conversations" });
   await expect(list.getByText(noOutcome.contactName)).toBeVisible();
 
-  recordMatrixResult({ id: "F04", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F04" });
+  recordRowOutcome({ id: "F04", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F04" });
 });
 
 test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => {
@@ -135,7 +134,7 @@ test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => 
   await page.getByLabel(/Hide DNC and test conversations/).uncheck();
   await expect(list.getByText(dnc.contactName)).toBeVisible();
 
-  recordMatrixResult({ id: "F05", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F05" });
+  recordRowOutcome({ id: "F05", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F05" });
 });
 
 test("F06 — rows order by most recent activity", async ({ page }) => {
@@ -160,7 +159,7 @@ test("F06 — rows order by most recent activity", async ({ page }) => {
   const firstRowText = await rows.first().innerText();
   expect(firstRowText).toContain(newer.contactName);
 
-  recordMatrixResult({ id: "F06", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F06" });
+  recordRowOutcome({ id: "F06", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F06" });
 });
 
 test("F07/F08/F09/F10 — open a conversation, read history, mark-read, identity/context", async ({ page }) => {
@@ -216,10 +215,10 @@ test("F07/F08/F09/F10 — open a conversation, read history, mark-read, identity
   await page.getByRole("button", { name: "Close conversation details" }).click();
   await expect(detail).toHaveCount(0);
 
-  recordMatrixResult({ id: "F07", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
-  recordMatrixResult({ id: "F08", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
-  recordMatrixResult({ id: "F09", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
-  recordMatrixResult({ id: "F10", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
+  recordRowOutcome({ id: "F07", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
+  recordRowOutcome({ id: "F08", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
+  recordRowOutcome({ id: "F09", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
+  recordRowOutcome({ id: "F10", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
 });
 
 async function runBulkOutcome(
@@ -239,7 +238,7 @@ async function runBulkOutcome(
   await expect(applyButton).toBeEnabled({ timeout: 10_000 });
   await applyButton.click();
   await expect(page.getByText(/Action (accepted|succeeded|finished)/i)).toBeVisible({ timeout: 15_000 });
-  recordMatrixResult({ id: matrixId, status: "pass", evidence: `e2e/inbox-acceptance/inbox.spec.ts::${matrixId}` });
+  recordRowOutcome({ id: matrixId, status: "pass", evidence: `e2e/inbox-acceptance/inbox.spec.ts::${matrixId}` });
 }
 
 test("A01 — Wrong number bulk outcome applies", async ({ page }) => {
@@ -308,7 +307,7 @@ test("A07 — Permanent DNC action is absent (gated)", async ({ page }) => {
   const actionRail = page.getByRole("complementary", { name: "Actions for selection" });
   await expect(actionRail.getByRole("button", { name: /permanent dnc/i })).toHaveCount(0);
 
-  recordMatrixResult({ id: "A07", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::A07" });
+  recordRowOutcome({ id: "A07", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::A07" });
 });
 
 test("A10 — Assign to a teammate bulk action applies", async ({ page }) => {
@@ -340,7 +339,7 @@ test("A10 — Assign to a teammate bulk action applies", async ({ page }) => {
   await applyButton.click();
   await expect(page.getByText(/Action (accepted|succeeded|finished)/i)).toBeVisible({ timeout: 15_000 });
 
-  recordMatrixResult({ id: "A10", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::A10" });
+  recordRowOutcome({ id: "A10", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::A10" });
 });
 
 test("A11 — Clear assignment (unassign) bulk action applies", async ({ page }) => {

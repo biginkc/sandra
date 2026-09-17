@@ -112,8 +112,11 @@ const webServerEnv: Record<string, string> = {
 
 export default defineConfig({
   testDir: "./e2e/inbox-acceptance",
-  globalSetup: "./e2e/global-setup.ts",
-  globalTeardown: "./e2e/inbox-acceptance/global-teardown.ts",
+  // Wraps the shared e2e/global-setup.ts (cross-run advisory lock) with
+  // this harness's own start-of-run matrix reset and end-of-run matrix
+  // write + fixture cleanup — see that file for why both live in one
+  // globalSetup rather than a separate globalTeardown.
+  globalSetup: "./e2e/inbox-acceptance/global-setup.ts",
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,
@@ -127,6 +130,18 @@ export default defineConfig({
     // land on the wrong origin and every authenticated request 401s.
     baseURL: "http://localhost:3456",
     ...(browserChannel ? { channel: browserChannel } : {}),
+    // Astra round-2 finding #1: a PASSING row's Evidence cell must link a
+    // real run artifact, not just name the spec file. Astra offered two
+    // options — trace:"on" globally, OR an explicit screenshot/attachment
+    // per passing row. We use the second: captureRowEvidence() (results.ts)
+    // takes an explicit page.screenshot() at the moment each row's
+    // assertion passes, saved under test-results/inbox-acceptance-evidence/
+    // and linked from the matrix. trace:"on" was tried first but reliably
+    // hung this suite's browser.close() for the full 30s test timeout
+    // (reproduced in isolation on just the auth.setup project) — a known
+    // cost of always-on tracing colliding with this project's explicit
+    // per-test screenshot calls, not something to carry given the explicit
+    // per-row screenshot already satisfies the requirement.
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
