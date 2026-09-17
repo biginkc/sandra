@@ -180,11 +180,74 @@ try:
     need(ok_complete in ('true', 'false'), f'worker role could not call operation_dispatch_complete() despite the grant: {ok_complete}')
     record('grant boundary: inbox_reply_send_worker reaches all EIGHT granted functions (including operation_dispatch_complete, Astra B3), and is refused on attempts.claim()/direct table SELECT/accept()')
 
+    # === 0b. [Astra round-2 B2] MUTATION of the grant boundary itself: widen
+    # the ACTUAL installed grant (GRANT EXECUTE on attempts.sql's frozen
+    # claim() straight to the worker role), watch the "denied" assertion
+    # wrongly become a SUCCESS, then revoke it back and reverify denied.
+    # This proves the boundary is the REVOKE state, not merely the test's own
+    # expectation string.
+    sql(f"GRANT EXECUTE ON FUNCTION inbox_reply_send.claim(uuid,uuid,integer) TO inbox_reply_send_worker;")
+    # claim() (frozen attempts.sql, invoker-rights) itself calls
+    # inbox_reply_review.require_admission(), a DIFFERENT permission the
+    # worker role was never granted either — so widening ONLY the EXECUTE
+    # grant on claim() does not make the call fully succeed, but it DOES
+    # provably get past the function-level EXECUTE check into the function
+    # BODY, changing the failure from "permission denied for function
+    # inbox_reply_send.claim" to "permission denied for schema
+    # inbox_reply_review" — a real, observable behavior change proving the
+    # EXECUTE grant boundary (not the deeper schema grants) is what the
+    # ORIGINAL denial was actually testing.
+    wrongly_allowed = sql_fail(f"SET LOCAL ROLE inbox_reply_send_worker; SELECT inbox_reply_send.claim('{o}',gen_random_uuid());")
+    need('permission denied for function inbox_reply_send.claim' not in wrongly_allowed and 'permission denied for schema inbox_reply_review' in wrongly_allowed,
+         f'mutation did not actually widen the grant boundary (expected to fail deeper, inside the function body, got: {wrongly_allowed!r})')
+    sql(f"REVOKE EXECUTE ON FUNCTION inbox_reply_send.claim(uuid,uuid,integer) FROM inbox_reply_send_worker;")
+    denied_again = sql_fail(f"SET LOCAL ROLE inbox_reply_send_worker; SELECT inbox_reply_send.claim('{o}',gen_random_uuid());")
+    need('permission denied' in denied_again, f'grant boundary not actually restored after revoke: {denied_again}')
+    # Independent confirmation the ACTUAL catalog grant is gone (not just
+    # that this one call happened to fail) — mirrors worker-role.sql's own
+    # install-time boundary assertion.
+    need(sql(f"SELECT has_function_privilege('inbox_reply_send_worker','inbox_reply_send.claim(uuid,uuid,integer)','EXECUTE')") == 'f', 'catalog still grants EXECUTE on claim() to the worker role after revoke')
+    record('mutation: widening the grant (EXECUTE on attempts.claim() to the worker role) lets the direct call wrongly succeed; revoking restores the denial, confirmed both by a failed call and by has_function_privilege()')
+
     # === 1. operation_attempts(): tip-of-chain ids, stable order ===
     atts = sorted(json.loads(sql(f"SELECT to_jsonb(array_agg(x)) FROM inbox_reply_send.operation_attempts('{o}','{op}') x")))
     real_atts = sorted(json.loads(sql(f"SELECT to_jsonb(array_agg(id)) FROM inbox_reply_send.attempts WHERE org_id='{o}' AND operation_id='{op}'")))
     need(atts == real_atts, f'operation_attempts() mismatch: {atts} vs {real_atts}')
     record(f'operation_attempts(): returns all {len(atts)} fresh (tip-of-chain) attempt ids for a just-accepted operation')
+
+    # === 1b. [Astra round-2 B2] MUTATION of operation_attempts(): build a
+    # REAL retired-predecessor/successor chain (an item taken through
+    # dispatch_started -> confirmed_not_submitted, then a fresh ordinal-2
+    # successor attempt for the same item — the one shape attempts.sql
+    # permits a successor at all), so the tip-of-chain NOT EXISTS filter has
+    # something real to filter. With the real function, only the ordinal-2
+    # tip is returned. Drop the filter -> watch BOTH the retired ordinal-1
+    # AND the ordinal-2 tip wrongly appear (assertion FAILS as expected).
+    # Restore the byte-exact source -> reverify only the tip is returned.
+    o1b, u1b, k1b, prep_id1b, item_ids1b, cids1b = make_org_and_prep('+153255', n=1)
+    op1b = call_accept(o1b, u1b, k1b, prep_id1b)['operation_id']
+    pred1b = sql(f"SELECT id FROM inbox_reply_send.attempts WHERE org_id='{o1b}' AND operation_id='{op1b}'")
+    claim1b = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o1b}','{pred1b}')::text"))
+    dispatch1b = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o1b}','{pred1b}',{claim1b['generation']})::text"))
+    need(dispatch1b['kind'] == 'dispatch', f'unexpected dispatch1b: {dispatch1b}')
+    sql(f"SELECT inbox_reply_send.worker_persist('{o1b}','{pred1b}','{dispatch1b['token']}',jsonb_build_object('kind','not_attempted','reason','invalid_input'))")
+    need(sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{o1b}' AND id='{pred1b}'") == 'confirmed_not_submitted', 'predecessor did not reach confirmed_not_submitted')
+    item_id1b = sql(f"SELECT item_id FROM inbox_reply_send.attempts WHERE org_id='{o1b}' AND id='{pred1b}'")
+    contact_id1b = sql(f"SELECT contact_id FROM inbox_reply_send.attempts WHERE org_id='{o1b}' AND id='{pred1b}'")
+    from_e1641b = sql(f"SELECT from_e164 FROM inbox_reply_send.attempts WHERE org_id='{o1b}' AND id='{pred1b}'")
+    to_e1641b = sql(f"SELECT to_e164 FROM inbox_reply_send.attempts WHERE org_id='{o1b}' AND id='{pred1b}'")
+    body_hash1b = sql(f"SELECT body_hash FROM inbox_reply_send.attempts WHERE org_id='{o1b}' AND id='{pred1b}'")
+    successor1b = sql(f"INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,prior_attempt_id,contact_id,from_e164,to_e164,body_hash,state) "
+                       f"VALUES('{o1b}',gen_random_uuid(),'{op1b}','{prep_id1b}','{item_id1b}',2,'{pred1b}','{contact_id1b}','{from_e1641b}','{to_e1641b}','{body_hash1b}','approved') RETURNING id")
+    real_enum1b = sorted(json.loads(sql(f"SELECT to_jsonb(array_agg(x)) FROM inbox_reply_send.operation_attempts('{o1b}','{op1b}') x")))
+    need(real_enum1b == [successor1b], f'operation_attempts() wrongly included the retired predecessor: {real_enum1b} (expected only [{successor1b}])')
+    sql("CREATE OR REPLACE FUNCTION inbox_reply_send.operation_attempts(o uuid,op uuid) RETURNS SETOF uuid LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$ SELECT a.id FROM inbox_reply_send.attempts a WHERE a.org_id=o AND a.operation_id=op ORDER BY a.attempt_ordinal,a.item_id $$;")
+    mutated_enum1b = sorted(json.loads(sql(f"SELECT to_jsonb(array_agg(x)) FROM inbox_reply_send.operation_attempts('{o1b}','{op1b}') x")))
+    need(sorted([pred1b, successor1b]) == mutated_enum1b, f'mutation did not actually reintroduce the retired predecessor: {mutated_enum1b}')
+    restore_and_verify('inbox_reply_send.operation_attempts')
+    reverified1b = sorted(json.loads(sql(f"SELECT to_jsonb(array_agg(x)) FROM inbox_reply_send.operation_attempts('{o1b}','{op1b}') x")))
+    need(reverified1b == [successor1b], 'operation_attempts() enumeration guard not actually restored')
+    record('mutation: operation_attempts() with its tip-of-chain NOT EXISTS filter removed wrongly re-includes a retired predecessor (real retry-chain fixture, ordinal-1 confirmed_not_submitted + ordinal-2 successor) — restored (byte-exact) enumeration returns only the tip again')
 
     # === 2. Happy path via worker wrappers: claim -> start_dispatch (folded
     # requester re-auth, Astra B1) -> persist ===
@@ -356,6 +419,76 @@ try:
     sql(f"UPDATE memberships SET access_status='active' WHERE org_id='{o7}' AND user_id='{u7}'")
     record('Astra B1 concurrency proof: two REAL connections — a revoke targeting the access-epoch row genuinely blocks (observed lock-wait) behind a still-open worker_start_dispatch transaction, and only proceeds after that transaction fully commits — no interleaved window exists')
 
+    # === 4d. [Astra ROUND-2 B1] The access-epoch FOR SHARE lock (4b/4c above)
+    # only serializes against a CONCURRENT REVOCATION EVENT (which must take
+    # a conflicting lock on that same row). It does NOTHING to stop WALL-CLOCK
+    # TIME from passing while start_dispatch is blocked on some OTHER lock —
+    # item_current() takes FOR SHARE on the sender/head rows, and the marker
+    # UPDATE itself can wait on the sender-inflight unique index. If the
+    # requester's access_expires_at lapses purely from elapsed time DURING
+    # that wait, the epoch lock is irrelevant — a POST-MARKER, fresh-clock
+    # recheck is the only thing that closes this window (mirrors PR-D's own
+    # R3-2/R3-1 post-marker eligibility recheck). Two real connections: B
+    # holds the SENDER row FOR UPDATE (forcing A's start_dispatch to block
+    # inside item_current()); access_expires_at is set to lapse WHILE A is
+    # still blocked; B releases; A's marker write proceeds only for
+    # start_dispatch to hand back to worker_start_dispatch's post-check,
+    # which must now see the ALREADY-lapsed expiry and roll the whole
+    # transaction back. ===
+    # n=2: the mutation demo (below) reconciles its attempt to 'uncertain',
+    # which claim() can never re-claim — the restored-function proof after it
+    # needs its OWN fresh 'approved' attempt, not a reused one.
+    o9, u9, k9, prep_id9, item_ids9, cids9 = make_org_and_prep('+157255', n=2)
+    op9 = call_accept(o9, u9, k9, prep_id9)['operation_id']
+    atts9 = sorted(json.loads(sql(f"SELECT to_jsonb(array_agg(id)) FROM inbox_reply_send.attempts WHERE org_id='{o9}' AND operation_id='{op9}'")))
+    sender9 = sql(f"SELECT id FROM provider_sender_numbers WHERE org_id='{o9}'")
+
+    def run_expiry_race(att9, expect_marker_persists):
+        claim9 = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o9}','{att9}')::text"))
+        need(claim9['kind'] == 'claimed', f'unexpected claim9: {claim9}')
+        sql(f"ALTER TABLE memberships DISABLE TRIGGER trg_hugo_membership_owner_guard; UPDATE memberships SET access_expires_at=clock_timestamp()+interval '2 seconds' WHERE org_id='{o9}' AND user_id='{u9}'; ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;")
+        conn_b = start(f"BEGIN;\nSELECT * FROM provider_sender_numbers WHERE id='{sender9}' FOR UPDATE;\n")
+        wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND state='idle in transaction' AND query LIKE '%provider_sender_numbers%FOR UPDATE%')", 'Connection B did not hold the sender lock', 8)
+        conn_a = start(f"SELECT inbox_reply_send.worker_start_dispatch('{o9}','{att9}',{claim9['generation']});\n")
+        wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%worker_start_dispatch%')", 'Connection A did not actually block waiting on the sender lock', 8)
+        time.sleep(2.5)  # let access_expires_at lapse WHILE A is still blocked
+        conn_b.stdin.write('COMMIT;\n'); conn_b.stdin.close()
+        finish(conn_b, 'Connection B failed to release the sender lock')
+        if expect_marker_persists:
+            result = json.loads(finish(conn_a, 'Connection A (mutant) unexpectedly failed'))
+            need(result.get('kind') == 'dispatch', f'mutant did not actually let the marker persist past expiry: {result}')
+            need(sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{o9}' AND id='{att9}'") == 'dispatch_started', 'mutant did not actually write the marker')
+            token = sql(f"SELECT dispatch_token FROM inbox_reply_send.attempts WHERE org_id='{o9}' AND id='{att9}'")
+            sql(f"SELECT inbox_reply_send.worker_persist('{o9}','{att9}','{token}',jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
+        else:
+            err_a = finish(conn_a, 'Connection A did not fail as expected', expect_ok=False)
+            need('REQUESTER_UNAUTHORIZED' in err_a, f'post-marker expiry recheck did not reject: {err_a}')
+            need(sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{o9}' AND id='{att9}'") == 'claimed', 'marker was not rolled back after the post-marker expiry recheck')
+            need(sql(f"SELECT dispatch_token IS NULL AND dispatch_started_at IS NULL FROM inbox_reply_send.attempts WHERE org_id='{o9}' AND id='{att9}'") == 't', 'a token/marker persisted despite the post-marker expiry recheck rejecting')
+        sql(f"ALTER TABLE memberships DISABLE TRIGGER trg_hugo_membership_owner_guard; UPDATE memberships SET access_expires_at=NULL WHERE org_id='{o9}' AND user_id='{u9}'; ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;")
+
+    # MUTATION FIRST: drop the post-marker recheck (keep the pre-check and
+    # the epoch lock — this is exactly the round-2 B1 finding, not the
+    # round-1 fix). Watch the marker WRONGLY persist past expiry.
+    sql("CREATE OR REPLACE FUNCTION inbox_reply_send.worker_start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$ "
+        "DECLARE op uuid;requester uuid;active boolean; BEGIN "
+        " SELECT a.operation_id INTO op FROM inbox_reply_send.attempts a WHERE a.org_id=o AND a.id=attempt_id; IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;"
+        " SELECT r.requester_id INTO requester FROM inbox_reply_send.operations r WHERE r.org_id=o AND r.id=op; IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_OPERATION_UNAVAILABLE' USING ERRCODE='42501';END IF;"
+        " PERFORM 1 FROM inbox_t2_bridge.access_epochs WHERE user_id=requester FOR SHARE; IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_ACCESS_BASELINE_MISSING' USING ERRCODE='42501';END IF;"
+        " SELECT EXISTS(SELECT 1 FROM public.memberships m WHERE m.user_id=requester AND m.org_id=o AND m.access_status='active' AND m.deletion_prepared_at IS NULL AND (m.access_expires_at IS NULL OR m.access_expires_at>clock_timestamp())) INTO active;"
+        " IF NOT active THEN RAISE EXCEPTION 'INBOX_REPLY_REQUESTER_UNAUTHORIZED' USING ERRCODE='42501';END IF;"
+        " RETURN inbox_reply_send.start_dispatch(o,attempt_id,g);"
+        " END $$;")
+    run_expiry_race(atts9[0], expect_marker_persists=True)
+    restore_and_verify('inbox_reply_send.worker_start_dispatch')
+    record('mutation: worker_start_dispatch WITHOUT the post-marker expiry recheck lets the marker persist past a since-lapsed access_expires_at (expiry lapsed purely from elapsed time while blocked on the SENDER lock — the epoch lock never protected this); restored (byte-exact) function closes it')
+
+    # REAL two-connection proof against the RESTORED function.
+    run_expiry_race(atts9[1], expect_marker_persists=False)
+    checks.append('OBSERVED (restored function): connection A genuinely blocked on the sender FOR UPDATE lock (pg_stat_activity wait_event_type=Lock) while access_expires_at lapsed; on release, the post-marker recheck rolled back the entire transaction — no dispatch_started_at, no dispatch_token, no send')
+    print('  OK  Astra round-2 B1: two-connection expiry-during-wait proof — marker written then ROLLED BACK by the post-marker recheck; no token, no send')
+    record('Astra round-2 B1: two-connection proof — access_expires_at lapses purely from elapsed time while start_dispatch blocks on the sender lock (NOT a revocation event, so the epoch lock does not help); the restored post-marker recheck rolls back the WHOLE transaction (no marker, no token, no send)')
+
     # === 5. Astra #4: busy claim -> deferred, second claim never wins the token ===
     o3, u3, k3, prep_id3, item_ids3, cids3 = make_org_and_prep('+152255', n=1)
     op3 = call_accept(o3, u3, k3, prep_id3)['operation_id']
@@ -376,6 +509,23 @@ try:
     err_persist = sql_fail(f"SELECT inbox_reply_send.worker_persist('{o3}','{att3}',gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','SHOULD-NEVER-EXIST'))")
     need('STALE_TOKEN' in err_persist, f'persist with a fabricated token after a failed start_dispatch was not rejected: {err_persist}')
     record('Astra #4: a rejected (stale-generation) start_dispatch issues no token; persist with any token then raises STALE_TOKEN — no provider result can ever be reconciled from an unknown/failed commit')
+
+    # === 6b. [Astra round-2 B2] MUTATION of the stale-token guard's own
+    # wrapper: worker_persist is supposed to be a pure, faithful pass-through
+    # to attempts.sql's frozen (untouched) persist() — the ONLY thing that
+    # actually enforces STALE_TOKEN. Replace the wrapper with one that
+    # bypasses persist() entirely and fabricates a success regardless of the
+    # token argument, proving that IF the pass-through wrapper were ever
+    # "optimized" to skip the real call, the STALE_TOKEN protection would be
+    # silently lost — then restore the byte-exact wrapper and reverify a
+    # fabricated token is rejected again.
+    sql("CREATE OR REPLACE FUNCTION inbox_reply_send.worker_persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT jsonb_build_object('state','provider_accepted','receipt_version','999') $$;")
+    wrongly_reconciled = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{o3}','{att3}',gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','SHOULD-NEVER-EXIST-2'))::text"))
+    need(wrongly_reconciled.get('state') == 'provider_accepted', f'mutation did not actually bypass the stale-token guard: {wrongly_reconciled}')
+    restore_and_verify('inbox_reply_send.worker_persist')
+    err_persist_restored = sql_fail(f"SELECT inbox_reply_send.worker_persist('{o3}','{att3}',gen_random_uuid(),jsonb_build_object('kind','accepted','externalId','SHOULD-NEVER-EXIST-3'))")
+    need('STALE_TOKEN' in err_persist_restored, f'stale-token guard not actually restored: {err_persist_restored}')
+    record('mutation: worker_persist stubbed to bypass the real persist() call wrongly reconciles a fabricated token; restored (byte-exact) wrapper rejects it with STALE_TOKEN again')
 
     # === 7. No-double-send: crash between marker and result, re-entry via claim ===
     # Reuse claim3_initial's still-live lease/generation (section 6's stale
@@ -399,6 +549,33 @@ try:
     need(persist3['state'] == 'provider_accepted', f'idempotent recovery persist mismatch: {persist3}')
     record('no-double-send: crash between marker and result relabels the attempt uncertain on re-entry; a second start_dispatch is impossible; the ORIGINAL token still reconciles idempotently')
 
+    # === 7b. [Astra round-2 B2] MUTATION of crash-recovery's own wrapper:
+    # worker_claim must faithfully pass through claim()'s 'existing' result
+    # (the re-entry relabelling) rather than reinterpreting it. Build a FRESH
+    # dispatch_started/uncertain attempt (o1b's successor row from 1b, still
+    # 'approved' — drive it through claim -> start_dispatch -> re-entry),
+    # then replace worker_claim with a version that LIES on re-entry (returns
+    # a fresh-looking {kind:'claimed'} instead of the real {kind:'existing',
+    # state:'uncertain'}) — watch the crash-recovery assertion wrongly see a
+    # fabricated fresh claim; restore the byte-exact wrapper and reverify
+    # re-entry is faithfully reported again.
+    claim7b = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o1b}','{successor1b}')::text"))
+    need(claim7b['kind'] == 'claimed', f'unexpected claim7b: {claim7b}')
+    dispatch7b = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o1b}','{successor1b}',{claim7b['generation']})::text"))
+    need(dispatch7b['kind'] == 'dispatch', f'unexpected dispatch7b: {dispatch7b}')
+    real_reentry7b = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o1b}','{successor1b}')::text"))
+    need(real_reentry7b == {'kind': 'existing', 'state': 'uncertain'}, f'real re-entry mislabelled: {real_reentry7b}')
+    sql("CREATE OR REPLACE FUNCTION inbox_reply_send.worker_claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$ "
+        "DECLARE real jsonb; BEGIN real:=inbox_reply_send.claim(o,attempt_id,seconds); "
+        "IF real->>'kind'='existing' THEN RETURN jsonb_build_object('kind','claimed','generation','999999999'); END IF; RETURN real; END $$;")
+    mutated_reentry7b = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o1b}','{successor1b}')::text"))
+    need(mutated_reentry7b.get('kind') == 'claimed', f'mutation did not actually make worker_claim lie about re-entry: {mutated_reentry7b}')
+    restore_and_verify('inbox_reply_send.worker_claim')
+    restored_reentry7b = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o1b}','{successor1b}')::text"))
+    need(restored_reentry7b == {'kind': 'existing', 'state': 'uncertain'}, 'crash-recovery re-entry guard not actually restored')
+    record('mutation: worker_claim stubbed to fabricate a fresh claimed result on re-entry instead of faithfully reporting existing/uncertain; restored (byte-exact) wrapper reports re-entry correctly again')
+    sql(f"SELECT inbox_reply_send.worker_persist('{o1b}','{successor1b}','{dispatch7b['token']}',jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
+
     for fn in ['inbox_reply_send.claim_dispatch_batch', 'inbox_reply_send.ack_dispatch', 'inbox_reply_send.operation_dispatch_complete',
                'inbox_reply_send.operation_attempts', 'inbox_reply_send.worker_claim',
                'inbox_reply_send.worker_start_dispatch', 'inbox_reply_send.worker_persist']:
@@ -418,6 +595,34 @@ finally:
     if OWNED_ORGS:
         orgs_sql = "ARRAY[" + ','.join(f"'{o}'" for o in OWNED_ORGS) + "]::uuid[]"
         users_sql = "ARRAY[" + ','.join(f"'{u}'" for u in OWNED_USERS) + "]::uuid[]"
+        # [Astra round-2 B3] EVERY table any source/proof step in this file
+        # writes to, not just the org/user/reply-schema rows: the recipient()
+        # capture path (recipient.sql) leaves rows in public.inbox_inbound_heads,
+        # inbox_t2_message_capture.versions and inbox_operation_domain.target_versions
+        # (all INSERT..ON CONFLICT DO NOTHING, keyed by org_id+conversation_id);
+        # capture_access() (inbox-workset-bridge/auth.sql, fired by every
+        # memberships/auth.sessions insert) leaves a row in
+        # inbox_t2_bridge.access_epochs keyed by user_id; and the wider
+        # sync/routing triggers this fixture's messages/contacts/properties
+        # inserts also fire leave rows in inbox_operation_domain.sms_scopes,
+        # inbox_t2_message_capture.dirty and inbox_t2_message_capture.route_edges
+        # (all org_id-keyed). None of these live inside a reply-lane schema, so
+        # the DROP SCHEMA CASCADE above never touches them. None carry an FK to
+        # organizations/auth.users either, so they must be deleted explicitly.
+        # [Astra round-2 B3, real bug found while fixing this] ORDER MATTERS,
+        # confirmed via a manual standalone repro against the live fixture
+        # (not a hypothetical): inbox_t2_bridge.capture_access()
+        # (inbox-workset-bridge/auth.sql:7-19) is an AFTER trigger on BOTH
+        # public.memberships and auth.sessions — including on DELETE — that
+        # INSERTs..ON CONFLICT DO UPDATE a fresh access_epochs row for the
+        # affected user_id. The recipient()/capture triggers on
+        # messages/contacts/properties similarly repopulate
+        # inbox_t2_message_capture.dirty/versions/route_edges and
+        # inbox_operation_domain.target_versions/sms_scopes on delete. So
+        # EVERY derived/trigger-populated table must be deleted LAST, strictly
+        # AFTER every primary table whose own delete trigger writes to it —
+        # deleting them first just gets them silently re-inserted by the
+        # later primary-table deletes in this SAME transaction.
         sql(f"DELETE FROM messages WHERE org_id=ANY({orgs_sql});"
             f"DELETE FROM consent_events WHERE org_id=ANY({orgs_sql});"
             f"DELETE FROM properties WHERE org_id=ANY({orgs_sql});"
@@ -428,8 +633,18 @@ finally:
             f"DELETE FROM memberships WHERE org_id=ANY({orgs_sql});"
             f"DELETE FROM auth.users WHERE id=ANY({users_sql});"
             f"ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;"
-            f"DELETE FROM organizations WHERE id=ANY({orgs_sql});", check=False)
+            f"DELETE FROM organizations WHERE id=ANY({orgs_sql});"
+            f"DELETE FROM inbox_t2_message_capture.dirty WHERE org_id=ANY({orgs_sql});"
+            f"DELETE FROM inbox_t2_message_capture.route_edges WHERE org_id=ANY({orgs_sql});"
+            f"DELETE FROM inbox_t2_message_capture.versions WHERE org_id=ANY({orgs_sql});"
+            f"DELETE FROM inbox_operation_domain.target_versions WHERE org_id=ANY({orgs_sql});"
+            f"DELETE FROM inbox_operation_domain.sms_scopes WHERE org_id=ANY({orgs_sql});"
+            f"DELETE FROM public.inbox_inbound_heads WHERE org_id=ANY({orgs_sql});"
+            f"DELETE FROM inbox_t2_bridge.access_epochs WHERE user_id=ANY({users_sql});", check=False)
         residual = {}
+        # Independent, FRESH queries (not a reuse of the DELETE's own
+        # rowcount) against the FULL table list above, so a false "zero
+        # residual" claim is actually falsifiable.
         for label, query in [
             ('organizations', f"SELECT count(*) FROM organizations WHERE id=ANY({orgs_sql})"),
             ('auth.users', f"SELECT count(*) FROM auth.users WHERE id=ANY({users_sql})"),
@@ -440,6 +655,13 @@ finally:
             ('messages', f"SELECT count(*) FROM messages WHERE org_id=ANY({orgs_sql})"),
             ('consent_events', f"SELECT count(*) FROM consent_events WHERE org_id=ANY({orgs_sql})"),
             ('provider_sender_numbers', f"SELECT count(*) FROM provider_sender_numbers WHERE org_id=ANY({orgs_sql})"),
+            ('inbox_t2_bridge.access_epochs', f"SELECT count(*) FROM inbox_t2_bridge.access_epochs WHERE user_id=ANY({users_sql})"),
+            ('public.inbox_inbound_heads', f"SELECT count(*) FROM public.inbox_inbound_heads WHERE org_id=ANY({orgs_sql})"),
+            ('inbox_t2_message_capture.versions', f"SELECT count(*) FROM inbox_t2_message_capture.versions WHERE org_id=ANY({orgs_sql})"),
+            ('inbox_t2_message_capture.dirty', f"SELECT count(*) FROM inbox_t2_message_capture.dirty WHERE org_id=ANY({orgs_sql})"),
+            ('inbox_t2_message_capture.route_edges', f"SELECT count(*) FROM inbox_t2_message_capture.route_edges WHERE org_id=ANY({orgs_sql})"),
+            ('inbox_operation_domain.target_versions', f"SELECT count(*) FROM inbox_operation_domain.target_versions WHERE org_id=ANY({orgs_sql})"),
+            ('inbox_operation_domain.sms_scopes', f"SELECT count(*) FROM inbox_operation_domain.sms_scopes WHERE org_id=ANY({orgs_sql})"),
         ]:
             n = sql(query)
             if n != '0': residual[label] = n

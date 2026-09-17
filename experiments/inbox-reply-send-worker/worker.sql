@@ -124,9 +124,26 @@ LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_reply_send.c
 -- A revoked/expired/foreign-org membership, or a forged operation/attempt
 -- relationship (attempt not found, or operation not found for org o), raises
 -- 42501 and start_dispatch is never called — no token, no provider call.
+-- [Astra round-2 B1] The pre-check above is fail-fast only — it is NOT the
+-- authoritative gate. inbox_reply_send.start_dispatch() itself can BLOCK for
+-- an unbounded time: item_current() takes FOR SHARE on the sender/head rows,
+-- and the marker UPDATE itself can wait on the D-6(5) sender-inflight unique
+-- index. A requester's access_expires_at can lapse DURING that wait — the
+-- exact same "last-eligibility-read-after-the-last-statement-that-can-wait"
+-- shape PR-D's own R3-2/R3-1 invariant exists to close for eligibility, now
+-- applied to requester authorization. So: capture start_dispatch's result,
+-- and — ONLY if it actually wrote the marker ({kind:'dispatch'}; a
+-- 'skipped' result changed nothing that needs unwinding) — re-check the
+-- SAME membership predicate with a FRESH clock_timestamp() AFTER
+-- start_dispatch returns. A lapsed/revoked/foreign-org membership at THAT
+-- point raises 42501, which aborts this ENTIRE function's transaction —
+-- including start_dispatch's own marker UPDATE, which is not yet committed
+-- (this whole function is one top-level statement/transaction) — so the
+-- attempt rolls back to 'claimed', dispatch_started_at/dispatch_token are
+-- never persisted, and no provider call is possible.
 CREATE FUNCTION inbox_reply_send.worker_start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
-DECLARE op uuid;requester uuid;active boolean;
+DECLARE op uuid;requester uuid;active boolean;result jsonb;
 BEGIN
  SELECT a.operation_id INTO op FROM inbox_reply_send.attempts a WHERE a.org_id=o AND a.id=attempt_id;
  IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;
@@ -140,7 +157,16 @@ BEGIN
    AND (m.access_expires_at IS NULL OR m.access_expires_at>clock_timestamp())
  ) INTO active;
  IF NOT active THEN RAISE EXCEPTION 'INBOX_REPLY_REQUESTER_UNAUTHORIZED' USING ERRCODE='42501';END IF;
- RETURN inbox_reply_send.start_dispatch(o,attempt_id,g);
+ result:=inbox_reply_send.start_dispatch(o,attempt_id,g);
+ IF result->>'kind'='dispatch' THEN
+  SELECT EXISTS(
+   SELECT 1 FROM public.memberships m
+   WHERE m.user_id=requester AND m.org_id=o AND m.access_status='active' AND m.deletion_prepared_at IS NULL
+    AND (m.access_expires_at IS NULL OR m.access_expires_at>clock_timestamp())
+  ) INTO active;
+  IF NOT active THEN RAISE EXCEPTION 'INBOX_REPLY_REQUESTER_UNAUTHORIZED' USING ERRCODE='42501';END IF;
+ END IF;
+ RETURN result;
 END $$;
 
 CREATE FUNCTION inbox_reply_send.worker_persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb

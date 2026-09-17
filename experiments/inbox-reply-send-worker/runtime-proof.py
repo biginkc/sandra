@@ -246,6 +246,14 @@ finally:
     sql(CLEANUP, check=False)
     sql(ROLE_CLEANUP, check=False)
     if owned_org:
+        # [Astra round-2 B3] Same full table list as proof.py's cleanup —
+        # see its comment for why each of these is written outside any
+        # reply-lane schema and carries no FK to organizations/auth.users.
+        # [Astra round-2 B3] Derived/trigger-populated tables must be deleted
+        # LAST — see proof.py's cleanup comment: memberships/auth.sessions/
+        # messages/contacts/properties DELETEs fire capture_access() and the
+        # recipient() capture triggers, which re-insert rows into these
+        # tables if they run after those tables were already cleared.
         sql(f"DELETE FROM messages WHERE org_id='{owned_org}';"
             f"DELETE FROM consent_events WHERE org_id='{owned_org}';"
             f"DELETE FROM properties WHERE org_id='{owned_org}';"
@@ -256,11 +264,25 @@ finally:
             f"DELETE FROM memberships WHERE org_id='{owned_org}';"
             f"DELETE FROM auth.users WHERE id='{owned_user}';"
             f"ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;"
-            f"DELETE FROM organizations WHERE id='{owned_org}';", check=False)
+            f"DELETE FROM organizations WHERE id='{owned_org}';"
+            f"DELETE FROM inbox_t2_message_capture.dirty WHERE org_id='{owned_org}';"
+            f"DELETE FROM inbox_t2_message_capture.route_edges WHERE org_id='{owned_org}';"
+            f"DELETE FROM inbox_t2_message_capture.versions WHERE org_id='{owned_org}';"
+            f"DELETE FROM inbox_operation_domain.target_versions WHERE org_id='{owned_org}';"
+            f"DELETE FROM inbox_operation_domain.sms_scopes WHERE org_id='{owned_org}';"
+            f"DELETE FROM public.inbox_inbound_heads WHERE org_id='{owned_org}';"
+            f"DELETE FROM inbox_t2_bridge.access_epochs WHERE user_id='{owned_user}';", check=False)
         residual = {}
         for label, query in [
             ('organizations', f"SELECT count(*) FROM organizations WHERE id='{owned_org}'"),
             ('auth.users', f"SELECT count(*) FROM auth.users WHERE id='{owned_user}'"),
+            ('inbox_t2_bridge.access_epochs', f"SELECT count(*) FROM inbox_t2_bridge.access_epochs WHERE user_id='{owned_user}'"),
+            ('public.inbox_inbound_heads', f"SELECT count(*) FROM public.inbox_inbound_heads WHERE org_id='{owned_org}'"),
+            ('inbox_t2_message_capture.versions', f"SELECT count(*) FROM inbox_t2_message_capture.versions WHERE org_id='{owned_org}'"),
+            ('inbox_t2_message_capture.dirty', f"SELECT count(*) FROM inbox_t2_message_capture.dirty WHERE org_id='{owned_org}'"),
+            ('inbox_t2_message_capture.route_edges', f"SELECT count(*) FROM inbox_t2_message_capture.route_edges WHERE org_id='{owned_org}'"),
+            ('inbox_operation_domain.target_versions', f"SELECT count(*) FROM inbox_operation_domain.target_versions WHERE org_id='{owned_org}'"),
+            ('inbox_operation_domain.sms_scopes', f"SELECT count(*) FROM inbox_operation_domain.sms_scopes WHERE org_id='{owned_org}'"),
         ]:
             n = sql(query, check=False)
             if n and n != '0': residual[label] = n
