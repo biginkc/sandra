@@ -1,0 +1,40 @@
+{
+ "sources": {
+  "inbox-reply-boundary/context.sql": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+  "inbox-reply-preparation/recipient.sql": "90d1e6d24f954a7ae809962c8f7181a4f9a21b973303163c9655940e4c18cdf1",
+  "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
+  "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
+  "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
+  "inbox-reply-send/attempts.sql": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9",
+  "inbox-reply-send/accept.sql": "375fcb63bdd59e14168f49b05e46ab33f2f4f55c04e72ea5242b4165f6a54621",
+  "inbox-reply-send/public-api.sql": "4d5e1c7d76bd3464ca12c68d0a173bc6a58c3bc1e743d2e6f69b0b57da79fe0e",
+  "inbox-reply-send-worker/worker.sql": "a4c4a5229a74a538addeec29e153e4633c1c3dbf2bd5e91cc5fa1f28a475486c",
+  "inbox-reply-send-worker/worker-role.sql": "086f384ecb54a0966e16aa3d007cd767a73e3ba06faa120141c36926858de465"
+ },
+ "runner_sha256": "40dae114e018be222865408af5e423ef72da113b459271ee92f5aef1ac6da824",
+ "checks": [
+  "grant boundary: inbox_reply_send_worker reaches all EIGHT granted functions (including operation_dispatch_complete, Astra B3), and is refused on attempts.claim()/direct table SELECT/accept()",
+  "mutation: widening the grant (EXECUTE on attempts.claim() to the worker role) lets the direct call wrongly succeed; revoking restores the denial, confirmed both by a failed call and by has_function_privilege()",
+  "operation_attempts(): returns all 2 fresh (tip-of-chain) attempt ids for a just-accepted operation",
+  "mutation: operation_attempts() with its tip-of-chain NOT EXISTS filter removed wrongly re-includes a retired predecessor (real retry-chain fixture, ordinal-1 confirmed_not_submitted + ordinal-2 successor) \u2014 restored (byte-exact) enumeration returns only the tip again",
+  "happy path via worker_claim -> worker_start_dispatch (folded requester re-auth) -> worker_persist reaches provider_accepted",
+  "ack-readiness: a still-claimed attempt keeps operation_dispatch_complete=false and ack_dispatch=false (deferred, not journaled complete)",
+  "mutation: operation_dispatch_complete stubbed true wrongly acks a busy operation; restored (byte-exact) guard blocks it again",
+  "ack-readiness: once every attempt is dispatched-or-terminal, ack_dispatch acknowledges the outbox row",
+  "Astra #3/B1: worker_start_dispatch raises for a revoked requester (folded check, same statement as the marker); attempt stays claimed, no dispatch_token, no provider call possible",
+  "Astra #3/B1: worker_start_dispatch rejects a cross-org attempt id and a forged/unknown attempt id",
+  "positive control: restoring the membership makes worker_start_dispatch succeed again",
+  "mutation: worker_start_dispatch without the access-epoch lock (and an artificial gap standing in for the original narrower race) lets a mid-flight-revoked requester reach the marker; restored (byte-exact) guard is re-verified against a REAL two-connection race in 4c below",
+  "OBSERVED: connection B (revoke) is genuinely blocked (pg_stat_activity wait_event_type=Lock) while connection A still holds its access-epoch FOR SHARE lock open",
+  "Astra B1 concurrency proof: two REAL connections \u2014 a revoke targeting the access-epoch row genuinely blocks (observed lock-wait) behind a still-open worker_start_dispatch transaction, and only proceeds after that transaction fully commits \u2014 no interleaved window exists",
+  "mutation: worker_start_dispatch WITHOUT the post-marker expiry recheck lets the marker persist past a since-lapsed access_expires_at (expiry lapsed purely from elapsed time while blocked on the SENDER lock \u2014 the epoch lock never protected this); restored (byte-exact) function closes it",
+  "OBSERVED (restored function): connection A genuinely blocked on the sender FOR UPDATE lock (pg_stat_activity wait_event_type=Lock) while access_expires_at lapsed; on release, the post-marker recheck rolled back the entire transaction \u2014 no dispatch_started_at, no dispatch_token, no send",
+  "Astra round-2 B1: two-connection proof \u2014 access_expires_at lapses purely from elapsed time while start_dispatch blocks on the sender lock (NOT a revocation event, so the epoch lock does not help); the restored post-marker recheck rolls back the WHOLE transaction (no marker, no token, no send)",
+  "Astra #4: a second claim on a live lease returns busy (deferred), never a second dispatch token",
+  "Astra #4: a rejected (stale-generation) start_dispatch issues no token; persist with any token then raises STALE_TOKEN \u2014 no provider result can ever be reconciled from an unknown/failed commit",
+  "mutation: worker_persist stubbed to bypass the real persist() call wrongly reconciles a fabricated token; restored (byte-exact) wrapper rejects it with STALE_TOKEN again",
+  "no-double-send: crash between marker and result relabels the attempt uncertain on re-entry; a second start_dispatch is impossible; the ORIGINAL token still reconciles idempotently",
+  "mutation: worker_claim stubbed to fabricate a fresh claimed result on re-entry instead of faithfully reporting existing/uncertain; restored (byte-exact) wrapper reports re-entry correctly again",
+  "final state: every worker.sql function is byte-exact against its source definition"
+ ]
+}
