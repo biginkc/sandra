@@ -6,11 +6,11 @@ const path = require("node:path");
 // neither lane contacts fonts.googleapis.com or fonts.gstatic.com. Turbopack
 // cannot resolve an absolute filesystem URL emitted by a mocked Google CSS
 // response; its internal font transform treats that URL as a remote fetch.
-// Use a local() face for the production build that backs the browser lane. This
-// gives Turbopack no URL to resolve while still exercising the real
-// next/font/google transform; the fixture intentionally does not claim to
-// validate remote font asset fetching. Development-only Webpack runs retain
-// filesystem URLs so that loader can inspect the bundled WOFF2 assets.
+// Use a local() face when the caller selects Turbopack, because that bundler
+// cannot resolve an absolute filesystem URL. The browser lane pins Webpack
+// and sets the flag to 0, so its production build receives filesystem URLs and
+// exercises the real bundled WOFF2 asset path. The fixture never contacts a
+// remote font provider.
 // Resolve from the project working directory because Turbopack evaluates this
 // mocked module from a virtual /mock location rather than its source path.
 const mockedResponsePath = process.env.NEXT_FONT_GOOGLE_MOCKED_RESPONSES;

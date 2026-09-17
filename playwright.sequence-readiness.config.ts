@@ -114,12 +114,15 @@ const commonLocalEnv = {
   NEXT_FONT_GOOGLE_MOCKED_RESPONSES: googleFontMockPath,
 };
 const productionLocalEnv = {
-  ...Object.fromEntries(
-    Object.entries(commonLocalEnv).filter(([name]) => name !== "E2E_AUTH_BYPASS"),
-  ),
+  ...commonLocalEnv,
+  // Playwright merges webServer.env with its parent process. An explicit
+  // empty value prevents the runner's development-only bypass from leaking
+  // into this production server.
+  E2E_AUTH_BYPASS: "",
   NODE_ENV: "production",
   NEXT_PUBLIC_SITE_URL: baseURL,
-  NEXT_FONT_GOOGLE_TURBOPACK_MOCKED_RESPONSES: "1",
+  NEXT_FONT_GOOGLE_TURBOPACK_MOCKED_RESPONSES: "0",
+  NEXT_TELEMETRY_DISABLED: "1",
   SEQUENCE_READINESS_PRODUCTION_BROWSER: "1",
 };
 
@@ -170,11 +173,11 @@ export default defineConfig({
     {
       // Build once before browser workers start so cold route compilation is
       // outside the bounded acceptance-flow budgets. CI checks this real
-      // production server with the offline Google-font transform fixture;
-      // local disposable runs may use a symlinked dependency cache that
-      // cannot satisfy Turbopack's project-root rule.
+      // production server with the offline Google-font fixture. Pin Webpack
+      // because disposable mutation worktrees may symlink dependencies beyond
+      // the project root, which Turbopack rejects.
       command:
-        "npm run build && npx next start --hostname 127.0.0.1 -p 3557",
+        "npm run build -- --webpack && npx next start --hostname 127.0.0.1 -p 3557",
       url: `${baseURL}/login`,
       name: "sequence-readiness-app",
       timeout: 300_000,
