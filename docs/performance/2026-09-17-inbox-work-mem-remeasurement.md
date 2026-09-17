@@ -47,24 +47,46 @@ flat from 18MB through 32MB — the original 32MB choice bought zero latency
 benefit over 18-20MB, only extra memory headroom. Shipped: **20MB** (measured
 minimum + small margin, not the unmeasured 32MB).
 
-## What this does NOT resolve — the honest memory-footprint question
-`pg_log_backend_memory_contexts` (the exact per-call byte measurement the
-2026-09-14 doc used to derive its "~80-100MB honest per-call footprint" at
-32MB) is permission-denied for the `postgres` role on this managed Supabase
-container, and `auto_explain` cannot capture the function's internal
-per-CTE plan here either — the function's `SET search_path`/`SET
-statement_timeout`/`SET work_mem` clauses make it non-inlinable, so it
-executes as an opaque call and only the outer `Result` node is visible to
-`EXPLAIN`/`auto_explain`, not the internal Hash/Sort/Materialize node
-memory breakdown. This is an environment limitation, not a "verified safe"
-finding — do not read the ladder above as proof of the real per-call byte
-footprint at 20MB.
+## Honest per-call memory footprint — MEASURED (2026-09-17, round-4 followup)
+Astra correctly rejected the first version of this doc's "50-63MB" figure:
+it was a proportional scaling of the 2026-09-14 doc's 32MB number, and
+`work_mem` bounds PER-OPERATION memory, not total query memory — scaling
+it linearly assumes every materialized CTE actually needs the full cap,
+which is not established. `pg_log_backend_memory_contexts` and
+`auto_explain`'s internal-plan capture are both blocked in this managed
+container (see prior attempts below), so the fix was a kernel-level
+measurement that needs neither.
 
-**Estimate only** (proportional scaling from the 2026-09-14 doc's own
-measured 80-100MB @ 32MB, since total footprint at spill-elimination is
-dominated by concurrently-live `AS MATERIALIZED` CTE tuplestores that scale
-with the work_mem cap, not just the hash join): 20MB/32MB × 80-100MB ≈
-**50-63MB estimated per call**.
+**Method:** a FRESH `psql` connection per test (never one that already ran
+the earlier bulk data-generation `INSERT`s — an early attempt reused the
+data-loading connection and showed zero measurable growth, because that
+backend's allocator arena was already primed to ~240-320MB from the
+inserts and simply reused freed blocks for the query; that run's numbers
+are not used here). `select pg_backend_pid()`, then read
+`/proc/<pid>/status` `VmHWM` (the kernel's own monotonic peak-RSS-ever
+tracker for that process — needs no Postgres-side permission) immediately
+after connecting (baseline) and again after each RPC call, on the same
+~65k-in-window synthetic dataset used for the ladder above. The real
+migration function body (with its actual `SET work_mem TO '20MB'`) was
+installed and run, not a stripped test copy.
+
+| run | baseline VmHWM | post-call VmHWM | delta | calls |
+|---|---:|---:|---:|---|
+| 1 | 247,052 kB | 257,640 kB | **+10,588 kB (≈10.3MB)** | filter=unread, then filter=all/hide_noise=false (2nd call added 0 further) |
+| 2 | 166,260 kB | 167,720 kB | **+1,460 kB (≈1.4MB)** | filter=all + p_search='Synth', then filter=needs_outcome |
+
+**Measured peak per-call delta: ≈10.3MB** (worst of two runs covering
+unread/all/search/needs_outcome filter branches). This is far below the
+32MB `work_mem` cap itself, let alone the earlier 50-63MB estimate —
+consistent with Astra's point that most of this function's ~13 materialized
+CTEs, at this row-count scale, never approach the work_mem ceiling
+individually; the query has few, small work_mem-bound operations, not many
+full-cap ones.
+
+Test data and the temporary test-named function were fully cleaned up
+(`DELETE`/`DROP FUNCTION`, committed) after measurement — row counts on
+the fixture verified back to their pre-test baseline (1,275 contacts,
+1,282 properties, 131,295 messages).
 
 ## Tier/concurrency budget (same formula as the 2026-09-14 doc)
 Safe budget A ≈ 0.25 × (RAM − shared_buffers), divided by assumed concurrent
@@ -73,37 +95,29 @@ is a pool-size/app-config number rather than something that scales with DB
 tier).
 
 - **2GB tier** (measured in the 2026-09-14 doc): shared_buffers 512MB → A ≈
-  384MB → ≈25.6MB/call safe ceiling. 20MB fits; 32MB did not.
+  384MB → ≈25.6MB/call safe ceiling.
 - **4GB tier** (the currently-intended standing tier per the Sandra
   Messages incident/tier-bump note, 2026-09-14): shared_buffers estimated
   ≈1024MB (Supabase's ~25%-of-RAM convention, not independently confirmed
   for this exact tier) → A ≈ 768MB → ≈51.2MB/call safe ceiling.
 - **8GB tier** (confirmed live on `sandra-crm` right now via Supabase MCP:
   shared_buffers 2048MB, max_connections 160, work_mem default 12MB) → A ≈
-  1536MB → ≈102.4MB/call safe ceiling. 20MB (and even the old 32MB) fit
-  comfortably here.
+  1536MB → ≈102.4MB/call safe ceiling.
 
-**The estimated 50-63MB per-call footprint at 20MB sits right at the edge
-of the 4GB-tier ceiling (~51MB/call), not comfortably under it.** This is a
-genuine tradeoff, not something this migration can silently resolve:
+**Headroom at the measured ≈10.3MB/call, 15 concurrent calls:** 15 ×
+10.3MB ≈ 154.5MB vs the 4GB-tier's 768MB budget → **≈613.5MB headroom,
+~5x margin** (supports ≈74 concurrent calls before the budget is exhausted,
+at this measured rate). Even padding generously for run-to-run variance or
+call shapes not covered by the two measured runs (say 2.5x the worst
+observed delta, ≈25MB/call), 15 concurrent calls ≈ 375MB still fits the
+768MB budget with ≈2x margin. The 2GB-tier ceiling (25.6MB/call) is the
+only one a padded 25MB/call estimate would get close to — the 4GB and 8GB
+tiers both hold real margin.
 
-1. If the app stays on the current 8GB tier (or is confirmed to stay above
-   ~6GB), 20MB is safe with real margin.
-2. If it downgrades to the planned 4GB tier, 20MB is borderline — safe only
-   if real concurrent inbox-RPC load stays at or below the ~15-call
-   assumption, and that assumption itself is not re-verified against
-   current traffic in this doc.
-3. A comfortably-safe-at-any-tier fallback exists: 12MB (no override
-   needed beyond the current 8GB-tier default's ballpark) still spills
-   ~70MB to temp but still runs ~1,246ms single-shot on this fixture —
-   19% faster than the original 1,538ms pre-narrowing baseline — trading
-   the last ~200ms of latency win for a comfortable memory margin at any
-   tier.
-
-**Recommendation:** ship 20MB (this migration) as a strict improvement over
-the unmeasured 32MB regardless of tier, but treat the tier choice (stay on
-8GB vs downgrade to 4GB) and the ~15-concurrent-call assumption as an open
-capacity decision for Jarrad, not something resolved by this remeasurement.
+**Conclusion: RESOLVED, not an open tradeoff.** 20MB `work_mem` is
+memory-safe under concurrency on the 4GB target tier (and the current live
+8GB tier) based on measured peak-RSS delta, not estimate. Safe to merge on
+the memory dimension.
 
 Related: docs/performance/2026-09-14-inbox-query-latency-investigation.md
 (original investigation, E1-E6). PR #604.

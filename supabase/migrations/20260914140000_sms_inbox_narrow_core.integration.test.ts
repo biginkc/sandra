@@ -630,12 +630,15 @@ describe("sms_inbox_thread_page_snapshot signature/config safety net (BLOCKING, 
     );
     const config: string[] = rows[0].proconfig ?? [];
     const isSecurityDefiner: boolean = rows[0].prosecdef;
-    expect(config).toEqual(expect.arrayContaining(["search_path=", "statement_timeout=15s", "work_mem=20MB"]));
+    // Astra round-4 gate on #604 (issue 2): Postgres stores an EMPTY
+    // search_path as `search_path=""` (quoted empty string), not bare
+    // `search_path=` -- the original assertion could never pass.
+    expect(config).toEqual(expect.arrayContaining(["search_path=\"\"", "statement_timeout=15s", "work_mem=20MB"]));
     // SECURITY INVOKER means prosecdef is false (prosecdef = true is SECURITY DEFINER).
     expect(isSecurityDefiner).toBe(false);
     // Mutation-kill demo: dropping search_path must fail this assertion.
     const mutatedSearchPath = config.filter(c => !c.startsWith("search_path"));
-    expect(mutatedSearchPath).not.toEqual(expect.arrayContaining(["search_path="]));
+    expect(mutatedSearchPath).not.toEqual(expect.arrayContaining(["search_path=\"\""]));
     // Mutation-kill demo: dropping work_mem must fail this assertion.
     const mutatedWorkMem = config.filter(c => !c.startsWith("work_mem"));
     expect(mutatedWorkMem).not.toEqual(expect.arrayContaining(["work_mem=20MB"]));
@@ -651,7 +654,7 @@ describe("sms_inbox_thread_page_snapshot signature/config safety net (BLOCKING, 
       );
       const rolledBackArgs = rows[0].args as string;
       const rolledBackConfig: string[] = rows[0].proconfig ?? [];
-      expect(rolledBackConfig).toEqual(expect.arrayContaining(["search_path=", "statement_timeout=15s"]));
+      expect(rolledBackConfig).toEqual(expect.arrayContaining(["search_path=\"\"", "statement_timeout=15s"]));
       expect(rolledBackArgs).toContain("p_search text DEFAULT NULL::text");
     } finally {
       // Always restore the rewrite regardless of assertion outcome above.

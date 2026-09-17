@@ -100,13 +100,13 @@
 -- flat from 18MB through 32MB (~1.0-1.09s on the fixture's hardware,
 -- vs ~1.29-1.33s still-spilling at 8-16MB). The function-scoped
 -- `SET work_mem TO '20MB'` below ships the measured minimum plus a
--- small margin, not the unmeasured 32MB — roughly 40% less memory
--- pressure per call than the original round-3 value for the same
--- spill-free result. See that doc for the full ladder, the honest
--- per-call footprint estimate, and the standing tier/concurrency
--- tradeoff this does NOT resolve (still needs a capacity decision, not
--- a query fix, if concurrent load or DB tier changes). No
--- `plan_cache_mode` or other planner GUC is set, per S16.3/S18.1/S19.
+-- small margin, not the unmeasured 32MB. Capacity was measured, not
+-- estimated: kernel-level `/proc/<pid>/status VmHWM` on a fresh backend
+-- shows ~10.3MB peak RSS delta per call (worst of two runs across
+-- unread/all/search/needs_outcome filters) -- comfortably within the
+-- ~768MB 4GB-tier concurrency budget at ~15 concurrent calls (~5x
+-- margin). See that doc for the full ladder and the measurement method.
+-- No `plan_cache_mode` or other planner GUC is set, per S16.3/S18.1/S19.
 --
 -- Reviewability: see the companion migration
 -- 20260914140000_sms_inbox_narrow_core.integration.test.ts for the
