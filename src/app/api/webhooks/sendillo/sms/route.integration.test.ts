@@ -426,6 +426,80 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     expect(deliveryCount).toBe(3);
   });
 
+  it("does not complete an incomplete canonical intent from a semantic duplicate", async () => {
+    const phone = "+18165550141";
+    const contactId = await seedContact(phone);
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "141 Sendillo Semantic Retry Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    const conversationId = "22222222-3333-4444-8555-666666666666";
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "sendillo",
+      external_id: "snd_semantic_retry_outbound_001",
+      from_address: "+18164876899",
+      to_address: phone,
+      body: "seed outbound",
+      contact_id: contactId,
+      property_id: property!.id,
+      conversation_id: conversationId,
+    });
+
+    const receivedAt = new Date("2026-07-02T19:09:39.000Z");
+    const orgId = await getOrgId();
+    const canonical = await claimInboundSmsIntent(supabase, {
+      orgId,
+      providerId: "sendillo",
+      externalId: "snd_semantic_retry_canonical_001",
+      from: phone,
+      to: "+18164876899",
+      body: "I need to check with Maria",
+      receivedAt,
+      raw: { messageId: "snd_semantic_retry_canonical_001" },
+      mediaUrls: null,
+      webhookEventId: null,
+      contactId,
+      propertyId: property!.id,
+      conversationId,
+      routingResolution: "matched_recipient_number",
+    });
+    expect(canonical).toMatchObject({ duplicate: false });
+    if (canonical.duplicate) throw new Error("canonical claim unexpectedly duplicated");
+    if (!canonical.intentId) throw new Error("canonical intent was not created");
+
+    const { error: incompleteError } = await supabase
+      .from("sms_inbound_intents")
+      .update({ status: "message_inserted" })
+      .eq("id", canonical.intentId);
+    if (incompleteError) throw new Error(incompleteError.message);
+
+    const res = await POST(
+      makeSendilloInboundRequest({
+        messageId: "snd_semantic_retry_duplicate_001",
+        from: phone,
+        body: "I need to check with Maria",
+        receivedAt: receivedAt.toISOString(),
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: intent } = await supabase
+      .from("sms_inbound_intents")
+      .select("status")
+      .eq("id", canonical.intentId)
+      .single();
+    expect(intent?.status).toBe("message_inserted");
+  });
+
   it("lets the same Sendillo ID resume a partially claimed inbound intent", async () => {
     const contactId = await seedContact("+18165550104");
     const { data: contact } = await supabase
