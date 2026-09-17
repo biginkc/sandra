@@ -1385,5 +1385,7 @@
   ],
   "candidate": "2ddeaf555436ce0316f824639c061a4f7b9eab95",
   "retainedExecutableEvidence": "docs/testing/sequence-readiness-replay-source.mjs.txt",
-  "replayInstructions": "Copy retained text bytes to scripts/.sequence-mutation-proof-diagnostic.mjs in the candidate worktree with recorded artifacts present; run recorded Node24 invocation; remove only temporary sibling."
+  "replayInstructions": "Copy retained text bytes to scripts/.sequence-mutation-proof-diagnostic.mjs in the candidate worktree with recorded artifacts present; run recorded Node24 invocation; remove only temporary sibling.",
+  "trackedReplayTextSha256": "e26dfbd7b1a6fcbd754cef58dd13dde7722b2f9e222ffcb3c01b19d48b262a84",
+  "trackedReplayTextMatchesExecutedScript": true
 }
