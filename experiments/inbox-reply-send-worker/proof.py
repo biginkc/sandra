@@ -22,6 +22,7 @@ from pathlib import Path
 P = Path(__file__).resolve().parent
 sys.path.insert(0, str(P.parent / 'inbox-projection' / 'fixture'))
 from guards import validate_container, validate_cron
+import owned_cleanup
 if sys.argv[1:] != ['--run-owned-fixture']: raise SystemExit('Explicit owned fixture required')
 D = ['docker', '--host', 'unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock']; N = 'sandra-inbox-projection-t2-db'
 validate_container(json.loads(subprocess.check_output(D + ['inspect', N], text=True))[0])
@@ -61,6 +62,14 @@ validate_cron(sql('SHOW cron.launch_active_jobs'))
 need(sql('SELECT marker FROM inbox_t2_fixture.identity') == 'sandra-inbox-projection-t2-owned-synthetic', 'Wrong fixture')
 need(sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespace('inbox_reply_preparation') IS NULL AND to_regnamespace('inbox_reply_review') IS NULL AND to_regnamespace('inbox_reply_send') IS NULL") == 't', 'Refusing existing reply schema')
 need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_send_worker')") == 't', 'Refusing existing worker role')
+
+# [Astra round-3] Dynamic, exhaustive-by-construction residual discovery —
+# see owned_cleanup.py's module docstring. MUST run before anything else
+# writes a row, so counter_baseline reflects the true pre-run state.
+ORG_TABLES, USER_TABLES, COUNTER_TABLES = owned_cleanup.discover(sql)
+COUNTER_BASELINE = owned_cleanup.snapshot_counters(sql, COUNTER_TABLES)
+print(f'Discovered {len(ORG_TABLES)} org_id-scoped + {len(USER_TABLES)} user_id-scoped + {len(COUNTER_TABLES)} counter table(s) to verify residual-free at cleanup')
+
 CLEANUP = ("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);"
            "DROP FUNCTION IF EXISTS public.inbox_accept_reply(uuid,uuid);DROP FUNCTION IF EXISTS public.inbox_recover_reply(uuid,uuid);DROP FUNCTION IF EXISTS public.inbox_reply_operation_status(uuid);"
            "DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;"
@@ -595,34 +604,10 @@ finally:
     if OWNED_ORGS:
         orgs_sql = "ARRAY[" + ','.join(f"'{o}'" for o in OWNED_ORGS) + "]::uuid[]"
         users_sql = "ARRAY[" + ','.join(f"'{u}'" for u in OWNED_USERS) + "]::uuid[]"
-        # [Astra round-2 B3] EVERY table any source/proof step in this file
-        # writes to, not just the org/user/reply-schema rows: the recipient()
-        # capture path (recipient.sql) leaves rows in public.inbox_inbound_heads,
-        # inbox_t2_message_capture.versions and inbox_operation_domain.target_versions
-        # (all INSERT..ON CONFLICT DO NOTHING, keyed by org_id+conversation_id);
-        # capture_access() (inbox-workset-bridge/auth.sql, fired by every
-        # memberships/auth.sessions insert) leaves a row in
-        # inbox_t2_bridge.access_epochs keyed by user_id; and the wider
-        # sync/routing triggers this fixture's messages/contacts/properties
-        # inserts also fire leave rows in inbox_operation_domain.sms_scopes,
-        # inbox_t2_message_capture.dirty and inbox_t2_message_capture.route_edges
-        # (all org_id-keyed). None of these live inside a reply-lane schema, so
-        # the DROP SCHEMA CASCADE above never touches them. None carry an FK to
-        # organizations/auth.users either, so they must be deleted explicitly.
-        # [Astra round-2 B3, real bug found while fixing this] ORDER MATTERS,
-        # confirmed via a manual standalone repro against the live fixture
-        # (not a hypothetical): inbox_t2_bridge.capture_access()
-        # (inbox-workset-bridge/auth.sql:7-19) is an AFTER trigger on BOTH
-        # public.memberships and auth.sessions — including on DELETE — that
-        # INSERTs..ON CONFLICT DO UPDATE a fresh access_epochs row for the
-        # affected user_id. The recipient()/capture triggers on
-        # messages/contacts/properties similarly repopulate
-        # inbox_t2_message_capture.dirty/versions/route_edges and
-        # inbox_operation_domain.target_versions/sms_scopes on delete. So
-        # EVERY derived/trigger-populated table must be deleted LAST, strictly
-        # AFTER every primary table whose own delete trigger writes to it —
-        # deleting them first just gets them silently re-inserted by the
-        # later primary-table deletes in this SAME transaction.
+        # PRIMARY tables: deleted explicitly, in the correct FK/trigger order
+        # (owner-guard trigger dance on memberships). These are excluded from
+        # owned_cleanup's dynamic discovery (PRIMARY_TABLES) precisely so
+        # they stay hand-ordered here rather than swept generically.
         sql(f"DELETE FROM messages WHERE org_id=ANY({orgs_sql});"
             f"DELETE FROM consent_events WHERE org_id=ANY({orgs_sql});"
             f"DELETE FROM properties WHERE org_id=ANY({orgs_sql});"
@@ -633,18 +618,17 @@ finally:
             f"DELETE FROM memberships WHERE org_id=ANY({orgs_sql});"
             f"DELETE FROM auth.users WHERE id=ANY({users_sql});"
             f"ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;"
-            f"DELETE FROM organizations WHERE id=ANY({orgs_sql});"
-            f"DELETE FROM inbox_t2_message_capture.dirty WHERE org_id=ANY({orgs_sql});"
-            f"DELETE FROM inbox_t2_message_capture.route_edges WHERE org_id=ANY({orgs_sql});"
-            f"DELETE FROM inbox_t2_message_capture.versions WHERE org_id=ANY({orgs_sql});"
-            f"DELETE FROM inbox_operation_domain.target_versions WHERE org_id=ANY({orgs_sql});"
-            f"DELETE FROM inbox_operation_domain.sms_scopes WHERE org_id=ANY({orgs_sql});"
-            f"DELETE FROM public.inbox_inbound_heads WHERE org_id=ANY({orgs_sql});"
-            f"DELETE FROM inbox_t2_bridge.access_epochs WHERE user_id=ANY({users_sql});", check=False)
+            f"DELETE FROM organizations WHERE id=ANY({orgs_sql});", check=False)
+        # [Astra round-3] EVERYTHING ELSE: a generic, dynamically-discovered
+        # sweep — see owned_cleanup.py's module docstring for why this closes
+        # the CLASS of leak (three rounds of hand-maintained table lists have
+        # each missed real tables) instead of patching the latest few names.
+        # Repeated passes survive AFTER-trigger repopulation (the round-2
+        # finding) without needing delete order to be hand-derived per table.
+        owned_cleanup.sweep_delete(sql, ORG_TABLES, USER_TABLES, OWNED_ORGS, OWNED_USERS)
         residual = {}
         # Independent, FRESH queries (not a reuse of the DELETE's own
-        # rowcount) against the FULL table list above, so a false "zero
-        # residual" claim is actually falsifiable.
+        # rowcount) so a false "zero residual" claim is actually falsifiable.
         for label, query in [
             ('organizations', f"SELECT count(*) FROM organizations WHERE id=ANY({orgs_sql})"),
             ('auth.users', f"SELECT count(*) FROM auth.users WHERE id=ANY({users_sql})"),
@@ -655,17 +639,17 @@ finally:
             ('messages', f"SELECT count(*) FROM messages WHERE org_id=ANY({orgs_sql})"),
             ('consent_events', f"SELECT count(*) FROM consent_events WHERE org_id=ANY({orgs_sql})"),
             ('provider_sender_numbers', f"SELECT count(*) FROM provider_sender_numbers WHERE org_id=ANY({orgs_sql})"),
-            ('inbox_t2_bridge.access_epochs', f"SELECT count(*) FROM inbox_t2_bridge.access_epochs WHERE user_id=ANY({users_sql})"),
-            ('public.inbox_inbound_heads', f"SELECT count(*) FROM public.inbox_inbound_heads WHERE org_id=ANY({orgs_sql})"),
-            ('inbox_t2_message_capture.versions', f"SELECT count(*) FROM inbox_t2_message_capture.versions WHERE org_id=ANY({orgs_sql})"),
-            ('inbox_t2_message_capture.dirty', f"SELECT count(*) FROM inbox_t2_message_capture.dirty WHERE org_id=ANY({orgs_sql})"),
-            ('inbox_t2_message_capture.route_edges', f"SELECT count(*) FROM inbox_t2_message_capture.route_edges WHERE org_id=ANY({orgs_sql})"),
-            ('inbox_operation_domain.target_versions', f"SELECT count(*) FROM inbox_operation_domain.target_versions WHERE org_id=ANY({orgs_sql})"),
-            ('inbox_operation_domain.sms_scopes', f"SELECT count(*) FROM inbox_operation_domain.sms_scopes WHERE org_id=ANY({orgs_sql})"),
         ]:
             n = sql(query)
             if n != '0': residual[label] = n
-        if residual: raise RuntimeError(f'Owned-fixture cleanup left residual rows: {residual}')
+        if residual: raise RuntimeError(f'Owned-fixture cleanup left residual rows in explicitly-managed PRIMARY tables: {residual}')
+        # [Astra round-3] The exhaustive-by-construction check — EVERY
+        # dynamically-discovered org_id/user_id-scoped table anywhere in the
+        # database (not the primary tables above), plus the counter/cursor
+        # tables checked against their pre-run baseline. This is what
+        # actually catches a table nobody thought to name.
+        owned_cleanup.assert_zero_residual(sql, ORG_TABLES, USER_TABLES, COUNTER_TABLES, COUNTER_BASELINE, OWNED_ORGS, OWNED_USERS)
+        print(f'Exhaustive dynamic residual check passed: {len(ORG_TABLES)} org-scoped + {len(USER_TABLES)} user-scoped + {len(COUNTER_TABLES)} counter table(s), zero net residual across all of them')
     need(sql("SELECT to_regnamespace('inbox_reply_send') IS NULL") == 't', 'inbox_reply_send schema not dropped')
     need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_send_worker')") == 't', 'inbox_reply_send_worker role not dropped')
     print(f'Cleanup verified: zero residual rows across {len(OWNED_ORGS)} owned orgs / {len(OWNED_USERS)} owned users; schemas and worker role dropped')

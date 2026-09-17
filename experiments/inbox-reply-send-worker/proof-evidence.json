@@ -11,7 +11,7 @@
   "inbox-reply-send-worker/worker.sql": "a4c4a5229a74a538addeec29e153e4633c1c3dbf2bd5e91cc5fa1f28a475486c",
   "inbox-reply-send-worker/worker-role.sql": "086f384ecb54a0966e16aa3d007cd767a73e3ba06faa120141c36926858de465"
  },
- "runner_sha256": "e9744d29a472d4329d034137b57722a6b5e96b408d70f6eb4de8f7fb9a976c22",
+ "runner_sha256": "6300c759459acbadbbfa437a5883a1eb8e56dbc2c1620612c84bab7026fb1adb",
  "checks": [
   "grant boundary: inbox_reply_send_worker reaches all EIGHT granted functions (including operation_dispatch_complete, Astra B3), and is refused on attempts.claim()/direct table SELECT/accept()",
   "mutation: widening the grant (EXECUTE on attempts.claim() to the worker role) lets the direct call wrongly succeed; revoking restores the denial, confirmed both by a failed call and by has_function_privilege()",
