@@ -90,6 +90,17 @@ checks=[]
 def record(label):
  checks.append(label);print(f'  OK  {label}')
 
+def assert_sanitized(err,*phones):
+ """Every conflict raise in accept.sql carries no DETAIL/HINT. Assert the
+ raised text contains none of the given E.164 numbers, no generic E.164-shaped
+ digit run, no raw Postgres 'DETAIL:'/'duplicate key value' phrasing (which
+ would mean the bare ELSE RAISE; re-raise was hit instead of a sanitized
+ branch), and no raw index/constraint name leaking internal schema."""
+ need('DETAIL' not in err and 'duplicate key value' not in err,f'raised error carries raw constraint DETAIL (bare ELSE hit): {err}')
+ for p in phones:
+  need(p not in err,f'raised error text leaked phone number {p}: {err}')
+ need(not re.search(r'\+1[0-9]{10}',err),f'raised error text contains an E.164-shaped digit run: {err}')
+
 def make_org_and_prep(dest_prefix,n=1,extra_shared_dest=None):
  """Fresh org+user+session+n conversations (distinct destinations
  dest_prefix+00001.. ) -> frozen preparation covering all n, returns
@@ -163,6 +174,20 @@ try:
  sql("CREATE OR REPLACE FUNCTION inbox_reply_preparation.quiet_hours(state text,at_time timestamptz) RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path='' AS $qh$ SELECT jsonb_build_object('ok',true,'zone','Etc/UTC','local_time','12:00:00') $qh$;")
  print('Installed accept.sql + public-api.sql on top of attempts.sql')
 
+ # === 0. Verify the two AUTO-GENERATED constraint names accept.sql's
+ # exception-mapping block branches on. These are the ONLY two names in that
+ # block not taken verbatim from a CREATE UNIQUE INDEX in attempts.sql (which
+ # already fixes the index name explicitly) — if Postgres ever generated a
+ # different default name for operations' two UNIQUE(...) clauses, that
+ # 23505 would fall to the bare ELSE RAISE; and leak the raw constraint
+ # detail (including the phone number, for a destination-adjacent index).
+ # Query pg_constraint directly rather than trust the hardcoded literals.
+ real_prep_key_constraint=sql("SELECT conname FROM pg_constraint WHERE conrelid='inbox_reply_send.operations'::regclass AND pg_get_constraintdef(oid)='UNIQUE (org_id, preparation_id)'")
+ real_idem_key_constraint=sql("SELECT conname FROM pg_constraint WHERE conrelid='inbox_reply_send.operations'::regclass AND pg_get_constraintdef(oid)='UNIQUE (org_id, requester_id, idempotency_key)'")
+ need(real_prep_key_constraint=='operations_org_id_preparation_id_key',f"accept.sql's exception block assumes constraint name 'operations_org_id_preparation_id_key' but pg_constraint reports '{real_prep_key_constraint}' — the ELSE RAISE; bare re-raise would leak the raw 23505 detail for this conflict")
+ need(real_idem_key_constraint=='operations_org_id_requester_id_idempotency_key_key',f"accept.sql's exception block assumes constraint name 'operations_org_id_requester_id_idempotency_key_key' but pg_constraint reports '{real_idem_key_constraint}' — the ELSE RAISE; bare re-raise would leak the raw 23505 detail for this conflict")
+ record(f'constraint-name ground truth: pg_constraint confirms operations UNIQUE(org_id,preparation_id)={real_prep_key_constraint!r} and UNIQUE(org_id,requester_id,idempotency_key)={real_idem_key_constraint!r} match accept.sql\'s exception-mapping literals exactly')
+
  # === 1. Happy path: eligible set -> operations + N attempts + 1 outbox row ===
  o,u,k,prep_id,item_ids,cids=make_org_and_prep('+140255',n=3)
  result=json.loads(call_accept(o,u,k,prep_id))
@@ -213,7 +238,8 @@ try:
  freeze2=json.loads(sql(authed(u2,f"SELECT public.inbox_freeze_reply_review('{payload2}',gen_random_uuid())::text;")))
  err=sql_fail(authed(u2,f"SELECT inbox_reply_send.accept('{o2}','{u2}','{k2}','{freeze2['preparationId']}')::text;"))
  need('INBOX_REPLY_KEY_REUSED' in err,f'expected INBOX_REPLY_KEY_REUSED, got: {err}')
- record('key reuse (same key, different preparation, an operation already exists under it) -> INBOX_REPLY_KEY_REUSED, distinct from idempotent replay')
+ assert_sanitized(err,dest)
+ record('key reuse (same key, different preparation, an operation already exists under it) -> INBOX_REPLY_KEY_REUSED, distinct from idempotent replay, sanitized')
 
  # === 4. operations UNIQUE(org_id,preparation_id) exception-mapping ===
  # Step 4's binding check (request_key must equal the caller's key) makes a
@@ -234,9 +260,11 @@ try:
  sql(f"INSERT INTO inbox_reply_send.operations(org_id,requester_id,preparation_id,idempotency_key) VALUES('{o3}','{u3}','{prep_id3}','{rogue_key}');")
  err=sql_fail(authed(u3,f"SELECT inbox_reply_send.accept('{o3}','{u3}','{k3}','{prep_id3}')::text;"))
  need('INBOX_REPLY_PREPARATION_ACCEPTED' in err,f'expected INBOX_REPLY_PREPARATION_ACCEPTED, got: {err}')
+ dest3=sql(f"SELECT from_address FROM messages WHERE org_id='{o3}' LIMIT 1")
+ assert_sanitized(err,dest3)
  ops3,atts3,outbox3=counts(o3)
  need((ops3,atts3,outbox3)==(1,0,0),'accept should not have created any rows on top of the pre-existing rogue operation')
- record('operations UNIQUE(org_id,preparation_id) conflict -> INBOX_REPLY_PREPARATION_ACCEPTED, zero extra rows (defense-in-depth backstop)')
+ record('operations UNIQUE(org_id,preparation_id) conflict -> INBOX_REPLY_PREPARATION_ACCEPTED, zero extra rows, sanitized (proves the real constraint name, not the bare ELSE)')
 
  # === 5. Expiry ===
  o4,u4,k4,prep_id4,_,_=make_org_and_prep('+143255',n=1)
@@ -251,9 +279,11 @@ try:
      f"ALTER TABLE inbox_reply_review.preparations ENABLE TRIGGER immutable_reply_preparation;")
  err=sql_fail(authed(u4,f"SELECT inbox_reply_send.accept('{o4}','{u4}','{k4}','{prep_id4}')::text;"))
  need('INBOX_REPLY_PREPARATION_EXPIRED' in err,f'expected INBOX_REPLY_PREPARATION_EXPIRED, got: {err}')
+ dest4=sql(f"SELECT from_address FROM messages WHERE org_id='{o4}' LIMIT 1")
+ assert_sanitized(err,dest4)
  ops4,atts4,outbox4=counts(o4)
  need((ops4,atts4,outbox4)==(0,0,0),'expired accept created rows')
- record('expired preparation -> INBOX_REPLY_PREPARATION_EXPIRED, zero rows')
+ record('expired preparation -> INBOX_REPLY_PREPARATION_EXPIRED, zero rows, sanitized')
 
  # === 6. Subtractive E4: a frozen-eligible item now suppressed is DROPPED; a
  # frozen-EXCLUDED item is NEVER revived ===
@@ -290,6 +320,7 @@ try:
  o6,u6,k6,prep_id6,item_ids6,cids6=make_org_and_prep('+146255',n=51)
  err=sql_fail(authed(u6,f"SELECT inbox_reply_send.accept('{o6}','{u6}','{k6}','{prep_id6}')::text;"))
  need('INBOX_REPLY_RECIPIENT_LIMIT' in err,f'expected INBOX_REPLY_RECIPIENT_LIMIT, got: {err}')
+ assert_sanitized(err)
  ops6,atts6,outbox6=counts(o6)
  need((ops6,atts6,outbox6)==(0,0,0),'over-cap accept created rows')
  record('51 eligible recipients -> INBOX_REPLY_RECIPIENT_LIMIT, zero rows created')
@@ -317,9 +348,7 @@ try:
  ops_before,atts_before,outbox_before=counts(o7)
  err=sql_fail(authed(u7,f"SELECT inbox_reply_send.accept('{o7}','{u7}','{k7}','{prep_id7}')::text;"))
  need('INBOX_REPLY_DESTINATION_IN_PROGRESS' in err,f'expected INBOX_REPLY_DESTINATION_IN_PROGRESS, got: {err}')
- need(draft_dest not in err,'raised error text leaked the destination phone number')
- for e164 in [sql(f"SELECT to_address FROM messages WHERE conversation_id='{c}'") for c in cids7]:
-  need(e164 not in err,f'raised error text leaked a phone number ({e164})')
+ assert_sanitized(err,draft_dest,*[sql(f"SELECT from_address FROM messages WHERE conversation_id='{c}'") for c in cids7])
  ops_after,atts_after,outbox_after=counts(o7)
  need((ops_after,atts_after,outbox_after)==(ops_before,atts_before,outbox_before),f'a colliding batch left extra rows: before={(ops_before,atts_before,outbox_before)} after={(ops_after,atts_after,outbox_after)}')
  record('concurrent-destination collision -> INBOX_REPLY_DESTINATION_IN_PROGRESS, ZERO new rows from the colliding batch (atomic), no phone number in the error text')
@@ -400,7 +429,7 @@ try:
  finish(writer,'#10a writer (A) should commit cleanly')
  err10a=finish(reader,'#10a reader (B)',expect_ok=False)
  need('INBOX_REPLY_DESTINATION_IN_PROGRESS' in err10a,f'#10a expected INBOX_REPLY_DESTINATION_IN_PROGRESS after A committed, got: {err10a}')
- need(destA not in err10a,'#10a error text leaked the destination phone number')
+ assert_sanitized(err10a,destA)
  opsA,attsA,outboxA=counts(oA)
  need((opsA,attsA,outboxA)==(1,1,1),f'#10a loser B should have created ZERO rows: {(opsA,attsA,outboxA)}')
  record('concurrency #10a: two real connections race the SAME destination — B genuinely blocks on the lock (observed via pg_stat_activity), then loses with INBOX_REPLY_DESTINATION_IN_PROGRESS once A commits; B creates zero rows')
@@ -414,6 +443,58 @@ try:
  opsC,attsC,outboxC=counts(oC)
  need((opsC,attsC,outboxC)==(1,1,1),'#10b replay created extra rows')
  record('concurrency #10b: same-key replay on a FRESH connection after the first accept already committed -> identical operationId, zero new rows')
+
+ # #10c: disjoint accepts, two real connections, DIFFERENT destinations in
+ # the SAME org -> both must commit; the destination guard must never
+ # false-positive across unrelated destinations (Astra #1).
+ oD,uD,_,_,_,cidsD=make_org_and_prep('+152255',n=2)
+ claimsD=json.dumps({'sub':uD,'role':'authenticated','session_id':SESS[uD],'exp':4102444800})
+ solo_prep_ids=[]
+ for idx,cid in enumerate(cidsD):
+  captureX=json.loads(sql(authed(uD,f"SELECT public.inbox_capture_reply_recipients(ARRAY['{cid}']::uuid[])::text;")))
+  draftX=[{'conversationId':cid,'body':f'Disjoint {idx}','dependencies':captureX['items'][0]['dependencies'],'exclusion':None}]
+  payloadX=json.dumps({'targets':[{'kind':'conversation','id':cid}],'drafts':draftX,'template':f'Disjoint {idx}'}).replace("'","''")
+  kX=str(uuid.uuid4())
+  freezeX=json.loads(sql(authed(uD,f"SELECT public.inbox_freeze_reply_review('{payloadX}','{kX}')::text;")))
+  solo_prep_ids.append((kX,freezeX['preparationId']))
+ (kD1,prepD1),(kD2,prepD2)=solo_prep_ids
+ wnameD1='pr-e-disjoint1-'+str(uuid.uuid4());wnameD2='pr-e-disjoint2-'+str(uuid.uuid4())
+ connD1=start(f"SET application_name='{wnameD1}';BEGIN;SET LOCAL request.jwt.claims='{claimsD}';SELECT inbox_reply_send.accept('{oD}','{uD}','{kD1}','{prepD1}');SELECT pg_sleep(1);COMMIT;")
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wnameD1}' AND wait_event='PgSleep')",'#10c connection 1 did not reach pg_sleep')
+ connD2=start(f"SET application_name='{wnameD2}';BEGIN;SET LOCAL request.jwt.claims='{claimsD}';SELECT inbox_reply_send.accept('{oD}','{uD}','{kD2}','{prepD2}');SELECT pg_sleep(1);COMMIT;")
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wnameD2}' AND wait_event='PgSleep')",'#10c connection 2 did not reach pg_sleep (should never block on connection 1 — disjoint destinations)')
+ finish(connD1,'#10c connection 1 should commit cleanly')
+ finish(connD2,'#10c connection 2 should commit cleanly (no false destination_guard collision)')
+ opsD,attsD,outboxD=counts(oD)
+ need((opsD,attsD,outboxD)==(2,2,2),f'#10c both disjoint accepts should have committed independently: {(opsD,attsD,outboxD)}')
+ record('concurrency #10c: two real connections accept DIFFERENT destinations in the same org concurrently (both observed reaching pg_sleep simultaneously, i.e. neither blocked on the other) -> BOTH commit, 2 operations/2 attempts/2 outbox rows, no false destination_guard collision')
+
+ # #10d: expiry after a REAL lock wait. Connection A holds provider_sender_numbers'
+ # row FOR UPDATE (the same row item_current()'s canonical FOR SHARE reads);
+ # while A holds it, the preparation's expires_at is set to just past "now";
+ # connection B's accept() genuinely blocks on that row (observed via
+ # pg_stat_activity), and only unblocks once A commits — by which point
+ # expires_at has already lapsed. accept() must still reject with
+ # INBOX_REPLY_PREPARATION_EXPIRED and create ZERO rows (R3-2/time-after-locks).
+ oE,uE,kE,prepE,_,cidsE=make_org_and_prep('+153255',n=1)
+ claimsE=json.dumps({'sub':uE,'role':'authenticated','session_id':SESS[uE],'exp':4102444800})
+ wnameE='pr-e-expiry-lock-'+str(uuid.uuid4())
+ connE=start(f"SET application_name='{wnameE}';BEGIN;SELECT * FROM public.provider_sender_numbers WHERE org_id='{oE}' AND provider='sendillo' FOR UPDATE;SELECT pg_sleep(3);COMMIT;")
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wnameE}' AND wait_event='PgSleep')",'#10d writer did not hold the sender row FOR UPDATE')
+ sql(f"ALTER TABLE inbox_reply_review.preparations DISABLE TRIGGER immutable_reply_preparation;"
+     f"UPDATE inbox_reply_review.preparations SET expires_at=clock_timestamp()+interval '1.5 seconds' WHERE id='{prepE}';"
+     f"ALTER TABLE inbox_reply_review.preparations ENABLE TRIGGER immutable_reply_preparation;")
+ rnameE='pr-e-expiry-reader-'+str(uuid.uuid4())
+ readerE=start(f"SET application_name='{rnameE}';BEGIN;SET LOCAL request.jwt.claims='{claimsE}';SELECT inbox_reply_send.accept('{oE}','{uE}','{kE}','{prepE}');COMMIT;")
+ wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{rnameE}' AND wait_event_type='Lock')",'#10d reader did not genuinely block on the sender row lock')
+ finish(connE,'#10d writer (A) should commit cleanly, releasing the sender row lock')
+ errE=finish(readerE,'#10d reader (B)',expect_ok=False)
+ need('INBOX_REPLY_PREPARATION_EXPIRED' in errE,f'#10d expected INBOX_REPLY_PREPARATION_EXPIRED after the lock-wait pushed past expires_at, got: {errE}')
+ destE=sql(f"SELECT from_address FROM messages WHERE org_id='{oE}' LIMIT 1")
+ assert_sanitized(errE,destE)
+ opsE,attsE,outboxE=counts(oE)
+ need((opsE,attsE,outboxE)==(0,0,0),f'#10d a lock-delayed accept past expiry must create ZERO rows: {(opsE,attsE,outboxE)}')
+ record('concurrency #10d: a REAL lock wait (observed) on the sender row delays accept() past its preparation\'s expires_at -> still rejects with INBOX_REPLY_PREPARATION_EXPIRED (time-after-locks), zero rows, sanitized')
 
  for fn in ['inbox_reply_send.accept','inbox_reply_send.recover','inbox_reply_send.operation_status']:
   assert_body_matches(fn)
