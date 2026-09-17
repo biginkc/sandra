@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { createInboxActionRepository, type InboxActionClient } from "./action-api";
+import type { PreparedInboxAction } from "./action-api-contract";
 import { parseInboxActionAcceptance, parseInboxActionIntent } from "./action-definition";
 const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const signal = () => new AbortController().signal;
@@ -12,7 +13,7 @@ function client(results: unknown[]) { const rpc = vi.fn(() => ({ abortSignal: vi
 const ok = (data: unknown) => ({ data, error: null });
 const status = () => ({ operation_id: id(8), accepted_at: "2026-09-13T00:00:00Z", completed: true, result: "failed", items: [{ id: id(6), kind: "conversation", target_id: id(4), property_id: id(7), exclusion_code: null, step_ids: [id(9), id(10)], state: "conflicted", code: "record_changed" }], steps: [{ id: id(9), action: "outcome", state: "conflicted", code: "record_changed", receipt_version: "1", changed: false }, { id: id(10), action: "assign", state: "blocked", code: "predecessor_failed", receipt_version: "1", changed: false }] });
 describe("authoritative Inbox action transport", () => {
-    it("derives requester/org from live authorization and accepts jsonb member ordering", async () => { const c = client([ok(actor), ok(prepared())]); const p = await c.repository.prepare(JSON.stringify(request), signal()); expect(p.eligibleCount).toBe(1); expect(c.rpc.mock.calls[1]).toEqual(["inbox_prepare_action", { canonical_input: intent.canonicalInput, idempotency_key: id(3) }]); });
+    it("derives requester/org from live authorization and accepts jsonb member ordering", async () => { const c = client([ok(actor), ok(prepared())]); const p = await c.repository.prepare(JSON.stringify(request), signal()) as PreparedInboxAction; expect(p.eligibleCount).toBe(1); expect(c.rpc.mock.calls[1]).toEqual(["inbox_prepare_action", { canonical_input: intent.canonicalInput, idempotency_key: id(3) }]); });
     it("rejects client-supplied authority before prepare RPC", async () => { const c = client([ok(actor)]); await expect(c.repository.prepare(JSON.stringify({ ...request, organizationId: id(90) }), signal())).rejects.toMatchObject({ status: 400 }); expect(c.rpc).toHaveBeenCalledTimes(1); });
     it.each(["dnc", "callback_requested"])("keeps unsupported %s outcomes gated", async (value) => { const c = client([ok(actor)]); await expect(c.repository.prepare(JSON.stringify({ ...request, definition: { version: 1, steps: [{ type: "outcome", value }] } }), signal())).rejects.toMatchObject({ status: 400 }); expect(c.rpc).toHaveBeenCalledTimes(1); });
     it("rejects altered identity/hash, mapping and effect counts", async () => { for (const mutate of [(p: ReturnType<typeof prepared>) => { p.input_hash = "a".repeat(64); }, (p: ReturnType<typeof prepared>) => { p.items[0].target_id = id(98); }, (p: ReturnType<typeof prepared>) => { p.effect_count = 2; }]) {
@@ -51,8 +52,54 @@ describe("action review and recovery decoding", () => {
         const raw = JSON.stringify({ ...request, definition: { version: 1, steps: [{ type: "outcome", value: "opted_out" }] } });
         const parsed = parseInboxActionIntent(raw, { organizationId: id(1), requesterId: id(2) });
         const row = { ...prepared(), input_hash: parsed.inputHash, definition: parsed.input.definition, sms_safety_summary: { contacts: 1, linked_properties: 2, active_enrollments: 3 } };
-        expect((await client([ok(actor), ok(row)]).repository.prepare(raw, signal())).smsSafetySummary).toEqual({ contacts: 1, linkedProperties: 2, activeEnrollments: 3 });
+        expect((await client([ok(actor), ok(row)]).repository.prepare(raw, signal()) as PreparedInboxAction).smsSafetySummary).toEqual({ contacts: 1, linkedProperties: 2, activeEnrollments: 3 });
         await expect(client([ok(actor), ok({ ...row, sms_safety_summary: null })]).repository.prepare(raw, signal())).rejects.toMatchObject({ status: 503 });
+    });
+});
+describe("saved-action prepare glue", () => {
+    const savedRow = (definition: unknown, overrides: Record<string, unknown> = {}) => ({ id: id(20), version: 1, name: "Saved", definition, org_id: id(1), requester_id: id(2), is_active: true, created_at: "2026-09-14T00:00:00Z", ...overrides });
+    it("resolves the exact stored version via an authorized lookup and threads it into the metadata seam (never the raw client definition)", async () => {
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const savedDefinition = { version: 1, steps: [{ type: "outcome", value: "nurture" }] };
+        const preparedRow = { preparation_id: id(5), idempotency_key: id(3), input_hash: "will not be checked here", expires_at: "2026-09-14T00:00:00Z", definition: savedDefinition, items: [{ id: id(6), kind: "conversation", target_id: id(4), resolution: { property_id: id(7) }, exclusion_code: null }], effect_count: 1, affected_property_count: 1, sms_safety_summary: null };
+        // input_hash/definition echo must match the real parseInboxActionIntent
+        // output for this exact saved snapshot, so compute it the same way the
+        // route does rather than hand-typing a hash.
+        const intentForHash = parseInboxActionIntent(JSON.stringify(savedRequest), { organizationId: id(1), requesterId: id(2) }, { organizationId: id(1), requesterId: id(2), id: id(20), version: 1, definition: savedDefinition as never });
+        preparedRow.input_hash = intentForHash.inputHash;
+        const c = client([ok(actor), ok(savedRow(savedDefinition)), ok(preparedRow)]);
+        const p = await c.repository.prepare(JSON.stringify(savedRequest), signal()) as PreparedInboxAction;
+        expect(p.eligibleCount).toBe(1);
+        const calls = c.rpc.mock.calls as unknown as [string, Record<string, unknown>][];
+        expect(calls[1][0]).toBe("inbox_saved_action_get");
+        expect(calls[1][1]).toEqual({ id: id(20), version: 1 });
+        // The canonical input sent to inbox_prepare_action must carry the
+        // savedAction reference (not "savedAction":null / a client definition).
+        expect((calls[2][1] as { canonical_input: string }).canonical_input).toContain(`"savedAction":{"id":"${id(20)}","version":1}`);
+    });
+    it("MUTATION: a savedAction reference whose resolved snapshot belongs to a different org/requester than the live session is rejected before any prepare RPC (owner mismatch)", async () => {
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const c = client([ok(actor), ok(savedRow({ version: 1, steps: [{ type: "outcome", value: "nurture" }] }, { org_id: id(99) }))]);
+        await expect(c.repository.prepare(JSON.stringify(savedRequest), signal())).rejects.toMatchObject({ status: 403 });
+        expect(c.rpc).toHaveBeenCalledTimes(2);
+    });
+    it("review_reply saved actions hand off to reply PREPARE only — never inbox_accept_action/inbox_accept_reply, i.e. never auto-send", async () => {
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "unknown_sender_group", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const reviewReplyDefinition = { version: 1, steps: [{ type: "review_reply", value: undefined, text: "Hi {{first_name}}" }] };
+        const freezeRow = { idempotencyKey: id(3), replayed: false, items: [{ id: id(6), target: { kind: "unknown_sender_group", id: id(4) }, exclusion: "unsupported_target", recipient: null, duplicateDestination: false }], recipientCount: 0, blockers: ["empty"], preparationId: id(7), inputHash: "a".repeat(64), expiresAt: "2026-09-14T00:00:00Z" };
+        const c = client([ok(actor), ok(savedRow(reviewReplyDefinition)), ok(freezeRow)]);
+        const result = await c.repository.prepare(JSON.stringify(savedRequest), signal());
+        expect(result).toMatchObject({ recipientCount: 0, blockers: ["empty"] });
+        const calledRpcNames = (c.rpc.mock.calls as unknown as [string, unknown][]).map((call) => call[0]);
+        expect(calledRpcNames).toEqual(["inbox_authorize_sync", "inbox_saved_action_get", "inbox_freeze_reply_review"]);
+        expect(calledRpcNames).not.toContain("inbox_accept_action");
+        expect(calledRpcNames).not.toContain("inbox_accept_reply");
+        expect(calledRpcNames).not.toContain("inbox_prepare_action");
+    });
+    it("a non-savedAction request is unaffected (no saved-action RPC issued)", async () => {
+        const c = client([ok(actor), ok(prepared())]);
+        await c.repository.prepare(JSON.stringify(request), signal());
+        expect((c.rpc.mock.calls as unknown as [string, unknown][]).map((call) => call[0])).toEqual(["inbox_authorize_sync", "inbox_prepare_action"]);
     });
 });
 it("distinguishes definitive expired-not-accepted from still pending and rejects contradictory recovery data", async () => {
