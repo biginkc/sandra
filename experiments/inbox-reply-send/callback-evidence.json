@@ -1,0 +1,36 @@
+{
+ "sources": {
+  "inbox-reply-boundary/context.sql": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+  "inbox-reply-preparation/recipient.sql": "90d1e6d24f954a7ae809962c8f7181a4f9a21b973303163c9655940e4c18cdf1",
+  "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
+  "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
+  "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
+  "inbox-reply-send/attempts.sql": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9",
+  "inbox-reply-send/accept.sql": "375fcb63bdd59e14168f49b05e46ab33f2f4f55c04e72ea5242b4165f6a54621",
+  "inbox-reply-send/public-api.sql": "4d5e1c7d76bd3464ca12c68d0a173bc6a58c3bc1e743d2e6f69b0b57da79fe0e",
+  "inbox-reply-send/callback.sql": "96e6eea9a64cc51d681377d686d7ad7c9b410b9a3666518678ab645d25f8d784"
+ },
+ "runner_sha256": "ef9012677b408427d526181e87ec384df3d483e4812c1974113b05473f49ffad",
+ "checks": [
+  "grant hygiene: inbox_reply_reconcile_callback EXECUTE granted to service_role only (postgres is the owner)",
+  "grant hygiene: authenticated denied EXECUTE on the wrapper",
+  "happy path: provider_accepted -> delivered via wrapper",
+  "happy path: provider_accepted -> delivery_failed via wrapper",
+  "idempotent redelivery of the same terminal status is a no-op (deduped at the receipt-lease layer)",
+  "out-of-order contradictory terminal (delivered then delivery_failed) rejected, first-terminal-wins",
+  "callback-before-persist: stored durably in unmatched_callbacks, never discarded",
+  "unmatched holding row dedups first-received, never overwritten by a later contradictory callback",
+  "callback-before-persist: drain reconciles exactly once; second drain is a no-op",
+  "unique association: a second attempt cannot bind an already-used provider_reference (23505, no phone leak)",
+  "a callback matches exactly one attempt by reference, never by phone",
+  "mutation: unique index removal allows collision; restored index blocks it again",
+  "org scope: reconcile_delivery with the wrong org_id rejects (never touches another org's row)",
+  "org scope: the wrapper resolves the correct org and reconciles normally",
+  "lease fencing: a completion carrying a stale lease_generation affects zero rows",
+  "lease fencing: an expired lease is reclaimed (fresh owner, strictly higher generation) and completes",
+  "reply-vs-Outbox namespace isolation: a shared external_id never collides across webhook_events (sms_status_) and callback_receipts (inbox_reply_status_)",
+  "malformed terminal status rejected before any write (SQL-layer bound of the route-level 401/400 contract)",
+  "mutation: precedence guard removed -> contradictory terminal silently flips the row (proves the guard, not incidental behavior, blocks this)",
+  "restore verified byte-exact (assert_body_matches) and the precedence guard is back in force"
+ ]
+}
