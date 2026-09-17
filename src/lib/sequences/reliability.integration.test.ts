@@ -29,6 +29,7 @@ import { processEnrollmentTick } from "./tick";
 import type { Database } from "@/lib/supabase/types";
 import type { SmsOutboundInput, SmsSendResult } from "@/lib/messaging/types";
 import { ProviderError } from "@/lib/errors/classes";
+import { selectSafeApplicationClock } from "@tests/sequence-readiness/clock";
 
 /**
  * These tests deliberately drive the native sequence path through
@@ -39,11 +40,11 @@ import { ProviderError } from "@/lib/errors/classes";
 
 const supabase = createTestClient();
 // Claims and stale-claim RPC predicates use database-created timestamps while
-// due scheduling and quiet-hours checks use application Date.  Anchor the
-// application clock to a timestamp returned by the disposable database so a
-// fresh claim cannot look stale merely because this test chose a fixed UTC
-// fixture.  The property state is selected from a supported timezone whose
-// local hour is inside the send window at that same anchor.
+// due scheduling and quiet-hours checks use application Date. DB_T0 remains
+// the real database anchor for stale-claim aging. T0 is the application
+// anchor selected by the shared fixture clock and may be later than DB_T0 so
+// the entire lifecycle horizon remains inside a supported send window.
+let DB_T0 = new Date();
 let T0 = new Date();
 let safeTestState = "GU";
 
@@ -170,35 +171,6 @@ async function seedLead(
   return { propertyId: property.id, contactId: contact.id, phone };
 }
 
-function chooseSafeTestState(anchor: Date): string {
-  const candidates = ["GU", "PR", "OH", "MO", "CA", "HI"];
-  for (const state of candidates) {
-    const zone =
-      state === "GU"
-        ? "Pacific/Guam"
-        : state === "PR"
-          ? "America/Puerto_Rico"
-          : state === "OH"
-            ? "America/New_York"
-            : state === "MO"
-              ? "America/Chicago"
-              : state === "CA"
-                ? "America/Los_Angeles"
-                : "Pacific/Honolulu";
-    const localHour = Number(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone: zone,
-        hour12: false,
-        hour: "2-digit",
-      })
-        .format(anchor)
-        .replace(/^24$/, "0"),
-    );
-    if (localHour >= 8 && localHour < 21) return state;
-  }
-  throw new Error(`database clock anchor has no supported send-window fixture state: ${anchor.toISOString()}`);
-}
-
 async function enroll(sequenceId: string, propertyId: string): Promise<string> {
   const outcome = await enrollLead(supabase, { sequenceId, propertyId });
   if (outcome.status !== "enrolled") {
@@ -236,7 +208,11 @@ async function loadDueSnapshot(client: SupabaseClient<Database>, enrollmentId: s
  * select it; this keeps the DB predicate and fake application clock ordered.
  */
 function setApplicationTimeAfterPersistedDue(nextRunAt: string): Date {
-  const applicationDue = new Date(new Date(nextRunAt).getTime() + 1);
+  // Recovery RPCs calculate next_run_at from database now(), which may be
+  // earlier than the application clock selected for quiet-hours safety. Never
+  // move the fake application clock backwards into a quiet window.
+  const persistedDue = new Date(nextRunAt).getTime() + 1;
+  const applicationDue = new Date(Math.max(Date.now(), persistedDue));
   vi.setSystemTime(applicationDue);
   return applicationDue;
 }
@@ -483,8 +459,10 @@ beforeEach(async () => {
       `sequence reliability DB clock anchor failed: ${clockAnchorError?.message ?? "missing row"}`,
     );
   }
-  T0 = new Date(clockAnchor.created_at);
-  safeTestState = chooseSafeTestState(T0);
+  DB_T0 = new Date(clockAnchor.created_at);
+  const safeClock = selectSafeApplicationClock(DB_T0, 30);
+  T0 = safeClock.applicationNow;
+  safeTestState = safeClock.state;
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(T0);
   providerInvocations = [];
@@ -714,7 +692,7 @@ describe("native retained-claim recovery", () => {
     expect(definitiveRetryScheduleError).toBeNull();
     expect(definitiveRetrySchedule?.next_run_at).not.toBeNull();
     expect(new Date(definitiveRetrySchedule!.next_run_at!).getTime()).toBeGreaterThanOrEqual(
-      T0.getTime(),
+      DB_T0.getTime(),
     );
     setApplicationTimeAfterPersistedDue(definitiveRetrySchedule!.next_run_at!);
     const repaired = await runSequenceTick(supabase);
@@ -791,7 +769,7 @@ describe("native retained-claim recovery", () => {
     // bounded 15-minute stale window; this is the point at which an actionable
     // reconciliation pause is safe.  It still must never auto-retry a stale
     // claim; any resend needs an explicit proven-no-send repair.
-    const staleAt = new Date(T0.getTime() - 16 * 60_000).toISOString();
+    const staleAt = new Date(DB_T0.getTime() - 16 * 60_000).toISOString();
     const { error: ageError } = await supabase
       .from("sequence_step_runs")
       .update({ created_at: staleAt, attempt_started_at: staleAt })
@@ -832,7 +810,7 @@ describe("native retained-claim recovery", () => {
     expect(crashRetryScheduleError).toBeNull();
     expect(crashRetrySchedule?.next_run_at).not.toBeNull();
     expect(new Date(crashRetrySchedule!.next_run_at!).getTime()).toBeGreaterThanOrEqual(
-      T0.getTime(),
+      DB_T0.getTime(),
     );
     setApplicationTimeAfterPersistedDue(crashRetrySchedule!.next_run_at!);
     const recovered = await runSequenceTick(supabase);
@@ -915,7 +893,7 @@ describe("native retained-claim recovery", () => {
     // Age the claim explicitly in the DB, then allow reconciliation to expose
     // an actionable pause. Even after that pause, normal ticks and both
     // recovery operations must refuse a blind resend.
-    const staleAt = new Date(T0.getTime() - 16 * 60_000).toISOString();
+    const staleAt = new Date(DB_T0.getTime() - 16 * 60_000).toISOString();
     const { error: ageError } = await supabase
       .from("sequence_step_runs")
       .update({ created_at: staleAt, attempt_started_at: staleAt })

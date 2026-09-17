@@ -22,6 +22,7 @@ import {
   resumeEnrollment,
   retrySequenceStep,
 } from "@/lib/sequences/enrollment";
+import { selectSafeApplicationClock } from "@tests/sequence-readiness/clock";
 
 /**
  * These cases exercise the native sequence enrollment path through
@@ -33,6 +34,7 @@ const supabase = createTestClient();
 const realProcessEnrollmentTick = sequenceTick.processEnrollmentTick;
 
 let T0 = new Date();
+let DB_T0 = new Date();
 let safeState = "MO";
 
 type SeededLead = {
@@ -81,10 +83,6 @@ function chooseState(anchor: Date, predicate: (hour: number) => boolean): string
   return selected[0];
 }
 
-function chooseSendWindowState(anchor: Date): string {
-  return chooseState(anchor, (hour) => hour >= 8 && hour < 21);
-}
-
 function chooseQuietState(anchor: Date): string {
   // +10 hours must reach the open window. Avoid 21:xx, where +10h would
   // still be 07:xx local and remain quiet.
@@ -93,7 +91,10 @@ function chooseQuietState(anchor: Date): string {
 
 /** Clear the sub-millisecond precision lost when a DB timestamp is read into Date. */
 function setApplicationTimeAfterPersistedDue(nextRunAt: string): Date {
-  const applicationDue = new Date(new Date(nextRunAt).getTime() + 1);
+  // Recovery RPCs calculate next_run_at from database now(), which can be
+  // earlier than the application clock selected for quiet-hours safety.
+  const persistedDue = new Date(nextRunAt).getTime() + 1;
+  const applicationDue = new Date(Math.max(DB_T0.getTime(), Date.now(), persistedDue));
   vi.setSystemTime(applicationDue);
   return applicationDue;
 }
@@ -398,8 +399,10 @@ beforeEach(async () => {
   await resetTenantTables(supabase);
   resetMockState();
   await seedSenderCatalog(supabase, await orgId(), [MOCK_SENDER_PRIMARY]);
-  T0 = await seedClockAnchor();
-  safeState = chooseSendWindowState(T0);
+  DB_T0 = await seedClockAnchor();
+  const safeClock = selectSafeApplicationClock(DB_T0, 30);
+  T0 = safeClock.applicationNow;
+  safeState = safeClock.state;
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(T0);
 });
@@ -523,7 +526,7 @@ describe("native quiet-hours and explicit recovery", () => {
     const repairedSchedule = await loadEnrollment(enrollmentId);
     expect(repairedSchedule.next_run_at).not.toBeNull();
     expect(new Date(repairedSchedule.next_run_at!).getTime()).toBeGreaterThanOrEqual(
-      T0.getTime(),
+      DB_T0.getTime(),
     );
     setApplicationTimeAfterPersistedDue(repairedSchedule.next_run_at!);
     const repaired = await runSequenceTick(supabase);

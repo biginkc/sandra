@@ -12,6 +12,7 @@ import {
   TEST_ORG_B_ID,
 } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
+import { selectSafeApplicationClock } from "@tests/sequence-readiness/clock";
 
 import { handleInboundWebhook } from "@/lib/messaging/inbound";
 import { MockMessagingProvider, resetMockState, getMockMessageLog } from "@/lib/messaging/providers/mock";
@@ -22,29 +23,8 @@ import type { Database } from "@/lib/supabase/types";
 
 const supabase = createTestClient();
 let testNow = new Date();
+let applicationNow = new Date();
 let safeState = "GU";
-
-function chooseSafeState(anchor: Date): string {
-  const states = [
-    ["GU", "Pacific/Guam"],
-    ["PR", "America/Puerto_Rico"],
-    ["OH", "America/New_York"],
-    ["MO", "America/Chicago"],
-    ["CA", "America/Los_Angeles"],
-    ["HI", "Pacific/Honolulu"],
-  ] as const;
-  for (const [state, timeZone] of states) {
-    const hour = Number(
-      new Intl.DateTimeFormat("en-US", {
-        timeZone,
-        hour: "2-digit",
-        hour12: false,
-      }).format(anchor).replace(/^24$/, "0"),
-    );
-    if (hour >= 8 && hour < 21) return state;
-  }
-  throw new Error("no supported send-window state for " + anchor.toISOString());
-}
 
 async function orgId(): Promise<string> {
   return getCanonicalTestOrgId(supabase);
@@ -243,9 +223,11 @@ beforeEach(async () => {
     .single();
   if (error || !anchor) throw new Error(error?.message ?? "clock anchor failed");
   testNow = new Date(anchor.created_at);
-  safeState = chooseSafeState(testNow);
+  const applicationClock = selectSafeApplicationClock(testNow, 30);
+  applicationNow = applicationClock.applicationNow;
+  safeState = applicationClock.state;
   vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(testNow);
+  vi.setSystemTime(applicationNow);
 });
 
 afterEach(() => {
@@ -419,9 +401,9 @@ describe("sequence recovery security", () => {
         row.next_run_at === null,
       )).toBe(true);
 
-      vi.setSystemTime(new Date(testNow.getTime() + 5 * 60_000));
+      vi.setSystemTime(new Date(applicationNow.getTime() + 5 * 60_000));
       const firstTick = await runSequenceTick(supabase);
-      vi.setSystemTime(new Date(testNow.getTime() + 15 * 60_000));
+      vi.setSystemTime(new Date(applicationNow.getTime() + 15 * 60_000));
       const secondTick = await runSequenceTick(supabase);
       expect(firstTick.outcomes.sent).toBe(1);
       expect(secondTick.processed).toBe(0);
