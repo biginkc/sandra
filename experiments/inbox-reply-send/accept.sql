@@ -143,15 +143,38 @@ BEGIN
    GET STACKED DIAGNOSTICS cn=CONSTRAINT_NAME;
    IF cn='inbox_reply_send_destination_guard' THEN RAISE EXCEPTION 'INBOX_REPLY_DESTINATION_IN_PROGRESS';
    ELSIF cn IN ('inbox_reply_send_live_attempt','inbox_reply_send_attempt_ordinal','inbox_reply_send_attempt_successor') THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_IDENTITY';
-   ELSIF cn='operations_org_id_preparation_id_key' THEN RAISE EXCEPTION 'INBOX_REPLY_PREPARATION_ACCEPTED';
-   ELSIF cn='operations_org_id_requester_id_idempotency_key_key' THEN
-    -- Race with step 3: a concurrent accept committed the same key between
-    -- our pre-check and this insert. Re-resolve exactly like step 3.
+   ELSIF cn IN ('operations_org_id_preparation_id_key','operations_org_id_requester_id_idempotency_key_key') THEN
+    -- Astra round-2 finding: do NOT route the idempotency decision on WHICH
+    -- of these two operations-table unique indexes fired. A race between
+    -- two accepts sharing the SAME (org,requester,key,preparation) violates
+    -- BOTH indexes at once, and Postgres reports whichever it happens to
+    -- check first — non-deterministic from this function's point of view.
+    -- Routing on cn alone would let that race's loser wrongly see
+    -- PREPARATION_ACCEPTED instead of replaying the winner's operation, so
+    -- a legitimate same-key retry could get a false conflict instead of the
+    -- idempotent operationId it's entitled to. Resolve BOTH constraint
+    -- names identically, by re-looking up the existing operation by
+    -- (org,requester,key) — the same predicate step 3 already used, and the
+    -- ONLY reliable signal for "is this actually the same request replaying
+    -- or a genuine conflict":
+    --  * found, same preparation_id -> idempotent replay, regardless of
+    --    which index fired (this is the race step 3's own pre-check can
+    --    lose: a concurrent accept committed the same key between our
+    --    pre-check and this insert).
+    --  * found, different preparation_id -> a genuine key reuse.
+    --  * not found by key at all -> this insert's OWN key never matched an
+    --    existing operation, so the conflict can only be the OTHER caller's
+    --    key already holding this preparation -> preparation already
+    --    accepted under a different key.
     SELECT * INTO relookup FROM inbox_reply_send.operations WHERE org_id=o AND requester_id=requester AND idempotency_key=k;
-    IF FOUND AND relookup.preparation_id=preparation_id THEN
-     RETURN jsonb_build_object('operation_id',relookup.id,'preparation_id',relookup.preparation_id,'accepted_at',relookup.created_at);
+    IF FOUND THEN
+     IF relookup.preparation_id=preparation_id THEN
+      RETURN jsonb_build_object('operation_id',relookup.id,'preparation_id',relookup.preparation_id,'accepted_at',relookup.created_at);
+     ELSE
+      RAISE EXCEPTION 'INBOX_REPLY_KEY_REUSED';
+     END IF;
     ELSE
-     RAISE EXCEPTION 'INBOX_REPLY_KEY_REUSED';
+     RAISE EXCEPTION 'INBOX_REPLY_PREPARATION_ACCEPTED';
     END IF;
    ELSE
     RAISE;

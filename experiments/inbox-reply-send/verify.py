@@ -34,7 +34,7 @@ for path in accept_sources:
 if hashlib.sha256((p/'accept-proof.py').read_bytes()).hexdigest()!=accept_evidence['runner_sha256']:raise SystemExit('Stale evidence: accept-proof.py')
 if manifest['sources']['inbox-reply-send/attempts.sql']!=accept_evidence['sources']['inbox-reply-send/attempts.sql']:
     raise SystemExit('run.py and accept-proof.py evidence disagree on attempts.sql content')
-if len(accept_evidence['checks'])!=21:raise SystemExit('Expected twenty-one accept-proof.py proof groups')
+if len(accept_evidence['checks'])!=23:raise SystemExit('Expected twenty-three accept-proof.py proof groups')
 
 # P2 (round 4, binding note): this file only binds evidence to the exact
 # SOURCE bytes (a file-hash check) — it cannot detect an INSTALLED-definition
@@ -46,4 +46,4 @@ if len(accept_evidence['checks'])!=21:raise SystemExit('Expected twenty-one acce
 # before each positive control, so a stale restore fails loudly inside the
 # harness run itself rather than silently passing this hash check.
 print('PR-D send-attempt ledger evidence (run.py + concurrency.py) matches its exact source; 52 proof groups bound')
-print('PR-E accept/recover/operation_status evidence (accept-proof.py) matches its exact source; 21 proof groups bound')
+print('PR-E accept/recover/operation_status evidence (accept-proof.py) matches its exact source; 23 proof groups bound')

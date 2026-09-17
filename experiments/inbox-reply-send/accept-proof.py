@@ -101,11 +101,15 @@ def assert_sanitized(err,*phones):
   need(p not in err,f'raised error text leaked phone number {p}: {err}')
  need(not re.search(r'\+1[0-9]{10}',err),f'raised error text contains an E.164-shaped digit run: {err}')
 
+OWNED_ORGS=[]
+OWNED_USERS=[]
+
 def make_org_and_prep(dest_prefix,n=1,extra_shared_dest=None):
  """Fresh org+user+session+n conversations (distinct destinations
  dest_prefix+00001.. ) -> frozen preparation covering all n, returns
  (org,user,key,prep_id,item_ids[],cids[])."""
  o=str(uuid.uuid4());u=str(uuid.uuid4());sess=str(uuid.uuid4());s=str(uuid.uuid4());k=str(uuid.uuid4())
+ OWNED_ORGS.append(o);OWNED_USERS.append(u)
  sql(f"INSERT INTO organizations(id,name) VALUES('{o}','PR-E proof {o}');"
      f"INSERT INTO auth.users(id,email) VALUES('{u}','{u}@example.invalid');"
      f"INSERT INTO memberships(org_id,user_id,role,access_status) VALUES('{o}','{u}','owner','active');"
@@ -205,15 +209,24 @@ try:
  need((ops2,atts2,outbox2)==(1,3,1),f'replay inserted new rows: {(ops2,atts2,outbox2)}')
  record('idempotent replay: same operationId, zero new rows')
  # MUTATION: skip the step-3 pre-check entirely (force straight to insert).
+ # Astra round-2's BLOCKER 1 fix made the exception handler's own relookup
+ # (by org,requester,key) fully replicate step 3's decision — found+same
+ # preparation -> replay, found+different -> KEY_REUSED, not found -> a
+ # genuine PREPARATION_ACCEPTED conflict — so skipping step 3 with the FIXED
+ # code no longer breaks correctness, it only skips the early-exit
+ # optimization (defense in depth: prove the exception path alone still
+ # gets a same-key-same-prep replay right, even with step 3 fully removed).
  restore_fn('inbox_reply_send.accept')
  mutant=real_fn('inbox_reply_send.accept').replace(
   "-- 3. Idempotent-replay resolution, before any insert.\n SELECT * INTO existing_op FROM inbox_reply_send.operations WHERE org_id=o AND requester_id=requester AND idempotency_key=k;\n IF FOUND THEN",
   "-- 3. MUTATED OUT for proof.\n SELECT * INTO existing_op FROM inbox_reply_send.operations WHERE org_id=o AND requester_id=requester AND idempotency_key=k;\n IF FALSE THEN")
  need(mutant!=real_fn('inbox_reply_send.accept'),'mutation string not found (source drifted)')
  sql(mutant)
- err=sql_fail(authed(u,f"SELECT inbox_reply_send.accept('{o}','{u}','{k}','{prep_id}')::text;"))
- need('INBOX_REPLY_PREPARATION_ACCEPTED' in err or '23505' in err or 'duplicate key' in err.lower(),f'mutant should have raised a constraint conflict on the second accept, got: {err}')
- record('MUTATION watched fail: skipping step-3 pre-check makes replay hit the operations unique-key race path instead of returning cleanly')
+ result_no_precheck=json.loads(sql(authed(u,f"SELECT inbox_reply_send.accept('{o}','{u}','{k}','{prep_id}')::text;")))
+ need(result_no_precheck['operation_id']==op_id,f'with step 3 skipped, the exception-handler relookup should STILL replay the same operationId; got {result_no_precheck}')
+ ops2b,atts2b,outbox2b=counts(o)
+ need((ops2b,atts2b,outbox2b)==(1,3,1),f'with step 3 skipped, the exception-handler relookup must still insert ZERO new rows: {(ops2b,atts2b,outbox2b)}')
+ record('defense in depth: with step 3\'s pre-check mutated out entirely, the exception handler\'s OWN relookup (Astra round-2 fix) still replays the same operationId with zero new rows — the two paths are independently correct')
  restore_and_verify('inbox_reply_send.accept')
  result3=json.loads(call_accept(o,u,k,prep_id))
  need(result3['operation_id']==op_id,'restored accept() replay broken')
@@ -496,6 +509,115 @@ try:
  need((opsE,attsE,outboxE)==(0,0,0),f'#10d a lock-delayed accept past expiry must create ZERO rows: {(opsE,attsE,outboxE)}')
  record('concurrency #10d: a REAL lock wait (observed) on the sender row delays accept() past its preparation\'s expires_at -> still rejects with INBOX_REPLY_PREPARATION_EXPIRED (time-after-locks), zero rows, sanitized')
 
+ # #10e (Astra round-2 BLOCKER 1): the identical-request race. Two real
+ # connections both call accept() with the EXACT SAME (org,requester,key,
+ # preparation) — a genuine same-key retry racing itself, not two different
+ # callers. This violates BOTH operations unique indexes at once; on this
+ # schema (UNIQUE(org_id,preparation_id) declared before UNIQUE(org_id,
+ # requester_id,idempotency_key) in attempts.sql's CREATE TABLE) Postgres
+ # deterministically reports operations_org_id_preparation_id_key FIRST. A
+ # name-routed exception handler would misread that as "preparation already
+ # accepted under a different key" instead of "this IS my own key, replay
+ # it" — the exact bug Astra's gate caught. The loser MUST get back the
+ # SAME operationId as the winner, never an error.
+ def samekey_race(oG,uG,kG,prepG):
+  """Run the two-connection identical-(org,requester,key,preparation) race
+  against whatever is CURRENTLY installed as inbox_reply_send.accept.
+  Returns (winner_op_id, loser_outcome) where loser_outcome is either
+  ('ok', operation_id) or ('error', message)."""
+  claimsG=json.dumps({'sub':uG,'role':'authenticated','session_id':SESS[uG],'exp':4102444800})
+  wnameG='pr-e-samekey-writer-'+str(uuid.uuid4())
+  writerG=start(f"SET application_name='{wnameG}';BEGIN;SET LOCAL request.jwt.claims='{claimsG}';SELECT inbox_reply_send.accept('{oG}','{uG}','{kG}','{prepG}');SELECT pg_sleep(3);COMMIT;")
+  wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{wnameG}' AND wait_event='PgSleep')",'#10e writer did not hold its inserted (uncommitted) operation row')
+  rnameG='pr-e-samekey-reader-'+str(uuid.uuid4())
+  readerG=start(f"SET application_name='{rnameG}';BEGIN;SET LOCAL request.jwt.claims='{claimsG}';SELECT inbox_reply_send.accept('{oG}','{uG}','{kG}','{prepG}');COMMIT;")
+  wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='{rnameG}' AND wait_event_type='Lock')",'#10e reader did not genuinely block on the identical-key race')
+  winner_out=finish(writerG,'#10e writer (A) should commit cleanly')
+  winner_op=json.loads(winner_out.split('\n',1)[0])['operation_id']
+  # Read the loser's own outcome directly (not via finish()'s expect_ok
+  # branch) since which outcome is correct depends on which code — old
+  # buggy or fixed — is currently installed; the caller decides.
+  out,err=readerG.communicate(timeout=12)
+  if readerG.returncode==0:
+   loser_op=json.loads(out.strip().split('\n',1)[0])['operation_id']
+   return winner_op,('ok',loser_op)
+  else:
+   return winner_op,('error',err)
+
+ oG,uG,kG,prepG,_,_=make_org_and_prep('+155255',n=1)
+
+ # MUTATION-FIRST: install the OLD (pre-fix) name-routed exception block —
+ # taken verbatim from the prior accept.sql revision — and watch the SAME
+ # race produce the bug: the loser gets INBOX_REPLY_PREPARATION_ACCEPTED
+ # instead of the winner's operationId.
+ restore_fn('inbox_reply_send.accept')
+ real_body=real_fn('inbox_reply_send.accept')
+ new_block="""   ELSIF cn IN ('operations_org_id_preparation_id_key','operations_org_id_requester_id_idempotency_key_key') THEN
+    -- Astra round-2 finding: do NOT route the idempotency decision on WHICH
+    -- of these two operations-table unique indexes fired. A race between
+    -- two accepts sharing the SAME (org,requester,key,preparation) violates
+    -- BOTH indexes at once, and Postgres reports whichever it happens to
+    -- check first — non-deterministic from this function's point of view.
+    -- Routing on cn alone would let that race's loser wrongly see
+    -- PREPARATION_ACCEPTED instead of replaying the winner's operation, so
+    -- a legitimate same-key retry could get a false conflict instead of the
+    -- idempotent operationId it's entitled to. Resolve BOTH constraint
+    -- names identically, by re-looking up the existing operation by
+    -- (org,requester,key) — the same predicate step 3 already used, and the
+    -- ONLY reliable signal for "is this actually the same request replaying
+    -- or a genuine conflict":
+    --  * found, same preparation_id -> idempotent replay, regardless of
+    --    which index fired (this is the race step 3's own pre-check can
+    --    lose: a concurrent accept committed the same key between our
+    --    pre-check and this insert).
+    --  * found, different preparation_id -> a genuine key reuse.
+    --  * not found by key at all -> this insert's OWN key never matched an
+    --    existing operation, so the conflict can only be the OTHER caller's
+    --    key already holding this preparation -> preparation already
+    --    accepted under a different key.
+    SELECT * INTO relookup FROM inbox_reply_send.operations WHERE org_id=o AND requester_id=requester AND idempotency_key=k;
+    IF FOUND THEN
+     IF relookup.preparation_id=preparation_id THEN
+      RETURN jsonb_build_object('operation_id',relookup.id,'preparation_id',relookup.preparation_id,'accepted_at',relookup.created_at);
+     ELSE
+      RAISE EXCEPTION 'INBOX_REPLY_KEY_REUSED';
+     END IF;
+    ELSE
+     RAISE EXCEPTION 'INBOX_REPLY_PREPARATION_ACCEPTED';
+    END IF;
+"""
+ old_buggy_block="""   ELSIF cn='operations_org_id_preparation_id_key' THEN RAISE EXCEPTION 'INBOX_REPLY_PREPARATION_ACCEPTED';
+   ELSIF cn='operations_org_id_requester_id_idempotency_key_key' THEN
+    -- Race with step 3: a concurrent accept committed the same key between
+    -- our pre-check and this insert. Re-resolve exactly like step 3.
+    SELECT * INTO relookup FROM inbox_reply_send.operations WHERE org_id=o AND requester_id=requester AND idempotency_key=k;
+    IF FOUND AND relookup.preparation_id=preparation_id THEN
+     RETURN jsonb_build_object('operation_id',relookup.id,'preparation_id',relookup.preparation_id,'accepted_at',relookup.created_at);
+    ELSE
+     RAISE EXCEPTION 'INBOX_REPLY_KEY_REUSED';
+    END IF;
+"""
+ need(new_block in real_body,'#10e mutation anchor (new combined branch) not found in current source — has accept.sql drifted?')
+ mutant=real_body.replace(new_block,old_buggy_block)
+ need(mutant!=real_body,'#10e mutation produced no change')
+ sql(mutant)
+ winner_op,loser_outcome=samekey_race(oG,uG,kG,prepG)
+ need(loser_outcome[0]=='error' and 'INBOX_REPLY_PREPARATION_ACCEPTED' in loser_outcome[1],
+  f'#10e mutant should have reproduced the OLD bug (loser wrongly sees PREPARATION_ACCEPTED instead of replaying operationId {winner_op}); got {loser_outcome}')
+ record('MUTATION watched fail: the OLD name-routed exception block makes the same-key race\'s LOSER wrongly raise INBOX_REPLY_PREPARATION_ACCEPTED instead of replaying the winner\'s operationId')
+
+ # Restore the FIXED code and re-run the IDENTICAL race: the loser must now
+ # get back the SAME operationId as the winner, not an error.
+ restore_and_verify('inbox_reply_send.accept')
+ ops_g_before,atts_g_before,outbox_g_before=counts(oG)
+ oG2,uG2,kG2,prepG2,_,_=make_org_and_prep('+156255',n=1)
+ winner_op2,loser_outcome2=samekey_race(oG2,uG2,kG2,prepG2)
+ need(loser_outcome2[0]=='ok',f'#10e fixed code: loser should succeed (idempotent replay), got error: {loser_outcome2}')
+ need(loser_outcome2[1]==winner_op2,f'#10e fixed code: loser returned a DIFFERENT operationId ({loser_outcome2[1]}) than the winner ({winner_op2})')
+ opsG2,attsG2,outboxG2=counts(oG2)
+ need((opsG2,attsG2,outboxG2)==(1,1,1),f'#10e fixed code: the race must still produce exactly ONE operation total: {(opsG2,attsG2,outboxG2)}')
+ record('RESTORED and re-verified byte-exact against source; concurrency #10e: the SAME same-key race now returns the IDENTICAL operationId to both the winner and the loser (regardless of which operations unique index Postgres reports first), exactly one operation/attempt/outbox row total')
+
  for fn in ['inbox_reply_send.accept','inbox_reply_send.recover','inbox_reply_send.operation_status']:
   assert_body_matches(fn)
  record('final state: accept/recover/operation_status all byte-exact against accept.sql source')
@@ -508,4 +630,54 @@ try:
  }
  (P/'accept-evidence.json').write_text(json.dumps(evidence,indent=1)+'\n')
 finally:
+ # Drop the reply schemas FIRST (removes every operations/attempts/
+ # preparations row that references org_id, though none of those tables
+ # carry an FK to organizations/auth.users directly) before deleting the
+ # owned org/user rows below, so there is no ordering ambiguity either way.
  sql(CLEANUP,check=False)
+ # This harness commits real rows (concurrency proofs need real, separate
+ # connections — not rollback-only), so every owned org/user created by
+ # make_org_and_prep() (the sole creation path in this script — every extra
+ # conversation/message elsewhere always attaches to an already-tracked org)
+ # must be explicitly deleted here, in FK-dependency order, scoped ONLY to
+ # OWNED_ORGS/OWNED_USERS (never a broad DELETE). Mirrors concurrency.py's
+ # own committed-data cleanup discipline.
+ if OWNED_ORGS:
+  orgs_sql="ARRAY["+','.join(f"'{o}'" for o in OWNED_ORGS)+"]::uuid[]"
+  users_sql="ARRAY["+','.join(f"'{u}'" for u in OWNED_USERS)+"]::uuid[]"
+  # trg_hugo_membership_owner_guard blocks deleting an org's last active
+  # 'owner' membership (a real production safety rail). Every owned test org
+  # here has EXACTLY that one owner membership, so it must be disabled for
+  # this scoped, owned-fixture-only cleanup — same "force test data past a
+  # guard trigger" idiom already used for immutable_reply_preparation above,
+  # applied to a table this script doesn't otherwise touch.
+  sql(f"DELETE FROM messages WHERE org_id=ANY({orgs_sql});"
+      f"DELETE FROM consent_events WHERE org_id=ANY({orgs_sql});"
+      f"DELETE FROM properties WHERE org_id=ANY({orgs_sql});"
+      f"DELETE FROM contacts WHERE org_id=ANY({orgs_sql});"
+      f"DELETE FROM provider_sender_numbers WHERE org_id=ANY({orgs_sql});"
+      f"DELETE FROM auth.sessions WHERE user_id=ANY({users_sql});"
+      f"ALTER TABLE memberships DISABLE TRIGGER trg_hugo_membership_owner_guard;"
+      f"DELETE FROM memberships WHERE org_id=ANY({orgs_sql});"
+      f"DELETE FROM auth.users WHERE id=ANY({users_sql});"
+      f"ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;"
+      f"DELETE FROM organizations WHERE id=ANY({orgs_sql});",check=False)
+  # Assert cleanup actually succeeded — re-query and fail loudly on any
+  # residual owned row, rather than trusting the DELETE exit code alone.
+  residual={}
+  for label,query in [
+   ('organizations',f"SELECT count(*) FROM organizations WHERE id=ANY({orgs_sql})"),
+   ('auth.users',f"SELECT count(*) FROM auth.users WHERE id=ANY({users_sql})"),
+   ('memberships',f"SELECT count(*) FROM memberships WHERE org_id=ANY({orgs_sql})"),
+   ('auth.sessions',f"SELECT count(*) FROM auth.sessions WHERE user_id=ANY({users_sql})"),
+   ('contacts',f"SELECT count(*) FROM contacts WHERE org_id=ANY({orgs_sql})"),
+   ('properties',f"SELECT count(*) FROM properties WHERE org_id=ANY({orgs_sql})"),
+   ('messages',f"SELECT count(*) FROM messages WHERE org_id=ANY({orgs_sql})"),
+   ('consent_events',f"SELECT count(*) FROM consent_events WHERE org_id=ANY({orgs_sql})"),
+   ('provider_sender_numbers',f"SELECT count(*) FROM provider_sender_numbers WHERE org_id=ANY({orgs_sql})"),
+  ]:
+   n=sql(query)
+   if n!='0':residual[label]=n
+  if residual:
+   raise RuntimeError(f'Owned-fixture cleanup left residual rows: {residual} (orgs={len(OWNED_ORGS)}, users={len(OWNED_USERS)})')
+  print(f'Cleanup verified: zero residual rows across {len(OWNED_ORGS)} owned orgs / {len(OWNED_USERS)} owned users')
