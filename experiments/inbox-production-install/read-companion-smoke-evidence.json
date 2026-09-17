@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "org": "c238a2d7-cdc2-4c2c-b227-6646503ab8d7",
+  "resolved_rpcs": [
+    "inbox_authorize_sync",
+    "inbox_get_sync_scope",
+    "inbox_bind_sync_handle",
+    "inbox_create_workset_v2",
+    "inbox_counts_v2",
+    "inbox_sync_snapshot_v1",
+    "inbox_sync_finalize_v1",
+    "inbox_acknowledge_read"
+  ],
+  "checks": [
+    "inbox_create_workset_v2 created a workset",
+    "inbox_get_sync_scope round-trips the created scope",
+    "inbox_counts_v2 resolves",
+    "inbox_sync_snapshot_v1 returns an authorized snapshot for the owned scope",
+    "inbox_sync_finalize_v1 accepts the first CAS write (expected_handle=NULL)",
+    "inbox_bind_sync_handle rejects a stale expected_handle (CAS holds)",
+    "inbox_sync_finalize_v1 reports conflict=true for a stale expected_handle (no silent overwrite)"
+  ],
+  "scope": "Owned synthetic DB only; proves the real supabase-sync-repository snapshot->finalize sequence resolves and enforces CAS against the installed companion. Does not prove production throughput."
+}
