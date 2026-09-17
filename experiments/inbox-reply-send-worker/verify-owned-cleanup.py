@@ -108,7 +108,7 @@ def not_owned_sql(table, has_org, has_user, owned_orgs, owned_users):
 
 # === Defeat mutation 1: hugo_owner_guard_serialization.guard_key swap ===
 # (round-4's checker: row count 1->1, version sum unchanged -> PASSED.)
-hugo_hash_sql = owned_cleanup._content_hash_sql('public.hugo_owner_guard_serialization', 'version')
+hugo_hash_sql = owned_cleanup._content_hash_sql(sql, 'public.hugo_owner_guard_serialization', 'version')
 out = run_rollback_only([
     f"SELECT count(*) AS before_count, coalesce(sum(version),0) AS before_version, ({hugo_hash_sql}) AS before_hash FROM public.hugo_owner_guard_serialization;",
     "UPDATE public.hugo_owner_guard_serialization SET guard_key='SYNTHETIC-DEFEAT-ASTRA-R5' WHERE guard_key='memberships';",
@@ -123,7 +123,7 @@ print(f'  CAUGHT  public.hugo_owner_guard_serialization: row count unchanged ({b
 checks.append('defeat 1 (hugo_owner_guard_serialization.guard_key synthetic swap): content hash changed, row count and counter unchanged — caught')
 
 # === Defeat mutation 2: inbox_t2_capture_boundary.generation UUID swap ===
-gen_hash_sql = owned_cleanup._content_hash_sql('inbox_t2_capture_boundary.generation', None)
+gen_hash_sql = owned_cleanup._content_hash_sql(sql, 'inbox_t2_capture_boundary.generation', None)
 out = run_rollback_only([
     f"SELECT count(*) AS before_count, ({gen_hash_sql}) AS before_hash FROM inbox_t2_capture_boundary.generation;",
     "UPDATE inbox_t2_capture_boundary.generation SET generation='11111111-1111-1111-1111-111111111111' WHERE singleton IS TRUE;",
@@ -144,7 +144,7 @@ need(policy_col == 'revision', f'inbox_t2_policy.versions counter-column detecti
 baseline_org3 = str(uuid.uuid4())  # a "pre-existing baseline row", NOT one of this run's own ids
 owned_org3 = str(uuid.uuid4())  # stands in for "this run's own synthetic org"
 not_owned3 = not_owned_sql('inbox_t2_policy.versions', True, False, [owned_org3], [])
-policy_hash_sql = owned_cleanup._content_hash_sql('inbox_t2_policy.versions', policy_col, not_owned3)
+policy_hash_sql = owned_cleanup._content_hash_sql(sql, 'inbox_t2_policy.versions', policy_col, not_owned3)
 out = run_rollback_only([
     f"INSERT INTO inbox_t2_policy.versions(org_id,namespace,entity_key,revision) VALUES('{baseline_org3}','property_identity','astra-r6-baseline-entity',1);",
     f"SELECT ({policy_hash_sql}) AS baseline_filter_hash_seed;",
@@ -172,7 +172,7 @@ org_col = owned_cleanup._counter_column(sql, 'public.organizations')
 baseline_org4 = str(uuid.uuid4())
 owned_org4 = str(uuid.uuid4())
 not_owned4 = not_owned_sql('public.organizations', False, False, [owned_org4], [])
-org_hash_sql = owned_cleanup._content_hash_sql('public.organizations', org_col, not_owned4)
+org_hash_sql = owned_cleanup._content_hash_sql(sql, 'public.organizations', org_col, not_owned4)
 out = run_rollback_only([
     f"INSERT INTO organizations(id,name) VALUES('{baseline_org4}','Astra R7 baseline org');",
     f"SELECT ({org_hash_sql}) AS seed;",
@@ -196,7 +196,7 @@ checks.append('defeat 4 (public.organizations baseline-row name mutation, net-ze
 # all, so a real regression passed completely silently. ===
 baseline_org5 = str(uuid.uuid4())
 not_owned5 = not_owned_sql('inbox_t2_policy.versions', True, False, [], [])
-policy_hash_sql5 = owned_cleanup._content_hash_sql('inbox_t2_policy.versions', policy_col, not_owned5)
+policy_hash_sql5 = owned_cleanup._content_hash_sql(sql, 'inbox_t2_policy.versions', policy_col, not_owned5)
 out = run_rollback_only([
     f"INSERT INTO inbox_t2_policy.versions(org_id,namespace,entity_key,revision) VALUES('{baseline_org5}','property_identity','astra-r7-decrease-entity',5);",
     f"SELECT coalesce(sum(revision),0) AS before_revision, ({policy_hash_sql5}) AS before_hash FROM inbox_t2_policy.versions WHERE org_id::text='{baseline_org5}';",
@@ -216,7 +216,7 @@ checks.append('defeat 5 (inbox_t2_policy.versions baseline-row revision DECREASE
 # in the "advanced" list) — this is the other half of the same blind spot. ===
 baseline_org6 = str(uuid.uuid4())
 not_owned6 = not_owned_sql('inbox_t2_policy.versions', True, False, [], [])
-policy_hash_sql6 = owned_cleanup._content_hash_sql('inbox_t2_policy.versions', policy_col, not_owned6)
+policy_hash_sql6 = owned_cleanup._content_hash_sql(sql, 'inbox_t2_policy.versions', policy_col, not_owned6)
 out = run_rollback_only([
     f"INSERT INTO inbox_t2_policy.versions(org_id,namespace,entity_key,revision) VALUES('{baseline_org6}','property_identity','astra-r7-increase-entity',3);",
     f"SELECT coalesce(sum(revision),0) AS before_revision, ({policy_hash_sql6}) AS before_hash FROM inbox_t2_policy.versions WHERE org_id::text='{baseline_org6}';",
@@ -230,20 +230,85 @@ need(int(after_rev6) > int(before_rev6), f'defeat mutation 6 did not actually in
 print(f'  CAUGHT  inbox_t2_policy.versions: content hash unchanged ({before_hash6}) but revision INCREASED ({before_rev6} -> {after_rev6}) on a baseline row; the round-7 uniform checker value-checks and REPORTS this by name (as a benign monotonic advance, exactly like a counter/shared table); round 6 (id-scoped counters never tracked at all) would have both passed AND never reported it')
 checks.append('defeat 6 (inbox_t2_policy.versions baseline-row revision INCREASE): value-checked and reported by name — caught (round-6 id-scoped-counter silent-advance blind spot closed)')
 
+# === Defeat mutation 7 [round 8]: inbox_t2_policy.versions — TWO baseline
+# rows in the SAME table, one revision +3 and one -3 (table-wide SUM
+# unchanged: 5+5=10 before, 8+2=10 after). Round 7's SUM-based counter check
+# passed this silently; the round-8 PER-ROW check (grouped by each row's own
+# non-counter identity hash — their distinct entity_key values keep the two
+# rows separately tracked) must catch the decrease on its own row. ===
+baseline_org7a, baseline_org7b = str(uuid.uuid4()), str(uuid.uuid4())
+not_owned7 = not_owned_sql('inbox_t2_policy.versions', True, False, [], [])
+pairs_sql7 = owned_cleanup._counter_row_pairs_sql(sql, 'inbox_t2_policy.versions', policy_col, not_owned7)
+out = run_rollback_only([
+    f"INSERT INTO inbox_t2_policy.versions(org_id,namespace,entity_key,revision) VALUES('{baseline_org7a}','property_identity','astra-r8-row-a',5),('{baseline_org7b}','property_identity','astra-r8-row-b',5);",
+    f"SELECT coalesce(sum(revision),0) AS before_sum FROM inbox_t2_policy.versions WHERE org_id::text IN ('{baseline_org7a}','{baseline_org7b}');",
+    f"SELECT ({pairs_sql7}) AS before_pairs;",
+    f"UPDATE inbox_t2_policy.versions SET revision=8 WHERE org_id::text='{baseline_org7a}';",  # +3
+    f"UPDATE inbox_t2_policy.versions SET revision=2 WHERE org_id::text='{baseline_org7b}';",  # -3
+    f"SELECT coalesce(sum(revision),0) AS after_sum FROM inbox_t2_policy.versions WHERE org_id::text IN ('{baseline_org7a}','{baseline_org7b}');",
+    f"SELECT ({pairs_sql7}) AS after_pairs;",
+])
+before_sum7, before_pairs_raw7, after_sum7, after_pairs_raw7 = out[0], out[1], out[2], out[3]
+need(before_sum7 == after_sum7, f'defeat mutation 7 is not row-count/sum-neutral as designed: {before_sum7} -> {after_sum7} (expected the table-wide SUM to stay unchanged — that IS the round-7 blind spot being reproduced)')
+before_pairs7 = owned_cleanup._parse_counter_pairs(before_pairs_raw7)
+after_pairs7 = owned_cleanup._parse_counter_pairs(after_pairs_raw7)
+decreased_rows = []
+for row_id in set(before_pairs7) | set(after_pairs7):
+    bvals, avals = before_pairs7.get(row_id, []), after_pairs7.get(row_id, [])
+    if len(bvals) == len(avals):
+        for bv, av in zip(bvals, avals):
+            if av < bv:
+                decreased_rows.append((row_id, bv, av))
+need(len(decreased_rows) >= 1, 'ROUND-8 CHECKER STILL DEFEATED: table-wide SUM unchanged (10 -> 10) AND no per-row decrease detected — the per-row grouping did not catch the masked decrease')
+row_id, bv, av = decreased_rows[0]
+print(f'  CAUGHT  inbox_t2_policy.versions: table-wide SUM unchanged ({before_sum7} -> {after_sum7}, one row +3 masking another row\'s -3), but the PER-ROW check finds row(identity={row_id[:12]}...) revision DECREASED {bv} -> {av} — the round-8 per-row checker FAILS this by name; round 7\'s SUM-based check would have PASSED it silently')
+checks.append('defeat 7 (inbox_t2_policy.versions two rows, +3/-3, SUM unchanged): per-row check finds the masked decrease — caught (round-7 SUM-aggregation blind spot closed)')
+
+# === Defeat mutation 8 [round 8]: public.webhook_events — a jsonb column's
+# CONTENT mutated (key value changed, array untouched) and, separately, its
+# ARRAY LENGTH changed (element appended), both with row count stable. A
+# to_jsonb(record)-based hash re-serializes jsonb subcolumns THROUGH jsonb's
+# own (potentially lossy) output; hashing each column's raw ::text avoids
+# that re-serialization entirely. ===
+wh_col = owned_cleanup._counter_column(sql, 'public.webhook_events')
+ext_a, ext_b = str(uuid.uuid4()), str(uuid.uuid4())
+wh_hash_sql = owned_cleanup._content_hash_sql(sql, 'public.webhook_events', wh_col)
+out = run_rollback_only([
+    f"INSERT INTO public.webhook_events(provider,event_type,external_id,payload) VALUES"
+    f"('astra-r8','defeat.content','{ext_a}','{{\"a\": 1, \"arr\": [1,2,3]}}'::jsonb),"
+    f"('astra-r8','defeat.arraylen','{ext_b}','{{\"b\": 1, \"arr\": [1,2,3]}}'::jsonb);",
+    f"SELECT count(*) AS seed_count, ({wh_hash_sql}) AS seed_hash FROM public.webhook_events;",
+    # Content mutation: change key "a"'s value, array untouched.
+    f"UPDATE public.webhook_events SET payload='{{\"a\": 2, \"arr\": [1,2,3]}}'::jsonb WHERE external_id='{ext_a}';",
+    f"SELECT count(*) AS after_content_count, ({wh_hash_sql}) AS after_content_hash FROM public.webhook_events;",
+    # Array-length mutation: append an element, no key's scalar value changed.
+    f"UPDATE public.webhook_events SET payload='{{\"b\": 1, \"arr\": [1,2,3,4]}}'::jsonb WHERE external_id='{ext_b}';",
+    f"SELECT count(*) AS after_arr_count, ({wh_hash_sql}) AS after_arr_hash FROM public.webhook_events;",
+])
+seed_count8, seed_hash8 = out[0].split('|')
+content_count8, content_hash8 = out[1].split('|')
+arr_count8, arr_hash8 = out[2].split('|')
+need(seed_count8 == content_count8 == arr_count8, 'defeat mutation 8 unexpectedly changed row count — not a faithful repro (both mutations must be row-count-neutral UPDATEs)')
+need(seed_hash8 != content_hash8, 'ROUND-8 CHECKER STILL DEFEATED: jsonb key-value content mutation left the content hash unchanged — jsonb is being re-serialized/normalized somewhere in the hash path')
+need(content_hash8 != arr_hash8, 'ROUND-8 CHECKER STILL DEFEATED: jsonb array-length mutation left the content hash unchanged — array element count is not fully covered by the hash')
+print(f'  CAUGHT  public.webhook_events: row count unchanged ({seed_count8}); jsonb key-value content mutation changed the hash ({seed_hash8} -> {content_hash8}); jsonb array-length mutation changed the hash again ({content_hash8} -> {arr_hash8}) — the round-8 raw ::text hash FAILS both by name; a to_jsonb(record)-based hash risks re-normalizing jsonb subcolumns on the way through')
+checks.append('defeat 8 (public.webhook_events jsonb content mutation + array-length change): both change the raw-::text hash — caught (round-7 to_jsonb(record) re-normalization risk closed)')
+
 # === Positive control: two independent, UNMUTATED rollback-only re-checks
 # of all tables above produce the identical content hash — proves the check
 # is not merely noisy/always-failing, only the actual mutations above trip it ===
 control_query = (
     f"SELECT ({hugo_hash_sql}) AS h1, ({gen_hash_sql}) AS h2, "
-    f"({owned_cleanup._content_hash_sql('inbox_t2_policy.versions', policy_col)}) AS h3, "
-    f"({owned_cleanup._content_hash_sql('public.organizations', org_col)}) AS h4;"
+    f"({owned_cleanup._content_hash_sql(sql, 'inbox_t2_policy.versions', policy_col)}) AS h3, "
+    f"({owned_cleanup._content_hash_sql(sql, 'public.organizations', org_col)}) AS h4, "
+    f"({owned_cleanup._content_hash_sql(sql, 'public.webhook_events', wh_col)}) AS h5;"
 )
 check_a = run_rollback_only([control_query])[0].split('|')
 check_b = run_rollback_only([control_query])[0].split('|')
 need(check_a == check_b, 'positive control: unmutated re-check should be stable across independent rollback-only sessions')
-print('  OK  positive control: two independent, unmutated rollback-only re-checks of all four tables produce the IDENTICAL content hash — the check is not merely noisy/always-failing')
-checks.append('positive control: unmutated content hash is stable across independent checks (all four tables)')
+print('  OK  positive control: two independent, unmutated rollback-only re-checks of all five tables produce the IDENTICAL content hash — the check is not merely noisy/always-failing')
+checks.append('positive control: unmutated content hash is stable across independent checks (all five tables)')
 
-print(f'\nALL {len(checks)} CHECKER-DEFEAT PROOFS PASSED (rounds 5-7; every mutation was ROLLBACK-ONLY; nothing committed)')
+print(f'\nALL {len(checks)} CHECKER-DEFEAT PROOFS PASSED (rounds 5-8; every mutation was ROLLBACK-ONLY; nothing committed)')
 for c in checks:
     print('  -', c)

@@ -17,39 +17,31 @@ closes:
 - round 6: the round-5 content hash was applied only to the "neither org_id
   nor user_id" counter/shared set — an id-scoped table's PRE-EXISTING
   (non-synthetic) baseline rows were never hashed at all.
-- round 7 (this one, THE definitive closure): rounds 3-6 each closed one
-  CATEGORY of gap (org-scoped / user-scoped / counter-shared / id-scoped) by
-  adding a NEW, SEPARATE code path for that category — and each round,
-  Astra found the next category's gap, because the underlying defect was
-  never the specific columns; it was the categorization itself. Astra's
-  round-7 repro landed on TWO more category seams: (1) organizations and
-  auth.users were excluded from every content signature entirely (the old
-  PRIMARY_TABLES skip applied even to the round-6 id-scoped hash), so a
-  baseline organization's `name` could be silently rewritten; (2) an
-  id-scoped table's own counter column (e.g. inbox_t2_policy.versions.
-  revision) was excluded from its content hash (correctly, to avoid a false
-  positive on a legitimate advance) but then NEVER VALUE-CHECKED THE WAY
-  counter/shared tables were — so a baseline row's revision could DECREASE,
-  or increase without being reported, and nothing caught it.
-
-  The fix is not a seventh category patch: it is deleting the category
-  distinction. This module now discovers ONE universe — every base table
-  anywhere in the database, PRIMARY_TABLES and all — and runs the exact same
-  per-table content-signature check against every member of it, uniformly:
-  - a full per-row content hash over every column except a single,
-    dynamically-detected, name-pattern-whitelisted counter column (if any) —
-    applied to EVERY table, no exceptions, no organizations/auth.users skip;
-  - that whitelisted counter column's value, when present, is checked on
-    EVERY table that has one (not only tables lacking org_id/user_id) —
-    a decrease always fails, an increase is always reported by name;
-  - "this run's own rows are gone" is a single OWNED predicate evaluated
-    identically for every table, including organizations/auth.users
-    (identified by their own `id`, the two unavoidable anchor points — not a
-    coverage exclusion, just how "owned" is defined for the two tables that
-    define identity rather than reference it).
-  There is no longer a table category (org-scoped, user-scoped, counter,
-  id-scoped, primary) whose persistent content this module checks
-  differently from any other's.
+- round 7: rounds 3-6 each closed one CATEGORY of gap (org-scoped /
+  user-scoped / counter-shared / id-scoped) by adding a NEW, SEPARATE code
+  path for that category. Round 7 deleted the category distinction: ONE
+  universe (every base table anywhere, PRIMARY_TABLES included), ONE
+  content-signature check applied uniformly, ONE OWNED predicate.
+- round 8 (this one, THE definitive, LOSSLESS closure): round 7 removed the
+  category branching, but Astra found two remaining ALGORITHMIC gaps in the
+  signature itself (not category exclusions):
+  1. the counter check compared a table-WIDE SUM of the counter column — two
+     rows in the same table, one +N and one -N, leave the sum unchanged and
+     pass silently. Fixed by checking every counter row INDIVIDUALLY,
+     grouped by that row's own non-counter content hash (its de facto
+     identity, since that content is independently asserted unchanged) —
+     see _counter_row_pairs_sql/assert_clean: a decrease in ANY single row
+     fails, named by table+row-identity+column, never averaged away.
+  2. the content hash was built via `to_jsonb(row)`, which re-serializes
+     every column through jsonb's own (lossy) output — jsonb subcolumns get
+     silently re-normalized on the way through (whitespace, and in some PG
+     versions numeric formatting), so a real content mutation could produce
+     an unchanged hash. Fixed by hashing each column's OWN native `::text`
+     output directly (jsonb::text, numeric::text, bytea::text, array::text,
+     etc. — each type's own exact, lossless textual representation, never
+     routed through to_jsonb(record) at all) — see _row_hash_expr.
+  There is no aggregation (SUM) and no normalization (to_jsonb) left
+  anywhere in this module for a mutation to hide behind.
 1. EXHAUSTIVE COVERAGE: every base table ANYWHERE in the database (any
    schema, never hardcoded, PRIMARY_TABLES included) is discovered via
    pg_catalog, excluding only the ephemeral reply-lane schemas that get
@@ -105,6 +97,29 @@ COUNTER_COLUMN_PATTERN_SQL = r"a.attname ~* '(version|revision|generation|counte
 def _rows(sql, query):
     out = sql(query)
     return [r for r in out.splitlines() if r.strip()]
+
+
+_COLUMN_CACHE = {}
+
+
+def _columns(sql, table):
+    """[Astra round-8] The table's actual column list, in attnum order,
+    memoized per process run (columns are structurally stable for the
+    duration of one proof run — nothing in this module ever adds/drops a
+    column). Used to build _row_hash_expr directly from each column's own
+    type, instead of going through a composite-to-jsonb conversion that can
+    silently re-normalize (and thereby lose) a column's real content."""
+    if table not in _COLUMN_CACHE:
+        schema, name = table.split('.', 1)
+        _COLUMN_CACHE[table] = _rows(sql, f"""
+            SELECT a.attname FROM pg_attribute a
+            JOIN pg_class c ON c.oid=a.attrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE c.relkind='r' AND n.nspname='{schema}' AND c.relname='{name}'
+              AND a.attnum>0 AND NOT a.attisdropped
+            ORDER BY a.attnum
+        """)
+    return _COLUMN_CACHE[table]
 
 
 def _counter_column(sql, table):
@@ -173,34 +188,91 @@ def discover(sql):
     return org_tables, user_tables, all_tables
 
 
-def _content_hash_sql(table, col, where=None):
+def _row_hash_expr(sql, table, exclude_col):
+    """[Astra round-8] Per-row content hash built from each column's OWN
+    native `::text` output, concatenated in a stable (attnum) order — never
+    from `to_jsonb(row)`. This matters: converting a whole row to jsonb
+    re-serializes every column THROUGH jsonb's own type system, which can
+    silently re-normalize (and thereby lose) a column's real stored content
+    — e.g. a jsonb subcolumn's exact text is not guaranteed byte-identical
+    once re-emitted via to_jsonb(record). Casting each column directly to
+    ::text instead uses that column's OWN type output function — jsonb::text
+    is the value's own raw serialization (preserves array element order and
+    duplicates exactly as stored), numeric::text preserves the exact stored
+    scale/precision, bytea::text is a lossless hex encoding, array/composite/
+    range/hstore::text likewise use their own faithful literal output. NULL
+    is distinguished from any string via array_to_string's null_string arg
+    (chr(1), never valid in these outputs) so NULL and '' can never collide.
+    If a column's type has no meaningful ::text cast, Postgres raises at
+    query time rather than this module silently falling back to a lossy
+    encoding — a hard failure, never a silent narrowing of coverage."""
+    cols = [c for c in _columns(sql, table) if c != exclude_col]
+    if not cols:
+        return "md5('')"
+    parts = ','.join(f't."{c}"::text' for c in cols)
+    return f"md5(array_to_string(ARRAY[{parts}], chr(2), chr(1)))"
+
+
+def _content_hash_sql(sql, table, col, where=None):
     """One table-level digest over EVERY column except the whitelisted
     counter column (or every column, if col is None), optionally restricted
-    to a WHERE clause: per-row `to_jsonb(row) - col`, md5'd, sorted (so row
-    order/physical layout never matters), joined, md5'd again. Generic — no
-    column list, no primary key, identical whether or not the table has a
-    counter column, and applied to EVERY table with zero exceptions —
-    including organizations and auth.users (round-7's own closure)."""
-    drop = f" - '{col}'" if col else ""
+    to a WHERE clause: each row's _row_hash_expr, md5'd, sorted (so row
+    order/physical layout never matters), joined, md5'd again. Applied to
+    EVERY table with zero exceptions — including organizations and
+    auth.users (round-7's closure) — using each column's raw ::text output,
+    never to_jsonb (round-8's closure)."""
+    row_hash = _row_hash_expr(sql, table, col)
     filt = f" WHERE {where}" if where else ""
-    return f"SELECT md5(coalesce(string_agg(h,',' ORDER BY h),'')) FROM (SELECT md5((to_jsonb(t){drop})::text) AS h FROM {table} t{filt}) x"
+    return f"SELECT md5(coalesce(string_agg(h,',' ORDER BY h),'')) FROM (SELECT {row_hash} AS h FROM {table} t{filt}) x"
+
+
+def _counter_row_pairs_sql(sql, table, col, where=None):
+    """[Astra round-8] One row per (row-identity-hash, counter-value) pair,
+    as `hash:value` joined by commas — the raw material for a PER-ROW
+    counter check (never a table-wide SUM, which lets one row's decrease be
+    masked by another row's increase). The identity hash is the SAME
+    per-row hash _content_hash_sql aggregates (every column except the
+    counter), so a row's identity across before/after is exactly the set of
+    columns this module already asserts is unchanged — grouping by it is
+    sound: two rows can only share an identity if their entire non-counter
+    content is byte-identical, in which case a sorted per-identity multiset
+    comparison of their counters (see _parse_counter_pairs/assert_clean) is
+    the correct, PK-free generalization of "this row's counter"."""
+    row_hash = _row_hash_expr(sql, table, col)
+    filt = f" WHERE {where}" if where else ""
+    return f"SELECT coalesce(string_agg({row_hash} || ':' || t.{col}::text, ',' ORDER BY {row_hash}), '') FROM {table} t{filt}"
+
+
+def _parse_counter_pairs(s):
+    """Parse the `hash:value,hash:value,...` text _counter_row_pairs_sql
+    returns into {identity_hash: sorted [int values]} — grouping and sorting
+    here (not in SQL) keeps the per-row comparison logic in one place."""
+    groups = {}
+    if not s:
+        return groups
+    for part in s.split(','):
+        h, v = part.rsplit(':', 1)
+        groups.setdefault(h, []).append(int(v))
+    for h in groups:
+        groups[h].sort()
+    return groups
 
 
 def snapshot_baseline(sql, all_tables):
-    """[Astra round-7] MUST run before any synthetic id this run will ever
+    """[Astra round-7/8] MUST run before any synthetic id this run will ever
     use exists — every row in every table is, by definition, a "baseline"
     row at this point, so each snapshot is unrestricted (no owned-id filter
     needed: nothing owned exists yet, so "every row" and "every non-owned
-    row" are the same set). Per table: (row_count, counter_value_or_None,
-    content_hash) — the identical triple, computed the identical way, for
-    EVERY table in the universe: organizations/auth.users exactly like
-    inbox_t2_policy.versions exactly like hugo_owner_guard_serialization."""
+    row" are the same set). Per table: (row_count, content_hash,
+    counter_pairs_or_None) — content_hash and counter_pairs both built from
+    raw per-column ::text output (round 8), and counter_pairs is PER ROW
+    (round 8), never a table-wide SUM."""
     snapshot = {}
     for table, _, _, col in all_tables:
         count = sql(f"SELECT count(*) FROM {table}")
-        value = sql(f"SELECT coalesce(sum({col}),0) FROM {table}") if col else None
-        content_hash = sql(_content_hash_sql(table, col))
-        snapshot[table] = (count, value, content_hash)
+        content_hash = sql(_content_hash_sql(sql, table, col))
+        pairs = _parse_counter_pairs(sql(_counter_row_pairs_sql(sql, table, col))) if col else None
+        snapshot[table] = (count, content_hash, pairs)
     return snapshot
 
 
@@ -255,20 +327,24 @@ def _owned_predicate(table, has_org, has_user, orgs, users):
 
 
 def assert_clean(sql, all_tables, baseline, owned_orgs, owned_users):
-    """[Astra round-7, the definitive closure] ONE uniform check, run
-    identically over EVERY table in the universe — no org-scoped/user-scoped/
-    counter/id-scoped branches, no PRIMARY_TABLES exemption:
+    """[Astra round-8, the definitive, LOSSLESS closure] ONE uniform check,
+    run identically over EVERY table in the universe — no org-scoped/
+    user-scoped/counter/id-scoped branches, no PRIMARY_TABLES exemption, no
+    aggregation and no normalization left for a mutation to hide behind:
       1. this run's OWN rows (the OWNED predicate) must be net-zero in every
          table — proves the sweep/explicit-delete actually removed them;
       2. every row NOT owned by this run must be byte-identical, in every
          column except a whitelisted counter column, to the pre-run
-         baseline — proves nothing else anywhere was mutated, including
-         organizations.name and auth.users (round-7's own repro);
-      3. a whitelisted counter column, when present, is value-checked on
-         EVERY table that has one (not only tables lacking org_id/user_id —
-         round-7's other repro): a decrease always fails; an increase is
+         baseline, hashed from each column's raw ::text output (round 8) —
+         proves nothing else anywhere was mutated, including a jsonb
+         column's exact content/array length, organizations.name, and
+         auth.users, uniformly;
+      3. a whitelisted counter column, when present, is checked PER ROW
+         (round 8 — never a table-wide SUM), grouped by that row's own
+         non-counter identity hash: a decrease in ANY single row fails,
+         named by table+row-identity+column; an increase in any row is
          always reported by name, never silently accepted, never silently
-         missed.
+         missed, never averaged against another row's decrease.
     Returns the list of benign "counter advanced" report lines and raises on
     any real residual, naming every offending table."""
     orgs, users = _text_array(owned_orgs), _text_array(owned_users)
@@ -285,23 +361,27 @@ def assert_clean(sql, all_tables, baseline, owned_orgs, owned_users):
         if owned_count != '0':
             residual[table] = f"{owned_count} of this run's own synthetic row(s) still present after cleanup (expected 0)"
 
-        before_count, before_value, before_hash = baseline.get(table, ('?', None, '?'))
+        before_count, before_hash, before_pairs = baseline.get(table, ('?', '?', None))
         now_count = sql(f"SELECT count(*) FROM {table} WHERE {not_owned}")
         if before_count != '?' and now_count != before_count:
             residual[table] = residual.get(table, '') + f'; non-owned row count changed {before_count} -> {now_count} (a row was added to or removed from the pre-existing baseline, outside this run\'s own synthetic ids)'
         else:
-            now_hash = sql(_content_hash_sql(table, col, not_owned))
+            now_hash = sql(_content_hash_sql(sql, table, col, not_owned))
             if before_hash != '?' and now_hash != before_hash:
-                residual[table] = residual.get(table, '') + f'; non-owned content hash changed {before_hash} -> {now_hash} (a mutation in a pre-existing row\'s non-counter column — includes organizations.name/auth.users and every other table uniformly)'
+                residual[table] = residual.get(table, '') + f'; non-owned content hash changed {before_hash} -> {now_hash} (a mutation in a pre-existing row\'s non-counter column, hashed from raw ::text output — includes jsonb content/array length, organizations.name/auth.users, and every other table/type uniformly)'
 
-        if col:
-            now_value = sql(f"SELECT coalesce(sum({col}),0) FROM {table} WHERE {not_owned}")
-            if before_value not in ('?', None) and now_value != before_value:
-                if int(now_value) < int(before_value):
-                    residual[table] = residual.get(table, '') + f'; {col} DECREASED {before_value} -> {now_value} (never a benign monotonic advance — investigate)'
-                else:
-                    advanced.append(f'{table}.{col} +{int(now_value) - int(before_value)} ({before_value} -> {now_value})')
+        if col and before_pairs is not None:
+            now_pairs = _parse_counter_pairs(sql(_counter_row_pairs_sql(sql, table, col, not_owned)))
+            for row_id in set(before_pairs) | set(now_pairs):
+                bvals, avals = before_pairs.get(row_id, []), now_pairs.get(row_id, [])
+                if len(bvals) != len(avals):
+                    continue  # a row's identity appearing/disappearing is already caught by the count/hash checks above
+                for bv, av in zip(bvals, avals):  # both lists sorted ascending — the sound PK-free multiset comparison
+                    if av < bv:
+                        residual[table] = residual.get(table, '') + f'; {col} DECREASED {bv} -> {av} on row(identity={row_id[:12]}...) (per-row check — never masked by another row\'s increase via a table-wide SUM)'
+                    elif av > bv:
+                        advanced.append(f'{table}.{col} row {row_id[:12]}... +{av - bv} ({bv} -> {av})')
 
     if residual:
-        raise RuntimeError(f'Owned-fixture cleanup left residual/unexplained changes across {len(residual)} dynamically-discovered table(s) (single uniform check over the whole database, no category exclusions): {residual}')
+        raise RuntimeError(f'Owned-fixture cleanup left residual/unexplained changes across {len(residual)} dynamically-discovered table(s) (single uniform, lossless, per-row check over the whole database): {residual}')
     return advanced
