@@ -65,9 +65,11 @@ try {
  sql(`insert into acquisition_queue_states(property_id,org_id,stage,version) values('${property}','${org}','contacted',1)`);
  const as=(user,query)=>sql(`select set_config('request.jwt.claim.sub','${user}',false);set role authenticated;${query}`).split('\n').at(-1);
  const set=(user=rep,phone='+18163706846',def=true,active=true)=>`select fn_set_rep_sms_sender('${org}','${user}','sendillo','${phone}','account-1','sender-${user}','Rep phone',${def},${active})`;
+ const setWithoutAccount=(user=rep,phone='+18163706846',def=true,active=true)=>`select fn_set_rep_sms_sender('${org}','${user}','sendillo','${phone}',null,'sender-${user}','Rep phone',${def},${active})`;
  const context=()=>JSON.parse(as(rep,`select fn_get_rep_sms_context('${property}')`));
  assert.throws(()=>as(rep,set()));
  assert.throws(()=>sql(`set role anon;${set()}`));
+ assert.throws(()=>as(owner,setWithoutAccount()),/SENDILLO_PROVIDER_ACCOUNT_REQUIRED/);
  as(owner,set());
  as(owner,set(rep,'+18165550001',true));
  as(owner,set(other,'+18163706846',true));
@@ -114,9 +116,9 @@ try {
  const finalizeInput=JSON.stringify({orgId:org,propertyId:property,callActivityId:id(13),idempotencyKey:id(32),outcome:'no_answer'}).replaceAll("'","''");
  const finalized=JSON.parse(as(rep,`select fn_finalize_acquisition_attempt('${finalizeInput}'::jsonb)`));
  assert.equal(as(rep,`select state from rep_sms_obligations where attempt_id='${finalized.attemptId}'`),'required');
- // Provider reconciliation updates a previously pending Sandra attempt after
- // evidence arrives. The database trigger must create one obligation on that
- // transition, and the repeated update must remain idempotent.
+ // Provider reconciliation attaches evidence to a previously pending Sandra
+ // attempt, but transport telemetry does not choose the rep's outcome. A
+ // voicemail or busy answer alone must therefore create no SMS obligation.
  const reconciledAttempt=id(40);
  sql(`insert into dialer_batch_items(id,property_id,phone_e164) values('${id(42)}','${property}','+19995550101');
    insert into acquisition_commands(id,org_id,actor_kind,operation,idempotency_key,request_hash,result)
@@ -126,29 +128,30 @@ try {
    insert into call_activities(id,org_id,property_id,operator_user_id,dialer_batch_item_id,provider,jitter_attempt_id,provider_call_id,outcome)
      values('${id(43)}','${org}','${property}','${rep}','${id(42)}','sandra_softphone','sandra-reconcile-1','provider-reconcile-1','voicemail');
    select my_leads_reconcile_call('${org}','reconcile-1');
+   update call_activities set outcome='busy' where id='${id(43)}';
    select my_leads_reconcile_call('${org}','reconcile-1');`);
- assert.equal(sql(`select outcome from acquisition_attempts where id='${reconciledAttempt}'`),'no_answer');
+ assert.equal(sql(`select outcome from acquisition_attempts where id='${reconciledAttempt}'`),'');
  assert.equal(sql(`select call_activity_id from acquisition_attempts where id='${reconciledAttempt}'`),id(43));
- assert.equal(as(rep,`select count(*) from rep_sms_obligations where attempt_id='${reconciledAttempt}'`),'1');
- assert.equal(as(rep,`select state from rep_sms_obligations where attempt_id='${reconciledAttempt}'`),'required');
- assert.equal(as(rep,`select to_number from rep_sms_obligations where attempt_id='${reconciledAttempt}'`),'+19995550101');
+ assert.equal(as(rep,`select count(*) from rep_sms_obligations where attempt_id='${reconciledAttempt}'`),'0');
  const detail=JSON.parse(as(rep,`select fn_get_acquisition_detail('${org}','${rep}','${property}','attempts',null)`));
  const detailAttempt=detail.groups.attempts.rows.find(row=>row.id===reconciledAttempt);
- assert.equal(detailAttempt.followUpStatus,'required');
- assert.equal(detailAttempt.followUpObligationId,as(rep,`select id from rep_sms_obligations where attempt_id='${reconciledAttempt}'`));
+ assert.equal(detailAttempt.followUpStatus,null);
+ assert.equal(detailAttempt.followUpObligationId,null);
  const history=JSON.parse(as(rep,`select fn_get_lead_acquisition_history('${property}',50,null,null,null)`));
  const historyAttempt=history.rows.find(row=>row.id===reconciledAttempt);
- assert.equal(historyAttempt.followUpStatus,'required');
- assert.equal(historyAttempt.followUpObligationId,detailAttempt.followUpObligationId);
- const resumableContext=context();
- assert.equal(resumableContext.obligation.status,'required');
- assert.equal(resumableContext.obligation.id,detailAttempt.followUpObligationId);
+ assert.equal(historyAttempt.followUpStatus,null);
+ assert.equal(historyAttempt.followUpObligationId,null);
+ const finalizedObligationId=as(rep,`select id from rep_sms_obligations where attempt_id='${finalized.attemptId}'`);
+ assert.equal(context().obligation.id,finalizedObligationId);
  const firstAttempt=JSON.parse(as(rep,`select fn_log_acquisition_attempt('${logInput(id(20),1)}'::jsonb)`));
  assert.equal(as(rep,`select state from rep_sms_obligations where attempt_id='${firstAttempt.attemptId}'`),'required');
  assert.equal(as(rep,`select message_body from rep_sms_obligations where attempt_id='${firstAttempt.attemptId}'`),'Checking in');
  assert.equal(as(rep,`select composition->>'templateId' from rep_sms_obligations where attempt_id='${firstAttempt.attemptId}'`),'no-answer-callback');
  assert.equal(as(rep,`select composition->>'body' from rep_sms_obligations where attempt_id='${firstAttempt.attemptId}'`),'Checking in');
  assert.equal(as(rep,`select to_number from rep_sms_obligations where attempt_id='${firstAttempt.attemptId}'`),'+18165551234');
+ const loggedContext=context();
+ assert.equal(loggedContext.obligation.status,'required');
+ assert.equal(loggedContext.obligation.id,as(rep,`select id from rep_sms_obligations where attempt_id='${firstAttempt.attemptId}'`));
  as(owner,set(rep,'+18163706846',false,false));
  const secondAttempt=JSON.parse(as(rep,`select fn_log_acquisition_attempt('${logInput(id(21),2)}'::jsonb)`));
  assert.equal(as(rep,`select state from rep_sms_obligations where attempt_id='${secondAttempt.attemptId}'`),'blocked');
@@ -166,13 +169,32 @@ try {
  assert.equal(fence.providerAccountId,'account-1');
  assert.equal(as(rep,`select count(*) from rep_sms_obligation_audit where obligation_id='${claim.obligationId}' and action='dispatch_fence'`),'1');
  assert.throws(()=>sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${claim.obligationId}','${id(99)}',${claim.claimGeneration},'${rep}')`));
- const accepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${claim.obligationId}','${claim.claimToken}','accepted','provider-1','accepted',null,null,'{}')`));
- assert.equal(accepted.state,'accepted');
- const wrongAccount=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','wrong-account','provider-1','delivered','delivered',null,'{}')`));
- assert.equal(wrongAccount.matched,false);
- const delivered=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-1','delivered','delivered',null,'{}')`));
- assert.equal(delivered.state,'delivered');
- assert.equal(as(rep,`select count(*) from rep_sms_obligation_audit where obligation_id='${claim.obligationId}'`),'4');
+const accepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${claim.obligationId}','${claim.claimToken}','accepted','provider-1','accepted',null,null,'{}')`));
+assert.equal(accepted.state,'accepted');
+const wrongAccount=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','wrong-account','provider-1','delivered','delivered',null,'{}')`));
+assert.equal(wrongAccount.matched,false);
+const delivered=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-1','delivered','delivered',null,'{}')`));
+assert.equal(delivered.state,'delivered');
+assert.equal(as(rep,`select count(*) from rep_sms_obligation_audit where obligation_id='${claim.obligationId}'`),'4');
+// A provider receipt can arrive while the fenced row is still `sending`,
+// before fn_record_rep_sms_obligation_result has written provider_message_id.
+// The exact org + obligation + provider + account path must bind that id and
+// settle the row exactly once.
+const raceVersion=sql(`select version from acquisition_queue_states where org_id='${org}' and property_id='${property}'`);
+const raceAttempt=JSON.parse(as(rep,`select fn_log_acquisition_attempt('${logInput(id(23),raceVersion)}'::jsonb)`));
+const raceObligationId=as(rep,`select id from rep_sms_obligations where attempt_id='${raceAttempt.attemptId}'`);
+const raceClaim=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${org}','${raceObligationId}','${rep}','${composition}'::jsonb)`));
+assert.equal(raceClaim.state,'sending');
+const wrongExact=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','wrong-account','provider-raced','delivered','delivered',null,'{}','${org}','${raceObligationId}')`));
+assert.equal(wrongExact.matched,false);
+const racedDelivered=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-raced','delivered','delivered',null,'{}','${org}','${raceObligationId}')`));
+assert.equal(racedDelivered.state,'delivered');
+assert.equal(as(rep,`select provider_message_id from rep_sms_obligations where id='${raceObligationId}'`),'provider-raced');
+const lateAccepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${raceObligationId}','${raceClaim.claimToken}','accepted','provider-raced','accepted',null,null,'{}')`));
+assert.equal(lateAccepted.state,'delivered');
+assert.equal(lateAccepted.duplicate,true);
+const racedReplay=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-raced','delivered','delivered',null,'{}','${org}','${raceObligationId}')`));
+assert.equal(racedReplay.duplicate,true);
  // A current assignee can read outstanding history, while the original actor
  // remains visible for audit. This tests the transfer side of RLS directly.
  sql(`update properties set assigned_user_id='${other}' where id='${property}'`);
@@ -182,9 +204,9 @@ try {
  // Once authorization has durably reached `sending`, an expired claim is
  // ambiguous because the provider may already have received the request.
  sql(`update rep_sms_obligations set next_attempt_at=now() where attempt_id='${finalized.attemptId}'`);
- const finalizedObligationId=sql(`select id from rep_sms_obligations where attempt_id='${finalized.attemptId}'`);
- assert.match(finalizedObligationId,/^[0-9a-f-]{36}$/);
- const expiredClaim=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${org}','${finalizedObligationId}','${rep}','${composition}'::jsonb)`));
+ const finalizedObligationIdForLease=sql(`select id from rep_sms_obligations where attempt_id='${finalized.attemptId}'`);
+ assert.match(finalizedObligationIdForLease,/^[0-9a-f-]{36}$/);
+ const expiredClaim=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${org}','${finalizedObligationIdForLease}','${rep}','${composition}'::jsonb)`));
  assert.equal(expiredClaim.state,'sending');
  sql(`update rep_sms_obligations set lease_expires_at=now()-interval '1 second' where id='${expiredClaim.obligationId}'`);
  const stale=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${org}','${expiredClaim.obligationId}','${rep}','${composition}'::jsonb)`));

@@ -29,7 +29,17 @@ export async function sendRepSms(input: DispatchRepSmsInput & { obligationId?: s
   try {
     // A no-answer follow-up is durable. Resume that exact obligation after a
     // reload instead of falling back to the generic manual sender.
-    return ok({ outcome: input.obligationId ? await resumeRepSms({ ...input, obligationId: input.obligationId }) : await dispatchRepSms(input) });
+    const obligationId = typeof input.obligationId === "string" ? input.obligationId.trim() : "";
+    if (obligationId) {
+      return ok({ outcome: await resumeRepSms({ ...input, obligationId }) });
+    }
+    const context = await readRepSmsContext(input.propertyId);
+    if (context.obligation) {
+      throw new Error(
+        "This lead has a saved SMS follow-up. Resume the exact saved follow-up before sending another message.",
+      );
+    }
+    return ok({ outcome: await dispatchRepSms(input) });
   } catch (error) {
     return errFromUnknown(error, "TEXTING_UNAVAILABLE");
   }
@@ -41,7 +51,6 @@ type ObligationRpc = {
 };
 
 const RESUMABLE_OBLIGATION_STATES = new Set(["required", "draft", "failed_not_dispatched"]);
-const REVIEW_ONLY_OBLIGATION_STATES = new Set(["blocked", "unknown", "delivery_failed", "claimed", "sending"]);
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -162,8 +171,13 @@ async function resumeRepSms(input: DispatchRepSmsInput & { obligationId: string 
   if (outcome.status === "provider_failed" && outcome.providerAttempted === false) {
     return persistResumedResult(admin, obligation.id, claimRecord.claimToken, "failed_not_dispatched", reason, composition);
   }
+  // Once dispatchRepSms has crossed its provider boundary, a provider failure
+  // or deferral does not prove non-delivery. Keep the durable obligation
+  // ambiguous so an owner can reconcile the provider receipt before another
+  // attempt is considered. Only the explicit providerAttempted=false signal
+  // is safe to retry.
   if (outcome.status === "provider_failed" || outcome.status === "provider_deferred") {
-    return persistResumedResult(admin, obligation.id, claimRecord.claimToken, "delivery_failed", reason, composition);
+    return persistResumedResult(admin, obligation.id, claimRecord.claimToken, "unknown", reason, composition);
   }
   return persistResumedResult(admin, obligation.id, claimRecord.claimToken, "unknown", reason, composition);
 }
@@ -286,6 +300,9 @@ export async function saveRepSmsSender(input: SaveRepSmsSenderInput) {
         throw new Error("Sendillo did not return an auditable sender identity. Refresh and retry.");
       }
       const catalogId = catalogAccountId(match);
+      if (!catalogId) {
+        throw new Error("Sendillo did not return a stable account identity for this sender. Refresh and retry.");
+      }
       const requestedSenderId = input.providerSenderId?.trim() || null;
       const requestedAccountId = input.providerAccountId?.trim() || null;
       if (requestedSenderId && requestedSenderId !== catalogSenderId) {

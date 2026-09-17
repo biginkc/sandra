@@ -69,7 +69,10 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       if(!row||row.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
         setRecovery({opening,message:'This lead is unavailable in this queue or its assignment changed. Your draft is retained; copy it before closing. Reopen the lead from the current queue to start a new update.',blocked:true,busy:false});return;
       }
-      recoveredRow.current={opening,row};submission.current=null;
+      // Refreshing an opening after a stale response does not start a new
+      // submission. Keep its idempotency key so retrying the same command is
+      // safe even when the draft was edited while the dialog was blocked.
+      recoveredRow.current={opening,row};
       setRecovery({opening,message:'Lead refreshed. Your draft is retained. Review it before saving.',blocked:false,busy:false});
     }catch{
       if(activeDialog.current===opening)setRecovery({opening,message:'Could not refresh this lead. Your draft is retained. Try Refresh again.',blocked:true,busy:false});
@@ -77,7 +80,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   };
   const [detailRevision,setDetailRevision]=useState(0);
   const [recipient,setRecipient]=useState(roster.settings.recipientId??'');const [settingsBusy,setSettingsBusy]=useState(false);
-  const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<{hash:string;key:string}|null>(null);
+  const initialEffect=useRef(Boolean(initialSnapshot&&initialKpis));const request=useRef(0);const submission=useRef<{key:string}|null>(null);
   const serverScopeKey=member;
   const previousServerScope=useRef(serverScopeKey);
   const refresh=useCallback(async(background=false)=>{
@@ -185,8 +188,13 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     if(recovery?.opening===dialog&&(recovery.blocked||recovery.busy))return {ok:false as const,message:recovery.message};
     const row=recoveredRow.current?.opening===dialog?recoveredRow.current.row:dialog.row;
     setRecovery(null);
-    const hash=JSON.stringify(payload);
-    if(submission.current?.hash!==hash)submission.current={hash,key:crypto.randomUUID()};
+    // A command's idempotency key belongs to the opened submission, not to
+    // the current draft contents. If the response is lost, the rep may edit
+    // the draft before retrying; retaining the key lets the server replay the
+    // original command outcome instead of creating a second attempt. The key
+    // is cleared only when this opening is explicitly closed/replaced or a
+    // confirmed terminal result closes it.
+    if(!submission.current)submission.current={key:crypto.randomUUID()};
     const input=JSON.parse(JSON.stringify({...payload,propertyId:row.propertyId,expectedEpisodeId:row.assignmentEpisodeId,
       expectedQueueVersion:row.queueVersion,expectedSharedStatus:row.sharedStatus,idempotencyKey:submission.current.key})) as Record<string,Json>;
     const result=await submitMyLeadCommand(dialog.action as Parameters<typeof submitMyLeadCommand>[0],input);
@@ -197,7 +205,12 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       const read=refresh();mutationReads.current.set(dialog.row.propertyId,{scope:openingScope,episodeId:dialog.row.assignmentEpisodeId,requestId:request.current,read});
       const followUpPending = dialog.action === 'log-attempt' && input.outcome === 'no_answer' &&
         (!result.followUp || !['accepted','delivered'].includes(result.followUp.status));
-      if(!followUpPending)setDialog(current=>current===dialog?null:current);
+      if(!followUpPending){
+        setDialog(current=>current===dialog?null:current);
+        // This result is the confirmed terminal outcome for the opening.
+        // A subsequent dialog gets a fresh idempotency key.
+        submission.current=null;
+      }
       setDetailRevision(revision=>revision+1);await read;router.refresh();
     }
     return result;
@@ -207,7 +220,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
   // Completion callbacks belong to one opening, even when the same lead is reopened.
   // A previous form can finish after its post-save refresh and must not close a new form.
-  const common=dialog?{open:true,propertyId:dialog.row.propertyId,propertyLabel:dialog.row.address,onOpenChange:(open:boolean)=>{if(!open)setDialog(current=>current===dialog?null:current);}}:null;
+  const common=dialog?{open:true,propertyId:dialog.row.propertyId,propertyLabel:dialog.row.address,onOpenChange:(open:boolean)=>{if(!open){submission.current=null;setDialog(current=>current===dialog?null:current);}}}:null;
   return <>
     {openingStatus&&<div role="status" className="mb-4 rounded border p-3">
       {openingStatus.message}

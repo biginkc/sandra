@@ -1,10 +1,10 @@
 begin;
 
--- Keep the obligation boundary complete for provider reconciliation and
--- softphone paths. The two attempt RPC wrappers create an obligation for a
--- browser submission, while reconciliation updates an existing Sandra attempt
--- after provider evidence arrives. This trigger covers that transition and
--- any future authenticated attempt writer without backfilling old rows.
+-- Keep the obligation boundary complete for explicit softphone and manual
+-- paths. The two attempt RPC wrappers create an obligation for a browser
+-- submission, and this trigger covers any future attempt writer without
+-- allowing provider telemetry to select the rep's outcome or backfilling old
+-- rows.
 create or replace function public.rep_sms_no_answer_attempt_trigger()
 returns trigger language plpgsql security definer set search_path='' as $$
 begin
@@ -97,40 +97,6 @@ begin
 end;
 $$;
 revoke all on function public.fn_ensure_rep_sms_no_answer_obligation(uuid,uuid,uuid,uuid,uuid,timestamptz,jsonb) from public,anon,authenticated,service_role;
-
--- The latest acquisition metrics migration intentionally stopped inferring a
--- rep outcome from transport telemetry. Provider reconciliation still needs
--- to carry an explicit provider terminal answer into the pending Sandra
--- attempt, however, so the no-answer obligation trigger can observe that
--- transition. Preserve an already selected outcome and never create an
--- attempt from evidence alone.
-create or replace function public.my_leads_reconcile_call(p_org uuid,p_jitter_id text)
-returns void language plpgsql security definer set search_path='' as $$
-begin
-  if p_jitter_id is null or p_jitter_id='' then return; end if;
-  perform pg_advisory_xact_lock(hashtextextended(p_org::text||':acquisition-finalize:'||p_jitter_id,0));
-  update public.acquisition_attempts a set
-    call_activity_id=c.id,
-    outcome=coalesce(a.outcome,case c.outcome
-      when 'connected_human' then 'reached'
-      when 'no_answer' then 'no_answer'
-      when 'voicemail' then 'no_answer'
-      when 'busy' then 'no_answer'
-    end),
-    note=coalesce(a.note,nullif(btrim(c.notes),''))
-  from public.acquisition_commands r,public.call_activities c
-  where r.org_id=p_org and r.operation='record_call_start'
-    and r.result->>'jitterCallId'=p_jitter_id
-    and a.command_id=r.id and a.org_id=p_org and a.source='sandra'
-    and c.org_id=p_org and c.property_id=a.property_id
-    and c.provider='sandra_softphone'
-    and c.jitter_attempt_id='sandra-'||p_jitter_id
-    and c.operator_user_id=a.actor_user_id
-    and c.provider_call_id=r.result->>'sellerProviderCallId'
-    and (a.call_activity_id is null or a.call_activity_id=c.id);
-end;
-$$;
-revoke all on function public.my_leads_reconcile_call(uuid,text) from public,anon,authenticated,service_role;
 
 -- The acquisition detail read model is the source used by My Leads. Keep
 -- attempt facts one row per attempt while exposing the durable follow-up row

@@ -8,6 +8,7 @@ function sendilloNumber(overrides: Record<string, unknown> = {}) {
     providerNumberId: "sendillo-number-1",
     status: "active",
     messagingStatus: "ready",
+    providerAccountId: "sendillo-account-1",
     raw: {},
     ...overrides,
   } as Parameters<typeof repSmsCatalogOptionIsEligible>[0];
@@ -27,6 +28,7 @@ describe("rep SMS sender catalog eligibility", () => {
     ["unknown messaging status", { messagingStatus: "unknown" }],
     ["pending messaging status", { messagingStatus: "pending" }],
     ["unregistered number", { providerNumberId: null }],
+    ["missing provider account identity", { providerAccountId: null }],
   ])("rejects %s", (_label, overrides) => {
     expect(repSmsCatalogOptionIsEligible(sendilloNumber(overrides))).toBe(false);
   });

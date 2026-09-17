@@ -5397,7 +5397,7 @@ export type Database = {
       fn_claim_authorize_rep_sms_obligation: { Args: { p_org_id: string; p_obligation_id: string; p_actor_id: string; p_composition: Json }; Returns: Json }
       fn_assert_rep_sms_obligation_dispatch: { Args: { p_obligation_id: string; p_claim_token: string; p_claim_generation: number; p_actor_id: string }; Returns: Json }
       fn_record_rep_sms_obligation_result: { Args: { p_obligation_id: string; p_claim_token: string; p_state: string; p_provider_message_id?: string | null; p_provider_status?: string | null; p_provider_error?: string | null; p_retry_at?: string | null; p_metadata?: Json }; Returns: Json }
-      fn_record_rep_sms_delivery: { Args: { p_provider: string; p_provider_account_id: string; p_provider_message_id: string; p_state: string; p_provider_status?: string | null; p_provider_error?: string | null; p_metadata?: Json }; Returns: Json }
+      fn_record_rep_sms_delivery: { Args: { p_provider: string; p_provider_account_id: string; p_provider_message_id: string; p_state: string; p_provider_status?: string | null; p_provider_error?: string | null; p_metadata?: Json; p_org_id?: string | null; p_obligation_id?: string | null }; Returns: Json }
       fn_owner_correct_rep_sms_obligation: { Args: { p_obligation_id: string; p_action: string; p_reason: string }; Returns: Json }
       ack_sentry_anomaly: {
         Args: {

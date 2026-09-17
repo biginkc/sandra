@@ -187,6 +187,84 @@ describe("applyMessageStatusEvent", () => {
     });
   });
 
+  it("acknowledges an unmatched manual rep SMS receipt without retrying forever", async () => {
+    const row = message({
+      metadata: {
+        repSms: {
+          provider: "sendillo",
+          providerAccountId: "account-from-message",
+        },
+      } as Json,
+    });
+    const rpc = vi.fn(async () => ({
+      data: { ok: false, matched: false },
+      error: null,
+    }));
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
+    const { supabase } = makeSupabase({
+      messages: [row],
+      updatedRows: [{ id: row.id }],
+    });
+
+    await expect(
+      applyMessageStatusEvent(supabase, "sendillo", {
+        kind: "delivered",
+        externalId: "provider-message-manual-unmatched",
+        timestamp: new Date("2026-06-24T15:01:00.000Z"),
+      }),
+    ).resolves.toBe("updated");
+
+    expect(rpc).toHaveBeenCalledWith("fn_record_rep_sms_delivery", expect.objectContaining({
+      p_provider_message_id: "provider-message-manual-unmatched",
+    }));
+  });
+
+  it("uses the fenced obligation identity when a receipt races the accepted write", async () => {
+    const row = message({
+      metadata: {
+        repSms: {
+          provider: "sendillo",
+          providerAccountId: "account-from-message",
+          obligationId: "10000000-0000-4000-8000-000000000123",
+        },
+      } as Json,
+    });
+    const rpc = vi.fn(async () => ({
+      data: { ok: true, matched: true, state: "delivered" },
+      error: null,
+    }));
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
+    const { supabase } = makeSupabase({
+      messages: [row],
+      updatedRows: [{ id: row.id }],
+    });
+
+    await expect(
+      applyMessageStatusEvent(supabase, "sendillo", {
+        kind: "delivered",
+        externalId: "provider-message-raced",
+        timestamp: new Date("2026-06-24T15:01:00.000Z"),
+      }),
+    ).resolves.toBe("updated");
+
+    expect(rpc).toHaveBeenCalledWith("fn_record_rep_sms_delivery", {
+      p_provider: "sendillo",
+      p_provider_account_id: "account-from-message",
+      p_provider_message_id: "provider-message-raced",
+      p_state: "delivered",
+      p_provider_status: "delivered",
+      p_provider_error: null,
+      p_metadata: {
+        source: "sendillo_status_webhook",
+        messageId: "msg-1",
+        messageOrgId: "org-1",
+        eventTimestamp: "2026-06-24T15:01:00.000Z",
+      },
+      p_org_id: "org-1",
+      p_obligation_id: "10000000-0000-4000-8000-000000000123",
+    });
+  });
+
   it("does not call the rep bridge for ordinary messages or trust callback fields", async () => {
     const row = message({
       metadata: {
@@ -209,7 +287,7 @@ describe("applyMessageStatusEvent", () => {
     expect(vi.mocked(createAdminClient)).not.toHaveBeenCalled();
   });
 
-  it("keeps the webhook path successful when the optional bridge RPC is unavailable", async () => {
+  it("leaves a valid rep-SMS webhook retryable when the bridge RPC is unavailable", async () => {
     const row = message({
       metadata: {
         repSms: {
@@ -231,7 +309,59 @@ describe("applyMessageStatusEvent", () => {
         externalId: "provider-message-3",
         timestamp: new Date("2026-06-24T15:01:00.000Z"),
       }),
-    ).resolves.toBe("updated");
+    ).rejects.toThrow("function not installed");
+  });
+
+  it("rejects a matched-but-unsettled bridge result so reconciliation cannot acknowledge it", async () => {
+    const row = message({
+      metadata: {
+        repSms: {
+          provider: "sendillo",
+          providerAccountId: "account-from-message",
+          obligationId: "10000000-0000-4000-8000-000000000124",
+        },
+      } as Json,
+    });
+    const rpc = vi.fn(async () => ({
+      data: { ok: false, matched: true, reason: "callback_state_not_settleable" },
+      error: null,
+    }));
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
+    const { supabase } = makeSupabase({ messages: [row], updatedRows: [{ id: row.id }] });
+
+    await expect(
+      applyMessageStatusEvent(supabase, "sendillo", {
+        kind: "delivered",
+        externalId: "provider-message-mismatch",
+        timestamp: new Date("2026-06-24T15:01:00.000Z"),
+      }),
+    ).rejects.toThrow("did not transition");
+  });
+
+  it("keeps a fenced receipt retryable when its exact obligation is not found", async () => {
+    const row = message({
+      metadata: {
+        repSms: {
+          provider: "sendillo",
+          providerAccountId: "account-from-message",
+          obligationId: "10000000-0000-4000-8000-000000000126",
+        },
+      } as Json,
+    });
+    const rpc = vi.fn(async () => ({
+      data: { ok: false, matched: false, reason: "obligation_not_found" },
+      error: null,
+    }));
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
+    const { supabase } = makeSupabase({ messages: [row], updatedRows: [{ id: row.id }] });
+
+    await expect(
+      applyMessageStatusEvent(supabase, "sendillo", {
+        kind: "delivered",
+        externalId: "provider-message-fenced-missing",
+        timestamp: new Date("2026-06-24T15:01:00.000Z"),
+      }),
+    ).rejects.toThrow("did not transition");
   });
 
   it("uses the service client when transport reconciliation runs as an authenticated user", async () => {
@@ -319,6 +449,77 @@ describe("applyMessageStatusEvent", () => {
     expect(adminRpc).toHaveBeenCalledTimes(1);
     expect(transportRpc).not.toHaveBeenCalled();
     expect(webhookUpdates).toContainEqual({
+      processing_status: "processed",
+      processed_at: expect.any(String),
+    });
+  });
+
+  it("leaves a stored rep-SMS event retryable when the obligation bridge fails", async () => {
+    const row = message({
+      metadata: {
+        repSms: {
+          provider: "sendillo",
+          providerAccountId: "account-from-message",
+          obligationId: "10000000-0000-4000-8000-000000000125",
+        },
+      } as Json,
+    });
+    const adminRpc = vi.fn(async () => ({
+      data: null,
+      error: { message: "obligation bridge unavailable" },
+    }));
+    vi.mocked(createAdminClient).mockReturnValue({ rpc: adminRpc } as unknown as SupabaseClient<Database>);
+    const base = makeSupabase({ messages: [row], updatedRows: [{ id: row.id }] }).supabase;
+    const baseFrom = (base as unknown as { from: (table: string) => unknown }).from;
+    const webhookUpdates: Array<Record<string, unknown>> = [];
+    const supabase = {
+      ...base,
+      from(table: string) {
+        if (table !== "webhook_events") return baseFrom(table);
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                in: () => ({
+                  neq: () => ({
+                    order: async () => ({
+                      data: [{
+                        event_type: "sms_status_delivered",
+                        external_id: "provider-message-retryable",
+                        payload: {
+                          kind: "delivered",
+                          timestamp: "2026-06-24T15:01:00.000Z",
+                        },
+                      }],
+                      error: null,
+                    }),
+                  }),
+                }),
+              }),
+            }),
+          }),
+          update: (patch: Record<string, unknown>) => {
+            webhookUpdates.push(patch);
+            const builder = {
+              eq: () => builder,
+              select: async () => ({ data: [{ id: "webhook-retryable" }], error: null }),
+            };
+            return builder;
+          },
+        };
+      },
+    } as unknown as SupabaseClient<Database>;
+
+    await expect(
+      reconcileStoredStatusEvents(supabase, "sendillo", "provider-message-retryable"),
+    ).resolves.toBeUndefined();
+
+    expect(webhookUpdates).toContainEqual({
+      processing_status: "error",
+      processed_at: expect.any(String),
+      error_message: "obligation bridge unavailable",
+    });
+    expect(webhookUpdates).not.toContainEqual({
       processing_status: "processed",
       processed_at: expect.any(String),
     });

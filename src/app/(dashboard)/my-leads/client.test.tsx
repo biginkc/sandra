@@ -434,7 +434,34 @@ describe('stale form recovery',()=>{
     await user.click(screen.getByRole('button',{name:'Save attempt'}));
     await waitFor(()=>expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
     expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({expectedQueueVersion:2,expectedEpisodeId:'episode-1',note:'Keep this original draft'});
-    expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).not.toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
+    // Refreshing a stale opening keeps the same logical submission alive. A
+    // new idempotency key is reserved for an explicit close/reopen or a
+    // confirmed terminal result.
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
+  });
+  it('reuses the opening idempotency key after a lost response and an edited retry', async()=>{
+    const user=userEvent.setup();
+    mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});
+    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:snapshot('106 Fixture Lane'),kpis});
+    mocks.submitMyLeadCommand
+      .mockRejectedValueOnce(new Error('The save response was lost'))
+      .mockResolvedValueOnce({ok:true});
+    renderClient(snapshot('106 Fixture Lane'));
+    await user.click(screen.getByRole('button',{name:'Log attempt'}));
+    await user.selectOptions(screen.getByLabelText('External outcome'),'reached');
+    fireEvent.change(screen.getByLabelText('When did the outreach occur?'),{target:{value:'2026-09-11T09:00'}});
+    const note=screen.getByLabelText('Note (optional)');
+    await user.type(note,'Original draft');
+    await user.click(screen.getByRole('button',{name:'Save attempt'}));
+    await screen.findByText("We couldn't save this change. Try again.");
+
+    await user.clear(note);
+    await user.type(note,'Edited after response loss');
+    await user.click(screen.getByRole('button',{name:'Save attempt'}));
+    await waitFor(()=>expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
+    expect(mocks.submitMyLeadCommand.mock.calls[0][1]).toMatchObject({note:'Original draft'});
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({note:'Edited after response loss'});
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
   });
   it('ignores recovery finishing after cancellation and reopening the same lead',async()=>{
     const user=await rejectedDraft();

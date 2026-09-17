@@ -2,7 +2,7 @@
 
 import { MessageSquareIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -56,6 +56,11 @@ export function SmsComposer({
   // result. Keep the draft mounted so the operator can inspect it while
   // reconciliation determines whether the first request was delivered.
   const [providerUnknown, setProviderUnknown] = useState(false);
+  // React's pending state is asynchronous. This synchronous fence closes the
+  // click/keyboard race before the first transition has rendered and remains
+  // authoritative until the provider outcome (including provider_unknown)
+  // has been handled.
+  const sendInFlight = useRef(false);
 
   const loadFromOptions = () => {
     if (fromOptions.length > 0 || loadingFroms) return;
@@ -112,69 +117,76 @@ export function SmsComposer({
   const tooLong = length > 1600;
 
   const sendOrQueue = (queueOnly: boolean) => {
+    if (sendInFlight.current) return;
+    if (disabled || providerUnknown || pending || length === 0 || tooLong) return;
+    sendInFlight.current = true;
     startTransition(async () => {
-      const result = await callAction(
-        sendSmsFromLead(propertyId, body, fromNumber || null, queueOnly, homeownerPhone),
-        { fallbackMessage: queueOnly ? "Queue failed" : "SMS send failed" },
-      );
-      if (!result.ok) return;
+      try {
+        const result = await callAction(
+          sendSmsFromLead(propertyId, body, fromNumber || null, queueOnly, homeownerPhone),
+          { fallbackMessage: queueOnly ? "Queue failed" : "SMS send failed" },
+        );
+        if (!result.ok) return;
 
-      const { outcome } = result.data;
-      switch (outcome.status) {
-        case "sent":
-          toast.success("Message sent", {
-            description: `Delivered to ${homeownerPhone}.`,
-          });
-          setBody("");
-          setOpen(false);
-          router.refresh();
-          break;
-        case "queued":
-          toast.success("Queued", {
-            description: "Release it from the Messages page.",
-          });
-          setBody("");
-          setOpen(false);
-          router.refresh();
-          break;
-        case "blocked_no_consent":
-          toast.error("Blocked: no consent", {
-            description: outcome.reason,
-          });
-          break;
-        case "blocked_quiet_hours":
-          toast.warning("Blocked: quiet hours", {
-            description: outcome.reason,
-          });
-          break;
-        case "blocked_no_phone":
-          toast.error("Blocked: no phone", { description: outcome.reason });
-          break;
-        case "blocked_landline":
-        case "blocked_terminal_dispo":
-        case "blocked_automated_suppressed":
-          toast.warning("Skipped", { description: outcome.reason });
-          break;
-        case "blocked_provider_off":
-          toast.error("Messaging disabled", { description: outcome.reason });
-          break;
-        case "provider_failed":
-          toast.error("Provider error", { description: outcome.error });
-          break;
-        case "provider_unknown":
-          setProviderUnknown(true);
-          toast.warning("Send pending reconciliation", {
-            description:
-              "The messaging provider did not provide a definitive receipt. Your draft is preserved. Review the thread before retrying to avoid a duplicate message.",
-          });
-          break;
-        case "contact_not_found":
-        case "property_not_found":
-          toast.error("Lead not found");
-          break;
-        case "db_error":
-          toast.error("Database error", { description: outcome.error });
-          break;
+        const { outcome } = result.data;
+        switch (outcome.status) {
+          case "sent":
+            toast.success("Message sent", {
+              description: `Delivered to ${homeownerPhone}.`,
+            });
+            setBody("");
+            setOpen(false);
+            router.refresh();
+            break;
+          case "queued":
+            toast.success("Queued", {
+              description: "Release it from the Messages page.",
+            });
+            setBody("");
+            setOpen(false);
+            router.refresh();
+            break;
+          case "blocked_no_consent":
+            toast.error("Blocked: no consent", {
+              description: outcome.reason,
+            });
+            break;
+          case "blocked_quiet_hours":
+            toast.warning("Blocked: quiet hours", {
+              description: outcome.reason,
+            });
+            break;
+          case "blocked_no_phone":
+            toast.error("Blocked: no phone", { description: outcome.reason });
+            break;
+          case "blocked_landline":
+          case "blocked_terminal_dispo":
+          case "blocked_automated_suppressed":
+            toast.warning("Skipped", { description: outcome.reason });
+            break;
+          case "blocked_provider_off":
+            toast.error("Messaging disabled", { description: outcome.reason });
+            break;
+          case "provider_failed":
+            toast.error("Provider error", { description: outcome.error });
+            break;
+          case "provider_unknown":
+            setProviderUnknown(true);
+            toast.warning("Send pending reconciliation", {
+              description:
+                "The messaging provider did not provide a definitive receipt. Your draft is preserved. Review the thread before retrying to avoid a duplicate message.",
+            });
+            break;
+          case "contact_not_found":
+          case "property_not_found":
+            toast.error("Lead not found");
+            break;
+          case "db_error":
+            toast.error("Database error", { description: outcome.error });
+            break;
+        }
+      } finally {
+        sendInFlight.current = false;
       }
     });
   };
@@ -262,6 +274,15 @@ export function SmsComposer({
             placeholder="Type your message…"
             value={body}
             onChange={(e) => setBody(e.target.value)}
+            onKeyDown={(e) => {
+              // Cmd/Ctrl + Enter sends now, matching the inline composer and
+              // guarding keyboard activation with the same synchronous lock
+              // as the footer buttons.
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                sendOrQueue(false);
+              }
+            }}
             disabled={disabled || pending || providerUnknown}
             maxLength={2000}
           />

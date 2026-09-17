@@ -53,7 +53,9 @@ describe("Lead Detail v2 integration contract", () => {
       inlineGateStart,
       source.indexOf("</SmsEntryPointGate>", inlineGateStart),
     );
-    expect(headerGate).toContain("restricted={smsPresentation.smsRestricted}");
+    expect(headerGate).toContain(
+      "restricted={isAcquisitionMember ? acquisitionSmsPresentation.smsRestricted : smsPresentation.smsRestricted}",
+    );
     expect(inlineGate).toContain(
       "restricted={inlineSmsPresentation.smsRestricted}",
     );
@@ -76,6 +78,19 @@ describe("Lead Detail v2 integration contract", () => {
     expect(inlinePresentation).toContain("inlinePhoneSuppressionResult");
     expect(inlinePresentation).toContain("latestHomeownerSmsRoute");
     expect(inlinePresentation).toContain(": smsPresentation");
+  });
+
+  it("gates the acquisition composer with the exact thread recipient when it diverges from the best phone", () => {
+    expect(source).toContain("const acquisitionSmsPresentation = inlineReplyPhone");
+    expect(source).toContain("? inlineSmsPresentation");
+    expect(source).toContain(": smsPresentation;");
+    expect(source).toContain("<RepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} />");
+    expect(source).toContain(
+      "restrictionLabel={isAcquisitionMember ? acquisitionSmsPresentation.consentLabel : smsPresentation.consentLabel}",
+    );
+    expect(source).toContain(
+      "restrictionDetail={isAcquisitionMember ? acquisitionSmsPresentation.consentDetail : smsPresentation.consentDetail}",
+    );
   });
 
   it("keeps the permanent DNC return ahead of normal-page work", () => {

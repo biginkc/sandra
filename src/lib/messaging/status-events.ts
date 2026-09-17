@@ -102,9 +102,11 @@ export async function applyMessageStatusEvent(
 
 /**
  * Complete the durable rep-SMS obligation after the transport row has been
- * reconciled. This is deliberately best effort: provider callbacks must keep
- * acknowledging ordinary SMS traffic even when the optional rep-SMS schema
- * is unavailable or has no matching obligation.
+ * reconciled. Ordinary SMS traffic keeps its existing best-effort behavior.
+ * Fenced rep-SMS callbacks (those carrying an obligation id) are part of the
+ * durable obligation and bridge failures are propagated so the webhook event
+ * remains retryable. Older/manual rep-SMS rows without an obligation id stay
+ * best-effort when no legacy obligation matches the provider message id.
  *
  * The provider account identity is read only from the stored outbound
  * message's repSms metadata. The webhook supplies the provider message id
@@ -144,21 +146,65 @@ export async function recordRepSmsDeliveryFromMessage(
         messageOrgId: message.org_id,
         eventTimestamp: event.timestamp.toISOString(),
       },
+      ...(identity.obligationId
+        ? {
+            // A fenced rep send can receive a provider callback before the
+            // worker's accepted-result write binds provider_message_id on the
+            // obligation. The exact obligation/org path closes that race;
+            // the RPC still verifies provider + account + tenant before it
+            // binds the external id.
+            p_org_id: message.org_id,
+            p_obligation_id: identity.obligationId,
+          }
+        : {}),
     });
 
     if (result.error) {
-      reportRepSmsDeliveryBridgeError(result.error.message);
+      const bridgeError = new Error(result.error.message);
+      // A valid rep-SMS identity is part of the durable delivery contract.
+      // Leave the webhook row retryable when the service RPC is unavailable
+      // or rejects the callback; ordinary messages never enter this block.
+      throw bridgeError;
+    }
+    const bridgeResult = result.data;
+    if (!isSuccessfulRepSmsDeliveryResult(bridgeResult)) {
+      // Older/manual rep-SMS rows predate durable obligations. The callback
+      // still gets a chance to reconcile a matching legacy obligation by
+      // provider message id, but an unmatched row is intentionally a no-op;
+      // otherwise every status replay would remain retryable forever.
+      if (!identity.obligationId && isUnmatchedRepSmsDeliveryResult(bridgeResult)) {
+        return;
+      }
+      const bridgeError = new Error(
+        "Rep SMS delivery callback did not transition its obligation.",
+      );
+      throw bridgeError;
     }
   } catch (error) {
-    reportRepSmsDeliveryBridgeError(
-      error instanceof Error ? error.message : String(error),
-    );
+    const message = error instanceof Error ? error.message : String(error);
+    // Avoid silently acknowledging a valid rep-SMS callback. The caller's
+    // webhook/reconciliation boundary records the event as error, allowing a
+    // later replay after the database/provider bridge is healthy.
+    reportRepSmsDeliveryBridgeError(message);
+    throw error;
   }
+}
+
+function isSuccessfulRepSmsDeliveryResult(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  return result.ok === true && result.matched === true;
+}
+
+function isUnmatchedRepSmsDeliveryResult(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  return result.ok === false && result.matched === false;
 }
 
 function readRepSmsDeliveryIdentity(
   metadata: Database["public"]["Tables"]["messages"]["Row"]["metadata"],
-): { provider: string; providerAccountId: string } | null {
+): { provider: string; providerAccountId: string; obligationId?: string } | null {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
     return null;
   }
@@ -168,6 +214,7 @@ function readRepSmsDeliveryIdentity(
   }
   const provider = repSms.provider;
   const providerAccountId = repSms.providerAccountId;
+  const obligationId = repSms.obligationId;
   if (
     typeof provider !== "string" ||
     !provider.trim() ||
@@ -179,6 +226,9 @@ function readRepSmsDeliveryIdentity(
   return {
     provider: provider.trim(),
     providerAccountId: providerAccountId.trim(),
+    ...(typeof obligationId === "string" && obligationId.trim()
+      ? { obligationId: obligationId.trim() }
+      : {}),
   };
 }
 

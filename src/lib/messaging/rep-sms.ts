@@ -211,6 +211,11 @@ function assertSenderGrant(
     );
   }
   if (provider.providerId === REP_SMS_PROVIDER_ID) {
+    if (!sender.providerAccountId?.trim()) {
+      throw new Error(
+        "This texting assignment has no audited Sendillo account identity. Ask an owner to refresh the assignment.",
+      );
+    }
     if (!sender.providerSenderId?.trim()) {
       throw new Error(
         "This texting assignment has no audited Sendillo sender identity. Ask an owner to refresh the assignment.",
@@ -257,7 +262,8 @@ function eligibleStatus(value: string | null | undefined): boolean {
 
 function eligibleSendilloNumber(entry: ProviderSenderNumber): boolean {
   return Boolean(
-    entry.providerNumberId?.trim()
+    entry.providerAccountId?.trim()
+      && entry.providerNumberId?.trim()
       && SENDILLO_NUMBER_ACTIVE_STATUSES.has(entry.status?.trim().toLowerCase() ?? "")
       && SENDILLO_MESSAGING_ACTIVE_STATUSES.has(entry.messagingStatus?.trim().toLowerCase() ?? ""),
   );
@@ -287,7 +293,11 @@ async function assertLiveSenderEligibility(
     }
     if (
       provider.providerId === REP_SMS_PROVIDER_ID &&
-      (!sender?.providerSenderId || match.providerNumberId !== sender.providerSenderId)
+      (!sender?.providerAccountId ||
+        !match.providerAccountId ||
+        match.providerAccountId !== sender.providerAccountId ||
+        !sender.providerSenderId ||
+        match.providerNumberId !== sender.providerSenderId)
     ) {
       throw new Error(
         `The assigned Sendillo sender identity changed. Ask an owner to refresh the assignment.`,
@@ -347,6 +357,20 @@ export type DispatchRepSmsInput = {
 export async function dispatchRepSms(input: DispatchRepSmsInput) {
   const composition = compositionFromInput(input);
   const context = await readRepSmsContext(input.propertyId);
+  if (context.obligation && !input.obligationFence) {
+    throw new Error(
+      "This lead has a saved SMS follow-up. Resume the exact saved follow-up before sending another message.",
+    );
+  }
+  if (
+    context.obligation &&
+    input.obligationFence &&
+    input.obligationFence.obligationId !== context.obligation.id
+  ) {
+    throw new Error(
+      "The saved SMS follow-up changed. Refresh and resume the current follow-up before sending.",
+    );
+  }
   const provider = providerForRepSms();
   const sender = context.senders.find((candidate) => candidate.id === input.assignmentId);
   assertSenderGrant(sender, context, provider);
@@ -355,6 +379,7 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
 
   const senderNumber = normalizePhone(sender.number) ?? sender.number.trim();
   const to = input.to?.trim() || undefined;
+  const fence = input.obligationFence;
   const metadata = {
     repSms: {
       workflow: "maria-through-mel",
@@ -367,6 +392,11 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
       providerAccountId: sender.providerAccountId ?? null,
       providerSenderId: sender.providerSenderId ?? null,
       grantStatus: sender.grantStatus ?? null,
+      // Persist the fenced obligation before the provider request. A Sendillo
+      // delivery callback can arrive before the accepted-result write binds
+      // its external id on rep_sms_obligations; status-events uses this exact
+      // id plus the stored org/provider/account identity to close that race.
+      obligationId: fence?.obligationId ?? null,
       from: senderNumber,
       introId: composition.introId,
       introVersion: composition.introVersion,
@@ -380,7 +410,6 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
     },
   };
   const client = await createClient();
-  const fence = input.obligationFence;
   if (fence && (!fence.obligationId || !fence.claimToken || !fence.actorId
     || !Number.isInteger(fence.claimGeneration) || fence.claimGeneration < 1)) {
     throw new Error("The saved follow-up fence is invalid. Refresh before sending.");

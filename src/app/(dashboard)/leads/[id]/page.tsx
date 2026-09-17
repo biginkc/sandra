@@ -545,6 +545,15 @@ export default async function LeadDetailPage({
         phoneLineType: inlineRoutePhoneChoice?.lineType ?? null,
       })
     : smsPresentation;
+  // Acquisitions uses the exact saved thread recipient when one is available
+  // (`replyToPhone={inlineReplyPhone}`). The header gate must make the same
+  // phone-level decision or a divergent thread number can be displayed as
+  // textable while the composer is correctly fenced (or vice versa). When a
+  // thread route is unusable, RepSmsComposer falls back to the context's best
+  // mobile and the header's best-phone presentation remains authoritative.
+  const acquisitionSmsPresentation = inlineReplyPhone
+    ? inlineSmsPresentation
+    : smsPresentation;
 
   // Tags attached to this property, with the tag row joined inline.
   const { data: tagRowsRaw, error: tagRowsError } = await supabase
@@ -635,10 +644,10 @@ export default async function LeadDetailPage({
     <>
       <SoftphoneLeadButton lead={detailSoftphoneLead} />
       <SmsEntryPointGate
-        restricted={smsPresentation.smsRestricted}
+        restricted={isAcquisitionMember ? acquisitionSmsPresentation.smsRestricted : smsPresentation.smsRestricted}
         placement="header"
-        restrictionLabel={smsPresentation.consentLabel}
-        restrictionDetail={smsPresentation.consentDetail}
+        restrictionLabel={isAcquisitionMember ? acquisitionSmsPresentation.consentLabel : smsPresentation.consentLabel}
+        restrictionDetail={isAcquisitionMember ? acquisitionSmsPresentation.consentDetail : smsPresentation.consentDetail}
       >
         <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <RepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} /> : <SmsComposer
           propertyId={lead.id}

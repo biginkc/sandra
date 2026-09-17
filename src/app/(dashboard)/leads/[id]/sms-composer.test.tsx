@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -42,6 +42,40 @@ beforeEach(() => {
 });
 
 describe("SmsComposer provider outcomes", () => {
+  it("sends once when keyboard and click activate the composer in the same tick", async () => {
+    mocks.sendSmsFromLead.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        outcome: {
+          status: "provider_unknown",
+          messageId: "attempted-message",
+          error: "The provider did not return a definitive receipt.",
+        },
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <SmsComposer
+        propertyId="property-1"
+        homeownerContactId="contact-1"
+        homeownerPhone="+18165550123"
+        homeownerName="Homeowner"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Send SMS" }));
+    const composer = await screen.findByLabelText("Message");
+    await user.type(composer, "Do not duplicate this message");
+    const sendButton = screen.getByRole("button", { name: "Send now" });
+    fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
+    fireEvent.click(sendButton);
+
+    expect(mocks.sendSmsFromLead).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.getByText(/pending reconciliation/i)).toBeVisible());
+    expect(screen.getByLabelText("Message")).toHaveValue("Do not duplicate this message");
+    expect(screen.getByRole("button", { name: "Send now" })).toBeDisabled();
+  });
+
   it("preserves the draft and disables resend while provider reconciliation is pending", async () => {
     mocks.sendSmsFromLead.mockResolvedValueOnce({
       ok: true,
