@@ -5,9 +5,9 @@
     "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
     "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
     "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
-    "inbox-reply-send/attempts.sql": "49a428cfa16adc680e5f12207074fe52f5eafeb2c8cb2e157b30c58c6e702b38"
+    "inbox-reply-send/attempts.sql": "0db6157d309a579f4c1a66180b08a8d72531fb9fae55241227b98dcab3e44ef5"
   },
-  "runner_sha256": "19d4d7ecedbe40c4d9c8ff44752a86be5a71075de056a1bada9a47f19b6ca45f",
+  "runner_sha256": "40c8b5f8ed7cf21c6e0125b439dd3d50e2016d74093a261a671ded7ad1bcf64c",
   "checks": [
     "Happy path: insert (frozen-matching) -> claim -> expired-lease reclaim (generation strictly increases) -> start_dispatch (body/from/to byte-identical to frozen row) -> re-entry claim labels uncertain (never re-claims, never re-issues a token) -> persist wrong token raises, correct token reconciles to provider_accepted -> idempotent re-ack and post-accept uncertain are no-ops -> contradictory externalId raises -> provider_accepted->delivered (trigger edge, PR-G territory)",
     "#4 terminal resurrection: every out-of-matrix UPDATE on a terminal (delivered) row raises (approved/claimed/rejected_unsent); claim()/persist(uncertain) on a terminal row return stored data without mutating receipt_version; persist(not_attempted) on a terminal row raises. Mutation: trigger disabled -> both resurrection and rejected_unsent forcing succeed; trigger re-enabled -> both blocked again",

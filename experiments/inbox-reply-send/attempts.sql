@@ -28,6 +28,19 @@
 --    is the last statement that can wait, so item_current runs once MORE
 --    after it returns. Nothing about a caller's business logic may run
 --    between that final item_current() call and the RETURN of its result.
+--  - THE ISOLATION CONTRACT (R4, binding): the R3 invariant above only holds
+--    because each plpgsql statement takes a FRESH snapshot under READ
+--    COMMITTED. Under REPEATABLE READ or SERIALIZABLE the whole transaction
+--    shares ONE pinned snapshot, so the post-marker item_current() call would
+--    see the exact same (stale) data as the pre-marker call and silently
+--    miss a suppression committed during the marker's lock-wait — reverting
+--    R3 without any code path looking broken. item_current() and
+--    start_dispatch() both assert READ COMMITTED and raise
+--    INBOX_REPLY_UNSUPPORTED_ISOLATION (0A000) otherwise. THIS IS A BINDING
+--    CONTRACT ON PR-F: the reply worker MUST call start_dispatch() (and thus
+--    item_current()) under READ COMMITTED — Postgres's default — and must
+--    never raise the isolation level for that connection/transaction, in the
+--    pg pool config, a Restate wrapper, or any BEGIN/SET on that path.
 --  - No body/phone is ever put in an evidence string or RAISE message
 --    (S11 audit trail). evidence is always a short lowercase code;
 --    provider_reference is the provider's own id, never message content.
@@ -239,6 +252,19 @@ END $$;
 CREATE FUNCTION inbox_reply_send.item_current(o uuid,item jsonb) RETURNS text LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE qh jsonb;policy_result jsonb;sender public.provider_sender_numbers;head public.inbox_inbound_heads;
 BEGIN
+ -- R4 (binding, isolation contract): the post-marker savepoint recheck in
+ -- start_dispatch relies on EVERY plpgsql statement in THIS function taking a
+ -- FRESH snapshot under READ COMMITTED. Under REPEATABLE READ/SERIALIZABLE
+ -- the transaction snapshot is pinned at the first query, so this function
+ -- (called a second time after the marker UPDATE) would see the SAME stale
+ -- snapshot and miss a suppression committed during the marker's lock-wait —
+ -- silently reverting the R3 fix and issuing a token to a now-suppressed
+ -- destination. Fail fast rather than risk that: every eligibility-recheck
+ -- caller (start_dispatch pre-marker + post-marker, and any future PR-E
+ -- accept-path E4 reuse) MUST run under READ COMMITTED, full stop.
+ IF current_setting('transaction_isolation')<>'read committed' THEN
+  RAISE EXCEPTION 'INBOX_REPLY_UNSUPPORTED_ISOLATION' USING ERRCODE='0A000';
+ END IF;
  -- INVARIANT: the last eligibility read happens after the last statement
  -- that can WAIT in the transaction; the marker UPDATE is the last
  -- statement that can wait, so item_current runs once MORE after it
@@ -313,6 +339,13 @@ BEGIN
  SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
  IF NOT FOUND OR row.state<>'claimed' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() OR row.dispatch_started_at IS NOT NULL THEN
   RAISE EXCEPTION 'INBOX_REPLY_STALE_CLAIM';
+ END IF;
+ -- R4 (binding, isolation contract, same as item_current): fail fast, before
+ -- any write, if a future caller ever invokes start_dispatch outside READ
+ -- COMMITTED — belt-and-suspenders with the item_current assert, since a
+ -- caller could theoretically bypass item_current entirely.
+ IF current_setting('transaction_isolation')<>'read committed' THEN
+  RAISE EXCEPTION 'INBOX_REPLY_UNSUPPORTED_ISOLATION' USING ERRCODE='0A000';
  END IF;
  frozen:=inbox_reply_send.frozen_item(o,row.preparation_id,row.item_id);
  recomputed:=inbox_reply_send.body_hash(frozen->'recipient'->>'renderedBody',frozen->'recipient'->>'from',frozen->'recipient'->>'to');

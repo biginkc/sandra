@@ -5,11 +5,11 @@
     "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
     "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
     "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
-    "inbox-reply-send/attempts.sql": "49a428cfa16adc680e5f12207074fe52f5eafeb2c8cb2e157b30c58c6e702b38"
+    "inbox-reply-send/attempts.sql": "0db6157d309a579f4c1a66180b08a8d72531fb9fae55241227b98dcab3e44ef5"
   },
-  "setup_sha256": "c547c5cd623d8b692c978db75587f712d9c7fda64c6ed50a392201e4da15d7cb",
-  "runner_sha256": "deb8c9e9783808e1d148c066c966e43caaaeb8cbe9b830a7229a01c9c158c2fe",
-  "owned_org_id": "05f4f24e-8043-410b-963a-92fd89212ca4",
+  "setup_sha256": "a7b6c268e544b9963b2308a34f9655ca2f3d2f9b74216cea77debabf2426d30b",
+  "runner_sha256": "130d8d0069bf2157107e5bead1f0f99f2a2760b21d8434ab25140a0362e142dd",
+  "owned_org_id": "c807112d-a51d-4783-b9db-5e14f3f668a3",
   "checks": [
     "#1 double-claim: two real connections, reader observed waiting on the writer row lock (pg_stat_activity wait_event_type=Lock) before the writer committed; writer got {claimed}, reader got {busy}; generation bumped exactly once",
     "#1 mutation: claim() redefined without FOR UPDATE \u2014 the reader still blocks on the writer row lock (its own UPDATE has no state re-check), but on unblocking it blindly re-applies the transition: both connections report {kind:claimed} for the same row, generation double-bumped to 2 \u2014 the real double-claim the FOR UPDATE + reclaim predicate prevents; restored below",
@@ -28,7 +28,11 @@
     "Race#1 positive control: with the post-marker recheck stripped from start_dispatch (round-2 shape), the IDENTICAL marker-block race is MISSED \u2014 B wrongly returns {kind:dispatch} with a token despite the suppression committed during its lock wait, confirming the post-marker recheck in the real function is what makes the positive case above actually work",
     "Race#2 Z1 (positive case): conn A held the inbound-head row FOR UPDATE for 3s while item Z1's 2s window expired underneath; conn B's start_dispatch blocked on that same head lock (observed wait_event_type=Lock), and once unblocked evaluated validUntil AFTER the wait (R3-2) \u2014 skipped_ineligible/conversation_window_expired, no marker ever written, no token",
     "Race#2 Z2 (positive control): with item_current's time-check reorder reverted, start_dispatch's post-marker recheck stripped, AND the trigger's R3-2b window check removed \u2014 all three defenses gone \u2014 the marker is written and returned to the caller with dispatch_started_at genuinely past the frozen validUntil",
-    "Race#2 Z3 (R3-2b isolation): with item_current and start_dispatch STILL broken exactly as in Z2, restoring ONLY the trigger's R3-2b check is sufficient \u2014 the marker UPDATE itself raises INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER (an uncaught SQLSTATE, by design \u2014 only IR001/unique_violation are caught), aborting the call; the row is left exactly as it was (claimed), proving the trigger-level defense is independent of every function-body defense"
+    "Race#2 Z3 (R3-2b isolation): with item_current and start_dispatch STILL broken exactly as in Z2, restoring ONLY the trigger's R3-2b check is sufficient \u2014 the marker UPDATE itself raises INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER (an uncaught SQLSTATE, by design \u2014 only IR001/unique_violation are caught), aborting the call; the row is left exactly as it was (claimed), proving the trigger-level defense is independent of every function-body defense",
+    "R4a (positive control, single connection): start_dispatch on a claimed attempt raises INBOX_REPLY_UNSUPPORTED_ISOLATION (0A000) under both BEGIN ISOLATION LEVEL REPEATABLE READ and SERIALIZABLE, before ever writing the marker \u2014 row is left exactly as it was (claimed, no dispatch_started_at, no token); the normal READ COMMITTED path (every other check in this file and run.py) is unaffected",
+    "R4b (Codex's exact repro, real connections): B opened a genuine REPEATABLE READ transaction and called start_dispatch for Y (sharing X's sender) while A held an uncommitted marker for X \u2014 B raised INBOX_REPLY_UNSUPPORTED_ISOLATION immediately (before ever blocking on the sender-inflight index), row Y untouched (still claimed, no marker, no token); A's rollback is independent of B's outcome",
+    "R4c (mutation, reproduces Codex's exact defect): with the isolation assert stripped from item_current() and start_dispatch() (round-3 shape), B's REPEATABLE READ transaction genuinely blocks on the sender-inflight index while A holds an uncommitted marker; once A rolls back, B's post-marker item_current() reuses B's OWN pinned pre-suppression snapshot and does NOT see the suppression C committed during the block \u2014 B wrongly returns {kind:dispatch} with a token to a now-suppressed destination; restored below",
+    "R4d (restore): with the candidate item_current()/start_dispatch() reinstalled (via restore_fn, re-extracted from attempts.sql, and confirmed installed via assert_installed), the identical race on a fresh pair is caught again \u2014 B raises INBOX_REPLY_UNSUPPORTED_ISOLATION before ever reaching the marker, row untouched; the READ COMMITTED path used by every other check in this file remains unaffected"
   ],
   "cleanup": "Private inbox_reply_* schemas and the two public wrapper functions removed; uniquely marked synthetic organizations/contacts/properties/messages rows retained in the owned fixture (same precedent as inbox-reply-preparation/recipient-concurrency.py)",
   "limitations": [
