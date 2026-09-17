@@ -1,0 +1,33 @@
+{
+ "sources": {
+  "inbox-reply-boundary/context.sql": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+  "inbox-reply-preparation/recipient.sql": "90d1e6d24f954a7ae809962c8f7181a4f9a21b973303163c9655940e4c18cdf1",
+  "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
+  "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
+  "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
+  "inbox-reply-send/attempts.sql": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9",
+  "inbox-reply-send/accept.sql": "941c8abc6155d6de7aa76f185be42b70d7c54135b66c78a642177e912d9942e2",
+  "inbox-reply-send/public-api.sql": "4d5e1c7d76bd3464ca12c68d0a173bc6a58c3bc1e743d2e6f69b0b57da79fe0e"
+ },
+ "runner_sha256": "025b0f8581e98c899305b9446e80f95d8965d1b5e2b03971b316694a650d838c",
+ "checks": [
+  "accept happy path: 1 operation, 3 attempts (approved), 1 outbox row",
+  "idempotent replay: same operationId, zero new rows",
+  "MUTATION watched fail: skipping step-3 pre-check makes replay hit the operations unique-key race path instead of returning cleanly",
+  "RESTORED and re-verified byte-exact against source; replay passes again",
+  "key reuse (same key, different preparation, an operation already exists under it) -> INBOX_REPLY_KEY_REUSED, distinct from idempotent replay",
+  "operations UNIQUE(org_id,preparation_id) conflict -> INBOX_REPLY_PREPARATION_ACCEPTED, zero extra rows (defense-in-depth backstop)",
+  "expired preparation -> INBOX_REPLY_PREPARATION_EXPIRED, zero rows",
+  "subtractive E4: a now-ineligible item is dropped from the attempt set (fresh item_current recheck), operation still created with zero attempts",
+  "MUTATION watched fail: disabling the E4 recheck lets a now-ineligible (sender-suspended) item get an attempt",
+  "RESTORED and re-verified byte-exact against source",
+  "51 eligible recipients -> INBOX_REPLY_RECIPIENT_LIMIT, zero rows created",
+  "concurrent-destination collision -> INBOX_REPLY_DESTINATION_IN_PROGRESS, ZERO new rows from the colliding batch (atomic), no phone number in the error text",
+  "MUTATION watched fail: per-row exception-swallowing insert lets a PARTIAL (2-of-3) batch persist instead of rolling back the whole accept",
+  "RESTORED and re-verified byte-exact against source",
+  "recover(): prepared -> accepted transition; operation_status(): dispatchComplete=false with one pending receipt",
+  "concurrency #10a: two real connections race the SAME destination \u2014 B genuinely blocks on the lock (observed via pg_stat_activity), then loses with INBOX_REPLY_DESTINATION_IN_PROGRESS once A commits; B creates zero rows",
+  "concurrency #10b: same-key replay on a FRESH connection after the first accept already committed -> identical operationId, zero new rows",
+  "final state: accept/recover/operation_status all byte-exact against accept.sql source"
+ ]
+}

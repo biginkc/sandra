@@ -423,3 +423,129 @@ describe("abort handling (obligation 11)", () => {
   // MUTATION: dropping the `signal.throwIfAborted()` call immediately after
   // the capture RPC resolves lets freeze run even though the caller aborted.
 });
+
+describe("accept() (Lane 1 PR-E)", () => {
+  const preparationId = id(999);
+  const idempotencyKey = id(4);
+  const acceptanceBody = () => JSON.stringify({ preparationId, idempotencyKey });
+
+  it("calls inbox_accept_reply with the parsed reference and returns operationId", async () => {
+    const c = client([ok({ operation_id: id(700), preparation_id: preparationId, accepted_at: "2026-09-17T00:00:00Z" })]);
+    const result = await c.repository.accept(acceptanceBody(), signal());
+    expect(result).toEqual({ preparationId, idempotencyKey, operationId: id(700) });
+    expect(c.rpc).toHaveBeenCalledWith("inbox_accept_reply", { preparation_id: preparationId, idempotency_key: idempotencyKey });
+  });
+  // MUTATION: swapping preparation_id/idempotency_key argument names or
+  // values would send the wrong reference to the RPC; this asserts the
+  // exact call shape, not just a truthy response.
+
+  it("rejects malformed acceptance JSON before any RPC (400)", async () => {
+    const c = client([]);
+    await expect(c.repository.accept(JSON.stringify({ preparationId }), signal())).rejects.toMatchObject({ status: 400 });
+    expect(c.rpc).not.toHaveBeenCalled();
+  });
+
+  it("rejects a response whose echoed preparation_id does not match the request (total validation)", async () => {
+    const c = client([ok({ operation_id: id(700), preparation_id: id(1), accepted_at: "2026-09-17T00:00:00Z" })]);
+    await expect(c.repository.accept(acceptanceBody(), signal())).rejects.toThrow();
+  });
+  // MUTATION: removing the `need(id(row.preparation_id) === parsed.preparationId)`
+  // check lets a mismatched/forged echo pass straight through to the caller.
+
+  it("maps each new P0001 conflict code to its own distinct HTTP body (Astra #1 distinct-code requirement)", async () => {
+    const cases: [string, string][] = [
+      ["INBOX_REPLY_DESTINATION_IN_PROGRESS", "destination_in_progress"],
+      ["INBOX_REPLY_PREPARATION_ACCEPTED", "preparation_accepted"],
+      ["INBOX_REPLY_KEY_REUSED", "key_reused"],
+      ["INBOX_REPLY_ATTEMPT_IDENTITY", "attempt_conflict"],
+      ["INBOX_REPLY_RECIPIENT_LIMIT", "recipient_limit"],
+      ["INBOX_REPLY_PREPARATION_KEY_MISMATCH", "preparation_key_mismatch"],
+      ["INBOX_REPLY_PREPARATION_EXPIRED", "preparation_expired"],
+    ];
+    for (const [message, code] of cases) {
+      const c = client([{ data: null, error: { code: "P0001", message } }]);
+      await expect(c.repository.accept(acceptanceBody(), signal())).rejects.toMatchObject({ status: 409, code });
+    }
+  });
+  // MUTATION: collapsing two distinct constraint messages onto the same code
+  // (or dropping a case from the map so it falls through to 503) makes this
+  // fail — each of the seven raises must resolve to ITS OWN http code.
+
+  it("maps a 42501 forbidden/unavailable code to 403 access_unavailable (new branch)", async () => {
+    for (const message of ["INBOX_ACTION_FORBIDDEN", "INBOX_REPLY_PREPARATION_UNAVAILABLE", "INBOX_REPLY_OPERATION_UNAVAILABLE"]) {
+      const c = client([{ data: null, error: { code: "42501", message } }]);
+      await expect(c.repository.accept(acceptanceBody(), signal())).rejects.toMatchObject({ status: 403, code: "access_unavailable" });
+    }
+  });
+  // MUTATION: removing the 42501 branch added in this PR (reply-api.ts's
+  // failure() previously had none) falls through to the default 503 instead.
+});
+
+describe("recover() (Lane 1 PR-E)", () => {
+  const preparationId = id(999);
+  const idempotencyKey = id(4);
+
+  it("returns state 'prepared' (reply-api-contract vocabulary, not metadata's 'pending')", async () => {
+    const c = client([ok({ state: "prepared", preparationId, idempotencyKey, operation: null })]);
+    const result = await c.repository.recover(preparationId, idempotencyKey, signal());
+    expect(result).toEqual({ state: "prepared", preparationId, idempotencyKey });
+  });
+  // MUTATION: accepting a row.state of "pending" (the metadata spelling)
+  // here would silently swallow a real server contract violation instead of
+  // failing the `need(row.state === "accepted")` fallthrough assert.
+
+  it("returns state 'expired_not_accepted' with operation null", async () => {
+    const c = client([ok({ state: "expired_not_accepted", preparationId, idempotencyKey, operation: null })]);
+    const result = await c.repository.recover(preparationId, idempotencyKey, signal());
+    expect(result).toEqual({ state: "expired_not_accepted", preparationId, idempotencyKey });
+  });
+
+  it("returns state 'accepted' with the operation reference", async () => {
+    const c = client([ok({ state: "accepted", operation: { operationId: id(700), preparationId, idempotencyKey } })]);
+    const result = await c.repository.recover(preparationId, idempotencyKey, signal());
+    expect(result).toEqual({ state: "accepted", operation: { operationId: id(700), preparationId, idempotencyKey } });
+  });
+
+  it("rejects non-UUID preparationId/idempotencyKey before any RPC", async () => {
+    const c = client([]);
+    await expect(c.repository.recover("not-a-uuid", idempotencyKey, signal())).rejects.toMatchObject({ status: 400 });
+    expect(c.rpc).not.toHaveBeenCalled();
+  });
+});
+
+describe("status() (Lane 1 PR-E)", () => {
+  const operationId = id(700);
+  const preparationId = id(999);
+  const statusItem = freezeItemFor(5, "Hi there");
+  const receipt = (overrides: Record<string, unknown> = {}) => ({ itemId: statusItem.id, attemptId: id(800), version: "0", state: "pending", reason: null, ...overrides });
+
+  it("decodes items + receipts and computes dispatchComplete from terminal receipt states", async () => {
+    const c = client([ok({ operationId, preparationId, dispatchComplete: false, items: [statusItem], receipts: [receipt()] })]);
+    const result = await c.repository.status(operationId, signal());
+    expect(result.dispatchComplete).toBe(false);
+    expect(result.receipts).toEqual([{ itemId: statusItem.id, attemptId: id(800), version: "0", state: "pending", reason: null }]);
+  });
+
+  it("rejects a response whose dispatchComplete disagrees with the receipts' terminal states (exhaustive total validation)", async () => {
+    const c = client([ok({ operationId, preparationId, dispatchComplete: true, items: [statusItem], receipts: [receipt({ state: "pending" })] })]);
+    await expect(c.repository.status(operationId, signal())).rejects.toThrow();
+  });
+  // MUTATION: removing the `need(row.dispatchComplete === receipts.every(...))`
+  // check would accept a server that lies about dispatch completion.
+
+  it("rejects an unrecognized receipt state (exhaustive state-mapping validation)", async () => {
+    const c = client([ok({ operationId, preparationId, dispatchComplete: false, items: [statusItem], receipts: [receipt({ state: "not_a_real_state" })] })]);
+    await expect(c.repository.status(operationId, signal())).rejects.toThrow();
+  });
+
+  it("rejects duplicate item ids and duplicate receipt item ids", async () => {
+    const dup = client([ok({ operationId, preparationId, dispatchComplete: true, items: [statusItem, statusItem], receipts: [] })]);
+    await expect(dup.repository.status(operationId, signal())).rejects.toThrow();
+  });
+
+  it("rejects non-UUID operationId before any RPC", async () => {
+    const c = client([]);
+    await expect(c.repository.status("not-a-uuid", signal())).rejects.toMatchObject({ status: 400 });
+    expect(c.rpc).not.toHaveBeenCalled();
+  });
+});

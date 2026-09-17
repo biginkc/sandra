@@ -1,12 +1,12 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/types";
-import { parseInboxReplyPrepareRequest } from "./action-definition";
+import { parseInboxReplyPrepareRequest, parseInboxActionAcceptance } from "./action-definition";
 import { InvalidInboxActionError } from "./action-definition";
 import { renderReviewedReply, ReplyTemplateError } from "./reply-template";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
 import { getOutboundSenderName } from "@/lib/messaging/sender-persona";
-import { INBOX_REPLY_EXCLUSIONS, INBOX_REPLY_RECIPIENT_LIMIT, type InboxReplyExclusion, type InboxReplyTarget, type PreparedInboxReply, type PreparedInboxReplyItem } from "./reply-api-contract";
+import { INBOX_REPLY_EXCLUSIONS, INBOX_REPLY_RECIPIENT_LIMIT, type AcceptedInboxReply, type InboxReplyExclusion, type InboxReplyReceipt, type InboxReplyReceiptState, type InboxReplyRecovery, type InboxReplyStatus, type InboxReplyTarget, type PreparedInboxReply, type PreparedInboxReplyItem } from "./reply-api-contract";
 
 type ReplyDatabase = Omit<Database, "public"> & {
     public: Omit<Database["public"], "Functions"> & {
@@ -17,6 +17,18 @@ type ReplyDatabase = Omit<Database, "public"> & {
             };
             inbox_freeze_reply_review: {
                 Args: { canonical_input: string; idempotency_key: string };
+                Returns: Json;
+            };
+            inbox_accept_reply: {
+                Args: { preparation_id: string; idempotency_key: string };
+                Returns: Json;
+            };
+            inbox_recover_reply: {
+                Args: { preparation_id: string; idempotency_key: string };
+                Returns: Json;
+            };
+            inbox_reply_operation_status: {
+                Args: { operation_id: string };
                 Returns: Json;
             };
         };
@@ -57,7 +69,11 @@ function failure(error: { code?: string; message?: string } | null): void {
     if (error.code === "42501") {
         if (["INBOX_AUTH_REQUIRED", "INBOX_SESSION_EXPIRED", "INBOX_SESSION_REVOKED"].includes(error.message ?? ""))
             throw new InboxReplyApiError(401, "authentication_required");
-        if (["INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", "INBOX_ORG_DENIED", "INBOX_ACTION_FORBIDDEN"].includes(error.message ?? ""))
+        // Mirrors action-api.ts:60-68: membership/org/requester-forbidden AND
+        // "unavailable" (preparation/operation not found or not this
+        // requester's) both fail closed to the same 403 — never distinguish
+        // "exists but not yours" from "doesn't exist".
+        if (["INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", "INBOX_ORG_DENIED", "INBOX_ACTION_FORBIDDEN", "INBOX_REPLY_PREPARATION_UNAVAILABLE", "INBOX_REPLY_OPERATION_UNAVAILABLE"].includes(error.message ?? ""))
             throw new InboxReplyApiError(403, "access_unavailable");
     }
     // Half-enabled (admission closed) must be indistinguishable from the flag
@@ -69,6 +85,12 @@ function failure(error: { code?: string; message?: string } | null): void {
             INBOX_REPLY_PREPARATION_CHANGED: "preparation_changed",
             INBOX_REPLY_IDEMPOTENCY_MISMATCH: "idempotency_mismatch",
             INBOX_REPLY_PREPARATION_EXPIRED: "preparation_expired",
+            INBOX_REPLY_PREPARATION_KEY_MISMATCH: "preparation_key_mismatch",
+            INBOX_REPLY_KEY_REUSED: "key_reused",
+            INBOX_REPLY_PREPARATION_ACCEPTED: "preparation_accepted",
+            INBOX_REPLY_DESTINATION_IN_PROGRESS: "destination_in_progress",
+            INBOX_REPLY_ATTEMPT_IDENTITY: "attempt_conflict",
+            INBOX_REPLY_RECIPIENT_LIMIT: "recipient_limit",
         };
         if (error.message && conflicts[error.message])
             throw new InboxReplyApiError(409, conflicts[error.message]);
@@ -295,6 +317,76 @@ export function createInboxReplyRepository(client: InboxReplyClient) {
                 recipientCount,
                 blockers,
             };
+        },
+        async accept(raw: string, signal: AbortSignal): Promise<AcceptedInboxReply> {
+            signal.throwIfAborted();
+            let parsed: ReturnType<typeof parseInboxActionAcceptance>;
+            try {
+                parsed = parseInboxActionAcceptance(raw);
+            } catch (error) {
+                if (error instanceof InvalidInboxActionError)
+                    throw new InboxReplyApiError(400, "invalid_reply");
+                throw error;
+            }
+            const result = await retryReceiptTransaction(() => { signal.throwIfAborted(); return client.rpc("inbox_accept_reply", { preparation_id: parsed.preparationId, idempotency_key: parsed.idempotencyKey }).abortSignal(signal); });
+            signal.throwIfAborted();
+            failure(result.error);
+            const row = record(result.data);
+            need(id(row.preparation_id) === parsed.preparationId);
+            return { preparationId: parsed.preparationId, idempotencyKey: parsed.idempotencyKey, operationId: id(row.operation_id) };
+        },
+        async recover(preparationId: string, idempotencyKey: string, signal: AbortSignal): Promise<InboxReplyRecovery> {
+            need(UUID.test(preparationId) && UUID.test(idempotencyKey), 400);
+            signal.throwIfAborted();
+            const response = await retryReceiptTransaction(() => { signal.throwIfAborted(); return client.rpc("inbox_recover_reply", { preparation_id: preparationId, idempotency_key: idempotencyKey }).abortSignal(signal); });
+            signal.throwIfAborted();
+            failure(response.error);
+            const row = record(response.data);
+            if (row.state === "prepared" || row.state === "expired_not_accepted") {
+                need(row.operation === null && row.preparationId === preparationId && row.idempotencyKey === idempotencyKey);
+                return { state: row.state, preparationId, idempotencyKey };
+            }
+            need(row.state === "accepted");
+            const operation = record(row.operation);
+            need(operation.preparationId === preparationId && operation.idempotencyKey === idempotencyKey);
+            return { state: "accepted", operation: { preparationId, idempotencyKey, operationId: id(operation.operationId) } };
+        },
+        async status(operationId: string, signal: AbortSignal): Promise<InboxReplyStatus> {
+            need(UUID.test(operationId), 400);
+            signal.throwIfAborted();
+            const result = await client.rpc("inbox_reply_operation_status", { operation_id: operationId }).abortSignal(signal);
+            signal.throwIfAborted();
+            failure(result.error);
+            const row = record(result.data);
+            need(row.operationId === operationId && typeof row.preparationId === "string" && typeof row.dispatchComplete === "boolean"
+                && Array.isArray(row.items) && row.items.length > 0 && row.items.length <= 500
+                && Array.isArray(row.receipts) && row.receipts.length <= 500);
+            const seenItemIds = new Set<string>();
+            // The frozen items array was already validated at prepare() time;
+            // replayed=true skips the fresh-render body-equality check (there
+            // is no fresh render at status time), matching the B2 replay path.
+            const items = row.items.map((raw: unknown) => {
+                const decoded = item(raw, new Map(), true);
+                need(!seenItemIds.has(decoded.id));
+                seenItemIds.add(decoded.id);
+                return decoded;
+            });
+            const RECEIPT_STATES = new Set<InboxReplyReceiptState>(["pending", "blocked", "dispatch_started", "uncertain", "provider_accepted", "delivered", "delivery_failed", "rejected_unsent", "confirmed_not_submitted"]);
+            const TERMINAL_RECEIPT_STATES = new Set<InboxReplyReceiptState>(["provider_accepted", "delivered", "delivery_failed", "rejected_unsent", "confirmed_not_submitted"]);
+            const seenReceiptItemIds = new Set<string>();
+            const receipts: InboxReplyReceipt[] = row.receipts.map((raw: unknown) => {
+                const r = record(raw);
+                const itemId = id(r.itemId);
+                need(!seenReceiptItemIds.has(itemId) && seenItemIds.has(itemId));
+                seenReceiptItemIds.add(itemId);
+                need(r.attemptId === null || (typeof r.attemptId === "string" && UUID.test(r.attemptId)));
+                need(typeof r.version === "string" && /^(0|[1-9][0-9]{0,18})$/.test(r.version));
+                need(typeof r.state === "string" && RECEIPT_STATES.has(r.state as InboxReplyReceiptState));
+                need(r.reason === null || typeof r.reason === "string");
+                return { itemId, attemptId: r.attemptId as string | null, version: r.version, state: r.state as InboxReplyReceiptState, reason: r.reason as string | null };
+            });
+            need(row.dispatchComplete === receipts.every(r => TERMINAL_RECEIPT_STATES.has(r.state)));
+            return { operationId, preparationId: row.preparationId, dispatchComplete: row.dispatchComplete, items, receipts };
         },
     };
 }
