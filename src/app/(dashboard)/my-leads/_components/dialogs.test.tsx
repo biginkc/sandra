@@ -126,6 +126,7 @@ describe("My Leads workflow dialogs", () => {
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), {
       target: { value: "2026-09-12T09:00" },
     })
+    await user.type(screen.getByLabelText("Recording link (required)"), "https://dialpad.com/shared/call/example")
     await user.click(screen.getByRole("button", { name: "Save attempt" }))
     expect(onSubmit).not.toHaveBeenCalled()
     expect(screen.getByText("Choose a curated follow-up template.")).toBeInTheDocument()
@@ -143,7 +144,7 @@ describe("My Leads workflow dialogs", () => {
       outcome: "no_answer",
       occurredAt: "2026-09-12T14:00:00.000Z",
       note: null,
-      recordingUrl: null,
+      recordingUrl: "https://dialpad.com/shared/call/example",
       callActivityId: null,
       smsBody: "Hey, this is Mel, Maria's assistant.\n\nPlease text Maria a time that works.",
       followUp: expect.objectContaining({
@@ -153,6 +154,21 @@ describe("My Leads workflow dialogs", () => {
         remainder: "Please text Maria a time that works.",
       }),
     }))
+  })
+
+  it("requires a recording link for DialPad calls", async () => {
+    const user = userEvent.setup()
+    const onSubmit = vi.fn(async () => ({ ok: true as const }))
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={onSubmit} />)
+
+    await user.selectOptions(screen.getByLabelText("External outcome"), "reached")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), {
+      target: { value: "2026-09-12T09:00" },
+    })
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(screen.getByText("Attach the DialPad recording link.")).toBeInTheDocument()
   })
 
   it("freezes a recorded no-answer attempt and leaves its obligation for the composer to resume", async () => {
@@ -168,6 +184,7 @@ describe("My Leads workflow dialogs", () => {
     await user.selectOptions(screen.getByLabelText("External outcome"), "no_answer")
     await user.selectOptions(screen.getByLabelText("Curated follow-up template"), "no-answer-availability")
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-12T09:00" } })
+    await user.type(screen.getByLabelText("Recording link (required)"), "https://dialpad.com/shared/call/frozen")
     const saveButton = screen.getByRole("button", { name: "Save attempt" })
     await user.click(saveButton)
     expect(screen.getByText("Follow-up blocked")).toBeInTheDocument()
@@ -280,6 +297,7 @@ describe("My Leads workflow dialogs", () => {
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), {
       target: { value: "2026-09-12T09:00" },
     })
+    await user.type(screen.getByLabelText("Recording link (required)"), "https://dialpad.com/shared/call/retry")
     await user.type(screen.getByLabelText("Note (optional)"), "Seller asked for a callback")
     const saveButton = screen.getByRole("button", { name: "Save attempt" })
     await user.click(saveButton)

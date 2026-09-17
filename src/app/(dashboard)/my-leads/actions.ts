@@ -66,6 +66,7 @@ export async function submitMyLeadCommand(command:keyof typeof commands,input:Re
   if(error) {
     const message=error.message??'';
     if(message==='FORBIDDEN') return {ok:false as const,code:'FORBIDDEN' as const,message:'This lead is unavailable or you no longer have access. Refresh to check access. Your draft is retained.'};
+    if(message.includes('RECORDING_REQUIRED')) return {ok:false as const,message:'Attach the DialPad recording link before saving this call.'};
     if(message.includes('STALE_')) return {ok:false as const,code:'STALE_STATE' as const,message:'This lead changed. Refresh before trying again.'};
     return {ok:false as const,message:message.includes('MOTIVATION')?'Specify motivation or choose No motivation provided.':message.includes('PENDING_OFFER')?'Resolve the current pending offer first.':message.includes('RECIPIENT')?'The handoff recipient is unavailable. Ask the owner to update settings.':'The update could not be saved. Check the fields and retry.'};
   }
