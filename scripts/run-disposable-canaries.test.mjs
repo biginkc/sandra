@@ -50,6 +50,35 @@ test('browser-only mode requires browser acceptance and skips Vitest', async () 
   assert.match(source, /testLane:[\s\S]*'browser-only'/);
 });
 
+test('environment manifest records production UNKNOWN and the complete clock audit scope', async () => {
+  const source = await readFile(path.join(root, 'scripts/run-disposable-canaries.mjs'), 'utf8');
+  assert.match(source, /productionEquivalence:\s*\{[\s\S]*status:\s*'UNKNOWN'/);
+  assert.match(source, /configuredProvider:\s*'UNKNOWN'/);
+  assert.match(source, /deployedCronCadence:\s*'UNKNOWN'/);
+  assert.match(source, /No production inspection was performed/);
+  assert.match(source, /fixtureOrg:\s*CANONICAL_FIXTURE_ORG/);
+  assert.match(source, /postgrestVersion:\s*postgrestVersionFromStatus\(status\)/);
+  assert.match(source, /providerContractCoverage:\s*\{/);
+  for (const sourcePath of [
+    'src/lib/sequences/enrollment.ts',
+    'src/lib/messaging/send.ts',
+  ]) {
+    assert.match(source, new RegExp(sourcePath.replaceAll('/', '\/')));
+  }
+  for (const predicate of [
+    'enrollment_first_due',
+    'next_step_due',
+    'queue_pending_stale_sweep',
+    'queue_due_and_pending_age',
+    'queue_retry_backoff',
+    'provider_intent_timestamp',
+    'retry_resume_schedule',
+    'stale_claim_reconciliation',
+  ]) {
+    assert.match(source, new RegExp(`id: '${predicate}'`));
+  }
+});
+
 for (const phase of ['startup', 'tests']) test(`cancellation during ${phase} stops the owned project`, { timeout: 30000 }, async () => {
   const sandbox = await mkdtemp(path.join(tmpdir(), 'canary-runner-contract-'));
   const bin = path.join(sandbox, 'bin');

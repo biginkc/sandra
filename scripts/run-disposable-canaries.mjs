@@ -10,6 +10,139 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LOOPBACK_API_URL = 'http://127.0.0.1:54321';
 const LOOPBACK_DB_URL = 'postgresql://postgres:postgres@127.0.0.1:54322/postgres';
 const SUPABASE_CLI_VERSION = '2.116.0';
+const CANONICAL_FIXTURE_ORG = {
+  id: '00000000-0000-0000-0000-000000000bbb',
+  source: 'tests/integration/fixtures/multi-user.ts:BMH_ORG_ID',
+  role: 'canonical integration tenant',
+};
+const PRODUCTION_EQUIVALENCE_UNKNOWN_REASON =
+  'No production inspection was performed by this local runner.';
+
+// This is an explicit audit list, rather than a broad Date/now regex. Each
+// entry names the predicate, source and clock domain that the manifest claims
+// to have reviewed. The source hashes below make an unreviewed source change
+// visible in the retained run evidence.
+const CLOCK_AUDIT = [
+  {
+    id: 'enrollment_first_due',
+    sourceKey: 'enrollment',
+    sourcePath: 'src/lib/sequences/enrollment.ts',
+    function: 'enrollLead',
+    predicate: 'step 0 delay to sequence_enrollments.next_run_at',
+    clock: 'application Date / new Date()',
+    contract: /delayToDate\(step0\.delay_after_previous_minutes,\s*new Date\(\)\)/,
+  },
+  {
+    id: 'tick_due_and_budget',
+    sourceKey: 'handlers',
+    sourcePath: 'src/app/api/cron/sequence-tick/handlers.ts',
+    function: 'runSequenceTick',
+    predicate: 'due enrollment/message selection and elapsed budget',
+    clock: 'application Date / Date.now()',
+    contract: /const\s+startedAt\s*=\s*Date\.now\(\)[\s\S]*const\s+nowIso\s*=\s*new Date\(\)\.toISOString\(\)/,
+  },
+  {
+    id: 'native_claim_stale_cutoff',
+    sourceKey: 'tick',
+    sourcePath: 'src/lib/sequences/tick.ts',
+    function: 'processEnrollmentTick',
+    predicate: 'claim scheduled_for and application stale-cutoff input',
+    clock: 'application Date / Date.now(); DB RPC clamps minimum age',
+    contract: /scheduled_for:\s*new Date\(\)\.toISOString\(\)[\s\S]*p_stale_before:\s*new Date\(Date\.now\(\)\s*-\s*SEQUENCE_CLAIM_STALE_MS\)/,
+  },
+  {
+    id: 'quiet_hours',
+    sourceKey: 'quietHours',
+    sourcePath: 'src/lib/messaging/quiet-hours.ts',
+    function: 'checkQuietHours',
+    predicate: 'local send window and test override',
+    clock: 'application Date / E2E_QUIET_HOURS_NOW override',
+    contract: /const\s+override\s*=\s*process\.env\.E2E_QUIET_HOURS_NOW[\s\S]*return\s+new Date\(\)/,
+  },
+  {
+    id: 'direct_quiet_deferral',
+    sourceKey: 'tick',
+    sourcePath: 'src/lib/sequences/tick.ts',
+    function: 'processEnrollmentTick',
+    predicate: 'quiet-hours next_run_at deferral',
+    clock: 'application Date / Date.now()',
+    contract: /Date\.now\(\)\s*\+\s*10\s*\*\s*60\s*\*\s*60\s*\*\s*1000/,
+  },
+  {
+    id: 'next_step_due',
+    sourceKey: 'tick',
+    sourcePath: 'src/lib/sequences/tick.ts',
+    function: 'advanceEnrollment',
+    predicate: 'next step delay to sequence_enrollments.next_run_at',
+    clock: 'application Date / new Date()',
+    contract: /delayToDate\(\s*nextStep\.delay_after_previous_minutes,\s*new Date\(\),/,
+  },
+  {
+    id: 'queue_pending_stale_sweep',
+    sourceKey: 'handlers',
+    sourcePath: 'src/app/api/cron/sequence-tick/handlers.ts',
+    function: 'failStalePendingProviderAttempts',
+    predicate: 'pending provider attempt age cutoff',
+    clock: 'application Date / Date.now()',
+    contract: /const\s+cutoffIso\s*=\s*new Date\(nowMs\s*-\s*PROVIDER_PENDING_STALE_MS\)\.toISOString\(\)/,
+  },
+  {
+    id: 'queue_due_and_pending_age',
+    sourceKey: 'send',
+    sourcePath: 'src/lib/messaging/send.ts',
+    function: 'releaseQueuedMessage',
+    constant: 'PROVIDER_PENDING_STALE_MS',
+    predicate: 'queued release due check and provider-pending age',
+    clock: 'application Date / Date.now()',
+    contract: /PROVIDER_PENDING_STALE_MS\s*=\s*15\s*\*\s*60_000[\s\S]*scheduled_for\)[\s\S]*Date\.now\(\)/,
+  },
+  {
+    id: 'queue_retry_backoff',
+    sourceKey: 'send',
+    sourcePath: 'src/lib/messaging/send.ts',
+    function: 'buildProviderRetryUpdate',
+    relatedFunction: 'deferQueuedMessage',
+    predicate: 'provider transient retry nextRetryAt/scheduled_for',
+    clock: 'application Date / Date.now()',
+    contract: /PROVIDER_TRANSIENT_DEFER_MS\s*=\s*5\s*\*\s*60_000[\s\S]*now\.getTime\(\)\s*\+\s*PROVIDER_TRANSIENT_DEFER_MS[\s\S]*Date\.now\(\)\s*\+\s*PROVIDER_TRANSIENT_DEFER_MS/,
+  },
+  {
+    id: 'sequence_audit_defaults',
+    sourceKey: 'sequenceMigration',
+    sourcePath: 'supabase/migrations/018_sequences_v1.sql',
+    function: 'sequence_step_runs.created_at default',
+    predicate: 'audit row creation timestamp',
+    clock: 'PostgreSQL now()',
+    contract: /create table(?: public)? sequence_step_runs[\s\S]*created_at timestamptz not null default now\(\)/,
+  },
+  {
+    id: 'provider_intent_timestamp',
+    sourceKey: 'runtimeMigration',
+    sourcePath: 'supabase/migrations/20260917110000_sequence_runtime_recovery.sql',
+    function: 'authorize_sequence_provider_attempt',
+    predicate: 'provider-intent attempt_started_at',
+    clock: 'PostgreSQL now()',
+    contract: /authorize_sequence_provider_attempt[\s\S]*attempt_started_at\s*=\s*now\(\)/,
+  },
+  {
+    id: 'retry_resume_schedule',
+    sourceKey: 'runtimeMigration',
+    sourcePath: 'supabase/migrations/20260917110000_sequence_runtime_recovery.sql',
+    function: 'retry_sequence_step, resume_sequence_enrollment',
+    predicate: 'explicit recovery next_run_at',
+    clock: 'PostgreSQL now()',
+    contract: /retry_sequence_step[\s\S]*next_run_at\s*=\s*now\(\)[\s\S]*resume_sequence_enrollment[\s\S]*next_at\s*:=\s*now\(\)\s*\+\s*make_interval\(mins\s*=>\s*s\.delay_after_previous_minutes\)/,
+  },
+  {
+    id: 'stale_claim_reconciliation',
+    sourceKey: 'runtimeMigration',
+    sourcePath: 'supabase/migrations/20260917110000_sequence_runtime_recovery.sql',
+    function: 'retire_stale_sequence_claim',
+    predicate: 'bounded stale claim age',
+    clock: 'PostgreSQL now()',
+    contract: /retire_stale_sequence_claim[\s\S]*least\(\s*coalesce\(p_stale_before,\s*now\(\)\s*-\s*interval\s+'15 minutes'\),\s*now\(\)\s*-\s*interval\s+'15 minutes'\s*\)/,
+  },
+];
 // Sequence canaries only need Postgres, Auth, PostgREST, Kong and storage.
 // Keeping dashboards, realtime, mail, and observability out of the disposable
 // stack reduces image and volume pressure on constrained runners.
@@ -188,8 +321,11 @@ async function assertSourceContracts() {
   const { readFile } = await import('node:fs/promises');
   const paths = {
     quietHours: path.join(root, 'src/lib/messaging/quiet-hours.ts'),
+    enrollment: path.join(root, 'src/lib/sequences/enrollment.ts'),
     tick: path.join(root, 'src/lib/sequences/tick.ts'),
     handlers: path.join(root, 'src/app/api/cron/sequence-tick/handlers.ts'),
+    send: path.join(root, 'src/lib/messaging/send.ts'),
+    fixtureOrgSource: path.join(root, 'tests/integration/fixtures/multi-user.ts'),
     vercel: path.join(root, 'vercel.json'),
     sequenceMigration: path.join(root, 'supabase/migrations/018_sequences_v1.sql'),
     runtimeMigration: path.join(root, 'supabase/migrations/20260917110000_sequence_runtime_recovery.sql'),
@@ -204,6 +340,7 @@ async function assertSourceContracts() {
     ['handlers', /const\s+DRAIN_BATCH_SIZE\s*=\s*240\b/, 'queue drain 240'],
     ['handlers', /const\s+TICK_BUDGET_MS\s*=\s*240_000\b/, 'tick budget 240000ms'],
     ['handlers', /const\s+BLOCKED_DEFER_MS\s*=\s*30\s*\*\s*60_000\b/, 'queue quiet deferral 30m'],
+    ['fixtureOrgSource', /BMH_ORG_ID\s*=\s*['"]00000000-0000-0000-0000-000000000bbb['"]/, 'canonical fixture organization'],
     ['vercel', /"schedule"\s*:\s*"\*\/5 \* \* \* \*"/, 'sequence cron */5'],
     ['sequenceMigration', /idx_step_runs_unique_enrollment_step/, 'sequence step uniqueness constraint'],
     ['runtimeMigration', /idx_step_runs_active_enrollment_step/, 'active sequence step uniqueness constraint'],
@@ -212,10 +349,22 @@ async function assertSourceContracts() {
     ['runtimeMigration', /next_at\s*:=\s*now\(\)\s*\+\s*make_interval\(mins\s*=>\s*s\.delay_after_previous_minutes\)/, 'resume database clock'],
     ['runtimeMigration', /least\(\s*coalesce\(p_stale_before,\s*now\(\)\s*-\s*interval\s+'15 minutes'\),\s*now\(\)\s*-\s*interval\s+'15 minutes'\s*\)/, 'database stale-claim minimum age'],
   ];
+  for (const audit of CLOCK_AUDIT) {
+    if (!source[audit.sourceKey]) {
+      throw new Error(`Manifest clock audit source is not loaded: ${audit.sourcePath}`);
+    }
+    contracts.push([audit.sourceKey, audit.contract, `clock audit ${audit.id}`]);
+  }
   for (const [name, pattern, label] of contracts) {
     if (!pattern.test(source[name].text)) throw new Error(`Manifest source contract drift: ${label}`);
   }
   return source;
+}
+
+function postgrestVersionFromStatus(status) {
+  const reported = status.POSTGREST_VERSION ?? status.REST_VERSION ?? status.postgrestVersion;
+  if (typeof reported === 'string' && reported.trim()) return reported.trim();
+  return 'UNKNOWN (local Supabase status does not expose PostgREST version; no container inspection performed)';
 }
 
 async function readLocalDatabaseManifest(dbUrl) {
@@ -260,12 +409,14 @@ async function printEnvironmentManifest(status, workdir, cliVersionOutput) {
     },
     database: {
       supabaseCli: cliVersionOutput.trim(),
+      postgrestVersion: postgrestVersionFromStatus(status),
       postgresVersion: database.postgresVersion,
       database: database.database,
       transactionIsolation: database.transactionIsolation,
       apiOrigin: LOOPBACK_API_URL,
       dbOrigin: '127.0.0.1:54322',
     },
+    fixtureOrg: CANONICAL_FIXTURE_ORG,
     isolation: {
       project: 'unique temporary Supabase project',
       docker: 'dedicated local Unix socket only',
@@ -283,6 +434,23 @@ async function printEnvironmentManifest(status, workdir, cliVersionOutput) {
       providerLedger: browserAcceptanceEnabled ? 'loopback token-protected ledger' : 'disabled',
       testFileParallelism: false,
       teardown: 'supabase stop --no-backup, then remove temporary project directory',
+    },
+    providerContractCoverage: {
+      selectedProvider: 'mock',
+      outbound: 'mock invocation log records a distinct invocation and accepted external ID; no external provider request is permitted',
+      sequenceFailures: 'native sequence tests cover definitive rejection and ambiguous provider outcomes with the mock transport',
+      inbound: 'Sendillo and Dialpad webhook route fixtures, including signature and STOP/replay handling',
+      adapterMapping: 'Sendillo outbound adapter unit coverage is outside this disposable integration lane; its documented 400 rejection and ambiguous timeout/network/5xx/2xx-without-ID mapping is not treated as production-provider evidence here',
+      configuredProductionProvider: 'UNKNOWN (production inspection was not performed)',
+    },
+    productionEquivalence: {
+      status: 'UNKNOWN',
+      postgresVersion: 'UNKNOWN',
+      postgrestVersion: 'UNKNOWN',
+      transactionIsolation: 'UNKNOWN',
+      configuredProvider: 'UNKNOWN',
+      deployedCronCadence: 'UNKNOWN',
+      reason: PRODUCTION_EQUIVALENCE_UNKNOWN_REASON,
     },
     criticalConstraint: {
       migration: 'supabase/migrations/20260917110000_sequence_runtime_recovery.sql',
@@ -326,6 +494,11 @@ async function printEnvironmentManifest(status, workdir, cliVersionOutput) {
       sequenceTickDrain: 240,
       sequenceTickBudgetMs: 240000,
       cronCadence: '*/5 * * * *',
+      audit: CLOCK_AUDIT.map((entry) => {
+        const manifestEntry = { ...entry };
+        delete manifestEntry.contract;
+        return manifestEntry;
+      }),
     },
   };
   console.log(`[disposable-canary-manifest] ${JSON.stringify(manifest)}`);
