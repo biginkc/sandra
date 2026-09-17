@@ -108,7 +108,13 @@ create policy rep_sms_rollout_enrollments_select
 -- this row represents work that must be accounted for after a no-answer.
 -- `state` is the provider/business outcome; `claim_state` and `claim_token`
 -- are the worker lease fence. A worker may only write while holding the
--- exact unexpired token it was issued by fn_claim_rep_sms_obligations.
+-- exact unexpired token it was issued by fn_claim_authorize_rep_sms_obligation.
+-- acquisition_attempts exposes id as its canonical key. Add the tenant
+-- companion key before creating this table so the obligation FK enforces both
+-- the attempt identity and its organization on the real schema.
+create unique index if not exists acquisition_attempts_id_org_idx
+  on public.acquisition_attempts(id,org_id);
+
 create table if not exists public.rep_sms_obligations (
   id uuid primary key default extensions.gen_random_uuid(),
   org_id uuid not null references public.organizations(id) on delete cascade,
@@ -119,6 +125,7 @@ create table if not exists public.rep_sms_obligations (
   obligation_kind text not null default 'no_answer_sms'
     check (obligation_kind='no_answer_sms'),
   provider text,
+  provider_account_id text,
   sender_assignment_id uuid references public.rep_sms_sender_assignments(id) on delete set null,
   from_number text,
   to_number text,
@@ -153,6 +160,9 @@ create table if not exists public.rep_sms_obligations (
   constraint rep_sms_obligations_attempt_org_fkey
     foreign key (attempt_id,org_id)
     references public.acquisition_attempts(id,org_id) on delete cascade,
+  constraint rep_sms_obligations_provider_callback_identity_check check (
+    provider_message_id is null or provider_account_id is not null
+  ),
   constraint rep_sms_obligations_phone_check check (
     to_number is null or to_number ~ '^\+[1-9][0-9]{7,14}$'
   ),
@@ -179,6 +189,9 @@ alter table public.rep_sms_obligations
   check (jsonb_typeof(composition) = 'object');
 create unique index if not exists rep_sms_obligations_attempt_kind_idx
   on public.rep_sms_obligations(org_id,attempt_id,obligation_kind);
+create unique index if not exists rep_sms_obligations_provider_callback_idx
+  on public.rep_sms_obligations(provider,provider_account_id,provider_message_id)
+  where provider_message_id is not null and provider_account_id is not null;
 create index if not exists rep_sms_obligations_claim_idx
   on public.rep_sms_obligations(org_id,state,claim_state,next_attempt_at,lease_expires_at);
 create index if not exists rep_sms_obligations_actor_idx
@@ -244,13 +257,15 @@ returns trigger language plpgsql set search_path='' as $$
 begin
   if new.state is distinct from old.state then
     if not (
-      (old.state='required' and new.state in ('draft','claimed','blocked','voided','exception_closed'))
-      or (old.state='draft' and new.state in ('claimed','blocked','voided','exception_closed'))
+      (old.state='required' and new.state in ('draft','claimed','sending','blocked','voided','exception_closed'))
+      or (old.state='draft' and new.state in ('claimed','sending','blocked','voided','exception_closed'))
       or (old.state='claimed' and new.state in ('sending','failed_not_dispatched','unknown','blocked','voided','exception_closed'))
       or (old.state='sending' and new.state in ('accepted','failed_not_dispatched','unknown','blocked','voided','exception_closed'))
       or (old.state='accepted' and new.state in ('delivered','delivery_failed','unknown','voided','exception_closed'))
-      or (old.state='failed_not_dispatched' and new.state in ('claimed','voided','exception_closed'))
-      or (old.state='unknown' and new.state in ('blocked','voided','exception_closed'))
+      or (old.state='failed_not_dispatched' and new.state in ('claimed','sending','voided','exception_closed'))
+      -- A timeout leaves the request ambiguous. Only an authenticated
+      -- provider callback may settle it later as delivered or failed.
+      or (old.state='unknown' and new.state in ('delivered','delivery_failed','blocked','voided','exception_closed'))
       or (old.state='blocked' and new.state in ('draft','required','voided','exception_closed'))
       or (old.state='delivery_failed' and new.state in ('voided','exception_closed'))
       or (old.state='delivered' and new.state='delivered')
@@ -288,8 +303,10 @@ begin
     values(p_org_id,p_user_id,p_enabled,case when p_enabled then statement_timestamp() end,
       case when p_enabled then v_actor end,v_actor)
   on conflict(org_id,user_id) do update set enabled=excluded.enabled,
-    enrolled_at=case when excluded.enabled then coalesce(rep_sms_rollout_enrollments.enrolled_at,excluded.enrolled_at) else null end,
-    enrolled_by=case when excluded.enabled then coalesce(rep_sms_rollout_enrollments.enrolled_by,excluded.enrolled_by) else null end,
+    -- Every enable is a new rollout enrollment event. Preserve history in
+    -- updated_at/updated_by while stamping the actor that re-enabled access.
+    enrolled_at=case when excluded.enabled then excluded.enrolled_at else null end,
+    enrolled_by=case when excluded.enabled then excluded.enrolled_by else null end,
     updated_at=statement_timestamp(),updated_by=excluded.updated_by;
   return p_enabled;
 end;
@@ -343,7 +360,8 @@ begin
   if p_active then
     insert into public.rep_sms_rollout_enrollments(org_id,user_id,enabled,enrolled_at,enrolled_by,updated_by)
       values(p_org_id,p_user_id,true,statement_timestamp(),v_actor,v_actor)
-    on conflict(org_id,user_id) do update set enabled=true,updated_at=statement_timestamp(),updated_by=v_actor;
+    on conflict(org_id,user_id) do update set enabled=true,enrolled_at=statement_timestamp(),enrolled_by=v_actor,
+      updated_at=statement_timestamp(),updated_by=v_actor;
   end if;
   return v_id;
 end;
@@ -388,10 +406,10 @@ begin
   else v_state:='required'; v_reason:=null;
   end if;
   insert into public.rep_sms_obligations(
-  org_id,property_id,assignment_episode_id,attempt_id,actor_user_id,provider,sender_assignment_id,
+  org_id,property_id,assignment_episode_id,attempt_id,actor_user_id,provider,provider_account_id,sender_assignment_id,
     from_number,to_number,message_body,composition,state,blocked_reason,next_attempt_at
   ) values(
-    p_org_id,p_property_id,p_episode_id,p_attempt_id,p_actor_id,v_sender.provider,v_sender.id,
+    p_org_id,p_property_id,p_episode_id,p_attempt_id,p_actor_id,v_sender.provider,v_sender.provider_account_id,v_sender.id,
     v_sender.phone_e164,v_to,nullif(btrim(p_input->>'smsBody'),''),
     case when jsonb_typeof(p_input->'followUp')='object' then p_input->'followUp' else '{}'::jsonb end,
     v_state,v_reason,statement_timestamp()
@@ -401,104 +419,15 @@ end;
 $$;
 revoke all on function public.fn_ensure_rep_sms_no_answer_obligation(uuid,uuid,uuid,uuid,uuid,timestamptz,jsonb) from public,anon,authenticated,service_role;
 
-create or replace function public.fn_claim_rep_sms_obligations(
-  p_org_id uuid,p_limit integer default 20,p_worker_id uuid default null
-) returns table(
-  id uuid,org_id uuid,property_id uuid,attempt_id uuid,actor_user_id uuid,provider text,
-  sender_assignment_id uuid,from_number text,to_number text,message_body text,state text,
-  claim_token uuid,claim_generation bigint,lease_expires_at timestamptz
-) language plpgsql security definer set search_path='' as $$
-declare v_worker uuid:=coalesce(p_worker_id,auth.uid()); v_limit integer:=least(100,greatest(1,coalesce(p_limit,20)));
-begin
-  if auth.uid() is not null then raise exception 'Worker claims are service-only' using errcode='42501'; end if;
-  -- Reclaiming an expired lease is itself a fenced transition. A worker that
-  -- had durable pre-network authorization becomes `unknown`; a claim that
-  -- never reached authorization is safely retryable as failed_not_dispatched.
-  with expired as (
-    select o.id,o.org_id,o.state from public.rep_sms_obligations o
-    where o.org_id=p_org_id and o.claim_state='claimed' and o.lease_expires_at<=statement_timestamp()
-      and o.state in ('claimed','sending') for update
-  ), changed as (
-    update public.rep_sms_obligations o set state=case when e.state='sending' then 'unknown' else 'failed_not_dispatched' end,
-      claim_state='unclaimed',claim_token=null,claimed_by=null,claimed_at=null,lease_expires_at=null,
-      last_error='obligation claim lease expired',next_attempt_at=statement_timestamp()
-      from expired e where o.id=e.id returning o.id
-  )
-  insert into public.rep_sms_obligation_audit(org_id,obligation_id,actor_kind,action,from_state,to_state,reason)
-    select e.org_id,e.id,'system','lease_expired',e.state,case when e.state='sending' then 'unknown' else 'failed_not_dispatched' end,
-      'worker lease expired' from expired e join changed c on c.id=e.id;
-  -- A grant may be revoked between obligation creation and dispatch. Keep
-  -- that obligation visible as blocked so an enrolled rep's work is never
-  -- silently dropped and the owner has a durable correction path.
-  with revoked as (
-    select o.id,o.state from public.rep_sms_obligations o
-    where o.org_id=p_org_id and o.state in ('required','draft','failed_not_dispatched') and o.claim_state='unclaimed'
-      and not exists(select 1 from public.rep_sms_sender_assignments s
-        where s.id=o.sender_assignment_id and s.org_id=o.org_id and s.user_id=o.actor_user_id
-          and s.active and s.grant_status='active' and s.revoked_at is null)
-    for update
-  ), changed as (
-    update public.rep_sms_obligations o set state='blocked',blocked_reason='sender_grant_missing',next_attempt_at=statement_timestamp()
-      from revoked r where o.id=r.id returning o.org_id,o.id
-  )
-  insert into public.rep_sms_obligation_audit(org_id,obligation_id,actor_kind,action,from_state,to_state,reason)
-    select c.org_id,c.id,'system','grant_revoked',r.state,'blocked','sender_grant_missing'
-    from changed c join revoked r on r.id=c.id;
-  return query
-  with candidates as (
-    select o.id from public.rep_sms_obligations o
-    where o.org_id=p_org_id and o.state in ('required','draft','failed_not_dispatched')
-      and o.claim_state='unclaimed' and o.next_attempt_at<=statement_timestamp()
-    order by o.next_attempt_at,o.created_at,o.id
-    for update skip locked limit v_limit
-  ), updated as (
-    update public.rep_sms_obligations o set state='claimed',claim_state='claimed',claim_token=extensions.gen_random_uuid(),
-      claim_generation=o.claim_generation+1,claimed_by=v_worker,claimed_at=statement_timestamp(),
-      lease_expires_at=statement_timestamp()+interval '5 minutes'
-    from candidates c where o.id=c.id
-    returning o.*
-  )
-  select u.id,u.org_id,u.property_id,u.attempt_id,u.actor_user_id,u.provider,u.sender_assignment_id,
-    u.from_number,u.to_number,u.message_body,u.state,u.claim_token,u.claim_generation,u.lease_expires_at
-  from updated u;
-end;
-$$;
-revoke all on function public.fn_claim_rep_sms_obligations(uuid,integer,uuid) from public,anon,authenticated;
-grant execute on function public.fn_claim_rep_sms_obligations(uuid,integer,uuid) to service_role;
-
-create or replace function public.fn_authorize_rep_sms_obligation(
-  p_obligation_id uuid,p_claim_token uuid
-) returns jsonb language plpgsql security definer set search_path='' as $$
-declare v_o public.rep_sms_obligations%rowtype; v_now timestamptz:=statement_timestamp(); v_reason text;
-begin
-  if auth.uid() is not null then raise exception 'Worker authorization is service-only' using errcode='42501'; end if;
-  select * into v_o from public.rep_sms_obligations where id=p_obligation_id for update;
-  if not found or v_o.state<>'claimed' or v_o.claim_state<>'claimed' or v_o.claim_token is distinct from p_claim_token
-    or v_o.lease_expires_at<=v_now then raise exception 'STALE_CLAIM' using errcode='40001'; end if;
-  if not exists(select 1 from public.rep_sms_rollout_enrollments e where e.org_id=v_o.org_id and e.user_id=v_o.actor_user_id and e.enabled)
-    or not exists(select 1 from public.rep_sms_sender_assignments s where s.id=v_o.sender_assignment_id and s.org_id=v_o.org_id
-      and s.user_id=v_o.actor_user_id and s.active and s.grant_status='active' and s.revoked_at is null)
-    then v_reason:='sender_grant_missing';
-  elsif v_o.to_number is null then v_reason:='recipient_missing';
-  end if;
-  if v_reason is not null then
-    update public.rep_sms_obligations set state='blocked',blocked_reason=v_reason,claim_state='unclaimed',claim_token=null,
-      claimed_by=null,claimed_at=null,lease_expires_at=null,next_attempt_at=v_now where id=v_o.id;
-    insert into public.rep_sms_obligation_audit(org_id,obligation_id,actor_kind,action,from_state,to_state,reason)
-      values(v_o.org_id,v_o.id,'system','pre_dispatch_block',v_o.state,'blocked',v_reason);
-    return jsonb_build_object('ok',false,'obligationId',v_o.id,'state','blocked','reason',v_reason);
-  end if;
-  update public.rep_sms_obligations set state='sending',authorized_at=v_now where id=v_o.id;
-  return jsonb_build_object('ok',true,'obligationId',v_o.id,'state','sending','claimToken',p_claim_token,
-    'provider',v_o.provider,'fromNumber',v_o.from_number,'toNumber',v_o.to_number,'body',v_o.message_body);
-end;
-$$;
-revoke all on function public.fn_authorize_rep_sms_obligation(uuid,uuid) from public,anon,authenticated;
-grant execute on function public.fn_authorize_rep_sms_obligation(uuid,uuid) to service_role;
-
 -- A browser submission names one exact obligation. Claiming a batch here would
 -- allow a racing submission to send a different rep's work, so this RPC locks
 -- only the requested row and binds/authorizes it in the same transaction.
+-- The former batch-claim and separate authorize RPCs are intentionally not
+-- part of the public contract. They could claim a row without the complete
+-- lead/grant validation performed below, and no application caller uses them.
+drop function if exists public.fn_claim_rep_sms_obligations(uuid,integer,uuid);
+drop function if exists public.fn_authorize_rep_sms_obligation(uuid,uuid);
+
 create or replace function public.fn_claim_authorize_rep_sms_obligation(
   p_org_id uuid,p_obligation_id uuid,p_actor_id uuid,p_composition jsonb
 ) returns jsonb language plpgsql security definer set search_path='' as $$
@@ -608,6 +537,7 @@ begin
     values(v_o.org_id,v_o.id,'service',p_actor_id,'claim_authorize',v_o.state,'sending',null,p_composition);
   return jsonb_build_object('ok',true,'obligationId',v_o.id,'state','sending','claimToken',v_token,
     'claimGeneration',v_o.claim_generation+1,'assignmentId',v_o.sender_assignment_id,
+    'provider',v_o.provider,'providerAccountId',v_o.provider_account_id,
     'fromNumber',v_o.from_number,'toNumber',v_o.to_number,'body',p_composition->>'body',
     'composition',p_composition);
 end;
@@ -615,6 +545,102 @@ $$;
 revoke all on function public.fn_claim_authorize_rep_sms_obligation(uuid,uuid,uuid,jsonb)
   from public,anon,authenticated;
 grant execute on function public.fn_claim_authorize_rep_sms_obligation(uuid,uuid,uuid,jsonb)
+  to service_role;
+
+-- This is the last database-side fence before the provider request. The
+-- caller must prove it still owns the exact sending claim it authorized, and
+-- the lead, assignment, grant and provider identity must all still match.
+-- Returning success also leaves an immutable audit breadcrumb so an operator
+-- can distinguish a send that crossed this fence from a pre-fence block.
+create or replace function public.fn_assert_rep_sms_obligation_dispatch(
+  p_obligation_id uuid,p_claim_token uuid,p_claim_generation bigint,p_actor_id uuid
+) returns jsonb language plpgsql security definer set search_path='' as $$
+declare
+  v_o public.rep_sms_obligations%rowtype;
+  v_property public.properties%rowtype;
+  v_sender public.rep_sms_sender_assignments%rowtype;
+  v_contact public.contacts%rowtype;
+  v_now timestamptz:=statement_timestamp();
+  v_reason text;
+  v_audit_id uuid;
+begin
+  if auth.uid() is not null then
+    raise exception 'Worker dispatch fences are service-only' using errcode='42501';
+  end if;
+  if p_obligation_id is null or p_claim_token is null or p_claim_generation is null or p_actor_id is null then
+    raise exception 'INVALID_INPUT' using errcode='22023';
+  end if;
+
+  select * into v_o from public.rep_sms_obligations
+    where id=p_obligation_id for update;
+  if not found or v_o.state<>'sending' or v_o.claim_state<>'claimed'
+    or v_o.claim_token is distinct from p_claim_token
+    or v_o.claim_generation is distinct from p_claim_generation
+    or v_o.claimed_by is distinct from p_actor_id
+    or v_o.lease_expires_at is null or v_o.lease_expires_at<=v_now then
+    raise exception 'STALE_CLAIM' using errcode='40001';
+  end if;
+  if v_o.actor_user_id is distinct from p_actor_id then
+    raise exception 'FORBIDDEN' using errcode='42501';
+  end if;
+
+  select * into v_property from public.properties p
+    where p.id=v_o.property_id and p.org_id=v_o.org_id for update;
+  if not found or v_property.deleted_at is not null or v_property.is_dnc_locked
+    or v_property.assigned_user_id is distinct from p_actor_id then
+    v_reason:='current_assignment_changed';
+  elsif not exists(select 1 from public.memberships m
+    where m.org_id=v_o.org_id and m.user_id=p_actor_id
+      and m.access_status='active' and m.deletion_prepared_at is null
+      and (m.access_expires_at is null or m.access_expires_at>v_now)
+      and coalesce(m.acquisitions_enabled,false)) then
+    v_reason:='membership_or_acquisitions_disabled';
+  elsif not exists(select 1 from public.rep_sms_rollout_enrollments e
+    where e.org_id=v_o.org_id and e.user_id=p_actor_id and e.enabled) then
+    v_reason:='rollout_not_enabled';
+  elsif not exists(select 1 from public.acquisition_assignment_episodes e
+    where e.id=v_o.assignment_episode_id and e.org_id=v_o.org_id and e.property_id=v_o.property_id
+      and e.assignee_user_id=p_actor_id and e.ended_at is null) then
+    v_reason:='current_assignment_changed';
+  elsif not exists(select 1 from public.rep_sms_sender_assignments s
+    where s.id=v_o.sender_assignment_id and s.org_id=v_o.org_id and s.user_id=p_actor_id
+      and s.active and s.grant_status='active' and s.revoked_at is null
+      and s.provider=v_o.provider and s.provider_account_id=v_o.provider_account_id
+      and s.phone_e164=v_o.from_number) then
+    v_reason:='sender_grant_missing';
+  elsif v_o.provider is null or v_o.provider_account_id is null
+    or v_o.from_number is null or v_o.to_number is null then
+    v_reason:='provider_identity_missing';
+  else
+    select * into v_contact from public.contacts c
+      where c.id=v_property.homeowner_contact_id and c.org_id=v_o.org_id;
+    if not found or v_o.to_number not in (v_contact.phone_1,v_contact.phone_2,v_contact.phone_3)
+      or v_o.to_number !~ '^\+[1-9][0-9]{7,14}$' then
+      v_reason:='recipient_changed';
+    end if;
+  end if;
+  if v_reason is not null then
+    raise exception 'DISPATCH_FENCE_REJECTED: %',v_reason using errcode='42501';
+  end if;
+
+  insert into public.rep_sms_obligation_audit(
+    org_id,obligation_id,actor_kind,actor_user_id,action,from_state,to_state,reason,metadata
+  ) values(
+    v_o.org_id,v_o.id,'service',p_actor_id,'dispatch_fence','sending','sending',null,
+    jsonb_build_object('claimGeneration',p_claim_generation,'provider',v_o.provider,
+      'providerAccountId',v_o.provider_account_id,'senderAssignmentId',v_o.sender_assignment_id,
+      'fromNumber',v_o.from_number,'toNumber',v_o.to_number)
+  ) returning id into v_audit_id;
+  return jsonb_build_object('ok',true,'obligationId',v_o.id,'state','sending','claimToken',v_o.claim_token,
+    'claimGeneration',v_o.claim_generation,'actorId',p_actor_id,'provider',v_o.provider,
+    'providerAccountId',v_o.provider_account_id,'assignmentId',v_o.sender_assignment_id,
+    'fromNumber',v_o.from_number,'toNumber',v_o.to_number,'body',v_o.message_body,
+    'auditId',v_audit_id);
+end;
+$$;
+revoke all on function public.fn_assert_rep_sms_obligation_dispatch(uuid,uuid,bigint,uuid)
+  from public,anon,authenticated;
+grant execute on function public.fn_assert_rep_sms_obligation_dispatch(uuid,uuid,bigint,uuid)
   to service_role;
 
 create or replace function public.fn_record_rep_sms_obligation_result(
@@ -636,6 +662,9 @@ begin
   end if;
   if p_state='accepted' and nullif(btrim(p_provider_message_id),'') is null then
     raise exception 'ACCEPTED_REQUIRES_PROVIDER_ID' using errcode='22023';
+  end if;
+  if p_state='accepted' and v_o.provider_account_id is null then
+    raise exception 'ACCEPTED_REQUIRES_PROVIDER_ACCOUNT' using errcode='22023';
   end if;
   if p_state in ('blocked','failed_not_dispatched','delivery_failed') and nullif(btrim(coalesce(p_provider_error,'')),'') is null then
     raise exception 'FAILURE_REQUIRES_REASON' using errcode='22023';
@@ -665,17 +694,28 @@ revoke all on function public.fn_record_rep_sms_obligation_result(uuid,uuid,text
 grant execute on function public.fn_record_rep_sms_obligation_result(uuid,uuid,text,text,text,text,timestamptz,jsonb) to service_role;
 
 create or replace function public.fn_record_rep_sms_delivery(
-  p_provider text,p_provider_message_id text,p_state text,p_provider_status text default null,
+  p_provider text,p_provider_account_id text,p_provider_message_id text,p_state text,p_provider_status text default null,
   p_provider_error text default null,p_metadata jsonb default '{}'::jsonb
 ) returns jsonb language plpgsql security definer set search_path='' as $$
 declare v_o public.rep_sms_obligations%rowtype; v_now timestamptz:=statement_timestamp();
+  v_provider text:=nullif(btrim(p_provider),'');
+  v_provider_account_id text:=nullif(btrim(p_provider_account_id),'');
+  v_provider_message_id text:=nullif(btrim(p_provider_message_id),'');
+  v_message_org_id text:=nullif(btrim(p_metadata->>'messageOrgId'),'');
 begin
   if auth.uid() is not null then raise exception 'Provider callbacks are service-only' using errcode='42501'; end if;
-  if nullif(btrim(p_provider),'') is null or nullif(btrim(p_provider_message_id),'') is null
+  if v_provider is null or v_provider_account_id is null or v_provider_message_id is null
     or p_state not in ('delivered','delivery_failed','unknown') then raise exception 'INVALID_INPUT' using errcode='22023'; end if;
-  select * into v_o from public.rep_sms_obligations where provider=p_provider
-    and provider_message_id=p_provider_message_id for update;
+  select * into v_o from public.rep_sms_obligations where provider=v_provider
+    and provider_account_id=v_provider_account_id and provider_message_id=v_provider_message_id for update;
   if not found then return jsonb_build_object('ok',false,'matched',false); end if;
+  -- The webhook handler obtains messageOrgId from the stored outbound row.
+  -- If supplied, bind it to the obligation's tenant before accepting the
+  -- provider callback. The verifier's legacy-shaped calls omit this optional
+  -- audit field and retain the provider/account/message identity guard above.
+  if v_message_org_id is not null and v_message_org_id<>v_o.org_id::text then
+    return jsonb_build_object('ok',false,'matched',false,'tenantMismatch',true);
+  end if;
   if v_o.state not in ('accepted','unknown') then
     return jsonb_build_object('ok',true,'matched',true,'state',v_o.state,'duplicate',true);
   end if;
@@ -696,8 +736,8 @@ begin
   return jsonb_build_object('ok',true,'matched',true,'state',p_state);
 end;
 $$;
-revoke all on function public.fn_record_rep_sms_delivery(text,text,text,text,text,jsonb) from public,anon,authenticated;
-grant execute on function public.fn_record_rep_sms_delivery(text,text,text,text,text,jsonb) to service_role;
+revoke all on function public.fn_record_rep_sms_delivery(text,text,text,text,text,text,jsonb) from public,anon,authenticated;
+grant execute on function public.fn_record_rep_sms_delivery(text,text,text,text,text,text,jsonb) to service_role;
 
 create or replace function public.fn_owner_correct_rep_sms_obligation(
   p_obligation_id uuid,p_action text,p_reason text

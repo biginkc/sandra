@@ -58,7 +58,7 @@ async function persistResumedResult(
   admin: { rpc(name: string, input: Record<string, unknown>): Promise<ObligationRpc> },
   obligationId: string,
   claimToken: string,
-  state: "accepted" | "blocked" | "delivery_failed" | "unknown",
+  state: "accepted" | "blocked" | "failed_not_dispatched" | "delivery_failed" | "unknown",
   value: string | null,
   composition: ReturnType<typeof composeRepSms>,
   messageId?: string | null,
@@ -122,6 +122,8 @@ async function resumeRepSms(input: DispatchRepSmsInput & { obligationId: string 
     return { status: "unknown" as const, reason: `${reason} Automatic retry is disabled; review or close the obligation.` };
   }
   if (claimRecord.state !== "sending" || typeof claimRecord.claimToken !== "string"
+    || typeof claimRecord.claimGeneration !== "number"
+    || !Number.isInteger(claimRecord.claimGeneration)
     || typeof claimRecord.assignmentId !== "string" || typeof claimRecord.toNumber !== "string") {
     throw new Error("Follow-up authorization returned an invalid fence. Refresh before retrying.");
   }
@@ -133,6 +135,12 @@ async function resumeRepSms(input: DispatchRepSmsInput & { obligationId: string 
       assignmentId: claimRecord.assignmentId,
       // The database claim owns the recipient. Ignore any stale browser hint.
       to: claimRecord.toNumber,
+      obligationFence: {
+        obligationId: obligation.id,
+        claimToken: claimRecord.claimToken,
+        claimGeneration: claimRecord.claimGeneration,
+        actorId: context.actorId,
+      },
       composition,
     });
   } catch (error) {
@@ -150,6 +158,9 @@ async function resumeRepSms(input: DispatchRepSmsInput & { obligationId: string 
   }
   if (typeof outcome.status === "string" && outcome.status.startsWith("blocked_")) {
     return persistResumedResult(admin, obligation.id, claimRecord.claimToken, "blocked", reason, composition);
+  }
+  if (outcome.status === "provider_failed" && outcome.providerAttempted === false) {
+    return persistResumedResult(admin, obligation.id, claimRecord.claimToken, "failed_not_dispatched", reason, composition);
   }
   if (outcome.status === "provider_failed" || outcome.status === "provider_deferred") {
     return persistResumedResult(admin, obligation.id, claimRecord.claimToken, "delivery_failed", reason, composition);

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { assertNotTrainingTarget } from "@/lib/leads/training";
+import { ProviderError } from "@/lib/errors/classes";
 
 vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
 
@@ -243,6 +244,78 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
 
     expect(provider.sendSms).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ status: "sent", messageId: "msg-2" });
+  });
+});
+
+describe("sendSmsToContact — ambiguous Sendillo outcomes", () => {
+  it.each([
+    ["transport", { transportFailure: true }],
+    ["timeout", { isAbort: true }],
+    ["server error", { status: 503, ambiguousDelivery: true }],
+    ["accepted without id", { acceptedWithoutId: true }],
+  ])("returns provider_unknown and does not expose a retry for %s", async (_label, details) => {
+    const provider = fakeProvider();
+    provider.providerId = "sendillo";
+    provider.sendSms.mockRejectedValueOnce(
+      new ProviderError("Sendillo delivery state is unknown", "sendillo", details),
+    );
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [
+        { data: { id: "msg-unknown" }, error: null },
+        { data: null, error: null },
+      ],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+    });
+
+    expect(outcome).toEqual({
+      status: "provider_unknown",
+      messageId: "msg-unknown",
+      error: "Sendillo delivery state is unknown",
+    });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a preflight notSent rejection retryable", async () => {
+    const provider = fakeProvider();
+    provider.providerId = "sendillo";
+    provider.sendSms.mockRejectedValueOnce(
+      new ProviderError("Sendillo sender is missing", "sendillo", { notSent: true }),
+    );
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [
+        { data: { id: "msg-failed" }, error: null },
+        { data: null, error: null },
+      ],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "hello",
+      from: "+18165551234",
+    });
+
+    expect(outcome).toEqual({
+      status: "provider_failed",
+      messageId: "msg-failed",
+      error: "Sendillo sender is missing",
+    });
   });
 });
 

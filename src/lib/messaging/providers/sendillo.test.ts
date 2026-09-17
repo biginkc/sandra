@@ -746,7 +746,7 @@ describe("SendilloMessagingProvider.listFromNumbers", () => {
     ]);
   });
 
-  it("falls back to a non-'available' status when the provider omits one, so the composer's Dialpad-only unassigned filter never hides a real Sendillo number", async () => {
+  it("preserves an omitted status as empty evidence instead of guessing active", async () => {
     mockFetch({
       status: 200,
       body: { data: [{ number: "+18165550003" }] },
@@ -759,7 +759,7 @@ describe("SendilloMessagingProvider.listFromNumbers", () => {
     const options = await provider.listFromNumbers();
 
     expect(options).toHaveLength(1);
-    expect(options[0].status).not.toBe("available");
+    expect(options[0].status).toBe("");
   });
 
   it("propagates the underlying ProviderError when the catalog fetch fails", async () => {

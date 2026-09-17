@@ -28,6 +28,7 @@ export type RepSmsSendState =
   | "delivered"
   | "delivery_failed"
   | "blocked"
+  | "provider_unknown"
   | "unknown"
   | "resume"
 
@@ -92,6 +93,8 @@ function outcomeState(outcome: SendSmsOutcome | { status: string }): SendState {
     case "provider_failed":
     case "provider_deferred":
       return { status: "delivery_failed", message: "The provider did not confirm delivery. Your draft is preserved; review the text history before retrying." }
+    case "provider_unknown":
+      return { status: "provider_unknown", message: "The messaging provider did not provide a definitive receipt. Reconciliation is pending. Your draft is preserved; review the text history before retrying." }
     case "blocked_no_consent":
     case "blocked_quiet_hours":
     case "blocked_no_phone":
@@ -116,6 +119,7 @@ const STATE_LABELS: Record<RepSmsSendState, string> = {
   delivered: "Delivered",
   delivery_failed: "Delivery failed",
   blocked: "Blocked",
+  provider_unknown: "Pending reconciliation",
   unknown: "Unknown result",
   resume: "Resume available",
 }
@@ -225,7 +229,7 @@ export function RepSmsComposer({
   const needsTemplate = Boolean(resumableObligationId)
   const missingTemplate = needsTemplate && !selectedTemplateId
   const tooLong = smsInfo.units > 1600
-  const canSend = Boolean(sender && recipient && remainder.trim() && composition && !missingTemplate && !tooLong && !reviewOnlyObligation && !pending && !sendInFlight.current)
+  const canSend = Boolean(sender && recipient && remainder.trim() && composition && !missingTemplate && !tooLong && !reviewOnlyObligation && sendState.status !== "provider_unknown" && !pending && !sendInFlight.current)
 
   const selectTemplate = (id: string) => {
     setSelectedTemplateId(id)
@@ -343,6 +347,7 @@ export function RepSmsComposer({
             onChange={(event) => selectTemplate(event.target.value)}
             aria-required={needsTemplate}
             aria-invalid={missingTemplate}
+            aria-describedby={missingTemplate ? `rep-sms-template-error-${propertyId}` : undefined}
           >
             <option value="">{needsTemplate ? "Choose a follow-up template…" : "Choose a template (optional)…"}</option>
             {templates.map((template) => <option key={template.id} value={template.id}>{template.label}</option>)}

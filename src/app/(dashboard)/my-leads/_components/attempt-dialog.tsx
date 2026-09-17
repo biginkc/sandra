@@ -96,6 +96,11 @@ export function AcquisitionAttemptDialog({
   const [templateId, setTemplateId] = useState("")
   const [remainder, setRemainder] = useState("")
   const [followUpState, setFollowUpState] = useState<FollowUpState | null>(null)
+  // Once the attempt has been durably recorded, this dialog becomes a
+  // receipt for that attempt. Keeping its original payload frozen prevents a
+  // user from changing a field and accidentally generating a second attempt
+  // with a new idempotency key while the follow-up is still unresolved.
+  const [attemptRecorded, setAttemptRecorded] = useState(false)
   const availableCalls = initialCallActivityId && !callReferenceOptions.some(call => call.id === initialCallActivityId)
     ? [{ id: initialCallActivityId, label: "Selected Sandra call" }, ...callReferenceOptions]
     : callReferenceOptions
@@ -114,10 +119,12 @@ export function AcquisitionAttemptDialog({
     setTemplateId("")
     setRemainder("")
     setFollowUpState(null)
+    setAttemptRecorded(false)
     setClientError(null)
     setClientFieldErrors({})
   }
   const submitState = useAcquisitionSubmit(onSubmit, (result) => {
+    if (result.ok && result.attemptRecorded) setAttemptRecorded(true)
     if (outcome === "no_answer") {
       const nextFollowUp: FollowUpState = result.ok && result.followUp
         ? result.followUp
@@ -170,7 +177,7 @@ export function AcquisitionAttemptDialog({
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (submitState.submitting) return
+    if (submitState.submitting || attemptRecorded) return
     clearClientErrors()
 
     const nextFieldErrors: Record<string, string> = {}
@@ -257,6 +264,7 @@ export function AcquisitionAttemptDialog({
                 <select
                   id="acquisition-attempt-source"
                   value={source}
+                  disabled={attemptRecorded}
                   onChange={(event) => {
                     const nextSource = event.target.value as AcquisitionAttemptSource
                     if (nextSource === "sandra" && !sandraAvailable) return
@@ -279,6 +287,7 @@ export function AcquisitionAttemptDialog({
                   <select
                     id="acquisition-attempt-kind"
                     value={kind}
+                    disabled={attemptRecorded}
                     onChange={(event) => setKind(event.target.value as AcquisitionAttemptKind)}
                     className={SELECT_FIELD_CLASS}
                   >
@@ -319,6 +328,7 @@ export function AcquisitionAttemptDialog({
                     id="acquisition-attempt-call-reference"
                     aria-label="Sandra call"
                     value={callActivityId}
+                    disabled={attemptRecorded}
                     onChange={(event) => setCallActivityId(event.target.value)}
                     aria-invalid={Boolean(clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId)}
                     aria-describedby={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId ? "acquisition-attempt-call-reference-error" : undefined}
@@ -349,6 +359,7 @@ export function AcquisitionAttemptDialog({
               <select
                 id="acquisition-attempt-outcome"
                 value={outcome}
+                disabled={attemptRecorded}
                 onChange={(event) => {
                   setOutcome(event.target.value as AcquisitionAttemptFormPayload["outcome"])
                   clearClientErrors()
@@ -380,6 +391,7 @@ export function AcquisitionAttemptDialog({
                     id="acquisition-follow-up-intro"
                     aria-label="Assistant introduction"
                     value={introId}
+                    disabled={attemptRecorded}
                     onChange={(event) => {
                       setIntroId(event.target.value)
                       clearClientErrors()
@@ -401,6 +413,7 @@ export function AcquisitionAttemptDialog({
                     id="acquisition-follow-up-template"
                     aria-label="Curated follow-up template"
                     value={templateId}
+                    disabled={attemptRecorded}
                     onChange={(event) => {
                       const nextId = event.target.value
                       setTemplateId(nextId)
@@ -426,6 +439,7 @@ export function AcquisitionAttemptDialog({
                     id="acquisition-follow-up-remainder"
                     aria-label="Editable follow-up remainder"
                     value={remainder}
+                    disabled={attemptRecorded}
                     onChange={(event) => {
                       setRemainder(event.target.value)
                       clearClientErrors()
@@ -450,6 +464,11 @@ export function AcquisitionAttemptDialog({
                     {followUpState.message && <p className="mt-0.5 text-muted-foreground">{followUpState.message}</p>}
                   </div>
                 )}
+                {attemptRecorded && followUpState?.status !== "accepted" && followUpState?.status !== "delivered" && (
+                  <p className="text-xs text-muted-foreground">
+                    This attempt is already recorded. Close this dialog and use the lead&apos;s Text lead action to resume the saved follow-up.
+                  </p>
+                )}
               </section>
             )}
 
@@ -459,6 +478,7 @@ export function AcquisitionAttemptDialog({
               value={occurredAt}
               onChange={setOccurredAt}
               error={clientFieldErrors.occurredAt || submitState.fieldErrors.occurredAt}
+              disabled={attemptRecorded}
             />
 
             <div className="flex flex-col gap-1.5">
@@ -467,6 +487,7 @@ export function AcquisitionAttemptDialog({
                 id="acquisition-attempt-recording"
                 type="url"
                 value={recordingUrl}
+                disabled={attemptRecorded}
                 onChange={(event) => setRecordingUrl(event.target.value)}
                 placeholder="https://…"
                 className={TEXT_FIELD_CLASS}
@@ -479,6 +500,7 @@ export function AcquisitionAttemptDialog({
               <Textarea
                 id="acquisition-attempt-note"
                 value={note}
+                disabled={attemptRecorded}
                 onChange={(event) => setNote(event.target.value)}
                 placeholder="Add context for the next rep"
                 rows={3}
@@ -488,8 +510,9 @@ export function AcquisitionAttemptDialog({
           </div>
           <WorkflowDialogFooter
             submitting={submitState.submitting}
-            submitLabel="Save attempt"
+            submitLabel={attemptRecorded ? "Attempt recorded" : "Save attempt"}
             onCancel={closeDialog}
+            disabled={attemptRecorded}
           />
         </form>
       </DialogContent>

@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { ConfigurationError } from "@/lib/errors/classes";
 import { normalizePhone } from "@/lib/csv/normalize";
 import { getConsentState } from "./consent";
@@ -47,6 +48,13 @@ export type RepSmsPendingObligation = {
   senderAssignmentId: string | null;
   fromNumber: string | null;
   toNumber: string | null;
+};
+
+export type RepSmsObligationFence = {
+  obligationId: string;
+  claimToken: string;
+  claimGeneration: number;
+  actorId: string;
 };
 
 export type RepSmsContext = {
@@ -237,10 +245,21 @@ function assertSenderGrant(
   }
 }
 
+// Sendillo's catalog is the source of truth for live sender readiness. Keep
+// this vocabulary deliberately small: an absent, pending, unknown, or newly
+// invented status is not affirmative evidence that SMS can be sent.
+const SENDILLO_NUMBER_ACTIVE_STATUSES = new Set(["active"]);
+const SENDILLO_MESSAGING_ACTIVE_STATUSES = new Set(["active"]);
+
 function eligibleStatus(value: string | null | undefined): boolean {
-  if (!value) return true;
-  return !["inactive", "disabled", "suspended", "released", "blocked", "rejected", "failed"].includes(
-    value.trim().toLowerCase(),
+  return Boolean(value?.trim());
+}
+
+function eligibleSendilloNumber(entry: ProviderSenderNumber): boolean {
+  return Boolean(
+    entry.providerNumberId?.trim()
+      && SENDILLO_NUMBER_ACTIVE_STATUSES.has(entry.status?.trim().toLowerCase() ?? "")
+      && SENDILLO_MESSAGING_ACTIVE_STATUSES.has(entry.messagingStatus?.trim().toLowerCase() ?? ""),
   );
 }
 
@@ -258,7 +277,10 @@ async function assertLiveSenderEligibility(
   if (typeof provider.listPurchasedNumbers === "function") {
     const purchased = await provider.listPurchasedNumbers();
     const match = purchased.find((entry) => samePhone(entry.phoneE164, normalizedSender));
-    if (!match || !eligibleStatus(match.status) || !eligibleStatus(match.messagingStatus)) {
+    if (
+      !match ||
+      (provider.providerId === REP_SMS_PROVIDER_ID && !eligibleSendilloNumber(match))
+    ) {
       throw new Error(
         `The assigned Sendillo number ${senderNumber} is not currently eligible for SMS. Ask an owner to update the assignment.`,
       );
@@ -313,6 +335,8 @@ export type DispatchRepSmsInput = {
   initialRemainder?: string | null;
   remainder?: string | null;
   initialBody?: string | null;
+  /** Present only when resuming a claimed durable obligation. */
+  obligationFence?: RepSmsObligationFence;
 };
 
 /**
@@ -356,6 +380,11 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
     },
   };
   const client = await createClient();
+  const fence = input.obligationFence;
+  if (fence && (!fence.obligationId || !fence.claimToken || !fence.actorId
+    || !Number.isInteger(fence.claimGeneration) || fence.claimGeneration < 1)) {
+    throw new Error("The saved follow-up fence is invalid. Refresh before sending.");
+  }
   return sendSmsToContact(
     client,
     {
@@ -392,6 +421,28 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
           to,
           orgId: context.orgId,
         });
+        if (fence) {
+          const admin = createAdminClient() as unknown as {
+            rpc(name: string, args: Record<string, unknown>): Promise<{
+              data: unknown;
+              error: { message?: string; code?: string } | null;
+            }>;
+          };
+          const { data, error } = await admin.rpc("fn_assert_rep_sms_obligation_dispatch", {
+            p_obligation_id: fence.obligationId,
+            p_claim_token: fence.claimToken,
+            p_claim_generation: fence.claimGeneration,
+            p_actor_id: fence.actorId,
+          });
+          const asserted = data && typeof data === "object" && !Array.isArray(data)
+            ? data as Record<string, unknown>
+            : null;
+          if (error || asserted?.ok !== true || asserted.state !== "sending") {
+            throw new Error(
+              error?.message ?? "The saved follow-up is no longer authorized for dispatch. Refresh before sending.",
+            );
+          }
+        }
       },
     },
   );
@@ -459,7 +510,8 @@ export function repSmsProviderId(): typeof REP_SMS_PROVIDER_ID {
 
 export function repSmsCatalogOptionIsEligible(entry: ProviderSenderNumber | DialpadFromOption): boolean {
   if ("phoneE164" in entry) {
-    return eligibleStatus(entry.status) && eligibleStatus(entry.messagingStatus);
+    return eligibleSendilloNumber(entry);
   }
-  return eligibleStatus(entry.status) && entry.ownerType !== "unknown" && entry.ownerType !== "available";
+  return eligibleStatus(entry.status)
+    && !["unknown", "available"].includes(entry.ownerType.trim().toLowerCase());
 }

@@ -52,6 +52,10 @@ export function SmsComposer({
   const [fromOptions, setFromOptions] = useState<DialpadFromOption[]>([]);
   const [fromNumber, setFromNumber] = useState<string>(preferredFromNumber ?? "");
   const [loadingFroms, setLoadingFroms] = useState(false);
+  // Do not offer a second send after the provider returned an ambiguous
+  // result. Keep the draft mounted so the operator can inspect it while
+  // reconciliation determines whether the first request was delivered.
+  const [providerUnknown, setProviderUnknown] = useState(false);
 
   const loadFromOptions = () => {
     if (fromOptions.length > 0 || loadingFroms) return;
@@ -157,6 +161,13 @@ export function SmsComposer({
         case "provider_failed":
           toast.error("Provider error", { description: outcome.error });
           break;
+        case "provider_unknown":
+          setProviderUnknown(true);
+          toast.warning("Send pending reconciliation", {
+            description:
+              "The messaging provider did not provide a definitive receipt. Your draft is preserved. Review the thread before retrying to avoid a duplicate message.",
+          });
+          break;
         case "contact_not_found":
         case "property_not_found":
           toast.error("Lead not found");
@@ -200,7 +211,7 @@ export function SmsComposer({
             className="border-input bg-transparent rounded-md border px-3 py-2 text-sm shadow-sm focus-visible:ring-1 focus-visible:outline-none"
             value={fromNumber}
             onChange={(e) => setFromNumber(e.target.value)}
-            disabled={loadingFroms || pending}
+            disabled={loadingFroms || pending || providerUnknown}
           >
             {loadingFroms && <option value="">Loading numbers…</option>}
             {!loadingFroms && fromOptions.length === 0 && (
@@ -231,7 +242,7 @@ export function SmsComposer({
                 if (tpl) setBody(tpl.body);
                 setSelectedTemplateId("");
               }}
-              disabled={disabled || pending}
+              disabled={disabled || pending || providerUnknown}
             >
               <option value="">Select a template…</option>
               {templates.map((t) => (
@@ -251,7 +262,7 @@ export function SmsComposer({
             placeholder="Type your message…"
             value={body}
             onChange={(e) => setBody(e.target.value)}
-            disabled={disabled || pending}
+            disabled={disabled || pending || providerUnknown}
             maxLength={2000}
           />
           <div className="flex items-center justify-end text-xs">
@@ -260,6 +271,13 @@ export function SmsComposer({
             </span>
           </div>
         </div>
+
+        {providerUnknown && (
+          <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status" aria-live="polite">
+            Send pending reconciliation. Your draft is preserved; review the
+            thread before retrying.
+          </p>
+        )}
 
         <DialogFooter>
           <Button
@@ -272,13 +290,13 @@ export function SmsComposer({
           <Button
             variant="outline"
             onClick={() => sendOrQueue(true)}
-            disabled={disabled || pending || length === 0 || tooLong}
+            disabled={disabled || providerUnknown || pending || length === 0 || tooLong}
           >
             {pending ? "Working…" : "Queue"}
           </Button>
           <Button
             onClick={() => sendOrQueue(false)}
-            disabled={disabled || pending || length === 0 || tooLong}
+            disabled={disabled || providerUnknown || pending || length === 0 || tooLong}
           >
             {pending ? "Sending…" : "Send now"}
           </Button>

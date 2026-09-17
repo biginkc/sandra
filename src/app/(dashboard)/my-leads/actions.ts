@@ -171,6 +171,8 @@ async function finishNoAnswerFollowUp(args: {
     return followUpResult('unknown', claimMessage ?? 'Attempt recorded. Follow-up authorization could not be confirmed.');
   }
   if (claimState !== 'sending' || typeof claimRecord.claimToken !== 'string'
+    || typeof claimRecord.claimGeneration !== 'number'
+    || !Number.isInteger(claimRecord.claimGeneration)
     || typeof claimRecord.assignmentId !== 'string' || typeof claimRecord.toNumber !== 'string') {
     return followUpResult('unknown', 'Attempt recorded. Follow-up authorization returned an invalid fence. Refresh before retrying.');
   }
@@ -181,6 +183,12 @@ async function finishNoAnswerFollowUp(args: {
       propertyId: String(args.input.propertyId),
       assignmentId: claimRecord.assignmentId,
       to: claimRecord.toNumber,
+      obligationFence: {
+        obligationId,
+        claimToken: claimRecord.claimToken,
+        claimGeneration: claimRecord.claimGeneration,
+        actorId: args.viewer.userId,
+      },
       composition: args.composition,
     });
   } catch (error) {
@@ -203,6 +211,9 @@ async function finishNoAnswerFollowUp(args: {
   }
   if (typeof outcome.status === 'string' && outcome.status.startsWith('blocked_')) {
     return persistFollowUpResult(admin, obligationId, claimRecord.claimToken, 'blocked', reason, args.composition);
+  }
+  if (outcome.status === 'provider_failed' && outcome.providerAttempted === false) {
+    return persistFollowUpResult(admin, obligationId, claimRecord.claimToken, 'failed_not_dispatched', reason, args.composition);
   }
   // Once dispatchRepSms has crossed its provider boundary, a provider failure
   // is ambiguous. Keep it unknown; only an exception before that call can be

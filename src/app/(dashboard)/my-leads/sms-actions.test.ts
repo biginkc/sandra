@@ -45,7 +45,7 @@ beforeEach(() => {
 describe("resumed rep SMS obligations", () => {
   it("claims the exact saved obligation and uses its claimed recipient", async () => {
     mocks.readContext.mockResolvedValue(baseContext("failed_not_dispatched"))
-    mocks.adminRpc.mockResolvedValueOnce({ data: { ok: true, state: "sending", claimToken: "claim-1", assignmentId: "sender-1", toNumber: "+18165550123" }, error: null })
+    mocks.adminRpc.mockResolvedValueOnce({ data: { ok: true, state: "sending", claimToken: "claim-1", claimGeneration: 1, assignmentId: "sender-1", toNumber: "+18165550123" }, error: null })
     mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "message-1", externalId: "provider-1" })
 
     const result = await sendRepSms({ propertyId: "property-1", obligationId: "obligation-1", assignmentId: "stale-sender", to: "+19995550101", composition })
@@ -54,7 +54,7 @@ describe("resumed rep SMS obligations", () => {
     expect(mocks.adminRpc).toHaveBeenNthCalledWith(1, "fn_claim_authorize_rep_sms_obligation", expect.objectContaining({
       p_org_id: "org-1", p_obligation_id: "obligation-1", p_actor_id: "rep-1",
     }))
-    expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ assignmentId: "sender-1", to: "+18165550123" }))
+    expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({ assignmentId: "sender-1", to: "+18165550123", obligationFence: { obligationId: "obligation-1", claimToken: "claim-1", claimGeneration: 1, actorId: "rep-1" } }))
     expect(mocks.adminRpc).toHaveBeenNthCalledWith(2, "fn_record_rep_sms_obligation_result", expect.objectContaining({
       p_obligation_id: "obligation-1", p_claim_token: "claim-1", p_state: "accepted", p_provider_message_id: "provider-1",
     }))
@@ -73,12 +73,23 @@ describe("resumed rep SMS obligations", () => {
 
   it("records a provider failure as delivery_failed instead of retrying generically", async () => {
     mocks.readContext.mockResolvedValue(baseContext("required"))
-    mocks.adminRpc.mockResolvedValueOnce({ data: { ok: true, state: "sending", claimToken: "claim-1", assignmentId: "sender-1", toNumber: "+18165550123" }, error: null })
+    mocks.adminRpc.mockResolvedValueOnce({ data: { ok: true, state: "sending", claimToken: "claim-1", claimGeneration: 1, assignmentId: "sender-1", toNumber: "+18165550123" }, error: null })
     mocks.dispatch.mockResolvedValue({ status: "provider_failed", messageId: "message-1", error: "provider rejected" })
 
     const result = await sendRepSms({ propertyId: "property-1", obligationId: "obligation-1", assignmentId: "sender-1", composition })
 
     expect(result).toEqual(expect.objectContaining({ data: { outcome: { status: "delivery_failed", reason: "provider rejected" } } }))
     expect(mocks.adminRpc).toHaveBeenNthCalledWith(2, "fn_record_rep_sms_obligation_result", expect.objectContaining({ p_state: "delivery_failed", p_provider_error: "provider rejected" }))
+  })
+
+  it("keeps a pre-provider authorization fence failure retryable", async () => {
+    mocks.readContext.mockResolvedValue(baseContext("required"))
+    mocks.adminRpc.mockResolvedValueOnce({ data: { ok: true, state: "sending", claimToken: "claim-1", claimGeneration: 1, assignmentId: "sender-1", toNumber: "+18165550123" }, error: null })
+    mocks.dispatch.mockResolvedValue({ status: "provider_failed", messageId: "message-1", error: "stale dispatch fence", providerAttempted: false })
+
+    const result = await sendRepSms({ propertyId: "property-1", obligationId: "obligation-1", assignmentId: "sender-1", composition })
+
+    expect(result).toEqual(expect.objectContaining({ data: { outcome: { status: "failed_not_dispatched", reason: "stale dispatch fence" } } }))
+    expect(mocks.adminRpc).toHaveBeenNthCalledWith(2, "fn_record_rep_sms_obligation_result", expect.objectContaining({ p_state: "failed_not_dispatched", p_provider_error: "stale dispatch fence" }))
   })
 })

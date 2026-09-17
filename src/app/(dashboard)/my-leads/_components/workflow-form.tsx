@@ -111,11 +111,13 @@ export function WorkflowDialogFooter({
   submitLabel,
   onCancel,
   destructive = false,
+  disabled = false,
 }: {
   submitting: boolean
   submitLabel: string
   onCancel: () => void
   destructive?: boolean
+  disabled?: boolean
 }) {
   const recovery = useContext(WorkflowRecoveryContext)
   return (
@@ -123,7 +125,7 @@ export function WorkflowDialogFooter({
       <Button type="button" variant="outline" disabled={submitting} onClick={onCancel}>
         Cancel
       </Button>
-      <Button type="submit" variant={destructive ? "destructive" : "default"} disabled={submitting || recovery?.blocked || recovery?.busy}>
+      <Button type="submit" variant={destructive ? "destructive" : "default"} disabled={disabled || submitting || recovery?.blocked || recovery?.busy}>
         {submitting ? "Saving…" : submitLabel}
       </Button>
     </DialogFooter>
@@ -153,6 +155,7 @@ export function DateTimeField({
   onChange,
   error,
   required = true,
+  disabled = false,
 }: {
   id: string
   label: string
@@ -160,6 +163,7 @@ export function DateTimeField({
   onChange: (value: string) => void
   error?: string
   required?: boolean
+  disabled?: boolean
 }) {
   const errorId = `${id}-error`
   return (
@@ -170,6 +174,7 @@ export function DateTimeField({
         type="datetime-local"
         value={value}
         aria-required={required}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : undefined}

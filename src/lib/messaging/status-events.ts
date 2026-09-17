@@ -1,12 +1,15 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { reportError } from "@/lib/errors/report";
 import { recordAiResponderDeliveryForThread } from "@/lib/messages/ai-responder-thread-state";
+import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/types";
 import type { SmsStatusEvent } from "./types";
 
 type MessageStatusRow = Pick<
   Database["public"]["Tables"]["messages"]["Row"],
   | "id"
+  | "org_id"
   | "status"
   | "sent_at"
   | "delivered_at"
@@ -36,7 +39,7 @@ export async function applyMessageStatusEvent(
   const { data: messages, error } = await supabase
     .from("messages")
     .select(
-      "id, status, sent_at, delivered_at, failed_at, error_message, created_at, conversation_id, metadata",
+      "id, org_id, status, sent_at, delivered_at, failed_at, error_message, created_at, conversation_id, metadata",
     )
     .eq("external_id", event.externalId)
     .eq("provider", providerId)
@@ -56,11 +59,23 @@ export async function applyMessageStatusEvent(
   if (!message) return "unknown";
 
   const update = buildStatusUpdate(message, event);
-  if (!update) return "skipped";
+  if (!update) {
+    await recordRepSmsDeliveryFromMessage(supabase, providerId, event, message);
+    return "skipped";
+  }
 
   let query = supabase.from("messages").update(update).eq("id", message.id);
   if (event.kind === "delivered") {
-    query = query.neq("status", "failed");
+    if (isProviderUnknownMessage(message)) {
+      // provider_unknown is persisted as failed while the provider receipt is
+      // unresolved. Allow only that exact placeholder state to be promoted;
+      // a genuine terminal failure remains protected from late delivery.
+      query = query
+        .eq("status", "failed")
+        .eq("metadata->>providerOutcome", "provider_unknown");
+    } else {
+      query = query.neq("status", "failed");
+    }
   } else if (event.kind === "sent") {
     query = query.neq("status", "delivered").neq("status", "failed");
   } else if (event.kind === "failed") {
@@ -71,7 +86,11 @@ export async function applyMessageStatusEvent(
   if (updateError) {
     throw new Error(`status update failed: ${updateError.message}`);
   }
-  if ((updatedRows ?? []).length === 0) return "skipped";
+  if ((updatedRows ?? []).length === 0) {
+    await recordRepSmsDeliveryFromMessage(supabase, providerId, event, message);
+    return "skipped";
+  }
+  await recordRepSmsDeliveryFromMessage(supabase, providerId, event, message);
   await recordAiResponderDeliveryForThread(supabase, {
     conversationId: message.conversation_id,
     messageId: message.id,
@@ -79,6 +98,102 @@ export async function applyMessageStatusEvent(
     event,
   });
   return "updated";
+}
+
+/**
+ * Complete the durable rep-SMS obligation after the transport row has been
+ * reconciled. This is deliberately best effort: provider callbacks must keep
+ * acknowledging ordinary SMS traffic even when the optional rep-SMS schema
+ * is unavailable or has no matching obligation.
+ *
+ * The provider account identity is read only from the stored outbound
+ * message's repSms metadata. The webhook supplies the provider message id
+ * after it has already matched the authoritative messages row above.
+ */
+export async function recordRepSmsDeliveryFromMessage(
+  supabase: SupabaseClient<Database>,
+  providerId: string,
+  event: SmsStatusEvent,
+  message: Pick<MessageStatusRow, "id" | "org_id" | "metadata">,
+): Promise<void> {
+  if (event.kind === "sent") return;
+
+  const identity = readRepSmsDeliveryIdentity(message.metadata);
+  if (!identity || identity.provider.toLowerCase() !== providerId.toLowerCase()) {
+    return;
+  }
+
+  try {
+    // Delivery callbacks are service-only. `supabase` may be the signed-in
+    // user client when this function is reached from sendSmsToContact's
+    // reconciliation path, so never attempt the RPC on that client.
+    const admin = createAdminClient();
+    const result = await admin.rpc("fn_record_rep_sms_delivery", {
+      p_provider: providerId,
+      p_provider_account_id: identity.providerAccountId,
+      p_provider_message_id: event.externalId,
+      p_state: event.kind === "delivered" ? "delivered" : "delivery_failed",
+      p_provider_status: event.kind,
+      p_provider_error:
+        event.kind === "failed"
+          ? event.errorMessage ?? "Provider reported delivery failure."
+          : null,
+      p_metadata: {
+        source: "sendillo_status_webhook",
+        messageId: message.id,
+        messageOrgId: message.org_id,
+        eventTimestamp: event.timestamp.toISOString(),
+      },
+    });
+
+    if (result.error) {
+      reportRepSmsDeliveryBridgeError(result.error.message);
+    }
+  } catch (error) {
+    reportRepSmsDeliveryBridgeError(
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+function readRepSmsDeliveryIdentity(
+  metadata: Database["public"]["Tables"]["messages"]["Row"]["metadata"],
+): { provider: string; providerAccountId: string } | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+  const repSms = metadata.repSms;
+  if (!repSms || typeof repSms !== "object" || Array.isArray(repSms)) {
+    return null;
+  }
+  const provider = repSms.provider;
+  const providerAccountId = repSms.providerAccountId;
+  if (
+    typeof provider !== "string" ||
+    !provider.trim() ||
+    typeof providerAccountId !== "string" ||
+    !providerAccountId.trim()
+  ) {
+    return null;
+  }
+  return {
+    provider: provider.trim(),
+    providerAccountId: providerAccountId.trim(),
+  };
+}
+
+function isProviderUnknownMessage(message: Pick<MessageStatusRow, "metadata" | "status">): boolean {
+  if (message.status !== "failed") return false;
+  if (!message.metadata || typeof message.metadata !== "object" || Array.isArray(message.metadata)) {
+    return false;
+  }
+  return message.metadata.providerOutcome === "provider_unknown";
+}
+
+function reportRepSmsDeliveryBridgeError(message: string): void {
+  reportError(new Error(`rep SMS delivery bridge failed: ${message}`), {
+    tags: { surface: "rep_sms_delivery_bridge" },
+  });
 }
 
 export async function reconcileStoredStatusEvents(
@@ -144,11 +259,22 @@ function buildStatusUpdate(
 
   switch (event.kind) {
     case "delivered": {
-      if (message.status === "failed") return null;
+      const unresolvedProviderOutcome = isProviderUnknownMessage(message);
+      if (message.status === "failed" && !unresolvedProviderOutcome) return null;
       if (!shouldApplyTimestamp(message.delivered_at, timestamp)) return null;
+      const metadata = unresolvedProviderOutcome
+        ? clearProviderUnknownMetadata(message.metadata)
+        : undefined;
       return {
         status: "delivered",
         delivered_at: timestamp,
+        ...(unresolvedProviderOutcome
+          ? {
+              failed_at: null,
+              error_message: null,
+              ...(metadata ? { metadata } : {}),
+            }
+          : {}),
       };
     }
     case "sent": {
@@ -170,10 +296,14 @@ function buildStatusUpdate(
         Boolean(nextErrorMessage) &&
         nextErrorMessage !== message.error_message;
       if (!shouldApplyTime && !shouldApplyError) return null;
+      const metadata = isProviderUnknownMessage(message)
+        ? clearProviderUnknownMetadata(message.metadata)
+        : undefined;
       return {
         status: "failed",
         failed_at: shouldApplyTime ? timestamp : message.failed_at,
         error_message: nextErrorMessage ?? null,
+        ...(metadata ? { metadata } : {}),
       };
     }
   }
@@ -185,6 +315,18 @@ function shouldApplyTimestamp(current: string | null, next: string): boolean {
   const nextMs = new Date(next).getTime();
   if (Number.isNaN(currentMs) || Number.isNaN(nextMs)) return true;
   return nextMs > currentMs;
+}
+
+function clearProviderUnknownMetadata(
+  metadata: MessageStatusRow["metadata"],
+): MessageStatusUpdate["metadata"] | undefined {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return undefined;
+  }
+  if (metadata.providerOutcome !== "provider_unknown") return undefined;
+  const next = { ...metadata };
+  delete next.providerOutcome;
+  return next;
 }
 
 function parseStoredStatusEvent(row: WebhookEventRow): SmsStatusEvent {

@@ -640,7 +640,7 @@ export default async function LeadDetailPage({
         restrictionLabel={smsPresentation.consentLabel}
         restrictionDetail={smsPresentation.consentDetail}
       >
-        <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <RepSmsComposer propertyId={lead.id} /> : <SmsComposer
+        <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <RepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} /> : <SmsComposer
           propertyId={lead.id}
           homeownerContactId={lead.homeowner?.id ?? null}
           homeownerPhone={homeownerSmsPhone}
@@ -878,7 +878,7 @@ export default async function LeadDetailPage({
                 restrictionLabel={inlineSmsPresentation.consentLabel}
                 restrictionDetail={inlineSmsPresentation.consentDetail}
               >
-                <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <><RepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} />{!inlineReplyUnavailable && <AddNoteComposer propertyId={lead.id} compact />}</> : <InlineReply
+                <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? null : <InlineReply
                   propertyId={lead.id}
                   homeownerContactId={lead.homeowner?.id ?? null}
                   homeownerPhone={inlineReplyPhone}
@@ -893,7 +893,7 @@ export default async function LeadDetailPage({
                   }
                 />}</fieldset>
               </SmsEntryPointGate>
-              {inlineSmsPresentation.smsRestricted || inlineReplyUnavailable ? (
+              {isAcquisitionMember || inlineSmsPresentation.smsRestricted || inlineReplyUnavailable ? (
                 <div className="mt-2 flex justify-end">
                   <AddNoteComposer propertyId={lead.id} compact />
                 </div>

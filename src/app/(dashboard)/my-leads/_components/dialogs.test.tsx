@@ -155,7 +155,7 @@ describe("My Leads workflow dialogs", () => {
     }))
   })
 
-  it("keeps a no-answer draft visible when follow-up is blocked and closes after delivery", async () => {
+  it("freezes a recorded no-answer attempt and leaves its obligation for the composer to resume", async () => {
     const user = userEvent.setup()
     const onOpenChange = vi.fn()
     const onSubmit = vi.fn()
@@ -164,23 +164,37 @@ describe("My Leads workflow dialogs", () => {
         attemptRecorded: true,
         followUp: { status: "blocked" as const, message: "Sender assignment missing." },
       })
-      .mockResolvedValueOnce({
-        ok: true as const,
-        attemptRecorded: true,
-        followUp: { status: "delivered" as const },
-      })
     render(<AcquisitionAttemptDialog {...baseProps} onOpenChange={onOpenChange} onSubmit={onSubmit} />)
     await user.selectOptions(screen.getByLabelText("External outcome"), "no_answer")
     await user.selectOptions(screen.getByLabelText("Curated follow-up template"), "no-answer-availability")
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-12T09:00" } })
-    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+    const saveButton = screen.getByRole("button", { name: "Save attempt" })
+    await user.click(saveButton)
     expect(screen.getByText("Follow-up blocked")).toBeInTheDocument()
     expect(screen.getByLabelText("Editable follow-up remainder")).toHaveValue("When would be a good time for you and Maria to connect about the property?")
     expect(onOpenChange).not.toHaveBeenCalledWith(false)
+    expect(screen.getByLabelText("External outcome")).toBeDisabled()
+    expect(screen.getByLabelText("Editable follow-up remainder")).toBeDisabled()
+    expect(saveButton).toBeDisabled()
 
+    // A changed draft cannot turn the already-recorded attempt into another
+    // submission. The separate Text lead composer resumes the saved obligation.
+    await user.click(saveButton)
+    expect(onSubmit).toHaveBeenCalledOnce()
+    expect(onOpenChange).not.toHaveBeenCalledWith(false)
+  })
+
+  it("describes a missing required follow-up template to assistive technology", async () => {
+    const user = userEvent.setup()
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={vi.fn()} />)
+    await user.selectOptions(screen.getByLabelText("External outcome"), "no_answer")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-12T09:00" } })
     await user.click(screen.getByRole("button", { name: "Save attempt" }))
-    expect(onSubmit).toHaveBeenCalledTimes(2)
-    expect(onOpenChange).toHaveBeenCalledWith(false)
+
+    expect(screen.getByLabelText("Curated follow-up template")).toHaveAttribute(
+      "aria-describedby",
+      "acquisition-follow-up-template-error",
+    )
   })
 
   it("keeps Sandra unavailable without a call and explains how to log external outreach", async () => {

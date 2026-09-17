@@ -81,10 +81,10 @@ begin
   else v_state:='required'; v_reason:=null;
   end if;
   insert into public.rep_sms_obligations(
-    org_id,property_id,assignment_episode_id,attempt_id,actor_user_id,provider,sender_assignment_id,
+    org_id,property_id,assignment_episode_id,attempt_id,actor_user_id,provider,provider_account_id,sender_assignment_id,
     from_number,to_number,message_body,composition,state,blocked_reason,next_attempt_at
   ) values(
-    p_org_id,p_property_id,p_episode_id,p_attempt_id,p_actor_id,v_sender.provider,v_sender.id,
+    p_org_id,p_property_id,p_episode_id,p_attempt_id,p_actor_id,v_sender.provider,v_sender.provider_account_id,v_sender.id,
     v_sender.phone_e164,v_to,nullif(btrim(p_input->>'smsBody'),''),
     case when jsonb_typeof(p_input->'followUp')='object' then p_input->'followUp' else '{}'::jsonb end,
     v_state,v_reason,statement_timestamp()

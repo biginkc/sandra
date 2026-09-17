@@ -137,6 +137,18 @@ export type SendSmsOutcome =
       status: "provider_failed";
       messageId: string;
       error: string;
+      /** False means the manual authorization fence failed before fetch. */
+      providerAttempted?: boolean;
+    }
+  | {
+      /**
+       * The provider boundary was reached but Sendillo did not provide
+       * definitive non-delivery evidence. This is a durable hold: callers
+       * must reconcile the provider receipt before offering another send.
+       */
+      status: "provider_unknown";
+      messageId: string;
+      error: string;
     }
   | {
       status: "provider_deferred";
@@ -453,8 +465,10 @@ export async function sendSmsToContact(
   // 6. Send. Keep accepted-provider errors outside provider failure handling.
   let acceptedExternalId: string | undefined;
   let providerAccepted = false;
+  let providerCallStarted = false;
   try {
     await manualDispatch?.authorize();
+    providerCallStarted = true;
     const result = await provider.sendSms({
       to: destination.phone,
       body: input.body,
@@ -510,6 +524,32 @@ export async function sendSmsToContact(
         error: message,
       };
     }
+    if (isAmbiguousProviderError(e)) {
+      await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: message,
+          metadata: {
+            ...(inputMetadata ?? {}),
+            providerOutcome: "provider_unknown",
+            providerAttempt: {
+              pendingAt,
+              maxPendingMs: PROVIDER_PENDING_STALE_MS,
+              terminal: true,
+              retryable: false,
+            },
+          } as Json,
+        })
+        .eq("id", pending.id)
+        .eq("status", "pending");
+      return {
+        status: "provider_unknown",
+        messageId: pending.id,
+        error: message,
+      };
+    }
     await supabase
       .from("messages")
       .update({
@@ -530,6 +570,7 @@ export async function sendSmsToContact(
       status: "provider_failed",
       messageId: pending.id,
       error: message,
+      ...(manualDispatch && !providerCallStarted ? { providerAttempted: false } : {}),
     };
   }
 }
@@ -1116,6 +1157,36 @@ export async function releaseQueuedMessage(
         error: message,
       };
     }
+    if (isAmbiguousProviderError(e)) {
+      const unknownMetadata = {
+        ...(currentMetadata ?? {}),
+        providerOutcome: "provider_unknown",
+        providerAttempt: {
+          pendingAt,
+          maxPendingMs: PROVIDER_PENDING_STALE_MS,
+          terminal: true,
+          retryable: false,
+        },
+      } as Json;
+      const { error: unknownError } = await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: message,
+          metadata: unknownMetadata,
+        })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (unknownError) {
+        return { status: "db_error", error: unknownError.message };
+      }
+      return {
+        status: "provider_unknown",
+        messageId: msg.id,
+        error: message,
+      };
+    }
     const retry = buildProviderRetryUpdate(e, currentMetadata);
     if (retry.defer) {
       const pauseForRetry = await campaignIsPaused(supabase, msg.campaign_id);
@@ -1365,21 +1436,14 @@ function readProviderRetryMetadata(
   };
 }
 
-// Codex round 9 (finding 1): sendillo.ts now stamps `details.isAbort = true`
-// on a ProviderError thrown from either its own internal send timeout or an
-// external AbortSignal (see that file's sendSms doc comment). This
-// classifier deliberately does NOT read that flag — it only ever looks at
-// `details?.status` (an HTTP status Sendillo returned), so an ambiguous
-// abort/timeout here keeps its EXISTING classification: not transient, one
-// terminal `provider_failed`/deferred-cap write, same as before this round.
-// Verified deliberately, not by omission: this queue's retry semantics are
-// keyed on HTTP status codes (408/425/429/5xx) that imply the provider
-// itself said "try again" — a timeout where the provider never responded at
-// all doesn't map onto that vocabulary, and folding `isAbort` in here would
-// be a real behavior change (retry-on-ambiguous-timeout for seller-facing
-// sends) out of scope for this round, which only concerns the rep-SMS
-// aborted_ambiguous path (rep-sms.ts).
+// Provider retries are allowed only for errors with documented retry
+// semantics. The Sendillo adapter marks its ambiguous boundary outcomes
+// before this classifier runs, so those rows stay on the non-resend hold.
 function isTransientProviderError(error: unknown): boolean {
+  // Sendillo's timeout, transport failure, 5xx response, and 2xx response
+  // without a reconcilable message id all leave delivery uncertain. They
+  // must never enter the generic retry queue, which could duplicate a text.
+  if (isAmbiguousProviderError(error)) return false;
   if (error instanceof ProviderError) {
     const status = error.details?.status;
     if (
@@ -1400,6 +1464,25 @@ function isTransientProviderError(error: unknown): boolean {
   return /\b429\b|rate limit|too many requests|timeout|timed out|abort|network|fetch failed|econn|etimedout|temporar|5\d\d/.test(
     message,
   );
+}
+
+/**
+ * A provider error can be safely retried only when the provider proved it
+ * rejected the request before accepting it. Sendillo's API gives us no such
+ * proof for a transport/abort failure, a 5xx response, or a successful
+ * response with no message id. Keep this classifier deliberately narrow so
+ * another adapter's documented retry contract is unchanged.
+ */
+function isAmbiguousProviderError(error: unknown): boolean {
+  if (!(error instanceof ProviderError) || error.provider !== "sendillo") {
+    return false;
+  }
+  const details = error.details;
+  if (!details || details.notSent === true) return false;
+  return details.ambiguousDelivery === true
+    || details.transportFailure === true
+    || details.isAbort === true
+    || details.acceptedWithoutId === true;
 }
 
 function consentMessage(state: ConsentState): string {

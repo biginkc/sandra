@@ -246,10 +246,10 @@ export class SendilloMessagingProvider implements MessagingProvider {
       number: n.phoneE164,
       ownerName: "Sendillo",
       ownerType: "sendillo",
-      // Never the literal "available" — that's Dialpad's unassigned-number
-      // status, which the composer filters out; Sendillo has no such
-      // concept, so any provider-reported status (or its absence) passes.
-      status: n.status ?? "active",
+      // Preserve an absent status as empty evidence. Rep SMS assignment
+      // filters require the provider's affirmative `active` vocabulary and
+      // must never treat a missing status as implicitly active.
+      status: n.status ?? "",
     }));
   }
 

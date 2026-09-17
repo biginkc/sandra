@@ -57,4 +57,43 @@ describe("RepSmsComposer obligation resume", () => {
     expect(screen.queryByRole("button", { name: "Resume draft" })).not.toBeInTheDocument()
     expect(mocks.send).not.toHaveBeenCalled()
   })
+
+  it("shows pending reconciliation and does not offer a resume action for an ambiguous provider result", async () => {
+    mocks.load.mockResolvedValue({ ok: true, data: context("required") })
+    mocks.send.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        outcome: {
+          status: "provider_unknown",
+          messageId: "attempted-message",
+          error: "The provider did not return a definitive receipt.",
+        },
+      },
+    })
+    const user = userEvent.setup()
+    render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    await waitFor(() => expect(screen.getByLabelText("Editable message remainder")).toHaveValue(savedComposition.remainder))
+
+    await user.click(screen.getByRole("button", { name: "Send resumed draft" }))
+
+    await waitFor(() => expect(screen.getByText("Pending reconciliation")).toBeInTheDocument())
+    expect(screen.getByText(/Reconciliation is pending/)).toBeInTheDocument()
+    expect(screen.getByLabelText("Editable message remainder")).toHaveValue(savedComposition.remainder)
+    expect(screen.queryByRole("button", { name: "Resume draft" })).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Send text" })).toBeDisabled()
+  })
+
+  it("connects the required template error to its select", async () => {
+    const data = context("required") as any
+    data.obligation.composition = null
+    mocks.load.mockResolvedValue({ ok: true, data })
+    const user = userEvent.setup()
+    render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+
+    const template = await screen.findByLabelText("Curated follow-up template")
+    expect(template).toHaveAttribute("aria-describedby", "rep-sms-template-error-property-1")
+    expect(screen.getByText(/Choose a follow-up template before sending/)).toBeInTheDocument()
+  })
 })
