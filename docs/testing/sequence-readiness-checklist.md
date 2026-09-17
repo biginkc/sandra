@@ -8,9 +8,9 @@ This is a work checklist, not a release approval. All evidence must be tied to t
 - [x] Database migration applies with active-claim index checks.
 - [x] Three-step lifecycle and 20 synchronized claim trials passed in run 3.
 - [x] Broad unit and component snapshot passed (4,612 / 1,511).
-- [ ] Run 4 recovery, stop-race, fixture and backlog failures repaired and rerun.
-- [ ] Remaining enrollment/import/tenant, durable stop, scheduling and post-send fault contracts exercised.
-- [ ] Queue overlap and clock-advancing in-flight budget contracts exercised.
+- [x] Run 4 recovery, stop-race, fixture and backlog failures repaired and rerun.
+- [x] Remaining enrollment/import/tenant, durable stop, scheduling and post-send fault contracts exercised.
+- [x] Queue overlap and clock-advancing in-flight budget contracts exercised.
 - [ ] Real app browser create/edit/enroll/thread/reply/pause/resume/cancel and tenant controls pass.
 - [ ] Targeted mutations fail specific assertions while positive controls pass; clean baseline reconfirmed.
 - [x] Opus source review 3 and migration delta review pass, conditional on runtime evidence.
@@ -18,3 +18,5 @@ This is a work checklist, not a release approval. All evidence must be tied to t
 - [ ] Dependency-correct PR prepared with exact tested SHA and evidence.
 
 Live-provider and recurring-monitor phases remain specification-only, with allowance zero. Their future recipient authorization and atomic send-slot mutation checks must pass before any live execution; local readiness does not authorize live sends or production deployment.
+
+Database evidence:231/231 passed on3fcf38387157a1598423b52fd82378b1178131cd, CI run35209814889. Production build and Verify passed at that revision; final candidate verification remains required after further changes. Browser4/6 passed; mutation gates remain unexecuted.

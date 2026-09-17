@@ -60,7 +60,7 @@ jobs:
               relative="${file#test-results/sequence-readiness/}"
               target="$destination/$relative"
               mkdir -p "$(dirname "$target")"
-              if [[ "$file" == *.md ]]; then
+              if [[ "$file" == *.md || "$file" == *.json ]]; then
                 python3 - "$file" "$target" <<'PY'
           import re
           import sys
@@ -75,7 +75,7 @@ jobs:
               else
                 cp "$file" "$target"
               fi
-            done < <(find test-results/sequence-readiness -type f \( -name 'error-context.md' -o -name '*.png' \) -print0)
+            done < <(find test-results/sequence-readiness -type f \( -name 'error-context.md' -o -name '*.json' -o -name '*.png' \) -print0)
           fi
       - name: Upload scrubbed disposable browser evidence
         if: always()

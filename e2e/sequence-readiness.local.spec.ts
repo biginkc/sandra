@@ -1,4 +1,10 @@
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Page,
+  type TestInfo,
+} from "@playwright/test";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -80,12 +86,11 @@ async function createSequence(page: Page, name: string): Promise<string> {
   const createButton = page.getByRole("button", { name: /^create$/i });
   await expect(nameInput).toBeVisible();
   await expect(nameInput).toBeEditable();
-  await nameInput.fill(name);
-  await descriptionInput.fill("Local browser persistence contract");
-  // In Next dev, hydration can replace a controlled input after the first
-  // sibling interaction. Re-apply the value and assert that React retained it
-  // before submitting, rather than retrying the server action or sleeping.
-  await nameInput.fill(name);
+  // CI showed `fill()` leaving the DOM value present while the controlled name
+  // state stayed empty. Keyboard events exercise the same onChange path as a
+  // user and keep the button's state tied to the value we assert below.
+  await nameInput.pressSequentially(name);
+  await descriptionInput.pressSequentially("Local browser persistence contract");
   await expect(nameInput).toHaveValue(name);
   await expect(descriptionInput).toHaveValue("Local browser persistence contract");
   await expect(createButton).toBeEnabled();
@@ -146,6 +151,94 @@ function isLoopbackHttpUrl(value: string): boolean {
   );
 }
 
+type BrowserDiagnostics = {
+  pageErrors: string[];
+  consoleErrors: string[];
+  failedRequests: Array<{ method: string; url: string; error: string | null }>;
+  failedLocalScriptResponses: Array<{
+    method: string;
+    status: number;
+    url: string;
+  }>;
+};
+
+const browserDiagnostics = new WeakMap<Page, BrowserDiagnostics>();
+
+function diagnosticUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return "[invalid-url]";
+  }
+}
+
+function diagnosticText(value: string): string {
+  return value
+    .replace(/\bbearer\s+[A-Za-z0-9._-]+/gi, "Bearer [REDACTED]")
+    .replace(/\bjwt\s+[A-Za-z0-9._-]+/gi, "JWT [REDACTED]")
+    .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[JWT-REDACTED]")
+    .replace(
+      /((?:authorization|bearer|access[_ -]?token|refresh[_ -]?token|service[_ -]?role|anon[_ -]?key|secret|password)\s*[:=]\s*)[^\s,;]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/postgres(?:ql)?:\/\/[^\s)]+/gi, "postgresql://[REDACTED]")
+    .replace(/https?:\/\/[^\s)'\"`<>]+/gi, (url) => diagnosticUrl(url))
+    .slice(0, 2_000);
+}
+
+function recordDiagnostic<T>(items: T[], item: T): void {
+  if (items.length < 50) items.push(item);
+}
+
+function installBrowserDiagnostics(page: Page): void {
+  const diagnostics: BrowserDiagnostics = {
+    pageErrors: [],
+    consoleErrors: [],
+    failedRequests: [],
+    failedLocalScriptResponses: [],
+  };
+  browserDiagnostics.set(page, diagnostics);
+
+  page.on("pageerror", (error) => {
+    recordDiagnostic(diagnostics.pageErrors, diagnosticText(error.message));
+  });
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      recordDiagnostic(diagnostics.consoleErrors, diagnosticText(message.text()));
+    }
+  });
+  page.on("requestfailed", (request) => {
+    recordDiagnostic(diagnostics.failedRequests, {
+      method: request.method(),
+      url: diagnosticUrl(request.url()),
+      error: request.failure()?.errorText
+        ? diagnosticText(request.failure()!.errorText)
+        : null,
+    });
+  });
+  page.on("response", (response) => {
+    const request = response.request();
+    if (request.resourceType() !== "script" || response.status() < 400) return;
+    if (!isLoopbackHttpUrl(response.url())) return;
+    recordDiagnostic(diagnostics.failedLocalScriptResponses, {
+      method: request.method(),
+      status: response.status(),
+      url: diagnosticUrl(response.url()),
+    });
+  });
+}
+
+async function attachBrowserDiagnostics(page: Page, testInfo: TestInfo): Promise<void> {
+  if (testInfo.status === testInfo.expectedStatus) return;
+  const diagnostics = browserDiagnostics.get(page);
+  if (!diagnostics) return;
+  await testInfo.attach("browser-diagnostics", {
+    body: JSON.stringify(diagnostics, null, 2),
+    contentType: "application/json",
+  });
+}
+
 async function installBrowserEgressGuard(
   page: Page,
   request: APIRequestContext,
@@ -179,15 +272,25 @@ async function installBrowserEgressGuard(
 
 test.describe("sequence readiness — local browser contract", () => {
   test.beforeEach(async ({ page, request }) => {
+    installBrowserDiagnostics(page);
     await installBrowserEgressGuard(page, request);
     const admin = adminClient();
     await resetTenantTables(admin);
     await ensureTestUser(admin);
   });
 
+  test.afterEach(async ({ page }, testInfo) => {
+    await attachBrowserDiagnostics(page, testInfo);
+    browserDiagnostics.delete(page);
+  });
+
   test("create/edit/enroll then persist pause, resume, cancel, and reload", async ({
     page,
   }) => {
+    // This flow intentionally crosses several DB-backed routes; allow the
+    // cold Webpack dev server to compile them without changing the bounded
+    // 10-second readiness assertions below.
+    test.setTimeout(120_000);
     const admin = adminClient();
     await signIn(page);
 
@@ -274,6 +377,7 @@ test.describe("sequence readiness — local browser contract", () => {
     request,
     baseURL,
   }) => {
+    test.setTimeout(120_000);
     const admin = adminClient();
     await signIn(page);
 
