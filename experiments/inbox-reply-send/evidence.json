@@ -7,7 +7,7 @@
     "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
     "inbox-reply-send/attempts.sql": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9"
   },
-  "runner_sha256": "0152566ca68837a24571bae9fce2afd6378495d206e4d408bc8578e5cc644068",
+  "runner_sha256": "aa953e7d0e548bfa762f2b38cb4ab93cc50d8509aaee90b99ed01934e6fba13f",
   "checks": [
     "Happy path: insert (frozen-matching) -> claim -> expired-lease reclaim (generation strictly increases) -> start_dispatch (body/from/to byte-identical to frozen row) -> re-entry claim labels uncertain (never re-claims, never re-issues a token) -> persist wrong token raises, correct token reconciles to provider_accepted -> idempotent re-ack and post-accept uncertain are no-ops -> contradictory externalId raises -> provider_accepted->delivered (trigger edge, PR-G territory)",
     "#4 terminal resurrection: every out-of-matrix UPDATE on a terminal (delivered) row raises (approved/claimed/rejected_unsent); claim()/persist(uncertain) on a terminal row return stored data without mutating receipt_version; persist(not_attempted) on a terminal row raises. Mutation: trigger disabled -> both resurrection and rejected_unsent forcing succeed; trigger re-enabled -> both blocked again",

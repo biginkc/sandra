@@ -30,21 +30,34 @@ for i,path in enumerate(sources):
 # read once; every @@RESTORE_*@@ placeholder in `test` below is substituted
 # with the current candidate body extracted straight out of it.
 #
-# P7 (round 7, binding): assert_body_matches() below replaces the old
-# assert_installed()'s substring-needle check, which Astra round 6 proved
-# hollow — removing persist()'s null/invalid-kind predicate, or its
-# not_attempted reason-enum predicate, still left the needle strings
-# ('Invalid dispatch result', 'local_not_attempted:') present elsewhere in
-# the body (the object-type check, the evidence assignment), and putting a
-# needle only in a COMMENT also passed. assert_body_matches() instead
-# compares the INSTALLED function's whitespace-normalized body
-# (pg_get_functiondef, read back at runtime — never what we intended to
-# install) against the CANDIDATE's whitespace-normalized body (extracted
-# straight from the source .sql files): any removed, reordered, or
-# comment-relocated code changes the normalized text and trips it, because
-# the WHOLE body must match, not just a substring. See
+# P8 (round 8, binding): assert_body_matches() no longer compares
+# whitespace-normalized text. Astra round 7 defeated the round-7 comparator
+# two ways: (1) replacing the newline that ENDS persist()'s `-- B1` comment
+# with a space folds the following line into that `--` comment (a `--`
+# comment runs to end-of-line) — a real, byte-level change to prosrc — but
+# whitespace normalization collapses both the removed newline and its
+# replacement space to the same single space, so the normalized comparison
+# saw no difference; (2) a body-only comparison never looks at the
+# function's ATTRIBUTES at all, so adding STRICT (or flipping
+# VOLATILE/STABLE/IMMUTABLE, SECURITY DEFINER, SET search_path, or an
+# arg/return type) changes real runtime behavior while leaving the body text
+# untouched.
+#
+# assert_body_matches() now installs the EXACT candidate CREATE OR REPLACE
+# statement — byte-for-byte, only its schema-qualified name changed — into a
+# SCRATCH schema, then compares pg_get_functiondef() of the function
+# ACTUALLY installed under the real name against pg_get_functiondef() of the
+# scratch-installed candidate, byte-exact, with only the one
+# schema-qualified name token normalized in each (the sole expected
+# difference, since Postgres renders both through the identical
+# pg_get_functiondef formatter). This catches the comment-out-via-newline
+# trick (the raw newline/space difference now survives — nothing is
+# whitespace-collapsed) AND any behavioral-attribute mutation, because
+# pg_get_functiondef renders STRICT/VOLATILE/STABLE/IMMUTABLE/SECURITY
+# DEFINER/SET search_path/LANGUAGE/arg+return types along with the body. See
 # pg_temp.assert_body_matches (installed once, below) for the SQL side.
 ALL_SOURCES_SQL=''.join(s.read_text() for s in sources)
+SCRATCH_SCHEMA='inbox_reply_send_scratch'
 def real_fn(qualified_name):
  # Terminator is the first bare "$$;" line after the opening — matches both
  # a plpgsql body ("...END $$;\n") and a bodyless SQL-language body
@@ -63,51 +76,71 @@ def real_fn_minus_edge(qualified_name,edge_marker):
  kept=[l for l in lines if edge_marker not in l]
  if len(kept)==len(lines):raise RuntimeError(f'real_fn_minus_edge: {edge_marker!r} not found in {qualified_name}')
  return '\n'.join(kept)
-def _extract_body(definition_sql):
- """Whitespace-normalized text between a dollar-quoted body's delimiters,
- from either a CREATE [OR REPLACE] FUNCTION statement (every real candidate
- in this codebase uses the bare '$$' tag) or a pg_get_functiondef()
- readback (Postgres always tags the body '$function$', regardless of the
- tag used at CREATE time — verified empirically against this Postgres
- version). Collapsing whitespace runs to one space and stripping means
- only a SEMANTIC difference changes the result: removed/reordered code, or
- a needle relocated into a comment, both change it, because comments are
- NOT stripped (prosrc keeps them verbatim) — a needle-in-a-comment
- mutation still shows up as a body difference against the real candidate."""
- m=re.search(r'AS\s+(\$[A-Za-z0-9_]*\$)(.*)\1',definition_sql,re.DOTALL)
- if not m:raise RuntimeError(f'_extract_body: no dollar-quoted body found in: {definition_sql[:200]!r}')
- return re.sub(r'\s+',' ',m.group(2)).strip()
-def candidate_body(qualified_name):
- """Ground truth for assert_body_matches: qualified_name's own body, read
- straight from the source .sql files (never pg_get_functiondef, never
- hand-typed)."""
- return _extract_body(real_fn(qualified_name))
-def _pg_dquote(text):
- """Dollar-quote text with a tag guaranteed absent from it."""
- tag='body';i=0
- while f'${tag}{i}$' in text:i+=1
- t=f'{tag}{i}'
- return f'${t}$'+text+f'${t}$'
+def real_fn_comment_out_newline(qualified_name,line_marker):
+ """Same as real_fn, but with the newline immediately AFTER the single line
+ containing line_marker replaced by a single space — used ONLY for the R8
+ comment-out-via-newline meta-test control: it folds the following source
+ line into a `--` comment (comments run to end-of-line, and this is now one
+ line longer) without touching anything else, so every OTHER byte still
+ matches the real candidate exactly."""
+ defn=real_fn(qualified_name)
+ lines=defn.split('\n')
+ idxs=[i for i,l in enumerate(lines) if line_marker in l]
+ if len(idxs)!=1:raise RuntimeError(f'real_fn_comment_out_newline: {line_marker!r} found {len(idxs)} times (expected 1) in {qualified_name}')
+ i=idxs[0]
+ return '\n'.join(lines[:i+1])+' '+'\n'.join(lines[i+1:])
+def real_fn_add_strict(qualified_name):
+ """Same as real_fn, but with STRICT inserted into the attribute list right
+ after LANGUAGE plpgsql — used ONLY for the R8 added-STRICT meta-test
+ control: a real behavioral change (a null argument now short-circuits to
+ NULL instead of running the body and raising) that leaves the body text
+ byte-for-byte untouched, so a body-only comparison cannot see it."""
+ defn=real_fn(qualified_name)
+ marker='LANGUAGE plpgsql '
+ if marker not in defn:raise RuntimeError(f'real_fn_add_strict: {marker!r} not found in {qualified_name}')
+ return defn.replace(marker,marker+'STRICT ',1)
+def _scratch_install(qualified_name):
+ """Return (scratch_qualified_name, DDL) that installs qualified_name's
+ candidate definition — read straight from the source .sql files, byte-
+ identical except for the one schema-qualified name token at its
+ declaration — under SCRATCH_SCHEMA, so pg_get_functiondef can canonicalize
+ the untouched candidate body AND attributes for a byte-exact comparison
+ against whatever is actually installed under the real name."""
+ defn=real_fn(qualified_name)
+ prefix='CREATE OR REPLACE FUNCTION '+qualified_name+'('
+ if not defn.startswith(prefix):raise RuntimeError(f'_scratch_install: {qualified_name} definition does not start with the expected declaration prefix')
+ name=qualified_name.split('.',1)[1]
+ scratch_name=f'{SCRATCH_SCHEMA}.{name}'
+ return scratch_name,'CREATE OR REPLACE FUNCTION '+scratch_name+'('+defn[len(prefix):]
 def assert_call(qualified_name):
- """PL/pgSQL statement calling the pg_temp.assert_body_matches checker
- (defined below, once, ahead of the DO block) with this function's
- candidate body embedded as a dollar-quoted literal."""
- return f"PERFORM pg_temp.assert_body_matches('{qualified_name}',{_pg_dquote(candidate_body(qualified_name))});\n"
+ """PL/pgSQL statements that (re)install qualified_name's exact candidate
+ definition into SCRATCH_SCHEMA under its own name, then call the
+ pg_temp.assert_body_matches checker (defined once, below) to compare it
+ byte-exact — body AND attributes — against whatever is ACTUALLY installed
+ under qualified_name right now. Schema creation is idempotent
+ (IF NOT EXISTS); the scratch objects live only inside this rollback-only
+ transaction, so nothing to clean up on success or failure."""
+ scratch_name,scratch_ddl=_scratch_install(qualified_name)
+ return f"CREATE SCHEMA IF NOT EXISTS {SCRATCH_SCHEMA};\n{scratch_ddl}\nPERFORM pg_temp.assert_body_matches('{qualified_name}','{scratch_name}');\n"
 # Installed once, ahead of the DO $test$ block, in the SAME session/
 # transaction (pg_temp persists for the session; this whole run is one
-# psql invocation ending in ROLLBACK). See the P7 docstring above for why
-# a full-body comparison, not a substring needle, is required.
+# psql invocation ending in ROLLBACK). See the P8 docstring above for why a
+# scratch-installed, byte-exact pg_get_functiondef comparison — not a
+# whitespace-normalized body substring — is required.
 ASSERT_BODY_MATCHES_FN=r"""
-CREATE FUNCTION pg_temp.assert_body_matches(qualified_name text,expected_body text) RETURNS void LANGUAGE plpgsql AS $checker$
-DECLARE installed_body text;
+CREATE FUNCTION pg_temp.assert_body_matches(qualified_name text,scratch_name text) RETURNS void LANGUAGE plpgsql AS $checker$
+DECLARE installed_def text;scratch_def text;p integer;
 BEGIN
- installed_body:=substring(pg_get_functiondef(qualified_name::regproc) FROM '\$function\$(.*)\$function\$');
- IF installed_body IS NULL THEN
-  RAISE EXCEPTION 'assert_body_matches: could not extract an installed body for % (pg_get_functiondef tag assumption broken?)',qualified_name;
- END IF;
- installed_body:=btrim(regexp_replace(installed_body,'\s+',' ','g'));
- IF installed_body<>expected_body THEN
-  RAISE EXCEPTION 'assert_body_matches: % installed body does not match its candidate definition in the source .sql files after restore — stale, hand-inlined, or tampered definition installed instead of the exact candidate',qualified_name;
+ installed_def:=pg_get_functiondef(qualified_name::regproc);
+ scratch_def:=pg_get_functiondef(scratch_name::regproc);
+ p:=position(qualified_name IN installed_def);
+ IF p=0 THEN RAISE EXCEPTION 'assert_body_matches: % not found in its own pg_get_functiondef output (formatter assumption broken)',qualified_name;END IF;
+ installed_def:=overlay(installed_def PLACING '<FN>' FROM p FOR length(qualified_name));
+ p:=position(scratch_name IN scratch_def);
+ IF p=0 THEN RAISE EXCEPTION 'assert_body_matches: % not found in its own pg_get_functiondef output (formatter assumption broken)',scratch_name;END IF;
+ scratch_def:=overlay(scratch_def PLACING '<FN>' FROM p FOR length(scratch_name));
+ IF installed_def IS DISTINCT FROM scratch_def THEN
+  RAISE EXCEPTION 'assert_body_matches: % installed definition does not byte-exactly match its scratch-installed candidate definition (pg_get_functiondef, only the schema-qualified name normalized) — stale, hand-inlined, tampered, or behaviorally different (STRICT/VOLATILE/SECURITY DEFINER/etc) definition installed instead of the exact candidate',qualified_name;
  END IF;
 END $checker$;
 """
@@ -901,6 +934,45 @@ END $stale_persist$;
    IF SQLERRM LIKE 'assert_body_matches:%' THEN failed:=true;ELSE RAISE;END IF;
   END;
   IF NOT failed THEN RAISE EXCEPTION 'R7 control #3: assert_body_matches did not trip on a staged stale (round-3-shape) persist restore — the guard is a no-op';END IF;
+
+  -- R8 control #1 (Astra round-7 finding, binding): install persist() with
+  -- ONLY the newline that ends its `-- B1` comment replaced by a single
+  -- space — every other byte identical to the real candidate. A `--`
+  -- comment runs to end-of-line, so this folds the very next source line
+  -- into that comment: a real, byte-level change to the installed
+  -- function's prosrc. The round-7 whitespace-normalizing comparator
+  -- collapsed the removed newline and its replacement space to the same
+  -- single space and saw no difference (this is the exact mutation Astra
+  -- used to defeat it). The round-8 scratch/pg_get_functiondef comparison
+  -- below does NOT normalize whitespace at all — only the schema-qualified
+  -- name token is normalized — so this byte-level difference must trip it.
+@@MUTATE_PERSIST_COMMENT_OUT_NEWLINE@@
+  failed:=false;
+  BEGIN
+@@ASSERT_PERSIST@@
+  EXCEPTION WHEN raise_exception THEN
+   IF SQLERRM LIKE 'assert_body_matches:%' THEN failed:=true;ELSE RAISE;END IF;
+  END;
+  IF NOT failed THEN RAISE EXCEPTION 'R8 control #1: assert_body_matches did not trip on persist with the newline ending its -- B1 comment replaced by a space — the round-7 whitespace-normalizing comparator is provably hollow against this exact mutation';END IF;
+
+  -- R8 control #2 (Astra round-7 finding, binding): install persist() with
+  -- STRICT added to its LANGUAGE clause — body text is completely
+  -- untouched (byte-identical to the real candidate); only an attribute
+  -- changed. STRICT is a real behavioral change (any NULL argument makes
+  -- Postgres short-circuit straight to a NULL result without ever running
+  -- the body — so a NULL token would silently return NULL instead of
+  -- raising INBOX_REPLY_STALE_TOKEN). A body-only comparison (round 7)
+  -- cannot see an attribute-only change at all; pg_get_functiondef renders
+  -- STRICT alongside the body, so the round-8 comparison must trip.
+@@MUTATE_PERSIST_ADD_STRICT@@
+  failed:=false;
+  BEGIN
+@@ASSERT_PERSIST@@
+  EXCEPTION WHEN raise_exception THEN
+   IF SQLERRM LIKE 'assert_body_matches:%' THEN failed:=true;ELSE RAISE;END IF;
+  END;
+  IF NOT failed THEN RAISE EXCEPTION 'R8 control #2: assert_body_matches did not trip on persist with STRICT added — a body-only comparison misses behavioral-attribute mutations entirely';END IF;
+
 @@RESTORE_PERSIST@@
   -- P7/R6 real assert: read back what is ACTUALLY installed (not what we
   -- intended to install) and fail loudly on ANY deviation from the exact
@@ -1116,6 +1188,8 @@ test=test.replace('@@RESTORE_START_DISPATCH@@',real_fn('inbox_reply_send.start_d
 test=test.replace('@@ASSERT_START_DISPATCH@@',assert_call('inbox_reply_send.start_dispatch'))
 test=test.replace('@@RESTORE_PERSIST@@',real_fn('inbox_reply_send.persist'))
 test=test.replace('@@ASSERT_PERSIST@@',assert_call('inbox_reply_send.persist'))
+test=test.replace('@@MUTATE_PERSIST_COMMENT_OUT_NEWLINE@@',real_fn_comment_out_newline('inbox_reply_send.persist',"always evaluated against a genuine object."))
+test=test.replace('@@MUTATE_PERSIST_ADD_STRICT@@',real_fn_add_strict('inbox_reply_send.persist'))
 test=test.replace('@@RESTORE_CLAIM_1@@',real_fn('inbox_reply_send.claim'))
 test=test.replace('@@ASSERT_CLAIM_1@@',assert_call('inbox_reply_send.claim'))
 test=test.replace('@@RESTORE_CLAIM_2@@',real_fn('inbox_reply_send.claim'))

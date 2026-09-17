@@ -8,8 +8,8 @@
     "inbox-reply-send/attempts.sql": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9"
   },
   "setup_sha256": "6b7727c4d425433061300598093e7a9cbb7051c6167ed4e81e930dc22f29cdeb",
-  "runner_sha256": "9b36b7b32dfa7b049ab5f5d4dcec5d40082c37f5e8edfa197f4a176c3cedc398",
-  "owned_org_id": "05d8c685-4913-4f54-ae9d-0d75deec2880",
+  "runner_sha256": "808eef6315ab93f8eabc236eb9b2515dee03cf240082010ff24429c53c158a86",
+  "owned_org_id": "1db7d883-9a70-4696-916f-cb76479fa40c",
   "checks": [
     "#1 double-claim: two real connections, reader observed waiting on the writer row lock (pg_stat_activity wait_event_type=Lock) before the writer committed; writer got {claimed}, reader got {busy}; generation bumped exactly once",
     "#1 mutation: claim() redefined without FOR UPDATE \u2014 the reader still blocks on the writer row lock (its own UPDATE has no state re-check), but on unblocking it blindly re-applies the transition: both connections report {kind:claimed} for the same row, generation double-bumped to 2 \u2014 the real double-claim the FOR UPDATE + reclaim predicate prevents; restored below",

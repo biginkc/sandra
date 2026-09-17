@@ -49,7 +49,7 @@ need(sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamesp
 # Defensive: a prior interrupted run of this script can leave schemas
 # committed (unlike run.py's rollback-only harness, this script commits real
 # DDL across separate connections). Clean any such leftovers before install.
-sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;")
+sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;DROP SCHEMA IF EXISTS inbox_reply_send_scratch CASCADE;")
 
 sources=[P.parent/'inbox-reply-boundary/context.sql',P.parent/'inbox-reply-preparation/recipient.sql',P.parent/'inbox-reply-preparation/batch.sql',P.parent/'inbox-reply-review/setup.sql',P.parent/'inbox-reply-review/public-api.sql',P/'attempts.sql']
 setup_sql=(P/'concurrency-setup.sql').read_text()
@@ -61,20 +61,37 @@ setup_sql=(P/'concurrency-setup.sql').read_text()
 # read once, and every restore re-slices the current candidate body straight
 # out of it.
 #
-# P7 (round 7, binding): assert_body_matches() replaces the old
-# assert_installed()'s substring-needle check. Astra round 6 proved that
-# hollow: removing persist()'s null/invalid-kind predicate, or its
-# not_attempted reason-enum predicate, still left the needle strings
-# ('Invalid dispatch result', 'local_not_attempted:') present elsewhere in
-# the body (the object-type check, the evidence assignment), and a needle
-# relocated into a COMMENT also passed — a substring check cannot tell code
-# from a comment. assert_body_matches() instead compares the INSTALLED
-# function's whitespace-normalized body (pg_get_functiondef, read back at
-# runtime) against the CANDIDATE's whitespace-normalized body (extracted
-# straight from the source .sql files): any removed, reordered, or
-# comment-relocated code changes the normalized text and trips it, because
-# the WHOLE body must match, not just a substring.
+# P8 (round 8, binding): assert_body_matches() no longer compares
+# whitespace-normalized text. Astra round 7 defeated the round-7 comparator
+# two ways: (1) replacing the newline that ENDS persist()'s `-- B1` comment
+# with a space folds the following line into that `--` comment (a `--`
+# comment runs to end-of-line) — a real, byte-level change to prosrc — but
+# whitespace normalization collapses both the removed newline and its
+# replacement space to the same single space, so the normalized comparison
+# saw no difference; (2) a body-only comparison never looks at the
+# function's ATTRIBUTES at all, so adding STRICT (or flipping
+# VOLATILE/STABLE/IMMUTABLE, SECURITY DEFINER, SET search_path, or an
+# arg/return type) changes real runtime behavior while leaving the body text
+# untouched.
+#
+# assert_body_matches() now installs the EXACT candidate CREATE OR REPLACE
+# statement — byte-for-byte, only its schema-qualified name changed — into a
+# SCRATCH schema (SCRATCH_SCHEMA), then compares pg_get_functiondef() of the
+# function ACTUALLY installed under the real name against
+# pg_get_functiondef() of the scratch-installed candidate, byte-exact, with
+# only the one schema-qualified name token normalized in each (the sole
+# expected difference, since Postgres renders both through the identical
+# pg_get_functiondef formatter). This catches the comment-out-via-newline
+# trick (the raw newline/space difference now survives — nothing is
+# whitespace-collapsed) AND any behavioral-attribute mutation, because
+# pg_get_functiondef renders STRICT/VOLATILE/STABLE/IMMUTABLE/SECURITY
+# DEFINER/SET search_path/LANGUAGE/arg+return types along with the body.
+# Unlike run.py's rollback-only harness, this script commits real DDL across
+# separate connections, so the scratch function is dropped again right after
+# each comparison (see the `finally` below) — nothing scratch-related is
+# ever left behind for a later invocation to trip over.
 ALL_SOURCES_SQL=''.join(s.read_text() for s in sources)
+SCRATCH_SCHEMA='inbox_reply_send_scratch'
 def real_fn(qualified_name):
  """Extract the exact `CREATE FUNCTION <qualified_name>(...) ... $$;` block
  for a function defined in the source .sql files, and return it as a CREATE
@@ -102,36 +119,52 @@ def real_fn_minus_block(qualified_name,start_marker,num_lines):
  if len(idxs)!=1:raise RuntimeError(f'real_fn_minus_block: {start_marker!r} found {len(idxs)} times (expected 1) in {qualified_name}')
  idx=idxs[0]
  return '\n'.join(lines[:idx]+lines[idx+num_lines:])
-def _extract_body(definition_sql):
- """Whitespace-normalized text between a dollar-quoted body's delimiters,
- from either a CREATE [OR REPLACE] FUNCTION statement (every real candidate
- in this codebase uses the bare '$$' tag) or a pg_get_functiondef()
- readback (Postgres always tags the body '$function$', regardless of the
- tag used at CREATE time — verified empirically against this Postgres
- version). Collapsing whitespace runs to one space and stripping means
- only a SEMANTIC difference changes the result: removed/reordered code, or
- a needle relocated into a comment, both change it, because comments are
- NOT stripped (prosrc keeps them verbatim)."""
- m=re.search(r'AS\s+(\$[A-Za-z0-9_]*\$)(.*)\1',definition_sql,re.DOTALL)
- if not m:raise RuntimeError(f'_extract_body: no dollar-quoted body found in: {definition_sql[:200]!r}')
- return re.sub(r'\s+',' ',m.group(2)).strip()
-def candidate_body(qualified_name):
- """Ground truth for assert_body_matches: qualified_name's own body, read
- straight from the source .sql files (never pg_get_functiondef, never
- hand-typed)."""
- return _extract_body(real_fn(qualified_name))
+def _scratch_install(qualified_name):
+ """Return (scratch_qualified_name, DDL) that installs qualified_name's
+ candidate definition — read straight from the source .sql files, byte-
+ identical except for the one schema-qualified name token at its
+ declaration — under SCRATCH_SCHEMA, so pg_get_functiondef can canonicalize
+ the untouched candidate body AND attributes for a byte-exact comparison
+ against whatever is actually installed under the real name."""
+ defn=real_fn(qualified_name)
+ prefix='CREATE OR REPLACE FUNCTION '+qualified_name+'('
+ if not defn.startswith(prefix):raise RuntimeError(f'_scratch_install: {qualified_name} definition does not start with the expected declaration prefix')
+ name=qualified_name.split('.',1)[1]
+ scratch_name=f'{SCRATCH_SCHEMA}.{name}'
+ return scratch_name,'CREATE OR REPLACE FUNCTION '+scratch_name+'('+defn[len(prefix):]
+def _normalize_functiondef(definition,name):
+ """Replace the FIRST occurrence of name (a schema-qualified function name)
+ in definition (a pg_get_functiondef() readback) with a fixed placeholder —
+ the sole expected difference between an installed function and its
+ scratch-installed twin. Everything else — body, comments, whitespace,
+ attributes — is left completely untouched, so the caller's comparison is
+ byte-exact on everything but the name."""
+ p=definition.find(name)
+ if p<0:raise RuntimeError(f'_normalize_functiondef: {name} not found in its own pg_get_functiondef output (formatter assumption broken)')
+ return definition[:p]+'<FN>'+definition[p+len(name):]
 def assert_body_matches(qualified_name):
- """Runtime guard against a stale restore: compare the INSTALLED function's
- whitespace-normalized body (pg_get_functiondef — never what we intended to
- install) against the CANDIDATE body extracted straight from the source
- .sql files. Call this immediately after every restore that a positive
- control depends on — a hand-inlined restore that silently omitted a later
- round's fix, reordered logic, or relocated a needle into a comment would
- otherwise let a stale positive control pass for the wrong reason."""
- installed_def=sql(f"SELECT pg_get_functiondef('{qualified_name}'::regproc)")
- installed_body=_extract_body(installed_def)
- want=candidate_body(qualified_name)
- need(installed_body==want,f'assert_body_matches: {qualified_name} installed body does not match its candidate definition in the source .sql files after restore — stale, hand-inlined, or tampered definition installed instead of the exact candidate')
+ """Runtime guard against a stale restore: install qualified_name's exact
+ candidate definition into SCRATCH_SCHEMA under its own name, then compare
+ pg_get_functiondef() of what is ACTUALLY installed under qualified_name
+ right now against pg_get_functiondef() of the scratch-installed candidate,
+ byte-exact except for the one schema-qualified name token in each. Call
+ this immediately after every restore that a positive control depends on —
+ a hand-inlined restore that silently omitted a later round's fix,
+ reordered logic, relocated a needle into a comment, or changed a
+ behavioral attribute (STRICT/VOLATILE/SECURITY DEFINER/etc) would
+ otherwise let a stale positive control pass for the wrong reason. The
+ scratch function is dropped again before returning, success or failure."""
+ sql(f'CREATE SCHEMA IF NOT EXISTS {SCRATCH_SCHEMA};')
+ scratch_name,scratch_ddl=_scratch_install(qualified_name)
+ sql(scratch_ddl)
+ try:
+  installed_def=sql(f"SELECT pg_get_functiondef('{qualified_name}'::regproc)")
+  scratch_def=sql(f"SELECT pg_get_functiondef('{scratch_name}'::regproc)")
+  installed_norm=_normalize_functiondef(installed_def,qualified_name)
+  scratch_norm=_normalize_functiondef(scratch_def,scratch_name)
+  need(installed_norm==scratch_norm,f'assert_body_matches: {qualified_name} installed definition does not byte-exactly match its scratch-installed candidate definition (pg_get_functiondef, only the schema-qualified name normalized) — stale, hand-inlined, tampered, or behaviorally different (STRICT/VOLATILE/SECURITY DEFINER/etc) definition installed instead of the exact candidate')
+ finally:
+  sql(f"DO $scratch_drop$ DECLARE cmd text; BEGIN SELECT 'DROP FUNCTION '||oid::regprocedure INTO cmd FROM pg_proc WHERE oid='{scratch_name}'::regproc; EXECUTE cmd; END $scratch_drop$;")
 installed=False;org=None;children=[]
 checks=[]
 try:
@@ -1160,14 +1193,14 @@ except Exception:
  for c in children:
   if c.poll() is None:c.terminate();c.wait(timeout=5)
  if installed:
-  sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;")
+  sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;DROP SCHEMA IF EXISTS inbox_reply_send_scratch CASCADE;")
  raise
 need(len(checks)==26,f'Expected 26 check groups, got {len(checks)}')
 # Only the private schemas are dropped — per the established
 # inbox-reply-preparation/recipient-concurrency.py precedent, the uniquely
 # marked synthetic canonical rows (organizations/contacts/properties/
 # messages under 'Owned PR-D concurrency %') are left in the owned fixture.
-sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;")
+sql("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;DROP SCHEMA IF EXISTS inbox_reply_send_scratch CASCADE;")
 need(sql("SELECT to_regnamespace('inbox_reply_context') IS NULL AND to_regnamespace('inbox_reply_preparation') IS NULL AND to_regnamespace('inbox_reply_review') IS NULL AND to_regnamespace('inbox_reply_send') IS NULL")=='t','Owned schema cleanup failed')
 (P/'concurrency-evidence.json').write_text(json.dumps({
  'sources_sha256':{str(path.relative_to(P.parent)):hashlib.sha256(path.read_bytes()).hexdigest() for path in sources},
