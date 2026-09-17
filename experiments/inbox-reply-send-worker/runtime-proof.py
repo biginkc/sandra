@@ -70,13 +70,13 @@ need(sql('SELECT marker FROM inbox_t2_fixture.identity') == 'sandra-inbox-projec
 need(sql("SELECT to_regnamespace('inbox_reply_send') IS NULL") == 't', 'Refusing existing reply_send schema — run cleanup or another proof left state behind')
 need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_send_worker')") == 't', 'Refusing existing worker role')
 
-# [Astra round-3] Dynamic, exhaustive-by-construction residual discovery —
+# [Astra round-7] Dynamic, exhaustive-by-construction residual discovery —
 # see owned_cleanup.py's module docstring. MUST run before anything else
-# writes a row, so COUNTER_BASELINE reflects the true pre-run state.
-ORG_TABLES, USER_TABLES, COUNTER_TABLES, ID_TABLES = owned_cleanup.discover(sql)
-COUNTER_BASELINE = owned_cleanup.snapshot_counters(sql, COUNTER_TABLES)
-BASELINE_HASHES = owned_cleanup.snapshot_baseline_hashes(sql, ID_TABLES)
-print(f'Discovered {len(ORG_TABLES)} org_id-scoped + {len(USER_TABLES)} user_id-scoped + {len(COUNTER_TABLES)} counter table(s) to verify residual-free at cleanup, plus {len(ID_TABLES)} id-scoped table(s) baselined for content-hash verification')
+# writes a row, so BASELINE reflects the true pre-run state for every table
+# in the single uniform universe (no org/user/counter/id-scoped split).
+ORG_TABLES, USER_TABLES, ALL_TABLES = owned_cleanup.discover(sql)
+BASELINE = owned_cleanup.snapshot_baseline(sql, ALL_TABLES)
+print(f'Discovered {len(ALL_TABLES)} table(s) database-wide (uniform content-signature universe, no category exclusions) — {len(ORG_TABLES)} org_id-scoped + {len(USER_TABLES)} user_id-scoped for the sweep')
 
 sources = [P.parent / 'inbox-reply-boundary/context.sql', P.parent / 'inbox-reply-preparation/recipient.sql', P.parent / 'inbox-reply-preparation/batch.sql',
            P.parent / 'inbox-reply-review/setup.sql', P.parent / 'inbox-reply-review/public-api.sql', P.parent / 'inbox-reply-send/attempts.sql',
@@ -278,16 +278,10 @@ finally:
             n = sql(query, check=False)
             if n and n != '0': residual[label] = n
         if residual: raise RuntimeError(f'Owned-fixture cleanup left residual rows in explicitly-managed PRIMARY tables: {residual}')
-        # [Astra round-3] Exhaustive-by-construction check — every
-        # dynamically-discovered org_id/user_id-scoped table anywhere in the
-        # database, plus the counter/cursor tables against their baseline.
-        advanced = owned_cleanup.assert_zero_residual(sql, ORG_TABLES, USER_TABLES, COUNTER_TABLES, COUNTER_BASELINE, [owned_org], [owned_user])
-        # [Astra round-6] Independent, additional check: every id-scoped
-        # table's pre-existing (non-owned) rows must be byte-identical to
-        # their pre-run baseline.
-        owned_cleanup.assert_baseline_unchanged(sql, ID_TABLES, BASELINE_HASHES, [owned_org], [owned_user])
-        # [Astra round-4] Honest accounting, never a blanket "zero residual".
-        print(f'Exhaustive dynamic residual check passed: zero synthetic rows across {len(ORG_TABLES)} org-scoped + {len(USER_TABLES)} user-scoped table(s); baseline content byte-identical across {len(ID_TABLES)} id-scoped table(s)' + (f'; serialization counters advanced monotonically: {"; ".join(advanced)}' if advanced else '; no counter table changed'))
+        # [Astra round-7, the definitive closure] ONE uniform check over the
+        # ENTIRE table universe — see owned_cleanup.py's module docstring.
+        advanced = owned_cleanup.assert_clean(sql, ALL_TABLES, BASELINE, [owned_org], [owned_user])
+        print(f'Exhaustive dynamic residual check passed: zero synthetic rows AND byte-identical baseline content across all {len(ALL_TABLES)} discovered table(s) database-wide (single uniform check, no category exclusions)' + (f'; whitelisted counters advanced monotonically: {"; ".join(advanced)}' if advanced else '; no counter column changed'))
     need(sql("SELECT to_regnamespace('inbox_reply_send') IS NULL", check=False) == 't', 'inbox_reply_send schema not dropped')
     need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_send_worker')", check=False) == 't', 'inbox_reply_send_worker role not dropped')
     print('Cleanup verified: containers/volume/image removed, schemas and worker role dropped, zero residual owned rows')
