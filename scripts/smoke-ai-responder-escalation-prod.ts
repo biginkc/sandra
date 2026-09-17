@@ -49,6 +49,7 @@ async function main(): Promise<void> {
         first_name: "Canary",
         last_name: TAG,
         phone_1: PHONE,
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();
