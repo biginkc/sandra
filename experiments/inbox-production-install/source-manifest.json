@@ -22,7 +22,8 @@
   "smoke.py": "48fb552e52de31bdce662f44c149ed87fef84e2efd2cbb8748069fd5edec6e96",
   "unknown-retention-test.py": "15c027cc365b46d2fdc21e7ff4e0ca6ea74afef21949f8a9c70424a9eb1d99c7",
   "unknown-retention.sql": "974eab36185aa70d78099eb1867e35c741a51bf5b5b0d68155be74e5604e6504",
-  "verify-mutation-harness.py": "83fe39694e17cb9f85925e9764788c7eff24e30241e799f810c363b1500397be",
-  "verify.py": "cf119994220425f6edb0fa7effc5d1b8c093f3d6029416727c61de2d564ffb29",
-  "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15"
+  "verify-mutation-harness.py": "ec32b30de6b5ad2910de8f69f5447d107c7686586d4575fa2bc63e1e9694332d",
+  "verify.py": "205308c9d644bc519d353960d6a5f43d0ad0a6828a2c299c5c94a14c8b6fac9d",
+  "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15",
+  "function-owners.json": "b532fc854058ce968f4348ab28a19ddd0e49351f9556b003c58c7b82198cecc6"
 }

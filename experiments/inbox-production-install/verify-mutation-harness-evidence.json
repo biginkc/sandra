@@ -16,7 +16,7 @@
     {
       "case": "index_recreated_different_columns",
       "drift_caught": true,
-      "drift_error": "  live=    createindexsummary_orderoninbox_bridge.summariesorg_id,target_kind",
+      "drift_error": "  live=    CREATE INDEX summary_order ON inbox_bridge.summaries USING btree (org_id, target_kind)",
       "restored_pass": true
     },
     {
@@ -40,19 +40,19 @@
     {
       "case": "weakened_check_constraint",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Constraint definition drift on inbox_parent.work: expected fragment not found live (exact match required): 'CHECK (ack>=0 AND ack<=generation)' (live remaining=[{'def': 'CHECK ((ack >= 0))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': \"CHECK ((stream = ANY (ARRAY['messages'::text, 'reviews'::text])))\", 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((claim_token IS NULL) = (lease_until IS NULL)))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((scan_generation IS NULL) = (stream IS NULL)))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((scan_generation IS NULL) OR ((scan_generation > ack) AND (scan_generation <= generation))))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'PRIMARY KEY (org_id, kind, entity_id)', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': True}])",
+      "drift_error": "  live remaining=[{'def': \"CHECK ((stream = ANY (ARRAY['messages'::text, 'reviews'::text])))\", 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((claim_token IS NULL) = (lease_until IS NULL)))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((scan_generation IS NULL) = (stream IS NULL)))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((scan_generation IS NULL) OR ((scan_generation > ack) AND (scan_generation <= generation))))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'PRIMARY KEY (org_id, kind, entity_id)', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': True}, {'def': 'CHECK ((ack >= 0))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}]",
       "restored_pass": true
     },
     {
       "case": "fk_on_delete_added",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Constraint definition drift on inbox_bridge.cursors: expected fragment not found live (exact match required): 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id)' (live remaining=[{'def': 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id) ON DELETE CASCADE', 'table': 'inbox_bridge.cursors', 'valid': True, 'noinherit': True}])",
+      "drift_error": "  live remaining=[{'def': 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id) ON DELETE CASCADE', 'table': 'inbox_bridge.cursors', 'valid': True, 'noinherit': True}]",
       "restored_pass": true
     },
     {
       "case": "not_valid_readd",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Constraint not validated on public.messages: 'CHECK (inbox_inbound_revision >= 0)' is installed NOT VALID (convalidated=False); legacy-violating rows could be hiding behind it",
+      "drift_error": "  live remaining=[{'def': \"CHECK ((channel = ANY (ARRAY['sms'::text, 'email'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False}, {'def': \"CHECK ((direction = ANY (ARRAY['outbound'::text, 'inbound'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False}, {'def': 'PRIMARY KEY (id)', 'table': 'public.messages', 'valid': True, 'noinherit': True}, {'def': 'FOREIGN KEY (org_id) REFERENCES organizations(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True}, {'def': 'FOREIGN KEY (property_id) REFERENCES properties(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True}, {'def': 'FOREIGN KEY (contact_id) REFERENCES contacts(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True}, {'def': 'FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE RESTRICT', 'table': 'public.messages', 'valid': True, 'noinherit': True}, {'def': 'FOREIGN KEY (attributed_outbound_message_id) REFERENCES messages(id) ON DELETE SET NULL', 'table': 'public.messages', 'valid': True, 'noinherit': True}, {'def': \"CHECK ((provider = ANY (ARRAY['dialpad'::text, 'twilio'::text, 'resend'::text, 'sendgrid'::text, 'internal'::text, 'mock'::text, 'sendillo'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False}, {'def': 'FOREIGN KEY (inbound_intent_id) REFERENCES sms_inbound_intents(id) ON DELETE SET NULL', 'table': 'public.messages', 'valid': True, 'noinherit': True}, {'def': \"CHECK ((status = ANY (ARRAY['pending'::text, 'queued'::text, 'paused'::text, 'sent'::text, 'delivered'::text, 'failed'::text, 'received'::text, 'bounced'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False}, {'def': 'CHECK ((inbox_inbound_revision >= 0)) NOT VALID', 'table': 'public.messages', 'valid': False, 'noinherit': False}]",
       "restored_pass": true
     },
     {
@@ -64,7 +64,7 @@
     {
       "case": "function_volatility_changed",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Volatility drift on inbox_bridge.matching: expected='s' live='v'",
+      "drift_error": "$function$",
       "restored_pass": true
     },
     {
@@ -118,37 +118,67 @@
     {
       "case": "function_overload_added",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Conflicting overload(s) installed for inbox_read.detail: ['o uuid, c uuid', 'o uuid, c uuid, extra text']",
+      "drift_error": "RuntimeError: Conflicting overload(s) installed for inbox_read.detail: 2 rows",
       "restored_pass": true
     },
     {
       "case": "search_path_public",
       "drift_caught": true,
-      "drift_error": "RuntimeError: proconfig drift on inbox_bridge.authorize: expected=['search_path=\"\"'] live=['search_path=public']",
+      "drift_error": "END $function$",
       "restored_pass": true
     },
     {
       "case": "function_strict_drift",
       "drift_caught": true,
-      "drift_error": "RuntimeError: STRICT drift on inbox_bridge.matching: expected=False live=True",
+      "drift_error": "$function$",
       "restored_pass": true
     },
     {
       "case": "check_constraint_arithmetic_regrouping",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Constraint definition drift on inbox_bridge.worksets: expected fragment not found live (exact match required): \"CHECK (jsonb_typeof(handles)='array' AND jsonb_array_length(handles)=greatest(1,(jsonb_array_length(targets)+99)/100))\" (live remaining=[{'def': \"CHECK (((jsonb_typeof(handles) = 'array'::text) AND (jsonb_array_length(handles) = GREATEST(1, (jsonb_array_length(targets) + (99 / 100)))))) NOT VALID\", 'table': 'inbox_bridge.worksets', 'valid': False, 'noinherit': False}])",
+      "drift_error": "  live remaining=[{'def': \"CHECK (((jsonb_typeof(handles) = 'array'::text) AND (jsonb_array_length(handles) = GREATEST(1, (jsonb_array_length(targets) + (99 / 100)))))) NOT VALID\", 'table': 'inbox_bridge.worksets', 'valid': False, 'noinherit': False}]",
       "restored_pass": true
     },
     {
       "case": "function_session_replication_role_bypass",
       "drift_caught": true,
-      "drift_error": "RuntimeError: proconfig drift on inbox_message_capture.capture: expected=['search_path=\"\"'] live=['search_path=\"\"', 'session_replication_role=replica']",
+      "drift_error": "END $function$",
+      "restored_pass": true
+    },
+    {
+      "case": "function_owner_changed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Function OWNER drift inbox_bridge.matching: expected owner='postgres' live='supabase_admin' (for a SECURITY DEFINER function the owner is the execution principal)",
+      "restored_pass": true
+    },
+    {
+      "case": "function_arg_default_changed",
+      "drift_caught": true,
+      "drift_error": "END $function$",
+      "restored_pass": true
+    },
+    {
+      "case": "function_return_type_changed",
+      "drift_caught": true,
+      "drift_error": "END $function$",
+      "restored_pass": true
+    },
+    {
+      "case": "check_constraint_string_literal_case",
+      "drift_caught": true,
+      "drift_error": "  live remaining=[{'def': 'CHECK (((claim_token IS NULL) = (lease_until IS NULL)))', 'table': 'inbox_backfill.jobs', 'valid': True, 'noinherit': False}, {'def': \"CHECK ((stream = ANY (ARRAY['messages'::text, 'reviews'::text, 'threads'::text, 'DONE'::text]))) NOT VALID\", 'table': 'inbox_backfill.jobs', 'valid': False, 'noinherit': False}]",
+      "restored_pass": true
+    },
+    {
+      "case": "index_predicate_string_literal_case",
+      "drift_caught": true,
+      "drift_error": "  live=    CREATE INDEX backfill_available ON inbox_backfill.jobs USING btree (available_at, org_id) WHERE (stream <> 'DONE'::text)",
       "restored_pass": true
     },
     {
       "case": "index_packet_injection_ignored",
       "drift_caught": true,
-      "drift_error": "  live=    createindexsummary_orderoninbox_bridge.summariesorg_id,target_kind",
+      "drift_error": "  live=    CREATE INDEX summary_order ON inbox_bridge.summaries USING btree (org_id, target_kind)",
       "restored_pass": true
     }
   ],

@@ -52,51 +52,43 @@ jobs:
           subprocess.run([sys.executable,'read-companion.py'],check=True)
           print('Source-manifest hashes match, all bundle .py files parse, compiler is deterministic with no DB.')
           PY
-      # --- verify.py's own comparison LOGIC now actually runs in CI (Astra
-      # rounds 2-3 gate on G2/#585: "green CI doesn't certify verifier
-      # integrity" -- this closes that for every class fixed across both
-      # rounds). `verify.py --selftest` calls the real, unmodified
-      # bool_ast / bool_ast_repr / strip_whole_argument_parens /
-      # parse_function_set_clauses / render_proconfig_entry /
-      # expected_proconfig functions (the exact code verify.py --installed
-      # uses for every CHECK/index WHERE-clause and function-config
-      # comparison) against fixed inputs -- for the arithmetic-regrouping
-      # case, REAL pg_get_constraintdef() output captured from the owned T2
-      # fixture's inbox_bridge.worksets_check; for proconfig, REAL
-      # to_jsonb(proconfig) output captured from a live multi-SET function
-      # on the same fixture -- not synthetic text for either. It asserts
-      # that a correctly-installed live object still compares equal to
-      # source (no false positive from Postgres's own cosmetic re-wrapping/
-      # rendering) AND that each demonstrated drift (regrouped arithmetic,
-      # missing STRICT, an added session_replication_role=replica entry, a
-      # changed-not-just-added/removed proconfig value) does not. This
-      # needs no database at all, so it runs on every PR unconditionally.
-      - name: verify.py comparison-logic selftest (DB-less)
-        working-directory: experiments/inbox-production-install
-        run: python3 verify.py --selftest
-      # --- --installed / verify-mutation-harness.py --owned-fixture (25
-      # cases, including the ones above at the live-catalog level) are
-      # still NOT run here. Both require fixture_db.py's guard(), which --
-      # by design (experiments/inbox-projection/fixture/guards.py) -- pins
-      # an EXACT local container id + image digest + network-isolated
-      # (NetworkMode=none), resource-capped Docker container that only
-      # exists on one operator machine, and the owned fixture's full
-      # installed catalog (26 tables, 82 functions, real GoTrue Auth, the
-      # base Sandra app schema, pg_cron, supabase_admin/anon/authenticated/
-      # service_role roles) has no CI-portable equivalent -- reproducing it
-      # from a vanilla CI-provisioned Postgres would mean bootstrapping
-      # effectively all of Sandra's existing schema plus Supabase
-      # infrastructure, which is a separate, explicitly out-of-scope
-      # redesign of fixture_db.py / guards.py for CI-portability, not
-      # something this gate's fix can absorb.
+      # --- verify.py --installed, verify.py --selftest, and
+      # verify-mutation-harness.py --owned-fixture (30 cases) are all NOT
+      # run in this job. Rounds 2-3 ran --selftest here DB-lessly (it
+      # exercised pure text-normalization functions -- bool_ast, proconfig
+      # parsing -- with no live catalog needed). Round 4 (Astra NO/4)
+      # deliberately replaced that whole custom-normalization comparison
+      # engine with POSTGRES'S OWN CANONICAL DEPARSE: every function/
+      # constraint/index/default expectation is now rendered by installing
+      # it a second time into a throwaway schema and reading back
+      # pg_get_functiondef/pg_get_constraintdef/pg_get_indexdef/pg_get_expr,
+      # then compared byte-exact against the same rendering of the real
+      # installed copy -- the fix for the recurring "one more hand-picked
+      # attribute was missed" class of gap (STRICT, proconfig, string-
+      # literal case, arg defaults, return type, function ownership all
+      # fell out of this ONE mechanism instead of five separate ad hoc
+      # comparisons). There is no DB-less way to ask Postgres to
+      # canonicalize an expression, so --selftest is now ALSO DB-dependent
+      # -- it calls the exact same scratch-install-and-compare functions
+      # --installed uses (scratch_function_stmt, owner_mismatch), just
+      # against small throwaway objects instead of the full candidate, and
+      # requires fixture_db.py's guard(), the same pinned local Docker
+      # fixture --installed itself requires (see
+      # experiments/inbox-projection/fixture/guards.py: an EXACT local
+      # container id + image digest + network-isolated, resource-capped
+      # container that only exists on one operator machine). Reproducing
+      # that -- or even a vanilla CI-provisioned Postgres sufficient for
+      # just --selftest's throwaway objects -- is a separate,
+      # explicitly out-of-scope CI-portability redesign, not something
+      # this gate's fix can absorb.
       #
-      # Until that redesign exists, the live-catalog mutation-harness proof
-      # for this gate is produced locally and recorded in
-      # verify-mutation-harness-evidence.json (committed with each change,
-      # currently 25 cases including function_strict_drift,
-      # check_constraint_arithmetic_regrouping and
-      # function_session_replication_role_bypass); the selftest step above
-      # is the automated CI backstop for the logic those cases exercise.
+      # Both proofs are produced locally instead: `verify.py --selftest`
+      # (run manually against the owned fixture before every push) and
+      # verify-mutation-harness.py --owned-fixture, whose result is
+      # committed in verify-mutation-harness-evidence.json (currently 30
+      # cases, including function_owner_changed, function_arg_default_changed,
+      # function_return_type_changed, check_constraint_string_literal_case
+      # and index_predicate_string_literal_case from this round).
       - name: Record known CI scope gap
         run: |
-          echo "verify.py --installed and verify-mutation-harness.py --owned-fixture (live-catalog proof, 25 cases) require the locally-pinned T2 fixture (see guards.py) and are not run in this job; verify.py --selftest above is the DB-less logic-level backstop for the classes fixed in this PR. See workflow comments." >> "$GITHUB_STEP_SUMMARY"
+          echo "verify.py --installed, verify.py --selftest, and verify-mutation-harness.py --owned-fixture (live-catalog proof, 30 cases) all require the locally-pinned T2 fixture (see guards.py) and are not run in this job -- Postgres-canonical-deparse comparison has no DB-less form. Both are run locally before every push; see workflow comments." >> "$GITHUB_STEP_SUMMARY"

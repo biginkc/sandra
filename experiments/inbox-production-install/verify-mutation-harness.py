@@ -98,7 +98,7 @@ run_case('fk_on_delete_added',
 run_case('not_valid_readd',
  lambda: sql("ALTER TABLE public.messages DROP CONSTRAINT messages_inbox_inbound_revision_nonnegative;ALTER TABLE public.messages ADD CONSTRAINT messages_inbox_inbound_revision_nonnegative CHECK (inbox_inbound_revision >= 0) NOT VALID"),
  lambda: sql("ALTER TABLE public.messages DROP CONSTRAINT messages_inbox_inbound_revision_nonnegative;ALTER TABLE public.messages ADD CONSTRAINT messages_inbox_inbound_revision_nonnegative CHECK (inbox_inbound_revision >= 0)"),
- 'constraint not validated on public.messages')
+ 'constraint definition drift')
 
 # 7d. rls_forced: FORCE ROW LEVEL SECURITY silently added (changes owner/
 # superuser bypass semantics unreviewed).
@@ -111,7 +111,7 @@ run_case('force_row_level_security',
 run_case('function_volatility_changed',
  lambda: sql("ALTER FUNCTION inbox_bridge.matching(uuid,uuid,jsonb) VOLATILE"),
  lambda: sql("ALTER FUNCTION inbox_bridge.matching(uuid,uuid,jsonb) STABLE"),
- 'volatility drift on inbox_bridge.matching')
+ 'function definition drift')
 
 # 8. Unexpected object kind (view) planted in a private companion schema.
 run_case('extra_view_in_companion_schema',
@@ -184,7 +184,7 @@ run_case('function_overload_added',
 run_case('search_path_public',
  lambda: sql("ALTER FUNCTION inbox_bridge.authorize(uuid) SET search_path=public"),
  lambda: sql("ALTER FUNCTION inbox_bridge.authorize(uuid) SET search_path=''"),
- 'proconfig drift')
+ 'function definition drift')
 
 # 11b. function_strict_drift (Astra-flagged gap): verify.py's function
 # snapshot used to compare volatility/SECURITY DEFINER/search_path but not
@@ -194,7 +194,7 @@ run_case('search_path_public',
 run_case('function_strict_drift',
  lambda: sql("ALTER FUNCTION inbox_bridge.matching(uuid,uuid,jsonb) STRICT"),
  lambda: sql("ALTER FUNCTION inbox_bridge.matching(uuid,uuid,jsonb) CALLED ON NULL INPUT"),
- 'strict drift on inbox_bridge.matching')
+ 'function definition drift')
 
 # 11c. check_constraint_arithmetic_regrouping (Astra-flagged gap): verify.py's
 # CHECK-constraint leaf comparison used to blanket-strip every paren inside a
@@ -238,7 +238,91 @@ run_case('check_constraint_arithmetic_regrouping',
 run_case('function_session_replication_role_bypass',
  lambda: sql("ALTER FUNCTION inbox_message_capture.capture() SET session_replication_role=replica",role='supabase_admin'),
  lambda: sql("ALTER FUNCTION inbox_message_capture.capture() RESET session_replication_role",role='supabase_admin'),
- 'proconfig drift on inbox_message_capture.capture')
+ 'function definition drift')
+
+# 12. function_owner_changed (Astra round 4, gap #1): pg_get_functiondef
+# never renders OWNER TO -- for a SECURITY DEFINER function the OWNER is the
+# execution principal, a real privilege escalation vector a byte-exact
+# functiondef comparison alone cannot see. Verified separately against
+# function-owners.json.
+run_case('function_owner_changed',
+ lambda: sql("ALTER FUNCTION inbox_bridge.matching(uuid,uuid,jsonb) OWNER TO supabase_admin",role='supabase_admin'),
+ lambda: sql("ALTER FUNCTION inbox_bridge.matching(uuid,uuid,jsonb) OWNER TO postgres",role='supabase_admin'),
+ 'function owner drift')
+
+# 13/14. function_arg_default_changed / function_return_type_changed (Astra
+# round 4, gap #2): both an arg DEFAULT and a RETURN TYPE can only be
+# changed via DROP+CREATE (Postgres has no ALTER FUNCTION ... ALTER
+# PARAMETER, and CREATE OR REPLACE rejects a return-type change outright).
+# Rather than hand-copy the function body into this file (a byte-for-byte
+# fork that would silently drift out of sync with the real source -- these
+# bodies contain comments that ARE part of the stored prosrc, so even a
+# whitespace/comment mismatch would make the "restore" leave a function
+# that no longer matches source, breaking the PASS-after-restore check for
+# reasons unrelated to what this case is testing), extract the EXACT
+# verbatim statement text straight out of the freshly-compiled source file
+# -- the same file verify.py itself just regenerated -- via the identical
+# regex verify.py uses to find it. The mutation is then a single targeted
+# substitution (DEFAULT 100 -> DEFAULT 200, or RETURNS integer -> RETURNS
+# bigint) applied to that exact text, so restore is always byte-identical
+# to source by construction.
+import re as _re
+def _extract_function_stmt(fname):
+ src=(P/'generated/install-candidate.sql').read_text()+'\n'+(P/'generated/read-companion.sql').read_text()
+ pat=r'CREATE (?:OR REPLACE )?FUNCTION '+_re.escape(fname)+r'\(.*?RETURNS\s+(?:SETOF\s+)?(?:TABLE\([^)]*\)|[\w.]+)\s+LANGUAGE\s+\w+[\s\S]*?AS \$\$.*?\$\$;'
+ m=_re.search(pat,src,_re.S)
+ if not m:raise RuntimeError('Could not extract source statement for '+fname)
+ return m.group(0)
+
+_peb_revoke="REVOKE ALL ON FUNCTION inbox_read.prune_expired_boundaries(integer) FROM PUBLIC,anon,authenticated,service_role;"
+_peb=_extract_function_stmt('inbox_read.prune_expired_boundaries')
+if 'DEFAULT 100' not in _peb:raise RuntimeError('Expected DEFAULT 100 in extracted prune_expired_boundaries source; source may have changed -- update this case')
+# DROP FUNCTION also drops its own GRANT/REVOKE state -- a freshly CREATEd
+# function defaults to PUBLIC EXECUTE, so the REVOKE that source always
+# pairs with this CREATE must be replayed too, or "restore" would leave the
+# function correctly-defined but newly exposed to anon/authenticated/
+# service_role (a real privilege drift the privilege_exposure check then
+# correctly flags -- confirmed empirically, not theoretical).
+run_case('function_arg_default_changed',
+ lambda: sql("DROP FUNCTION inbox_read.prune_expired_boundaries(integer);"+_peb.replace('DEFAULT 100','DEFAULT 200',1)+_peb_revoke),
+ lambda: sql("DROP FUNCTION inbox_read.prune_expired_boundaries(integer);"+_peb+_peb_revoke),
+ 'function definition drift')
+
+_peuc_revoke="REVOKE ALL ON FUNCTION inbox_read.prune_expired_unknown_cursors(integer) FROM PUBLIC,anon,authenticated,service_role;"
+_peuc=_extract_function_stmt('inbox_read.prune_expired_unknown_cursors')
+if ') RETURNS integer\n' not in _peuc:raise RuntimeError('Expected RETURNS integer in extracted prune_expired_unknown_cursors source; source may have changed -- update this case')
+run_case('function_return_type_changed',
+ lambda: sql("DROP FUNCTION inbox_read.prune_expired_unknown_cursors(integer);"+_peuc.replace(') RETURNS integer\n',') RETURNS bigint\n',1)+_peuc_revoke),
+ lambda: sql("DROP FUNCTION inbox_read.prune_expired_unknown_cursors(integer);"+_peuc+_peuc_revoke),
+ 'function definition drift')
+
+# 15. check_constraint_string_literal_case (Astra round 4, gap #3): bool_ast
+# used to lowercase every leaf, so a CHECK on 'DONE' was indistinguishable
+# from one on 'done' -- inbox_backfill.jobs_stream_check's real data
+# (2 rows, both stream='done') would genuinely violate an uppercased
+# membership list, so this uses NOT VALID (same technique as
+# check_constraint_arithmetic_regrouping above) to install the drifted text
+# without a real data conflict; restore is the original text, which the
+# real data already satisfies, re-validating cleanly.
+run_case('check_constraint_string_literal_case',
+ lambda: sql("ALTER TABLE inbox_backfill.jobs DROP CONSTRAINT jobs_stream_check;"
+  "ALTER TABLE inbox_backfill.jobs ADD CONSTRAINT jobs_stream_check "
+  "CHECK (stream IN ('messages','reviews','threads','DONE')) NOT VALID"),
+ lambda: sql("ALTER TABLE inbox_backfill.jobs DROP CONSTRAINT jobs_stream_check;"
+  "ALTER TABLE inbox_backfill.jobs ADD CONSTRAINT jobs_stream_check "
+  "CHECK (stream IN ('messages','reviews','threads','done'))"),
+ 'constraint definition drift')
+
+# 16. index_predicate_string_literal_case (Astra round 4, gap #3, index
+# form): the same case-folding gap inside an index WHERE predicate --
+# inbox_backfill.backfill_available's real predicate is `stream<>'done'`;
+# recreate it as `stream<>'DONE'` (same columns, same table).
+run_case('index_predicate_string_literal_case',
+ lambda: sql("DROP INDEX inbox_backfill.backfill_available;"
+  "CREATE INDEX backfill_available ON inbox_backfill.jobs(available_at,org_id) WHERE stream<>'DONE'"),
+ lambda: sql("DROP INDEX inbox_backfill.backfill_available;"
+  "CREATE INDEX backfill_available ON inbox_backfill.jobs(available_at,org_id) WHERE stream<>'done'"),
+ 'index definition drift')
 
 # 11. Manifest-pinning (self-certification defense): inject a forged
 # generated/index-08.sql that redefines summary_order to match a drifted
