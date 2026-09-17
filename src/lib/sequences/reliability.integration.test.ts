@@ -29,6 +29,7 @@ import { processEnrollmentTick } from "./tick";
 import type { Database } from "@/lib/supabase/types";
 import type { SmsOutboundInput, SmsSendResult } from "@/lib/messaging/types";
 import { ProviderError } from "@/lib/errors/classes";
+import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { selectSafeApplicationClock } from "@tests/sequence-readiness/clock";
 
 /**
@@ -47,6 +48,16 @@ const supabase = createTestClient();
 let DB_T0 = new Date();
 let T0 = new Date();
 let safeTestState = "GU";
+
+// retry_sequence_step schedules at SQL now(); resume_sequence_enrollment adds
+// the current step delay. Every recovery fixture below targets a delay-0
+// current step. The lifecycle itself advances through +30 minutes.
+const MAX_RECOVERY_BACKOFF_MINUTES = 0;
+const MAX_LIFECYCLE_ADVANCE_MINUTES = 30;
+const SAFE_CLOCK_HORIZON_MINUTES = Math.max(
+  MAX_RECOVERY_BACKOFF_MINUTES,
+  MAX_LIFECYCLE_ADVANCE_MINUTES,
+);
 
 type SeededLead = { propertyId: string; contactId: string; phone: string };
 
@@ -214,6 +225,14 @@ function setApplicationTimeAfterPersistedDue(nextRunAt: string): Date {
   const persistedDue = new Date(nextRunAt).getTime() + 1;
   const applicationDue = new Date(Math.max(Date.now(), persistedDue));
   vi.setSystemTime(applicationDue);
+  const quiet = checkQuietHours(safeTestState, applicationDue);
+  const details = quiet.ok
+    ? `${quiet.zone} ${quiet.localTime}`
+    : `${quiet.reason} ${quiet.zone ?? "unknown"} ${quiet.localTime ?? "unknown"}`;
+  expect(
+    quiet.ok,
+    `recovery clock ${applicationDue.toISOString()} left ${safeTestState} send window (${details})`,
+  ).toBe(true);
   return applicationDue;
 }
 
@@ -460,7 +479,7 @@ beforeEach(async () => {
     );
   }
   DB_T0 = new Date(clockAnchor.created_at);
-  const safeClock = selectSafeApplicationClock(DB_T0, 30);
+  const safeClock = selectSafeApplicationClock(DB_T0, SAFE_CLOCK_HORIZON_MINUTES);
   T0 = safeClock.applicationNow;
   safeTestState = safeClock.state;
   vi.useFakeTimers({ toFake: ["Date"] });

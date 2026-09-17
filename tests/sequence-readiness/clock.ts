@@ -42,6 +42,10 @@ export function selectSafeApplicationClock(
     throw new Error(`selectSafeApplicationClock: invalid horizon ${horizonMinutes}`);
   }
 
+  // Every supported state uses the same [08:00, 21:00) window. Its shortest
+  // closed interval is 21:00→08:00 (600 minutes on spring-forward days), so
+  // endpoint checks are sufficient for the bounded <=60-minute horizons used
+  // by these fixtures: an endpoint pair cannot cross a closed interval.
   for (let offsetMinutes = 0; offsetMinutes <= SEARCH_HORIZON_MINUTES; offsetMinutes += 1) {
     const applicationNow = new Date(dbAnchor.getTime() + offsetMinutes * MINUTE_MS);
     const horizonEnd = new Date(applicationNow.getTime() + horizonMinutes * MINUTE_MS);

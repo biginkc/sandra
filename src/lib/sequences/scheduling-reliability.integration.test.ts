@@ -22,6 +22,7 @@ import {
   resumeEnrollment,
   retrySequenceStep,
 } from "@/lib/sequences/enrollment";
+import { checkQuietHours } from "@/lib/messaging/quiet-hours";
 import { selectSafeApplicationClock } from "@tests/sequence-readiness/clock";
 
 /**
@@ -36,6 +37,18 @@ const realProcessEnrollmentTick = sequenceTick.processEnrollmentTick;
 let T0 = new Date();
 let DB_T0 = new Date();
 let safeState = "MO";
+
+// retry_sequence_step schedules at SQL now(); resume_sequence_enrollment adds
+// the current step delay. Every recovery fixture below targets a delay-0
+// current step. The ordinary send/recovery horizon is 30 minutes; the
+// quiet-to-open case deliberately advances +10h and selects/verifies its own
+// quiet state separately.
+const MAX_RECOVERY_BACKOFF_MINUTES = 0;
+const MAX_LIFECYCLE_ADVANCE_MINUTES = 30;
+const SAFE_CLOCK_HORIZON_MINUTES = Math.max(
+  MAX_RECOVERY_BACKOFF_MINUTES,
+  MAX_LIFECYCLE_ADVANCE_MINUTES,
+);
 
 type SeededLead = {
   contactId: string;
@@ -55,38 +68,17 @@ async function orgId(): Promise<string> {
   return getCanonicalTestOrgId(supabase);
 }
 
-function localHour(anchor: Date, timeZone: string): number {
-  return Number(
-    new Intl.DateTimeFormat("en-US", {
-      hour: "2-digit",
-      hour12: false,
-      timeZone,
-    })
-      .format(anchor)
-      .replace(/^24$/, "0"),
-  );
-}
-
-function chooseState(anchor: Date, predicate: (hour: number) => boolean): string {
-  const candidates: Array<[string, string]> = [
-    ["GU", "Pacific/Guam"],
-    ["PR", "America/Puerto_Rico"],
-    ["OH", "America/New_York"],
-    ["MO", "America/Chicago"],
-    ["CA", "America/Los_Angeles"],
-    ["HI", "Pacific/Honolulu"],
-  ];
-  const selected = candidates.find(([, zone]) => predicate(localHour(anchor, zone)));
-  if (!selected) {
-    throw new Error(`no test timezone matched DB anchor ${anchor.toISOString()}`);
-  }
-  return selected[0];
-}
-
 function chooseQuietState(anchor: Date): string {
-  // +10 hours must reach the open window. Avoid 21:xx, where +10h would
-  // still be 07:xx local and remain quiet.
-  return chooseState(anchor, (hour) => hour >= 22 || hour <= 7);
+  const deferralEnd = new Date(anchor.getTime() + 10 * 60 * 60 * 1000);
+  const selected = ["GU", "PR", "OH", "MO", "CA", "HI"].find((state) => {
+    const atAnchor = checkQuietHours(state, anchor);
+    const afterDeferral = checkQuietHours(state, deferralEnd);
+    return !atAnchor.ok && atAnchor.reason === "outside_window" && afterDeferral.ok;
+  });
+  if (!selected) {
+    throw new Error(`no quiet-to-open test timezone matched application anchor ${anchor.toISOString()}`);
+  }
+  return selected;
 }
 
 /** Clear the sub-millisecond precision lost when a DB timestamp is read into Date. */
@@ -94,8 +86,16 @@ function setApplicationTimeAfterPersistedDue(nextRunAt: string): Date {
   // Recovery RPCs calculate next_run_at from database now(), which can be
   // earlier than the application clock selected for quiet-hours safety.
   const persistedDue = new Date(nextRunAt).getTime() + 1;
-  const applicationDue = new Date(Math.max(DB_T0.getTime(), Date.now(), persistedDue));
+  const applicationDue = new Date(Math.max(Date.now(), persistedDue));
   vi.setSystemTime(applicationDue);
+  const quiet = checkQuietHours(safeState, applicationDue);
+  const details = quiet.ok
+    ? `${quiet.zone} ${quiet.localTime}`
+    : `${quiet.reason} ${quiet.zone ?? "unknown"} ${quiet.localTime ?? "unknown"}`;
+  expect(
+    quiet.ok,
+    `recovery clock ${applicationDue.toISOString()} left ${safeState} send window (${details})`,
+  ).toBe(true);
   return applicationDue;
 }
 
@@ -400,7 +400,7 @@ beforeEach(async () => {
   resetMockState();
   await seedSenderCatalog(supabase, await orgId(), [MOCK_SENDER_PRIMARY]);
   DB_T0 = await seedClockAnchor();
-  const safeClock = selectSafeApplicationClock(DB_T0, 30);
+  const safeClock = selectSafeApplicationClock(DB_T0, SAFE_CLOCK_HORIZON_MINUTES);
   T0 = safeClock.applicationNow;
   safeState = safeClock.state;
   vi.useFakeTimers({ toFake: ["Date"] });

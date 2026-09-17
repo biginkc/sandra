@@ -2,6 +2,7 @@ import {
   expect,
   test,
   type APIRequestContext,
+  type Locator,
   type Page,
   type TestInfo,
 } from "@playwright/test";
@@ -39,10 +40,35 @@ async function signIn(
   },
 ): Promise<void> {
   await page.goto("/login");
+  await waitForLoginFormHydration(page);
   await page.getByLabel("Email").fill(identity.email);
   await page.getByLabel("Password").fill(identity.password);
   await page.getByRole("button", { name: /^sign in$/i }).click();
   await page.waitForURL(/\/(dashboard|leads|sequences)/, { timeout: 15_000 });
+}
+
+async function waitForLoginFormHydration(page: Page): Promise<void> {
+  // Login is a useActionState form.  Server markup can expose its controls
+  // before the action/router bindings exist, which can leave the submit button
+  // stuck in its pending state after a user click.  Wait for the private React host
+  // props used by the existing sequence-form readiness check; this fails
+  // closed if the pinned React/Next runtime changes that implementation.
+  await page.waitForFunction(
+    () => {
+      const controls = [
+        document.querySelector('input[aria-label="Email"]'),
+        document.querySelector('input[aria-label="Password"]'),
+        document.querySelector('button[type="submit"]'),
+      ];
+      return controls.every(
+        (control) =>
+          control &&
+          Object.keys(control).some((key) => key.startsWith("__reactProps")),
+      );
+    },
+    undefined,
+    { timeout: 10_000 },
+  );
 }
 
 async function waitForSequenceFormHydration(page: Page): Promise<void> {
@@ -122,14 +148,44 @@ async function createSequence(page: Page, name: string): Promise<string> {
   return new URL(page.url()).pathname.split("/")[2]!;
 }
 
-async function addStatusStep(page: Page): Promise<void> {
+async function gotoLeadPage(page: Page, propertyId: string): Promise<void> {
+  // CI6 captured a fully rendered lead page while the dev server's load event
+  // remained pending. DOMContentLoaded is the useful navigation boundary;
+  // callers assert the CTA they need before interacting with the page.
+  await page.goto(`/leads/${propertyId}`, { waitUntil: "domcontentloaded" });
+}
+
+async function clickAndAwaitServerAction(
+  page: Page,
+  button: Locator,
+): Promise<void> {
+  const actionPath = new URL(page.url()).pathname;
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (candidate) =>
+        candidate.request().method() === "POST" &&
+        new URL(candidate.url()).pathname === actionPath,
+      { timeout: 15_000 },
+    ),
+    button.click(),
+  ]);
+  expect((await response.finished())).toBeNull();
+  expect(response.ok()).toBe(true);
+}
+
+async function addStatusStep(page: Page, expectedStepNumber = 1): Promise<void> {
   await page.getByRole("button", { name: /^add step$/i }).click();
   const dialog = page.getByRole("dialog");
   const selects = dialog.getByRole("combobox");
   await selects.nth(1).selectOption("change_status");
   await selects.nth(2).selectOption("contacted");
-  await dialog.getByRole("button", { name: /^add step$/i }).click();
-  await expect(page.getByRole("heading", { name: "Step 1" })).toBeVisible();
+  await clickAndAwaitServerAction(
+    page,
+    dialog.getByRole("button", { name: /^add step$/i }),
+  );
+  await expect(
+    page.getByRole("heading", { name: `Step ${expectedStepNumber}` }),
+  ).toBeVisible();
 }
 
 async function addSmsStep(page: Page, body: string): Promise<void> {
@@ -138,7 +194,10 @@ async function addSmsStep(page: Page, body: string): Promise<void> {
   const selects = dialog.getByRole("combobox");
   await selects.nth(1).selectOption("send_sms");
   await dialog.getByLabel("Message body").fill(body);
-  await dialog.getByRole("button", { name: /^add step$/i }).click();
+  await clickAndAwaitServerAction(
+    page,
+    dialog.getByRole("button", { name: /^add step$/i }),
+  );
   await expect(page.getByRole("heading", { name: "Step 1" })).toBeVisible();
 }
 
@@ -385,7 +444,13 @@ test.describe("sequence readiness — local browser contract", () => {
     await addStatusStep(page);
 
     await page.getByLabel("Description").fill("Edited local description");
-    await page.getByRole("button", { name: /^save$/i }).first().click();
+    // The editor uses startTransition around this server action. CI6 captured
+    // an aborted edit POST during the following navigation, so settle the
+    // response before checking persistence or leaving the route.
+    await clickAndAwaitServerAction(
+      page,
+      page.getByRole("button", { name: /^save$/i }).first(),
+    );
     await expect(page.getByLabel("Description")).toHaveValue(
       "Edited local description",
     );
@@ -406,7 +471,8 @@ test.describe("sequence readiness — local browser contract", () => {
     );
 
     const { propertyId } = await seedLead(admin, "enroll");
-    await page.goto(`/leads/${propertyId}`);
+    await gotoLeadPage(page, propertyId);
+    await expect(page.getByTestId("enroll-in-sequence-button")).toBeVisible();
     await page.getByTestId("enroll-in-sequence-button").click();
     const option = page.getByRole("button", {
       name: new RegExp(`^${sequenceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
@@ -471,10 +537,11 @@ test.describe("sequence readiness — local browser contract", () => {
     const sequenceId = await createSequence(page, sequenceName);
     const body = "Hello from the local sequence readiness lane";
     await addSmsStep(page, body);
-    await addStatusStep(page);
+    await addStatusStep(page, 2);
     const { propertyId } = await seedLead(admin, "sms");
 
-    await page.goto(`/leads/${propertyId}`);
+    await gotoLeadPage(page, propertyId);
+    await expect(page.getByTestId("enroll-in-sequence-button")).toBeVisible();
     await page.getByTestId("enroll-in-sequence-button").click();
     await page
       .getByRole("button", {
@@ -564,7 +631,7 @@ test.describe("sequence readiness — local browser contract", () => {
     if (pausedError || !paused) throw pausedError ?? new Error("missing paused enrollment");
     expect(paused.pause_reason).toBe("inbound_reply");
 
-    await page.goto(`/leads/${propertyId}`);
+    await gotoLeadPage(page, propertyId);
     await expect(page.getByText(replyBody)).toBeVisible();
     await expect(page.getByText(/paused \(inbound_reply\)/i)).toBeVisible();
     expect(outbound.external_id).toBe(sendEvent?.externalId);
