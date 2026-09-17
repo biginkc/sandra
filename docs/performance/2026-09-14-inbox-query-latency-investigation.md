@@ -23,9 +23,11 @@
 ## The wall
 E5+32MB eliminates the disk spill by holding the previously-spilled ~48MB + hashes in RAM. Honest per-call working memory ≈ 80-100MB (hashes ~19MB + live AS MATERIALIZED tuplestores). At PostgREST pool ≈ 15: 15 × ~90MB ≈ 1.35GB >> 384MB safe budget on the 2GB tier → OOM risk. So the in-place spill-elimination is UNSAFE on this tier at real concurrency.
 
+**2026-09-17 update (Astra round-4 gate on #604):** 32MB was never re-measured at a representative row count — it was picked on a small dev-scale fixture. Remeasured on the owned PG17 fixture at ~65k in-window conversations (the scale this function actually touches post-E5): the spill-eliminating threshold is **18MB**, not 32MB, with execution time flat from 18MB through 32MB. Shipped in #604: **20MB** (measured minimum + margin). Estimated honest per-call footprint at 20MB ≈ 50-63MB (proportional estimate, not independently re-measured — this environment cannot run `pg_log_backend_memory_contexts` or get an inlined per-CTE `auto_explain` plan for this function). That estimate sits at the edge of, not comfortably under, the ~51MB/call safe ceiling this doc's own formula gives for a 4GB tier — still an open tier/capacity tradeoff, not resolved by the remeasurement. Full detail: docs/performance/2026-09-17-inbox-work-mem-remeasurement.md.
+
 ## Options
-1. Lower work_mem so bounded spill returns — safe, partial speedup only.
-2. Bump DB tier (more RAM) — makes E5+32MB safe; needs full gate finished.
+1. Lower work_mem so bounded spill returns — safe, partial speedup only. (12MB is safe at any tier in this budget's terms and still beats the pre-narrowing 1,538ms baseline by ~19%.)
+2. Bump DB tier (more RAM) — makes E5+20MB safe with real margin; already true today (live tier confirmed 8GB via Supabase MCP on 2026-09-17), pending confirmation of the standing target tier.
 3. /inbox redesign (precomputes classification; merged, flag-gated off) — only path to the approved budget; has Lane-4 rollout gates outstanding.
 
 ## Measurement caveats (for whoever continues)

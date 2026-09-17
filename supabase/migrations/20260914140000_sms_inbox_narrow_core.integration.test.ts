@@ -60,47 +60,88 @@ async function apply(source: string) {
   }
 }
 
+// Astra round-4 gate on #604: `set_config(..., true)` (is_local) and
+// `set local role` are BOTH transaction-scoped. The original version of
+// this helper issued them as bare statements with no open transaction, so
+// each ran in its own implicit autocommit transaction and evaporated
+// before the RPC call's own (separate) implicit transaction ever saw it --
+// the RPC always ran as the raw `postgres` connection role, which the
+// function's own `current_user <> 'authenticated' or ...` bypass branches
+// treat as "skip org scoping", not as a real authenticated/RLS-equivalent
+// call. Every equivalence assertion in this file was therefore comparing
+// old vs new under an UNSCOPED bypass, never under real auth.
+//
+// Fix: reentrant transaction boundary. Calls made standalone (outside any
+// already-open transaction) get their own short BEGIN/COMMIT so the
+// identity setting actually applies to the RPC call that follows it in the
+// SAME transaction. Calls made from inside `withMutant`'s already-open
+// transaction (the mutation-kill tests) piggyback on it instead of
+// nesting/committing -- committing here would end that transaction early
+// and PERSIST the mutated function body past the test.
+let ambientTxDepth = 0;
+
+async function withDbTransaction<T>(fn: () => Promise<T>): Promise<T> {
+  const isRoot = ambientTxDepth === 0;
+  ambientTxDepth++;
+  if (isRoot) await db.query("begin");
+  try {
+    const result = await fn();
+    if (isRoot) await db.query("commit");
+    return result;
+  } catch (error) {
+    if (isRoot) await db.query("rollback");
+    throw error;
+  } finally {
+    ambientTxDepth--;
+  }
+}
+
 /**
  * Equivalence assertion via the SQL-level oracle call (not the JS RPC client)
  * so we can pass the DB session's own auth context (RLS) identically to both
- * the old and new definitions in one connection.
+ * the old and new definitions in one connection. Sets the JWT claim + role
+ * inside an explicit transaction boundary (see withDbTransaction above) and
+ * asserts the effective identity actually took hold BEFORE trusting the RPC
+ * result -- a silent fall-back to the unscoped `postgres` role must fail the
+ * call, not quietly return unscoped data.
  */
+async function callViaSession(fnName: string, userId: string, args: Record<string, unknown>): Promise<Page> {
+  return withDbTransaction(async () => {
+    await db.query("set local role authenticated");
+    await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: userId, role: "authenticated" })]);
+    const identity = await db.query<{ effective_role: string; uid: string | null }>(
+      "select current_user as effective_role, auth.uid()::text as uid",
+    );
+    const { effective_role: effectiveRole, uid } = identity.rows[0];
+    if (effectiveRole !== "authenticated") {
+      throw new Error(`expected current_user='authenticated' for an RLS-scoped call, got '${effectiveRole}'`);
+    }
+    if (uid !== userId) {
+      throw new Error(`expected auth.uid()='${userId}', got '${uid}' -- claims did not take effect`);
+    }
+    const { rows } = await db.query(
+      `select public.${fnName}($1, $2, $3, $4, $5, $6, $7, $8) as doc`,
+      [
+        args.p_cutoff ?? CUTOFF,
+        args.p_filter ?? "all",
+        args.p_assignee_id ?? null,
+        args.p_include_thread_id ?? null,
+        args.p_hide_noise ?? true,
+        args.p_limit ?? 200,
+        args.p_offset ?? 0,
+        args.p_search ?? null,
+      ],
+    );
+    return rows[0].doc as Page;
+  });
+}
+
 async function callOldViaSession(userId: string, args: Record<string, unknown>): Promise<Page> {
-  await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: userId, role: "authenticated" })]);
-  await db.query("set local role authenticated");
-  const { rows } = await db.query(
-    `select public.${OLD_ORACLE_NAME}($1, $2, $3, $4, $5, $6, $7, $8) as doc`,
-    [
-      args.p_cutoff ?? CUTOFF,
-      args.p_filter ?? "all",
-      args.p_assignee_id ?? null,
-      args.p_include_thread_id ?? null,
-      args.p_hide_noise ?? true,
-      args.p_limit ?? 200,
-      args.p_offset ?? 0,
-      args.p_search ?? null,
-    ],
-  );
-  return rows[0].doc as Page;
+  return callViaSession(OLD_ORACLE_NAME, userId, args);
 }
 
 async function callNewViaSession(userId: string, args: Record<string, unknown>): Promise<Page> {
-  await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: userId, role: "authenticated" })]);
-  await db.query("set local role authenticated");
-  const { rows } = await db.query(
-    `select public.sms_inbox_thread_page_snapshot($1, $2, $3, $4, $5, $6, $7, $8) as doc`,
-    [
-      args.p_cutoff ?? CUTOFF,
-      args.p_filter ?? "all",
-      args.p_assignee_id ?? null,
-      args.p_include_thread_id ?? null,
-      args.p_hide_noise ?? true,
-      args.p_limit ?? 200,
-      args.p_offset ?? 0,
-      args.p_search ?? null,
-    ],
-  );
-  return rows[0].doc as Page;
+  return callViaSession("sms_inbox_thread_page_snapshot", userId, args);
 }
 
 async function assertEquivalent(userId: string, args: Record<string, unknown>) {
@@ -117,12 +158,19 @@ async function assertEquivalent(userId: string, args: Record<string, unknown>) {
  * other test in this file. Never mutates the old oracle.
  */
 async function withMutant(mutatedSql: string, fn: () => Promise<void>) {
+  // Shares ambientTxDepth with withDbTransaction (Astra round-4 gate on
+  // #604): callNewViaSession is called from inside `fn` below, and it must
+  // see this transaction as already open (piggyback, no nested
+  // begin/commit of its own) -- otherwise its COMMIT would end THIS
+  // transaction early and persist the mutated function body past the test.
+  ambientTxDepth++;
   await db.query("begin");
   try {
     await db.query(mutatedSql);
     await fn();
   } finally {
     await db.query("rollback");
+    ambientTxDepth--;
   }
 }
 
@@ -182,6 +230,13 @@ describe("sms_inbox_thread_page_snapshot narrow-core rewrite (Spec v6, S18)", ()
   let nullNameThreadId: string;
   let crossOrgContactThreadId: string;
   let oldFtsOnlyThreadId: string;
+  // Case 7 (Astra round-4 gate on #604): a SECOND real member identity in a
+  // DIFFERENT org, proving the equivalence holds under actual org-scoped
+  // RLS now that callViaSession asserts the identity really took effect
+  // (see withDbTransaction/callViaSession above) -- not just for the
+  // single BMH_ORG_ID user every other case in this file uses.
+  let userBId: string;
+  let orgBThreadId: string;
 
   beforeAll(async () => {
     await db.connect();
@@ -337,15 +392,44 @@ describe("sms_inbox_thread_page_snapshot narrow-core rewrite (Spec v6, S18)", ()
         created_at: new Date().toISOString(), body: "unrelated recent follow-up", from_address: "+18169999999", to_address: "+18160000008",
       });
     }
+
+    // Case 7 (Astra round-4 gate on #604): a second member, a second org.
+    // userB belongs ONLY to TEST_ORG_B_ID; orgBThreadId is a thread in that
+    // org. If org-scoping is actually applied (i.e. the auth-context fix
+    // above really took effect), userB's page must contain ONLY
+    // orgBThreadId, never any BMH_ORG_ID thread from cases 1-6 -- and the
+    // old/new equivalence must still hold for this second identity.
+    {
+      const userB = await createOrgUser(service, {
+        orgId: TEST_ORG_B_ID,
+        email: `inbox-narrow-core-orgb-${randomUUID()}@example.test`,
+        role: "member",
+      });
+      users.push(userB.userId);
+      userBId = userB.userId;
+
+      const contactId = randomUUID();
+      const { error: contactError } = await service.from("contacts").insert({
+        id: contactId, org_id: TEST_ORG_B_ID, first_name: "OrgB", last_name: "Member",
+      });
+      if (contactError) throw contactError;
+
+      orgBThreadId = randomUUID();
+      const { error: messageError } = await service.from("messages").insert({
+        org_id: TEST_ORG_B_ID, channel: "sms", status: "received",
+        contact_id: contactId, conversation_id: orgBThreadId, direction: "inbound",
+        created_at: new Date().toISOString(), body: "org b msg", from_address: "+18160000009", to_address: "+18169999998",
+      } as never);
+      if (messageError) throw messageError;
+    }
   }, 120000);
 
   afterAll(async () => {
-    try {
-      await apply(`drop function if exists public.${OLD_ORACLE_NAME}(timestamptz, text, uuid, uuid, boolean, integer, integer, text);`);
-      for (const id of users) await service.auth.admin.deleteUser(id);
-    } finally {
-      await db.end();
-    }
+    // The oracle and the `db` connection are torn down once, in the
+    // signature/config suite's own afterAll below (Astra round-4 gate on
+    // #604) -- that suite's tests still need both to exist. Only
+    // describe-local cleanup (test users) happens here.
+    for (const id of users) await service.auth.admin.deleteUser(id);
   });
 
   it("REQUIRED case 1: included READ thread under unread — page/total include it, counts.unread does not", async () => {
@@ -403,6 +487,20 @@ describe("sms_inbox_thread_page_snapshot narrow-core rewrite (Spec v6, S18)", ()
     await assertEquivalent(userId, { p_filter: "all", p_hide_noise: false, p_search: "zephyrqueryterm" });
     const newDoc = await callNewViaSession(userId, { p_filter: "all", p_hide_noise: false, p_search: "zephyrqueryterm" });
     expect(newDoc.rows.some(r => r.thread_id === oldFtsOnlyThreadId)).toBe(true);
+  });
+
+  it("REQUIRED case 7 (Astra round-4 gate on #604): old==new equivalence AND org isolation hold for a second member identity in a second org", async () => {
+    // Proves the auth-context fix actually scopes by org, not just that old
+    // and new agree under whatever (possibly unscoped) identity was active.
+    const oldDoc = await callOldViaSession(userBId, { p_filter: "all", p_hide_noise: false });
+    const newDoc = await callNewViaSession(userBId, { p_filter: "all", p_hide_noise: false });
+    expect(newDoc).toEqual(oldDoc);
+    expect(newDoc.rows.some(r => r.thread_id === orgBThreadId)).toBe(true);
+    // Org isolation: userB must never see any BMH_ORG_ID thread seeded by
+    // cases 1-6 above.
+    for (const bmhThreadId of [readThreadId, oldReviewThreadId, canaryThreadId, nullNameThreadId]) {
+      expect(newDoc.rows.some(r => r.thread_id === bmhThreadId)).toBe(false);
+    }
   });
 
   it.each(["all", "unread", "mine", "unassigned", "escalated", "dispo", "needs_outcome"] as const)(
@@ -488,11 +586,18 @@ describe("sms_inbox_thread_page_snapshot narrow-core rewrite (Spec v6, S18)", ()
 });
 
 describe("sms_inbox_thread_page_snapshot signature/config safety net (BLOCKING, Fable v6)", () => {
-  beforeAll(async () => {
-    await db.connect();
-  });
+  // `db` is the SAME connection opened in the first describe's beforeAll
+  // above and never closed by that describe's afterAll (Astra round-4 gate
+  // on #604) -- reconnecting here would throw ("Client has already been
+  // connected") and, before the fix, this suite also depended on the OLD
+  // oracle function, which the first describe used to drop before this ran.
+  // Both the oracle and the connection now live until this suite finishes.
   afterAll(async () => {
-    await db.end();
+    try {
+      await apply(`drop function if exists public.${OLD_ORACLE_NAME}(timestamptz, text, uuid, uuid, boolean, integer, integer, text);`);
+    } finally {
+      await db.end();
+    }
   });
 
   it("pg_get_function_arguments(oid) is byte-identical before and after the migration", async () => {
@@ -519,13 +624,13 @@ describe("sms_inbox_thread_page_snapshot signature/config safety net (BLOCKING, 
     expect(mutated).not.toBe(expected);
   });
 
-  it("proconfig carries search_path='', statement_timeout='15s', work_mem='32MB', and the function is SECURITY INVOKER (S20.1/S21.1 E5)", async () => {
+  it("proconfig carries search_path='', statement_timeout='15s', work_mem='20MB', and the function is SECURITY INVOKER (S20.1/S21.1 E5, remeasured Astra round-4)", async () => {
     const { rows } = await db.query(
       `select proconfig, prosecdef from pg_proc where proname = 'sms_inbox_thread_page_snapshot'`,
     );
     const config: string[] = rows[0].proconfig ?? [];
     const isSecurityDefiner: boolean = rows[0].prosecdef;
-    expect(config).toEqual(expect.arrayContaining(["search_path=", "statement_timeout=15s", "work_mem=32MB"]));
+    expect(config).toEqual(expect.arrayContaining(["search_path=", "statement_timeout=15s", "work_mem=20MB"]));
     // SECURITY INVOKER means prosecdef is false (prosecdef = true is SECURITY DEFINER).
     expect(isSecurityDefiner).toBe(false);
     // Mutation-kill demo: dropping search_path must fail this assertion.
@@ -533,7 +638,7 @@ describe("sms_inbox_thread_page_snapshot signature/config safety net (BLOCKING, 
     expect(mutatedSearchPath).not.toEqual(expect.arrayContaining(["search_path="]));
     // Mutation-kill demo: dropping work_mem must fail this assertion.
     const mutatedWorkMem = config.filter(c => !c.startsWith("work_mem"));
-    expect(mutatedWorkMem).not.toEqual(expect.arrayContaining(["work_mem=32MB"]));
+    expect(mutatedWorkMem).not.toEqual(expect.arrayContaining(["work_mem=20MB"]));
   });
 
   it("rehearsed rollback: re-applying the old body+config restores the pre-migration signature/config", async () => {

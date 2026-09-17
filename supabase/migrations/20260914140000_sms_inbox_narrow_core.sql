@@ -87,12 +87,26 @@
 -- (`keys`) does not narrow the BUILD side. Two new MATERIALIZED CTEs,
 -- `contacts_in_window` and `properties_in_window`, semi-join-prefilter
 -- each table down to only the rows `keys` can reference before
--- `classified_narrow` joins against them. Combined with the
--- function-scoped `SET work_mem TO '32MB'` added to the header below
--- (S19.1's ascending ladder settled at 32MB on the fixture), this is
--- the combination the orchestrator proved clears `temp_bytes` delta 0
--- (Batches: 1) on the fixture. No `plan_cache_mode` or other planner
--- GUC is set, per S16.3/S18.1/S19.
+-- `classified_narrow` joins against them.
+--
+-- Round 4 fix (Astra gate on #604, 2026-09-17): 32MB was picked on a
+-- small dev-scale fixture and never re-measured at a representative
+-- in-window row count. docs/performance/2026-09-17-inbox-work-mem-remeasurement.md
+-- (owned PG17 fixture, ~65k in-window conversations / 20k contacts / 15k
+-- properties, matching the ~64,643-row scale this function actually
+-- operates over post-E5) shows the disk-spill threshold is 18MB, not
+-- 32MB: 16MB spills ~26MB temp (+~250ms), 17MB spills ~18MB temp, 18MB
+-- and above clear `temp_bytes` delta 0 (Batches: 1) with execution time
+-- flat from 18MB through 32MB (~1.0-1.09s on the fixture's hardware,
+-- vs ~1.29-1.33s still-spilling at 8-16MB). The function-scoped
+-- `SET work_mem TO '20MB'` below ships the measured minimum plus a
+-- small margin, not the unmeasured 32MB — roughly 40% less memory
+-- pressure per call than the original round-3 value for the same
+-- spill-free result. See that doc for the full ladder, the honest
+-- per-call footprint estimate, and the standing tier/concurrency
+-- tradeoff this does NOT resolve (still needs a capacity decision, not
+-- a query fix, if concurrent load or DB tier changes). No
+-- `plan_cache_mode` or other planner GUC is set, per S16.3/S18.1/S19.
 --
 -- Reviewability: see the companion migration
 -- 20260914140000_sms_inbox_narrow_core.integration.test.ts for the
@@ -120,7 +134,7 @@ CREATE OR REPLACE FUNCTION public.sms_inbox_thread_page_snapshot(
  STABLE SECURITY INVOKER
  SET search_path TO ''
  SET statement_timeout TO '15s'
- SET work_mem TO '32MB'
+ SET work_mem TO '20MB'
 AS $function$
   with search_input as (
     select case when length(btrim(p_search)) >= 3
