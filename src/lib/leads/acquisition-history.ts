@@ -8,6 +8,25 @@ export type AcquisitionHistoryFact = {
       source: string;
       attemptKind: string;
       outcome: string | null;
+      /** Optional enrichment supplied by a rep-SMS orchestration read. */
+      followUpStatus?:
+        | "required"
+        | "draft"
+        | "claimed"
+        | "sending"
+        | "accepted"
+        | "delivered"
+        | "failed_not_dispatched"
+        | "delivery_failed"
+        | "blocked"
+        | "unknown"
+        | "voided"
+        | "exception_closed"
+        | null;
+      followUpObligationId?: string | null;
+      followUpMessage?: string | null;
+      followUpComposition?: Record<string, unknown> | null;
+      followUpBlockedReason?: string | null;
       note: string | null;
       recordingUrl: string | null;
       callActivityId: string | null;

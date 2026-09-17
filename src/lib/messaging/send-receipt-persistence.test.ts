@@ -8,7 +8,14 @@ vi.mock("./consent", () => ({ getConsentState: vi.fn().mockResolvedValue("can_se
 vi.mock("./opt-out-phone", () => ({ isSmsPhoneSuppressed: vi.fn().mockResolvedValue(false) }));
 vi.mock("./quiet-hours", () => ({ checkQuietHours: vi.fn().mockReturnValue({ ok: true }) }));
 vi.mock("@/lib/messages/threading", () => ({ ensureConversationIdForThread: vi.fn().mockResolvedValue("conversation-1") }));
-vi.mock("./status-events", () => ({ reconcileStoredStatusEvents: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("./status-events", () => ({
+  reconcileStoredStatusEvents: vi.fn().mockResolvedValue({
+    candidates: 0,
+    processed: 0,
+    failed: 0,
+    failures: [],
+  }),
+}));
 
 import { getMessagingProvider } from "./registry";
 import { reconcileStoredStatusEvents } from "./status-events";
@@ -77,7 +84,7 @@ function database(receipts: Array<Result | Error>, providerAccepted: () => boole
 }
 
 beforeEach(() => {
-  vi.mocked(reconcileStoredStatusEvents).mockReset().mockResolvedValue(undefined);
+  vi.mocked(reconcileStoredStatusEvents).mockReset().mockResolvedValue({ candidates: 0, processed: 0, failed: 0, failures: [] });
 });
 
 for (const mode of ["immediate", "queued"] as const) {

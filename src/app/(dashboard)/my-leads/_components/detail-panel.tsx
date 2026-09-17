@@ -15,6 +15,7 @@ import type {
   MyLeadDetailGroupName,
   MyLeadDetailPageResult,
   MyLeadDetailPanelProps,
+  MyLeadAttempt,
 } from "./types"
 
 type DetailPagingState = Partial<
@@ -124,6 +125,17 @@ export function MyLeadDetailPanel({
               )}
               <span className="font-mono text-[10.5px] text-muted-foreground">{attempt.occurredLabel}</span>
             </div>
+            {attempt.followUpStatus && (
+              <div
+                className="col-span-2 space-y-0.5 rounded-md border border-blue-200 bg-blue-50/60 px-2.5 py-2 text-xs dark:border-blue-900 dark:bg-blue-950/30"
+                data-testid={`attempt-follow-up-${attempt.id}`}
+              >
+                <p className="font-semibold">Text follow-up: {formatFollowUpStatus(attempt.followUpStatus)}</p>
+                {attempt.followUpMessage && <p className="text-muted-foreground">Status detail: {attempt.followUpMessage}</p>}
+                {attempt.followUpBlockedReason && <p className="text-muted-foreground">Blocked reason: {attempt.followUpBlockedReason}</p>}
+                <p className="text-muted-foreground">{followUpGuidance(attempt.followUpStatus)}</p>
+              </div>
+            )}
             {visible && attempt.callActivityId && <MyLeadCallArtifacts key={attempt.callActivityId} callActivityId={attempt.callActivityId} />}
           </div>
         )}
@@ -221,6 +233,23 @@ export function MyLeadDetailPanel({
       </div>
     </div>
   )
+}
+
+function formatFollowUpStatus(status: NonNullable<MyLeadAttempt["followUpStatus"]>) {
+  return status.replaceAll("_", " ").replace(/^./, (character) => character.toUpperCase())
+}
+
+function followUpGuidance(status: NonNullable<MyLeadAttempt["followUpStatus"]>) {
+  if (status === "required" || status === "draft" || status === "failed_not_dispatched") {
+    return "Open Text lead to resume this saved follow-up."
+  }
+  if (status === "accepted" || status === "delivered") {
+    return "Review the text history for the provider and delivery record."
+  }
+  if (status === "blocked") {
+    return "Resolve the blocked reason, then review the saved follow-up before sending."
+  }
+  return "Review the text history before retrying; automatic retry is disabled."
 }
 
 function DetailList<T extends { id: string }>({

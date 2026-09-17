@@ -1,5 +1,6 @@
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 import { normalizePhone } from "@/lib/csv/normalize";
 import { ConfigurationError, ProviderError } from "@/lib/errors/classes";
@@ -16,6 +17,7 @@ import {
   type SenderInventoryState,
 } from "./delivery";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
+import type { MessagingProvider } from "./types";
 import { getMessagingProvider } from "./registry";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "./sms-phone";
 import {
@@ -52,6 +54,185 @@ const LANDLINE_BLOCK_REASON =
 export const PROVIDER_PENDING_STALE_MS = 15 * 60_000;
 const PROVIDER_TRANSIENT_DEFER_MS = 5 * 60_000;
 const PROVIDER_TRANSIENT_MAX_DEFER_ATTEMPTS = 3;
+
+type RepSmsIdempotencyRow = {
+  id: string;
+  org_id: string;
+  property_id: string | null;
+  contact_id: string | null;
+  body: string;
+  status: string;
+  external_id: string | null;
+  error_message: string | null;
+  from_address: string | null;
+  to_address: string | null;
+  metadata: Json | null;
+};
+
+/**
+ * Service-owned reservation authority for a generic rep SMS. The value is
+ * created by fn_claim_rep_sms_delivery after the server validates the actor,
+ * tenant, lead, sender grant, and complete message payload. It is deliberately
+ * separate from the browser-writable messages row.
+ */
+export type RepSmsDeliveryReceiptAuthority = {
+  receiptId: string;
+  claimToken: string;
+  claimGeneration: number;
+  orgId: string;
+};
+
+type RepSmsDeliveryLedgerResult = {
+  ok?: unknown;
+  state?: unknown;
+  providerMessageId?: unknown;
+  providerError?: unknown;
+};
+
+function repSmsLedgerResult(value: unknown): RepSmsDeliveryLedgerResult | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as RepSmsDeliveryLedgerResult
+    : null;
+}
+
+async function recordRepSmsDeliveryLedgerResult(
+  authority: RepSmsDeliveryReceiptAuthority,
+  state: "accepted" | "failed_not_dispatched" | "unknown",
+  input: { providerMessageId?: string | null; providerStatus?: string | null; providerError?: string | null },
+): Promise<RepSmsDeliveryLedgerResult | null> {
+  try {
+    const admin = createAdminClient() as unknown as {
+      rpc(name: string, args: Record<string, unknown>): Promise<{ data: unknown; error: { message?: string } | null }>;
+    };
+    const result = await admin.rpc("fn_record_rep_sms_delivery_result", {
+      p_receipt_id: authority.receiptId,
+      p_claim_token: authority.claimToken,
+      p_claim_generation: authority.claimGeneration,
+      p_state: state,
+      p_provider_message_id: input.providerMessageId ?? null,
+      p_provider_status: input.providerStatus ?? null,
+      p_provider_error: input.providerError ?? null,
+    });
+    if (result.error) return null;
+    const record = repSmsLedgerResult(result.data);
+    return record?.ok === true ? record : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every return before the provider boundary is proven non-dispatch. A
+ * service-owned rep receipt must preserve that evidence so the same
+ * submission key can receive a fresh claim generation after the operator
+ * fixes the blocking condition. If the evidence write itself fails, hold the
+ * receipt as unknown rather than letting the caller retry blindly.
+ */
+async function preserveRepSmsPreDispatchFailure(
+  input: SendSmsInput,
+  outcome: SendSmsOutcome,
+): Promise<SendSmsOutcome> {
+  if (!input.repSmsReceipt) return outcome;
+  const detail = "error" in outcome && typeof outcome.error === "string"
+    ? outcome.error
+    : "reason" in outcome && typeof outcome.reason === "string"
+      ? outcome.reason
+      : `The SMS was held before provider dispatch (${outcome.status}).`;
+  const recorded = await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, "failed_not_dispatched", {
+    providerError: detail,
+  });
+  if (recorded) return outcome;
+  return {
+    status: "provider_unknown",
+    messageId: input.repSmsReceipt.receiptId,
+    error: `${detail}. The durable non-dispatch result could not be confirmed; review before retrying.`,
+  };
+}
+
+function normalizeMaybePhone(value: string | null | undefined): string | null {
+  if (!value?.trim()) return null;
+  return normalizePhone(value) ?? value.trim();
+}
+
+function repSmsIdempotencyConflict(
+  row: RepSmsIdempotencyRow,
+  input: SendSmsInput,
+): string | null {
+  if (row.property_id !== input.propertyId) return "lead";
+  if (row.contact_id !== input.contactId) return "contact";
+  if (row.body !== input.body) return "message body";
+  const requestedTo = normalizeMaybePhone(input.to);
+  if (requestedTo && normalizeMaybePhone(row.to_address) !== requestedTo) return "recipient";
+  const requestedFrom = normalizeMaybePhone(input.from);
+  if (requestedFrom && normalizeMaybePhone(row.from_address) !== requestedFrom) return "sender";
+  return null;
+}
+
+function repSmsIdempotencyReplay(
+  row: RepSmsIdempotencyRow,
+  input: SendSmsInput,
+): SendSmsOutcome {
+  const conflict = repSmsIdempotencyConflict(row, input);
+  if (conflict) {
+    return {
+      status: "db_error",
+      error: `SMS idempotency key was already used for a different ${conflict}. Start a new message before sending.`,
+    };
+  }
+  if (row.status === "sent" || row.status === "delivered") {
+    if (row.external_id) {
+      return { status: "sent", messageId: row.id, externalId: row.external_id };
+    }
+    // A terminal row without the provider receipt is still ambiguous. Keep
+    // the key held so a reload cannot issue a second provider request while
+    // an operator or webhook reconciles the missing external id.
+    return {
+      status: "provider_unknown",
+      messageId: row.id,
+      error: row.error_message ?? "The previous SMS was accepted without a provider receipt.",
+    };
+  }
+  if (row.status === "queued") return { status: "queued", messageId: row.id };
+  const metadata = row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+    ? row.metadata as Record<string, unknown>
+    : null;
+  if (row.status === "pending" || metadata?.providerOutcome === "provider_unknown") {
+    return {
+      status: "provider_unknown",
+      messageId: row.id,
+      error: row.error_message ?? "A previous SMS request is still being reconciled.",
+    };
+  }
+  if (row.status === "failed") {
+    return {
+      status: "provider_failed",
+      messageId: row.id,
+      error: row.error_message ?? "The previous SMS request failed before completion.",
+    };
+  }
+  return {
+    status: "db_error",
+    messageId: row.id,
+    error: `The previous SMS request has an unsupported state (${row.status}). Review text history before retrying.`,
+  };
+}
+
+async function loadRepSmsIdempotencyRow(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  idempotencyKey: string,
+): Promise<{ row: RepSmsIdempotencyRow | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id,org_id,property_id,contact_id,body,status,external_id,error_message,from_address,to_address,metadata")
+    .eq("org_id", orgId)
+    .eq("channel", "sms")
+    .eq("direction", "outbound")
+    .eq("idempotency_key", idempotencyKey)
+    .maybeSingle();
+  if (error) return { row: null, error: error.message };
+  return { row: data as RepSmsIdempotencyRow | null, error: null };
+}
 
 export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
@@ -136,6 +317,18 @@ export type SendSmsOutcome =
       status: "provider_failed";
       messageId: string;
       error: string;
+      /** False means the manual authorization fence failed before fetch. */
+      providerAttempted?: boolean;
+    }
+  | {
+      /**
+       * The provider boundary was reached but Sendillo did not provide
+       * definitive non-delivery evidence. This is a durable hold: callers
+       * must reconcile the provider receipt before offering another send.
+       */
+      status: "provider_unknown";
+      messageId: string;
+      error: string;
     }
   | {
       status: "provider_deferred";
@@ -202,46 +395,91 @@ export type SendSmsInput = {
    * still validate it against the approved sender catalog before any send.
    */
   allowDefaultFromWhenNoSticky?: boolean;
+  /** Tenant-scoped replay key for a manual rep SMS submission. */
+  idempotencyKey?: string | null;
+  /**
+   * Service-owned rep SMS reservation. When present, this ledger is the
+   * replay authority and messages.idempotency_key is intentionally ignored.
+   */
+  repSmsReceipt?: RepSmsDeliveryReceiptAuthority | null;
 };
 
 export async function sendSmsToContact(
   supabase: SupabaseClient<Database>,
   input: SendSmsInput,
+  manualDispatch?: { provider: MessagingProvider; authorize: (messageId: string) => Promise<void> },
 ): Promise<SendSmsOutcome> {
   await assertNotTrainingTarget(supabase, { propertyId: input.propertyId, contactId: input.contactId });
-  // 1. Resolve provider.
-  let provider;
-  try {
-    provider = getMessagingProvider();
-  } catch (e) {
-    if (e instanceof ConfigurationError) {
-      return {
-        status: "blocked_provider_off",
-        reason: e.message,
-      };
-    }
-    throw e;
+  if (manualDispatch && (input.origin !== "manual" || input.queueOnly || input.campaignId)) {
+    throw new Error("Assigned senders support immediate manual messages only.");
   }
-  if (!provider) {
-    return {
-      status: "blocked_provider_off",
-      reason:
-        "Messaging is off — set MESSAGING_PROVIDER in .env.local to enable it.",
-    };
+  const idempotencyKey = input.idempotencyKey?.trim() || null;
+  if (input.idempotencyKey != null && !idempotencyKey) {
+    return { status: "db_error", error: "SMS idempotency key cannot be blank." };
+  }
+  if (idempotencyKey && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
+    return { status: "db_error", error: "SMS idempotency key is invalid." };
+  }
+
+  const resolveProvider = (): MessagingProvider | SendSmsOutcome => {
+    try {
+      const provider = manualDispatch?.provider ?? getMessagingProvider();
+      return provider ?? {
+        status: "blocked_provider_off",
+        reason: "Messaging is off — set MESSAGING_PROVIDER in .env.local to enable it.",
+      };
+    } catch (e) {
+      if (e instanceof ConfigurationError) {
+        return { status: "blocked_provider_off", reason: e.message };
+      }
+      throw e;
+    }
+  };
+
+  // Resolve an existing keyed submission before provider configuration. A
+  // completed send must remain replayable when a later page load is missing
+  // provider configuration; replaying a durable receipt never needs a second
+  // provider request.
+  let preloadedProperty: {
+    id: string;
+    org_id: string;
+    state: string;
+    outreach_dispo: string | null;
+  } | null = null;
+  let idempotencyChecked = false;
+  if (idempotencyKey && !input.repSmsReceipt) {
+    const propertyLookup = await supabase
+      .from("properties")
+      .select("id, org_id, state, outreach_dispo")
+      .eq("id", input.propertyId)
+      .maybeSingle();
+    if (propertyLookup.error) return { status: "db_error", error: propertyLookup.error.message };
+    if (!propertyLookup.data) return { status: "property_not_found" };
+    preloadedProperty = propertyLookup.data;
+    idempotencyChecked = true;
+    const existing = await loadRepSmsIdempotencyRow(
+      supabase,
+      propertyLookup.data.org_id,
+      idempotencyKey,
+    );
+    if (existing.error) return { status: "db_error", error: existing.error };
+    if (existing.row) return repSmsIdempotencyReplay(existing.row, input);
   }
 
   // QUEUE-ONLY shortcut — skip consent + quiet-hours checks (they'll
   // run at release time), skip the provider call, just persist a
   // `status='queued'` breadcrumb.
   if (input.queueOnly) {
-    return queueForLater(supabase, provider.providerId, input);
+    const resolved = resolveProvider();
+    if (!("providerId" in resolved)) return resolved;
+    return queueForLater(supabase, resolved.providerId, input);
   }
 
   const campaignPause = await blockIfCampaignPaused(
     supabase,
     input.campaignId,
   );
-  if (campaignPause) return campaignPause;
+  if (campaignPause) return preserveRepSmsPreDispatchFailure(input, campaignPause);
 
   // 2. Look up contact + property in parallel.
   const [contactResult, propertyResult] = await Promise.all([
@@ -250,21 +488,43 @@ export async function sendSmsToContact(
       .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
       .eq("id", input.contactId)
       .maybeSingle(),
-    supabase
-      .from("properties")
-      .select("id, org_id, state, outreach_dispo")
-      .eq("id", input.propertyId)
-      .maybeSingle(),
+    preloadedProperty
+      ? Promise.resolve({ data: preloadedProperty, error: null })
+      : supabase
+        .from("properties")
+        .select("id, org_id, state, outreach_dispo")
+        .eq("id", input.propertyId)
+        .maybeSingle(),
   ]);
 
   if (contactResult.error) {
-    return { status: "db_error", error: contactResult.error.message };
+    return preserveRepSmsPreDispatchFailure(input, { status: "db_error", error: contactResult.error.message });
   }
-  if (!contactResult.data) return { status: "contact_not_found" };
+  if (!contactResult.data) return preserveRepSmsPreDispatchFailure(input, { status: "contact_not_found" });
   if (propertyResult.error) {
-    return { status: "db_error", error: propertyResult.error.message };
+    return preserveRepSmsPreDispatchFailure(input, { status: "db_error", error: propertyResult.error.message });
   }
-  if (!propertyResult.data) return { status: "property_not_found" };
+  if (!propertyResult.data) return preserveRepSmsPreDispatchFailure(input, { status: "property_not_found" });
+
+  // Resolve an existing submission before current consent or quiet-hour
+  // state. A replay is a read of the original durable outcome; it must never
+  // create a second provider request or turn a completed send into a new
+  // blocked attempt after the lead changes. The keyed fast path above handles
+  // provider-off reloads; this check covers callers whose initial property
+  // read did not use it.
+  if (idempotencyKey && !input.repSmsReceipt && !idempotencyChecked) {
+    const existing = await loadRepSmsIdempotencyRow(
+      supabase,
+      propertyResult.data.org_id,
+      idempotencyKey,
+    );
+    if (existing.error) return { status: "db_error", error: existing.error };
+    if (existing.row) return repSmsIdempotencyReplay(existing.row, input);
+  }
+
+  const resolved = resolveProvider();
+  if (!("providerId" in resolved)) return resolved;
+  const provider = resolved;
 
   const consentState = await getConsentState(supabase, input.contactId, "sms");
   const suppression = evaluateSuppression({
@@ -274,22 +534,22 @@ export async function sendSmsToContact(
     smsOptedOut: contactResult.data.sms_opted_out,
   });
   if (suppression.suppressed) {
-    return blockedTerminalDispo(suppression);
+    return preserveRepSmsPreDispatchFailure(input, blockedTerminalDispo(suppression));
   }
 
   const destination = input.to
     ? selectSmsPhoneByNumber(contactResult.data, input.to)
     : selectBestSmsPhone(contactResult.data);
   if (!destination) {
-    return {
+    return preserveRepSmsPreDispatchFailure(input, {
       status: "blocked_no_phone",
       reason: input.to
         ? "Selected thread phone is not saved on this contact. Resolve the contact phone before replying."
         : "Contact has no phone number. Add one before sending SMS.",
-    };
+    });
   }
   if (destination.lineType === "landline") {
-    return { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON };
+    return preserveRepSmsPreDispatchFailure(input, { status: "blocked_landline", reason: LANDLINE_BLOCK_REASON });
   }
   try {
     if (
@@ -299,38 +559,38 @@ export async function sendSmsToContact(
         propertyResult.data.org_id,
       )
     ) {
-      return blockedTerminalDispo({
+      return preserveRepSmsPreDispatchFailure(input, blockedTerminalDispo({
         suppressed: true,
         source: "phone_suppression",
         outreachDispo: propertyResult.data.outreach_dispo,
         consentState,
         reason: "Phone number is suppressed from SMS.",
-      });
+      }));
     }
   } catch (e) {
-    return {
+    return preserveRepSmsPreDispatchFailure(input, {
       status: "db_error",
       error: e instanceof Error ? e.message : String(e),
-    };
+    });
   }
 
   // 3. Consent check — only hard-block explicit opt-outs; no-consent is allowed.
   if (consentState === "opted_out") {
-    return {
+    return preserveRepSmsPreDispatchFailure(input, {
       status: "blocked_no_consent",
       reason: consentMessage(consentState),
       consentState,
-    };
+    });
   }
 
   // 4. Quiet hours.
   const quiet = checkQuietHours(propertyResult.data.state);
   if (!quiet.ok) {
-    return {
+    return preserveRepSmsPreDispatchFailure(input, {
       status: "blocked_quiet_hours",
       reason: quietMessage(quiet),
       check: quiet,
-    };
+    });
   }
 
   // 5. Pre-insert the row so we always have a breadcrumb.
@@ -342,10 +602,10 @@ export async function sendSmsToContact(
       input.propertyId,
     );
   } catch (e) {
-    return {
+    return preserveRepSmsPreDispatchFailure(input, {
       status: "db_error",
       error: e instanceof Error ? e.message : String(e),
-    };
+    });
   }
   const normalizedToPhone = normalizePhone(destination.phone) ?? destination.phone;
   const fromResolution = await resolveOutboundFromAddress(supabase, {
@@ -359,7 +619,7 @@ export async function sendSmsToContact(
     requireStickyFrom: input.requireStickyFrom ?? false,
     allowDefaultFromWhenNoSticky: input.allowDefaultFromWhenNoSticky ?? false,
   });
-  if (!fromResolution.ok) return fromResolution.outcome;
+  if (!fromResolution.ok) return preserveRepSmsPreDispatchFailure(input, fromResolution.outcome);
   const fromAddress = fromResolution.fromAddress;
   const inputMetadata =
     input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
@@ -376,6 +636,7 @@ export async function sendSmsToContact(
       campaign_id: input.campaignId ?? null,
       contact_id: input.contactId,
       property_id: input.propertyId,
+      idempotency_key: input.repSmsReceipt ? null : idempotencyKey,
       conversation_id: conversationId,
       from_address: fromAddress,
       to_address: normalizedToPhone,
@@ -391,6 +652,28 @@ export async function sendSmsToContact(
     .select("id")
     .single();
   if (insertError || !pending) {
+    if (insertError?.code === "23505" && idempotencyKey && !input.repSmsReceipt) {
+      const existing = await loadRepSmsIdempotencyRow(
+        supabase,
+        propertyResult.data.org_id,
+        idempotencyKey,
+      );
+      if (!existing.error && existing.row) {
+        return repSmsIdempotencyReplay(existing.row, input);
+      }
+    }
+    if (input.repSmsReceipt) {
+      const recorded = await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, "failed_not_dispatched", {
+        providerError: insertError?.message ?? "failed to insert the pending SMS row",
+      });
+      if (!recorded) {
+        return {
+          status: "provider_unknown",
+          messageId: input.repSmsReceipt.receiptId,
+          error: "The SMS could not be prepared and its durable retry state could not be recorded. Review before retrying.",
+        };
+      }
+    }
     return {
       status: "db_error",
       error: insertError?.message ?? "failed to insert pending message",
@@ -421,7 +704,7 @@ export async function sendSmsToContact(
       return {
         status: "blocked_fresh_state_unavailable",
         messageId: pending.id,
-        error: freshCheck.error,
+          error: freshCheck.error,
       };
     }
     const blocked = freshCheck.decision;
@@ -448,7 +731,10 @@ export async function sendSmsToContact(
   // 6. Send. Keep accepted-provider errors outside provider failure handling.
   let acceptedExternalId: string | undefined;
   let providerAccepted = false;
+  let providerCallStarted = false;
   try {
+    await manualDispatch?.authorize(pending.id);
+    providerCallStarted = true;
     const result = await provider.sendSms({
       to: destination.phone,
       body: input.body,
@@ -456,6 +742,24 @@ export async function sendSmsToContact(
     });
     providerAccepted = true;
     acceptedExternalId = result.externalId;
+    // Bind the provider receipt before updating the user-visible history row.
+    // If that row update loses a race, the service ledger still records that
+    // the provider accepted the request and a retry cannot issue a duplicate.
+    let repSmsLedgerResult: RepSmsDeliveryLedgerResult | null = null;
+    if (input.repSmsReceipt) {
+      repSmsLedgerResult = await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, "accepted", {
+        providerMessageId: result.externalId,
+        providerStatus: result.providerStatus,
+      });
+      if (!repSmsLedgerResult) {
+        return {
+          status: "db_error",
+          messageId: pending.id,
+          externalId: result.externalId,
+          error: "The provider accepted the SMS, but its durable receipt could not be recorded. Review before retrying.",
+        };
+      }
+    }
     const updates: MessagesUpdate = {
       status: "sent",
       external_id: result.externalId,
@@ -483,6 +787,15 @@ export async function sendSmsToContact(
         error: updateError?.message ?? "message changed while marking sent",
       };
     }
+    if (repSmsLedgerResult?.state === "delivery_failed") {
+      return {
+        status: "provider_failed",
+        messageId: pending.id,
+        error: typeof repSmsLedgerResult.providerError === "string"
+          ? repSmsLedgerResult.providerError
+          : "The provider reported delivery failure.",
+      };
+    }
     await reconcileStoredStatusEvents(
       supabase,
       provider.providerId,
@@ -501,6 +814,45 @@ export async function sendSmsToContact(
         status: "db_error",
         messageId: pending.id,
         externalId: acceptedExternalId,
+        error: message,
+      };
+    }
+    if (input.repSmsReceipt) {
+      const state = providerCallStarted ? "unknown" : "failed_not_dispatched";
+      const recorded = await recordRepSmsDeliveryLedgerResult(input.repSmsReceipt, state, {
+        providerError: message,
+      });
+      if (!recorded) {
+        return {
+          status: "provider_unknown",
+          messageId: pending.id,
+          error: `${message}. Durable receipt state could not be confirmed; review before retrying.`,
+        };
+      }
+    }
+    if (isAmbiguousProviderError(e)) {
+      await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: message,
+          metadata: {
+            ...(inputMetadata ?? {}),
+            providerOutcome: "provider_unknown",
+            providerAttempt: {
+              pendingAt,
+              maxPendingMs: PROVIDER_PENDING_STALE_MS,
+              terminal: true,
+              retryable: false,
+            },
+          } as Json,
+        })
+        .eq("id", pending.id)
+        .eq("status", "pending");
+      return {
+        status: "provider_unknown",
+        messageId: pending.id,
         error: message,
       };
     }
@@ -524,6 +876,7 @@ export async function sendSmsToContact(
       status: "provider_failed",
       messageId: pending.id,
       error: message,
+      ...(manualDispatch && !providerCallStarted ? { providerAttempted: false } : {}),
     };
   }
 }
@@ -1110,6 +1463,36 @@ export async function releaseQueuedMessage(
         error: message,
       };
     }
+    if (isAmbiguousProviderError(e)) {
+      const unknownMetadata = {
+        ...(currentMetadata ?? {}),
+        providerOutcome: "provider_unknown",
+        providerAttempt: {
+          pendingAt,
+          maxPendingMs: PROVIDER_PENDING_STALE_MS,
+          terminal: true,
+          retryable: false,
+        },
+      } as Json;
+      const { error: unknownError } = await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: message,
+          metadata: unknownMetadata,
+        })
+        .eq("id", msg.id)
+        .eq("status", "pending");
+      if (unknownError) {
+        return { status: "db_error", error: unknownError.message };
+      }
+      return {
+        status: "provider_unknown",
+        messageId: msg.id,
+        error: message,
+      };
+    }
     const retry = buildProviderRetryUpdate(e, currentMetadata);
     if (retry.defer) {
       const pauseForRetry = await campaignIsPaused(supabase, msg.campaign_id);
@@ -1359,21 +1742,14 @@ function readProviderRetryMetadata(
   };
 }
 
-// Codex round 9 (finding 1): sendillo.ts now stamps `details.isAbort = true`
-// on a ProviderError thrown from either its own internal send timeout or an
-// external AbortSignal (see that file's sendSms doc comment). This
-// classifier deliberately does NOT read that flag — it only ever looks at
-// `details?.status` (an HTTP status Sendillo returned), so an ambiguous
-// abort/timeout here keeps its EXISTING classification: not transient, one
-// terminal `provider_failed`/deferred-cap write, same as before this round.
-// Verified deliberately, not by omission: this queue's retry semantics are
-// keyed on HTTP status codes (408/425/429/5xx) that imply the provider
-// itself said "try again" — a timeout where the provider never responded at
-// all doesn't map onto that vocabulary, and folding `isAbort` in here would
-// be a real behavior change (retry-on-ambiguous-timeout for seller-facing
-// sends) out of scope for this round, which only concerns the rep-SMS
-// aborted_ambiguous path (rep-sms.ts).
+// Provider retries are allowed only for errors with documented retry
+// semantics. The Sendillo adapter marks its ambiguous boundary outcomes
+// before this classifier runs, so those rows stay on the non-resend hold.
 function isTransientProviderError(error: unknown): boolean {
+  // Sendillo's timeout, transport failure, 5xx response, and 2xx response
+  // without a reconcilable message id all leave delivery uncertain. They
+  // must never enter the generic retry queue, which could duplicate a text.
+  if (isAmbiguousProviderError(error)) return false;
   if (error instanceof ProviderError) {
     const status = error.details?.status;
     if (
@@ -1394,6 +1770,25 @@ function isTransientProviderError(error: unknown): boolean {
   return /\b429\b|rate limit|too many requests|timeout|timed out|abort|network|fetch failed|econn|etimedout|temporar|5\d\d/.test(
     message,
   );
+}
+
+/**
+ * A provider error can be safely retried only when the provider proved it
+ * rejected the request before accepting it. Sendillo's API gives us no such
+ * proof for a transport/abort failure, a 5xx response, or a successful
+ * response with no message id. Keep this classifier deliberately narrow so
+ * another adapter's documented retry contract is unchanged.
+ */
+function isAmbiguousProviderError(error: unknown): boolean {
+  if (!(error instanceof ProviderError) || error.provider !== "sendillo") {
+    return false;
+  }
+  const details = error.details;
+  if (!details || details.notSent === true) return false;
+  return details.ambiguousDelivery === true
+    || details.transportFailure === true
+    || details.isAbort === true
+    || details.acceptedWithoutId === true;
 }
 
 function consentMessage(state: ConsentState): string {

@@ -126,6 +126,10 @@ export type MyLeadAttempt = {
   sourceLabel?: string
   recordingUrl?: string | null
   callActivityId?: string | null
+  followUpObligationId?: string | null
+  followUpStatus?: "required" | "draft" | "claimed" | "sending" | "accepted" | "delivered" | "failed_not_dispatched" | "unknown" | "blocked" | "delivery_failed" | "voided" | "exception_closed" | null
+  followUpMessage?: string | null
+  followUpBlockedReason?: string | null
 }
 
 export type MyLeadAppointment = {
@@ -253,8 +257,36 @@ export type MyLeadDetailPanelProps = {
 }
 
 export type AcquisitionFormSubmitResult =
-  | { ok: true }
+  | {
+      ok: true
+      /** The attempt may be durable before its SMS obligation is resolved. */
+      attemptRecorded?: boolean
+      followUp?: {
+        status:
+          | "required"
+          | "draft"
+          | "sending"
+          | "accepted"
+          | "delivered"
+          | "delivery_failed"
+          | "blocked"
+          | "failed_not_dispatched"
+          | "unknown"
+        message?: string | null
+      } | null
+    }
   | { ok: false; message: string; fieldErrors?: Record<string, string> }
+
+export type AcquisitionAttemptFollowUp = {
+  policyVersion: number
+  introId: string
+  introVersion: number
+  templateId: string
+  templateVersion: number
+  initialRemainder: string
+  remainder: string
+  body: string
+}
 
 export type AcquisitionAttemptFormPayload = {
   propertyId: string
@@ -265,6 +297,9 @@ export type AcquisitionAttemptFormPayload = {
   note: string | null
   recordingUrl: string | null
   callActivityId: string | null
+  /** Required only for a no-answer outcome when the rep SMS rollout applies. */
+  smsBody?: string | null
+  followUp?: AcquisitionAttemptFollowUp | null
 }
 
 export type AcquisitionTemperature = "hot" | "warm" | "cold" | null

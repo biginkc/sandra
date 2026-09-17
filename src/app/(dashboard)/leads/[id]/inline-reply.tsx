@@ -30,6 +30,8 @@ type Props = {
   /** Compact adjacent action rendered with the send-safety explanation. */
   footerAction?: React.ReactNode;
   onSent?: (messageId: string) => void;
+  onPendingChange?: (pending: boolean) => void;
+  sendAction?: (body: string, to: string | null) => ReturnType<typeof sendSmsFromLead>;
 };
 
 /**
@@ -50,10 +52,16 @@ export function InlineReply({
   suspended = false,
   footerAction,
   onSent,
+  sendAction,
+  onPendingChange,
 }: Props) {
   const router = useRouter();
   const [body, setBody] = useState("");
   const [pending, startTransition] = useTransition();
+  // An accepted request without a durable provider receipt is not safe to
+  // resend from this composer. Keep the exact draft visible while the
+  // provider reconciliation path determines whether it was delivered.
+  const [providerUnknown, setProviderUnknown] = useState(false);
   // Tracks the most recent template selection so a slower in-flight
   // `loadLeadVars` for an earlier click can't overwrite the body the user
   // just picked (WR-04). Hooks must run before the early-return for the
@@ -73,17 +81,23 @@ export function InlineReply({
   const length = body.length;
   const tooLong = length > 1600;
   const canSend =
-    !disabled && length > 0 && !tooLong && !pending && !routeRefreshPending;
+    !disabled &&
+    !providerUnknown &&
+    length > 0 &&
+    !tooLong &&
+    !pending &&
+    !routeRefreshPending;
   const effectiveToPhone = replyToPhone ?? homeownerPhone;
 
   const send = () => {
     if (!canSend || sendInFlight.current) return;
     sendInFlight.current = true;
+    onPendingChange?.(true);
     const submittedBody = body;
     startTransition(async () => {
       try {
       const result = await callAction(
-        sendSmsFromLead(
+        sendAction ? sendAction(submittedBody, effectiveToPhone) : sendSmsFromLead(
           propertyId,
           submittedBody,
           fromNumber,
@@ -142,6 +156,13 @@ export function InlineReply({
             description: `${outcome.error} Check the thread before retrying to avoid a duplicate message.`,
           });
           break;
+        case "provider_unknown":
+          setProviderUnknown(true);
+          toast.warning("Send pending reconciliation", {
+            description:
+              "The messaging provider did not provide a definitive receipt. Your draft is preserved. Review the thread before retrying to avoid a duplicate message.",
+          });
+          break;
         case "contact_not_found":
         case "property_not_found":
           toast.error("Lead not found");
@@ -154,6 +175,7 @@ export function InlineReply({
       }
       } finally {
         sendInFlight.current = false;
+        onPendingChange?.(false);
       }
     });
   };
@@ -217,7 +239,7 @@ export function InlineReply({
           onKeyDown={handleKeyDown}
           placeholder="Type your reply…  (⌘/Ctrl + Enter to send)"
           aria-label="Reply to this lead"
-          disabled={pending}
+          disabled={pending || providerUnknown}
           maxLength={2000}
           rows={2}
           className="min-h-[52px] w-full resize-none border-none bg-transparent text-[14px] focus:ring-0 focus:outline-none placeholder:text-[#a8a29e]"
@@ -259,6 +281,16 @@ export function InlineReply({
         </div>
       </div>
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-2 px-2">
+        {providerUnknown && (
+          <p
+            className="col-span-2 text-[10px] leading-relaxed text-amber-700"
+            role="status"
+            aria-live="polite"
+          >
+            Send pending reconciliation. Your draft is preserved; review the
+            thread before retrying.
+          </p>
+        )}
         <p className="text-[10px] leading-relaxed text-[#a8a29e]">
           Sends immediately after Sandra checks current contact restrictions and
           quiet hours.

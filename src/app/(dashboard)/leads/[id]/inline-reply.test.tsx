@@ -178,6 +178,43 @@ describe("<InlineReply /> disabled explanations", () => {
     expect(routerRefreshMock).not.toHaveBeenCalled();
   });
 
+  it("preserves the draft and disables resend while provider reconciliation is pending", async () => {
+    const user = userEvent.setup();
+    vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
+      ok: true,
+      data: {
+        outcome: {
+          status: "provider_unknown",
+          messageId: "attempted-message",
+          error: "The provider did not return a definitive receipt.",
+        },
+      },
+    } as Awaited<ReturnType<typeof sendSmsFromLead>>);
+
+    render(
+      <InlineReply
+        propertyId="property-1"
+        homeownerContactId="contact-1"
+        homeownerPhone="+18165550123"
+      />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    await user.type(composer, "Keep this pending-reconciliation draft");
+    await user.click(screen.getByRole("button", { name: "Send reply" }));
+
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    expect(composer).toHaveValue("Keep this pending-reconciliation draft");
+    expect(composer).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send reply" })).toBeDisabled();
+    expect(screen.getByText(/pending reconciliation/i)).toBeVisible();
+    expect(toast.warning).toHaveBeenCalledWith("Send pending reconciliation", {
+      description:
+        "The messaging provider did not provide a definitive receipt. Your draft is preserved. Review the thread before retrying to avoid a duplicate message.",
+    });
+    expect(routerRefreshMock).not.toHaveBeenCalled();
+  });
+
   it("preserves the exact draft and warns before retrying after a database error", async () => {
     const user = userEvent.setup();
     vi.mocked(sendSmsFromLead).mockResolvedValueOnce({

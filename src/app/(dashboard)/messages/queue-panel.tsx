@@ -303,6 +303,17 @@ export function QueuePanel({
         toast.error("Provider error", { description: outcome.error });
         setRows((prev) => prev.filter((r) => r.id !== row.id));
         return false;
+      case "provider_unknown":
+        // The provider may have accepted the request even though the client
+        // did not receive a definitive receipt. Remove it from the queue so
+        // this screen cannot offer a duplicate send while reconciliation is
+        // pending; the message history remains the source of truth.
+        toast.warning("Send pending reconciliation", {
+          description:
+            "The messaging provider did not provide a definitive receipt. Review the message history before retrying to avoid a duplicate message.",
+        });
+        setRows((prev) => prev.filter((r) => r.id !== row.id));
+        return false;
       default:
         toast.error(outcome.status);
         return false;

@@ -14,6 +14,34 @@ export type Database = {
   }
   public: {
     Tables: {
+      rep_sms_sender_assignments: {
+        Row: { id: string; org_id: string; user_id: string; provider: string; provider_account_id: string | null; provider_sender_id: string | null; phone_e164: string; label: string; is_default: boolean; active: boolean; updated_by: string; updated_at: string; composition_policy_version: number; grant_status: string; granted_at: string; revoked_at: string | null; revoked_by: string | null }
+        Insert: { id?: string; org_id: string; user_id: string; provider?: string; provider_account_id?: string | null; provider_sender_id?: string | null; phone_e164: string; label: string; is_default?: boolean; active?: boolean; updated_by: string; updated_at?: string; composition_policy_version?: number; grant_status?: string; granted_at?: string; revoked_at?: string | null; revoked_by?: string | null }
+        Update: { active?: boolean; is_default?: boolean; label?: string; provider?: string; provider_account_id?: string | null; provider_sender_id?: string | null; composition_policy_version?: number; grant_status?: string; granted_at?: string; revoked_at?: string | null; revoked_by?: string | null; updated_by?: string; updated_at?: string }
+        Relationships: []
+      }
+
+      rep_sms_rollout_enrollments: {
+        Row: { org_id: string; user_id: string; enabled: boolean; enrolled_at: string | null; enrolled_by: string | null; updated_at: string; updated_by: string | null }
+        Insert: { org_id: string; user_id: string; enabled?: boolean; enrolled_at?: string | null; enrolled_by?: string | null; updated_at?: string; updated_by?: string | null }
+        Update: { enabled?: boolean; enrolled_at?: string | null; enrolled_by?: string | null; updated_at?: string; updated_by?: string | null }
+        Relationships: []
+      }
+
+      rep_sms_obligations: {
+        Row: { id: string; org_id: string; property_id: string; assignment_episode_id: string | null; attempt_id: string; actor_user_id: string; obligation_kind: string; provider: string | null; provider_account_id: string | null; sender_assignment_id: string | null; from_number: string | null; to_number: string | null; message_body: string | null; state: string; blocked_reason: string | null; provider_message_id: string | null; provider_status: string | null; provider_error: string | null; composition: Json; authorized_at: string | null; claim_state: string; claim_token: string | null; claim_generation: number; claimed_by: string | null; claimed_at: string | null; lease_expires_at: string | null; next_attempt_at: string; accepted_at: string | null; delivered_at: string | null; resolved_at: string | null; last_error: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; org_id: string; property_id: string; assignment_episode_id?: string | null; attempt_id: string; actor_user_id: string; obligation_kind?: string; provider?: string | null; provider_account_id?: string | null; sender_assignment_id?: string | null; from_number?: string | null; to_number?: string | null; message_body?: string | null; state?: string; blocked_reason?: string | null; provider_message_id?: string | null; provider_status?: string | null; provider_error?: string | null; composition?: Json; authorized_at?: string | null; claim_state?: string; claim_token?: string | null; claim_generation?: number; claimed_by?: string | null; claimed_at?: string | null; lease_expires_at?: string | null; next_attempt_at?: string; accepted_at?: string | null; delivered_at?: string | null; resolved_at?: string | null; last_error?: string | null; created_at?: string; updated_at?: string }
+        Update: { property_id?: string; assignment_episode_id?: string | null; actor_user_id?: string; obligation_kind?: string; provider?: string | null; provider_account_id?: string | null; sender_assignment_id?: string | null; from_number?: string | null; to_number?: string | null; message_body?: string | null; state?: string; blocked_reason?: string | null; provider_message_id?: string | null; provider_status?: string | null; provider_error?: string | null; composition?: Json; authorized_at?: string | null; claim_state?: string; claim_token?: string | null; claim_generation?: number; claimed_by?: string | null; claimed_at?: string | null; lease_expires_at?: string | null; next_attempt_at?: string; accepted_at?: string | null; delivered_at?: string | null; resolved_at?: string | null; last_error?: string | null; updated_at?: string }
+        Relationships: []
+      }
+
+      rep_sms_obligation_audit: {
+        Row: { id: string; org_id: string; obligation_id: string; actor_kind: string; actor_user_id: string | null; action: string; from_state: string | null; to_state: string | null; reason: string | null; metadata: Json; created_at: string }
+        Insert: { id?: string; org_id: string; obligation_id: string; actor_kind: string; actor_user_id?: string | null; action: string; from_state?: string | null; to_state?: string | null; reason?: string | null; metadata?: Json; created_at?: string }
+        Update: { actor_kind?: string; actor_user_id?: string | null; action?: string; from_state?: string | null; to_state?: string | null; reason?: string | null; metadata?: Json }
+        Relationships: []
+      }
+
       sentry_anomaly_ledger: {
         Row: {
           signal_kind: string
@@ -2504,6 +2532,7 @@ export type Database = {
           from_address: string | null
           id: string
           inbound_intent_id: string | null
+          idempotency_key: string | null
           metadata: Json | null
           org_id: string
           property_id: string | null
@@ -2533,6 +2562,7 @@ export type Database = {
           from_address?: string | null
           id?: string
           inbound_intent_id?: string | null
+          idempotency_key?: string | null
           metadata?: Json | null
           org_id?: string
           property_id?: string | null
@@ -2562,6 +2592,7 @@ export type Database = {
           from_address?: string | null
           id?: string
           inbound_intent_id?: string | null
+          idempotency_key?: string | null
           metadata?: Json | null
           org_id?: string
           property_id?: string | null
@@ -5024,6 +5055,9 @@ export type Database = {
           provider: string
           request_hash: string | null
           received_at: string
+          reconciliation_attempts: number
+          reconciliation_next_attempt_at: string | null
+          reconciliation_quarantined_at: string | null
           signature_verified: boolean
         }
         Insert: {
@@ -5039,6 +5073,9 @@ export type Database = {
           provider: string
           request_hash?: string | null
           received_at?: string
+          reconciliation_attempts?: number
+          reconciliation_next_attempt_at?: string | null
+          reconciliation_quarantined_at?: string | null
           signature_verified?: boolean
         }
         Update: {
@@ -5054,6 +5091,9 @@ export type Database = {
           provider?: string
           request_hash?: string | null
           received_at?: string
+          reconciliation_attempts?: number
+          reconciliation_next_attempt_at?: string | null
+          reconciliation_quarantined_at?: string | null
           signature_verified?: boolean
         }
         Relationships: [
@@ -5363,6 +5403,22 @@ export type Database = {
       }
     }
     Functions: {
+      fn_get_rep_sms_context: { Args: { p_property_id: string }; Returns: Json }
+      fn_set_rep_sms_enrollment: { Args: { p_org_id: string; p_user_id: string; p_enabled: boolean }; Returns: boolean }
+      fn_set_rep_sms_sender: { Args: { p_org_id: string; p_user_id: string; p_provider: string; p_phone: string; p_provider_account_id?: string | null; p_provider_sender_id?: string | null; p_label: string; p_default: boolean; p_active: boolean }; Returns: string }
+      fn_claim_authorize_rep_sms_obligation: { Args: { p_org_id: string; p_obligation_id: string; p_actor_id: string; p_composition: Json }; Returns: Json }
+      fn_assert_rep_sms_obligation_dispatch: { Args: { p_obligation_id: string; p_claim_token: string; p_claim_generation: number; p_actor_id: string }; Returns: Json }
+      fn_record_rep_sms_obligation_result: { Args: { p_obligation_id: string; p_claim_token: string; p_state: string; p_provider_message_id?: string | null; p_provider_status?: string | null; p_provider_error?: string | null; p_retry_at?: string | null; p_metadata?: Json }; Returns: Json }
+      fn_record_rep_sms_delivery: { Args: { p_provider: string; p_provider_account_id: string; p_provider_message_id: string; p_state: string; p_provider_status?: string | null; p_provider_error?: string | null; p_metadata?: Json; p_org_id?: string | null; p_obligation_id?: string | null }; Returns: Json }
+      fn_claim_rep_sms_delivery: { Args: { p_org_id: string; p_actor_id: string; p_submission_key: string; p_property_id: string; p_contact_id: string; p_sender_assignment_id: string; p_provider: string; p_provider_account_id: string; p_provider_sender_id: string; p_from_number: string; p_to_number: string; p_body: string; p_obligation_id?: string | null }; Returns: Json }
+      fn_claim_rep_sms_delivery_with_composition: { Args: { p_org_id: string; p_actor_id: string; p_submission_key: string; p_property_id: string; p_contact_id: string; p_sender_assignment_id: string; p_provider: string; p_provider_account_id: string; p_provider_sender_id: string; p_from_number: string; p_to_number: string; p_body: string; p_composition: Json; p_obligation_id?: string | null }; Returns: Json }
+      fn_get_rep_sms_delivery_draft: { Args: { p_property_id: string }; Returns: Json }
+      fn_ack_rep_sms_delivery_draft: { Args: { p_org_id: string; p_actor_id: string; p_property_id: string; p_contact_id: string; p_submission_key: string }; Returns: Json }
+      fn_mark_rep_sms_delivery_sending: { Args: { p_receipt_id: string; p_claim_token: string; p_claim_generation: number; p_message_id: string }; Returns: Json }
+      fn_record_rep_sms_delivery_result: { Args: { p_receipt_id: string; p_claim_token: string; p_claim_generation: number; p_state: string; p_provider_message_id?: string | null; p_provider_status?: string | null; p_provider_error?: string | null }; Returns: Json }
+      fn_record_rep_sms_delivery_ledger_callback: { Args: { p_provider: string; p_provider_account_id: string; p_provider_message_id: string; p_state: string; p_provider_status?: string | null; p_provider_error?: string | null; p_metadata?: Json; p_org_id?: string | null; p_receipt_id?: string | null }; Returns: Json }
+      fn_schedule_webhook_event_reconciliation_retry: { Args: { p_provider: string; p_event_type: string; p_external_id: string; p_error_message: string; p_max_attempts?: number }; Returns: Json }
+      fn_owner_correct_rep_sms_obligation: { Args: { p_obligation_id: string; p_action: string; p_reason: string }; Returns: Json }
       ack_sentry_anomaly: {
         Args: {
           p_signal_kind: string

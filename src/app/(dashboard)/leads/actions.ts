@@ -8,7 +8,8 @@ import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { dispatchRepSms, readRepSmsContext } from "@/lib/messaging/rep-sms";
+import { getCallerMemberships, getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
 export type { TeamMember } from "@/lib/auth/team-member";
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
@@ -2086,6 +2087,8 @@ export type SendSmsPayload = {
  */
 export async function listFromNumbers(): Promise<Result<DialpadFromOption[]>> {
   try {
+    const memberships = await getCallerMembershipsOrThrow();
+    if (!memberships.length || memberships.some(m => m.acquisitions_enabled && m.role !== "owner")) return ok([]);
     const provider = getMessagingProvider();
     if (!provider || !provider.listFromNumbers) {
       return ok([]);
@@ -2125,6 +2128,15 @@ export async function sendSmsFromLead(
   }
 
   try {
+    const memberships = await getCallerMembershipsOrThrow();
+    if (!memberships.length) throw new Error("Sign in to send a message.");
+    if (memberships.some(m => m.acquisitions_enabled && m.role !== "owner")) {
+      if (queueOnly) throw new Error("Rep texts must be sent immediately.");
+      const context = await readRepSmsContext(propertyId);
+      const sender = from ? context.senders.find(s => s.number === from) : context.senders.find(s => s.isDefault);
+      if (!sender) throw new Error("Choose a texting number assigned to you.");
+      return ok({ outcome: await dispatchRepSms({ propertyId, assignmentId: sender.id, body: trimmed, to }) });
+    }
     const supabase = await createClient();
     await assertNotTrainingTarget(supabase, { propertyId });
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);

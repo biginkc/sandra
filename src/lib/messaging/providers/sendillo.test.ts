@@ -65,6 +65,38 @@ describe("SendilloMessagingProvider.sendSms", () => {
       to: "+18165551234",
       body: "hello there",
     });
+    expect((init as RequestInit).redirect).toBe("error");
+    expect((init as RequestInit).cache).toBe("no-store");
+  });
+
+  it("uses a supplied sender explicitly even when the provider has no environment default", async () => {
+    mockFetch({
+      status: 200,
+      body: { data: { messageId: "snd_explicit", status: "accepted" } },
+    });
+    const provider = new SendilloMessagingProvider("sendillo-test-key", null);
+
+    await provider.sendSms({
+      from: "+18164876899",
+      to: "+18165551234",
+      body: "hello there",
+    });
+
+    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string).from).toBe("+18164876899");
+  });
+
+  it("fails before fetch when neither an explicit nor environment sender exists", async () => {
+    const provider = new SendilloMessagingProvider("sendillo-test-key", null);
+
+    await expect(
+      provider.sendSms({ to: "+18165551234", body: "hello there" }),
+    ).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      details: expect.objectContaining({ notSent: true }),
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it("returns messageId and status from the documented response envelope", async () => {
@@ -126,6 +158,31 @@ describe("SendilloMessagingProvider.sendSms", () => {
       errorClass: "provider",
       provider: "sendillo",
       details: expect.objectContaining({ acceptedWithoutId: true }),
+    });
+  });
+
+  it("marks a response-body read failure ambiguous after Sendillo returned headers", async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      text: vi.fn().mockRejectedValue(new Error("response stream reset")),
+    } as unknown as Response);
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await expect(
+      provider.sendSms({ to: "+18165551234", body: "hello there" }),
+    ).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      details: expect.objectContaining({
+        status: 200,
+        bodyReadFailure: true,
+        ambiguousDelivery: true,
+      }),
     });
   });
 
@@ -714,7 +771,7 @@ describe("SendilloMessagingProvider.listFromNumbers", () => {
     ]);
   });
 
-  it("falls back to a non-'available' status when the provider omits one, so the composer's Dialpad-only unassigned filter never hides a real Sendillo number", async () => {
+  it("preserves an omitted status as empty evidence instead of guessing active", async () => {
     mockFetch({
       status: 200,
       body: { data: [{ number: "+18165550003" }] },
@@ -727,7 +784,7 @@ describe("SendilloMessagingProvider.listFromNumbers", () => {
     const options = await provider.listFromNumbers();
 
     expect(options).toHaveLength(1);
-    expect(options[0].status).not.toBe("available");
+    expect(options[0].status).toBe("");
   });
 
   it("propagates the underlying ProviderError when the catalog fetch fails", async () => {

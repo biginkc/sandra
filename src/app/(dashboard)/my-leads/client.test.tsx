@@ -392,6 +392,7 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
     await user.click(screen.getByRole("radio",{name:"No motivation provided"}));
   }else{
     await user.selectOptions(screen.getByLabelText("External outcome"),"no_answer");
+    await user.selectOptions(screen.getByLabelText("Curated follow-up template"),"no-answer-callback-time");
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T11:00"}});
     await user.type(screen.getByLabelText("Note (optional)"),"Second opening draft");
   }
@@ -433,7 +434,36 @@ describe('stale form recovery',()=>{
     await user.click(screen.getByRole('button',{name:'Save attempt'}));
     await waitFor(()=>expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
     expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({expectedQueueVersion:2,expectedEpisodeId:'episode-1',note:'Keep this original draft'});
-    expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).not.toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
+    // Refreshing a stale opening keeps the same logical submission alive. A
+    // new idempotency key is reserved for an explicit close/reopen or a
+    // confirmed terminal result.
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
+  });
+  it('replays the original command payload after a lost response even if the draft is edited', async()=>{
+    const user=userEvent.setup();
+    mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});
+    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:snapshot('106 Fixture Lane'),kpis});
+    mocks.submitMyLeadCommand
+      .mockRejectedValueOnce(new Error('The save response was lost'))
+      .mockResolvedValueOnce({ok:true});
+    renderClient(snapshot('106 Fixture Lane'));
+    await user.click(screen.getByRole('button',{name:'Log attempt'}));
+    await user.selectOptions(screen.getByLabelText('External outcome'),'reached');
+    fireEvent.change(screen.getByLabelText('When did the outreach occur?'),{target:{value:'2026-09-11T09:00'}});
+    const note=screen.getByLabelText('Note (optional)');
+    await user.type(note,'Original draft');
+    await user.click(screen.getByRole('button',{name:'Save attempt'}));
+    await screen.findByText(/original request is preserved for reconciliation/);
+    expect(note).toHaveValue('Original draft');
+    expect(note).toBeDisabled();
+    expect(screen.getByRole('button',{name:'Reconcile saved change'})).toBeEnabled();
+    await user.click(screen.getByRole('button',{name:'Reconcile saved change'}));
+    await waitFor(()=>expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
+    expect(mocks.submitMyLeadCommand.mock.calls[0][1]).toMatchObject({note:'Original draft'});
+    // The key and payload are an inseparable replay pair. The visible form is
+    // frozen to the original values while the saved request is reconciled.
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({note:'Original draft'});
+    expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
   });
   it('ignores recovery finishing after cancellation and reopening the same lead',async()=>{
     const user=await rejectedDraft();
@@ -493,7 +523,7 @@ describe("current metadata for rapid workflow openings",()=>{
       await user.type(screen.getByLabelText("Offer amount"),"125000.50");await user.selectOptions(screen.getByLabelText("Offer method"),"verbal");
       fireEvent.change(screen.getByLabelText("Offer sent"),{target:{value:"2026-09-11T10:00"}});fireEvent.change(screen.getByLabelText("Required follow-up"),{target:{value:"2026-09-12T10:00"}});
     }else{
-      await user.selectOptions(screen.getByLabelText("External outcome"),"no_answer");fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T11:00"}});
+      await user.selectOptions(screen.getByLabelText("External outcome"),"no_answer");await user.selectOptions(screen.getByLabelText("Curated follow-up template"),"no-answer-callback-time");fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T11:00"}});
     }
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
     await user.click(screen.getByRole("button",{name:next==="offer"?"Save offer":"Save attempt"}));

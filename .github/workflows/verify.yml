@@ -30,6 +30,9 @@ jobs:
       - name: Rehearse My Leads metrics and signed call evidence
         run: node scripts/verify-my-leads-metrics.mjs && node scripts/rehearse-call-metrics-writeback.mjs
 
+      - name: Rehearse rep SMS assignments and queue authorization
+        run: node scripts/verify-rep-sms.mjs
+
       - name: Rehearse recording library authorization and catalog
         env:
           SANDRA_POSTGRES_BIN: /usr/lib/postgresql/17/bin

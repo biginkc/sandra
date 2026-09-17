@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, type FormEvent } from "react"
+import { useContext, useEffect, useState, type FormEvent } from "react"
 
 import {
   Dialog,
@@ -21,6 +21,8 @@ import {
   WorkflowDialogHeader,
   WorkflowFormError,
   centralDateTimeToIso,
+  centralDateTimeFromIso,
+  WorkflowRecoveryContext,
   useAcquisitionSubmit,
 } from "./workflow-form"
 import type {
@@ -66,6 +68,31 @@ export function AcquisitionOfferDialog({
   const [temperature, setTemperature] = useState<AcquisitionTemperature>(initialTemperature)
   const [clientError, setClientError] = useState<string | null>(null)
   const [clientFieldErrors, setClientFieldErrors] = useState<Record<string, string>>({})
+  const recovery = useContext(WorkflowRecoveryContext)
+  const reconciliation = recovery?.reconciliation
+  const reconciliationLocked = Boolean(reconciliation)
+  useEffect(() => {
+    if (!reconciliation) return
+    const payload = reconciliation.payload
+    const cents = typeof payload.amountCents === "number" ? payload.amountCents : Number(payload.amountCents)
+    setAmount(Number.isFinite(cents) ? (cents / 100).toFixed(2) : "")
+    setMethod(typeof payload.method === "string" ? payload.method as AcquisitionOfferMethod : "")
+    setSentAt(centralDateTimeFromIso(payload.sentAt))
+    setFollowUpAt(centralDateTimeFromIso(payload.followUpAt))
+    const motivation = payload.motivationResponse && typeof payload.motivationResponse === "object" && !Array.isArray(payload.motivationResponse)
+      ? payload.motivationResponse as Record<string, unknown>
+      : null
+    if (motivation?.kind === "no_motivation") {
+      setMotivationKind("no_motivation")
+      setMotivationText("")
+    } else if (motivation?.kind === "specified") {
+      setMotivationKind("specified")
+      setMotivationText(typeof motivation.text === "string" ? motivation.text : "")
+    }
+    setTemperature(typeof payload.temperature === "string" ? payload.temperature as AcquisitionTemperature : null)
+    setClientError(null)
+    setClientFieldErrors({})
+  }, [reconciliation])
   const resetFields = () => {
     setAmount("")
     setMethod("")
@@ -177,6 +204,7 @@ export function AcquisitionOfferDialog({
                     value={amount}
                     onChange={(event) => setAmount(event.target.value)}
                     placeholder="0.00"
+                    disabled={reconciliationLocked}
                     aria-invalid={Boolean(fieldError("amount"))}
                     aria-describedby={fieldError("amount") ? "acquisition-offer-amount-error" : undefined}
                     aria-required="true"
@@ -190,6 +218,7 @@ export function AcquisitionOfferDialog({
                 <select
                   id="acquisition-offer-method"
                   value={method}
+                  disabled={reconciliationLocked}
                   onChange={(event) => setMethod(event.target.value as AcquisitionOfferMethod)}
                   aria-invalid={Boolean(fieldError("method"))}
                   aria-describedby={fieldError("method") ? "acquisition-offer-method-error" : undefined}
@@ -211,6 +240,7 @@ export function AcquisitionOfferDialog({
                 label="Offer sent"
                 value={sentAt}
                 onChange={setSentAt}
+                disabled={reconciliationLocked}
                 error={fieldError("sentAt")}
               />
               <DateTimeField
@@ -218,6 +248,7 @@ export function AcquisitionOfferDialog({
                 label="Required follow-up"
                 value={followUpAt}
                 onChange={setFollowUpAt}
+                disabled={reconciliationLocked}
                 error={fieldError("followUpAt")}
               />
             </div>
@@ -231,6 +262,7 @@ export function AcquisitionOfferDialog({
                     name="acquisition-offer-motivation-response"
                     value="specified"
                     checked={motivationKind === "specified"}
+                    disabled={reconciliationLocked}
                     onChange={() => {
                       setMotivationKind("specified")
                       clearClientErrors()
@@ -242,6 +274,7 @@ export function AcquisitionOfferDialog({
                     name="acquisition-offer-motivation-response"
                     value="no_motivation"
                     checked={motivationKind === "no_motivation"}
+                    disabled={reconciliationLocked}
                     onChange={() => {
                       setMotivationKind("no_motivation")
                       setMotivationText("")
@@ -256,6 +289,7 @@ export function AcquisitionOfferDialog({
                     <Textarea
                       id="acquisition-offer-motivation-text"
                       value={motivationText}
+                      disabled={reconciliationLocked}
                       onChange={(event) => setMotivationText(event.target.value)}
                       aria-invalid={Boolean(fieldError("motivationText"))}
                       aria-describedby={fieldError("motivationText") ? "acquisition-offer-motivation-text-error" : undefined}
@@ -278,6 +312,7 @@ export function AcquisitionOfferDialog({
               <select
                 id="acquisition-offer-temperature"
                 value={temperature || ""}
+                disabled={reconciliationLocked}
                 onChange={(event) => setTemperature((event.target.value || null) as AcquisitionTemperature)}
                 className={SELECT_FIELD_CLASS}
               >

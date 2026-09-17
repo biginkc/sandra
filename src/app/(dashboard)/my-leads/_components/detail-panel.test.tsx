@@ -58,6 +58,33 @@ describe("MyLeadDetailPanel", () => {
     expect(screen.getByRole("link", { name: "Recording" })).toHaveAttribute("rel", "noopener noreferrer")
   })
 
+  it("shows follow-up status, details, and the next safe action in attempt history", () => {
+    render(<MyLeadDetailPanel state={{ status: "ready", detail: {
+      ...EMPTY_DETAIL,
+      attempts: {
+        rows: [{
+          id: "attempt-no-answer",
+          actorLabel: "Maria",
+          outcomeLabel: "No answer",
+          occurredLabel: "Sep 12",
+          sourceLabel: "DialPad",
+          followUpObligationId: "obligation-1",
+          followUpStatus: "blocked",
+          followUpMessage: "Sender assignment missing.",
+          followUpBlockedReason: "sender_grant_missing",
+        }],
+        hasMore: false,
+        nextCursor: null,
+      },
+    } }} onRetry={vi.fn()} />)
+
+    const followUp = screen.getByTestId("attempt-follow-up-attempt-no-answer")
+    expect(followUp).toHaveTextContent("Text follow-up: Blocked")
+    expect(followUp).toHaveTextContent("Status detail: Sender assignment missing.")
+    expect(followUp).toHaveTextContent("Blocked reason: sender_grant_missing")
+    expect(followUp).toHaveTextContent("Resolve the blocked reason")
+  })
+
   it("uses authenticated Sandra playback when the external recording URL is absent", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
       ok: true, json: async () => ({ recordingStatus: "available", durationSeconds: null, transcriptStatus: "none", summaryStatus: "failed", summary: null, transcript: null }),
