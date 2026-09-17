@@ -3,6 +3,7 @@ WORKDIR /app
 COPY --chown=node:node package.json ./
 RUN npm install --omit=dev --ignore-scripts && npm cache clean --force
 COPY --chown=node:node core.mjs runner.mjs server.mjs ./
+COPY --chown=node:node vendor/reply-provider.mjs ./vendor/reply-provider.mjs
 USER node
 ENV NODE_ENV=production PORT=9081 INBOX_WORKER_BIND=0.0.0.0
 EXPOSE 9081

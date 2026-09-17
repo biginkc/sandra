@@ -1,9 +1,11 @@
 -- Lane 1 PR-F: durable reply-send worker SQL surface. Additive only — does NOT
 -- touch attempts.sql or accept.sql (PR-D/PR-E are frozen). Every function here
--- is SECURITY DEFINER and is the ONLY thing granted to the dedicated
--- inbox_reply_send_worker role (worker-role.sql): claim, authorize,
--- start_dispatch, persist, enumerate (operation_attempts), ack. The role never
--- gets a direct table grant or EXECUTE on attempts.sql's plain (non-DEFINER)
+-- is SECURITY DEFINER and is one of the EIGHT things granted to the dedicated
+-- inbox_reply_send_worker role (worker-role.sql): claim_dispatch_batch,
+-- ack_dispatch, operation_dispatch_complete, operation_attempts, worker_claim,
+-- worker_start_dispatch (which folds the requester re-authorization check in —
+-- see its own header below), worker_persist. The role never gets a direct
+-- table grant or EXECUTE on attempts.sql's plain (non-DEFINER)
 -- claim()/start_dispatch()/persist() themselves — those stay reachable only
 -- from inside a SECURITY DEFINER wrapper here, exactly like
 -- inbox_action_api.run_step wraps inbox_operations.claim_step/execute_step
@@ -72,56 +74,81 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
  ORDER BY a.attempt_ordinal,a.item_id
 $$;
 
--- [Astra #3] Requester re-authorization, on the SAME connection, between claim
--- and start_dispatch (before the marker). Neither load_operation/run_step
--- (metadata lane) nor PR-D's claim()/start_dispatch() ever call authorize() —
--- both only gate on the global require_admission(). The requester's CURRENT
--- membership was unchecked at dispatch time until this function.
---
--- inbox_action_api.authorize(o,u) (inbox-operation-preparation/setup.sql:13)
--- delegates to inbox_t2_bridge.authorize(o) (inbox-workset-bridge/auth.sql:22),
--- which is fundamentally session/JWT-shaped: it reads auth.uid()/auth.jwt()
--- off `request.jwt.claims` in the CALLING session — there is no variant that
--- takes an arbitrary user id and checks their membership independent of a
--- live session context. A backend worker holds no caller bearer token and
--- must never be handed one. So this function reconstructs the requester's own
--- claims SERVER-SIDE, from their most recent still-live session row (never a
--- caller-supplied token), and runs the SAME check a live request would: a
--- revoked/expired membership, or a missing/expired session (the requester
--- logged out or their session lapsed since acceptance), raises 42501 exactly
--- as inbox_t2_bridge.authorize would for a real expired/revoked caller
--- (INBOX_SESSION_REVOKED/INBOX_SESSION_EXPIRED/INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING).
--- set_config(...,true) is transaction-LOCAL — the claim never leaks past this
--- connection's current transaction. The caller (runner.dispatchAttempt) MUST
--- NOT start_dispatch or send on a raise here — no provider call, ever.
-CREATE FUNCTION inbox_reply_send.worker_authorize(o uuid,op uuid) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
-DECLARE requester uuid;sess auth.sessions;claims jsonb;
-BEGIN
- SELECT requester_id INTO requester FROM inbox_reply_send.operations WHERE org_id=o AND id=op;
- IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_OPERATION_UNAVAILABLE' USING ERRCODE='42501';END IF;
- SELECT * INTO sess FROM auth.sessions WHERE user_id=requester AND not_after>clock_timestamp() ORDER BY not_after DESC LIMIT 1;
- IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_SESSION_REVOKED' USING ERRCODE='42501';END IF;
- claims:=jsonb_build_object('sub',requester,'role','authenticated','session_id',sess.id,'exp',extract(epoch FROM sess.not_after)::bigint);
- PERFORM set_config('request.jwt.claims',claims::text,true);
- PERFORM inbox_action_api.authorize(o,requester);
-END $$;
-
--- Thin SECURITY DEFINER pass-throughs onto attempts.sql's plain (invoker-
--- rights) claim()/start_dispatch()/persist() — attempts.sql is frozen (do not
--- touch), and those functions were deliberately left non-SECURITY-DEFINER
--- there (D-9/D-10/D-11 header: "No public API, no route, no worker"). Wrapping
--- here, rather than granting the worker role direct table privileges or
--- EXECUTE on the raw functions, keeps the worker's whole reachable surface to
--- exactly six entry points (worker-role.sql enforces this at install time).
+-- Thin SECURITY DEFINER pass-through onto attempts.sql's plain (invoker-
+-- rights) claim() — attempts.sql is frozen (do not touch), and claim() was
+-- deliberately left non-SECURITY-DEFINER there (D-9 header: "No public API,
+-- no route, no worker"). Wrapping here, rather than granting the worker role
+-- direct table privileges or EXECUTE on the raw function, keeps the worker's
+-- reachable surface bounded (worker-role.sql enforces the exact list at
+-- install time).
 CREATE FUNCTION inbox_reply_send.worker_claim(o uuid,attempt_id uuid,seconds integer DEFAULT 60) RETURNS jsonb
 LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_reply_send.claim(o,attempt_id,seconds) $$;
 
+-- [Astra B1, fixing the original Astra #3 finding] Requester re-authorization
+-- FOLDED INTO the same transaction/statement as the ledger start_dispatch
+-- call — not a separate prior statement whose locks release before the
+-- marker. The original design (a standalone worker_authorize() call before
+-- start_dispatch, and — worse — one that fabricated a browser session via
+-- request.jwt.claims) had two real defects: (1) its FOR SHARE lock on the
+-- access-epoch row was released the instant that statement committed, wide
+-- open to a revocation committing in the gap before start_dispatch's own
+-- marker write; (2) a background worker inventing a session claims object is
+-- the wrong shape entirely — a worker holds no bearer token and must not
+-- synthesize one, and worker_authorize was trivially skippable (nothing
+-- forced runner.mjs to call it before start_dispatch; it was just a second,
+-- separate, un-fenced RPC).
+--
+-- This function instead:
+--  1. Resolves the attempt's operation and the operation's requester_id
+--     (never a caller-supplied identity).
+--  2. Takes the SAME access-epoch row inbox_t2_bridge.authorize's own
+--     authorize() check takes, FOR SHARE, FIRST — inbox_t2_bridge.
+--     capture_access() (inbox-workset-bridge/auth.sql:7-19) fires on every
+--     memberships UPDATE and does an INSERT..ON CONFLICT DO UPDATE against
+--     this exact row, which requires a conflicting row lock. Holding FOR
+--     SHARE here means any concurrent membership revocation for this
+--     requester now serializes behind THIS transaction — it cannot commit
+--     until this function (and the start_dispatch call it makes, in the SAME
+--     transaction, further below) has committed or rolled back. There is no
+--     window between "check passes" and "marker written" for a revocation to
+--     land unnoticed, because the epoch lock is held THROUGH the marker.
+--  3. Checks the requester's CURRENT membership directly, using the exact
+--     predicate inbox_t2_bridge.authorize uses (auth.sql:31-34): active,
+--     not pending deletion, not expired, for the operation's own org. No
+--     session, no JWT, no request.jwt.claims fabrication — this is a direct,
+--     server-side membership read, exactly the shape a background worker
+--     should use.
+--  4. Only on success does it call inbox_reply_send.start_dispatch — in the
+--     SAME function invocation, i.e. the SAME statement-level transaction —
+--     so the epoch lock from step 2 is still held while the marker commits.
+-- A revoked/expired/foreign-org membership, or a forged operation/attempt
+-- relationship (attempt not found, or operation not found for org o), raises
+-- 42501 and start_dispatch is never called — no token, no provider call.
 CREATE FUNCTION inbox_reply_send.worker_start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_reply_send.start_dispatch(o,attempt_id,g) $$;
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+DECLARE op uuid;requester uuid;active boolean;
+BEGIN
+ SELECT a.operation_id INTO op FROM inbox_reply_send.attempts a WHERE a.org_id=o AND a.id=attempt_id;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;
+ SELECT r.requester_id INTO requester FROM inbox_reply_send.operations r WHERE r.org_id=o AND r.id=op;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_OPERATION_UNAVAILABLE' USING ERRCODE='42501';END IF;
+ PERFORM 1 FROM inbox_t2_bridge.access_epochs WHERE user_id=requester FOR SHARE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_ACCESS_BASELINE_MISSING' USING ERRCODE='42501';END IF;
+ SELECT EXISTS(
+  SELECT 1 FROM public.memberships m
+  WHERE m.user_id=requester AND m.org_id=o AND m.access_status='active' AND m.deletion_prepared_at IS NULL
+   AND (m.access_expires_at IS NULL OR m.access_expires_at>clock_timestamp())
+ ) INTO active;
+ IF NOT active THEN RAISE EXCEPTION 'INBOX_REPLY_REQUESTER_UNAUTHORIZED' USING ERRCODE='42501';END IF;
+ RETURN inbox_reply_send.start_dispatch(o,attempt_id,g);
+END $$;
 
 CREATE FUNCTION inbox_reply_send.worker_persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb
 LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_reply_send.persist(o,attempt_id,token,result) $$;
 
-REVOKE ALL ON FUNCTION inbox_reply_send.claim_dispatch_batch(integer),inbox_reply_send.ack_dispatch(uuid,uuid,bigint),inbox_reply_send.operation_dispatch_complete(uuid,uuid),inbox_reply_send.operation_attempts(uuid,uuid),inbox_reply_send.worker_authorize(uuid,uuid),inbox_reply_send.worker_claim(uuid,uuid,integer),inbox_reply_send.worker_start_dispatch(uuid,uuid,bigint),inbox_reply_send.worker_persist(uuid,uuid,uuid,jsonb) FROM PUBLIC,anon,authenticated,service_role;
+-- [Astra B3] operation_dispatch_complete is called directly by the Restate
+-- handler (server.mjs) to decide whether to ack — it is NOT merely an
+-- internal helper for ack_dispatch, and must be granted. The worker's
+-- reachable surface is EIGHT functions, not seven.
+REVOKE ALL ON FUNCTION inbox_reply_send.claim_dispatch_batch(integer),inbox_reply_send.ack_dispatch(uuid,uuid,bigint),inbox_reply_send.operation_dispatch_complete(uuid,uuid),inbox_reply_send.operation_attempts(uuid,uuid),inbox_reply_send.worker_claim(uuid,uuid,integer),inbox_reply_send.worker_start_dispatch(uuid,uuid,bigint),inbox_reply_send.worker_persist(uuid,uuid,uuid,jsonb) FROM PUBLIC,anon,authenticated,service_role;
 COMMIT;

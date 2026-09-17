@@ -23,13 +23,19 @@ export type ReplyAttemptState =
   | "delivered"
   | "delivery_failed";
 
-// Three disjoint outcome shapes, never conflated:
+// Three disjoint outcome shapes, never conflated. Neither "deferred" nor
+// "not_sent" is ever safe to memoize/journal as a completed outcome — a
+// caller (e.g. the Restate handler in server.mjs) MUST treat both as
+// retryable, not final; only "settled" represents a real, durable ledger
+// state:
 //  - "settled": the ledger recorded one of the seven states above.
-//  - "deferred": SENDER_BUSY / lease held elsewhere (Astra #4) — nothing was
-//    journaled, nothing was sent; retry on a later pass.
-//  - "not_sent": the requester's re-auth failed (Astra #3), or start_dispatch
-//    itself raised/returned ambiguously (never-provider-on-unknown-commit,
-//    Astra #4) — again nothing was journaled and nothing was sent.
+//  - "deferred": SENDER_BUSY / lease held elsewhere (Astra #4, Astra B2) —
+//    nothing was journaled, nothing was sent; retry on a later pass.
+//  - "not_sent": the requester's re-authorization failed (folded into the
+//    same start_dispatch call as the marker write, Astra B1 — not a separate
+//    prior step), or start_dispatch itself raised/returned ambiguously for
+//    another reason (never-provider-on-unknown-commit, Astra #4) — again
+//    nothing was journaled and nothing was sent.
 export type ReplyAttemptResult =
   | { attemptId: string; kind: "settled"; state: ReplyAttemptState }
   | { attemptId: string; kind: "deferred" }
@@ -43,7 +49,8 @@ export type ReplyDispatchClaim =
 
 export interface ReplyDispatchDependencies {
   /** One fresh transaction (or fenced sequence on one connection): canonical
-   * eligibility, requester re-authorization (Astra #3) and the durable
+   * eligibility, requester re-authorization (Astra #3, folded into the same
+   * statement as the marker write per Astra B1) and the durable
    * dispatch_started marker. Existing markers NEVER return another dispatch
    * token; a busy sender NEVER returns a dispatch token either — it returns
    * `deferred`. Do not journal this method separately from the enclosing

@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """Lane 1 PR-F mutation-first proof for the durable reply-send worker SQL
 surface (worker.sql/worker-role.sql): claim_dispatch_batch/ack_dispatch,
-operation_attempts, worker_authorize (Astra #3), worker_claim/
-worker_start_dispatch/worker_persist, and operation_dispatch_complete
-(Astra #4 ack-readiness). Owned fixture only; installs its own schemas
-(committed, not rollback-only — several proofs need the worker role's actual
-grants, which are cluster-level) and drops everything in a finally block.
-Mirrors experiments/inbox-reply-send/accept-proof.py's idiom exactly:
-sql()/sql_fail(), make_org_and_prep(), assert_body_matches() scratch-install
-byte-exact compare. Every mutation below: install a broken candidate -> run
-the proof -> watch it FAIL for the reason claimed -> restore the exact source
-definition (verified byte-exact) -> re-run -> watch it PASS."""
+operation_attempts, worker_claim/worker_start_dispatch (which folds the
+Astra #3 requester re-authorization check into the SAME transaction as the
+ledger marker write, per Astra B1)/worker_persist, and
+operation_dispatch_complete (Astra #4 ack-readiness, and Astra B3 — granted
+directly since server.mjs calls it). Owned fixture only; installs its own
+schemas (committed, not rollback-only — several proofs need the worker
+role's actual grants, which are cluster-level, and the Astra B1 concurrency
+proof needs two REAL, separately-committing connections) and drops
+everything in a finally block. Mirrors
+experiments/inbox-reply-send/accept-proof.py's idiom exactly: sql()/
+sql_fail(), make_org_and_prep(), assert_body_matches() scratch-install
+byte-exact compare, and (for the B1 concurrency proof) the same
+start()/wait_for()/finish() raw-session pattern accept-proof.py's own
+advisory-lock test uses. Every mutation below: install a broken candidate ->
+run the proof -> watch it FAIL for the reason claimed -> restore the exact
+source definition (verified byte-exact) -> re-run -> watch it PASS."""
 import hashlib, json, re, subprocess, sys, time, uuid
 from pathlib import Path
 P = Path(__file__).resolve().parent
@@ -30,6 +36,26 @@ def sql_fail(q, timeout=20):
     r = subprocess.run(CMD, input="SET statement_timeout='15s'; SET lock_timeout='10s'; BEGIN;" + q.rstrip() + ";COMMIT;", text=True, capture_output=True, timeout=timeout)
     need(r.returncode != 0, f'expected failure but succeeded: {r.stdout}')
     return r.stderr
+def start(q):
+    """Open a raw multi-statement psql session (mirrors accept-proof.py's
+    own `start`) so its transaction can be held open across separate stdin
+    writes — required for the Astra B1 concurrency proof, where connection A
+    must keep its access-epoch FOR SHARE lock alive (by not committing)
+    while a second, real connection attempts a conflicting UPDATE."""
+    p = subprocess.Popen(CMD, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    p.stdin.write("SET statement_timeout='15s'; SET lock_timeout='10s';" + q); p.stdin.flush()
+    return p
+def wait_for(query, label, deadline_s=10):
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        if sql(query) == 't': return
+        time.sleep(.05)
+    raise RuntimeError(label)
+def finish(proc, label, timeout=12, expect_ok=True):
+    out, err = proc.communicate(timeout=timeout)
+    if expect_ok: need(proc.returncode == 0, f'{label}: {err}')
+    else: need(proc.returncode != 0, f'{label}: expected failure but succeeded: {out}')
+    return out.strip() if expect_ok else err
 
 validate_cron(sql('SHOW cron.launch_active_jobs'))
 need(sql('SELECT marker FROM inbox_t2_fixture.identity') == 'sandra-inbox-projection-t2-owned-synthetic', 'Wrong fixture')
@@ -130,19 +156,14 @@ try:
     sql("GRANT inbox_reply_send_worker TO postgres;")
     print('Installed attempts.sql + accept.sql + public-api.sql + worker.sql + worker-role.sql')
 
-    # === 0. Grant-boundary ground truth: the worker role reaches EXACTLY the
-    # seven SECURITY DEFINER entry points and nothing else. worker-role.sql's
-    # own install-time DO block already asserts this (it would have refused
-    # to install otherwise) — reconfirm it live under SET ROLE.
+    # === 0. Grant-boundary ground truth [Astra B3]: the worker role reaches
+    # EXACTLY the EIGHT SECURITY DEFINER entry points (including
+    # operation_dispatch_complete, which server.mjs calls directly — not
+    # merely an internal helper) and nothing else. worker-role.sql's own
+    # install-time DO block already asserts this (it would have refused to
+    # install otherwise) — reconfirm it live under SET ROLE.
     o, u, k, prep_id, item_ids, cids = make_org_and_prep('+150255', n=2)
     op = call_accept(o, u, k, prep_id)['operation_id']
-    for allowed, args in [
-        ("claim_dispatch_batch(1)", None),
-        (f"ack_dispatch('{o}','{op}',1)", None),
-        (f"operation_attempts('{o}','{op}')", None),
-        (f"worker_authorize('{o}','{op}')", None),
-    ]:
-        pass
     denied_direct = sql_fail(f"SET LOCAL ROLE inbox_reply_send_worker; SELECT inbox_reply_send.claim('{o}',gen_random_uuid());")
     need('permission denied' in denied_direct, f'worker role could call attempts.sql claim() directly: {denied_direct}')
     denied_table = sql_fail(f"SET LOCAL ROLE inbox_reply_send_worker; SELECT count(*) FROM inbox_reply_send.attempts;")
@@ -152,7 +173,12 @@ try:
     ok_batch = sql(f"SET LOCAL ROLE inbox_reply_send_worker; SELECT inbox_reply_send.claim_dispatch_batch(1)::text;")
     ok_attempts = sql(f"SET LOCAL ROLE inbox_reply_send_worker; SELECT array_agg(x) FROM inbox_reply_send.operation_attempts('{o}','{op}') x;")
     need(ok_attempts != '', 'worker role could not call operation_attempts() despite the grant')
-    record('grant boundary: inbox_reply_send_worker reaches claim_dispatch_batch/operation_attempts, and is refused on attempts.claim()/direct table SELECT/accept()')
+    # [Astra B3] operation_dispatch_complete must be directly callable — the
+    # bug was that it was excluded from the grant list even though the
+    # Restate handler calls it (not only ack_dispatch, internally).
+    ok_complete = sql(f"SET LOCAL ROLE inbox_reply_send_worker; SELECT inbox_reply_send.operation_dispatch_complete('{o}','{op}')::text;")
+    need(ok_complete in ('true', 'false'), f'worker role could not call operation_dispatch_complete() despite the grant: {ok_complete}')
+    record('grant boundary: inbox_reply_send_worker reaches all EIGHT granted functions (including operation_dispatch_complete, Astra B3), and is refused on attempts.claim()/direct table SELECT/accept()')
 
     # === 1. operation_attempts(): tip-of-chain ids, stable order ===
     atts = sorted(json.loads(sql(f"SELECT to_jsonb(array_agg(x)) FROM inbox_reply_send.operation_attempts('{o}','{op}') x")))
@@ -160,16 +186,16 @@ try:
     need(atts == real_atts, f'operation_attempts() mismatch: {atts} vs {real_atts}')
     record(f'operation_attempts(): returns all {len(atts)} fresh (tip-of-chain) attempt ids for a just-accepted operation')
 
-    # === 2. Happy path via worker wrappers: claim -> authorize -> start_dispatch -> persist ===
+    # === 2. Happy path via worker wrappers: claim -> start_dispatch (folded
+    # requester re-auth, Astra B1) -> persist ===
     att_a, att_b = real_atts[0], real_atts[1]
     claim1 = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o}','{att_a}')::text"))
     need(claim1['kind'] == 'claimed' and claim1['generation'] == '1', f'worker_claim mismatch: {claim1}')
-    sql(f"SELECT inbox_reply_send.worker_authorize('{o}','{op}')")  # must not raise
     dispatch1 = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o}','{att_a}',{claim1['generation']})::text"))
     need(dispatch1['kind'] == 'dispatch', f'worker_start_dispatch mismatch: {dispatch1}')
     persist1 = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{o}','{att_a}','{dispatch1['token']}',jsonb_build_object('kind','accepted','externalId','PROV-A'))::text"))
     need(persist1['state'] == 'provider_accepted', f'worker_persist mismatch: {persist1}')
-    record('happy path via worker_claim -> worker_authorize -> worker_start_dispatch -> worker_persist reaches provider_accepted')
+    record('happy path via worker_claim -> worker_start_dispatch (folded requester re-auth) -> worker_persist reaches provider_accepted')
 
     # === 3. Ack-readiness (Astra #4): item B still claimed -> NOT complete, NOT acked ===
     claimB_initial = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o}','{att_b}')::text"))  # leave in 'claimed'
@@ -201,7 +227,6 @@ try:
 
     # Resolve item B (still claimed from earlier, generation=1 — no need to
     # reclaim; its lease is still live), then ack succeeds.
-    sql(f"SELECT inbox_reply_send.worker_authorize('{o}','{op}')")
     dispatchB = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o}','{att_b}',{claimB_initial['generation']})::text"))
     sql(f"SELECT inbox_reply_send.worker_persist('{o}','{att_b}','{dispatchB['token']}',jsonb_build_object('kind','accepted','externalId','PROV-B'))")
     complete_after = sql(f"SELECT inbox_reply_send.operation_dispatch_complete('{o}','{op}')")
@@ -211,46 +236,125 @@ try:
     need(sql(f"SELECT acknowledged_at IS NOT NULL FROM inbox_reply_send.dispatch_outbox WHERE org_id='{o}' AND operation_id='{op}'") == 't', 'outbox not marked acknowledged')
     record('ack-readiness: once every attempt is dispatched-or-terminal, ack_dispatch acknowledges the outbox row')
 
-    # === 4. Astra #3: revoked requester between accept and dispatch ===
+    # === 4. Astra #3 / Astra B1: requester re-authorization, folded into
+    # worker_start_dispatch's own transaction (sequential cases first) ===
     o2, u2, k2, prep_id2, item_ids2, cids2 = make_org_and_prep('+151255', n=1)
     op2 = call_accept(o2, u2, k2, prep_id2)['operation_id']
     att2 = sql(f"SELECT id FROM inbox_reply_send.attempts WHERE org_id='{o2}' AND operation_id='{op2}'")
     claim2 = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o2}','{att2}')::text"))
     need(claim2['kind'] == 'claimed', f'unexpected claim2: {claim2}')
     sql(f"ALTER TABLE memberships DISABLE TRIGGER trg_hugo_membership_owner_guard; UPDATE memberships SET access_status='revoked' WHERE org_id='{o2}' AND user_id='{u2}'; ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;")
-    err = sql_fail(f"SELECT inbox_reply_send.worker_authorize('{o2}','{op2}')")
-    need('42501' in err or 'FORBIDDEN' in err or 'MEMBERSHIP' in err.upper(), f'revoked requester was not rejected: {err}')
-    need(sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{o2}' AND id='{att2}'") == 'claimed', 'attempt state moved past claimed despite failed authorize')
-    need(sql(f"SELECT dispatch_token IS NULL FROM inbox_reply_send.attempts WHERE org_id='{o2}' AND id='{att2}'") == 't', 'a dispatch token was issued despite failed authorize')
-    record('Astra #3: worker_authorize raises for a revoked requester; attempt stays claimed, no dispatch_token, no provider call possible')
+    err = sql_fail(f"SELECT inbox_reply_send.worker_start_dispatch('{o2}','{att2}',{claim2['generation']})")
+    need('REQUESTER_UNAUTHORIZED' in err or '42501' in err, f'revoked requester was not rejected: {err}')
+    need(sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{o2}' AND id='{att2}'") == 'claimed', 'attempt state moved past claimed despite the rejected requester check')
+    need(sql(f"SELECT dispatch_token IS NULL FROM inbox_reply_send.attempts WHERE org_id='{o2}' AND id='{att2}'") == 't', 'a dispatch token was issued despite the rejected requester check')
+    record('Astra #3/B1: worker_start_dispatch raises for a revoked requester (folded check, same statement as the marker); attempt stays claimed, no dispatch_token, no provider call possible')
 
-    # Cross-org / forged operation id.
-    err_cross = sql_fail(f"SELECT inbox_reply_send.worker_authorize('{o}','{op2}')")
-    need('OPERATION_UNAVAILABLE' in err_cross or '42501' in err_cross, f'cross-org worker_authorize was not rejected: {err_cross}')
-    err_forged = sql_fail(f"SELECT inbox_reply_send.worker_authorize('{o2}',gen_random_uuid())")
-    need('OPERATION_UNAVAILABLE' in err_forged or '42501' in err_forged, f'forged operation id was not rejected: {err_forged}')
-    record('Astra #3: worker_authorize rejects a cross-org operation id and a forged/unknown operation id')
+    # Cross-org / forged attempt id (worker_start_dispatch resolves the
+    # operation from the ATTEMPT row itself — org o has no attempt att2).
+    err_cross = sql_fail(f"SELECT inbox_reply_send.worker_start_dispatch('{o}','{att2}',1)")
+    need('ATTEMPT_UNAVAILABLE' in err_cross, f'cross-org attempt id was not rejected: {err_cross}')
+    err_forged = sql_fail(f"SELECT inbox_reply_send.worker_start_dispatch('{o2}',gen_random_uuid(),1)")
+    need('ATTEMPT_UNAVAILABLE' in err_forged, f'forged attempt id was not rejected: {err_forged}')
+    record('Astra #3/B1: worker_start_dispatch rejects a cross-org attempt id and a forged/unknown attempt id')
 
-    # Restore membership, reverify authorize succeeds (positive control that
-    # the guard is checking access_status, not something incidental).
+    # Restore membership, reverify start_dispatch succeeds (positive control
+    # that the guard is checking access_status, not something incidental).
     sql(f"UPDATE memberships SET access_status='active' WHERE org_id='{o2}' AND user_id='{u2}'")
-    sql(f"SELECT inbox_reply_send.worker_authorize('{o2}','{op2}')")
-    record('positive control: restoring the membership makes worker_authorize succeed again')
+    dispatch2 = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o2}','{att2}',{claim2['generation']})::text"))
+    need(dispatch2['kind'] == 'dispatch', f'restored membership still rejected: {dispatch2}')
+    sql(f"SELECT inbox_reply_send.worker_persist('{o2}','{att2}','{dispatch2['token']}',jsonb_build_object('kind','accepted','externalId','PROV-2'))")
+    record('positive control: restoring the membership makes worker_start_dispatch succeed again')
 
-    # MUTATION: replace worker_authorize with a no-op, watch a revoked
-    # requester's dispatch wrongly proceed to start_dispatch; restore.
-    sql(f"ALTER TABLE memberships DISABLE TRIGGER trg_hugo_membership_owner_guard; UPDATE memberships SET access_status='revoked' WHERE org_id='{o2}' AND user_id='{u2}'; ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;")
-    sql("CREATE OR REPLACE FUNCTION inbox_reply_send.worker_authorize(o uuid,op uuid) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$ BEGIN END $$;")
-    sql(f"SELECT inbox_reply_send.worker_authorize('{o2}','{op2}')")  # must NOT raise with the stub
-    dispatch2_mutant = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o2}','{att2}',{claim2['generation']})::text"))
-    need(dispatch2_mutant['kind'] == 'dispatch', 'mutation did not actually let a revoked requester reach start_dispatch')
+    # === 4b. [Astra B1] MUTATION proving the ORIGINAL defect this redesign
+    # fixes: a stubbed worker_start_dispatch that (a) drops the access-epoch
+    # FOR SHARE lock and (b) widens the check-to-marker gap with a real
+    # pg_sleep — modelling exactly the bug report's "membership revocation
+    # commits between authorize and start_dispatch" window, since a real
+    # concurrent revoke can now land DURING that gap. Watch a revoked-mid-
+    # flight requester's dispatch WRONGLY succeed; restore the byte-exact
+    # real function (whose FOR SHARE lock closes this exact window — proven
+    # via genuine two-connection lock-wait in 4c below) and reverify the
+    # equivalent race can no longer land a stale-authorized token. ===
+    o6, u6, k6, prep_id6, item_ids6, cids6 = make_org_and_prep('+154255', n=1)
+    op6 = call_accept(o6, u6, k6, prep_id6)['operation_id']
+    att6 = sql(f"SELECT id FROM inbox_reply_send.attempts WHERE org_id='{o6}' AND operation_id='{op6}'")
+    claim6 = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o6}','{att6}')::text"))
+    need(claim6['kind'] == 'claimed', f'unexpected claim6: {claim6}')
+    sql("CREATE OR REPLACE FUNCTION inbox_reply_send.worker_start_dispatch(o uuid,attempt_id uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$ "
+        "DECLARE op uuid;requester uuid;active boolean; BEGIN "
+        " SELECT a.operation_id INTO op FROM inbox_reply_send.attempts a WHERE a.org_id=o AND a.id=attempt_id; IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_ATTEMPT_UNAVAILABLE';END IF;"
+        " SELECT r.requester_id INTO requester FROM inbox_reply_send.operations r WHERE r.org_id=o AND r.id=op; IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_REPLY_OPERATION_UNAVAILABLE' USING ERRCODE='42501';END IF;"
+        # No FOR SHARE lock (the mutation) and an artificial pg_sleep to
+        # reliably widen the check-to-marker gap for testability, exactly
+        # standing in for the original bug's real (much narrower, but
+        # exploitable) network-round-trip gap between a separate authorize
+        # RPC and start_dispatch.
+        " SELECT EXISTS(SELECT 1 FROM public.memberships m WHERE m.user_id=requester AND m.org_id=o AND m.access_status='active' AND m.deletion_prepared_at IS NULL AND (m.access_expires_at IS NULL OR m.access_expires_at>clock_timestamp())) INTO active;"
+        " IF NOT active THEN RAISE EXCEPTION 'INBOX_REPLY_REQUESTER_UNAUTHORIZED' USING ERRCODE='42501';END IF;"
+        " PERFORM pg_sleep(2);"
+        " RETURN inbox_reply_send.start_dispatch(o,attempt_id,g);"
+        " END $$;")
+    mutant_call = start(f"SELECT inbox_reply_send.worker_start_dispatch('{o6}','{att6}',{claim6['generation']});\n")
+    wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND query LIKE '%pg_sleep(2)%')", 'Mutant worker_start_dispatch did not reach pg_sleep', 6)
+    # While the mutant is asleep (membership already checked, marker not yet
+    # written), a real concurrent revoke lands with NO contention at all —
+    # this is the vulnerability.
+    sql(f"ALTER TABLE memberships DISABLE TRIGGER trg_hugo_membership_owner_guard; UPDATE memberships SET access_status='revoked' WHERE org_id='{o6}' AND user_id='{u6}'; ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;")
+    mutant_result = json.loads(finish(mutant_call, 'Mutant worker_start_dispatch call failed', timeout=15))
+    need(mutant_result['kind'] == 'dispatch', f'mutation did not actually let a mid-flight-revoked requester reach the marker: {mutant_result}')
+    need(sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{o6}' AND id='{att6}'") == 'dispatch_started', 'mutation did not actually issue a token against a since-revoked membership')
     # Undo: reconcile the wrongly-issued token to uncertain (never send), restore the guard.
-    sql(f"SELECT inbox_reply_send.worker_persist('{o2}','{att2}','{dispatch2_mutant['token']}',jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
-    restore_and_verify('inbox_reply_send.worker_authorize')
-    err_restored = sql_fail(f"SELECT inbox_reply_send.worker_authorize('{o2}','{op2}')")
-    need('MEMBERSHIP' in err_restored.upper() or 'FORBIDDEN' in err_restored.upper(), 'Astra #3 guard not actually restored: '+err_restored)
-    sql(f"UPDATE memberships SET access_status='active' WHERE org_id='{o2}' AND user_id='{u2}'")
-    record('mutation: worker_authorize stubbed to a no-op lets a revoked requester reach start_dispatch; restored (byte-exact) guard blocks it again')
+    sql(f"SELECT inbox_reply_send.worker_persist('{o6}','{att6}','{mutant_result['token']}',jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
+    restore_and_verify('inbox_reply_send.worker_start_dispatch')
+    sql(f"UPDATE memberships SET access_status='active' WHERE org_id='{o6}' AND user_id='{u6}'")
+    record('mutation: worker_start_dispatch without the access-epoch lock (and an artificial gap standing in for the original narrower race) lets a mid-flight-revoked requester reach the marker; restored (byte-exact) guard is re-verified against a REAL two-connection race in 4c below')
+
+    # === 4c. [Astra B1] REAL two-connection concurrency proof against the
+    # RESTORED (byte-exact) function: connection A holds its transaction open
+    # (via an explicit BEGIN, not committed) through a full worker_start_dispatch
+    # call, so the FOR SHARE lock the function takes on the access-epoch row
+    # stays held past the point where the function has already returned its
+    # result. A concurrent connection B's revoke (whose capture_access
+    # trigger needs a CONFLICTING lock on that exact row) must then observe
+    # a genuine lock-wait — proven via pg_stat_activity — and cannot commit
+    # until A's WHOLE transaction ends. This is the mechanism that closes the
+    # 4b mutation's window: there is no interleaving where B's revoke can
+    # land between A's check and A's marker, because both are inside the
+    # SAME locked span. ===
+    o7, u7, k7, prep_id7, item_ids7, cids7 = make_org_and_prep('+155255', n=1)
+    op7 = call_accept(o7, u7, k7, prep_id7)['operation_id']
+    att7 = sql(f"SELECT id FROM inbox_reply_send.attempts WHERE org_id='{o7}' AND operation_id='{op7}'")
+    claim7 = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{o7}','{att7}')::text"))
+    need(claim7['kind'] == 'claimed', f'unexpected claim7: {claim7}')
+    # Disable the owner-guard trigger BEFORE opening connection A: A's own
+    # transaction holds an AccessShareLock on public.memberships for its
+    # whole duration (via worker_start_dispatch's membership SELECT), which
+    # would otherwise make this ALTER TABLE itself block on A.
+    sql("ALTER TABLE memberships DISABLE TRIGGER trg_hugo_membership_owner_guard;")
+    connection_a = start(f"BEGIN;\nSELECT inbox_reply_send.worker_start_dispatch('{o7}','{att7}',{claim7['generation']});\n")
+    wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND state='idle in transaction' AND query LIKE '%worker_start_dispatch%{att7}%')", 'Connection A did not reach idle-in-transaction after worker_start_dispatch', 8)
+    # A's transaction is now open and idle — its worker_start_dispatch call
+    # already ran to completion (marker written, uncommitted) and is still
+    # holding the access-epoch FOR SHARE lock. Fire connection B's revoke:
+    # its trigger needs a CONFLICTING lock on that same row.
+    connection_b = start(f"UPDATE memberships SET access_status='revoked' WHERE org_id='{o7}' AND user_id='{u7}';\n")
+    wait_for(f"SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%UPDATE memberships%')", 'Connection B (revoke) did not actually wait on a lock — the fix is not serializing', 8)
+    checks.append('OBSERVED: connection B (revoke) is genuinely blocked (pg_stat_activity wait_event_type=Lock) while connection A still holds its access-epoch FOR SHARE lock open')
+    print('  OK  real lock-wait observed: revoke blocked behind the held access-epoch lock')
+    # Only now does A commit — its dispatch decision (membership was active
+    # at check time) is finalized and durable BEFORE B's revoke can proceed.
+    connection_a.stdin.write('COMMIT;\n'); connection_a.stdin.close()
+    finish(connection_a, 'Connection A (worker_start_dispatch) failed to commit')
+    connection_b.stdin.close()
+    finish(connection_b, 'Connection B (revoke) failed to complete after A committed')
+    need(sql(f"SELECT state FROM inbox_reply_send.attempts WHERE org_id='{o7}' AND id='{att7}'") == 'dispatch_started', 'A\'s legitimately-authorized dispatch did not commit')
+    need(sql(f"SELECT access_status FROM memberships WHERE org_id='{o7}' AND user_id='{u7}'") == 'revoked', 'B\'s revoke did not eventually commit')
+    sql("ALTER TABLE memberships ENABLE TRIGGER trg_hugo_membership_owner_guard;")
+    # Cleanup: reconcile the (legitimately issued, pre-revoke) token.
+    sql(f"SELECT inbox_reply_send.worker_persist('{o7}','{att7}',(SELECT dispatch_token FROM inbox_reply_send.attempts WHERE org_id='{o7}' AND id='{att7}'),jsonb_build_object('kind','uncertain','reason','proof_cleanup'))")
+    sql(f"UPDATE memberships SET access_status='active' WHERE org_id='{o7}' AND user_id='{u7}'")
+    record('Astra B1 concurrency proof: two REAL connections — a revoke targeting the access-epoch row genuinely blocks (observed lock-wait) behind a still-open worker_start_dispatch transaction, and only proceeds after that transaction fully commits — no interleaved window exists')
 
     # === 5. Astra #4: busy claim -> deferred, second claim never wins the token ===
     o3, u3, k3, prep_id3, item_ids3, cids3 = make_org_and_prep('+152255', n=1)
@@ -278,7 +382,6 @@ try:
     # (999) start_dispatch attempt was correctly rejected and never touched
     # the row) — no need to reclaim.
     claim3 = claim3_initial
-    sql(f"SELECT inbox_reply_send.worker_authorize('{o3}','{op3}')")
     dispatch3 = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{o3}','{att3}',{claim3['generation']})::text"))
     need(dispatch3['kind'] == 'dispatch', f'expected a real dispatch: {dispatch3}')
     tok3 = dispatch3['token']
@@ -297,7 +400,7 @@ try:
     record('no-double-send: crash between marker and result relabels the attempt uncertain on re-entry; a second start_dispatch is impossible; the ORIGINAL token still reconciles idempotently')
 
     for fn in ['inbox_reply_send.claim_dispatch_batch', 'inbox_reply_send.ack_dispatch', 'inbox_reply_send.operation_dispatch_complete',
-               'inbox_reply_send.operation_attempts', 'inbox_reply_send.worker_authorize', 'inbox_reply_send.worker_claim',
+               'inbox_reply_send.operation_attempts', 'inbox_reply_send.worker_claim',
                'inbox_reply_send.worker_start_dispatch', 'inbox_reply_send.worker_persist']:
         assert_body_matches(fn)
     record('final state: every worker.sql function is byte-exact against its source definition')

@@ -1,9 +1,13 @@
 -- Dedicated role candidate for the reply-send worker. Mirrors
 -- experiments/inbox-operation-preparation/worker-role.sql's inbox_action_worker
 -- exactly, distinct role name and distinct (narrower) function allow-list —
--- claim/authorize/start_dispatch/persist/enumerate/ack, nothing else. No
--- password or LOGIN role is created here; credential/login provisioning is a
--- separate approved hosting operation.
+-- EIGHT functions: claim_dispatch_batch, ack_dispatch,
+-- operation_dispatch_complete [Astra B3 — the Restate handler calls this
+-- directly to decide whether to ack, not merely internally from ack_dispatch],
+-- operation_attempts, worker_claim, worker_start_dispatch (folds the
+-- requester re-authorization check in, see worker.sql), worker_persist.
+-- Nothing else. No password or LOGIN role is created here; credential/login
+-- provisioning is a separate approved hosting operation.
 BEGIN;
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_send_worker') THEN
@@ -21,19 +25,15 @@ GRANT USAGE ON SCHEMA inbox_reply_send TO inbox_reply_send_worker;
 GRANT EXECUTE ON FUNCTION
  inbox_reply_send.claim_dispatch_batch(integer),
  inbox_reply_send.ack_dispatch(uuid,uuid,bigint),
+ inbox_reply_send.operation_dispatch_complete(uuid,uuid),
  inbox_reply_send.operation_attempts(uuid,uuid),
- inbox_reply_send.worker_authorize(uuid,uuid),
  inbox_reply_send.worker_claim(uuid,uuid,integer),
  inbox_reply_send.worker_start_dispatch(uuid,uuid,bigint),
  inbox_reply_send.worker_persist(uuid,uuid,uuid,jsonb)
  TO inbox_reply_send_worker;
--- operation_dispatch_complete is an internal helper for ack_dispatch/worker_claim
--- reasoning only; the worker never calls it directly, so it stays ungranted
--- (defense in depth — even the seven entry points above are already the
--- worker's whole reachable surface).
 -- Explicit REVOKE cannot subtract an inherited PUBLIC privilege. Refuse the
 -- installation if canonical schema ACLs grant this principal broader authority
--- than the seven functions above.
+-- than the eight functions above.
 DO $$ BEGIN
  IF EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
   WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname<>'information_schema'
@@ -49,8 +49,8 @@ DO $$ BEGIN
    AND has_function_privilege('inbox_reply_send_worker',p.oid,'EXECUTE')
    AND p.oid<>ALL(ARRAY['inbox_reply_send.claim_dispatch_batch(integer)'::regprocedure,
     'inbox_reply_send.ack_dispatch(uuid,uuid,bigint)'::regprocedure,
+    'inbox_reply_send.operation_dispatch_complete(uuid,uuid)'::regprocedure,
     'inbox_reply_send.operation_attempts(uuid,uuid)'::regprocedure,
-    'inbox_reply_send.worker_authorize(uuid,uuid)'::regprocedure,
     'inbox_reply_send.worker_claim(uuid,uuid,integer)'::regprocedure,
     'inbox_reply_send.worker_start_dispatch(uuid,uuid,bigint)'::regprocedure,
     'inbox_reply_send.worker_persist(uuid,uuid,uuid,jsonb)'::regprocedure]::oid[])) THEN

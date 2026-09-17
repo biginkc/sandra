@@ -22,7 +22,10 @@ async function loadTransport() {
     const mod = await import(process.env.INBOX_REPLY_SEND_TEST_TRANSPORT_MODULE);
     return mod.createTestReplyTransport();
   }
-  const { createSendilloReplyTransport } = await import('../../src/lib/inbox/reply-provider.ts');
+  // [Astra B5] vendored, type-erased runtime copy — see vendor/reply-provider.mjs's
+  // own header. The Docker image has no TypeScript toolchain and cannot import
+  // src/lib/inbox/reply-provider.ts directly.
+  const { createSendilloReplyTransport } = await import('./vendor/reply-provider.mjs');
   const apiKey = process.env.SENDILLO_API_KEY;
   if (!apiKey) throw Error('Sendillo API key required');
   return createSendilloReplyTransport(apiKey);
@@ -37,13 +40,37 @@ const service = restate.service({
       const orgId = String(input.orgId), operationId = String(input.operationId);
       const attemptIds = await ctx.run('list-attempts', () => runner.operationAttempts(orgId, operationId));
       const results = [];
-      for (const attemptId of attemptIds) results.push(await ctx.run(`attempt:${attemptId}`, () => runner.dispatchAttempt(orgId, operationId, attemptId)));
+      for (const attemptId of attemptIds) {
+        // [Astra B2] A deferred/not_sent outcome is NEVER a value this step
+        // may return normally — a normal return is what Restate's ctx.run
+        // memoizes durably, and memoizing "deferred" would permanently strand
+        // this attempt: a later replay of THIS invocation would just replay
+        // the journaled "deferred" forever, never re-checking the ledger.
+        // Instead, the action throws a plain (non-Terminal) Error when the
+        // outcome isn't 'settled'. A thrown, non-terminal error inside
+        // ctx.run is NEVER journaled as a completed value — Restate retries
+        // the action itself (bounded, with backoff), calling
+        // dispatchAttempt() again for real each time. dispatchAttempt is
+        // always safe to re-enter: claim() is idempotent/fenced (busy again,
+        // or existing/settled — never a second token), so re-running it on
+        // retry can never double-send. Only once the outcome is genuinely
+        // 'settled' does the action return normally, and ctx.run then
+        // memoizes THAT (real, durable, ledger-backed) value — a later
+        // replay of this same invocation returns it instantly without ever
+        // touching the ledger or the provider again.
+        const outcome = await ctx.run(`attempt:${attemptId}`, async () => {
+          const result = await runner.dispatchAttempt(orgId, operationId, attemptId);
+          if (result.kind !== 'settled') throw Error(`reply attempt ${attemptId} not yet settled: ${result.kind}${result.reason ? `(${result.reason})` : ''}`);
+          return result;
+        });
+        results.push(outcome);
+      }
       const acknowledged = await ctx.run('ack-if-complete', async () => {
-        // Re-check completeness inside its own ctx.run: dispatchAttempt above
-        // may have deferred (busy) or left an attempt unauthorized, in which
-        // case operation_dispatch_complete is false and the caller
-        // (dispatchBatch) simply does not ack — the outbox lease naturally
-        // expires and the next poll re-invokes this same idempotent handler.
+        // Every attempt above is 'settled' by the time we reach here (the
+        // loop above cannot exit early with a deferred/not_sent outcome
+        // still pending — it would have thrown and Restate would have
+        // retried that step before ever reaching this line), so this is
+        // read-only confirmation, never a reason by itself to defer.
         return (await pool.query('SELECT inbox_reply_send.operation_dispatch_complete($1,$2) AS ready', [orgId, operationId])).rows[0]?.ready === true;
       });
       return { operationId, attempts: results, complete: acknowledged };

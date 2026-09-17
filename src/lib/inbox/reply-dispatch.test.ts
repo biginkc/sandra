@@ -79,9 +79,9 @@ it("a busy claim defers without sending or persisting", async () => {
   expect(result).toEqual({ attemptId, kind: "deferred" });
   expect(deps.send).not.toHaveBeenCalled(); expect(deps.persist).not.toHaveBeenCalled();
 });
-// [Astra #3] a revoked/expired requester never reaches start_dispatch or the
-// provider; the claim dependency itself reports not_sent before any token
-// exists (mirrors runner.mjs's worker_authorize raise -> not_sent_unauthorized).
+// [Astra #3 / Astra B1] a revoked/expired requester never reaches the
+// provider; worker_start_dispatch itself (folded authz, same statement as
+// the marker write) reports not_sent before any token exists.
 it("an unauthorized requester never reaches the provider", async () => {
   const deps = fixture();
   deps.claim = vi.fn<ReplyDispatchDependencies["claim"]>(async () => ({ kind: "not_sent", attemptId, reason: "requester_unauthorized" }));
@@ -90,13 +90,25 @@ it("an unauthorized requester never reaches the provider", async () => {
   expect(deps.send).not.toHaveBeenCalled(); expect(deps.persist).not.toHaveBeenCalled();
 });
 // [Astra #4] never-provider-on-unknown-commit: start_dispatch raised/returned
-// ambiguously (STALE_CLAIM/SENDER_BUSY/WINDOW_EXPIRED/FROZEN_MISMATCH) after
-// the marker attempt but before any token existed -> not_sent, no provider call.
+// ambiguously (STALE_CLAIM/WINDOW_EXPIRED/FROZEN_MISMATCH) after the marker
+// attempt but before any token existed -> not_sent, no provider call.
+// SENDER_BUSY is covered separately below as `deferred` (Astra B2).
 it("an ambiguous/unknown start_dispatch commit never reaches the provider", async () => {
   const deps = fixture();
   deps.claim = vi.fn<ReplyDispatchDependencies["claim"]>(async () => ({ kind: "not_sent", attemptId, reason: "INBOX_REPLY_STALE_CLAIM" }));
   const result = await dispatchReplyAttempt(attemptId, deps, signal());
   expect(result).toEqual({ attemptId, kind: "not_sent", reason: "INBOX_REPLY_STALE_CLAIM" });
+  expect(deps.send).not.toHaveBeenCalled(); expect(deps.persist).not.toHaveBeenCalled();
+});
+// [Astra B2] SENDER_BUSY maps to `deferred`, the same retryable shape as a
+// busy claim — NOT `not_sent`. Both are equally non-memoizable, but this
+// keeps the reason vocabulary honest: SENDER_BUSY genuinely means "someone
+// else is mid-flight right now", not "this requester/commit is invalid".
+it("a sender-busy start_dispatch failure is reported as deferred, not not_sent", async () => {
+  const deps = fixture();
+  deps.claim = vi.fn<ReplyDispatchDependencies["claim"]>(async () => ({ kind: "deferred", attemptId }));
+  const result = await dispatchReplyAttempt(attemptId, deps, signal());
+  expect(result).toEqual({ attemptId, kind: "deferred" });
   expect(deps.send).not.toHaveBeenCalled(); expect(deps.persist).not.toHaveBeenCalled();
 });
 // Exhaustive translation: an out-of-vocabulary state from claim()/persist()

@@ -17,7 +17,7 @@ function settledResult(attemptId: string, state: string): ReplyAttemptResult {
   return { attemptId, kind: "settled", state: state as ReplyAttemptState };
 }
 
-const STALE_CLAIM_CODES = ["INBOX_REPLY_STALE_CLAIM", "INBOX_REPLY_SENDER_BUSY", "INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER", "INBOX_REPLY_FROZEN_MISMATCH"];
+const STALE_CLAIM_CODES = ["INBOX_REPLY_STALE_CLAIM", "INBOX_REPLY_WINDOW_EXPIRED_AT_MARKER", "INBOX_REPLY_FROZEN_MISMATCH", "INBOX_REPLY_REQUESTER_UNAUTHORIZED", "INBOX_REPLY_ATTEMPT_UNAVAILABLE", "INBOX_REPLY_OPERATION_UNAVAILABLE", "INBOX_ACCESS_BASELINE_MISSING"];
 function startDispatchFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   for (const code of STALE_CLAIM_CODES) if (message.includes(code)) return code;
@@ -25,16 +25,19 @@ function startDispatchFailureReason(error: unknown): string {
 }
 
 /** SQL adapter implementing ReplyDispatchDependencies against
- * inbox_reply_send.worker_claim/worker_authorize/worker_start_dispatch/
- * worker_persist (experiments/inbox-reply-send-worker/worker.sql) — the
- * SECURITY DEFINER entry points granted to inbox_reply_send_worker.
- * Mirrors experiments/inbox-reply-send-worker/runner.mjs's own JS control
- * flow so both implementations of the single-connection contract (this
- * one and the durable worker's) agree byte-for-byte on the state machine.
- * `claim` folds claim -> worker_authorize (Astra #3) -> start_dispatch
- * (Astra #4) into ONE call, exactly as ReplyDispatchDependencies documents:
- * "One fresh transaction: canonical eligibility, account admission and
- * durable dispatch_started marker." */
+ * inbox_reply_send.worker_claim/worker_start_dispatch/worker_persist
+ * (experiments/inbox-reply-send-worker/worker.sql) — the SECURITY DEFINER
+ * entry points granted to inbox_reply_send_worker. Mirrors
+ * experiments/inbox-reply-send-worker/runner.mjs's own JS control flow so
+ * both implementations of the single-connection contract (this one and the
+ * durable worker's) agree byte-for-byte on the state machine.
+ * `claim` folds claim -> worker_start_dispatch into ONE call, exactly as
+ * ReplyDispatchDependencies documents: "One fresh transaction: canonical
+ * eligibility, account admission and durable dispatch_started marker."
+ * [Astra B1] worker_start_dispatch itself folds the requester
+ * re-authorization check (Astra #3) in as its FIRST statements, in the SAME
+ * transaction as the ledger marker write — there is no longer a separate
+ * worker_authorize RPC whose lock would release before the marker. */
 export function createReplyDispatchSqlAdapter(
   executor: ReplyDispatchQueryExecutor,
   orgId: string,
@@ -52,23 +55,26 @@ export function createReplyDispatchSqlAdapter(
         return { kind: "existing", result: settledResult(attemptId, claim.state) };
       }
       if (claim.kind !== "claimed" || typeof claim.generation !== "string") throw Error("Invalid reply claim result");
-      try {
-        await executor.query("SELECT inbox_reply_send.worker_authorize($1,$2)", [orgId, operationId]);
-      } catch {
-        // [Astra #3] Requester's membership was revoked/expired since
-        // acceptance. Do NOT start_dispatch, do NOT send. The attempt stays
-        // claimed for lease-expiry (reclaimable by a later pass); nothing is
-        // journaled here.
-        return { kind: "not_sent", attemptId, reason: "requester_unauthorized" };
-      }
       let dispatchRow: unknown;
       try {
+        // worker_start_dispatch resolves the operation's requester and
+        // re-checks their CURRENT membership (Astra B1) before ever writing
+        // the ledger marker, in the SAME statement/transaction as that
+        // marker write — a raise here means the requester's membership was
+        // revoked/expired, a cross-org or forged operation/attempt
+        // relationship, or the ledger itself rejected the marker
+        // (STALE_CLAIM/SENDER_BUSY/WINDOW_EXPIRED/FROZEN_MISMATCH). No
+        // token was ever returned in any of these cases.
         dispatchRow = (await executor.query<{ result: unknown }>("SELECT inbox_reply_send.worker_start_dispatch($1,$2,$3) AS result", [orgId, attemptId, claim.generation])).rows[0]?.result;
       } catch (error) {
-        // [Astra #4] never-provider-on-unknown-commit: a thrown/ambiguous
-        // start_dispatch means NO token exists. Re-entry goes back through
-        // claim() next pass, which reads the row's real committed state —
-        // never a provider call from here.
+        // [Astra #4 + Astra B2] never-provider-on-unknown-commit: re-entry
+        // goes back through claim() next pass, which reads the row's real
+        // committed state — never a provider call from here. SENDER_BUSY is
+        // specifically a `deferred` (retryable, same shape as a busy claim),
+        // not a distinctly-reasoned `not_sent` — the caller must never treat
+        // it as a final/journalable outcome.
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("INBOX_REPLY_SENDER_BUSY")) return { kind: "deferred", attemptId };
         return { kind: "not_sent", attemptId, reason: startDispatchFailureReason(error) };
       }
       if (!dispatchRow || typeof dispatchRow !== "object") throw Error("Invalid reply start_dispatch result");

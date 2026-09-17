@@ -19,7 +19,13 @@ export async function dispatchBatch(pool, fetcher, ingress) {
   for (const entry of entries) {
     const orgId = id(entry.org_id), operationId = id(entry.operation_id), eventId = id(entry.event_id);
     if (typeof entry.generation !== 'string' || !/^[1-9][0-9]{0,18}$/.test(entry.generation) || BigInt(entry.generation) > 9223372036854775807n) throw Error('Invalid dispatch fence');
-    const response = await fetcher(new URL('/InboxReplySend/run', ingress), { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': eventId }, body: JSON.stringify({ orgId, operationId }), signal: AbortSignal.timeout(5000), redirect: 'error' });
+    // [Astra B4] /run alone is Restate's SYNCHRONOUS ingress path — it blocks
+    // for the full handler result and its 200 response IS the result, not an
+    // {status:'Accepted'|'PreviouslyAccepted', invocationId} envelope. /run/send
+    // is the durable ASYNC path (mirrors the proven metadata worker's own
+    // core.mjs) whose response is exactly the Accepted/PreviouslyAccepted
+    // shape this function validates below.
+    const response = await fetcher(new URL('/InboxReplySend/run/send', ingress), { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': eventId }, body: JSON.stringify({ orgId, operationId }), signal: AbortSignal.timeout(5000), redirect: 'error' });
     const body = await readBoundedJson(response, 4096);
     if (!['Accepted', 'PreviouslyAccepted'].includes(body.status) || typeof body.invocationId !== 'string' || !/^inv_[A-Za-z0-9]+$/.test(body.invocationId)) throw Error('Durable acceptance not confirmed');
     // No acknowledgment on a thrown/lost response. A later dispatcher reuses the
@@ -68,7 +74,14 @@ export function databaseConfiguration(env) {
   let ssl = { rejectUnauthorized: true, servername: url.hostname };
   if (env.INBOX_ACTION_LOCAL_FIXTURE === '1') {
     const profile = env.INBOX_ACTION_FIXTURE_PROFILE ?? 'proof';
-    const approved = profile === 'proof' ? url.hostname === 'sandra-inbox-actions-db-owned' && database === 'sandra_inbox_action_runtime_20260913' : profile === 'preview' && url.hostname === 'sandra-inbox-preview-db-owned' && database === 'sandra_inbox_install_20260913';
+    // 'reply-runtime': the RULING 1 runtime-proof targets the SAME shared
+    // projection-t2 owned fixture database (postgres) that every other
+    // reply-lane proof script in this repo installs its schemas into —
+    // unlike the metadata worker, this PR does not stand up a second,
+    // dedicated runtime-only database.
+    const approved = profile === 'proof' ? url.hostname === 'sandra-inbox-actions-db-owned' && database === 'sandra_inbox_action_runtime_20260913'
+      : profile === 'reply-runtime' ? url.hostname === 'sandra-inbox-actions-db-owned' && database === 'postgres'
+      : profile === 'preview' && url.hostname === 'sandra-inbox-preview-db-owned' && database === 'sandra_inbox_install_20260913';
     if (env.NODE_ENV !== 'test' || !approved) throw Error('Unapproved plaintext fixture database');
     ssl = false;
   } else {
