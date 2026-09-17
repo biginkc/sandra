@@ -17,7 +17,13 @@ test.beforeAll(async () => {
     // below the row are omitted so this fixture cannot call server actions.
     plugins: [{ name: "omit-record-editors", setup(build) {
       build.onResolve({ filter: /^\.\/detail-panel$/ }, () => ({ path: "detail-panel", namespace: "sms-fixture" }))
-      build.onLoad({ filter: /.*/, namespace: "sms-fixture" }, () => ({ contents: "export function MyLeadDetailPanel() { return null }", loader: "js" }))
+      build.onResolve({ filter: /^\.\.\/rep-sms-composer$/ }, () => ({ path: "rep-sms-composer", namespace: "sms-fixture" }))
+      build.onLoad({ filter: /.*/, namespace: "sms-fixture" }, ({ path: fixturePath }) => ({
+        contents: fixturePath === "rep-sms-composer"
+          ? "export function RepSmsComposer() { return null }"
+          : "export function MyLeadDetailPanel() { return null }",
+        loader: "js",
+      }))
     } }],
   })
   html = `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css.css}\n:root{--font-geist-sans:Arial,sans-serif;--font-geist-mono:monospace}</style></head><body><div id="root"></div><script>${bundle.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></body></html>`
