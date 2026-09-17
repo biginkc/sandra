@@ -280,8 +280,9 @@ finally:
         # [Astra round-3] Exhaustive-by-construction check — every
         # dynamically-discovered org_id/user_id-scoped table anywhere in the
         # database, plus the counter/cursor tables against their baseline.
-        owned_cleanup.assert_zero_residual(sql, ORG_TABLES, USER_TABLES, COUNTER_TABLES, COUNTER_BASELINE, [owned_org], [owned_user])
-        print(f'Exhaustive dynamic residual check passed: {len(ORG_TABLES)} org-scoped + {len(USER_TABLES)} user-scoped + {len(COUNTER_TABLES)} counter table(s), zero net residual across all of them')
+        advanced = owned_cleanup.assert_zero_residual(sql, ORG_TABLES, USER_TABLES, COUNTER_TABLES, COUNTER_BASELINE, [owned_org], [owned_user])
+        # [Astra round-4] Honest accounting, never a blanket "zero residual".
+        print(f'Exhaustive dynamic residual check passed: zero synthetic rows across {len(ORG_TABLES)} org-scoped + {len(USER_TABLES)} user-scoped table(s)' + (f'; serialization counters advanced monotonically: {"; ".join(advanced)}' if advanced else '; no counter table changed'))
     need(sql("SELECT to_regnamespace('inbox_reply_send') IS NULL", check=False) == 't', 'inbox_reply_send schema not dropped')
     need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_send_worker')", check=False) == 't', 'inbox_reply_send_worker role not dropped')
     print('Cleanup verified: containers/volume/image removed, schemas and worker role dropped, zero residual owned rows')

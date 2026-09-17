@@ -648,8 +648,13 @@ finally:
         # database (not the primary tables above), plus the counter/cursor
         # tables checked against their pre-run baseline. This is what
         # actually catches a table nobody thought to name.
-        owned_cleanup.assert_zero_residual(sql, ORG_TABLES, USER_TABLES, COUNTER_TABLES, COUNTER_BASELINE, OWNED_ORGS, OWNED_USERS)
-        print(f'Exhaustive dynamic residual check passed: {len(ORG_TABLES)} org-scoped + {len(USER_TABLES)} user-scoped + {len(COUNTER_TABLES)} counter table(s), zero net residual across all of them')
+        advanced = owned_cleanup.assert_zero_residual(sql, ORG_TABLES, USER_TABLES, COUNTER_TABLES, COUNTER_BASELINE, OWNED_ORGS, OWNED_USERS)
+        # [Astra round-4] Honest accounting, never a blanket "zero residual":
+        # zero SYNTHETIC rows across every org/user-scoped table (real,
+        # asserted above), and any shared serialization/version counter this
+        # run's own writes advanced is named explicitly here — it holds no
+        # synthetic rows and is never forced backward.
+        print(f'Exhaustive dynamic residual check passed: zero synthetic rows across {len(ORG_TABLES)} org-scoped + {len(USER_TABLES)} user-scoped table(s)' + (f'; serialization counters advanced monotonically: {"; ".join(advanced)}' if advanced else '; no counter table changed'))
     need(sql("SELECT to_regnamespace('inbox_reply_send') IS NULL") == 't', 'inbox_reply_send schema not dropped')
     need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_send_worker')") == 't', 'inbox_reply_send_worker role not dropped')
     print(f'Cleanup verified: zero residual rows across {len(OWNED_ORGS)} owned orgs / {len(OWNED_USERS)} owned users; schemas and worker role dropped')
