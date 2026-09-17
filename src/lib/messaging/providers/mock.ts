@@ -101,7 +101,8 @@ export type MockPendingReply = {
  * Browser acceptance runs cannot inspect this module's in-process simulation
  * log from Playwright. In the explicitly opt-in disposable lane, publish a
  * redacted send receipt to its loopback ledger instead. Every guard below is
- * required so production and ordinary tests never gain a network side effect.
+ * required so ordinary production and tests never gain a network side effect;
+ * only the explicit disposable production-browser lane may use the ledger.
  */
 async function recordDisposableBrowserSend(input: {
   externalId: string;
@@ -109,11 +110,7 @@ async function recordDisposableBrowserSend(input: {
   body: string;
   failReason?: MockFailReason;
 }): Promise<void> {
-  if (
-    process.env.SEQUENCE_READINESS_MOCK_PROVIDER_LEDGER !== "1" ||
-    process.env.E2E_DISPOSABLE_DATABASE !== "1" ||
-    process.env.NODE_ENV === "production"
-  ) {
+  if (!isDisposableBrowserLedgerEnabled()) {
     return;
   }
   const token = process.env.SEQUENCE_READINESS_LEDGER_TOKEN;
@@ -155,6 +152,65 @@ async function recordDisposableBrowserSend(input: {
     });
   } catch {
     // Ledger availability must never change mock-provider behavior.
+  }
+}
+
+const DISPOSABLE_SUPABASE_URL = "http://127.0.0.1:54321";
+const DISPOSABLE_LEDGER_URL = "http://127.0.0.1:3558/ledger";
+const DISPOSABLE_RUN_SLUG = /^(?:gha-[1-9][0-9]*-[1-9][0-9]*|local-[1-9][0-9]*-[a-f0-9]{12})$/;
+const DISPOSABLE_IDENTITY_EMAIL =
+  /^e2e-ci\+(gha-[1-9][0-9]*-[1-9][0-9]*|local-[1-9][0-9]*-[a-f0-9]{12})@bmhgroupkc\.com$/;
+
+/**
+ * The production browser lane runs the real app server with a mock provider.
+ * Keep its only cross-process side effect behind independent, exact-value
+ * checks so setting NODE_ENV=production cannot turn the mock ledger into a
+ * general production transport. The browser config supplies this flag only
+ * for the prebuilt disposable loopback lane.
+ */
+function isDisposableBrowserLedgerEnabled(): boolean {
+  const isProduction = process.env.NODE_ENV === "production";
+  if (
+    process.env.SEQUENCE_READINESS_MOCK_PROVIDER_LEDGER !== "1" ||
+    process.env.E2E_DISPOSABLE_DATABASE !== "1" ||
+    (isProduction && process.env.SEQUENCE_READINESS_PRODUCTION_BROWSER !== "1")
+  ) {
+    return false;
+  }
+
+  // Preserve the existing development/test opt-in behavior. Production has a
+  // stricter identity and endpoint contract below.
+  if (!isProduction) return true;
+
+  if (process.env.MESSAGING_PROVIDER?.trim().toLowerCase() !== "mock") {
+    return false;
+  }
+  if (
+    process.env.NEXT_PUBLIC_SUPABASE_URL !== DISPOSABLE_SUPABASE_URL ||
+    process.env.TEST_SUPABASE_URL !== DISPOSABLE_SUPABASE_URL
+  ) {
+    return false;
+  }
+
+  const runSlug = process.env.E2E_RUN_SLUG ?? "";
+  const email = process.env.E2E_TEST_USER_EMAIL?.trim().toLowerCase() ?? "";
+  if (
+    !DISPOSABLE_RUN_SLUG.test(runSlug) ||
+    !DISPOSABLE_IDENTITY_EMAIL.test(email) ||
+    email !== `e2e-ci+${runSlug}@bmhgroupkc.com` ||
+    (process.env.E2E_TEST_USER_PASSWORD?.length ?? 0) < 32
+  ) {
+    return false;
+  }
+
+  if ((process.env.SEQUENCE_READINESS_LEDGER_TOKEN?.length ?? 0) < 16) {
+    return false;
+  }
+  try {
+    const ledgerUrl = new URL(process.env.SEQUENCE_READINESS_LEDGER_URL ?? "");
+    return ledgerUrl.href === DISPOSABLE_LEDGER_URL;
+  } catch {
+    return false;
   }
 }
 

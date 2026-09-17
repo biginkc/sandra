@@ -9,17 +9,26 @@ The lane starts three loopback processes: a token-protected provider ledger,
 an external HTTP probe, and the Next app. The app and probe load
 `tests/sequence-readiness/deny-external-http.cjs`, which rejects non-loopback
 HTTP before the request reaches the network and records a sanitized event in
-the ledger. The Next app runs with Next's documented `next dev --webpack`
-fallback because the disposable worktree can use a node_modules symlink into
-the exact-deps cache, which Turbopack rejects outside the project root.
+the ledger. The app builds once and then runs from Next's production server
+on loopback before Playwright starts. The build uses the offline Google-font
+transform fixture, so Turbopack does not contact a font provider. A disposable
+worktree may use a node_modules symlink into the exact-deps cache; the
+production browser build requires fresh CI validation, while local runs must
+use a project-root dependency installation when Turbopack rejects an external
+symlink target.
 Playwright also installs a browser-context route that aborts
 non-loopback `http` and `https` requests before network and records only their
 origin, path, and method. Local app, API, and asset requests stay allowed. The
 browser test verifies both denials and that the app loaded the server guard.
 `tests/sequence-readiness/google-fonts-mock.cjs` is passed through
-`NEXT_FONT_GOOGLE_MOCKED_RESPONSES`; it supplies local CSS and bundled font
-bytes for `next/font/google`, so offline compilation does not weaken the
-egress guard. No provider credential or outbound provider request is permitted.
+`NEXT_FONT_GOOGLE_MOCKED_RESPONSES`; the production Turbopack mode supplies
+local font faces, while the development fixture can use bundled font bytes.
+This tests offline compilation rather than remote font fetching and retains the
+egress guard. The production browser server omits `E2E_AUTH_BYPASS` and uses
+the real local password session. Its mock-provider ledger exception is
+enabled only by `SEQUENCE_READINESS_PRODUCTION_BROWSER=1` together with the
+exact disposable loopback identity and endpoint checks in the mock provider.
+No provider credential or outbound provider request is permitted.
 
 The disposable runner can launch it in the same isolated project by setting
 `SANDRA_CANARY_BROWSER=1`; the runner forwards generated local keys and a

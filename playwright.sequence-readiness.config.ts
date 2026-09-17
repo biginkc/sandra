@@ -113,6 +113,15 @@ const commonLocalEnv = {
   SEQUENCE_READINESS_LEDGER_TOKEN: ledgerToken,
   NEXT_FONT_GOOGLE_MOCKED_RESPONSES: googleFontMockPath,
 };
+const productionLocalEnv = {
+  ...Object.fromEntries(
+    Object.entries(commonLocalEnv).filter(([name]) => name !== "E2E_AUTH_BYPASS"),
+  ),
+  NODE_ENV: "production",
+  NEXT_PUBLIC_SITE_URL: baseURL,
+  NEXT_FONT_GOOGLE_TURBOPACK_MOCKED_RESPONSES: "1",
+  SEQUENCE_READINESS_PRODUCTION_BROWSER: "1",
+};
 
 export default defineConfig({
   testDir: "./e2e",
@@ -159,16 +168,19 @@ export default defineConfig({
       },
     },
     {
-      // The disposable worktree may use a node_modules symlink into the
-      // exact-deps cache. Turbopack rejects that target outside its project
-      // root; Next documents --webpack as the supported opt-out for dev.
-      command: "npx next dev --webpack --hostname 127.0.0.1 -p 3557",
+      // Build once before browser workers start so cold route compilation is
+      // outside the bounded acceptance-flow budgets. CI checks this real
+      // production server with the offline Google-font transform fixture;
+      // local disposable runs may use a symlinked dependency cache that
+      // cannot satisfy Turbopack's project-root rule.
+      command:
+        "npm run build && npx next start --hostname 127.0.0.1 -p 3557",
       url: `${baseURL}/login`,
       name: "sequence-readiness-app",
-      timeout: 120_000,
+      timeout: 300_000,
       reuseExistingServer: false,
       env: {
-        ...commonLocalEnv,
+        ...productionLocalEnv,
         NODE_OPTIONS: guardNodeOption,
         SEQUENCE_READINESS_PROCESS_LABEL: "sequence-readiness-app",
         PORT: "3557",

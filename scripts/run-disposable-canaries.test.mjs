@@ -29,7 +29,7 @@ test('browser acceptance is an explicit opt-in with generated local credentials'
   assert.match(source, /E2E_TEST_USER_PASSWORD: browserIdentity\.password/);
   assert.match(source, /NEXT_FONT_GOOGLE_MOCKED_RESPONSES/);
   const browserConfig = await readFile(path.join(root, 'playwright.sequence-readiness.config.ts'), 'utf8');
-  assert.match(browserConfig, /next dev --webpack/);
+  assert.match(browserConfig, /npm run build[\s\S]*next start --hostname 127\.0\.0\.1 -p 3557/);
 });
 
 test('browser-only mode requires browser acceptance and skips Vitest', async () => {
