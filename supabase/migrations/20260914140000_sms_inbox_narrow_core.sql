@@ -100,13 +100,16 @@
 -- flat from 18MB through 32MB (~1.0-1.09s on the fixture's hardware,
 -- vs ~1.29-1.33s still-spilling at 8-16MB). The function-scoped
 -- `SET work_mem TO '20MB'` below ships the measured minimum plus a
--- small margin, not the unmeasured 32MB. Capacity was measured, not
--- estimated: kernel-level `/proc/<pid>/status VmHWM` on a fresh backend
--- shows ~10.3MB peak RSS delta per call (worst of two runs across
--- unread/all/search/needs_outcome filters) -- comfortably within the
--- ~768MB 4GB-tier concurrency budget at ~15 concurrent calls (~5x
--- margin). See that doc for the full ladder and the measurement method.
--- No `plan_cache_mode` or other planner GUC is set, per S16.3/S18.1/S19.
+-- small margin, not the unmeasured 32MB. Capacity is NOT fully resolved:
+-- every isolated fresh-backend single-call measurement (7 across all
+-- four filter shapes) shows 0-10MB per-call growth, but a real
+-- 15-concurrent-connection test OOM-crashed the test instance four
+-- times (confounded by that container's 512MiB cap and cold/unpooled
+-- connections -- both harsher than the real 4GB production tier with
+-- PostgREST/Supavisor pooling). See that doc for the full picture; this
+-- is an open tier/verification decision for Jarrad, not something this
+-- migration resolves. No `plan_cache_mode` or other planner GUC is set,
+-- per S16.3/S18.1/S19.
 --
 -- Reviewability: see the companion migration
 -- 20260914140000_sms_inbox_narrow_core.integration.test.ts for the

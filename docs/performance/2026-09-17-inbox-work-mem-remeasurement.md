@@ -88,36 +88,129 @@ Test data and the temporary test-named function were fully cleaned up
 the fixture verified back to their pre-test baseline (1,275 contacts,
 1,282 properties, 131,295 messages).
 
-## Tier/concurrency budget (same formula as the 2026-09-14 doc)
-Safe budget A ≈ 0.25 × (RAM − shared_buffers), divided by assumed concurrent
-live PostgREST calls (≈15, per the 2026-09-14 doc's own measurement, which
-is a pool-size/app-config number rather than something that scales with DB
-tier).
+## Per-shape, fresh-backend measurements (2026-09-17, second follow-up)
+Astra's next critique was correct: the two runs above reused each backend
+for a second query shape, so a second shape's peak could hide under the
+first's already-elevated `VmHWM`. Redone properly: **one fresh backend
+connection per shape**, no reuse, for all four shapes (all / unread /
+search / needs_outcome). Each: connect, read `/proc/<pid>/status`
+immediately (entry: `VmRSS`, `VmHWM`, `RssAnon`, `RssFile`, `RssShmem`),
+run exactly ONE RPC call, read `/proc/<pid>/status` again (post).
 
-- **2GB tier** (measured in the 2026-09-14 doc): shared_buffers 512MB → A ≈
-  384MB → ≈25.6MB/call safe ceiling.
-- **4GB tier** (the currently-intended standing tier per the Sandra
-  Messages incident/tier-bump note, 2026-09-14): shared_buffers estimated
-  ≈1024MB (Supabase's ~25%-of-RAM convention, not independently confirmed
-  for this exact tier) → A ≈ 768MB → ≈51.2MB/call safe ceiling.
-- **8GB tier** (confirmed live on `sandra-crm` right now via Supabase MCP:
-  shared_buffers 2048MB, max_connections 160, work_mem default 12MB) → A ≈
-  1536MB → ≈102.4MB/call safe ceiling.
+| shape | entry VmHWM | entry RssAnon (private) | entry RssShmem (shared) | post VmHWM | peak-above-entry |
+|---|---:|---:|---:|---:|---:|
+| all | 286,708 kB | 20,000 kB | 69,820 kB | 286,708 kB | **0** |
+| unread | 279,416 kB | 19,932 kB | 68,900 kB | 279,416 kB | **0** |
+| search | 281,984 kB | 13,840 kB | 68,944 kB | 281,984 kB | **0** |
+| needs_outcome | 267,932 kB | 6,592 kB | 69,012 kB | 267,932 kB | **0** |
 
-**Headroom at the measured ≈10.3MB/call, 15 concurrent calls:** 15 ×
-10.3MB ≈ 154.5MB vs the 4GB-tier's 768MB budget → **≈613.5MB headroom,
-~5x margin** (supports ≈74 concurrent calls before the budget is exhausted,
-at this measured rate). Even padding generously for run-to-run variance or
-call shapes not covered by the two measured runs (say 2.5x the worst
-observed delta, ≈25MB/call), 15 concurrent calls ≈ 375MB still fits the
-768MB budget with ≈2x margin. The 2GB-tier ceiling (25.6MB/call) is the
-only one a padded 25MB/call estimate would get close to — the 4GB and 8GB
-tiers both hold real margin.
+`peak-above-entry = post_VmHWM − max(entry_VmRSS, entry_VmHWM)`, per the
+gate's own formula. **Zero for all four shapes independently** — each
+call's own memory need fit entirely inside what the backend had already
+touched before the call even ran (RssShmem ≈68-70MB is `shared_buffers`
+pages, shared across every backend, not a per-call cost; RssAnon
+6.6-20MB is the entry-time PRIVATE figure, and it does not grow further).
+Private (`RssAnon`) is the OOM-relevant number; `RssShmem` is double-safe
+to ignore for concurrency math since the same physical pages are shared.
 
-**Conclusion: RESOLVED, not an open tradeoff.** 20MB `work_mem` is
-memory-safe under concurrency on the 4GB target tier (and the current live
-8GB tier) based on measured peak-RSS delta, not estimate. Safe to merge on
-the memory dimension.
+This is a genuinely stronger result than the earlier reused-backend runs'
+"≈10.3MB delta" — with clean isolation, no shape shows measurable growth
+at all at this row-count scale. Both results are kept in this doc; the
+per-shape numbers above supersede the reused-backend ones for the
+per-call footprint question.
+
+## Real concurrency test — an actual OOM crash (2026-09-17, third follow-up)
+Astra asked for actual N-parallel execution, not a multiplied single-call
+number. This surfaced something the isolated tests above completely
+missed:
+
+**Method:** 15 simultaneous fresh `psql` connections, no staggering, each
+running ONE call of the `all` shape, self-sampling their own
+`/proc/<pid>/status` from within the same driver script (to avoid a
+timing race against my own tool round-trips, which cost an earlier
+attempt its measurement window entirely).
+
+**Result: the Postgres instance was OOM-killed by the Linux kernel
+(signal 9) four separate times** during this testing, each one taking the
+whole `sandra-inbox-projection-t2-db` container down and back through
+crash recovery:
+```
+LOG: server process (PID 706491) was terminated by signal 9: Killed
+DETAIL: Failed process was running: select public.sms_inbox_thread_page_snapshot_new_proof(...)
+LOG: terminating any other active server processes
+LOG: all server processes terminated; reinitializing
+```
+(repeated at 19:57:19, 19:58:14, 19:58:35, 19:59:38 UTC). Recovery was
+automatic and clean each time (WAL replay, `database system is ready to
+accept connections` within ~1s); post-incident data integrity was
+verified (contacts/properties/messages counts exactly match the
+pre-test baseline; no test artifacts left behind).
+
+**Two confounds that keep this from being a clean answer either way:**
+
+1. **This container has a hard 512MiB memory limit** (`docker stats`:
+   `MEM USAGE / LIMIT: ... / 512MiB`) — a dev-fixture cgroup cap smaller
+   than even the 2GB real Supabase tier's usable budget, let alone the
+   4GB target tier this decision is actually about. Hitting a 512MB wall
+   does not mean a real, unconstrained 4GB-RAM managed Postgres instance
+   would OOM the same way.
+2. **The test used 15 FRESH/cold connections, not pooled ones.** Each
+   backend independently builds its own private catalog/relation-cache
+   copies on first use — cost that is paid ONCE per backend and then
+   reused for every later query on a warm, pooled connection.
+   Production traffic goes through PostgREST/Supavisor pooling (the
+   2026-09-14 doc's own "~15 live" figure is a POOL size — warm, reused
+   connections), which never repeats this cold-start cost 15 times
+   simultaneously the way this test did. **The isolated per-shape tests
+   above (zero growth per call) strongly suggest the crash is dominated
+   by this cold-connection/catalog-cache overhead, not by the RPC's own
+   `work_mem`-bound work** — but that is an inference from the isolated
+   results, not a direct measurement, and I did not attempt to
+   cleanly separate the two causes by, for example, re-running the
+   concurrency test against already-warmed connections, because doing so
+   meant risking a fifth crash on a fixture other work in this session
+   may depend on.
+
+**I am not willing to keep crash-testing a shared fixture to chase a
+cleaner number.** Four OOM-triggered restarts against a resource other
+agents in this session may be using is already a real cost, even though
+recovery was automatic and no data was lost.
+
+## Conclusion: NOT a clean "safe with margin" — a decision for Jarrad
+The evidence is genuinely mixed and I am not going to force it into a
+tidy verdict:
+
+- Every isolated, single-call measurement (7 across two rounds, covering
+  all four filter shapes) shows **zero to ~10MB per-call growth** — no
+  signal that 20MB `work_mem` itself is the problem.
+- A real 15-concurrent-connection test **crashed the instance via OOM**,
+  four times, reproducibly — but on a 512MiB-capped container with cold
+  (unpooled) connections, which is a materially harsher and smaller
+  environment than the actual 4GB production tier with pooled
+  connections this decision is about.
+- I have not proven this migration is safe under realistic production
+  concurrency (pooled, on an actual 4GB-tier Supabase project), and I
+  have also not proven it is unsafe there — I've proven the query CAN
+  exhaust a small, unpooled test environment, which is a real signal to
+  take seriously, not a data point to explain away.
+
+**Options for Jarrad, not decided here:**
+1. Treat the isolated per-call evidence (zero growth) plus the
+   cold-connection/pooling confound as sufficient reassurance and ship
+   20MB as-is, since production never presents 15 simultaneous cold
+   connections the way this test did.
+2. Require a proper concurrency test against an actual 4GB-tier Supabase
+   project through the real PostgREST/Supavisor pool before merging —
+   the only way to remove both confounds at once.
+3. Defer this optimization entirely (#604 is a non-critical perf change;
+   it is fine to wait) until (2) can be done without risk to a shared
+   fixture.
+
+This migration is **not being represented as merge-ready on the capacity
+dimension** — the correctness fixes (auth-scoped equivalence, org
+isolation, suite lifecycle, `search_path=""`) stand on their own measured
+proof, but capacity is handed to Jarrad as a tier/verification decision,
+not resolved here.
 
 Related: docs/performance/2026-09-14-inbox-query-latency-investigation.md
 (original investigation, E1-E6). PR #604.
