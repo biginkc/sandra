@@ -30,6 +30,8 @@ type Props = {
   /** Compact adjacent action rendered with the send-safety explanation. */
   footerAction?: React.ReactNode;
   onSent?: (messageId: string) => void;
+  onPendingChange?: (pending: boolean) => void;
+  sendAction?: (body: string, to: string | null) => ReturnType<typeof sendSmsFromLead>;
 };
 
 /**
@@ -50,6 +52,8 @@ export function InlineReply({
   suspended = false,
   footerAction,
   onSent,
+  sendAction,
+  onPendingChange,
 }: Props) {
   const router = useRouter();
   const [body, setBody] = useState("");
@@ -79,11 +83,12 @@ export function InlineReply({
   const send = () => {
     if (!canSend || sendInFlight.current) return;
     sendInFlight.current = true;
+    onPendingChange?.(true);
     const submittedBody = body;
     startTransition(async () => {
       try {
       const result = await callAction(
-        sendSmsFromLead(
+        sendAction ? sendAction(submittedBody, effectiveToPhone) : sendSmsFromLead(
           propertyId,
           submittedBody,
           fromNumber,
@@ -154,6 +159,7 @@ export function InlineReply({
       }
       } finally {
         sendInFlight.current = false;
+        onPendingChange?.(false);
       }
     });
   };

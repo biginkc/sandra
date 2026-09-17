@@ -24,6 +24,14 @@ export type SmsSendResult = {
   raw: unknown;
 };
 
+/** Optional caller deadline for one provider attempt. Providers must not
+ * silently retry the request, because an interrupted request may already
+ * have been accepted remotely. */
+export type SmsSendOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
 export type DialpadFromOption = {
   /** E.164 number (e.g. "+18163706846"). */
   number: string;
@@ -39,6 +47,8 @@ export type DialpadFromOption = {
 export type ProviderSenderNumber = {
   /** E.164 number the account owns and can send from. */
   phoneE164: string;
+  /** Provider account identity when the catalog exposes it. */
+  providerAccountId?: string | null;
   /** Provider's stable id for the number, when it exposes one. */
   providerNumberId: string | null;
   /** Provider-reported status string, verbatim (e.g. "active"). */
@@ -103,7 +113,7 @@ export interface MessagingProvider {
    */
   getDefaultFromNumber?(): string | null;
 
-  sendSms(input: SmsOutboundInput): Promise<SmsSendResult>;
+  sendSms(input: SmsOutboundInput, opts?: SmsSendOptions): Promise<SmsSendResult>;
 
   /**
    * Return `true` when the webhook is authentic. Caller passes the

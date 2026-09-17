@@ -56,6 +56,7 @@ describe("acquisition history rendering and recovery", () => {
   it("renders literal note, actor, real timestamp and no unsafe recording link", () => {
     render(<AcquisitionHistoryCard fact={fact} actor="Rep A" />);
     expect(screen.getByText("No answer")).toBeInTheDocument();
+    expect(screen.getByText("Follow-up required")).toBeInTheDocument();
     expect(screen.getByText(fact.note!)).toBeInTheDocument();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.getByText(/Rep A/)).toBeInTheDocument();

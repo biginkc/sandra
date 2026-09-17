@@ -165,33 +165,24 @@ export class DialpadMessagingProvider implements MessagingProvider {
    * on-demand at composer open.
    */
   async listFromNumbers(): Promise<DialpadFromOption[]> {
-    const url = `${NUMBERS_ENDPOINT}?limit=100`;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        headers: { Authorization: `Bearer ${this.apiKey}` },
-      });
-    } catch (e) {
-      throw new ProviderError(
-        e instanceof Error ? e.message : String(e),
-        "dialpad",
-      );
-    }
-    if (!res.ok) {
-      throw new ProviderError(
-        `Dialpad ${res.status}: ${await res.text().catch(() => res.statusText)}`,
-        "dialpad",
-      );
-    }
-    const data = (await res.json()) as {
-      items?: Array<{
-        number?: string;
-        status?: string;
-        target_id?: string | number;
-        target_type?: string;
-      }>;
-    };
-    const items = data.items ?? [];
+    const inventorySignal = AbortSignal.timeout(10_000);
+    type NumberItem = { number?: string; status?: string; target_id?: string | number; target_type?: string };
+    const items: NumberItem[] = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const url = new URL(NUMBERS_ENDPOINT);
+      url.searchParams.set("limit", "100");
+      if (cursor) url.searchParams.set("cursor", cursor);
+      const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${this.apiKey}` }, cache: "no-store", signal: inventorySignal });
+      if (!res.ok) throw new ProviderError(`Dialpad number inventory unavailable (${res.status}).`, "dialpad");
+      const data = await res.json() as { items?: NumberItem[]; cursor?: string };
+      items.push(...(data.items ?? []));
+      cursor = data.cursor;
+      if (cursor && seen.has(cursor)) throw new ProviderError("Dialpad inventory pagination did not advance.", "dialpad");
+      if (cursor) seen.add(cursor);
+      if (seen.size > 100) throw new ProviderError("Dialpad inventory exceeded page limit.", "dialpad");
+    } while (cursor);
 
     // Resolve owner names in parallel — but only fetch each (type,id)
     // once. The "available" numbers have no target.
@@ -207,7 +198,7 @@ export class DialpadMessagingProvider implements MessagingProvider {
     }
     const nameEntries = await Promise.all(
       [...needed.entries()].map(async ([key, { type, id }]) => {
-        const name = await this.resolveOwnerName(type, id);
+        const name = await this.resolveOwnerName(type, id, inventorySignal);
         return [key, name] as const;
       }),
     );
@@ -235,6 +226,7 @@ export class DialpadMessagingProvider implements MessagingProvider {
   private async resolveOwnerName(
     type: string,
     id: string,
+    signal?: AbortSignal,
   ): Promise<string | null> {
     const endpoint =
       type === "user"
@@ -245,6 +237,7 @@ export class DialpadMessagingProvider implements MessagingProvider {
     if (!endpoint) return null;
     try {
       const res = await fetch(endpoint, {
+        signal: signal ?? AbortSignal.timeout(5_000),
         headers: { Authorization: `Bearer ${this.apiKey}` },
       });
       if (!res.ok) return null;

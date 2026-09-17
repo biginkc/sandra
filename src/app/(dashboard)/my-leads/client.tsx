@@ -1,6 +1,7 @@
 'use client';
 import { useCallback,useEffect,useMemo,useRef,useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { RepSmsSettings } from './rep-sms-settings';
 import { Button } from '@/components/ui/button';
 import { useOptionalSoftphone } from '@/components/softphone/softphone-provider';
 import { BookAppointmentPopover } from '@/components/appointments/book-appointment-popover';
@@ -194,7 +195,10 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       // Publish the refresh barrier before closing so a rapid next click is retained
       // and initialized from authorized post-command metadata, never the old row.
       const read=refresh();mutationReads.current.set(dialog.row.propertyId,{scope:openingScope,episodeId:dialog.row.assignmentEpisodeId,requestId:request.current,read});
-      setDialog(current=>current===dialog?null:current);setDetailRevision(revision=>revision+1);await read;router.refresh();
+      const followUpPending = dialog.action === 'log-attempt' && input.outcome === 'no_answer' &&
+        (!result.followUp || !['accepted','delivered'].includes(result.followUp.status));
+      if(!followUpPending)setDialog(current=>current===dialog?null:current);
+      setDetailRevision(revision=>revision+1);await read;router.refresh();
     }
     return result;
   },[dialog,refresh,router,recovery,openingScope]);
@@ -215,6 +219,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
         <input type="checkbox" checked={m.acquisitionsEnabled} disabled={settingsBusy} onChange={async()=>{setSettingsBusy(true);try{const result=await changeAcquisitionDesignation({orgId:viewer.orgId,userId:m.id,enabled:!m.acquisitionsEnabled,expectedEnabled:m.acquisitionsEnabled,idempotencyKey:crypto.randomUUID()});if(!result.ok)setError(result.message);else router.refresh();}finally{setSettingsBusy(false);}}}/>{m.label}
       </label>)}<label className="block">Needs sequence recipient<select className="ml-2 rounded border p-2" value={recipient} onChange={e=>setRecipient(e.target.value)}><option value="">Choose recipient</option>{roster.members.filter(m=>m.active).map(m=><option key={m.id} value={m.id}>{m.label}</option>)}</select></label>
       <Button disabled={!recipient||settingsBusy} onClick={async()=>{setSettingsBusy(true);try{const result=await changeAcquisitionSettings({orgId:viewer.orgId,needsSequenceOwnerId:recipient,expectedSettingsRevision:roster.settings.revision,idempotencyKey:crypto.randomUUID()});if(!result.ok)setError(result.message);else router.refresh();}finally{setSettingsBusy(false);}}}>Save recipient</Button></div>
+    <RepSmsSettings orgId={viewer.orgId} members={roster.members} />
     </details>}
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}

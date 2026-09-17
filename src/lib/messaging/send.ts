@@ -16,6 +16,7 @@ import {
   type SenderInventoryState,
 } from "./delivery";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
+import type { MessagingProvider } from "./types";
 import { getMessagingProvider } from "./registry";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "./sms-phone";
 import {
@@ -207,12 +208,16 @@ export type SendSmsInput = {
 export async function sendSmsToContact(
   supabase: SupabaseClient<Database>,
   input: SendSmsInput,
+  manualDispatch?: { provider: MessagingProvider; authorize: () => Promise<void> },
 ): Promise<SendSmsOutcome> {
   await assertNotTrainingTarget(supabase, { propertyId: input.propertyId, contactId: input.contactId });
+  if (manualDispatch && (input.origin !== "manual" || input.queueOnly || input.campaignId)) {
+    throw new Error("Assigned senders support immediate manual messages only.");
+  }
   // 1. Resolve provider.
   let provider;
   try {
-    provider = getMessagingProvider();
+    provider = manualDispatch?.provider ?? getMessagingProvider();
   } catch (e) {
     if (e instanceof ConfigurationError) {
       return {
@@ -449,6 +454,7 @@ export async function sendSmsToContact(
   let acceptedExternalId: string | undefined;
   let providerAccepted = false;
   try {
+    await manualDispatch?.authorize();
     const result = await provider.sendSms({
       to: destination.phone,
       body: input.body,

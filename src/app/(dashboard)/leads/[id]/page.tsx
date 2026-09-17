@@ -1,3 +1,4 @@
+import { RepSmsComposer } from "../../my-leads/rep-sms-composer";
 import Link from "next/link";
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
@@ -639,14 +640,14 @@ export default async function LeadDetailPage({
         restrictionLabel={smsPresentation.consentLabel}
         restrictionDetail={smsPresentation.consentDetail}
       >
-        <fieldset disabled={training} inert={training || undefined} className="contents"><SmsComposer
+        <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <RepSmsComposer propertyId={lead.id} /> : <SmsComposer
           propertyId={lead.id}
           homeownerContactId={lead.homeowner?.id ?? null}
           homeownerPhone={homeownerSmsPhone}
           homeownerName={homeownerName}
           preferredFromNumber={preferredFromNumber}
           templates={templateOptions}
-        /></fieldset>
+        />}</fieldset>
       </SmsEntryPointGate>
       <fieldset disabled={training} inert={training || undefined} className="contents"><BookAppointmentPopover
         propertyId={lead.id}
@@ -877,7 +878,7 @@ export default async function LeadDetailPage({
                 restrictionLabel={inlineSmsPresentation.consentLabel}
                 restrictionDetail={inlineSmsPresentation.consentDetail}
               >
-                <fieldset disabled={training} inert={training || undefined} className="contents"><InlineReply
+                <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <><RepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} />{!inlineReplyUnavailable && <AddNoteComposer propertyId={lead.id} compact />}</> : <InlineReply
                   propertyId={lead.id}
                   homeownerContactId={lead.homeowner?.id ?? null}
                   homeownerPhone={inlineReplyPhone}
@@ -890,7 +891,7 @@ export default async function LeadDetailPage({
                       <AddNoteComposer propertyId={lead.id} compact />
                     ) : null
                   }
-                /></fieldset>
+                />}</fieldset>
               </SmsEntryPointGate>
               {inlineSmsPresentation.smsRestricted || inlineReplyUnavailable ? (
                 <div className="mt-2 flex justify-end">

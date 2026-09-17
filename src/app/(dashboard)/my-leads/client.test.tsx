@@ -392,6 +392,7 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
     await user.click(screen.getByRole("radio",{name:"No motivation provided"}));
   }else{
     await user.selectOptions(screen.getByLabelText("External outcome"),"no_answer");
+    await user.selectOptions(screen.getByLabelText("Curated follow-up template"),"no-answer-callback-time");
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T11:00"}});
     await user.type(screen.getByLabelText("Note (optional)"),"Second opening draft");
   }
@@ -493,7 +494,7 @@ describe("current metadata for rapid workflow openings",()=>{
       await user.type(screen.getByLabelText("Offer amount"),"125000.50");await user.selectOptions(screen.getByLabelText("Offer method"),"verbal");
       fireEvent.change(screen.getByLabelText("Offer sent"),{target:{value:"2026-09-11T10:00"}});fireEvent.change(screen.getByLabelText("Required follow-up"),{target:{value:"2026-09-12T10:00"}});
     }else{
-      await user.selectOptions(screen.getByLabelText("External outcome"),"no_answer");fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T11:00"}});
+      await user.selectOptions(screen.getByLabelText("External outcome"),"no_answer");await user.selectOptions(screen.getByLabelText("Curated follow-up template"),"no-answer-callback-time");fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T11:00"}});
     }
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
     await user.click(screen.getByRole("button",{name:next==="offer"?"Save offer":"Save attempt"}));

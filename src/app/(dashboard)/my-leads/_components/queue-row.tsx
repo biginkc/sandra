@@ -12,6 +12,7 @@ import {
 } from "lucide-react"
 
 import Link from "next/link"
+import { RepSmsComposer } from "../rep-sms-composer"
 
 import { Badge } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
@@ -282,6 +283,11 @@ export function MyLeadQueueRow({
             </span>
           )}
         </div>
+
+        <RepSmsComposer
+          propertyId={row.propertyId}
+          onSent={() => { onRetryDetails(); onDetailChanged?.(); }}
+        />
 
         <MyLeadSmsStrip
           state={detailState ?? { status: "loading" }}

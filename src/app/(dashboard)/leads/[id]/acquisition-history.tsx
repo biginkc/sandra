@@ -115,6 +115,14 @@ export function AcquisitionHistoryCard({
       </p>
       {fact.kind === "attempt" ? (
         <>
+          {fact.outcome === "no_answer" && (
+            <div className="rounded-md border border-amber-200 bg-amber-50/70 px-2.5 py-2 text-xs dark:border-amber-900 dark:bg-amber-950/30">
+              <p className="font-medium">
+                Follow-up {fact.followUpStatus?.replaceAll("_", " ") ?? "required"}
+              </p>
+              {fact.followUpMessage && <p className="mt-0.5 text-muted-foreground">{fact.followUpMessage}</p>}
+            </div>
+          )}
           <p>
             {{
               dialpad: "DialPad",

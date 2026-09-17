@@ -19,6 +19,13 @@ const PURCHASED_NUMBERS_ENDPOINT = `${API_BASE}/numbers/purchased`;
 const CAMPAIGNS_ENDPOINT = `${API_BASE}/campaigns`;
 const DEFAULT_SEND_TIMEOUT_MS = 10_000;
 
+export type SendilloSendOptions = {
+  /** Caller-owned deadline.  Aborting after a request starts is ambiguous. */
+  signal?: AbortSignal;
+  /** Kept explicit for tests and bounded one-shot callers. */
+  timeoutMs?: number;
+};
+
 type JsonObject = Record<string, unknown>;
 
 export class SendilloMessagingProvider implements MessagingProvider {
@@ -26,7 +33,7 @@ export class SendilloMessagingProvider implements MessagingProvider {
 
   constructor(
     private readonly apiKey: string,
-    private readonly fromNumber: string,
+    private readonly fromNumber: string | null,
     private readonly webhookSecret?: string | null,
   ) {}
 
@@ -72,10 +79,18 @@ export class SendilloMessagingProvider implements MessagingProvider {
    */
   async sendSms(
     input: SmsOutboundInput,
-    opts: { signal?: AbortSignal } = {},
+    opts: SendilloSendOptions = {},
   ): Promise<SmsSendResult> {
+    const from = input.from?.trim() || this.fromNumber?.trim() || null;
+    if (!from) {
+      throw new ProviderError(
+        "Sendillo send requires an explicit sender number",
+        "sendillo",
+        { notSent: true },
+      );
+    }
     const payload = {
-      from: input.from ?? this.fromNumber,
+      from,
       to: input.to,
       body: input.body,
     };
@@ -90,7 +105,10 @@ export class SendilloMessagingProvider implements MessagingProvider {
 
     let response: Response;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), DEFAULT_SEND_TIMEOUT_MS);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      opts.timeoutMs ?? DEFAULT_SEND_TIMEOUT_MS,
+    );
     const onExternalAbort = () => controller.abort();
     opts.signal?.addEventListener("abort", onExternalAbort);
     // Recheck immediately after attaching the listener — closes the race
@@ -117,6 +135,11 @@ export class SendilloMessagingProvider implements MessagingProvider {
         },
         body: JSON.stringify(payload),
         signal: controller.signal,
+        // A redirect could otherwise turn a one-shot bearer-authenticated
+        // request into a request to an untrusted origin.  Sendillo's API is
+        // expected to answer at its canonical HTTPS endpoint.
+        redirect: "error",
+        cache: "no-store",
       });
     } catch (e) {
       // Codex round 9 (finding 1): preserve abort provenance. `e.name` is
@@ -252,8 +275,16 @@ export class SendilloMessagingProvider implements MessagingProvider {
         reportMalformedCatalogEntry(entry, "purchased numbers", "missing phone");
         continue;
       }
+      const providerAccountId =
+        readString(entry, "providerAccountId") ??
+        readString(entry, "provider_account_id") ??
+        readString(entry, "accountId") ??
+        readString(entry, "account_id") ??
+        readString(entry, "account", "id") ??
+        readString(entry, "account", "accountId");
       numbers.push({
         phoneE164: phone,
+        ...(providerAccountId ? { providerAccountId } : {}),
         providerNumberId:
           readString(entry, "id") ?? readString(entry, "numberId"),
         status: readString(entry, "status"),
@@ -476,12 +507,24 @@ export class SendilloMessagingProvider implements MessagingProvider {
 }
 
 export function sendilloFromEnv(): SendilloMessagingProvider {
+  return sendilloFromEnvWithOptions();
+}
+
+/**
+ * Resolve Sendillo for a path that supplies an audited explicit sender.
+ * `SENDILLO_FROM_NUMBER` is intentionally optional here: a grant-owned
+ * number must be the request's `from`, and no environment default may be
+ * substituted when that grant is stale or missing.
+ */
+export function sendilloFromEnvWithOptions(options: { requireDefaultFrom?: boolean } = {}): SendilloMessagingProvider {
   const apiKey = process.env.SENDILLO_API_KEY;
-  const fromNumber = process.env.SENDILLO_FROM_NUMBER;
+  const fromNumber = process.env.SENDILLO_FROM_NUMBER?.trim() || null;
   const webhookSecret = process.env.SENDILLO_WEBHOOK_SECRET ?? null;
-  if (!apiKey || !fromNumber) {
+  if (!apiKey || (options.requireDefaultFrom !== false && !fromNumber)) {
     throw new ConfigurationError(
-      "Sendillo credentials missing. Set SENDILLO_API_KEY and SENDILLO_FROM_NUMBER in .env.local.",
+      options.requireDefaultFrom === false
+        ? "Sendillo credentials missing. Set SENDILLO_API_KEY in .env.local."
+        : "Sendillo credentials missing. Set SENDILLO_API_KEY and SENDILLO_FROM_NUMBER in .env.local.",
     );
   }
   return new SendilloMessagingProvider(apiKey, fromNumber, webhookSecret);

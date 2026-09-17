@@ -200,7 +200,7 @@ export function centralDateTimeToIso(value: string):
 
 export function useAcquisitionSubmit<T>(
   onSubmit: AcquisitionSubmit<T>,
-  onSuccess: () => void
+  onSuccess: (result: AcquisitionFormSubmitResult) => void
 ) {
   const submittingRef = useRef(false)
   const [submitting, setSubmitting] = useState(false)
@@ -229,7 +229,7 @@ export function useAcquisitionSubmit<T>(
         setFieldErrors(result.fieldErrors || {})
         return false
       }
-      onSuccess()
+      onSuccess(result)
       return true
     } finally {
       submittingRef.current = false

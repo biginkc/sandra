@@ -14,6 +14,13 @@ export type Database = {
   }
   public: {
     Tables: {
+      rep_sms_sender_assignments: {
+        Row: { id: string; org_id: string; user_id: string; provider: string; phone_e164: string; label: string; is_default: boolean; active: boolean; updated_by: string; updated_at: string }
+        Insert: { id?: string; org_id: string; user_id: string; provider?: string; phone_e164: string; label: string; is_default?: boolean; active?: boolean; updated_by: string; updated_at?: string }
+        Update: { active?: boolean; is_default?: boolean; label?: string }
+        Relationships: []
+      }
+
       sentry_anomaly_ledger: {
         Row: {
           signal_kind: string
@@ -5363,6 +5370,8 @@ export type Database = {
       }
     }
     Functions: {
+      fn_get_rep_sms_context: { Args: { p_property_id: string }; Returns: Json }
+      fn_set_rep_sms_sender: { Args: { p_org_id: string; p_user_id: string; p_phone: string; p_label: string; p_default: boolean; p_active: boolean }; Returns: string }
       ack_sentry_anomaly: {
         Args: {
           p_signal_kind: string
