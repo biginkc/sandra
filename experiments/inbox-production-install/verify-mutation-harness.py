@@ -186,6 +186,42 @@ run_case('search_path_public',
  lambda: sql("ALTER FUNCTION inbox_bridge.authorize(uuid) SET search_path=''"),
  'search_path drift')
 
+# 11b. function_strict_drift (Astra-flagged gap): verify.py's function
+# snapshot used to compare volatility/SECURITY DEFINER/search_path but not
+# STRICT -- an ALTER FUNCTION ... STRICT flip (proisstrict false->true,
+# which changes the function to silently return NULL instead of running
+# whenever any argument is NULL) passed verify.py --installed silently.
+run_case('function_strict_drift',
+ lambda: sql("ALTER FUNCTION inbox_bridge.matching(uuid,uuid,jsonb) STRICT"),
+ lambda: sql("ALTER FUNCTION inbox_bridge.matching(uuid,uuid,jsonb) CALLED ON NULL INPUT"),
+ 'strict drift on inbox_bridge.matching')
+
+# 11c. check_constraint_arithmetic_regrouping (Astra-flagged gap): verify.py's
+# CHECK-constraint leaf comparison used to blanket-strip every paren inside a
+# leaf, so "(jsonb_array_length(targets)+99)/100" and
+# "jsonb_array_length(targets)+(99/100)" -- different computations --
+# compared EQUAL. inbox_bridge.worksets_check already contains exactly this
+# expression shape; regroup it without changing any function/column name.
+# The regrouped form is genuinely a different computation for this table's
+# 28 existing rows (integer-division truncation), so a normal ALTER would
+# be rejected by Postgres's own table scan before verify.py ever runs --
+# that data-level rejection is not the thing under test here. Add it
+# NOT VALID (skips the row scan) so the ALTER itself succeeds; verify.py's
+# constraint-definition-text comparison runs and must still fail on the
+# TEXT mismatch alone, before it ever reaches the separate "not validated"
+# check (confirmed by fail_substr below being the definition-drift message,
+# not the not-validated one). Restore re-adds the ORIGINAL expression
+# without NOT VALID, which the real data already satisfies (proven by the
+# baseline pass before this case runs), so it re-validates cleanly.
+run_case('check_constraint_arithmetic_regrouping',
+ lambda: sql("ALTER TABLE inbox_bridge.worksets DROP CONSTRAINT worksets_check;"
+  "ALTER TABLE inbox_bridge.worksets ADD CONSTRAINT worksets_check "
+  "CHECK (jsonb_typeof(handles)='array' AND jsonb_array_length(handles)=greatest(1,jsonb_array_length(targets)+(99/100))) NOT VALID"),
+ lambda: sql("ALTER TABLE inbox_bridge.worksets DROP CONSTRAINT worksets_check;"
+  "ALTER TABLE inbox_bridge.worksets ADD CONSTRAINT worksets_check "
+  "CHECK (jsonb_typeof(handles)='array' AND jsonb_array_length(handles)=greatest(1,(jsonb_array_length(targets)+99)/100))"),
+ 'constraint definition drift')
+
 # 11. Manifest-pinning (self-certification defense): inject a forged
 # generated/index-08.sql that redefines summary_order to match a drifted
 # (actually installed) definition, alongside real drift on the live index.

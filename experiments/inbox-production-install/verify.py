@@ -3,7 +3,7 @@
 import argparse,ast,hashlib,json,re,shutil,subprocess,sys
 from pathlib import Path
 P=Path(__file__).resolve().parent
-ap=argparse.ArgumentParser();ap.add_argument('--installed',action='store_true');a=ap.parse_args()
+ap=argparse.ArgumentParser();ap.add_argument('--installed',action='store_true');ap.add_argument('--selftest',action='store_true');a=ap.parse_args()
 manifest=P/'source-manifest.json'
 if manifest.exists():
  for name,digest in json.loads(manifest.read_text()).items():
@@ -33,7 +33,7 @@ if drifted:
  correction=P/'hardening-evidence.json'
  if not correction.exists() or json.loads(correction.read_text())['foundation_sha256']!=digest:
   raise RuntimeError('Generated foundation differs from recorded installation and verified forward correction; never relabel old evidence')
- if not a.installed:
+ if not a.installed and not a.selftest:
   raise RuntimeError('Foundation hash differs from the original recorded installation; --installed structural re-verification against the live catalog is required to certify the forward correction in hardening-evidence.json, a matching receipt hash alone does not prove the installed DDL matches')
 
 # ---------------------------------------------------------------------------
@@ -167,6 +167,32 @@ def strip_redundant_outer_parens(expr):
   if not wraps_all:break
   expr=expr[1:-1].strip()
  return expr
+def strip_whole_argument_parens(text):
+ # Remove a paren pair ONLY when it exactly spans a self-contained,
+ # already-delimited argument/operand: the char immediately before its '('
+ # is start-of-string, '(' or ',', AND the char immediately after its ')'
+ # is end-of-string, ')' or ','. That boundary is what makes removal safe --
+ # the surrounding delimiter (or absence of one) already marks the same
+ # span, so dropping the redundant pair cannot change what binds to what.
+ # A grouping paren that instead sits next to an operator (e.g. the '(' in
+ # "(a+99)/100" is followed by ')' then '/', not by ')'/','/end) fails this
+ # check and is left alone, so real regrouping still differs after this.
+ while True:
+  stack=[];pairs=[]
+  for i,c in enumerate(text):
+   if c=='(':stack.append(i)
+   elif c==')':
+    if stack:pairs.append((stack.pop(),i))
+  removed=False
+  for s,e in pairs:
+   before_ok=s==0 or text[s-1] in '(,'
+   after_ok=e==len(text)-1 or text[e+1] in '),'
+   if before_ok and after_ok:
+    text=text[:s]+text[s+1:e]+text[e+1:]
+    removed=True
+    break
+  if not removed:return text
+
 def bool_ast(expr):
  expr=strip_redundant_outer_parens(expr)
  or_parts=split_top_level_kw(expr,'OR')
@@ -177,19 +203,66 @@ def bool_ast(expr):
  leaf=re.sub(r'::\w+(\([^)]*\))?','',leaf)
  leaf=re.sub(r'\s+','',leaf).lower()
  # A leaf is an atomic comparison/function-call, not a compound AND/OR
- # expression, so the semantic-regrouping risk that motivates AST-level
- # comparison above does not apply here: blanket-stripping parens within one
- # leaf only removes Postgres's redundant arithmetic/argument re-wrapping
- # (e.g. "(a+99)/100" vs "((a+99)/100)"), while commas and argument/operand
- # order are still preserved, so a genuine change (different function,
- # different argument, different grouping between distinct operators) still
- # produces a text difference.
- leaf=leaf.replace('(','').replace(')','')
+ # expression, so the AND/OR-level structural comparison above does not
+ # apply here -- but a leaf can itself contain arithmetic (+,-,*,/) whose
+ # PARENTHESIZATION is semantically load-bearing: "(a+99)/100" and
+ # "a+(99/100)" are different computations. Blanket-stripping every paren in
+ # the leaf (the previous approach) made those compare EQUAL, a real gap:
+ # a regrouped CHECK/generated-column expression would pass silently.
+ # Postgres's own deparse still isn't literal-text-identical to source,
+ # though: it cosmetically re-wraps some sub-expressions that don't need it
+ # (e.g. GREATEST(1,(a+99)/100)'s second argument comes back as
+ # GREATEST(1,((a+99)/100)) -- one extra, genuinely redundant outer paren
+ # around the whole argument). strip_whole_argument_parens removes exactly
+ # that class -- a paren pair whose open is immediately preceded by '(', ','
+ # or start-of-leaf AND whose close is immediately followed by ')', ',' or
+ # end-of-leaf -- because such a pair exactly spans one already-delimited
+ # argument/operand and can never change meaning. A grouping paren that
+ # affects precedence against a neighboring operator (the '(' in
+ # "(a+99)/100", or in "(a+b)*c") is never boundary-aligned this way, so it
+ # is preserved and a genuine regrouping still produces a text difference.
+ leaf=strip_whole_argument_parens(leaf)
  return ('LEAF',leaf)
 def bool_ast_repr(node):
  kind,val=node
  if kind=='LEAF':return val
  return kind+'('+','.join(sorted(bool_ast_repr(v) for v in val))+')'
+
+if a.selftest:
+ # DB-less regression guard for the two pure-logic gaps Astra flagged on
+ # G2/#585 round 2 (NO/2): the arithmetic-regrouping leaf comparison, and
+ # the STRICT source-attribute extraction regex. Runs the SAME functions
+ # verify.py --installed calls (bool_ast/bool_ast_repr/
+ # strip_whole_argument_parens above), fed fixed inputs -- for the
+ # regrouping check, REAL pg_get_constraintdef() output captured from the
+ # owned T2 fixture's inbox_bridge.worksets_check (2026-09-17), not
+ # synthetic text -- so it also proves Postgres's own cosmetic re-wrapping
+ # (the extra outer paren GREATEST(1,X) gets around a compound argument)
+ # does not false-positive. This intentionally does NOT require any
+ # database: CI can run it on every PR with no fixture at all, closing the
+ # "workflow never executes verify.py's comparison logic" gap for these two
+ # classes. It is NOT a substitute for verify-mutation-harness.py
+ # --owned-fixture (the live-catalog proof, including these two new cases,
+ # still requires the locally-pinned fixture per the workflow's own
+ # documented scope note below).
+ source_expr="jsonb_typeof(handles)='array' AND jsonb_array_length(handles)=greatest(1,(jsonb_array_length(targets)+99)/100)"
+ live_correctly_installed="((jsonb_typeof(handles) = 'array'::text) AND (jsonb_array_length(handles) = GREATEST(1, ((jsonb_array_length(targets) + 99) / 100))))"
+ live_regrouped_drift="((jsonb_typeof(handles) = 'array'::text) AND (jsonb_array_length(handles) = GREATEST(1, (jsonb_array_length(targets) + (99 / 100)))))"
+ base=bool_ast_repr(bool_ast(source_expr))
+ live_ok=bool_ast_repr(bool_ast(live_correctly_installed))
+ live_bad=bool_ast_repr(bool_ast(live_regrouped_drift))
+ if base!=live_ok:
+  print('SELFTEST FAIL: source vs a correctly-installed live constraint should compare EQUAL (false-positive risk)\n  source='+base+'\n  live=   '+live_ok,file=sys.stderr);sys.exit(1)
+ if base==live_bad:
+  print('SELFTEST FAIL: source vs a REGROUPED live constraint compared EQUAL -- the arithmetic-regrouping gap is back\n  source='+base+'\n  live=   '+live_bad,file=sys.stderr);sys.exit(1)
+ rest_without_strict=" VOLATILE SECURITY DEFINER SET search_path=''"
+ rest_with_strict=" STRICT VOLATILE SECURITY DEFINER SET search_path=''"
+ if re.search(r'\bSTRICT\b',rest_without_strict):
+  print('SELFTEST FAIL: STRICT falsely detected in a function definition that does not declare it',file=sys.stderr);sys.exit(1)
+ if not re.search(r'\bSTRICT\b',rest_with_strict):
+  print('SELFTEST FAIL: STRICT not detected in a function definition that does declare it',file=sys.stderr);sys.exit(1)
+ print('SELFTEST OK: leaf comparison catches arithmetic regrouping and tolerates cosmetic Postgres re-wrapping; STRICT source-attribute regex correct')
+ sys.exit(0)
 
 def index_compact(value):
  v=value.replace('CREATE INDEX CONCURRENTLY','CREATE INDEX').replace('CONCURRENTLY ','')
@@ -304,8 +377,23 @@ for name in dict(re.findall(r'CREATE (?:OR REPLACE )?FUNCTION ([\w.]+)\(.*?AS \$
  schema,fname=name.split('.')
  volm=re.search(r'\b(IMMUTABLE|STABLE|VOLATILE)\b',rest)
  volatility={'IMMUTABLE':'i','STABLE':'s','VOLATILE':'v'}[volm.group(1)] if volm else 'v'  # unspecified defaults to VOLATILE
+ # Behavior-affecting function attributes beyond volatility/SECURITY
+ # DEFINER/search_path -- a mismatch here changes what the function is
+ # allowed to do (STRICT: silently returns NULL instead of running on a
+ # NULL arg; LEAKPROOF: eligible to run before a security-barrier view's
+ # own quals, an information-disclosure risk if wrongly granted; PARALLEL:
+ # eligible for the planner to run in a parallel worker), so each must be
+ # compared, not merely extracted. None of this candidate's functions
+ # declare STRICT/RETURNS NULL ON NULL INPUT, LEAKPROOF or PARALLEL
+ # SAFE/RESTRICTED, so every expectation below is "the unspecified
+ # Postgres default" -- a function silently gaining one of these now fails.
+ strict=bool(re.search(r'\bSTRICT\b',rest)) or bool(re.search(r'\bRETURNS\s+NULL\s+ON\s+NULL\s+INPUT\b',rest))
+ leakproof=bool(re.search(r'\bLEAKPROOF\b',rest))
+ pm=re.search(r'\bPARALLEL\s+(SAFE|RESTRICTED|UNSAFE)\b',rest)
+ parallel={'SAFE':'s','RESTRICTED':'r','UNSAFE':'u'}[pm.group(1)] if pm else 'u'  # unspecified defaults to UNSAFE
  functions_src[(schema,fname)]={'body':body,'arg_types':arg_types,'volatility':volatility,
-  'secdef':'SECURITY DEFINER' in rest,'search_path':("search_path=''" in rest or 'search_path TO ' in rest)}
+  'secdef':'SECURITY DEFINER' in rest,'search_path':("search_path=''" in rest or 'search_path TO ' in rest),
+  'strict':strict,'leakproof':leakproof,'parallel':parallel}
 
 if a.installed:
  from fixture_db import guard,sql
@@ -360,7 +448,7 @@ SELECT jsonb_build_object(
    FROM pg_constraint co JOIN pg_class c ON c.oid=co.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace
    WHERE (n.nspname||'.'||c.relname)=ANY({constraint_arr})),
  'rollout_default',(SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE n.nspname='inbox_control' AND c.relname='rollout' AND a.attname='serving_enabled'),
- 'functions',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',p.proname,'args',pg_get_function_identity_arguments(p.oid),'prosecdef',p.prosecdef,'provolatile',p.provolatile,'search_path',(SELECT x FROM unnest(coalesce(p.proconfig,'{{}}'::text[])) x WHERE x LIKE 'search_path=%'),'prosrc',p.prosrc)),'[]')
+ 'functions',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',p.proname,'args',pg_get_function_identity_arguments(p.oid),'prosecdef',p.prosecdef,'provolatile',p.provolatile,'proisstrict',p.proisstrict,'proleakproof',p.proleakproof,'proparallel',p.proparallel,'search_path',(SELECT x FROM unnest(coalesce(p.proconfig,'{{}}'::text[])) x WHERE x LIKE 'search_path=%'),'prosrc',p.prosrc)),'[]')
    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
    WHERE n.nspname=ANY({private_arr}) OR (n.nspname='public' AND p.proname=ANY({public_fn_arr}))),
  'extra_relations',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',c.relname,'kind',c.relkind)),'[]')
@@ -405,6 +493,9 @@ COMMIT;
   if row['prosecdef']!=exp['secdef']:raise RuntimeError(f'SECURITY DEFINER drift on {schema}.{fname}: expected={exp["secdef"]} live={row["prosecdef"]}')
   if exp['search_path'] and row['search_path'] not in ('search_path=','search_path=""'):raise RuntimeError(f"search_path drift on {schema}.{fname}: expected empty search_path, live={row['search_path']!r}")
   if row['provolatile']!=exp['volatility']:raise RuntimeError(f"Volatility drift on {schema}.{fname}: expected={exp['volatility']!r} live={row['provolatile']!r}")
+  if row['proisstrict']!=exp['strict']:raise RuntimeError(f"STRICT drift on {schema}.{fname}: expected={exp['strict']!r} live={row['proisstrict']!r}")
+  if row['proleakproof']!=exp['leakproof']:raise RuntimeError(f"LEAKPROOF drift on {schema}.{fname}: expected={exp['leakproof']!r} live={row['proleakproof']!r}")
+  if row['proparallel']!=exp['parallel']:raise RuntimeError(f"Parallel-safety drift on {schema}.{fname}: expected={exp['parallel']!r} live={row['proparallel']!r}")
  # any extra installed function (in scope) not declared by this candidate at all
  extra_fn=set(live_fn_by_key)-set(functions_src)
  if extra_fn:raise RuntimeError('Extra installed functions: '+str(sorted(extra_fn)))

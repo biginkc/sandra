@@ -22,7 +22,7 @@
   "smoke.py": "48fb552e52de31bdce662f44c149ed87fef84e2efd2cbb8748069fd5edec6e96",
   "unknown-retention-test.py": "15c027cc365b46d2fdc21e7ff4e0ca6ea74afef21949f8a9c70424a9eb1d99c7",
   "unknown-retention.sql": "974eab36185aa70d78099eb1867e35c741a51bf5b5b0d68155be74e5604e6504",
-  "verify-mutation-harness.py": "53f8eaa19efea005235bf145ff295b318f0aced8a3b2ed6e6fd1848461098cc7",
-  "verify.py": "25e4edf474d2876a5b1b403e2053ad9fef06143346f4363430583f7792721d3a",
+  "verify-mutation-harness.py": "299fc599e1d4fb8903c1d489f49bdf11767da679521eb30fc7e44402c637853d",
+  "verify.py": "69469775dfa19fd7a61288c0f2200225ceb787d9572249b82f0aac3501a1418a",
   "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15"
 }
