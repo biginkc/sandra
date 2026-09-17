@@ -1,0 +1,31 @@
+{
+ "sources": {
+  "inbox-reply-boundary/context.sql": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+  "inbox-reply-preparation/recipient.sql": "90d1e6d24f954a7ae809962c8f7181a4f9a21b973303163c9655940e4c18cdf1",
+  "inbox-reply-preparation/batch.sql": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
+  "inbox-reply-review/setup.sql": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
+  "inbox-reply-review/public-api.sql": "9ca9aa77bb65ca16f9da75272affdbd38e27ba166d6929b91ec4e1cfa191b772",
+  "inbox-reply-send/attempts.sql": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9",
+  "inbox-reply-send/accept.sql": "375fcb63bdd59e14168f49b05e46ab33f2f4f55c04e72ea5242b4165f6a54621",
+  "inbox-reply-send/public-api.sql": "4d5e1c7d76bd3464ca12c68d0a173bc6a58c3bc1e743d2e6f69b0b57da79fe0e",
+  "inbox-reply-send-worker/worker.sql": "a9b21726a232d99f81520c227cebb46e67542e80c870d926251d99864b714f19",
+  "inbox-reply-send-worker/worker-role.sql": "253e379018a9d88bf9569648bb53d11b902d89e3f54adc7766321675757a5287"
+ },
+ "runner_sha256": "869eb63477a57170f39c624813be455f3bafbeaa14938beccca7e9e9de23f499",
+ "checks": [
+  "grant boundary: inbox_reply_send_worker reaches claim_dispatch_batch/operation_attempts, and is refused on attempts.claim()/direct table SELECT/accept()",
+  "operation_attempts(): returns all 2 fresh (tip-of-chain) attempt ids for a just-accepted operation",
+  "happy path via worker_claim -> worker_authorize -> worker_start_dispatch -> worker_persist reaches provider_accepted",
+  "ack-readiness: a still-claimed attempt keeps operation_dispatch_complete=false and ack_dispatch=false (deferred, not journaled complete)",
+  "mutation: operation_dispatch_complete stubbed true wrongly acks a busy operation; restored (byte-exact) guard blocks it again",
+  "ack-readiness: once every attempt is dispatched-or-terminal, ack_dispatch acknowledges the outbox row",
+  "Astra #3: worker_authorize raises for a revoked requester; attempt stays claimed, no dispatch_token, no provider call possible",
+  "Astra #3: worker_authorize rejects a cross-org operation id and a forged/unknown operation id",
+  "positive control: restoring the membership makes worker_authorize succeed again",
+  "mutation: worker_authorize stubbed to a no-op lets a revoked requester reach start_dispatch; restored (byte-exact) guard blocks it again",
+  "Astra #4: a second claim on a live lease returns busy (deferred), never a second dispatch token",
+  "Astra #4: a rejected (stale-generation) start_dispatch issues no token; persist with any token then raises STALE_TOKEN \u2014 no provider result can ever be reconciled from an unknown/failed commit",
+  "no-double-send: crash between marker and result relabels the attempt uncertain on re-entry; a second start_dispatch is impossible; the ORIGINAL token still reconciles idempotently",
+  "final state: every worker.sql function is byte-exact against its source definition"
+ ]
+}
