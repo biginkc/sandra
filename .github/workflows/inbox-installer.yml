@@ -53,27 +53,32 @@ jobs:
           print('Source-manifest hashes match, all bundle .py files parse, compiler is deterministic with no DB.')
           PY
       # --- verify.py's own comparison LOGIC now actually runs in CI (Astra
-      # round-2 gate on G2/#585: "green CI doesn't certify verifier
-      # integrity" -- this closes that for the two classes just fixed).
-      # `verify.py --selftest` calls the real, unmodified bool_ast /
-      # bool_ast_repr / strip_whole_argument_parens functions (the exact
-      # code verify.py --installed uses for every CHECK/index WHERE-clause
+      # rounds 2-3 gate on G2/#585: "green CI doesn't certify verifier
+      # integrity" -- this closes that for every class fixed across both
+      # rounds). `verify.py --selftest` calls the real, unmodified
+      # bool_ast / bool_ast_repr / strip_whole_argument_parens /
+      # parse_function_set_clauses / render_proconfig_entry /
+      # expected_proconfig functions (the exact code verify.py --installed
+      # uses for every CHECK/index WHERE-clause and function-config
       # comparison) against fixed inputs -- for the arithmetic-regrouping
       # case, REAL pg_get_constraintdef() output captured from the owned T2
-      # fixture's inbox_bridge.worksets_check, not synthetic text -- and
-      # against the STRICT source-attribute regex. It asserts BOTH that a
-      # correctly-installed live constraint still compares equal to source
-      # (no false positive from Postgres's own cosmetic re-wrapping) AND
-      # that a genuinely regrouped one does not (the gap Astra found). This
+      # fixture's inbox_bridge.worksets_check; for proconfig, REAL
+      # to_jsonb(proconfig) output captured from a live multi-SET function
+      # on the same fixture -- not synthetic text for either. It asserts
+      # that a correctly-installed live object still compares equal to
+      # source (no false positive from Postgres's own cosmetic re-wrapping/
+      # rendering) AND that each demonstrated drift (regrouped arithmetic,
+      # missing STRICT, an added session_replication_role=replica entry, a
+      # changed-not-just-added/removed proconfig value) does not. This
       # needs no database at all, so it runs on every PR unconditionally.
       - name: verify.py comparison-logic selftest (DB-less)
         working-directory: experiments/inbox-production-install
         run: python3 verify.py --selftest
-      # --- --installed / verify-mutation-harness.py --owned-fixture (24
-      # cases, including the two above at the live-catalog level) are still
-      # NOT run here. Both require fixture_db.py's guard(), which -- by
-      # design (experiments/inbox-projection/fixture/guards.py) -- pins an
-      # EXACT local container id + image digest + network-isolated
+      # --- --installed / verify-mutation-harness.py --owned-fixture (25
+      # cases, including the ones above at the live-catalog level) are
+      # still NOT run here. Both require fixture_db.py's guard(), which --
+      # by design (experiments/inbox-projection/fixture/guards.py) -- pins
+      # an EXACT local container id + image digest + network-isolated
       # (NetworkMode=none), resource-capped Docker container that only
       # exists on one operator machine, and the owned fixture's full
       # installed catalog (26 tables, 82 functions, real GoTrue Auth, the
@@ -88,9 +93,10 @@ jobs:
       # Until that redesign exists, the live-catalog mutation-harness proof
       # for this gate is produced locally and recorded in
       # verify-mutation-harness-evidence.json (committed with each change,
-      # currently 24 cases including function_strict_drift and
-      # check_constraint_arithmetic_regrouping); the selftest step above is
-      # the automated CI backstop for the logic those two new cases exercise.
+      # currently 25 cases including function_strict_drift,
+      # check_constraint_arithmetic_regrouping and
+      # function_session_replication_role_bypass); the selftest step above
+      # is the automated CI backstop for the logic those cases exercise.
       - name: Record known CI scope gap
         run: |
-          echo "verify.py --installed and verify-mutation-harness.py --owned-fixture (live-catalog proof, 24 cases) require the locally-pinned T2 fixture (see guards.py) and are not run in this job; verify.py --selftest above is the DB-less logic-level backstop for the two classes fixed in this PR. See workflow comments." >> "$GITHUB_STEP_SUMMARY"
+          echo "verify.py --installed and verify-mutation-harness.py --owned-fixture (live-catalog proof, 25 cases) require the locally-pinned T2 fixture (see guards.py) and are not run in this job; verify.py --selftest above is the DB-less logic-level backstop for the classes fixed in this PR. See workflow comments." >> "$GITHUB_STEP_SUMMARY"

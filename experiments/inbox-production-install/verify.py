@@ -228,23 +228,70 @@ def bool_ast_repr(node):
  if kind=='LEAF':return val
  return kind+'('+','.join(sorted(bool_ast_repr(v) for v in val))+')'
 
+def parse_function_set_clauses(rest):
+ # Every `SET name = value` / `SET name TO value` clause between a
+ # function's LANGUAGE keyword and its body -- not just search_path --
+ # since ANY of them changes runtime behavior for that function's calls
+ # (session_replication_role=replica suppresses downstream triggers,
+ # e.g. bypassing dirty-queue capture entirely; statement_timeout/
+ # lock_timeout change how long it can hold locks; role changes who it
+ # runs as for privilege purposes beyond SECURITY DEFINER itself). Value is
+ # either a single-quoted string (with '' as the escaped-quote form, same
+ # as ordinary SQL string literals) or a bare token (identifier/number)
+ # terminated by whitespace/end. Returns {name.lower(): value}.
+ out={}
+ for m in re.finditer(r'\bSET\s+(\w+)\s*(?:=|TO)\s*',rest):
+  name=m.group(1).lower();i=m.end()
+  if i<len(rest) and rest[i]=="'":
+   j=i+1;chars=[]
+   while j<len(rest):
+    if rest[j]=="'" and j+1<len(rest) and rest[j+1]=="'":chars.append("'");j+=2;continue
+    if rest[j]=="'":break
+    chars.append(rest[j]);j+=1
+   value=''.join(chars)
+  else:
+   j=i
+   while j<len(rest) and not rest[j].isspace():j+=1
+   value=rest[i:j]
+  out[name]=value
+ return out
+def render_proconfig_entry(name,value):
+ # Mirrors Postgres's own GUC-list rendering closely enough for every value
+ # this codebase's compiler ever emits (verified against a live SET
+ # search_path='' / SET session_replication_role=replica / SET
+ # statement_timeout='5s' function on the owned fixture): an empty value or
+ # anything outside a plain identifier/number/dot token is rendered
+ # double-quoted (matching the observed live `search_path=""`), otherwise
+ # bare (matching the observed live `session_replication_role=replica` and
+ # `statement_timeout=5s`).
+ if value=='' or not re.fullmatch(r'[A-Za-z0-9_.]+',value):
+  return f'{name}="{value.replace(chr(34),chr(34)*2)}"'
+ return f'{name}={value}'
+def expected_proconfig(rest):
+ return sorted(render_proconfig_entry(n,v) for n,v in parse_function_set_clauses(rest).items())
+
 if a.selftest:
- # DB-less regression guard for the two pure-logic gaps Astra flagged on
- # G2/#585 round 2 (NO/2): the arithmetic-regrouping leaf comparison, and
- # the STRICT source-attribute extraction regex. Runs the SAME functions
- # verify.py --installed calls (bool_ast/bool_ast_repr/
- # strip_whole_argument_parens above), fed fixed inputs -- for the
- # regrouping check, REAL pg_get_constraintdef() output captured from the
- # owned T2 fixture's inbox_bridge.worksets_check (2026-09-17), not
- # synthetic text -- so it also proves Postgres's own cosmetic re-wrapping
- # (the extra outer paren GREATEST(1,X) gets around a compound argument)
- # does not false-positive. This intentionally does NOT require any
- # database: CI can run it on every PR with no fixture at all, closing the
- # "workflow never executes verify.py's comparison logic" gap for these two
- # classes. It is NOT a substitute for verify-mutation-harness.py
- # --owned-fixture (the live-catalog proof, including these two new cases,
- # still requires the locally-pinned fixture per the workflow's own
- # documented scope note below).
+ # DB-less regression guard for the pure-logic gaps Astra flagged across
+ # G2/#585 rounds 2-3: the arithmetic-regrouping leaf comparison, the
+ # STRICT source-attribute extraction regex, and the full-proconfig
+ # comparator (round 3: `SET session_replication_role=replica` on a
+ # trigger function -- suppresses downstream triggers, a real writer-
+ # bypass vector -- passed silently because only search_path was ever
+ # snapshotted). Runs the SAME functions verify.py --installed calls
+ # (bool_ast/bool_ast_repr/strip_whole_argument_parens/
+ # parse_function_set_clauses/render_proconfig_entry/expected_proconfig
+ # above), fed fixed inputs -- for the regrouping check, REAL
+ # pg_get_constraintdef() output captured from the owned T2 fixture's
+ # inbox_bridge.worksets_check (2026-09-17), and for proconfig, REAL
+ # to_jsonb(proconfig) output captured from a live multi-SET function on
+ # the same fixture -- so it also proves Postgres's own cosmetic
+ # re-wrapping/rendering does not false-positive. This intentionally does
+ # NOT require any database: CI can run it on every PR with no fixture at
+ # all, closing the "workflow never executes verify.py's comparison logic"
+ # gap for these classes. It is NOT a substitute for
+ # verify-mutation-harness.py --owned-fixture (the live-catalog proof,
+ # including these new cases, still requires the locally-pinned fixture
+ # per the workflow's own documented scope note below).
  source_expr="jsonb_typeof(handles)='array' AND jsonb_array_length(handles)=greatest(1,(jsonb_array_length(targets)+99)/100)"
  live_correctly_installed="((jsonb_typeof(handles) = 'array'::text) AND (jsonb_array_length(handles) = GREATEST(1, ((jsonb_array_length(targets) + 99) / 100))))"
  live_regrouped_drift="((jsonb_typeof(handles) = 'array'::text) AND (jsonb_array_length(handles) = GREATEST(1, (jsonb_array_length(targets) + (99 / 100)))))"
@@ -261,7 +308,26 @@ if a.selftest:
   print('SELFTEST FAIL: STRICT falsely detected in a function definition that does not declare it',file=sys.stderr);sys.exit(1)
  if not re.search(r'\bSTRICT\b',rest_with_strict):
   print('SELFTEST FAIL: STRICT not detected in a function definition that does declare it',file=sys.stderr);sys.exit(1)
- print('SELFTEST OK: leaf comparison catches arithmetic regrouping and tolerates cosmetic Postgres re-wrapping; STRICT source-attribute regex correct')
+ # proconfig: source declares only SET search_path=''; live (real
+ # to_jsonb(proconfig) captured from the owned fixture) matches that
+ # exactly -- must compare EQUAL. A live catalog that has ADDITIONALLY
+ # picked up session_replication_role=replica (the exact attack Astra
+ # demonstrated) must compare UNEQUAL.
+ rest_search_path_only=" LANGUAGE plpgsql SECURITY DEFINER SET search_path=''"
+ expected=expected_proconfig(rest_search_path_only)
+ live_clean=["search_path=\"\""]
+ live_bypassed=["search_path=\"\"","session_replication_role=replica"]
+ if expected!=sorted(live_clean):
+  print(f'SELFTEST FAIL: expected proconfig {expected!r} should equal a clean live capture {sorted(live_clean)!r}',file=sys.stderr);sys.exit(1)
+ if expected==sorted(live_bypassed):
+  print(f'SELFTEST FAIL: expected proconfig compared EQUAL to a live catalog with an EXTRA session_replication_role=replica entry -- the trigger-bypass gap is back',file=sys.stderr);sys.exit(1)
+ # A live capture that also picked up a differently-valued entry (e.g. an
+ # attacker widened search_path from empty to something usable) must also
+ # be caught -- not just an added/removed key.
+ live_widened=["search_path=public"]
+ if expected==sorted(live_widened):
+  print('SELFTEST FAIL: a CHANGED (not just added/removed) proconfig value compared EQUAL',file=sys.stderr);sys.exit(1)
+ print('SELFTEST OK: leaf comparison catches arithmetic regrouping and tolerates cosmetic Postgres re-wrapping; STRICT regex and full-proconfig comparator correct')
  sys.exit(0)
 
 def index_compact(value):
@@ -391,8 +457,19 @@ for name in dict(re.findall(r'CREATE (?:OR REPLACE )?FUNCTION ([\w.]+)\(.*?AS \$
  leakproof=bool(re.search(r'\bLEAKPROOF\b',rest))
  pm=re.search(r'\bPARALLEL\s+(SAFE|RESTRICTED|UNSAFE)\b',rest)
  parallel={'SAFE':'s','RESTRICTED':'r','UNSAFE':'u'}[pm.group(1)] if pm else 'u'  # unspecified defaults to UNSAFE
+ # Full proconfig, not just search_path (Astra round 3, G2/#585): a
+ # function silently gaining or losing ANY SET clause -- not only
+ # search_path -- changes runtime behavior. session_replication_role is the
+ # concrete demonstrated case (=replica suppresses every downstream AFTER
+ # trigger the function's own writes would fire, a real writer-bypass
+ # vector this installer's whole design exists to catch -- see the
+ # capture-trigger-bypass README section), but statement_timeout/
+ # lock_timeout/role are exactly as unreviewed-behavior-changing if added.
+ # expected_proconfig() parses EVERY `SET name = value` clause here, not a
+ # hand-picked subset, so an added/removed/changed entry of any kind fails.
+ config=expected_proconfig(rest)
  functions_src[(schema,fname)]={'body':body,'arg_types':arg_types,'volatility':volatility,
-  'secdef':'SECURITY DEFINER' in rest,'search_path':("search_path=''" in rest or 'search_path TO ' in rest),
+  'secdef':'SECURITY DEFINER' in rest,'config':config,
   'strict':strict,'leakproof':leakproof,'parallel':parallel}
 
 if a.installed:
@@ -448,7 +525,7 @@ SELECT jsonb_build_object(
    FROM pg_constraint co JOIN pg_class c ON c.oid=co.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace
    WHERE (n.nspname||'.'||c.relname)=ANY({constraint_arr})),
  'rollout_default',(SELECT pg_get_expr(d.adbin,d.adrelid) FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE n.nspname='inbox_control' AND c.relname='rollout' AND a.attname='serving_enabled'),
- 'functions',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',p.proname,'args',pg_get_function_identity_arguments(p.oid),'prosecdef',p.prosecdef,'provolatile',p.provolatile,'proisstrict',p.proisstrict,'proleakproof',p.proleakproof,'proparallel',p.proparallel,'search_path',(SELECT x FROM unnest(coalesce(p.proconfig,'{{}}'::text[])) x WHERE x LIKE 'search_path=%'),'prosrc',p.prosrc)),'[]')
+ 'functions',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',p.proname,'args',pg_get_function_identity_arguments(p.oid),'prosecdef',p.prosecdef,'provolatile',p.provolatile,'proisstrict',p.proisstrict,'proleakproof',p.proleakproof,'proparallel',p.proparallel,'proconfig',coalesce(to_jsonb(p.proconfig),'[]'::jsonb),'prosrc',p.prosrc)),'[]')
    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
    WHERE n.nspname=ANY({private_arr}) OR (n.nspname='public' AND p.proname=ANY({public_fn_arr}))),
  'extra_relations',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',c.relname,'kind',c.relkind)),'[]')
@@ -491,7 +568,8 @@ COMMIT;
   if live_arg_types!=exp['arg_types']:raise RuntimeError(f'Function signature drift {schema}.{fname}: expected={exp["arg_types"]} live={live_arg_types}')
   if row['prosrc']!=exp['body']:raise RuntimeError(f'Installed foundation body differs: {schema}.{fname}')
   if row['prosecdef']!=exp['secdef']:raise RuntimeError(f'SECURITY DEFINER drift on {schema}.{fname}: expected={exp["secdef"]} live={row["prosecdef"]}')
-  if exp['search_path'] and row['search_path'] not in ('search_path=','search_path=""'):raise RuntimeError(f"search_path drift on {schema}.{fname}: expected empty search_path, live={row['search_path']!r}")
+  live_config=sorted(row['proconfig'])
+  if live_config!=exp['config']:raise RuntimeError(f"proconfig drift on {schema}.{fname}: expected={exp['config']!r} live={live_config!r}")
   if row['provolatile']!=exp['volatility']:raise RuntimeError(f"Volatility drift on {schema}.{fname}: expected={exp['volatility']!r} live={row['provolatile']!r}")
   if row['proisstrict']!=exp['strict']:raise RuntimeError(f"STRICT drift on {schema}.{fname}: expected={exp['strict']!r} live={row['proisstrict']!r}")
   if row['proleakproof']!=exp['leakproof']:raise RuntimeError(f"LEAKPROOF drift on {schema}.{fname}: expected={exp['leakproof']!r} live={row['proleakproof']!r}")

@@ -184,7 +184,7 @@ run_case('function_overload_added',
 run_case('search_path_public',
  lambda: sql("ALTER FUNCTION inbox_bridge.authorize(uuid) SET search_path=public"),
  lambda: sql("ALTER FUNCTION inbox_bridge.authorize(uuid) SET search_path=''"),
- 'search_path drift')
+ 'proconfig drift')
 
 # 11b. function_strict_drift (Astra-flagged gap): verify.py's function
 # snapshot used to compare volatility/SECURITY DEFINER/search_path but not
@@ -221,6 +221,24 @@ run_case('check_constraint_arithmetic_regrouping',
   "ALTER TABLE inbox_bridge.worksets ADD CONSTRAINT worksets_check "
   "CHECK (jsonb_typeof(handles)='array' AND jsonb_array_length(handles)=greatest(1,(jsonb_array_length(targets)+99)/100))"),
  'constraint definition drift')
+
+# 11d. function_session_replication_role_bypass (Astra round 3, the
+# concrete demonstrated gap): verify.py's function snapshot compared only
+# search_path from proconfig, not the FULL config array -- so
+# `SET session_replication_role = replica` on a capture trigger function
+# (inbox_message_capture.capture, fired by zzzzz_inbox_message_direct on
+# public.messages -- see disable_capture_trigger above for the same
+# trigger) passed silently. session_replication_role=replica makes
+# Postgres skip every non-ALWAYS trigger for the REST of that session,
+# including this function's own downstream dirty-queue/projection
+# triggers -- a real writer-bypass vector, exactly the class the README's
+# "Capture-trigger bypass paths" section already treats as a mandatory
+# reconciliation event. ALTER FUNCTION ... RESET removes only that one
+# config entry, leaving search_path untouched, so restore is exact.
+run_case('function_session_replication_role_bypass',
+ lambda: sql("ALTER FUNCTION inbox_message_capture.capture() SET session_replication_role=replica",role='supabase_admin'),
+ lambda: sql("ALTER FUNCTION inbox_message_capture.capture() RESET session_replication_role",role='supabase_admin'),
+ 'proconfig drift on inbox_message_capture.capture')
 
 # 11. Manifest-pinning (self-certification defense): inject a forged
 # generated/index-08.sql that redefines summary_order to match a drifted
