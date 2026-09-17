@@ -309,6 +309,23 @@ owner_pins=json.loads((P/'function-owners.json').read_text()) if (P/'function-ow
 # every other pinned fact in this bundle, and any live grant set that
 # doesn't match the pin now fails.
 grant_pins=json.loads((P/'function-grants.json').read_text()) if (P/'function-grants.json').exists() else {}
+# Astra round 6, gaps #1-#2: verify.py hardened FUNCTIONS thoroughly
+# (byte-exact def, pinned owner, pinned grants) but only partially covered
+# TABLES/SCHEMAS/TYPES -- ownership and full ACL (including WITH GRANT
+# OPTION, which turns up as a "*" suffix on a privilege letter inside the
+# raw aclitem text, e.g. "bob=r*w/postgres") were never compared for
+# relations at all, so `ALTER TABLE public.inbox_inbound_heads OWNER TO
+# authenticated` passed silently -- and a TABLE's OWNER bypasses RLS
+# entirely (RLS only restricts non-owners unless FORCE ROW LEVEL SECURITY
+# is also set), a sharper privilege escalation than a function-owner
+# change. Same pinning philosophy as function-owners.json/
+# function-grants.json (there is no safe way to derive "the expected ACL"
+# from source text alone -- REVOKE/GRANT ordering effects are exactly what
+# rounds 4-5 moved away from hand-simulating), extended to every table
+# this candidate declares (`tables`), every private schema it creates, and
+# every composite type it declares.
+relation_owner_pins=json.loads((P/'relation-owners.json').read_text()) if (P/'relation-owners.json').exists() else {}
+relation_acl_pins=json.loads((P/'relation-acl.json').read_text()) if (P/'relation-acl.json').exists() else {}
 
 # Functions: capture the WHOLE verbatim matched "CREATE (OR REPLACE) FUNCTION
 # ... AS $$ ... $$;" statement, nothing else. Round-4 no longer parses any
@@ -364,6 +381,26 @@ def find_constraint_match(remaining,scratch_def):
  # table, so this is a search, not a direct pairwise compare like
  # assert_deparse_match) -- same load-bearing rationale as above.
  return next((r for r in remaining if r['def']==scratch_def),None)
+
+def acl_mismatch(expected,live):
+ # The ONE comparison --installed's table/schema/type ACL checks AND
+ # --selftest both call (Astra round 6, gap #1) -- expected/live are each
+ # a list of raw aclitem text (e.g. "bob=r*w/postgres"), so a WITH GRANT
+ # OPTION change (the '*' suffix on a privilege letter) is caught by plain
+ # sorted-list inequality with no extra parsing needed.
+ return sorted(expected)!=sorted(live)
+
+def relation_set_mismatch(expected,live):
+ # The ONE comparison --installed's rewrite-rule/RLS-policy/trigger EXACT
+ # SET checks AND --selftest both call (round 6, gaps #3-#5) -- each of
+ # those is "the live set of names/defs must equal the expected set,
+ # order-independent," so one shared order-independent equality serves all
+ # three, the same way assert_deparse_match serves every byte-exact pair.
+ # Sorted by repr rather than natural ordering: policy entries are dicts
+ # (roles/cmd/using/withcheck), which Python cannot sort directly, while
+ # rule/trigger entries are plain name strings -- repr-keyed sorting
+ # handles either shape identically without a separate code path per kind.
+ return sorted(expected,key=repr)!=sorted(live,key=repr)
 
 if a.selftest:
  # DB-backed regression guard for the SHARED production comparator.
@@ -498,10 +535,27 @@ if a.selftest:
   live_trig_drift=sql(f"SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname='t' AND tgrelid='{trig_table}'::regclass")
   must_raise("a trigger arg 'PROPERTY' vs the expected 'property'",
    lambda:assert_deparse_match('Trigger','trig_tbl.t',expected_trig_def,live_trig_drift))
+
+  # Relation-level comparators (Astra round 6, gaps #1/#3-#5): the SAME
+  # acl_mismatch/relation_set_mismatch functions --installed calls for
+  # table/schema/type ACL and for rewrite-rule/policy/trigger exact-set
+  # checks.
+  if acl_mismatch(['postgres=arwdDxt/postgres'],['postgres=arwdDxt/postgres']):
+   print('SELFTEST FAIL: acl_mismatch on two identical ACL arrays returned True (false positive)',file=sys.stderr);sys.exit(1)
+  if not acl_mismatch(['postgres=arwdDxt/postgres'],['postgres=arwdDxt/postgres','anon=r/postgres']):
+   print('SELFTEST FAIL: acl_mismatch did not detect an ADDED grant -- the ACL gap is back',file=sys.stderr);sys.exit(1)
+  if not acl_mismatch(['bob=r/postgres'],['bob=r*/postgres']):
+   print("SELFTEST FAIL: acl_mismatch did not detect a WITH GRANT OPTION change ('*' suffix) -- the grant-option gap is back",file=sys.stderr);sys.exit(1)
+  if relation_set_mismatch([],[]):
+   print('SELFTEST FAIL: relation_set_mismatch on two empty sets returned True (false positive)',file=sys.stderr);sys.exit(1)
+  if not relation_set_mismatch([],['zz_extra_trigger']):
+   print('SELFTEST FAIL: relation_set_mismatch did not detect an extra trigger/rule name -- the extra-object gap is back',file=sys.stderr);sys.exit(1)
+  if not relation_set_mismatch([],[{'name':'zz_policy','cmd':'*','roles':['authenticated'],'using':'true','withcheck':None,'permissive':True}]):
+   print('SELFTEST FAIL: relation_set_mismatch did not detect an extra POLICY (dict-shaped entry) -- the policy gap is back',file=sys.stderr);sys.exit(1)
  finally:
   sql(f'DROP SCHEMA IF EXISTS {SCRATCH} CASCADE')
   sql(f'DROP SCHEMA IF EXISTS {SCRATCH}_src CASCADE')
- print('SELFTEST OK: the SAME functions --installed uses (scratch_function_stmt, scratch_trigger_stmt, assert_deparse_match, find_constraint_match, owner_mismatch) correctly distinguish real drift from cosmetic sameness for functions, owners, CHECK constraints, index predicates and triggers')
+ print('SELFTEST OK: the SAME functions --installed uses (scratch_function_stmt, scratch_trigger_stmt, assert_deparse_match, find_constraint_match, owner_mismatch, acl_mismatch, relation_set_mismatch) correctly distinguish real drift from cosmetic sameness for functions, owners, CHECK constraints, index predicates, triggers, ACLs (incl. WITH GRANT OPTION), and rewrite-rule/policy/trigger extra-object sets')
  sys.exit(0)
 
 if a.installed:
@@ -532,6 +586,16 @@ if a.installed:
  public_fn_names=sorted(fname for (schema,fname) in functions_src if schema=='public')
  public_fn_arr='ARRAY['+','.join("'"+x+"'" for x in public_fn_names)+']::text[]' if public_fn_names else "ARRAY[]::text[]"
  rls_arr='ARRAY['+','.join("'"+t+"'" for t in rls_tables)+']::text[]' if rls_tables else "ARRAY[]::text[]"
+ # Astra round 6: the full relation-level check (owner/ACL/persistence/
+ # rewrite-rules/policies/exact-trigger-set) applies to every table THIS
+ # CANDIDATE DECLARES (`tables`) -- both private-schema ones and the
+ # explicitly-owned public ones (public.inbox_inbound_heads) -- scoped by
+ # an explicit qualified-name array, never a namespace sweep of 'public'
+ # (which has hundreds of unrelated pre-existing app objects this
+ # candidate does not own and must never be asked to certify).
+ owned_table_arr='ARRAY['+','.join("'"+t+"'" for t in tables)+']::text[]' if tables else "ARRAY[]::text[]"
+ owned_schema_arr=private_arr  # schemas this candidate itself CREATEs; 'public' is never included (shared pre-existing schema, not owned)
+ owned_type_arr='ARRAY['+','.join("'"+t+"'" for t in composite_types)+']::text[]' if composite_types else "ARRAY[]::text[]"
 
  # ------------------------------------------------------------------------
  # Scratch-install phase: everything here is derived ONLY from `s` (the
@@ -704,7 +768,28 @@ SELECT jsonb_build_object(
  'extra_policies',(SELECT coalesce(jsonb_agg(schemaname||'.'||tablename||'.'||policyname),'[]') FROM pg_policies WHERE schemaname=ANY({private_arr})),
  'constraint_indexes',(SELECT coalesce(jsonb_agg(n.nspname||'.'||c.conname),'[]') FROM pg_constraint c JOIN pg_class t2 ON t2.oid=c.conrelid JOIN pg_namespace n ON n.oid=t2.relnamespace WHERE n.nspname=ANY({private_arr}) AND c.contype IN ('p','u')),
  'replica_identity',(SELECT relreplident FROM pg_class WHERE oid='inbox_bridge.summaries'::regclass),
- 'privilege_exposure',(SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname LIKE 'inbox\\_%' ESCAPE '\\' AND (has_function_privilege('anon',p.oid,'EXECUTE') OR has_function_privilege('authenticated',p.oid,'EXECUTE') OR has_function_privilege('service_role',p.oid,'EXECUTE')))
+ 'privilege_exposure',(SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname LIKE 'inbox\\_%' ESCAPE '\\' AND (has_function_privilege('anon',p.oid,'EXECUTE') OR has_function_privilege('authenticated',p.oid,'EXECUTE') OR has_function_privilege('service_role',p.oid,'EXECUTE'))),
+ -- Round 6 (Astra NO/6): full relation-level check, scoped by an explicit
+ -- qualified-name array (owned_table_arr) so a PUBLIC owned table (e.g.
+ -- public.inbox_inbound_heads) gets exactly the same coverage as a
+ -- private-schema one, without sweeping unrelated public objects.
+ 'relations',(SELECT coalesce(jsonb_object_agg(n.nspname||'.'||c.relname,jsonb_build_object(
+    'owner',c.relowner::regrole::text,
+    'acl',coalesce(to_jsonb(c.relacl::text[]),'[]'::jsonb),
+    'persistence',c.relpersistence,
+    'rules',(SELECT coalesce(jsonb_agg(r.rulename),'[]') FROM pg_rewrite r WHERE r.ev_class=c.oid AND r.rulename<>'_RETURN'),
+    'policies',(SELECT coalesce(jsonb_agg(jsonb_build_object('name',p.polname,'permissive',p.polpermissive,'cmd',p.polcmd::text,
+        'roles',(SELECT coalesce(jsonb_agg(rn.rolname ORDER BY rn.rolname),'[]') FROM unnest(p.polroles) x JOIN pg_roles rn ON rn.oid=x),
+        'using',pg_get_expr(p.polqual,p.polrelid),'withcheck',pg_get_expr(p.polwithcheck,p.polrelid))),'[]')
+      FROM pg_policy p WHERE p.polrelid=c.oid),
+    'triggers',(SELECT coalesce(jsonb_agg(t.tgname),'[]') FROM pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal)
+   )),'{{}}')
+   FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+   WHERE (n.nspname||'.'||c.relname)=ANY({owned_table_arr})),
+ 'owned_schemas',(SELECT coalesce(jsonb_object_agg(nspname,jsonb_build_object('owner',nspowner::regrole::text,'acl',coalesce(to_jsonb(nspacl::text[]),'[]'::jsonb))),'{{}}')
+   FROM pg_namespace WHERE nspname=ANY({owned_schema_arr})),
+ 'owned_types',(SELECT coalesce(jsonb_object_agg(n.nspname||'.'||t.typname,jsonb_build_object('owner',t.typowner::regrole::text,'acl',coalesce(to_jsonb(t.typacl::text[]),'[]'::jsonb))),'{{}}')
+   FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE (n.nspname||'.'||t.typname)=ANY({owned_type_arr}))
 );
 COMMIT;
 """
@@ -804,6 +889,58 @@ COMMIT;
   if t not in snap['rls']:raise RuntimeError('RLS table missing from snapshot: '+t)
   if snap['rls'][t]['enabled'] is not True:raise RuntimeError('Row level security disabled on installed table: '+t)
   if snap['rls'][t]['forced'] is not False:raise RuntimeError('Unexpected FORCE ROW LEVEL SECURITY on installed table: '+t)
+
+ # Relations (Astra round 6, gaps #1-#5): ownership, full ACL (incl. WITH
+ # GRANT OPTION), persistence, rewrite rules and the exact policy/trigger
+ # set, for EVERY table this candidate declares -- private-schema AND the
+ # explicitly-owned public ones alike (owned_table_arr above), closing the
+ # gap where a PUBLIC owned table (public.inbox_inbound_heads) escaped
+ # every one of these checks even though a private-schema table was
+ # already covered for some of them (owner bypasses RLS; an UNLOGGED table
+ # is crash-truncatable; a rewrite rule can silently suppress/redirect
+ # writes; an extra POLICY or TRIGGER can silently grant unreviewed access
+ # or run unreviewed logic).
+ for t in tables:
+  rel=snap['relations'].get(t)
+  if rel is None:raise RuntimeError(f'Installed relation missing from relation snapshot: {t}')
+  pin_key=f'table:{t}'
+  expected_owner=relation_owner_pins.get(pin_key)
+  if expected_owner is None:raise RuntimeError(f'No pinned owner expectation for {pin_key} in relation-owners.json -- add one before this can be certified')
+  if owner_mismatch(expected_owner,rel['owner']):raise RuntimeError(f"Table OWNER drift {t}: expected owner={expected_owner!r} live={rel['owner']!r} (a table's OWNER bypasses RLS entirely, regardless of any policy)")
+  expected_acl=relation_acl_pins.get(pin_key)
+  if expected_acl is None:raise RuntimeError(f'No pinned ACL expectation for {pin_key} in relation-acl.json -- add one before this can be certified')
+  live_acl=sorted(rel['acl'])
+  if acl_mismatch(expected_acl,live_acl):raise RuntimeError(f"Table ACL drift {t}: expected={sorted(expected_acl)} live={live_acl} (raw aclitem text, so a WITH GRANT OPTION change -- a '*' suffix on a privilege letter -- is included)")
+  if rel['persistence']!='p':raise RuntimeError(f"Table persistence drift {t}: expected permanent ('p'), live={rel['persistence']!r} -- an UNLOGGED table is crash-truncatable (silent data loss on the next crash/restart)")
+  if relation_set_mismatch([],rel['rules']):raise RuntimeError(f"Unexpected rewrite rule(s) on {t}: {rel['rules']} (a rule can silently suppress or redirect writes to this table)")
+  if relation_set_mismatch([],rel['policies']):raise RuntimeError(f"Unexpected RLS POLICY on {t}: {rel['policies']} (this candidate declares no CREATE POLICY anywhere -- every owned table relies on RLS-with-no-policies plus owner-bypass for its SECURITY DEFINER API functions, so ANY policy here is unreviewed)")
+  expected_trig_names=sorted(n for (tt,n) in expected_triggers if tt==t)
+  live_trig_names=sorted(rel['triggers'])
+  if relation_set_mismatch(expected_trig_names,live_trig_names):raise RuntimeError(f"Trigger set drift on {t}: expected={expected_trig_names} live={live_trig_names} (an extra undeclared trigger can run unreviewed logic on every write)")
+
+ for sch in private_schemas:
+  schrow=snap['owned_schemas'].get(sch)
+  if schrow is None:raise RuntimeError(f'Installed schema missing from schema snapshot: {sch}')
+  pin_key=f'schema:{sch}'
+  expected_owner=relation_owner_pins.get(pin_key)
+  if expected_owner is None:raise RuntimeError(f'No pinned owner expectation for {pin_key} in relation-owners.json -- add one before this can be certified')
+  if owner_mismatch(expected_owner,schrow['owner']):raise RuntimeError(f"Schema OWNER drift {sch}: expected owner={expected_owner!r} live={schrow['owner']!r}")
+  expected_acl=relation_acl_pins.get(pin_key)
+  if expected_acl is None:raise RuntimeError(f'No pinned ACL expectation for {pin_key} in relation-acl.json -- add one before this can be certified')
+  live_acl=sorted(schrow['acl'])
+  if acl_mismatch(expected_acl,live_acl):raise RuntimeError(f"Schema ACL drift {sch}: expected={sorted(expected_acl)} live={live_acl}")
+
+ for ct in composite_types:
+  typerow=snap['owned_types'].get(ct)
+  if typerow is None:raise RuntimeError(f'Installed type missing from type snapshot: {ct}')
+  pin_key=f'type:{ct}'
+  expected_owner=relation_owner_pins.get(pin_key)
+  if expected_owner is None:raise RuntimeError(f'No pinned owner expectation for {pin_key} in relation-owners.json -- add one before this can be certified')
+  if owner_mismatch(expected_owner,typerow['owner']):raise RuntimeError(f"Type OWNER drift {ct}: expected owner={expected_owner!r} live={typerow['owner']!r}")
+  expected_acl=relation_acl_pins.get(pin_key)
+  if expected_acl is None:raise RuntimeError(f'No pinned ACL expectation for {pin_key} in relation-acl.json -- add one before this can be certified')
+  live_acl=sorted(typerow['acl'])
+  if acl_mismatch(expected_acl,live_acl):raise RuntimeError(f"Type ACL drift {ct}: expected={sorted(expected_acl)} live={live_acl}")
 
  # Indexes: byte-exact pg_get_indexdef (scratch-rendered expected, after
  # normalizing the scratch table-qualifier back to the real one, vs live),
@@ -927,7 +1064,7 @@ COMMIT;
 
  if snap['replica_identity']!='f':raise RuntimeError('Projection replica identity drift')
  if snap['privilege_exposure']!=0:raise RuntimeError('Private helper exposed to browser/service roles')
- result={'foundation_sha256':digest,'installed_function_bodies':len(functions_src),'installed_tables':len(all_tables),'installed_composite_types':len(composite_types),'installed_indexes':len(expected_index),'installed_triggers':len(expected_triggers),'installed_constraints':sum(len(extract_constraints_for_table(t)) for t in constraint_tables),'installed_rls_tables':len(rls_tables),'private_schemas_scanned':len(private_schemas),'private_helper_exposure_count':0,'replica_identity':'FULL','snapshot_isolation':'REPEATABLE READ, READ ONLY, single transaction','scope':'Read-only owned fixture catalog proof (plus a throwaway verify_scratch schema, created and dropped within this same run, used only to let Postgres itself canonically render the expected side of every function/constraint/index/trigger/default comparison -- byte-exact pg_get_functiondef/pg_get_constraintdef/pg_get_indexdef/pg_get_triggerdef/pg_get_expr comparison, no custom text normalization, plus separately pinned function-owner and function-grant checks, plus FK/constraint enforcement-trigger-enabled checks) taken from one consistent REPEATABLE READ snapshot for the live side, not merely name presence; excludes runtime throughput and production schema equivalence'}
+ result={'foundation_sha256':digest,'installed_function_bodies':len(functions_src),'installed_tables':len(all_tables),'installed_composite_types':len(composite_types),'installed_indexes':len(expected_index),'installed_triggers':len(expected_triggers),'installed_constraints':sum(len(extract_constraints_for_table(t)) for t in constraint_tables),'installed_rls_tables':len(rls_tables),'private_schemas_scanned':len(private_schemas),'private_helper_exposure_count':0,'replica_identity':'FULL','snapshot_isolation':'REPEATABLE READ, READ ONLY, single transaction','scope':'Read-only owned fixture catalog proof (plus a throwaway verify_scratch schema, created and dropped within this same run, used only to let Postgres itself canonically render the expected side of every function/constraint/index/trigger/default comparison -- byte-exact pg_get_functiondef/pg_get_constraintdef/pg_get_indexdef/pg_get_triggerdef/pg_get_expr comparison, no custom text normalization, plus separately pinned function/table/schema/type owner and function/relation ACL checks, plus FK/constraint enforcement-trigger-enabled checks, plus table persistence/rewrite-rule/RLS-policy/extra-trigger checks applied uniformly to every table this candidate declares -- private-schema AND explicitly-owned public tables alike) taken from one consistent REPEATABLE READ snapshot for the live side, not merely name presence; excludes runtime throughput and production schema equivalence, and COMMENT metadata (cosmetic, not security-relevant)'}
  (P/'catalog-evidence.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
 else:
  print('Source syntax, pinned transforms and installation receipt hash verified')

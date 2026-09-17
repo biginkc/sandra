@@ -53,7 +53,7 @@ jobs:
           print('Source-manifest hashes match, all bundle .py files parse, compiler is deterministic with no DB.')
           PY
       # --- verify.py --installed, verify.py --selftest, and
-      # verify-mutation-harness.py --owned-fixture (33 cases) are all NOT
+      # verify-mutation-harness.py --owned-fixture (38 cases) are all NOT
       # run in this job. Rounds 2-3 ran --selftest here DB-lessly (it
       # exercised pure text-normalization functions -- bool_ast, proconfig
       # parsing -- with no live catalog needed). Round 4 (Astra NO/4)
@@ -99,9 +99,17 @@ jobs:
       # Both proofs are produced locally instead: `verify.py --selftest`
       # (run manually against the owned fixture before every push) and
       # verify-mutation-harness.py --owned-fixture, whose result is
-      # committed in verify-mutation-harness-evidence.json (currently 33
-      # cases, including function_grant_added, trigger_arg_case_changed
-      # and fk_enforcement_trigger_disabled from this round).
+      # committed in verify-mutation-harness-evidence.json (currently 38
+      # cases, including table_owner_changed, table_acl_grant_added,
+      # table_set_unlogged, table_rewrite_rule_added and
+      # table_policy_and_extra_trigger_added from this round -- round 6
+      # closed the RELATION-level class the same way round 4 closed the
+      # function-level one: table/schema/type ownership and full ACL
+      # (relacl/nspacl/typacl, incl. WITH GRANT OPTION), relpersistence,
+      # pg_rewrite rules, and the exact RLS-policy/trigger set are now
+      # checked for every table this candidate declares, private-schema
+      # AND explicitly-owned public tables alike, instead of the extra-
+      # object scan being scoped to private schemas only).
       - name: Record known CI scope gap
         run: |
-          echo "verify.py --installed, verify.py --selftest, and verify-mutation-harness.py --owned-fixture (live-catalog proof, 33 cases) all require the locally-pinned T2 fixture (see guards.py) and are not run in this job -- Postgres-canonical-deparse comparison has no DB-less form. Both are run locally before every push; see workflow comments." >> "$GITHUB_STEP_SUMMARY"
+          echo "verify.py --installed, verify.py --selftest, and verify-mutation-harness.py --owned-fixture (live-catalog proof, 38 cases) all require the locally-pinned T2 fixture (see guards.py) and are not run in this job -- Postgres-canonical-deparse comparison has no DB-less form. Both are run locally before every push; see workflow comments." >> "$GITHUB_STEP_SUMMARY"

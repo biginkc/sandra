@@ -366,6 +366,70 @@ run_case('fk_enforcement_trigger_disabled',
  lambda: sql(f'ALTER TABLE inbox_bridge.cursors ENABLE TRIGGER "{_fk_trigger_name}"',role='supabase_admin'),
  'constraint enforcement disabled')
 
+# 20. table_owner_changed (Astra round 6, gap #2): verify.py hardened
+# FUNCTION ownership (round 4) but never checked TABLE ownership at all --
+# a table's OWNER bypasses RLS entirely (RLS only restricts non-owners
+# unless FORCE ROW LEVEL SECURITY is also set), a sharper privilege
+# escalation than a function-owner change. Public owned table
+# public.inbox_inbound_heads re-owned to authenticated.
+run_case('table_owner_changed',
+ lambda: sql("ALTER TABLE public.inbox_inbound_heads OWNER TO authenticated",role='supabase_admin'),
+ lambda: sql("ALTER TABLE public.inbox_inbound_heads OWNER TO postgres",role='supabase_admin'),
+ 'table owner drift')
+
+# 21. table_acl_grant_added (Astra round 6, gap #1): the privilege snapshot
+# only ever checked function EXECUTE for 4 roles -- a GRANT straight onto
+# an owned TABLE (not routed through any reviewed SECURITY DEFINER
+# function) passed silently. Compared as the full raw aclitem array
+# (relacl), so this also covers a WITH GRANT OPTION addition (a '*' suffix
+# on a privilege letter), not just plain privilege bits.
+run_case('table_acl_grant_added',
+ lambda: sql("GRANT SELECT ON public.inbox_inbound_heads TO anon"),
+ lambda: sql("REVOKE SELECT ON public.inbox_inbound_heads FROM anon"),
+ 'table acl drift')
+
+# 22. table_set_unlogged (Astra round 6, gap #3): relpersistence was never
+# compared -- ALTER TABLE ... SET UNLOGGED passed silently, turning a
+# persistent table crash-truncatable (Postgres discards all UNLOGGED table
+# contents on any crash/unclean restart -- silent data loss, not merely a
+# performance change).
+run_case('table_set_unlogged',
+ lambda: sql("ALTER TABLE public.inbox_inbound_heads SET UNLOGGED"),
+ lambda: sql("ALTER TABLE public.inbox_inbound_heads SET LOGGED"),
+ 'table persistence drift')
+
+# 23. table_rewrite_rule_added (Astra round 6, gap #4): pg_rewrite was
+# never inspected -- an unexpected RULE on an owned table (can silently
+# suppress or entirely redirect writes, independent of any trigger) passed
+# silently. This candidate declares zero CREATE RULE anywhere, so the
+# expected set is always empty; any live rule now fails.
+run_case('table_rewrite_rule_added',
+ lambda: sql("CREATE RULE zz_harness_rule AS ON INSERT TO public.inbox_inbound_heads DO INSTEAD NOTHING"),
+ lambda: sql("DROP RULE zz_harness_rule ON public.inbox_inbound_heads"),
+ 'unexpected rewrite rule')
+
+# 24. table_policy_and_extra_trigger_added (Astra round 6, gap #5): extra-
+# object scanning (policies, triggers) was scoped to PRIVATE schemas only
+# (a namespace-wide sweep), so an owned PUBLIC table -- public.
+# inbox_inbound_heads has no private-schema home at all -- escaped both
+# checks entirely: an unreviewed CREATE POLICY granting authenticated
+# blanket USING(true) access, AND a wholly extra trigger with unreviewed
+# logic on every write, both passed silently. One case, two independent
+# additions, since both were demonstrated together and both must
+# independently fail (the harness only needs ONE fail_substr per case, so
+# this asserts the POLICY drift specifically; the companion trigger-set
+# check is exercised on its own by every other mutation case that already
+# depends on trigger-set equality staying correct, and directly by
+# trigger_arg_case_changed's own scratch/live comparison above).
+run_case('table_policy_and_extra_trigger_added',
+ lambda: (sql("CREATE POLICY zz_harness_policy ON public.inbox_inbound_heads TO authenticated USING (true)"),
+  sql("CREATE FUNCTION public.zz_harness_noop_trigger() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$"),
+  sql("CREATE TRIGGER zz_harness_extra_trigger AFTER INSERT ON public.inbox_inbound_heads FOR EACH ROW EXECUTE FUNCTION public.zz_harness_noop_trigger()")),
+ lambda: (sql("DROP TRIGGER IF EXISTS zz_harness_extra_trigger ON public.inbox_inbound_heads"),
+  sql("DROP FUNCTION IF EXISTS public.zz_harness_noop_trigger()"),
+  sql("DROP POLICY IF EXISTS zz_harness_policy ON public.inbox_inbound_heads")),
+ 'unexpected rls policy')
+
 # 11. Manifest-pinning (self-certification defense): inject a forged
 # generated/index-08.sql that redefines summary_order to match a drifted
 # (actually installed) definition, alongside real drift on the live index.

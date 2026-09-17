@@ -194,6 +194,36 @@
       "restored_pass": true
     },
     {
+      "case": "table_owner_changed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Table OWNER drift public.inbox_inbound_heads: expected owner='postgres' live='authenticated' (a table's OWNER bypasses RLS entirely, regardless of any policy)",
+      "restored_pass": true
+    },
+    {
+      "case": "table_acl_grant_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Table ACL drift public.inbox_inbound_heads: expected=['postgres=arwdDxtm/postgres'] live=['anon=r/postgres', 'postgres=arwdDxtm/postgres'] (raw aclitem text, so a WITH GRANT OPTION change -- a '*' suffix on a privilege letter -- is included)",
+      "restored_pass": true
+    },
+    {
+      "case": "table_set_unlogged",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Table persistence drift public.inbox_inbound_heads: expected permanent ('p'), live='u' -- an UNLOGGED table is crash-truncatable (silent data loss on the next crash/restart)",
+      "restored_pass": true
+    },
+    {
+      "case": "table_rewrite_rule_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Unexpected rewrite rule(s) on public.inbox_inbound_heads: ['zz_harness_rule'] (a rule can silently suppress or redirect writes to this table)",
+      "restored_pass": true
+    },
+    {
+      "case": "table_policy_and_extra_trigger_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Unexpected RLS POLICY on public.inbox_inbound_heads: [{'cmd': '*', 'name': 'zz_harness_policy', 'roles': ['authenticated'], 'using': 'true', 'withcheck': None, 'permissive': True}] (this candidate declares no CREATE POLICY anywhere -- every owned table relies on RLS-with-no-policies plus owner-bypass for its SECURITY DEFINER API functions, so ANY policy here is unreviewed)",
+      "restored_pass": true
+    },
+    {
       "case": "index_packet_injection_ignored",
       "drift_caught": true,
       "drift_error": "  live=    CREATE INDEX summary_order ON inbox_bridge.summaries USING btree (org_id, target_kind)",
