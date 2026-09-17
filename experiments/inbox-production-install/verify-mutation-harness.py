@@ -324,6 +324,48 @@ run_case('index_predicate_string_literal_case',
   "CREATE INDEX backfill_available ON inbox_backfill.jobs(available_at,org_id) WHERE stream<>'done'"),
  'index definition drift')
 
+# 17. function_grant_added (Astra round 5, gap #1): verify.py's
+# privilege_exposure check only ever scanned the PRIVATE inbox_* schemas --
+# a GRANT EXECUTE straight onto a PUBLIC-facing RPC wrapper
+# (public.inbox_counts_v2, currently pinned to {authenticated} only in
+# function-grants.json) passed silently. Adding anon here is the exact
+# demonstrated exposure: anon is the unauthenticated browser role.
+run_case('function_grant_added',
+ lambda: sql("GRANT EXECUTE ON FUNCTION public.inbox_counts_v2(uuid,jsonb) TO anon"),
+ lambda: sql("REVOKE EXECUTE ON FUNCTION public.inbox_counts_v2(uuid,jsonb) FROM anon"),
+ 'function grant drift')
+
+# 18. trigger_arg_case_changed (Astra round 5, gap #2): the old trigger
+# comparison lowercased and whitespace-stripped the EXECUTE FUNCTION
+# argument list before comparing, so a capture arg 'property' -> 'PROPERTY'
+# on the real zzzzz_inbox_parent trigger (public.properties ->
+# inbox_parent.capture_parent('property')) compared equal. Trigger
+# definitions are now compared byte-exact via scratch-installed
+# pg_get_triggerdef(), which preserves argument literal case.
+run_case('trigger_arg_case_changed',
+ lambda: sql("DROP TRIGGER zzzzz_inbox_parent ON public.properties;"
+  "CREATE TRIGGER zzzzz_inbox_parent AFTER INSERT OR UPDATE OR DELETE ON public.properties FOR EACH ROW EXECUTE FUNCTION inbox_parent.capture_parent('PROPERTY')"),
+ lambda: sql("DROP TRIGGER zzzzz_inbox_parent ON public.properties;"
+  "CREATE TRIGGER zzzzz_inbox_parent AFTER INSERT OR UPDATE OR DELETE ON public.properties FOR EACH ROW EXECUTE FUNCTION inbox_parent.capture_parent('property')"),
+ 'trigger definition drift')
+
+# 19. fk_enforcement_trigger_disabled (Astra round 5, gap #3): an internal
+# (tgisinternal, never declared in source) FK-enforcement trigger silently
+# disabled via ALTER TABLE ... DISABLE TRIGGER <system-generated name> --
+# the constraint row itself is untouched (still present, still
+# convalidated=true), only the separate enforcement machinery goes dark, so
+# this needs its own check (triggers_ok, tied to the constraint via
+# pg_trigger.tgconstraint) rather than anything the constraint-definition
+# text comparison could ever catch. Disabling a system trigger requires
+# superuser (supabase_admin here); the trigger's name is catalog-assigned
+# (RI_ConstraintTrigger_*), looked up fresh each run rather than hardcoded.
+_fk_trigger_name=sql("SELECT tgname FROM pg_trigger WHERE tgrelid='inbox_bridge.cursors'::regclass AND tgisinternal ORDER BY tgname LIMIT 1")
+if not _fk_trigger_name:raise RuntimeError('HARNESS FAILURE: no internal FK-enforcement trigger found on inbox_bridge.cursors')
+run_case('fk_enforcement_trigger_disabled',
+ lambda: sql(f'ALTER TABLE inbox_bridge.cursors DISABLE TRIGGER "{_fk_trigger_name}"',role='supabase_admin'),
+ lambda: sql(f'ALTER TABLE inbox_bridge.cursors ENABLE TRIGGER "{_fk_trigger_name}"',role='supabase_admin'),
+ 'constraint enforcement disabled')
+
 # 11. Manifest-pinning (self-certification defense): inject a forged
 # generated/index-08.sql that redefines summary_order to match a drifted
 # (actually installed) definition, alongside real drift on the live index.

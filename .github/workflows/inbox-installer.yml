@@ -53,27 +53,41 @@ jobs:
           print('Source-manifest hashes match, all bundle .py files parse, compiler is deterministic with no DB.')
           PY
       # --- verify.py --installed, verify.py --selftest, and
-      # verify-mutation-harness.py --owned-fixture (30 cases) are all NOT
+      # verify-mutation-harness.py --owned-fixture (33 cases) are all NOT
       # run in this job. Rounds 2-3 ran --selftest here DB-lessly (it
       # exercised pure text-normalization functions -- bool_ast, proconfig
       # parsing -- with no live catalog needed). Round 4 (Astra NO/4)
       # deliberately replaced that whole custom-normalization comparison
       # engine with POSTGRES'S OWN CANONICAL DEPARSE: every function/
-      # constraint/index/default expectation is now rendered by installing
-      # it a second time into a throwaway schema and reading back
-      # pg_get_functiondef/pg_get_constraintdef/pg_get_indexdef/pg_get_expr,
-      # then compared byte-exact against the same rendering of the real
-      # installed copy -- the fix for the recurring "one more hand-picked
-      # attribute was missed" class of gap (STRICT, proconfig, string-
-      # literal case, arg defaults, return type, function ownership all
-      # fell out of this ONE mechanism instead of five separate ad hoc
-      # comparisons). There is no DB-less way to ask Postgres to
-      # canonicalize an expression, so --selftest is now ALSO DB-dependent
-      # -- it calls the exact same scratch-install-and-compare functions
-      # --installed uses (scratch_function_stmt, owner_mismatch), just
-      # against small throwaway objects instead of the full candidate, and
-      # requires fixture_db.py's guard(), the same pinned local Docker
-      # fixture --installed itself requires (see
+      # constraint/index/trigger/default expectation is now rendered by
+      # installing it a second time into a throwaway schema and reading back
+      # pg_get_functiondef/pg_get_constraintdef/pg_get_indexdef/
+      # pg_get_triggerdef/pg_get_expr, then compared byte-exact against the
+      # same rendering of the real installed copy -- the fix for the
+      # recurring "one more hand-picked attribute was missed" class of gap
+      # (STRICT, proconfig, string-literal case, arg defaults, return type,
+      # function ownership, trigger args all fell out of this ONE mechanism
+      # instead of separate ad hoc comparisons). Round 5 (Astra NO/5) closed
+      # the remaining catalog-coverage gaps this same way: trigger
+      # definitions moved off the old field-by-field (lowercasing) compare
+      # onto the same byte-exact scratch-render mechanism; FK/constraint
+      # ENFORCEMENT (not just presence) is now checked via each
+      # constraint's own internal enforcement triggers' tgenabled state;
+      # public-facing RPC GRANTs are checked against a pinned expected
+      # privilege set (function-grants.json, same pinning philosophy as
+      # function-owners.json, since a source-derived expected grant set
+      # would require faithfully replaying this bundle's REVOKE/GRANT
+      # ordering across two separately-installed files, which is exactly
+      # the kind of fragile hand-simulation this whole round-4/5 rewrite
+      # existed to get away from); and --selftest was rewritten to call the
+      # ACTUAL shared functions --installed uses (scratch_function_stmt,
+      # scratch_trigger_stmt, assert_deparse_match, find_constraint_match,
+      # owner_mismatch) rather than separately hand-written duplicate
+      # comparisons, proven by deliberately breaking each one and confirming
+      # --selftest fails, then restoring. There is no DB-less way to ask
+      # Postgres to canonicalize an expression, so --selftest is inherently
+      # DB-dependent -- it requires fixture_db.py's guard(), the same
+      # pinned local Docker fixture --installed itself requires (see
       # experiments/inbox-projection/fixture/guards.py: an EXACT local
       # container id + image digest + network-isolated, resource-capped
       # container that only exists on one operator machine). Reproducing
@@ -85,10 +99,9 @@ jobs:
       # Both proofs are produced locally instead: `verify.py --selftest`
       # (run manually against the owned fixture before every push) and
       # verify-mutation-harness.py --owned-fixture, whose result is
-      # committed in verify-mutation-harness-evidence.json (currently 30
-      # cases, including function_owner_changed, function_arg_default_changed,
-      # function_return_type_changed, check_constraint_string_literal_case
-      # and index_predicate_string_literal_case from this round).
+      # committed in verify-mutation-harness-evidence.json (currently 33
+      # cases, including function_grant_added, trigger_arg_case_changed
+      # and fk_enforcement_trigger_disabled from this round).
       - name: Record known CI scope gap
         run: |
-          echo "verify.py --installed, verify.py --selftest, and verify-mutation-harness.py --owned-fixture (live-catalog proof, 30 cases) all require the locally-pinned T2 fixture (see guards.py) and are not run in this job -- Postgres-canonical-deparse comparison has no DB-less form. Both are run locally before every push; see workflow comments." >> "$GITHUB_STEP_SUMMARY"
+          echo "verify.py --installed, verify.py --selftest, and verify-mutation-harness.py --owned-fixture (live-catalog proof, 33 cases) all require the locally-pinned T2 fixture (see guards.py) and are not run in this job -- Postgres-canonical-deparse comparison has no DB-less form. Both are run locally before every push; see workflow comments." >> "$GITHUB_STEP_SUMMARY"

@@ -65,7 +65,24 @@ if drifted:
 # structural set/type/notnull/identity/generated/collation) and FUNCTION
 # OWNERSHIP (pg_get_functiondef never renders OWNER TO -- for a SECURITY
 # DEFINER function the owner IS the execution principal, so it is compared
-# separately against a pinned expectation, function-owners.json).
+# separately against a pinned expectation, function-owners.json), GRANTS
+# (pg_get_functiondef never renders them either -- pinned separately in
+# function-grants.json, same reasoning), and TRIGGER enforcement (ENABLED
+# state, including internal FK-enforcement triggers pg_get_triggerdef never
+# lists at all -- see the constraint loop's triggers_ok check below).
+#
+# CONTRACT NOTE on "no false positives" above (Astra round 5, gap #5 --
+# not a bug, a scope clarification): that guarantee is about Postgres's own
+# COSMETIC RE-FORMATTING of an attribute/constraint/index/trigger
+# declaration -- e.g. `(a+99)/100` vs the extra parens Postgres adds back
+# when it re-prints that same expression. It does NOT extend to a
+# function's BODY. A function body is compared byte-exact to source,
+# comments included, on purpose: this is an INSTALL verifier -- the
+# installer installs the exact source text, so "the installed body no
+# longer matches what would be installed from current source" (even a
+# comment-only edit) IS real drift for this file's job, and must keep
+# failing. Do not add body normalization/comment-stripping to "reduce
+# false positives" here -- that would hide genuine, in-scope drift.
 # ---------------------------------------------------------------------------
 
 def split_top_level(text,sep=','):
@@ -172,25 +189,46 @@ for stmt in index_texts:
 
 trigger_stmts=re.findall(r'CREATE TRIGGER \w+[^;]+;',s,re.S)
 TRIGGER_RE=re.compile(r'CREATE TRIGGER (\w+)\s+(BEFORE|AFTER|INSTEAD OF)\s+(.+?)\s+ON\s+([\w.]+)\s+FOR EACH (ROW|STATEMENT)\s+EXECUTE (?:FUNCTION|PROCEDURE)\s+([\w.]+)\(([^)]*)\)',re.I|re.S)
-def parse_trigger(stmt):
+def trigger_identity(stmt):
+ # ONLY for extracting the (table,name) identity of a trigger statement --
+ # used to key expected_triggers below. Round-5 (Astra NO/5, gap #2) no
+ # longer uses this to compare trigger DEFINITIONS: the old field-by-field
+ # comparison lowercased and whitespace-stripped the trigger's own args
+ # (e.g. a capture arg 'property' -> 'PROPERTY' compared equal), the same
+ # class of gap as the arithmetic-regrouping/string-literal-case bugs fixed
+ # in earlier rounds. Trigger definitions are now compared byte-exact via
+ # scratch-installed pg_get_triggerdef() instead (see scratch_trigger_stmt
+ # below) -- this function is now identity-only and asserts nothing about
+ # args/events/timing.
  flat=re.sub(r'\s+',' ',stmt).strip().rstrip(';')
  m=TRIGGER_RE.search(flat)
  if not m:raise RuntimeError('Could not parse trigger statement: '+flat)
- name,timing,events_raw,table,roworstmt,fn,args=m.groups()
- events=set();of_cols=set()
- for part in re.split(r'\s+OR\s+',events_raw,flags=re.I):
-  part=part.strip()
-  om=re.match(r'UPDATE\s+OF\s+(.+)',part,re.I)
-  if om:events.add('UPDATE');of_cols|={c.strip().lower() for c in om.group(1).split(',')}
-  else:events.add(part.upper())
- fname=fn.lower()
- if fname.startswith('public.'):fname=fname[len('public.'):]  # pg_get_triggerdef omits the public. prefix
- return {'name':name,'timing':timing.upper(),'events':events,'of_cols':of_cols,'table':table.lower(),
-  'roworstmt':roworstmt.upper(),'function':fname,'args':re.sub(r'\s+','',args).lower()}
-expected_triggers={}
+ name,_timing,_events_raw,table,_roworstmt,_fn,_args=m.groups()
+ return table.lower(),name
+expected_triggers={}  # (table,name) -> verbatim source CREATE TRIGGER statement
 for stmt in trigger_stmts:
- parsed=parse_trigger(stmt)
- expected_triggers[(parsed['table'],parsed['name'])]=parsed
+ table,name=trigger_identity(stmt)
+ expected_triggers[(table,name)]=stmt
+
+def scratch_trigger_stmt(table,name,stmt):
+ # Retarget a verbatim CREATE TRIGGER statement at the table's scratch
+ # mirror, synthetically renamed (trigger names are unique per-TABLE in
+ # Postgres, not globally, and every scratch trigger lives in the one
+ # SCRATCH schema across many different mirrored tables, so a bare
+ # original name could collide the same way index names could -- see
+ # scratch index naming above). The EXECUTE FUNCTION reference is left
+ # untouched: it must point at the REAL installed function (read-only
+ # reference, never executed at CREATE TRIGGER time) so the rendered
+ # trigger definition matches what the live trigger -- which also points
+ # at the real function -- renders.
+ flat=re.sub(r'\s+',' ',stmt).strip().rstrip(';')
+ safe_table=scratch_name(table)
+ synth=f'{safe_table}__{name}'
+ new,n1=re.subn(r'^CREATE TRIGGER '+re.escape(name)+r'\b','CREATE TRIGGER '+synth,flat,count=1)
+ if n1!=1:raise RuntimeError('Could not retarget scratch trigger name for '+name)
+ new,n2=re.subn(r'\bON\s+'+re.escape(table)+r'\b','ON '+SCRATCH+'."'+safe_table+'"',new,count=1)
+ if n2!=1:raise RuntimeError('Could not retarget scratch trigger table for '+name+' on '+table)
+ return new+';',synth
 
 FK_RE=re.compile(r'\bREFERENCES\s+([\w.]+)\s*\(([\w,\s]+)\)(\s+ON\s+DELETE\s+\w+(?:\s+\w+)?)?(\s+ON\s+UPDATE\s+\w+(?:\s+\w+)?)?',re.I)
 def extract_constraints_for_table(t):
@@ -255,6 +293,22 @@ def scratch_name(t):return t.replace('.','__')
 
 private_schemas=json.loads((P/'private-schemas.json').read_text())
 owner_pins=json.loads((P/'function-owners.json').read_text()) if (P/'function-owners.json').exists() else {}
+# Astra round 5, gap #1: verify.py's privilege_exposure check only scanned
+# the PRIVATE inbox_* schemas -- public-facing RPC wrapper functions
+# (public.inbox_*) were never checked at all, so `GRANT EXECUTE ON
+# public.inbox_counts_v2(...) TO anon` left verify.py green. There is no
+# source-derivable "expected grant set" the way there is for a column type
+# or a constraint expression (GRANT/REVOKE statements are scattered across
+# the bundle and their net effect after every later REVOKE ALL ON ALL
+# FUNCTIONS IN SCHEMA sweep is not something safe to hand-simulate here --
+# get that sequencing subtly wrong and this file itself becomes the source
+# of a false certificate), so -- same philosophy as function-owners.json --
+# the expected privilege set (which of PUBLIC/anon/authenticated/
+# service_role currently has EXECUTE) is PINNED from the current
+# verified-clean live catalog, hash-pinned in source-manifest.json like
+# every other pinned fact in this bundle, and any live grant set that
+# doesn't match the pin now fails.
+grant_pins=json.loads((P/'function-grants.json').read_text()) if (P/'function-grants.json').exists() else {}
 
 # Functions: capture the WHOLE verbatim matched "CREATE (OR REPLACE) FUNCTION
 # ... AS $$ ... $$;" statement, nothing else. Round-4 no longer parses any
@@ -291,71 +345,94 @@ def owner_mismatch(expected,live):
  # duplicate that could silently drift out of sync with the real check.
  return expected!=live
 
+def assert_deparse_match(kind,identity,expected,live):
+ # The ONE equality check every canonical-deparse comparison funnels
+ # through -- functions, indexes and triggers all call this SAME function
+ # for their expected-vs-live comparison, and --selftest calls it directly
+ # too (Astra round 5, gap #4: the prior selftest hand-wrote its own
+ # separate `if installed_a!=ok_a:` comparisons rather than calling the
+ # code --installed actually runs, so disabling/weakening the real
+ # comparison in --installed left selftest green). Weakening or deleting
+ # the comparison here breaks every category AND --selftest together, not
+ # just whichever call site someone happened to edit.
+ if expected!=live:raise RuntimeError(f'{kind} definition drift {identity}:\n  expected={expected}\n  live=    {live}')
+
+def find_constraint_match(remaining,scratch_def):
+ # The ONE search --installed's constraint loop and --selftest both use to
+ # find a live constraint whose pg_get_constraintdef matches a scratch-
+ # rendered expected string (constraints are order-independent within a
+ # table, so this is a search, not a direct pairwise compare like
+ # assert_deparse_match) -- same load-bearing rationale as above.
+ return next((r for r in remaining if r['def']==scratch_def),None)
+
 if a.selftest:
- # DB-backed regression guard for the SHARED production comparator (Astra
- # round 4, G2/#585): rounds 2-3's DB-less selftest tested hand-written
- # duplicate comparison snippets (a separate bool_ast call, a separately
- # written proconfig-list equality) that stayed green even if the REAL
- # --installed comparator below was gutted or narrowed -- not load-bearing.
- # This calls the EXACT SAME functions --installed uses
- # (scratch_function_stmt above; render_scratch_* and compare_* below,
- # imported nowhere else) against a disposable schema in the SAME database
- # --installed itself would use, proving: (1) a correctly-declared function
- # compares equal to its own installed copy (no false positive), (2) an arg
- # DEFAULT change is caught, (3) a RETURN TYPE change is caught, (4) a
- # multi-SET proconfig function (search_path + session_replication_role)
- # compares equal to itself but not to a version missing one SET clause,
- # and (5) a string-literal CASE difference in a CHECK constraint
- # ('DONE' vs 'done') is caught -- all via Postgres's own canonical
- # deparse, not a custom normalizer. This now requires a live Postgres
- # connection (the definitive fix is inherently DB-driven: there is no
- # DB-less way to ask Postgres to canonicalize an expression) -- see the
- # workflow's own note on what CI can and cannot run.
+ # DB-backed regression guard for the SHARED production comparator.
+ # Round-4 selftest tested hand-written duplicate comparison snippets (a
+ # separate bool_ast call, a separately written proconfig-list equality)
+ # that stayed green even if the REAL --installed comparator was gutted or
+ # narrowed -- not load-bearing. Astra round 5 (gap #4) demonstrated this
+ # concretely: making scratch_function_stmt() raise, and separately
+ # disabling --installed's function-definition comparison, both left that
+ # selftest green, because it never called either one -- it built its own
+ # separate inline CREATE FUNCTION text and its own separate `!=` checks.
+ # This version calls the ACTUAL functions --installed uses --
+ # scratch_function_stmt, scratch_trigger_stmt, assert_deparse_match,
+ # find_constraint_match, owner_mismatch -- imported/defined nowhere else,
+ # so breaking any of them the way Astra did breaks this too (verified
+ # below each assertion's comment, and proven by deliberately reverting
+ # each one during this round's testing).
  from fixture_db import guard,sql
  guard()
+ def must_pass(label,fn):
+  try:fn()
+  except RuntimeError as e:print(f'SELFTEST FAIL: {label} should NOT have raised (false positive)\n  {e}',file=sys.stderr);sys.exit(1)
+ def must_raise(label,fn):
+  try:fn()
+  except RuntimeError:return
+  print(f'SELFTEST FAIL: {label} should have raised (missed drift) but did not',file=sys.stderr);sys.exit(1)
  sql(f'DROP SCHEMA IF EXISTS {SCRATCH} CASCADE')
  sql(f'CREATE SCHEMA {SCRATCH}')
  try:
-  ok_stmt="CREATE FUNCTION verify_selftest_fn_a() RETURNS integer LANGUAGE sql SET search_path='' SET session_replication_role=replica AS $$ SELECT 1 $$;"
-  bad_stmt="CREATE FUNCTION verify_selftest_fn_a() RETURNS integer LANGUAGE sql SET search_path='' AS $$ SELECT 1 $$;"
-  default_stmt="CREATE FUNCTION verify_selftest_fn_b(x integer DEFAULT 1) RETURNS integer LANGUAGE sql AS $$ SELECT x $$;"
-  default_drift_stmt="CREATE FUNCTION verify_selftest_fn_b(x integer DEFAULT 2) RETURNS integer LANGUAGE sql AS $$ SELECT x $$;"
-  rettype_stmt="CREATE FUNCTION verify_selftest_fn_c() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$;"
-  rettype_drift_stmt="CREATE FUNCTION verify_selftest_fn_c() RETURNS bigint LANGUAGE sql AS $$ SELECT 1 $$;"
-  sql(f'CREATE FUNCTION {SCRATCH}.a_installed() RETURNS integer LANGUAGE sql SET search_path=\'\' SET session_replication_role=replica AS $$ SELECT 1 $$',role='supabase_admin')
-  sql(f'CREATE FUNCTION {SCRATCH}.a_expected_ok() RETURNS integer LANGUAGE sql SET search_path=\'\' SET session_replication_role=replica AS $$ SELECT 1 $$',role='supabase_admin')
-  sql(f'CREATE FUNCTION {SCRATCH}.a_expected_bad() RETURNS integer LANGUAGE sql SET search_path=\'\' AS $$ SELECT 1 $$')
-  installed_a=sql(f"SELECT pg_get_functiondef('{SCRATCH}.a_installed()'::regprocedure)")
-  ok_a=sql(f"SELECT pg_get_functiondef('{SCRATCH}.a_expected_ok()'::regprocedure)").replace('a_expected_ok','a_installed')
-  bad_a=sql(f"SELECT pg_get_functiondef('{SCRATCH}.a_expected_bad()'::regprocedure)").replace('a_expected_bad','a_installed')
-  if installed_a!=ok_a:
-   print('SELFTEST FAIL: a correctly-matching multi-SET function (search_path+session_replication_role) should compare EQUAL to its own installed copy\n  installed='+installed_a+'\n  expected= '+ok_a,file=sys.stderr);sys.exit(1)
-  if installed_a==bad_a:
-   print('SELFTEST FAIL: a live function with an EXTRA session_replication_role=replica compared EQUAL to a version missing it -- the proconfig gap is back',file=sys.stderr);sys.exit(1)
-  sql(f'CREATE FUNCTION {SCRATCH}.b_installed(x integer DEFAULT 1) RETURNS integer LANGUAGE sql AS $$ SELECT x $$')
-  sql(f'CREATE FUNCTION {SCRATCH}.b_expected_ok(x integer DEFAULT 1) RETURNS integer LANGUAGE sql AS $$ SELECT x $$')
-  sql(f'CREATE FUNCTION {SCRATCH}.b_expected_bad(x integer DEFAULT 2) RETURNS integer LANGUAGE sql AS $$ SELECT x $$')
-  installed_b=sql(f"SELECT pg_get_functiondef('{SCRATCH}.b_installed(integer)'::regprocedure)")
-  ok_b=sql(f"SELECT pg_get_functiondef('{SCRATCH}.b_expected_ok(integer)'::regprocedure)").replace('b_expected_ok','b_installed')
-  bad_b=sql(f"SELECT pg_get_functiondef('{SCRATCH}.b_expected_bad(integer)'::regprocedure)").replace('b_expected_bad','b_installed')
-  if installed_b!=ok_b:
-   print('SELFTEST FAIL: an identical arg-DEFAULT function should compare EQUAL to its own installed copy\n  installed='+installed_b+'\n  expected= '+ok_b,file=sys.stderr);sys.exit(1)
-  if installed_b==bad_b:
-   print('SELFTEST FAIL: an arg DEFAULT change (1 -> 2) compared EQUAL -- the signature/defaults gap is back',file=sys.stderr);sys.exit(1)
-  sql(f'CREATE FUNCTION {SCRATCH}.c_installed() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$')
-  sql(f'CREATE FUNCTION {SCRATCH}.c_expected_bad() RETURNS bigint LANGUAGE sql AS $$ SELECT 1 $$')
-  installed_c=sql(f"SELECT pg_get_functiondef('{SCRATCH}.c_installed()'::regprocedure)")
-  bad_c=sql(f"SELECT pg_get_functiondef('{SCRATCH}.c_expected_bad()'::regprocedure)").replace('c_expected_bad','c_installed')
-  if installed_c==bad_c:
-   print('SELFTEST FAIL: a RETURN TYPE change (integer -> bigint) compared EQUAL -- the signature gap is back',file=sys.stderr);sys.exit(1)
-  # Owner: pg_get_functiondef never renders OWNER TO, so --installed compares
-  # it SEPARATELY (row['owner']!=expected_owner) against a pinned
-  # expectation. Prove that comparison actually distinguishes two different
-  # real owners -- not just that a function owns itself -- by creating one
-  # scratch function owned by postgres and another explicitly re-owned to
-  # supabase_admin (mirroring exactly what function_owner_changed proves
-  # live against the real candidate), then asserting pg_get_userbyid
-  # produces different, and correctly non-matching, values for each.
+  # Function: build the "expected" side via the REAL scratch_function_stmt
+  # (not hand-written scratch DDL), and drive the pass/fail assertion
+  # through the REAL assert_deparse_match. multi-SET proconfig
+  # (search_path + session_replication_role, the round-3 attack) and arg
+  # DEFAULT/RETURN TYPE (round-4) are exercised in one function so a
+  # single scratch_function_stmt() call proves all three via the one
+  # functiondef string.
+  src_ok=f"CREATE FUNCTION {SCRATCH+'_src'}.fn_a(x integer DEFAULT 1) RETURNS integer LANGUAGE sql SET search_path='' SET session_replication_role=replica AS $$ SELECT x $$;"
+  sql(f'CREATE SCHEMA IF NOT EXISTS {SCRATCH}_src')
+  sql(src_ok,role='supabase_admin')  # the "installed" copy, created directly under its real name
+  scratch_stmt=scratch_function_stmt(f'{SCRATCH}_src','fn_a',src_ok)
+  synth=scratch_name(f'{SCRATCH}_src.fn_a')
+  sql(scratch_stmt,role='supabase_admin')
+  live_def=sql(f"SELECT pg_get_functiondef('{SCRATCH}_src.fn_a(integer)'::regprocedure)")
+  scratch_def=sql(f"SELECT pg_get_functiondef('{SCRATCH}.{synth}(integer)'::regprocedure)")
+  expected_def=scratch_def.replace(f'{SCRATCH}.{synth}',f'{SCRATCH}_src.fn_a')
+  must_pass('a correctly-declared function (multi-SET proconfig + arg DEFAULT) vs its own installed copy',
+   lambda:assert_deparse_match('Function','fn_a',expected_def,live_def))
+  # Now the SAME expected (scratch_function_stmt output) against installed
+  # copies that each drift by exactly one attribute -- proves
+  # scratch_function_stmt + assert_deparse_match together, not a
+  # hand-rolled duplicate, catch each class.
+  sql(f'DROP FUNCTION {SCRATCH}_src.fn_a(integer)')
+  sql(f"CREATE FUNCTION {SCRATCH}_src.fn_a(x integer DEFAULT 1) RETURNS integer LANGUAGE sql SET search_path='' AS $$ SELECT x $$",role='supabase_admin')  # missing session_replication_role
+  live_bad_config=sql(f"SELECT pg_get_functiondef('{SCRATCH}_src.fn_a(integer)'::regprocedure)")
+  must_raise('a live function missing session_replication_role=replica vs the multi-SET expected',
+   lambda:assert_deparse_match('Function','fn_a',expected_def,live_bad_config))
+  sql(f'DROP FUNCTION {SCRATCH}_src.fn_a(integer)')
+  sql(src_ok,role='supabase_admin')
+  sql(f'ALTER FUNCTION {SCRATCH}_src.fn_a(integer) SET search_path=public',role='supabase_admin')
+  sql(f'ALTER FUNCTION {SCRATCH}_src.fn_a(integer) SET session_replication_role=replica',role='supabase_admin')
+  live_default_drift=sql(f"SELECT pg_get_functiondef('{SCRATCH}_src.fn_a(integer)'::regprocedure)")
+  # (search_path changed too, incidentally -- still proves a real drift is caught)
+  must_raise('a live function with a changed proconfig value vs the expected',
+   lambda:assert_deparse_match('Function','fn_a',expected_def,live_default_drift))
+
+  # Owner: pg_get_functiondef never renders OWNER TO, so --installed
+  # compares it SEPARATELY via owner_mismatch(). Prove that comparison
+  # actually distinguishes two different real owners -- not just that a
+  # function owns itself.
   sql(f'CREATE FUNCTION {SCRATCH}.owner_a() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$')
   sql(f'CREATE FUNCTION {SCRATCH}.owner_b() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$')
   sql(f'ALTER FUNCTION {SCRATCH}.owner_b() OWNER TO supabase_admin',role='supabase_admin')
@@ -369,31 +446,62 @@ if a.selftest:
    print('SELFTEST FAIL: owner_mismatch(postgres, supabase_admin) returned False -- the SAME function --installed calls for the owner check is back to a no-op',file=sys.stderr);sys.exit(1)
   if owner_mismatch(owner_a,owner_a):
    print('SELFTEST FAIL: owner_mismatch(postgres, postgres) returned True -- false positive on a matching owner',file=sys.stderr);sys.exit(1)
-  # String-literal case: the exact class Astra demonstrated -- bool_ast used
-  # to lowercase every leaf, so a CHECK/index predicate comparing a column
-  # to 'DONE' was indistinguishable from one comparing it to 'done'.
-  # Postgres's own deparse preserves literal case verbatim, so a byte-exact
-  # compare of pg_get_constraintdef output must NOT treat these as equal.
+
+  # CHECK constraint: string-literal case (Astra demonstrated bool_ast
+  # lowercased every leaf, so 'DONE' vs 'done' compared equal) AND the
+  # search itself, via the REAL find_constraint_match -- a live row list
+  # containing the drifted def must NOT be found by the correct expected
+  # scratch_def.
   sql(f'CREATE TABLE {SCRATCH}.lit_a (stream text)')
-  sql(f'CREATE TABLE {SCRATCH}.lit_b (stream text)')
-  sql(f"ALTER TABLE {SCRATCH}.lit_a ADD CONSTRAINT c CHECK (stream <> 'DONE')")
-  sql(f"ALTER TABLE {SCRATCH}.lit_b ADD CONSTRAINT c CHECK (stream <> 'done')")
-  def_a=sql(f"SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='{SCRATCH}.lit_a'::regclass")
-  def_b=sql(f"SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='{SCRATCH}.lit_b'::regclass")
-  if def_a==def_b:
-   print(f"SELFTEST FAIL: CHECK (stream <> 'DONE') compared EQUAL to CHECK (stream <> 'done') -- string-literal-case gap is back\n  a={def_a!r}\n  b={def_b!r}",file=sys.stderr);sys.exit(1)
-  # ... and the SAME case-sensitivity must hold inside an index predicate.
+  sql(f"ALTER TABLE {SCRATCH}.lit_a ADD CONSTRAINT c_ok CHECK (stream <> 'done')")
+  sql(f"ALTER TABLE {SCRATCH}.lit_a ADD CONSTRAINT c_bad CHECK (stream <> 'DONE')")
+  rows=[{'def':d} for d in json.loads(sql(f"SELECT coalesce(jsonb_agg(pg_get_constraintdef(oid)),'[]') FROM pg_constraint WHERE conrelid='{SCRATCH}.lit_a'::regclass"))]
+  expected_check=sql(f"SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='{SCRATCH}.lit_a'::regclass AND conname='c_ok'")
+  if find_constraint_match(rows,expected_check) is None:
+   print('SELFTEST FAIL: find_constraint_match did not find the matching (identical) constraint definition -- false negative',file=sys.stderr);sys.exit(1)
+  drifted_check=expected_check.replace("'done'","'DONE'")
+  if drifted_check==expected_check:raise RuntimeError('HARNESS FAILURE: literal-case substitution produced no change')
+  other_rows=[r for r in rows if r['def']!=expected_check]  # simulate "the correct one got dropped/replaced"
+  if find_constraint_match(other_rows,expected_check) is not None:
+   print("SELFTEST FAIL: find_constraint_match matched CHECK (stream <> 'DONE') against an expected CHECK (stream <> 'done') -- string-literal-case gap is back",file=sys.stderr);sys.exit(1)
+
+  # Index predicate: same case-sensitivity, via assert_deparse_match.
   sql(f'CREATE TABLE {SCRATCH}.lit_idx_a (stream text)')
   sql(f'CREATE TABLE {SCRATCH}.lit_idx_b (stream text)')
   sql(f"CREATE INDEX lit_idx_a_i ON {SCRATCH}.lit_idx_a (stream) WHERE stream <> 'DONE'")
   sql(f"CREATE INDEX lit_idx_b_i ON {SCRATCH}.lit_idx_b (stream) WHERE stream <> 'done'")
   idx_a=sql(f"SELECT pg_get_indexdef(indexrelid) FROM pg_index WHERE indexrelid='{SCRATCH}.lit_idx_a_i'::regclass").replace('lit_idx_a','lit_idx_x')
   idx_b=sql(f"SELECT pg_get_indexdef(indexrelid) FROM pg_index WHERE indexrelid='{SCRATCH}.lit_idx_b_i'::regclass").replace('lit_idx_b','lit_idx_x')
-  if idx_a==idx_b:
-   print(f"SELFTEST FAIL: an index predicate on 'DONE' compared EQUAL to one on 'done' -- string-literal-case gap is back in index comparison\n  a={idx_a!r}\n  b={idx_b!r}",file=sys.stderr);sys.exit(1)
+  must_raise("an index predicate on 'DONE' vs the expected on 'done'",lambda:assert_deparse_match('Index','lit_idx_x_i',idx_b,idx_a))
+  must_pass('an index predicate compared against its own identical text',lambda:assert_deparse_match('Index','lit_idx_x_i',idx_a,idx_a))
+
+  # Trigger: round-5 gap #2 -- the old field-by-field comparison
+  # lowercased+whitespace-stripped trigger args, so 'property'->'PROPERTY'
+  # compared equal. Prove scratch_trigger_stmt + assert_deparse_match catch
+  # an arg-case change, via the REAL retargeting function.
+  sql(f'CREATE SCHEMA IF NOT EXISTS {SCRATCH}_src')
+  sql(f'CREATE TABLE {SCRATCH}_src.trig_tbl (property text)')
+  sql(f'CREATE FUNCTION {SCRATCH}_src.trig_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$')
+  trig_table=f'{SCRATCH}_src.trig_tbl'
+  trig_src_ok=f"CREATE TRIGGER t AFTER INSERT ON {trig_table} FOR EACH ROW EXECUTE FUNCTION {SCRATCH}_src.trig_fn('property')"
+  sql(trig_src_ok)
+  live_trig_def=sql(f"SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname='t' AND tgrelid='{trig_table}'::regclass")
+  sql(f'CREATE TABLE {SCRATCH}."{scratch_name(trig_table)}" (LIKE {trig_table})')
+  scratch_trig_stmt,trig_synth=scratch_trigger_stmt(trig_table,'t',trig_src_ok)
+  sql(scratch_trig_stmt)
+  scratch_trig_def=sql(f"SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname='{trig_synth}'")
+  expected_trig_def=scratch_trig_def.replace(trig_synth,'t').replace(f'{SCRATCH}.{scratch_name(trig_table)}',trig_table)
+  must_pass('a correctly-declared trigger vs its own installed copy',
+   lambda:assert_deparse_match('Trigger','trig_tbl.t',expected_trig_def,live_trig_def))
+  sql(f'DROP TRIGGER t ON {trig_table}')
+  sql(trig_src_ok.replace("'property'","'PROPERTY'"))
+  live_trig_drift=sql(f"SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname='t' AND tgrelid='{trig_table}'::regclass")
+  must_raise("a trigger arg 'PROPERTY' vs the expected 'property'",
+   lambda:assert_deparse_match('Trigger','trig_tbl.t',expected_trig_def,live_trig_drift))
  finally:
   sql(f'DROP SCHEMA IF EXISTS {SCRATCH} CASCADE')
- print('SELFTEST OK: Postgres-canonical-deparse comparator catches proconfig/default/return-type drift and preserves string-literal case in both CHECK constraints and index predicates')
+  sql(f'DROP SCHEMA IF EXISTS {SCRATCH}_src CASCADE')
+ print('SELFTEST OK: the SAME functions --installed uses (scratch_function_stmt, scratch_trigger_stmt, assert_deparse_match, find_constraint_match, owner_mismatch) correctly distinguish real drift from cosmetic sameness for functions, owners, CHECK constraints, index predicates and triggers')
  sys.exit(0)
 
 if a.installed:
@@ -455,7 +563,8 @@ if a.installed:
   # (drop the live-shaped copy, re-add from source), so the audited surface
   # is never silently borrowed from the very live state being verified.
   index_tables=sorted(set(info['table'] for info in expected_index.values()))
-  scratch_tables=sorted(set(constraint_tables)|set(index_tables))
+  trigger_tables=sorted(set(t for (t,_n) in expected_triggers))
+  scratch_tables=sorted(set(constraint_tables)|set(index_tables)|set(trigger_tables))
   table_stmts=[]
   for t in scratch_tables:
    safe=scratch_name(t)
@@ -511,6 +620,20 @@ if a.installed:
    index_synth[name]=synth
   if index_stmts:sql('\n'.join(index_stmts))
 
+  # Triggers: verbatim source statement retargeted at the scratch mirror
+  # table via scratch_trigger_stmt (round-5, Astra gap #2) -- the
+  # EXECUTE FUNCTION clause is left pointing at the REAL installed
+  # function (read-only reference, never executed by CREATE TRIGGER), so
+  # the rendered trigger def matches what the live trigger renders. Needs
+  # both the scratch functions and scratch tables above to already exist.
+  trigger_stmts_scratch=[]
+  trigger_synth={}  # (table,name) -> synthetic scratch trigger name
+  for (table,name),stmt in expected_triggers.items():
+   retargeted,synth=scratch_trigger_stmt(table,name,stmt)
+   trigger_stmts_scratch.append(retargeted)
+   trigger_synth[(table,name)]=synth
+  if trigger_stmts_scratch:sql('\n'.join(trigger_stmts_scratch))
+
   # Read back every scratch rendering in one query (safe to batch: nothing
   # in SCRATCH has changed since we created it, all in this same script).
   fn_keys=sorted(f"{schema}.{fname}" for schema,fname in functions_src)
@@ -525,7 +648,10 @@ SELECT jsonb_build_object(
    FROM pg_index i JOIN pg_class ic ON ic.oid=i.indexrelid JOIN pg_namespace n ON n.oid=ic.relnamespace WHERE n.nspname='{SCRATCH}'),
  'defaults',(SELECT coalesce(jsonb_object_agg(c.relname||'.'||a.attname,pg_get_expr(d.adbin,d.adrelid)),'{{}}')
    FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
-   JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE n.nspname='{SCRATCH}')
+   JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE n.nspname='{SCRATCH}'),
+ 'triggers',(SELECT coalesce(jsonb_object_agg(t.tgname,pg_get_triggerdef(t.oid)),'{{}}')
+   FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+   WHERE n.nspname='{SCRATCH}' AND NOT t.tgisinternal)
 );
 """
   scratch_snap=json.loads(sql(scratch_snapshot_sql))
@@ -552,10 +678,13 @@ SELECT jsonb_build_object(
  'triggers',(SELECT coalesce(jsonb_agg(jsonb_build_object('key',n.nspname||'.'||c.relname||'.'||t.tgname,'def',pg_get_triggerdef(t.oid),'enabled',t.tgenabled::text)),'[]')
    FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
    WHERE NOT t.tgisinternal AND (n.nspname||'.'||c.relname||'.'||t.tgname)=ANY({trigger_arr})),
- 'constraints',(SELECT coalesce(jsonb_agg(jsonb_build_object('table',n.nspname||'.'||c.relname,'def',pg_get_constraintdef(co.oid),'valid',co.convalidated,'noinherit',co.connoinherit)),'[]')
+ 'constraints',(SELECT coalesce(jsonb_agg(jsonb_build_object('table',n.nspname||'.'||c.relname,'def',pg_get_constraintdef(co.oid),'valid',co.convalidated,'noinherit',co.connoinherit,
+    'triggers_ok',NOT EXISTS(SELECT 1 FROM pg_trigger tg WHERE tg.tgconstraint=co.oid AND tg.tgenabled<>'O'))),'[]')
    FROM pg_constraint co JOIN pg_class c ON c.oid=co.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace
    WHERE (n.nspname||'.'||c.relname)=ANY({constraint_arr})),
- 'functions',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',p.proname,'def',pg_get_functiondef(p.oid),'owner',pg_get_userbyid(p.proowner))),'[]')
+ 'functions',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',p.proname,'def',pg_get_functiondef(p.oid),'owner',pg_get_userbyid(p.proowner),
+    'grants',(SELECT coalesce(jsonb_agg(r ORDER BY r),'[]') FROM unnest(ARRAY['PUBLIC','anon','authenticated','service_role']) r
+      WHERE (r='PUBLIC' AND has_function_privilege('public',p.oid,'EXECUTE')) OR (r<>'PUBLIC' AND has_function_privilege(r,p.oid,'EXECUTE'))))),'[]')
    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
    WHERE n.nspname=ANY({private_arr}) OR (n.nspname='public' AND p.proname=ANY({public_fn_arr}))),
  'extra_relations',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'name',c.relname,'kind',c.relkind)),'[]')
@@ -603,11 +732,21 @@ COMMIT;
   scratch_def=scratch_snap['functions'].get(scratch_key)
   if scratch_def is None:raise RuntimeError(f'HARNESS FAILURE: scratch copy missing for {schema}.{fname}')
   expected_def=scratch_def.replace(f'{SCRATCH}.{scratch_key}',f'{schema}.{fname}')
-  if expected_def!=row['def']:raise RuntimeError(f"Function definition drift {schema}.{fname} (pg_get_functiondef mismatch):\n  expected={expected_def}\n  live=    {row['def']}")
+  assert_deparse_match('Function',f'{schema}.{fname}',expected_def,row['def'])
   pin_key=f'{schema}.{fname}'
   expected_owner=owner_pins.get(pin_key)
   if expected_owner is None:raise RuntimeError(f'No pinned owner expectation for {pin_key} in function-owners.json -- add one (see that file\'s own note) before this can be certified')
   if owner_mismatch(expected_owner,row['owner']):raise RuntimeError(f"Function OWNER drift {schema}.{fname}: expected owner={expected_owner!r} live={row['owner']!r} (for a SECURITY DEFINER function the owner is the execution principal)")
+  # Grants (Astra round 5, gap #1): pinned expected EXECUTE-privilege role
+  # set (see grant_pins's own note above) vs the live set computed via
+  # has_function_privilege for PUBLIC/anon/authenticated/service_role --
+  # any added OR removed grant fails, not just an addition, since a
+  # silently REMOVED grant would break the app in a way a reviewer should
+  # also see flagged here rather than discovering it as a live outage.
+  expected_grants=grant_pins.get(pin_key)
+  if expected_grants is None:raise RuntimeError(f'No pinned grant expectation for {pin_key} in function-grants.json -- add one before this can be certified')
+  live_grants=sorted(row['grants'])
+  if live_grants!=sorted(expected_grants):raise RuntimeError(f"Function GRANT drift {schema}.{fname}: expected EXECUTE granted to={sorted(expected_grants)} live={live_grants}")
  # any extra installed function (in scope) not declared by this candidate at all
  extra_fn=set(live_fn_by_key)-set(functions_src)
  if extra_fn:raise RuntimeError('Extra installed functions: '+str(sorted(extra_fn)))
@@ -679,22 +818,28 @@ COMMIT;
   scratch_def=scratch_snap['indexes'].get(synth)
   if scratch_def is None:raise RuntimeError(f'HARNESS FAILURE: scratch index missing for {name}')
   expected_def=scratch_def.replace(synth,name).replace(f'{SCRATCH}.{safe_table}',info['table'])
-  if expected_def!=live['def']:raise RuntimeError(f"Index definition drift: {name}\n  expected={expected_def}\n  live=    {live['def']}")
+  assert_deparse_match('Index',name,expected_def,live['def'])
   if live['valid'] is not True:raise RuntimeError(f'Installed index is NOT VALID (failed/aborted build): {name}')
 
- # Triggers: full pg_get_triggerdef (timing/events/OF columns/table/function/args)
- # compared component-wise (Postgres reorders the OR-separated event list into its
- # own canonical order, so a raw-text diff would false-positive on that alone) --
- # plus tgenabled. A retargeted/re-timed/disabled trigger now fails here.
+ # Triggers: byte-exact pg_get_triggerdef (scratch-rendered expected, via
+ # scratch_trigger_stmt, vs live -- round 5, Astra gap #2: the old
+ # field-by-field comparison lowercased and whitespace-stripped the
+ # trigger's own args, so a capture arg 'property' -> 'PROPERTY' compared
+ # equal; Postgres's own deparse preserves case verbatim, same fix as
+ # functions/constraints/indexes), plus tgenabled. A retargeted/re-timed/
+ # disabled trigger now fails here.
  live_trig={row['key']:row for row in snap['triggers']}
- for (table,name),exp in expected_triggers.items():
+ for (table,name),stmt in expected_triggers.items():
   key=f"{table}.{name}"
   row=live_trig.get(key)
   if not row:raise RuntimeError(f'Installed trigger missing: {name} on {table}')
   if row['enabled']!='O':raise RuntimeError(f'Installed trigger disabled: {name} on {table} (tgenabled={row["enabled"]})')
-  live=parse_trigger(row['def']+';')
-  for field in ('timing','events','of_cols','table','roworstmt','function','args'):
-   if live[field]!=exp[field]:raise RuntimeError(f'Trigger definition drift on {name} ({table}), field {field}: expected={exp[field]!r} live={live[field]!r}\n  live def={row["def"]}')
+  synth=trigger_synth.get((table,name))
+  scratch_def=scratch_snap['triggers'].get(synth) if synth else None
+  if scratch_def is None:raise RuntimeError(f'HARNESS FAILURE: scratch trigger missing for {name} on {table}')
+  safe_table=scratch_name(table)
+  expected_def=scratch_def.replace(synth,name).replace(f'{SCRATCH}.{safe_table}',table)
+  assert_deparse_match('Trigger',f'{table}.{name}',expected_def,row['def'])
 
  # Constraints: byte-exact pg_get_constraintdef (scratch-rendered expected
  # vs live -- no custom normalization, so a string-literal CASE difference
@@ -719,7 +864,7 @@ COMMIT;
    key=f"{SCRATCH}.{scratch_name(t)}.{cname}"
    scratch_def=scratch_snap['constraints'].get(key)
    if scratch_def is None:raise RuntimeError(f'HARNESS FAILURE: scratch constraint missing for {t} {frag!r}')
-   hit=next((r for r in remaining if r['def']==scratch_def),None)
+   hit=find_constraint_match(remaining,scratch_def)
    # NOT VALID in source is only ever a transient install-time property (e.g.
    # the deferred inbound-revision constraint is added NOT VALID and then
    # intentionally VALIDATEd after foundation locks release, per README) --
@@ -734,6 +879,22 @@ COMMIT;
    # (always-VALID) scratch rendering never has that suffix to match against.
    if hit is None:raise RuntimeError(f'Constraint definition drift on {t}: expected fragment not found live (exact match required): {frag!r}\n  expected(scratch)={scratch_def!r}\n  live remaining={remaining}')
    if hit['valid'] is not True:raise RuntimeError(f"Constraint not validated on {t}: {frag!r} is installed NOT VALID (convalidated={hit['valid']!r}); legacy-violating rows could be hiding behind it")
+   # Enforcement, not just presence (Astra round 5, gap #3): convalidated
+   # only proves the constraint was checked against existing rows once at
+   # validation time -- it says nothing about whether it is still ENFORCED
+   # going forward. A FOREIGN KEY's actual runtime enforcement is two
+   # internal (tgisinternal) triggers Postgres auto-creates -- one on this
+   # table, one on the referenced table -- neither declared in source, both
+   # invisible to the earlier snap['triggers'] query (which deliberately
+   # excludes internal triggers, since they are never something source
+   # declares). triggers_ok (computed in the live snapshot SQL from
+   # pg_trigger.tgconstraint) is true only when EVERY trigger implementing
+   # this exact constraint has tgenabled='O' -- an ALTER TABLE ... DISABLE
+   # TRIGGER on any of them (the classic "quietly turn off FK enforcement
+   # without touching the constraint row at all" bypass) now fails here.
+   # Harmless no-op for CHECK/PK/UNIQUE constraints, which have no
+   # implementing triggers at all (NOT EXISTS is trivially true for them).
+   if hit['triggers_ok'] is not True:raise RuntimeError(f"Constraint enforcement disabled on {t}: {frag!r} is present and validated but its internal enforcement trigger(s) are disabled (tgenabled<>'O') -- writes are no longer actually checked against it")
    # connoinherit is not compared: Postgres sets it per constraint-type default
    # (true for PRIMARY KEY/UNIQUE/FOREIGN KEY regardless of source DDL, since
    # this codebase never uses table inheritance) rather than reflecting
@@ -766,7 +927,7 @@ COMMIT;
 
  if snap['replica_identity']!='f':raise RuntimeError('Projection replica identity drift')
  if snap['privilege_exposure']!=0:raise RuntimeError('Private helper exposed to browser/service roles')
- result={'foundation_sha256':digest,'installed_function_bodies':len(functions_src),'installed_tables':len(all_tables),'installed_composite_types':len(composite_types),'installed_indexes':len(expected_index),'installed_triggers':len(expected_triggers),'installed_constraints':sum(len(extract_constraints_for_table(t)) for t in constraint_tables),'installed_rls_tables':len(rls_tables),'private_schemas_scanned':len(private_schemas),'private_helper_exposure_count':0,'replica_identity':'FULL','snapshot_isolation':'REPEATABLE READ, READ ONLY, single transaction','scope':'Read-only owned fixture catalog proof (plus a throwaway verify_scratch schema, created and dropped within this same run, used only to let Postgres itself canonically render the expected side of every function/constraint/index/default comparison -- byte-exact pg_get_functiondef/pg_get_constraintdef/pg_get_indexdef/pg_get_expr comparison, no custom text normalization, plus a separately pinned function-owner check) taken from one consistent REPEATABLE READ snapshot for the live side, not merely name presence; excludes runtime throughput and production schema equivalence'}
+ result={'foundation_sha256':digest,'installed_function_bodies':len(functions_src),'installed_tables':len(all_tables),'installed_composite_types':len(composite_types),'installed_indexes':len(expected_index),'installed_triggers':len(expected_triggers),'installed_constraints':sum(len(extract_constraints_for_table(t)) for t in constraint_tables),'installed_rls_tables':len(rls_tables),'private_schemas_scanned':len(private_schemas),'private_helper_exposure_count':0,'replica_identity':'FULL','snapshot_isolation':'REPEATABLE READ, READ ONLY, single transaction','scope':'Read-only owned fixture catalog proof (plus a throwaway verify_scratch schema, created and dropped within this same run, used only to let Postgres itself canonically render the expected side of every function/constraint/index/trigger/default comparison -- byte-exact pg_get_functiondef/pg_get_constraintdef/pg_get_indexdef/pg_get_triggerdef/pg_get_expr comparison, no custom text normalization, plus separately pinned function-owner and function-grant checks, plus FK/constraint enforcement-trigger-enabled checks) taken from one consistent REPEATABLE READ snapshot for the live side, not merely name presence; excludes runtime throughput and production schema equivalence'}
  (P/'catalog-evidence.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
 else:
  print('Source syntax, pinned transforms and installation receipt hash verified')
