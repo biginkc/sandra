@@ -81,6 +81,17 @@ test('sequence browser mutations provision and serve one shared E2E identity', a
   );
 });
 
+test('sequence mutation project names cap the label while preserving uniqueness', async () => {
+  const source = await readFile(path.join(root, 'scripts/run-sequence-reliability-mutations.mjs'), 'utf8');
+  assert.match(source, /const MAX_SUPABASE_PROJECT_NAME_LENGTH = 45;/);
+  assert.match(source, /function createMutationProjectName\(mutation, pid, timestamp\)/);
+  assert.match(source, /createMutationProjectName\(\s*args\.mutation,\s*process\.pid,\s*Date\.now\(\)\.toString\(36\),/);
+  assert.match(source, /const projectNameCheck = selfTestMutationProjectName\(\);/);
+  assert.match(source, /longest\.endsWith\("-2286-mu5jxjdm"\)/);
+  assert.match(source, /if \(longest === otherPid\)/);
+  assert.match(source, /projectNameCheck,/);
+});
+
 test('environment manifest records production UNKNOWN and the complete clock audit scope', async () => {
   const source = await readFile(path.join(root, 'scripts/run-disposable-canaries.mjs'), 'utf8');
   assert.match(source, /productionEquivalence:\s*\{[\s\S]*status:\s*'UNKNOWN'/);

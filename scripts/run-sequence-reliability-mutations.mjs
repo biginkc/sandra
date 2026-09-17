@@ -15,6 +15,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SUPABASE_CLI_VERSION = "2.116.0";
 const LOOPBACK_API_URL = "http://127.0.0.1:54321";
 const LOOPBACK_DB_URL = "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
+// Supabase composes service names from the project name with a realtime
+// prefix. Keep a conservative 45-character project bound for generated names
+// while preserving the unique suffix; this does not prove a startup cause.
+const MAX_SUPABASE_PROJECT_NAME_LENGTH = 45;
 const SUPABASE_EXCLUDES = [
   "studio",
   "postgres-meta",
@@ -291,6 +295,18 @@ function sha256(value) {
 
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function createMutationProjectName(mutation, pid, timestamp) {
+  const prefix = "seqmut-";
+  const suffix = `${pid}-${timestamp}`;
+  const availableLabelLength = MAX_SUPABASE_PROJECT_NAME_LENGTH - prefix.length - suffix.length - 1;
+  if (availableLabelLength < 1) {
+    throw new Error("Mutation project name cannot preserve its unique PID/timestamp suffix");
+  }
+  const label = mutation.replace(/[^a-zA-Z0-9-]/g, "-").slice(0, availableLabelLength);
+  if (!label) throw new Error("Mutation project name requires a non-empty mutation label");
+  return `${prefix}${label}-${suffix}`;
 }
 
 function parseVitestReport(stdout, stderr) {
@@ -658,6 +674,27 @@ async function selfTestMutationFailureClassification(realReport) {
   return selectedFailure ? "actual-report" : "representative-fixture";
 }
 
+function selfTestMutationProjectName() {
+  const longest = createMutationProjectName(
+    "final-authorization-removed",
+    2286,
+    "mu5jxjdm",
+  );
+  if (longest.length > MAX_SUPABASE_PROJECT_NAME_LENGTH ||
+      !longest.endsWith("-2286-mu5jxjdm")) {
+    throw new Error("Mutation project-name self-test did not preserve the bounded unique suffix");
+  }
+  const otherPid = createMutationProjectName(
+    "final-authorization-removed",
+    2287,
+    "mu5jxjdm",
+  );
+  if (longest === otherPid) {
+    throw new Error("Mutation project-name self-test collapsed distinct PID values");
+  }
+  return { longest, otherPid };
+}
+
 function parseStatusJson(stdout) {
   const text = String(stdout ?? "").trim();
   try {
@@ -838,6 +875,7 @@ async function selfTestParser(reportPath) {
   if (!realReport || realReport.numTotalTests < 1) {
     throw new Error("Parser self-test could not normalize the real Vitest report");
   }
+  const projectNameCheck = selfTestMutationProjectName();
   const mutationClassification = await selfTestMutationFailureClassification(realReport);
   if (realReport.numFailedTests > 0) {
     if (realReport.numFailedTests !== 1 || realReport.setupFailures !== 0) {
@@ -945,6 +983,7 @@ async function selfTestParser(reportPath) {
     setupFailureNormalization: setupFailure.setupFailures,
     playwrightTests: playwright.numTotalTests,
     mutationClassification,
+    projectNameCheck,
   })}`);
 }
 
@@ -1427,9 +1466,11 @@ try {
   const resolvedCommit = await verifyCandidate();
   evidence.commit = resolvedCommit;
   worktreeParent = await mkdtemp(path.join(tmpdir(), "sandra-sequence-mutation-worktree-"));
-  projectName = `seqmut-${args.mutation}-${process.pid}-${Date.now().toString(36)}`
-    .replace(/[^a-zA-Z0-9-]/g, "-")
-    .slice(0, 48);
+  projectName = createMutationProjectName(
+    args.mutation,
+    process.pid,
+    Date.now().toString(36),
+  );
   worktree = path.join(worktreeParent, projectName);
   evidence.docker.project = projectName;
   await git(["worktree", "add", "--detach", worktree, resolvedCommit], { label: "git-worktree-add" });
