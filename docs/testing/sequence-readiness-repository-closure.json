@@ -1,0 +1,38 @@
+{
+  "candidate": "2ddeaf555436ce0316f824639c061a4f7b9eab95",
+  "candidateMigrationsGitTree": "97b1150f14b9f81bbaf878bc8a876c6205b87b3e",
+  "comparisons": [
+    {
+      "proofCommit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+      "allChangedRepositoryFiles": [
+        "docs/testing/sequence-readiness-checklist.md",
+        "docs/testing/sequence-readiness-execution.md",
+        "scripts/run-disposable-canaries.mjs",
+        "scripts/run-disposable-canaries.test.mjs",
+        "scripts/run-sequence-reliability-mutations.mjs"
+      ],
+      "migrationsGitTree": "97b1150f14b9f81bbaf878bc8a876c6205b87b3e"
+    },
+    {
+      "proofCommit": "72cab7c88442bf145aa382101bb77265465f55b0",
+      "allChangedRepositoryFiles": [
+        "docs/testing/sequence-readiness-checklist.md",
+        "docs/testing/sequence-readiness-execution.md",
+        "scripts/run-disposable-canaries.test.mjs",
+        "scripts/run-sequence-reliability-mutations.mjs"
+      ],
+      "migrationsGitTree": "97b1150f14b9f81bbaf878bc8a876c6205b87b3e"
+    },
+    {
+      "proofCommit": "540924657928eb47c89f28eb03376c436f8d920c",
+      "allChangedRepositoryFiles": [
+        "docs/testing/sequence-readiness-checklist.md",
+        "docs/testing/sequence-readiness-execution.md",
+        "scripts/run-disposable-canaries.test.mjs",
+        "scripts/run-sequence-reliability-mutations.mjs"
+      ],
+      "migrationsGitTree": "97b1150f14b9f81bbaf878bc8a876c6205b87b3e"
+    }
+  ],
+  "meaning": "Complete repository diff: every file not listed is byte-identical, including all test setup/configuration, package lockfile, application source and migrations."
+}

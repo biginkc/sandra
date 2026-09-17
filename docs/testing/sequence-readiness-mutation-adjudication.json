@@ -1,0 +1,1389 @@
+{
+  "invocation": {
+    "command": "npm exec --yes --package=node@24 -- node scripts/.sequence-mutation-proof-diagnostic-closure.mjs",
+    "cwd": "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/sequence-readiness-20260917",
+    "node": "v24.21.0",
+    "executedScript": "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/sequence-readiness-20260917/scripts/.sequence-mutation-proof-diagnostic-closure.mjs",
+    "retainedScript": "/tmp/sandra-sequence-six-mutation-adjudication-harness-2ddeaf55-closure-20260917.mjs",
+    "executedScriptSha256": "e26dfbd7b1a6fcbd754cef58dd13dde7722b2f9e222ffcb3c01b19d48b262a84",
+    "retainedScriptSha256Expected": "e26dfbd7b1a6fcbd754cef58dd13dde7722b2f9e222ffcb3c01b19d48b262a84"
+  },
+  "harnessSourcePath": "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/sequence-readiness-20260917/scripts/run-sequence-reliability-mutations.mjs",
+  "harnessSha256": "814b344f82ff21fba2e6195d14b5b4892dba989e77d4c37843a5d762e56b1000",
+  "extraction": {
+    "fromByte": 0,
+    "toByteExclusive": 44961,
+    "sourceEntryPointCharOffset": 44943,
+    "sourcePrefixSha256": "a5363ebc5c89d847cd9d6c98c403b40e10d1ae97b39abeefb7241f4afe3e8184",
+    "retainedPrefixSha256": "a5363ebc5c89d847cd9d6c98c403b40e10d1ae97b39abeefb7241f4afe3e8184",
+    "exactPrefixEqual": true,
+    "symbols": [
+      {
+        "name": "reportAssertions",
+        "startByte": 17259,
+        "endByte": 17385,
+        "sha256": "2e5f2c8535ccb4b9254adb9b8bc55f4c1bb1683ccb1385b13dc67ce9e983d857",
+        "retainedSha256": "2e5f2c8535ccb4b9254adb9b8bc55f4c1bb1683ccb1385b13dc67ce9e983d857",
+        "equal": true
+      },
+      {
+        "name": "reportFailureMessages",
+        "startByte": 17385,
+        "endByte": 17616,
+        "sha256": "c0a80ac6d5755b38eed358b9495381fe9b18a310c09e21cb3e96c9c7579b6a36",
+        "retainedSha256": "c0a80ac6d5755b38eed358b9495381fe9b18a310c09e21cb3e96c9c7579b6a36",
+        "equal": true
+      },
+      {
+        "name": "hasAssertionDiagnostic",
+        "startByte": 17710,
+        "endByte": 18161,
+        "sha256": "2bfafb8e33dbb1dfc4e0e2d1662a1d65ab5ea0dfeb4b65f070f5c88ce6ad6033",
+        "retainedSha256": "2bfafb8e33dbb1dfc4e0e2d1662a1d65ab5ea0dfeb4b65f070f5c88ce6ad6033",
+        "equal": true
+      },
+      {
+        "name": "selectedSourceEnd",
+        "startByte": 18478,
+        "endByte": 18768,
+        "sha256": "76bba6bdf7423479053fcba01f7130e65034a93e3b3973f4c19250ce6e982b72",
+        "retainedSha256": "76bba6bdf7423479053fcba01f7130e65034a93e3b3973f4c19250ce6e982b72",
+        "equal": true
+      },
+      {
+        "name": "assertionMarkers",
+        "startByte": 18768,
+        "endByte": 18911,
+        "sha256": "a0bd5382a6259c20250ad1840020af027a19d582f2f3bb6335e2f271665d9a53",
+        "retainedSha256": "a0bd5382a6259c20250ad1840020af027a19d582f2f3bb6335e2f271665d9a53",
+        "equal": true
+      },
+      {
+        "name": "validateMutationMarkers",
+        "startByte": 18911,
+        "endByte": 19835,
+        "sha256": "1a9147657c3937ffcbe47b351c5d0efe2a94636086340ec54b5f15f059b64da1",
+        "retainedSha256": "1a9147657c3937ffcbe47b351c5d0efe2a94636086340ec54b5f15f059b64da1",
+        "equal": true
+      },
+      {
+        "name": "assertFailureAtSelectedAssertion",
+        "startByte": 19835,
+        "endByte": 21593,
+        "sha256": "fe9148573024e4972645f4c1efbd6fb303835e5a5bc7450ba924e7fb5bec5956",
+        "retainedSha256": "fe9148573024e4972645f4c1efbd6fb303835e5a5bc7450ba924e7fb5bec5956",
+        "equal": true
+      },
+      {
+        "name": "assertOnePassingTest",
+        "startByte": 21593,
+        "endByte": 22531,
+        "sha256": "5aa85ef9c9dfc7a639f2df0c12a13ee3d6454e62fbe9b2d3b4869d979a6804d0",
+        "retainedSha256": "5aa85ef9c9dfc7a639f2df0c12a13ee3d6454e62fbe9b2d3b4869d979a6804d0",
+        "equal": true
+      },
+      {
+        "name": "assertOneAssertionFailure",
+        "startByte": 22531,
+        "endByte": 24711,
+        "sha256": "5f688f87c2c5dc66a15c9ac893591ea2c00932e0a4b51943473d9c52d6926e35",
+        "retainedSha256": "5f688f87c2c5dc66a15c9ac893591ea2c00932e0a4b51943473d9c52d6926e35",
+        "equal": true
+      },
+      {
+        "name": "cloneJson",
+        "startByte": 24711,
+        "endByte": 24786,
+        "sha256": "7239d44c5d5ad4068fc6209c9231dbe5aa532084b551af0bd26c1b86e664f4a0",
+        "retainedSha256": "7239d44c5d5ad4068fc6209c9231dbe5aa532084b551af0bd26c1b86e664f4a0",
+        "equal": true
+      },
+      {
+        "name": "expectRejected",
+        "startByte": 24786,
+        "endByte": 25213,
+        "sha256": "3b5f0d344d60d1ac2caf85a1793fd0e26527b83949697a9ece36e11394c0d2c5",
+        "retainedSha256": "3b5f0d344d60d1ac2caf85a1793fd0e26527b83949697a9ece36e11394c0d2c5",
+        "equal": true
+      }
+    ]
+  },
+  "sourceRoot": "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/sequence-readiness-20260917",
+  "mutations": [
+    {
+      "mutation": "claim-uniqueness-removed",
+      "artifactPath": "/tmp/sandra-sequence-mutation-215777a8-claim-uniqueness-removed/evidence.json",
+      "evidenceSha256": "ce7af2b82537a33b8ddbc1268cc3aa6ace25679797fd21563749ea9b6da45a77",
+      "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+      "run": 35221922638,
+      "selectedSpec": {
+        "runner": "vitest",
+        "file": "src/lib/sequences/reliability.integration.test.ts",
+        "pattern": "uses one provider invocation in 20 synchronized two-client claim trials",
+        "expectedFullName": "/uses one provider invocation in 20 synchronized two-client claim trials/",
+        "markers": [
+          {
+            "marker": "      expect(\n        summaries.reduce((count, summary) => count + (summary.outcomes.sent ?? 0), 0),\n      ).toBe(1);",
+            "line": 608
+          },
+          {
+            "marker": "expect(providerInvocations).toHaveLength(trial + 1);",
+            "line": 611
+          },
+          {
+            "marker": "expect(runCount).toBe(1);",
+            "line": 616
+          }
+        ]
+      },
+      "markerValidation": "PASS",
+      "mutationRecord": {
+        "kind": "postflight-ddl",
+        "sql": "drop index if exists public.idx_step_runs_active_enrollment_step",
+        "beforeSha256": "8902056136eeae4300c0c67c9475e6a53beacb43bd1ad3be8cc899973b42ca4f",
+        "afterSha256": null
+      },
+      "phases": {
+        "baselineBefore": {
+          "target": {
+            "fullName": "native claim concurrency uses one provider invocation in 20 synchronized two-client claim trials and still progresses an unrelated enrollment",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours and explicit recovery repairs a missing referenced template through resume and sends exactly once",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "mutant": {
+          "target": {
+            "fullName": "native claim concurrency uses one provider invocation in 20 synchronized two-client claim trials and still progresses an unrelated enrollment",
+            "status": "expected-failure",
+            "numTotalTests": 1,
+            "numFailedTests": 1,
+            "setupFailures": 0,
+            "actualFailureLines": [
+              611
+            ],
+            "failureMessageSha256": "429efeb26cbc49f7e6f085a6ea656e6e8cc4fb098d2f6563d31a434e8edd3737"
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours and explicit recovery repairs a missing referenced template through resume and sends exactly once",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "baselineAfter": {
+          "target": {
+            "fullName": "native claim concurrency uses one provider invocation in 20 synchronized two-client claim trials and still progresses an unrelated enrollment",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours and explicit recovery repairs a missing referenced template through resume and sends exactly once",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        }
+      },
+      "guards": {
+        "wrongLine": "rejected",
+        "plainThrow": "rejected",
+        "setupFailure": "rejected",
+        "zeroCount": "rejected",
+        "multipleCount": "rejected",
+        "compileError": "rejected",
+        "targetTimeout": "rejected"
+      },
+      "cleanupArtifacts": [
+        {
+          "file": "022-supabase-stop.stderr.log",
+          "bytes": 227,
+          "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+          "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+        },
+        {
+          "file": "022-supabase-stop.stdout.log",
+          "bytes": 65,
+          "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+          "content": "Stopping containers...\nStopped supabase local development setup.\n"
+        },
+        {
+          "file": "023-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "023-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "024-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "024-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-git-worktree-remove.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-git-worktree-remove.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "postRestoreIndexProof": [
+        {
+          "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+          "transactionIsolation": "read committed",
+          "indexes": [
+            {
+              "name": "idx_enrollments_unique_active",
+              "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+            },
+            {
+              "name": "idx_step_runs_active_enrollment_step",
+              "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+            }
+          ],
+          "activeClaimIndexPresent": true
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "mutation": "advancement-suppressed",
+      "artifactPath": "/tmp/sandra-sequence-mutation-72cab7c8-advancement-suppressed/evidence.json",
+      "evidenceSha256": "c6b310379ea70fadd2c19f69a866e5416413e48bc2e018929083896da6ad5669",
+      "commit": "72cab7c88442bf145aa382101bb77265465f55b0",
+      "run": 35224977706,
+      "selectedSpec": {
+        "runner": "vitest",
+        "file": "src/lib/sequences/reliability.integration.test.ts",
+        "pattern": "fires two SMS steps and a due status-change step",
+        "expectedFullName": "/fires two SMS steps and a due status-change step/",
+        "markers": [
+          {
+            "marker": "expect(enrollment).toMatchObject({ status: \"active\", current_step_index: 1 });",
+            "line": 522
+          }
+        ]
+      },
+      "markerValidation": "PASS",
+      "mutationRecord": {
+        "kind": "source",
+        "file": "src/lib/sequences/tick.ts",
+        "beforeSha256": "2aec090c4bc664bf2c9bd31a43dfcdb82b074fcf9af5f060f430339fa24af3da",
+        "afterSha256": "3a8ec622a22c0066176356de02f17f52dbde42d9935f1ca017f4bbebc475d317",
+        "from": "const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);",
+        "to": "const advanceError = null;"
+      },
+      "phases": {
+        "baselineBefore": {
+          "target": {
+            "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native quiet-hours boundary characterization fails closed for an unknown state and leaves the provider untouched",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native scheduler snapshot versus reply/cancel does not send when a reply pauses the enrollment after the scheduler snapshot",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "mutant": {
+          "target": {
+            "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+            "status": "expected-failure",
+            "numTotalTests": 1,
+            "numFailedTests": 1,
+            "setupFailures": 0,
+            "actualFailureLines": [
+              522
+            ],
+            "failureMessageSha256": "b15963f5ae3779221b7664193c3baed2170ece49372f758d82e9cc5e5870fe10"
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native quiet-hours boundary characterization fails closed for an unknown state and leaves the provider untouched",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native scheduler snapshot versus reply/cancel does not send when a reply pauses the enrollment after the scheduler snapshot",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "baselineAfter": {
+          "target": {
+            "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native quiet-hours boundary characterization fails closed for an unknown state and leaves the provider untouched",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native scheduler snapshot versus reply/cancel does not send when a reply pauses the enrollment after the scheduler snapshot",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        }
+      },
+      "guards": {
+        "wrongLine": "rejected",
+        "plainThrow": "rejected",
+        "setupFailure": "rejected",
+        "zeroCount": "rejected",
+        "multipleCount": "rejected",
+        "compileError": "rejected",
+        "targetTimeout": "rejected"
+      },
+      "cleanupArtifacts": [
+        {
+          "file": "022-supabase-stop.stderr.log",
+          "bytes": 227,
+          "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+          "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+        },
+        {
+          "file": "022-supabase-stop.stdout.log",
+          "bytes": 65,
+          "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+          "content": "Stopping containers...\nStopped supabase local development setup.\n"
+        },
+        {
+          "file": "023-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "023-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "024-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "024-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-git-worktree-remove.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-git-worktree-remove.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "postRestoreIndexProof": [
+        {
+          "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+          "transactionIsolation": "read committed",
+          "indexes": [
+            {
+              "name": "idx_enrollments_unique_active",
+              "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+            },
+            {
+              "name": "idx_step_runs_active_enrollment_step",
+              "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+            }
+          ],
+          "activeClaimIndexPresent": true
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "mutation": "final-authorization-removed",
+      "artifactPath": "/tmp/sandra-sequence-mutation-54092465-final-authorization-removed/evidence.json",
+      "evidenceSha256": "f9919167c7d799aac2026c4359fd0ecb19b73b8e4dcc98da83f03ea9a8e2ee68",
+      "commit": "540924657928eb47c89f28eb03376c436f8d920c",
+      "run": 35227327569,
+      "selectedSpec": {
+        "runner": "vitest",
+        "file": "src/lib/sequences/reliability.integration.test.ts",
+        "pattern": "does not send when a reply pauses the enrollment after the scheduler snapshot",
+        "expectedFullName": "/does not send when a reply pauses the enrollment after the scheduler snapshot/",
+        "markers": [
+          {
+            "marker": "expect(outcome.status).toBe(\"paused\");",
+            "line": 1115
+          },
+          {
+            "marker": "expect(providerInvocations).toHaveLength(0);",
+            "line": 1116
+          }
+        ]
+      },
+      "markerValidation": "PASS",
+      "mutationRecord": {
+        "kind": "source",
+        "file": "src/lib/messaging/send.ts",
+        "beforeSha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+        "afterSha256": "764864c8283519356a3f9b0b05db3b002b5bfd726a461162365f5454c8ef22f6",
+        "from": "  if (input.sequenceContext) {",
+        "to": "  if (false && input.sequenceContext) {"
+      },
+      "phases": {
+        "baselineBefore": {
+          "target": {
+            "fullName": "native scheduler snapshot versus reply/cancel does not send when a reply pauses the enrollment after the scheduler snapshot",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "runSequenceTick (integration) fires step 0 of a due enrollment and advances to step 1",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours and explicit recovery repairs missing sender inventory through resume and sends exactly once",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "mutant": {
+          "target": {
+            "fullName": "native scheduler snapshot versus reply/cancel does not send when a reply pauses the enrollment after the scheduler snapshot",
+            "status": "expected-failure",
+            "numTotalTests": 1,
+            "numFailedTests": 1,
+            "setupFailures": 0,
+            "actualFailureLines": [
+              1115
+            ],
+            "failureMessageSha256": "1b953da4ba5e9ccdae08e6386c39dcd4fd67724f9e474ec3c0a7247251bb6541"
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "runSequenceTick (integration) fires step 0 of a due enrollment and advances to step 1",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours and explicit recovery repairs missing sender inventory through resume and sends exactly once",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "baselineAfter": {
+          "target": {
+            "fullName": "native scheduler snapshot versus reply/cancel does not send when a reply pauses the enrollment after the scheduler snapshot",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "runSequenceTick (integration) fires step 0 of a due enrollment and advances to step 1",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours and explicit recovery repairs missing sender inventory through resume and sends exactly once",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        }
+      },
+      "guards": {
+        "wrongLine": "rejected",
+        "plainThrow": "rejected",
+        "setupFailure": "rejected",
+        "zeroCount": "rejected",
+        "multipleCount": "rejected",
+        "compileError": "rejected",
+        "targetTimeout": "rejected"
+      },
+      "cleanupArtifacts": [
+        {
+          "file": "022-supabase-stop.stderr.log",
+          "bytes": 227,
+          "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+          "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+        },
+        {
+          "file": "022-supabase-stop.stdout.log",
+          "bytes": 65,
+          "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+          "content": "Stopping containers...\nStopped supabase local development setup.\n"
+        },
+        {
+          "file": "023-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "023-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "024-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "024-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-git-worktree-remove.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-git-worktree-remove.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "postRestoreIndexProof": [
+        {
+          "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+          "transactionIsolation": "read committed",
+          "indexes": [
+            {
+              "name": "idx_enrollments_unique_active",
+              "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+            },
+            {
+              "name": "idx_step_runs_active_enrollment_step",
+              "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+            }
+          ],
+          "activeClaimIndexPresent": true
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "mutation": "persistence-error-ignored",
+      "artifactPath": "/tmp/sandra-sequence-mutation-215777a8-persistence-error-ignored/evidence.json",
+      "evidenceSha256": "5a9ac2fb60cd1c27d1b0cf2160705cf986854d6e7dff5979219fa0a85b4dd659",
+      "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+      "run": 35221931081,
+      "selectedSpec": {
+        "runner": "vitest",
+        "file": "src/lib/sequences/scheduling-reliability.integration.test.ts",
+        "pattern": "keeps an accepted provider attempt reconciliable when message receipt persistence returns a DB error",
+        "expectedFullName": "/keeps an accepted provider attempt reconciliable when message receipt persistence returns a DB error/",
+        "markers": [
+          {
+            "marker": "expect(first.outcomes.failed).toBe(1);",
+            "line": 880
+          }
+        ]
+      },
+      "markerValidation": "PASS",
+      "mutationRecord": {
+        "kind": "source",
+        "file": "src/lib/messaging/send.ts",
+        "beforeSha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+        "afterSha256": "31d3f1a4d7b3e37bf5eece15f51e54b49ac53f6adef6372a8fa7807f6080b2ec",
+        "from": "    if (updateError || !updated) {",
+        "to": "    if (false) {"
+      },
+      "phases": {
+        "baselineBefore": {
+          "target": {
+            "fullName": "native accepted-message persistence recovery keeps an accepted provider attempt reconciliable when message receipt persistence returns a DB error",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours and explicit recovery repairs missing sender inventory through resume and sends exactly once",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "mutant": {
+          "target": {
+            "fullName": "native accepted-message persistence recovery keeps an accepted provider attempt reconciliable when message receipt persistence returns a DB error",
+            "status": "expected-failure",
+            "numTotalTests": 1,
+            "numFailedTests": 1,
+            "setupFailures": 0,
+            "actualFailureLines": [
+              880
+            ],
+            "failureMessageSha256": "4ec69c47a2d1a4855c539d53cbee1c053d5e82a7fdb967834e3b77d4243b8465"
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours and explicit recovery repairs missing sender inventory through resume and sends exactly once",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "baselineAfter": {
+          "target": {
+            "fullName": "native accepted-message persistence recovery keeps an accepted provider attempt reconciliable when message receipt persistence returns a DB error",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours and explicit recovery repairs missing sender inventory through resume and sends exactly once",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        }
+      },
+      "guards": {
+        "wrongLine": "rejected",
+        "plainThrow": "rejected",
+        "setupFailure": "rejected",
+        "zeroCount": "rejected",
+        "multipleCount": "rejected",
+        "compileError": "rejected",
+        "targetTimeout": "rejected"
+      },
+      "cleanupArtifacts": [
+        {
+          "file": "022-supabase-stop.stderr.log",
+          "bytes": 227,
+          "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+          "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+        },
+        {
+          "file": "022-supabase-stop.stdout.log",
+          "bytes": 65,
+          "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+          "content": "Stopping containers...\nStopped supabase local development setup.\n"
+        },
+        {
+          "file": "023-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "023-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "024-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "024-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-git-worktree-remove.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-git-worktree-remove.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "postRestoreIndexProof": [
+        {
+          "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+          "transactionIsolation": "read committed",
+          "indexes": [
+            {
+              "name": "idx_enrollments_unique_active",
+              "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+            },
+            {
+              "name": "idx_step_runs_active_enrollment_step",
+              "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+            }
+          ],
+          "activeClaimIndexPresent": true
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "mutation": "unsafe-ambiguous-retry",
+      "artifactPath": "/tmp/sandra-sequence-mutation-215777a8-unsafe-ambiguous-retry/evidence.json",
+      "evidenceSha256": "6ad5b87ece910c147e45bb450bc29aed334ac6578702277f2e0711d0ac6393f9",
+      "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+      "run": 35221933931,
+      "selectedSpec": {
+        "runner": "vitest",
+        "file": "src/lib/sequences/reliability.integration.test.ts",
+        "pattern": "never blindly re-sends an accepted native SMS when claim receipt bookkeeping is ambiguous",
+        "expectedFullName": "/never blindly re-sends an accepted native SMS when claim receipt bookkeeping is ambiguous/",
+        "markers": [
+          {
+            "marker": "expect(ambiguousRetry).toMatchObject({ status: \"reconciliation_required\" });",
+            "line": 990
+          }
+        ]
+      },
+      "markerValidation": "PASS",
+      "mutationRecord": {
+        "kind": "migration",
+        "file": "supabase/migrations/20260917110000_sequence_runtime_recovery.sql",
+        "beforeSha256": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73",
+        "afterSha256": "a805af3df9838c0a191c2ea702c4f86cf2512cc4df42cbe9b8806d4b4cbef885",
+        "from": "  if prior.id is not null and (\n       prior.attempt_outcome not in ('not_attempted', 'definitively_rejected')\n     ) then",
+        "to": "  if false then"
+      },
+      "phases": {
+        "baselineBefore": {
+          "target": {
+            "fullName": "native retained-claim recovery never blindly re-sends an accepted native SMS when claim receipt bookkeeping is ambiguous",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "runSequenceTick (integration) fires step 0 of a due enrollment and advances to step 1",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours boundary characterization fails closed for an unknown state and leaves the provider untouched",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "mutant": {
+          "target": {
+            "fullName": "native retained-claim recovery never blindly re-sends an accepted native SMS when claim receipt bookkeeping is ambiguous",
+            "status": "expected-failure",
+            "numTotalTests": 1,
+            "numFailedTests": 1,
+            "setupFailures": 0,
+            "actualFailureLines": [
+              990
+            ],
+            "failureMessageSha256": "7f974a4ee535332a97adf6dfe99f8d822eb2bd3190bb14bec888ff9b6727ccae"
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "runSequenceTick (integration) fires step 0 of a due enrollment and advances to step 1",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours boundary characterization fails closed for an unknown state and leaves the provider untouched",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "baselineAfter": {
+          "target": {
+            "fullName": "native retained-claim recovery never blindly re-sends an accepted native SMS when claim receipt bookkeeping is ambiguous",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "runSequenceTick (integration) fires step 0 of a due enrollment and advances to step 1",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours boundary characterization fails closed for an unknown state and leaves the provider untouched",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        }
+      },
+      "guards": {
+        "wrongLine": "rejected",
+        "plainThrow": "rejected",
+        "setupFailure": "rejected",
+        "zeroCount": "rejected",
+        "multipleCount": "rejected",
+        "compileError": "rejected",
+        "targetTimeout": "rejected"
+      },
+      "cleanupArtifacts": [
+        {
+          "file": "024-supabase-stop.stderr.log",
+          "bytes": 227,
+          "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+          "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+        },
+        {
+          "file": "024-supabase-stop.stdout.log",
+          "bytes": 65,
+          "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+          "content": "Stopping containers...\nStopped supabase local development setup.\n"
+        },
+        {
+          "file": "025-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "028-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "028-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "029-git-worktree-remove.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "029-git-worktree-remove.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "postRestoreIndexProof": [
+        {
+          "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+          "transactionIsolation": "read committed",
+          "indexes": [
+            {
+              "name": "idx_enrollments_unique_active",
+              "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+            },
+            {
+              "name": "idx_step_runs_active_enrollment_step",
+              "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+            }
+          ],
+          "activeClaimIndexPresent": true
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "mutation": "suppression-bypassed",
+      "artifactPath": "/tmp/sandra-sequence-mutation-215777a8-suppression-bypassed/evidence.json",
+      "evidenceSha256": "660a0c50358d70d882962e1fa5aebab9861fc62265fa8848f2e53401db29b60e",
+      "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+      "run": 35221937134,
+      "selectedSpec": {
+        "runner": "vitest",
+        "file": "src/lib/messaging/send.integration.test.ts",
+        "pattern": "automated sends are blocked on a human-owned dispo",
+        "expectedFullName": "/automated sends are blocked on a human-owned dispo/",
+        "markers": [
+          {
+            "marker": "expect(outcome.status).toBe(\"blocked_automated_suppressed\");",
+            "line": 473
+          }
+        ]
+      },
+      "markerValidation": "PASS",
+      "mutationRecord": {
+        "kind": "source",
+        "file": "src/lib/messaging/send.ts",
+        "beforeSha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+        "afterSha256": "54c8e075254e4ae4dec162aa09e517d844107745961fbf1a5233ee2bbf0bdd67",
+        "from": "  if (input.origin === \"automated\") {",
+        "to": "  if (false && input.origin === \"automated\") {"
+      },
+      "phases": {
+        "baselineBefore": {
+          "target": {
+            "fullName": "sendSmsToContact (integration) automated sends are blocked on a human-owned dispo the early SUPPRESSED_DISPOS check does not catch \u2014 zero provider calls",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours boundary characterization fails closed for an unknown state and leaves the provider untouched",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "mutant": {
+          "target": {
+            "fullName": "sendSmsToContact (integration) automated sends are blocked on a human-owned dispo the early SUPPRESSED_DISPOS check does not catch \u2014 zero provider calls",
+            "status": "expected-failure",
+            "numTotalTests": 1,
+            "numFailedTests": 1,
+            "setupFailures": 0,
+            "actualFailureLines": [
+              473,
+              37,
+              458
+            ],
+            "failureMessageSha256": "3f9ea5450f54ad5aa541c77203631cb40ab64db7ccf483e7d76406e0122448aa"
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours boundary characterization fails closed for an unknown state and leaves the provider untouched",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        },
+        "baselineAfter": {
+          "target": {
+            "fullName": "sendSmsToContact (integration) automated sends are blocked on a human-owned dispo the early SUPPRESSED_DISPOS check does not catch \u2014 zero provider calls",
+            "status": "passed",
+            "numTotalTests": 1,
+            "numFailedTests": 0,
+            "setupFailures": 0,
+            "actualFailureLines": [],
+            "failureMessageSha256": null
+          },
+          "controls": [
+            {
+              "index": 1,
+              "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            },
+            {
+              "index": 2,
+              "fullName": "native quiet-hours boundary characterization fails closed for an unknown state and leaves the provider untouched",
+              "status": "passed",
+              "numTotalTests": 1,
+              "numFailedTests": 0,
+              "setupFailures": 0
+            }
+          ]
+        }
+      },
+      "guards": {
+        "wrongLine": "rejected",
+        "plainThrow": "rejected",
+        "setupFailure": "rejected",
+        "zeroCount": "rejected",
+        "multipleCount": "rejected",
+        "compileError": "rejected",
+        "targetTimeout": "rejected"
+      },
+      "cleanupArtifacts": [
+        {
+          "file": "022-supabase-stop.stderr.log",
+          "bytes": 227,
+          "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+          "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+        },
+        {
+          "file": "022-supabase-stop.stdout.log",
+          "bytes": 65,
+          "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+          "content": "Stopping containers...\nStopped supabase local development setup.\n"
+        },
+        {
+          "file": "023-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "023-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "024-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "024-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "025-docker-list-container.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "026-docker-list-volume.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-git-worktree-remove.stderr.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "file": "027-git-worktree-remove.stdout.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "postRestoreIndexProof": [
+        {
+          "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+          "transactionIsolation": "read committed",
+          "indexes": [
+            {
+              "name": "idx_enrollments_unique_active",
+              "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+            },
+            {
+              "name": "idx_step_runs_active_enrollment_step",
+              "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+            }
+          ],
+          "activeClaimIndexPresent": true
+        }
+      ],
+      "result": "PASS"
+    }
+  ],
+  "candidate": "2ddeaf555436ce0316f824639c061a4f7b9eab95",
+  "retainedExecutableEvidence": "docs/testing/sequence-readiness-replay-source.mjs.txt",
+  "replayInstructions": "Copy retained text bytes to scripts/.sequence-mutation-proof-diagnostic.mjs in the candidate worktree with recorded artifacts present; run recorded Node24 invocation; remove only temporary sibling."
+}

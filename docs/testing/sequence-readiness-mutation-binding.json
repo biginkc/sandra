@@ -1,0 +1,149 @@
+{
+  "candidate": "2ddeaf555436ce0316f824639c061a4f7b9eab95",
+  "mutationApplicationAndRestorationFunctions": {
+    "applySourceMutation": {
+      "sha256ByProofCommit": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "393991570192caae99e43419c8a34c3c159cee7dc50f9f836711e7f423520d73",
+        "2ddeaf555436ce0316f824639c061a4f7b9eab95": "393991570192caae99e43419c8a34c3c159cee7dc50f9f836711e7f423520d73",
+        "540924657928eb47c89f28eb03376c436f8d920c": "393991570192caae99e43419c8a34c3c159cee7dc50f9f836711e7f423520d73",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "393991570192caae99e43419c8a34c3c159cee7dc50f9f836711e7f423520d73"
+      },
+      "identicalAtAllProofCommits": true
+    },
+    "applyMutation": {
+      "sha256ByProofCommit": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "1a2620ae7cdd848e7a454d8e431ba66c1cd7e582113de0a8be5e452334b463f0",
+        "2ddeaf555436ce0316f824639c061a4f7b9eab95": "1a2620ae7cdd848e7a454d8e431ba66c1cd7e582113de0a8be5e452334b463f0",
+        "540924657928eb47c89f28eb03376c436f8d920c": "1a2620ae7cdd848e7a454d8e431ba66c1cd7e582113de0a8be5e452334b463f0",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "1a2620ae7cdd848e7a454d8e431ba66c1cd7e582113de0a8be5e452334b463f0"
+      },
+      "identicalAtAllProofCommits": true
+    },
+    "restoreMutation": {
+      "sha256ByProofCommit": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "43ce7d8838bedec23624cec6f33906b610d5a9cb512f9f348daf1c375ef0f1cb",
+        "2ddeaf555436ce0316f824639c061a4f7b9eab95": "43ce7d8838bedec23624cec6f33906b610d5a9cb512f9f348daf1c375ef0f1cb",
+        "540924657928eb47c89f28eb03376c436f8d920c": "43ce7d8838bedec23624cec6f33906b610d5a9cb512f9f348daf1c375ef0f1cb",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "43ce7d8838bedec23624cec6f33906b610d5a9cb512f9f348daf1c375ef0f1cb"
+      },
+      "identicalAtAllProofCommits": true
+    }
+  },
+  "bindings": [
+    {
+      "mutation": "claim-uniqueness-removed",
+      "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+      "run": 35221922638,
+      "record": {
+        "kind": "postflight-ddl",
+        "sql": "drop index if exists public.idx_step_runs_active_enrollment_step",
+        "beforeSha256": "8902056136eeae4300c0c67c9475e6a53beacb43bd1ad3be8cc899973b42ca4f",
+        "afterSha256": null
+      },
+      "executedDdlGuardSource": "  if (selectedMutation.kind === \"postflight-ddl\") {\n    const client = new Client({ connectionString: LOOPBACK_DB_URL, connectionTimeoutMillis: 10_000 });\n    await client.connect();\n    try {\n      await client.query(selectedMutation.sql);\n      const { rows } = await client.query(\"select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relname = 'idx_step_runs_active_enrollment_step'\");\n      if (rows.length) throw new Error(\"Claim uniqueness mutant did not remove the active index\");\n    } finally {\n      await client.end();\n    }\n    mutationRecord = {\n      kind: selectedMutation.kind,\n      sql: selectedMutation.sql,\n      beforeSha256: evidence.preflight.at(-1)?.indexes?.find((index) => index.name === \"idx_step_runs_active_enrollment_step\")?.definition\n        ? sha256(evidence.preflight.at(-1).indexes.find((index) => index.name === \"idx_step_runs_active_enrollment_step\").definition)\n        : null,\n      afterSha256: null,\n    };\n    evidence.mutationSetup = \"active claim uniqueness removed after clean DB preflight via owned local SQL session\";\n    await writeFile(path.join(artifactsDir, \"mutation.patch.txt\"), `${selectedMutation.sql};\\n`);\n    return;\n  }\n",
+      "indexAbsenceEvidence": "Proof-commit harness awaits the DROP, queries pg_class, and throws if any index row remains before recording mutationRecord and running mutant tests. Raw post-drop rows are not serialized; inline guard success is evidenced by subsequent recorded mutation and mutant execution."
+    },
+    {
+      "mutation": "advancement-suppressed",
+      "commit": "72cab7c88442bf145aa382101bb77265465f55b0",
+      "run": 35224977706,
+      "record": {
+        "kind": "source",
+        "file": "src/lib/sequences/tick.ts",
+        "beforeSha256": "2aec090c4bc664bf2c9bd31a43dfcdb82b074fcf9af5f060f430339fa24af3da",
+        "afterSha256": "3a8ec622a22c0066176356de02f17f52dbde42d9935f1ca017f4bbebc475d317",
+        "from": "const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);",
+        "to": "const advanceError = null;"
+      },
+      "exactRecordedPatchReconstructsAfterHash": true,
+      "matchedSourceLine": 441,
+      "sourceOccurrenceCount": 2,
+      "candidateOriginalHashMatches": true
+    },
+    {
+      "mutation": "final-authorization-removed",
+      "commit": "540924657928eb47c89f28eb03376c436f8d920c",
+      "run": 35227327569,
+      "record": {
+        "kind": "source",
+        "file": "src/lib/messaging/send.ts",
+        "beforeSha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+        "afterSha256": "764864c8283519356a3f9b0b05db3b002b5bfd726a461162365f5454c8ef22f6",
+        "from": "  if (input.sequenceContext) {",
+        "to": "  if (false && input.sequenceContext) {"
+      },
+      "exactRecordedPatchReconstructsAfterHash": true,
+      "matchedSourceLine": 485,
+      "sourceOccurrenceCount": 1,
+      "candidateOriginalHashMatches": true
+    },
+    {
+      "mutation": "persistence-error-ignored",
+      "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+      "run": 35221931081,
+      "record": {
+        "kind": "source",
+        "file": "src/lib/messaging/send.ts",
+        "beforeSha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+        "afterSha256": "31d3f1a4d7b3e37bf5eece15f51e54b49ac53f6adef6372a8fa7807f6080b2ec",
+        "from": "    if (updateError || !updated) {",
+        "to": "    if (false) {"
+      },
+      "exactRecordedPatchReconstructsAfterHash": true,
+      "matchedSourceLine": 574,
+      "sourceOccurrenceCount": 2,
+      "candidateOriginalHashMatches": true
+    },
+    {
+      "mutation": "unsafe-ambiguous-retry",
+      "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+      "run": 35221933931,
+      "record": {
+        "kind": "migration",
+        "file": "supabase/migrations/20260917110000_sequence_runtime_recovery.sql",
+        "beforeSha256": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73",
+        "afterSha256": "a805af3df9838c0a191c2ea702c4f86cf2512cc4df42cbe9b8806d4b4cbef885",
+        "from": "  if prior.id is not null and (\n       prior.attempt_outcome not in ('not_attempted', 'definitively_rejected')\n     ) then",
+        "to": "  if false then"
+      },
+      "exactRecordedPatchReconstructsAfterHash": true,
+      "matchedSourceLine": 476,
+      "sourceOccurrenceCount": 1,
+      "candidateOriginalHashMatches": true
+    },
+    {
+      "mutation": "suppression-bypassed",
+      "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+      "run": 35221937134,
+      "record": {
+        "kind": "source",
+        "file": "src/lib/messaging/send.ts",
+        "beforeSha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+        "afterSha256": "54c8e075254e4ae4dec162aa09e517d844107745961fbf1a5233ee2bbf0bdd67",
+        "from": "  if (input.origin === \"automated\") {",
+        "to": "  if (false && input.origin === \"automated\") {"
+      },
+      "exactRecordedPatchReconstructsAfterHash": true,
+      "matchedSourceLine": 437,
+      "sourceOccurrenceCount": 1,
+      "candidateOriginalHashMatches": true
+    },
+    {
+      "mutation": "ui-persistence-dropped",
+      "commit": "2ddeaf555436ce0316f824639c061a4f7b9eab95",
+      "run": 35228139492,
+      "record": {
+        "kind": "source",
+        "file": "src/app/(dashboard)/sequences/actions.ts",
+        "beforeSha256": "923cdf5aae8513cb0064eb80b8c13e24c135f0474b2c0beb337e6ba9e7dbd46d",
+        "afterSha256": "990297e58fadc701ebdebdf902c1ecc9debc722607cea9096642546887447573",
+        "from": "    if (patch.description !== undefined) update.description = patch.description;",
+        "to": "    if (false && patch.description !== undefined) update.description = patch.description;"
+      },
+      "exactRecordedPatchReconstructsAfterHash": true,
+      "matchedSourceLine": 250,
+      "sourceOccurrenceCount": 1,
+      "candidateOriginalHashMatches": true
+    }
+  ]
+}

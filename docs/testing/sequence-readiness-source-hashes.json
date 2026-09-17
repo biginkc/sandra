@@ -1,0 +1,860 @@
+{
+  "candidate": "2ddeaf555436ce0316f824639c061a4f7b9eab95",
+  "proofCommits": [
+    "215777a84ad9775d1d9950ff245bf90de539b06b",
+    "72cab7c88442bf145aa382101bb77265465f55b0",
+    "540924657928eb47c89f28eb03376c436f8d920c"
+  ],
+  "files": [
+    {
+      "file": "e2e/sequence-readiness.local.spec.ts",
+      "candidateSha256": "1bd0420544a541a3aaf527b4957efcd7eb5bc38feababa2a05ea2db068183943",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "1bd0420544a541a3aaf527b4957efcd7eb5bc38feababa2a05ea2db068183943",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "1bd0420544a541a3aaf527b4957efcd7eb5bc38feababa2a05ea2db068183943",
+        "540924657928eb47c89f28eb03376c436f8d920c": "1bd0420544a541a3aaf527b4957efcd7eb5bc38feababa2a05ea2db068183943"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "playwright.sequence-readiness.config.ts",
+      "candidateSha256": "ca72e0d62f830414f53910c61dbe88b4be4339b8a2a610ade82059c7fef14365",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "ca72e0d62f830414f53910c61dbe88b4be4339b8a2a610ade82059c7fef14365",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "ca72e0d62f830414f53910c61dbe88b4be4339b8a2a610ade82059c7fef14365",
+        "540924657928eb47c89f28eb03376c436f8d920c": "ca72e0d62f830414f53910c61dbe88b4be4339b8a2a610ade82059c7fef14365"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "scripts/run-sequence-reliability-mutations.mjs",
+      "candidateSha256": "814b344f82ff21fba2e6195d14b5b4892dba989e77d4c37843a5d762e56b1000",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "2036366590da902e299f2f3b56c5764bcdd58e4bf310821679b98389b2cc6d96",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "7641fabf59c5537c9d6db5a7d31c249b13e6eeecf65497ceeb59f06c97aa1898",
+        "540924657928eb47c89f28eb03376c436f8d920c": "f68344a1ff0d0fe6082c1a00a6de392e92e652f47210ce24d9d1ff5efe9f9874"
+      },
+      "unchangedAtEveryProofCommit": false
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/[id]/edit/editor.test.tsx",
+      "candidateSha256": "8e77747275f0bf6ad4d63b69fc6b8485509e47d380f8af02cfbab7cf7efed017",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "8e77747275f0bf6ad4d63b69fc6b8485509e47d380f8af02cfbab7cf7efed017",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "8e77747275f0bf6ad4d63b69fc6b8485509e47d380f8af02cfbab7cf7efed017",
+        "540924657928eb47c89f28eb03376c436f8d920c": "8e77747275f0bf6ad4d63b69fc6b8485509e47d380f8af02cfbab7cf7efed017"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/[id]/edit/editor.tsx",
+      "candidateSha256": "240fb4fef50e6a6f0b22600c783770b5937000fab360e92152065d86f59d4ab7",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "240fb4fef50e6a6f0b22600c783770b5937000fab360e92152065d86f59d4ab7",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "240fb4fef50e6a6f0b22600c783770b5937000fab360e92152065d86f59d4ab7",
+        "540924657928eb47c89f28eb03376c436f8d920c": "240fb4fef50e6a6f0b22600c783770b5937000fab360e92152065d86f59d4ab7"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/[id]/edit/page.tsx",
+      "candidateSha256": "21edc020f13735ee6fd500dd7d38e2ba26b0fc5903e3869bc0bef01002c0b1de",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "21edc020f13735ee6fd500dd7d38e2ba26b0fc5903e3869bc0bef01002c0b1de",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "21edc020f13735ee6fd500dd7d38e2ba26b0fc5903e3869bc0bef01002c0b1de",
+        "540924657928eb47c89f28eb03376c436f8d920c": "21edc020f13735ee6fd500dd7d38e2ba26b0fc5903e3869bc0bef01002c0b1de"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/actions.test.ts",
+      "candidateSha256": "051e5fbd46d829f4c7ce0dbb3cc09af000061f302f543e6f27c201be78c6ef2a",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "051e5fbd46d829f4c7ce0dbb3cc09af000061f302f543e6f27c201be78c6ef2a",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "051e5fbd46d829f4c7ce0dbb3cc09af000061f302f543e6f27c201be78c6ef2a",
+        "540924657928eb47c89f28eb03376c436f8d920c": "051e5fbd46d829f4c7ce0dbb3cc09af000061f302f543e6f27c201be78c6ef2a"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/actions.ts",
+      "candidateSha256": "923cdf5aae8513cb0064eb80b8c13e24c135f0474b2c0beb337e6ba9e7dbd46d",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "923cdf5aae8513cb0064eb80b8c13e24c135f0474b2c0beb337e6ba9e7dbd46d",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "923cdf5aae8513cb0064eb80b8c13e24c135f0474b2c0beb337e6ba9e7dbd46d",
+        "540924657928eb47c89f28eb03376c436f8d920c": "923cdf5aae8513cb0064eb80b8c13e24c135f0474b2c0beb337e6ba9e7dbd46d"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/admin.ts",
+      "candidateSha256": "580f5474ac90ef9e0702b8567d3c39b654addb7337a7647044bf28eb6d77dfe0",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "580f5474ac90ef9e0702b8567d3c39b654addb7337a7647044bf28eb6d77dfe0",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "580f5474ac90ef9e0702b8567d3c39b654addb7337a7647044bf28eb6d77dfe0",
+        "540924657928eb47c89f28eb03376c436f8d920c": "580f5474ac90ef9e0702b8567d3c39b654addb7337a7647044bf28eb6d77dfe0"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/new/form.test.tsx",
+      "candidateSha256": "e925323fcb590ac26a55c8a3ecb33c5da8b7858131ecfec9d6ca5af456465122",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "e925323fcb590ac26a55c8a3ecb33c5da8b7858131ecfec9d6ca5af456465122",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "e925323fcb590ac26a55c8a3ecb33c5da8b7858131ecfec9d6ca5af456465122",
+        "540924657928eb47c89f28eb03376c436f8d920c": "e925323fcb590ac26a55c8a3ecb33c5da8b7858131ecfec9d6ca5af456465122"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/new/form.tsx",
+      "candidateSha256": "912d58cffbbb5e751cd198976a0155a355c4a8996c84998a0bb6d6ee17fbb5bc",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "912d58cffbbb5e751cd198976a0155a355c4a8996c84998a0bb6d6ee17fbb5bc",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "912d58cffbbb5e751cd198976a0155a355c4a8996c84998a0bb6d6ee17fbb5bc",
+        "540924657928eb47c89f28eb03376c436f8d920c": "912d58cffbbb5e751cd198976a0155a355c4a8996c84998a0bb6d6ee17fbb5bc"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/new/page.tsx",
+      "candidateSha256": "d534d03a0f15002a4f5f71b40fa984a1daf35660ae9156d845e06d775104258b",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "d534d03a0f15002a4f5f71b40fa984a1daf35660ae9156d845e06d775104258b",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "d534d03a0f15002a4f5f71b40fa984a1daf35660ae9156d845e06d775104258b",
+        "540924657928eb47c89f28eb03376c436f8d920c": "d534d03a0f15002a4f5f71b40fa984a1daf35660ae9156d845e06d775104258b"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/page.tsx",
+      "candidateSha256": "1a3e56644cb9031c66a4131a18875904011e337babec98803b470d8fd8f91d0b",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "1a3e56644cb9031c66a4131a18875904011e337babec98803b470d8fd8f91d0b",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "1a3e56644cb9031c66a4131a18875904011e337babec98803b470d8fd8f91d0b",
+        "540924657928eb47c89f28eb03376c436f8d920c": "1a3e56644cb9031c66a4131a18875904011e337babec98803b470d8fd8f91d0b"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/(dashboard)/sequences/row-actions.tsx",
+      "candidateSha256": "88928471ad91fc158e3748bd511761d51c68d56eb0a01f30c5ec79c53d4d1bd8",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "88928471ad91fc158e3748bd511761d51c68d56eb0a01f30c5ec79c53d4d1bd8",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "88928471ad91fc158e3748bd511761d51c68d56eb0a01f30c5ec79c53d4d1bd8",
+        "540924657928eb47c89f28eb03376c436f8d920c": "88928471ad91fc158e3748bd511761d51c68d56eb0a01f30c5ec79c53d4d1bd8"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/api/cron/sequence-tick/handlers.test.ts",
+      "candidateSha256": "ae90a1bc6640d1eda7374f1720bf9ff229568f21c7768aacd2c9deaa963bb791",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "ae90a1bc6640d1eda7374f1720bf9ff229568f21c7768aacd2c9deaa963bb791",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "ae90a1bc6640d1eda7374f1720bf9ff229568f21c7768aacd2c9deaa963bb791",
+        "540924657928eb47c89f28eb03376c436f8d920c": "ae90a1bc6640d1eda7374f1720bf9ff229568f21c7768aacd2c9deaa963bb791"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/api/cron/sequence-tick/handlers.ts",
+      "candidateSha256": "9f4a84e0616b9746c9567b351681d2f5ba5e574d772ce2b8bc145387640c11d7",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "9f4a84e0616b9746c9567b351681d2f5ba5e574d772ce2b8bc145387640c11d7",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "9f4a84e0616b9746c9567b351681d2f5ba5e574d772ce2b8bc145387640c11d7",
+        "540924657928eb47c89f28eb03376c436f8d920c": "9f4a84e0616b9746c9567b351681d2f5ba5e574d772ce2b8bc145387640c11d7"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/api/cron/sequence-tick/route.integration.test.ts",
+      "candidateSha256": "4375b0c534e3bb08bd4e584240712f6dfb47cf4d97ba54f826e440c0930f4fe2",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "4375b0c534e3bb08bd4e584240712f6dfb47cf4d97ba54f826e440c0930f4fe2",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "4375b0c534e3bb08bd4e584240712f6dfb47cf4d97ba54f826e440c0930f4fe2",
+        "540924657928eb47c89f28eb03376c436f8d920c": "4375b0c534e3bb08bd4e584240712f6dfb47cf4d97ba54f826e440c0930f4fe2"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/api/cron/sequence-tick/route.queue.integration.test.ts",
+      "candidateSha256": "890746721fb1cad750d5a703eae6d68ba899432b0453f7e4cfeccb9a8287806c",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "890746721fb1cad750d5a703eae6d68ba899432b0453f7e4cfeccb9a8287806c",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "890746721fb1cad750d5a703eae6d68ba899432b0453f7e4cfeccb9a8287806c",
+        "540924657928eb47c89f28eb03376c436f8d920c": "890746721fb1cad750d5a703eae6d68ba899432b0453f7e4cfeccb9a8287806c"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/app/api/cron/sequence-tick/route.ts",
+      "candidateSha256": "25c5cf2dc0305b1c3910f4ea1fa71dacf6a10da196aff967530530d9453116ad",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "25c5cf2dc0305b1c3910f4ea1fa71dacf6a10da196aff967530530d9453116ad",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "25c5cf2dc0305b1c3910f4ea1fa71dacf6a10da196aff967530530d9453116ad",
+        "540924657928eb47c89f28eb03376c436f8d920c": "25c5cf2dc0305b1c3910f4ea1fa71dacf6a10da196aff967530530d9453116ad"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/audience-assessment.ts",
+      "candidateSha256": "746352eecfd2c96aafa04c8b911f64a60b4930c14b2a6b250e534364a95d6106",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "746352eecfd2c96aafa04c8b911f64a60b4930c14b2a6b250e534364a95d6106",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "746352eecfd2c96aafa04c8b911f64a60b4930c14b2a6b250e534364a95d6106",
+        "540924657928eb47c89f28eb03376c436f8d920c": "746352eecfd2c96aafa04c8b911f64a60b4930c14b2a6b250e534364a95d6106"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/bulk-queue.ts",
+      "candidateSha256": "a789dc998fc3617b28f6193f9b2c5686906a3113eb5adf45bdfd209f07888ae4",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "a789dc998fc3617b28f6193f9b2c5686906a3113eb5adf45bdfd209f07888ae4",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "a789dc998fc3617b28f6193f9b2c5686906a3113eb5adf45bdfd209f07888ae4",
+        "540924657928eb47c89f28eb03376c436f8d920c": "a789dc998fc3617b28f6193f9b2c5686906a3113eb5adf45bdfd209f07888ae4"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/consent.test.ts",
+      "candidateSha256": "fda6321b0be595544b76f8eed324ee371c38b689ece155c6bbd19970706e3bee",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "fda6321b0be595544b76f8eed324ee371c38b689ece155c6bbd19970706e3bee",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "fda6321b0be595544b76f8eed324ee371c38b689ece155c6bbd19970706e3bee",
+        "540924657928eb47c89f28eb03376c436f8d920c": "fda6321b0be595544b76f8eed324ee371c38b689ece155c6bbd19970706e3bee"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/consent.ts",
+      "candidateSha256": "bd459f482b81787f6afd351b9d3ade81cdf6014bbc87d7cbd826a4e57cfdbe1b",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "bd459f482b81787f6afd351b9d3ade81cdf6014bbc87d7cbd826a4e57cfdbe1b",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "bd459f482b81787f6afd351b9d3ade81cdf6014bbc87d7cbd826a4e57cfdbe1b",
+        "540924657928eb47c89f28eb03376c436f8d920c": "bd459f482b81787f6afd351b9d3ade81cdf6014bbc87d7cbd826a4e57cfdbe1b"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/delivery.integration.test.ts",
+      "candidateSha256": "4cc054c2a916d3a96647a6b910682df9dbfb3efc7e3bcc27e7b2cd41914fb356",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "4cc054c2a916d3a96647a6b910682df9dbfb3efc7e3bcc27e7b2cd41914fb356",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "4cc054c2a916d3a96647a6b910682df9dbfb3efc7e3bcc27e7b2cd41914fb356",
+        "540924657928eb47c89f28eb03376c436f8d920c": "4cc054c2a916d3a96647a6b910682df9dbfb3efc7e3bcc27e7b2cd41914fb356"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/delivery.ts",
+      "candidateSha256": "5a0efeaa32e8a452aac7ede3db9b67294c90253c5fb1942e8b84d88d9146a4a5",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "5a0efeaa32e8a452aac7ede3db9b67294c90253c5fb1942e8b84d88d9146a4a5",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "5a0efeaa32e8a452aac7ede3db9b67294c90253c5fb1942e8b84d88d9146a4a5",
+        "540924657928eb47c89f28eb03376c436f8d920c": "5a0efeaa32e8a452aac7ede3db9b67294c90253c5fb1942e8b84d88d9146a4a5"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/inbound-intents.ts",
+      "candidateSha256": "2c0a828286ecf2a98bba3dd23f9ce713d0918e5773e90a297f763c3e075fb366",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "2c0a828286ecf2a98bba3dd23f9ce713d0918e5773e90a297f763c3e075fb366",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "2c0a828286ecf2a98bba3dd23f9ce713d0918e5773e90a297f763c3e075fb366",
+        "540924657928eb47c89f28eb03376c436f8d920c": "2c0a828286ecf2a98bba3dd23f9ce713d0918e5773e90a297f763c3e075fb366"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/inbound-state.ts",
+      "candidateSha256": "fa2985727a0dcd21cdd3727dff28c831431a6abf77fe53262f125e4e2f36ce6f",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "fa2985727a0dcd21cdd3727dff28c831431a6abf77fe53262f125e4e2f36ce6f",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "fa2985727a0dcd21cdd3727dff28c831431a6abf77fe53262f125e4e2f36ce6f",
+        "540924657928eb47c89f28eb03376c436f8d920c": "fa2985727a0dcd21cdd3727dff28c831431a6abf77fe53262f125e4e2f36ce6f"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/inbound.test.ts",
+      "candidateSha256": "503e64c183716485a8b936f6fad6db2caca0db0667952c7728b7af44b8ee5080",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "503e64c183716485a8b936f6fad6db2caca0db0667952c7728b7af44b8ee5080",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "503e64c183716485a8b936f6fad6db2caca0db0667952c7728b7af44b8ee5080",
+        "540924657928eb47c89f28eb03376c436f8d920c": "503e64c183716485a8b936f6fad6db2caca0db0667952c7728b7af44b8ee5080"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/inbound.ts",
+      "candidateSha256": "eaa9e50abb86227010ff7098ac7088225e447b484c2e06d59755c034d22fbe5a",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "eaa9e50abb86227010ff7098ac7088225e447b484c2e06d59755c034d22fbe5a",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "eaa9e50abb86227010ff7098ac7088225e447b484c2e06d59755c034d22fbe5a",
+        "540924657928eb47c89f28eb03376c436f8d920c": "eaa9e50abb86227010ff7098ac7088225e447b484c2e06d59755c034d22fbe5a"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/line-type.test.ts",
+      "candidateSha256": "075c29dc347122e66ffde766e2fc7a067f4250a1e0a1dc66b0651a7f2383385e",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "075c29dc347122e66ffde766e2fc7a067f4250a1e0a1dc66b0651a7f2383385e",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "075c29dc347122e66ffde766e2fc7a067f4250a1e0a1dc66b0651a7f2383385e",
+        "540924657928eb47c89f28eb03376c436f8d920c": "075c29dc347122e66ffde766e2fc7a067f4250a1e0a1dc66b0651a7f2383385e"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/line-type.ts",
+      "candidateSha256": "64738e0f77ef1f1083ae582c081c10a93d07f9d08829d21d2aef8b8ffb4fbff0",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "64738e0f77ef1f1083ae582c081c10a93d07f9d08829d21d2aef8b8ffb4fbff0",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "64738e0f77ef1f1083ae582c081c10a93d07f9d08829d21d2aef8b8ffb4fbff0",
+        "540924657928eb47c89f28eb03376c436f8d920c": "64738e0f77ef1f1083ae582c081c10a93d07f9d08829d21d2aef8b8ffb4fbff0"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/opt-out-phone.test.ts",
+      "candidateSha256": "3679713bd8fcac844c3d2fba4959f23d9cac09a8644c2c70f43ba5f9a3bbc608",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "3679713bd8fcac844c3d2fba4959f23d9cac09a8644c2c70f43ba5f9a3bbc608",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "3679713bd8fcac844c3d2fba4959f23d9cac09a8644c2c70f43ba5f9a3bbc608",
+        "540924657928eb47c89f28eb03376c436f8d920c": "3679713bd8fcac844c3d2fba4959f23d9cac09a8644c2c70f43ba5f9a3bbc608"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/opt-out-phone.ts",
+      "candidateSha256": "0168bf1131b8fff95e7736440891aa7a958983f989b095da93e1b4a463bdb24b",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "0168bf1131b8fff95e7736440891aa7a958983f989b095da93e1b4a463bdb24b",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "0168bf1131b8fff95e7736440891aa7a958983f989b095da93e1b4a463bdb24b",
+        "540924657928eb47c89f28eb03376c436f8d920c": "0168bf1131b8fff95e7736440891aa7a958983f989b095da93e1b4a463bdb24b"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/pacing.ts",
+      "candidateSha256": "dec00916d7704c1206d07c7484a758991a161f15814e9bf7f8c4987aec1f033d",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "dec00916d7704c1206d07c7484a758991a161f15814e9bf7f8c4987aec1f033d",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "dec00916d7704c1206d07c7484a758991a161f15814e9bf7f8c4987aec1f033d",
+        "540924657928eb47c89f28eb03376c436f8d920c": "dec00916d7704c1206d07c7484a758991a161f15814e9bf7f8c4987aec1f033d"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/dialpad.test.ts",
+      "candidateSha256": "010045b1bab229605c62ef6867aea0639c300c881bb478316aaa25975ca36ffd",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "010045b1bab229605c62ef6867aea0639c300c881bb478316aaa25975ca36ffd",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "010045b1bab229605c62ef6867aea0639c300c881bb478316aaa25975ca36ffd",
+        "540924657928eb47c89f28eb03376c436f8d920c": "010045b1bab229605c62ef6867aea0639c300c881bb478316aaa25975ca36ffd"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/dialpad.ts",
+      "candidateSha256": "644cde1016469442af15d7e4c85a6ffafd4f96e236cf40bff272f744c391a6ca",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "644cde1016469442af15d7e4c85a6ffafd4f96e236cf40bff272f744c391a6ca",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "644cde1016469442af15d7e4c85a6ffafd4f96e236cf40bff272f744c391a6ca",
+        "540924657928eb47c89f28eb03376c436f8d920c": "644cde1016469442af15d7e4c85a6ffafd4f96e236cf40bff272f744c391a6ca"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/mock.production-ledger.test.ts",
+      "candidateSha256": "63e9bcdd27aa45437a11b5d3274a69882c785aeeb4651a60e3629a434954b917",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "63e9bcdd27aa45437a11b5d3274a69882c785aeeb4651a60e3629a434954b917",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "63e9bcdd27aa45437a11b5d3274a69882c785aeeb4651a60e3629a434954b917",
+        "540924657928eb47c89f28eb03376c436f8d920c": "63e9bcdd27aa45437a11b5d3274a69882c785aeeb4651a60e3629a434954b917"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/mock.simulation.test.ts",
+      "candidateSha256": "b144f4d25a3c6f8413a7ec83c6c16bbfecfcb3f397cbad1557f7ec87670e631b",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "b144f4d25a3c6f8413a7ec83c6c16bbfecfcb3f397cbad1557f7ec87670e631b",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "b144f4d25a3c6f8413a7ec83c6c16bbfecfcb3f397cbad1557f7ec87670e631b",
+        "540924657928eb47c89f28eb03376c436f8d920c": "b144f4d25a3c6f8413a7ec83c6c16bbfecfcb3f397cbad1557f7ec87670e631b"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/mock.ts",
+      "candidateSha256": "0b72935386c5ac271c755060c29dfe6baa8cbea241e807fb5f222f6df643db73",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "0b72935386c5ac271c755060c29dfe6baa8cbea241e807fb5f222f6df643db73",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "0b72935386c5ac271c755060c29dfe6baa8cbea241e807fb5f222f6df643db73",
+        "540924657928eb47c89f28eb03376c436f8d920c": "0b72935386c5ac271c755060c29dfe6baa8cbea241e807fb5f222f6df643db73"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/sendillo.test.ts",
+      "candidateSha256": "43f2e7535d4769e787f1120fd8499191b922fa9581cac43ef6b33994947b4571",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "43f2e7535d4769e787f1120fd8499191b922fa9581cac43ef6b33994947b4571",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "43f2e7535d4769e787f1120fd8499191b922fa9581cac43ef6b33994947b4571",
+        "540924657928eb47c89f28eb03376c436f8d920c": "43f2e7535d4769e787f1120fd8499191b922fa9581cac43ef6b33994947b4571"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/sendillo.ts",
+      "candidateSha256": "629531c17607e6bbe1e54d8db5f43fccc2533c03bc0ebe1e62ca3bab72b24ae4",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "629531c17607e6bbe1e54d8db5f43fccc2533c03bc0ebe1e62ca3bab72b24ae4",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "629531c17607e6bbe1e54d8db5f43fccc2533c03bc0ebe1e62ca3bab72b24ae4",
+        "540924657928eb47c89f28eb03376c436f8d920c": "629531c17607e6bbe1e54d8db5f43fccc2533c03bc0ebe1e62ca3bab72b24ae4"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/twilio-receiver.test.ts",
+      "candidateSha256": "47f7631fb96cb7e928c0ecaaa817db97dc5c6f65033fbadfd0492554f06f3e96",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "47f7631fb96cb7e928c0ecaaa817db97dc5c6f65033fbadfd0492554f06f3e96",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "47f7631fb96cb7e928c0ecaaa817db97dc5c6f65033fbadfd0492554f06f3e96",
+        "540924657928eb47c89f28eb03376c436f8d920c": "47f7631fb96cb7e928c0ecaaa817db97dc5c6f65033fbadfd0492554f06f3e96"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/twilio-receiver.ts",
+      "candidateSha256": "614d7b8a53a31e89b65588d69a2a51247bf97cc6e96e386eed8c94fbd7abd035",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "614d7b8a53a31e89b65588d69a2a51247bf97cc6e96e386eed8c94fbd7abd035",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "614d7b8a53a31e89b65588d69a2a51247bf97cc6e96e386eed8c94fbd7abd035",
+        "540924657928eb47c89f28eb03376c436f8d920c": "614d7b8a53a31e89b65588d69a2a51247bf97cc6e96e386eed8c94fbd7abd035"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/twilio.test.ts",
+      "candidateSha256": "047fec6b4bca589fa965e51a69f10705046fb9cd2ff7c1340a589c6caa29a19b",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "047fec6b4bca589fa965e51a69f10705046fb9cd2ff7c1340a589c6caa29a19b",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "047fec6b4bca589fa965e51a69f10705046fb9cd2ff7c1340a589c6caa29a19b",
+        "540924657928eb47c89f28eb03376c436f8d920c": "047fec6b4bca589fa965e51a69f10705046fb9cd2ff7c1340a589c6caa29a19b"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/providers/twilio.ts",
+      "candidateSha256": "edebaac124eb6589598c78795b2c874faa5c18d8b051b1b99f0a474a0ed87d89",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "edebaac124eb6589598c78795b2c874faa5c18d8b051b1b99f0a474a0ed87d89",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "edebaac124eb6589598c78795b2c874faa5c18d8b051b1b99f0a474a0ed87d89",
+        "540924657928eb47c89f28eb03376c436f8d920c": "edebaac124eb6589598c78795b2c874faa5c18d8b051b1b99f0a474a0ed87d89"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/quiet-hours.test.ts",
+      "candidateSha256": "ae0a89adf94d881fcb20ef4b8bb7ead5a16a0ddcb8024e17cb5fcf6c7b0e3cf8",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "ae0a89adf94d881fcb20ef4b8bb7ead5a16a0ddcb8024e17cb5fcf6c7b0e3cf8",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "ae0a89adf94d881fcb20ef4b8bb7ead5a16a0ddcb8024e17cb5fcf6c7b0e3cf8",
+        "540924657928eb47c89f28eb03376c436f8d920c": "ae0a89adf94d881fcb20ef4b8bb7ead5a16a0ddcb8024e17cb5fcf6c7b0e3cf8"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/quiet-hours.ts",
+      "candidateSha256": "7a7780a583099c0bf302589e23e35595de4f133ee4606fd3dfd52869d306f340",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "7a7780a583099c0bf302589e23e35595de4f133ee4606fd3dfd52869d306f340",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "7a7780a583099c0bf302589e23e35595de4f133ee4606fd3dfd52869d306f340",
+        "540924657928eb47c89f28eb03376c436f8d920c": "7a7780a583099c0bf302589e23e35595de4f133ee4606fd3dfd52869d306f340"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/receipt-persistence.ts",
+      "candidateSha256": "621ea6376fe3312fe7142284321ebc547a1584c20c46f4bad73d737c1c8dccd6",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "621ea6376fe3312fe7142284321ebc547a1584c20c46f4bad73d737c1c8dccd6",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "621ea6376fe3312fe7142284321ebc547a1584c20c46f4bad73d737c1c8dccd6",
+        "540924657928eb47c89f28eb03376c436f8d920c": "621ea6376fe3312fe7142284321ebc547a1584c20c46f4bad73d737c1c8dccd6"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/registry.ts",
+      "candidateSha256": "1e7c36d9f4e3c91c38334e17151c743c250e53f21ea76a4d606435edfda333c7",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "1e7c36d9f4e3c91c38334e17151c743c250e53f21ea76a4d606435edfda333c7",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "1e7c36d9f4e3c91c38334e17151c743c250e53f21ea76a4d606435edfda333c7",
+        "540924657928eb47c89f28eb03376c436f8d920c": "1e7c36d9f4e3c91c38334e17151c743c250e53f21ea76a4d606435edfda333c7"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/send-receipt-persistence.test.ts",
+      "candidateSha256": "dae49b54b0018d9c454eca0aef92b98bfa7c60ea254dbb94810b088c155313dc",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "dae49b54b0018d9c454eca0aef92b98bfa7c60ea254dbb94810b088c155313dc",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "dae49b54b0018d9c454eca0aef92b98bfa7c60ea254dbb94810b088c155313dc",
+        "540924657928eb47c89f28eb03376c436f8d920c": "dae49b54b0018d9c454eca0aef92b98bfa7c60ea254dbb94810b088c155313dc"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/send.integration.test.ts",
+      "candidateSha256": "28512183ba5b1bab4aa1338ea259e8cab2d04b11029f71bc04efbfa1d0dfc65f",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "28512183ba5b1bab4aa1338ea259e8cab2d04b11029f71bc04efbfa1d0dfc65f",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "28512183ba5b1bab4aa1338ea259e8cab2d04b11029f71bc04efbfa1d0dfc65f",
+        "540924657928eb47c89f28eb03376c436f8d920c": "28512183ba5b1bab4aa1338ea259e8cab2d04b11029f71bc04efbfa1d0dfc65f"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/send.test.ts",
+      "candidateSha256": "2e34f141cfef5783e337c96e9bf85159f6118599c4d295628a4393e6ee953d57",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "2e34f141cfef5783e337c96e9bf85159f6118599c4d295628a4393e6ee953d57",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "2e34f141cfef5783e337c96e9bf85159f6118599c4d295628a4393e6ee953d57",
+        "540924657928eb47c89f28eb03376c436f8d920c": "2e34f141cfef5783e337c96e9bf85159f6118599c4d295628a4393e6ee953d57"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/send.ts",
+      "candidateSha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+        "540924657928eb47c89f28eb03376c436f8d920c": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/sender-persona.test.ts",
+      "candidateSha256": "709213ca76113e1c6e86fe176bbebd9747c05b36b66f3d5b1c7a0178e2bb77ad",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "709213ca76113e1c6e86fe176bbebd9747c05b36b66f3d5b1c7a0178e2bb77ad",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "709213ca76113e1c6e86fe176bbebd9747c05b36b66f3d5b1c7a0178e2bb77ad",
+        "540924657928eb47c89f28eb03376c436f8d920c": "709213ca76113e1c6e86fe176bbebd9747c05b36b66f3d5b1c7a0178e2bb77ad"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/sender-persona.ts",
+      "candidateSha256": "01935ff683459b2d980837c5a5af6b8430bdbf8c5252ae8723e278d5719698d1",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "01935ff683459b2d980837c5a5af6b8430bdbf8c5252ae8723e278d5719698d1",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "01935ff683459b2d980837c5a5af6b8430bdbf8c5252ae8723e278d5719698d1",
+        "540924657928eb47c89f28eb03376c436f8d920c": "01935ff683459b2d980837c5a5af6b8430bdbf8c5252ae8723e278d5719698d1"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/sms-phone.test.ts",
+      "candidateSha256": "ed8dd8e16b3cb9b1eb394c6ee01dfc43a62f9328faf6ca4195c7fbfd9b2d0687",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "ed8dd8e16b3cb9b1eb394c6ee01dfc43a62f9328faf6ca4195c7fbfd9b2d0687",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "ed8dd8e16b3cb9b1eb394c6ee01dfc43a62f9328faf6ca4195c7fbfd9b2d0687",
+        "540924657928eb47c89f28eb03376c436f8d920c": "ed8dd8e16b3cb9b1eb394c6ee01dfc43a62f9328faf6ca4195c7fbfd9b2d0687"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/sms-phone.ts",
+      "candidateSha256": "ba03fd9a7c330c80c68516836d51530533a8d528b7572b1ba6366d4461e3e1eb",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "ba03fd9a7c330c80c68516836d51530533a8d528b7572b1ba6366d4461e3e1eb",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "ba03fd9a7c330c80c68516836d51530533a8d528b7572b1ba6366d4461e3e1eb",
+        "540924657928eb47c89f28eb03376c436f8d920c": "ba03fd9a7c330c80c68516836d51530533a8d528b7572b1ba6366d4461e3e1eb"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/status-events.test.ts",
+      "candidateSha256": "6ec18ef697bf9df1724a8dee0a7f8e6aed03515dda3616429bd7a238699c5bec",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "6ec18ef697bf9df1724a8dee0a7f8e6aed03515dda3616429bd7a238699c5bec",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "6ec18ef697bf9df1724a8dee0a7f8e6aed03515dda3616429bd7a238699c5bec",
+        "540924657928eb47c89f28eb03376c436f8d920c": "6ec18ef697bf9df1724a8dee0a7f8e6aed03515dda3616429bd7a238699c5bec"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/status-events.ts",
+      "candidateSha256": "d8dd9466d5792a30d5a67a01f508b63ad5e177bbb5fa6689a56ff89bfa40fe68",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "d8dd9466d5792a30d5a67a01f508b63ad5e177bbb5fa6689a56ff89bfa40fe68",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "d8dd9466d5792a30d5a67a01f508b63ad5e177bbb5fa6689a56ff89bfa40fe68",
+        "540924657928eb47c89f28eb03376c436f8d920c": "d8dd9466d5792a30d5a67a01f508b63ad5e177bbb5fa6689a56ff89bfa40fe68"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/suppression.test.ts",
+      "candidateSha256": "bb3c3cd0183331c2bdb2469fa59fedd4579e24c974e8dc93f71df45cb05ece6a",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "bb3c3cd0183331c2bdb2469fa59fedd4579e24c974e8dc93f71df45cb05ece6a",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "bb3c3cd0183331c2bdb2469fa59fedd4579e24c974e8dc93f71df45cb05ece6a",
+        "540924657928eb47c89f28eb03376c436f8d920c": "bb3c3cd0183331c2bdb2469fa59fedd4579e24c974e8dc93f71df45cb05ece6a"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/suppression.ts",
+      "candidateSha256": "3a22c69d12053e4cd6d7c093ebd09dbeff09c86c244813b879f62b3cbc6e0b9c",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "3a22c69d12053e4cd6d7c093ebd09dbeff09c86c244813b879f62b3cbc6e0b9c",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "3a22c69d12053e4cd6d7c093ebd09dbeff09c86c244813b879f62b3cbc6e0b9c",
+        "540924657928eb47c89f28eb03376c436f8d920c": "3a22c69d12053e4cd6d7c093ebd09dbeff09c86c244813b879f62b3cbc6e0b9c"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/messaging/types.ts",
+      "candidateSha256": "bc0cc6ade487d087eeaa35b6b04405bbf5bebe4f6dcd8ece039ec62193319f63",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "bc0cc6ade487d087eeaa35b6b04405bbf5bebe4f6dcd8ece039ec62193319f63",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "bc0cc6ade487d087eeaa35b6b04405bbf5bebe4f6dcd8ece039ec62193319f63",
+        "540924657928eb47c89f28eb03376c436f8d920c": "bc0cc6ade487d087eeaa35b6b04405bbf5bebe4f6dcd8ece039ec62193319f63"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/delays.test.ts",
+      "candidateSha256": "8f7c802b1a182b458a87451e0cf6f5e57a537d633672312e3b12c7114363c350",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "8f7c802b1a182b458a87451e0cf6f5e57a537d633672312e3b12c7114363c350",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "8f7c802b1a182b458a87451e0cf6f5e57a537d633672312e3b12c7114363c350",
+        "540924657928eb47c89f28eb03376c436f8d920c": "8f7c802b1a182b458a87451e0cf6f5e57a537d633672312e3b12c7114363c350"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/delays.ts",
+      "candidateSha256": "cf7f3fa7092e7d1c61a32f74e35fc71875a3a73ff1f59dd6a463823ae2f68d6e",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "cf7f3fa7092e7d1c61a32f74e35fc71875a3a73ff1f59dd6a463823ae2f68d6e",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "cf7f3fa7092e7d1c61a32f74e35fc71875a3a73ff1f59dd6a463823ae2f68d6e",
+        "540924657928eb47c89f28eb03376c436f8d920c": "cf7f3fa7092e7d1c61a32f74e35fc71875a3a73ff1f59dd6a463823ae2f68d6e"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/enrollment.integration.test.ts",
+      "candidateSha256": "4c7de973a777f1c377f8cf5d8fc0428b8900fc056e17e223a268cd81c0f02a4e",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "4c7de973a777f1c377f8cf5d8fc0428b8900fc056e17e223a268cd81c0f02a4e",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "4c7de973a777f1c377f8cf5d8fc0428b8900fc056e17e223a268cd81c0f02a4e",
+        "540924657928eb47c89f28eb03376c436f8d920c": "4c7de973a777f1c377f8cf5d8fc0428b8900fc056e17e223a268cd81c0f02a4e"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/enrollment.training.test.ts",
+      "candidateSha256": "dbbbb7cf871041d3faa5500da02522ff0edb62b512eb9c6e1a07b6713ac4d0f4",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "dbbbb7cf871041d3faa5500da02522ff0edb62b512eb9c6e1a07b6713ac4d0f4",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "dbbbb7cf871041d3faa5500da02522ff0edb62b512eb9c6e1a07b6713ac4d0f4",
+        "540924657928eb47c89f28eb03376c436f8d920c": "dbbbb7cf871041d3faa5500da02522ff0edb62b512eb9c6e1a07b6713ac4d0f4"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/enrollment.ts",
+      "candidateSha256": "db01b5187715c517fd59275f2aa31f0c771e27713cdc9cdeeeb3aba0d02c1db5",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "db01b5187715c517fd59275f2aa31f0c771e27713cdc9cdeeeb3aba0d02c1db5",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "db01b5187715c517fd59275f2aa31f0c771e27713cdc9cdeeeb3aba0d02c1db5",
+        "540924657928eb47c89f28eb03376c436f8d920c": "db01b5187715c517fd59275f2aa31f0c771e27713cdc9cdeeeb3aba0d02c1db5"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/impact.ts",
+      "candidateSha256": "b23aab047abdea7c5eb49056d8b4dfa9d38221908aed3e5b8a3b65b4e5b7be84",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "b23aab047abdea7c5eb49056d8b4dfa9d38221908aed3e5b8a3b65b4e5b7be84",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "b23aab047abdea7c5eb49056d8b4dfa9d38221908aed3e5b8a3b65b4e5b7be84",
+        "540924657928eb47c89f28eb03376c436f8d920c": "b23aab047abdea7c5eb49056d8b4dfa9d38221908aed3e5b8a3b65b4e5b7be84"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/opt-out.test.ts",
+      "candidateSha256": "be9b164943d7c4ac5b551d3b9885e9d66f731fc0b11b095f87cac3651b5599d0",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "be9b164943d7c4ac5b551d3b9885e9d66f731fc0b11b095f87cac3651b5599d0",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "be9b164943d7c4ac5b551d3b9885e9d66f731fc0b11b095f87cac3651b5599d0",
+        "540924657928eb47c89f28eb03376c436f8d920c": "be9b164943d7c4ac5b551d3b9885e9d66f731fc0b11b095f87cac3651b5599d0"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/opt-out.ts",
+      "candidateSha256": "798313fd6978e75312d480befe7cee2a3f0a2ed1473921a971c3403f01535e04",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "798313fd6978e75312d480befe7cee2a3f0a2ed1473921a971c3403f01535e04",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "798313fd6978e75312d480befe7cee2a3f0a2ed1473921a971c3403f01535e04",
+        "540924657928eb47c89f28eb03376c436f8d920c": "798313fd6978e75312d480befe7cee2a3f0a2ed1473921a971c3403f01535e04"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/pause-rules.test.ts",
+      "candidateSha256": "37133b90c68193fddc09e0609621b704ed17b0a2f74e5db0c099acc0d423a42a",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "37133b90c68193fddc09e0609621b704ed17b0a2f74e5db0c099acc0d423a42a",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "37133b90c68193fddc09e0609621b704ed17b0a2f74e5db0c099acc0d423a42a",
+        "540924657928eb47c89f28eb03376c436f8d920c": "37133b90c68193fddc09e0609621b704ed17b0a2f74e5db0c099acc0d423a42a"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/pause-rules.ts",
+      "candidateSha256": "265f8ac96935142533ea575e65001ea7028ad89904147f1847430be1ab0f628e",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "265f8ac96935142533ea575e65001ea7028ad89904147f1847430be1ab0f628e",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "265f8ac96935142533ea575e65001ea7028ad89904147f1847430be1ab0f628e",
+        "540924657928eb47c89f28eb03376c436f8d920c": "265f8ac96935142533ea575e65001ea7028ad89904147f1847430be1ab0f628e"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/recovery-security.integration.test.ts",
+      "candidateSha256": "71a8bf1ed1a15daa9d49c5903e4b3530d09b6509e5d84567e43b7c03089cf28d",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "71a8bf1ed1a15daa9d49c5903e4b3530d09b6509e5d84567e43b7c03089cf28d",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "71a8bf1ed1a15daa9d49c5903e4b3530d09b6509e5d84567e43b7c03089cf28d",
+        "540924657928eb47c89f28eb03376c436f8d920c": "71a8bf1ed1a15daa9d49c5903e4b3530d09b6509e5d84567e43b7c03089cf28d"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/reliability.integration.test.ts",
+      "candidateSha256": "0da96b3bd94fcef62c1db289d61546e33c91fc9c546cc0423a43e259173b3b67",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "0da96b3bd94fcef62c1db289d61546e33c91fc9c546cc0423a43e259173b3b67",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "0da96b3bd94fcef62c1db289d61546e33c91fc9c546cc0423a43e259173b3b67",
+        "540924657928eb47c89f28eb03376c436f8d920c": "0da96b3bd94fcef62c1db289d61546e33c91fc9c546cc0423a43e259173b3b67"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/render.test.ts",
+      "candidateSha256": "e521a30d9e21e5b84b154f7499ada9420143256fced15f13d83a49d948ca190c",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "e521a30d9e21e5b84b154f7499ada9420143256fced15f13d83a49d948ca190c",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "e521a30d9e21e5b84b154f7499ada9420143256fced15f13d83a49d948ca190c",
+        "540924657928eb47c89f28eb03376c436f8d920c": "e521a30d9e21e5b84b154f7499ada9420143256fced15f13d83a49d948ca190c"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/render.ts",
+      "candidateSha256": "cbe3227ea52660fd758415a36e4bf78156dc0696c0d32a30e095ae1ba2f3428c",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "cbe3227ea52660fd758415a36e4bf78156dc0696c0d32a30e095ae1ba2f3428c",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "cbe3227ea52660fd758415a36e4bf78156dc0696c0d32a30e095ae1ba2f3428c",
+        "540924657928eb47c89f28eb03376c436f8d920c": "cbe3227ea52660fd758415a36e4bf78156dc0696c0d32a30e095ae1ba2f3428c"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/scheduling-reliability.integration.test.ts",
+      "candidateSha256": "d3d2920a352d911cabe4728cc334b20e3ce0cdf4d3d46ca0ba497d2670d4904a",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "d3d2920a352d911cabe4728cc334b20e3ce0cdf4d3d46ca0ba497d2670d4904a",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "d3d2920a352d911cabe4728cc334b20e3ce0cdf4d3d46ca0ba497d2670d4904a",
+        "540924657928eb47c89f28eb03376c436f8d920c": "d3d2920a352d911cabe4728cc334b20e3ce0cdf4d3d46ca0ba497d2670d4904a"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/simulation.integration.test.ts",
+      "candidateSha256": "51abdb9971ec081a27c17b27aa73abe06bafe37534776fda888ba96e1213c7f1",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "51abdb9971ec081a27c17b27aa73abe06bafe37534776fda888ba96e1213c7f1",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "51abdb9971ec081a27c17b27aa73abe06bafe37534776fda888ba96e1213c7f1",
+        "540924657928eb47c89f28eb03376c436f8d920c": "51abdb9971ec081a27c17b27aa73abe06bafe37534776fda888ba96e1213c7f1"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/starter-library.integration.test.ts",
+      "candidateSha256": "9acb2420856844a3c4955e68a22501a788d6d880ac09aa9f4b7001487cb44db1",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "9acb2420856844a3c4955e68a22501a788d6d880ac09aa9f4b7001487cb44db1",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "9acb2420856844a3c4955e68a22501a788d6d880ac09aa9f4b7001487cb44db1",
+        "540924657928eb47c89f28eb03376c436f8d920c": "9acb2420856844a3c4955e68a22501a788d6d880ac09aa9f4b7001487cb44db1"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/starter-library.ts",
+      "candidateSha256": "95c71067acb20e4a19a8e37f248c1580992c3903767f33de21292e032b263bbe",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "95c71067acb20e4a19a8e37f248c1580992c3903767f33de21292e032b263bbe",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "95c71067acb20e4a19a8e37f248c1580992c3903767f33de21292e032b263bbe",
+        "540924657928eb47c89f28eb03376c436f8d920c": "95c71067acb20e4a19a8e37f248c1580992c3903767f33de21292e032b263bbe"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/template-vars.ts",
+      "candidateSha256": "8dea83e25684070ff9cad38cd94858f380be478fece2e3d367d9ab6f49853439",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "8dea83e25684070ff9cad38cd94858f380be478fece2e3d367d9ab6f49853439",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "8dea83e25684070ff9cad38cd94858f380be478fece2e3d367d9ab6f49853439",
+        "540924657928eb47c89f28eb03376c436f8d920c": "8dea83e25684070ff9cad38cd94858f380be478fece2e3d367d9ab6f49853439"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/tick.test.ts",
+      "candidateSha256": "76dd5d0fb44346d618ca5766f4f8a55bbd1d86a819d345f6c626dbf28766d6fa",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "76dd5d0fb44346d618ca5766f4f8a55bbd1d86a819d345f6c626dbf28766d6fa",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "76dd5d0fb44346d618ca5766f4f8a55bbd1d86a819d345f6c626dbf28766d6fa",
+        "540924657928eb47c89f28eb03376c436f8d920c": "76dd5d0fb44346d618ca5766f4f8a55bbd1d86a819d345f6c626dbf28766d6fa"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "src/lib/sequences/tick.ts",
+      "candidateSha256": "2aec090c4bc664bf2c9bd31a43dfcdb82b074fcf9af5f060f430339fa24af3da",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "2aec090c4bc664bf2c9bd31a43dfcdb82b074fcf9af5f060f430339fa24af3da",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "2aec090c4bc664bf2c9bd31a43dfcdb82b074fcf9af5f060f430339fa24af3da",
+        "540924657928eb47c89f28eb03376c436f8d920c": "2aec090c4bc664bf2c9bd31a43dfcdb82b074fcf9af5f060f430339fa24af3da"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "supabase/migrations/20260917110000_sequence_runtime_recovery.sql",
+      "candidateSha256": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73",
+        "540924657928eb47c89f28eb03376c436f8d920c": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73"
+      },
+      "unchangedAtEveryProofCommit": true
+    },
+    {
+      "file": "supabase/migrations/018_sequences_v1.sql",
+      "candidateSha256": "4cbb6c480a9d237c655e8e51cdc08bb7cc16ae82fcab06f5434c38d73bf59f85",
+      "proofCommitSha256": {
+        "215777a84ad9775d1d9950ff245bf90de539b06b": "4cbb6c480a9d237c655e8e51cdc08bb7cc16ae82fcab06f5434c38d73bf59f85",
+        "72cab7c88442bf145aa382101bb77265465f55b0": "4cbb6c480a9d237c655e8e51cdc08bb7cc16ae82fcab06f5434c38d73bf59f85",
+        "540924657928eb47c89f28eb03376c436f8d920c": "4cbb6c480a9d237c655e8e51cdc08bb7cc16ae82fcab06f5434c38d73bf59f85"
+      },
+      "unchangedAtEveryProofCommit": true
+    }
+  ]
+}

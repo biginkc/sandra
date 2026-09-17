@@ -70,3 +70,11 @@ Jarrad explicitly authorized implementation, necessary fixes, testing, review an
 ## Execution addendum — user-authorized product repairs
 
 The later explicit instruction to get the feature ready for production authorizes necessary product fixes beyond the earlier test-only plan. The candidate therefore adds a separately reviewed recovery migration and runtime/UI changes. Opus's revision-3 plan approval does not approve this implementation. Independent source review, green database/browser acceptance, mutation proof, and migration rollout review are still required. Existing unknown or accepted provider attempts must never be reclassified as safe to resend. Any test or environment failure remains a readiness blocker; no successful mocked test substitutes for the corresponding database or browser contract.
+
+## Candidate status addendum — 2026-09-17
+
+The original revision3 assessment above describes its historical baseline and remains unchanged. Current code candidate `2ddeaf555436ce0316f824639c061a4f7b9eab95` has passed231 database tests,6 browser cases,production build and Verify. Current results supersede historical defect/test-count status; see `sequence-readiness-results.md`.
+
+The emitted candidate environment manifest revalidates constants against source hashes and named predicates, avoiding stale line references. At this candidate: `tick.ts:57` stale claim15 minutes and `tick.ts:468` quiet deferral10 hours; `handlers.ts:37/45/49/53` batch100, one retained-claim lookahead page100, drain240 and240,000ms budget; `quiet-hours.ts:11/12` local window08:00–21:00; `vercel.json:12/13` configured cron every5minutes. This is source configuration, not proof of deployed production cadence. All13 clock predicates are retained in `sequence-readiness-environment.json`.
+
+The Phase5 `canary_atomic_allowance_removed` check is a future pre-live fake-transport prerequisite, not a gate requiring live execution during this local-readiness task. Live execution and recurring monitoring remain blocked at allowance zero until owned-recipient authorization, spending bounds and that atomic allowance check are established.

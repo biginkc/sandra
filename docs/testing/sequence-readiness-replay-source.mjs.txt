@@ -1,0 +1,1545 @@
+#!/usr/bin/env node
+
+import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { createConnection } from "node:net";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import pg from "pg";
+
+const { Client } = pg;
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const SUPABASE_CLI_VERSION = "2.116.0";
+const LOOPBACK_API_URL = "http://127.0.0.1:54321";
+const LOOPBACK_DB_URL = "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
+// Supabase composes service names from the project name with a realtime
+// prefix. Keep a 45-character generated-name bound while preserving the unique
+// suffix; this does not prove a startup cause.
+const MAX_SUPABASE_PROJECT_NAME_LENGTH = 45;
+const SUPABASE_EXCLUDES = [
+  "studio",
+  "postgres-meta",
+  "realtime",
+  "edge-runtime",
+  "logflare",
+  "vector",
+  "mailpit",
+  "imgproxy",
+];
+
+const mutationDefinitions = {
+  "claim-uniqueness-removed": {
+    kind: "postflight-ddl",
+    name: "remove active sequence claim uniqueness",
+    target: {
+      file: "src/lib/sequences/reliability.integration.test.ts",
+      pattern: "uses one provider invocation in 20 synchronized two-client claim trials",
+      expectedFullName: /uses one provider invocation in 20 synchronized two-client claim trials/,
+      expectedFailure: /(?:length of 1|to be 1|provider invocation|claim)/i,
+      expectedFailureMarkers: [
+        "      expect(\n        summaries.reduce((count, summary) => count + (summary.outcomes.sent ?? 0), 0),\n      ).toBe(1);",
+        "expect(providerInvocations).toHaveLength(trial + 1);",
+        "expect(runCount).toBe(1);",
+      ],
+    },
+    controls: [
+      {
+        file: "src/lib/sequences/reliability.integration.test.ts",
+        pattern: "fires two SMS steps and a due status-change step",
+      },
+      {
+        file: "src/lib/sequences/scheduling-reliability.integration.test.ts",
+        pattern: "repairs a missing referenced template through resume",
+      },
+    ],
+    sql: "drop index if exists public.idx_step_runs_active_enrollment_step",
+    restore: "supabase db reset --yes",
+  },
+  "advancement-suppressed": {
+    kind: "source",
+    name: "suppress successful native advancement",
+    file: "src/lib/sequences/tick.ts",
+    from: "const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);",
+    to: "const advanceError = null;",
+    expected: 2,
+    anchor: "Message ${messageId} accepted;",
+    target: {
+      file: "src/lib/sequences/reliability.integration.test.ts",
+      pattern: "fires two SMS steps and a due status-change step",
+      expectedFullName: /fires two SMS steps and a due status-change step/,
+      // Chai abbreviates the actual/expected objects in Vitest's diagnostic
+      // (`expected { …(5) } to match object { status: 'active', …(1) }`),
+      // so the source marker below carries the field-specific contract.
+      expectedFailure: /(?:completed|current_step_index|next_run_at|length of 3|to match object)/i,
+      expectedFailureMarker: "expect(enrollment).toMatchObject({ status: \"active\", current_step_index: 1 });",
+    },
+    controls: [
+      {
+        file: "src/lib/sequences/scheduling-reliability.integration.test.ts",
+        pattern: "fails closed for an unknown state and leaves the provider untouched",
+      },
+      {
+        file: "src/lib/sequences/reliability.integration.test.ts",
+        pattern: "does not send when a reply pauses the enrollment after the scheduler snapshot",
+        sourcePattern: "does not send when a %s pauses the enrollment after the scheduler snapshot",
+      },
+    ],
+  },
+  "final-authorization-removed": {
+    kind: "source",
+    name: "remove native final authorization fence",
+    file: "src/lib/messaging/send.ts",
+    from: "  if (input.sequenceContext) {",
+    to: "  if (false && input.sequenceContext) {",
+    expected: 1,
+    target: {
+      file: "src/lib/sequences/reliability.integration.test.ts",
+      pattern: "does not send when a reply pauses the enrollment after the scheduler snapshot",
+      sourcePattern: "does not send when a %s pauses the enrollment after the scheduler snapshot",
+      expectedFullName: /does not send when a reply pauses the enrollment after the scheduler snapshot/,
+      expectedFailure: /(?:length of 0|provider|paused|definitively_rejected)/i,
+      expectedFailureMarkers: [
+        "expect(outcome.status).toBe(\"paused\");",
+        "expect(providerInvocations).toHaveLength(0);",
+      ],
+    },
+    controls: [
+      {
+        file: "src/app/api/cron/sequence-tick/route.integration.test.ts",
+        pattern: "fires step 0 of a due enrollment and advances to step 1",
+      },
+      {
+        file: "src/lib/sequences/scheduling-reliability.integration.test.ts",
+        pattern: "repairs missing sender inventory through resume",
+      },
+    ],
+  },
+  "persistence-error-ignored": {
+    kind: "source",
+    name: "ignore native accepted-message receipt persistence errors",
+    file: "src/lib/messaging/send.ts",
+    from: "    if (updateError || !updated) {",
+    to: "    if (false) {",
+    expected: 2,
+    anchor: "pending.id",
+    target: {
+      file: "src/lib/sequences/scheduling-reliability.integration.test.ts",
+      pattern: "keeps an accepted provider attempt reconciliable when message receipt persistence returns a DB error",
+      expectedFullName: /keeps an accepted provider attempt reconciliable when message receipt persistence returns a DB error/,
+      expectedFailure: /(?:reconciliation_required|accepted|pending|failed|sent|to be 1|length of 1)/i,
+      expectedFailureMarker: "expect(first.outcomes.failed).toBe(1);",
+    },
+    controls: [
+      {
+        file: "src/lib/sequences/reliability.integration.test.ts",
+        pattern: "fires two SMS steps and a due status-change step",
+      },
+      {
+        file: "src/lib/sequences/scheduling-reliability.integration.test.ts",
+        pattern: "repairs missing sender inventory through resume",
+      },
+    ],
+  },
+  "unsafe-ambiguous-retry": {
+    kind: "migration",
+    name: "allow retry of an ambiguous accepted or unknown claim",
+    file: "supabase/migrations/20260917110000_sequence_runtime_recovery.sql",
+    from: "  if prior.id is not null and (\n       prior.attempt_outcome not in ('not_attempted', 'definitively_rejected')\n     ) then",
+    to: "  if false then",
+    expected: 1,
+    target: {
+      file: "src/lib/sequences/reliability.integration.test.ts",
+      pattern: "never blindly re-sends an accepted native SMS when claim receipt bookkeeping is ambiguous",
+      expectedFullName: /never blindly re-sends an accepted native SMS when claim receipt bookkeeping is ambiguous/,
+      expectedFailure: /(?:reconciliation_required|provider|length of 1|accepted)/i,
+      expectedFailureMarker: "expect(ambiguousRetry).toMatchObject({ status: \"reconciliation_required\" });",
+    },
+    controls: [
+      {
+        file: "src/app/api/cron/sequence-tick/route.integration.test.ts",
+        pattern: "fires step 0 of a due enrollment and advances to step 1",
+      },
+      {
+        file: "src/lib/sequences/scheduling-reliability.integration.test.ts",
+        pattern: "fails closed for an unknown state and leaves the provider untouched",
+      },
+    ],
+  },
+  "suppression-bypassed": {
+    kind: "source",
+    name: "bypass the final automated suppression fence",
+    file: "src/lib/messaging/send.ts",
+    from: "  if (input.origin === \"automated\") {",
+    to: "  if (false && input.origin === \"automated\") {",
+    expected: 1,
+    target: {
+      runner: "vitest",
+      file: "src/lib/messaging/send.integration.test.ts",
+      pattern: "automated sends are blocked on a human-owned dispo",
+      expectedFullName: /automated sends are blocked on a human-owned dispo/,
+      expectedFailure: /(?:blocked_automated_suppressed|provider|length of 0|zero)/i,
+      expectedFailureMarker: "expect(outcome.status).toBe(\"blocked_automated_suppressed\");",
+    },
+    controls: [
+      {
+        file: "src/lib/sequences/reliability.integration.test.ts",
+        pattern: "fires two SMS steps and a due status-change step",
+      },
+      {
+        file: "src/lib/sequences/scheduling-reliability.integration.test.ts",
+        pattern: "fails closed for an unknown state and leaves the provider untouched",
+      },
+    ],
+  },
+  "ui-persistence-dropped": {
+    kind: "source",
+    name: "drop sequence description persistence from the UI save action",
+    file: "src/app/(dashboard)/sequences/actions.ts",
+    from: "    if (patch.description !== undefined) update.description = patch.description;",
+    to: "    if (false && patch.description !== undefined) update.description = patch.description;",
+    expected: 1,
+    target: {
+      runner: "playwright",
+      file: "e2e/sequence-readiness.local.spec.ts",
+      pattern: "create/edit/enroll then persist pause, resume, cancel, and reload",
+      expectedFullName: /create\/edit\/enroll then persist pause, resume, cancel, and reload/,
+      expectedFailure: /Expected:\s*\"Edited local description\"[\s\S]*Received:\s*\"Local browser persistence contract\"/i,
+      expectedFailureMarkers: [
+        "await expect\n      .poll(async () => {\n        const { data, error } = await admin",
+        ".toBe(\"Edited local description\");",
+      ],
+    },
+    controls: [
+      {
+        runner: "playwright",
+        file: "e2e/sequence-readiness.local.spec.ts",
+        pattern: "non-admin cannot enter sequence authoring",
+        expectedFullName: /non-admin cannot enter sequence authoring/,
+      },
+      {
+        runner: "playwright",
+        file: "e2e/sequence-readiness.local.spec.ts",
+        pattern: "browser context denies external HTTP before network",
+        expectedFullName: /browser context denies external HTTP before network/,
+      },
+    ],
+  },
+};
+
+function usage() {
+  return [
+    "Usage: node scripts/run-sequence-reliability-mutations.mjs --commit=<clean-candidate-sha> --mutation=<name>",
+    "       node scripts/run-sequence-reliability-mutations.mjs --check-patches --mutation=<name>",
+    "       node scripts/run-sequence-reliability-mutations.mjs --self-test-parser=<vitest-json>",
+    "       node scripts/run-sequence-reliability-mutations.mjs --list",
+    "",
+    "This command executes one named mutant at a time in a fresh temporary worktree.",
+    "It requires SANDRA_CANARY_DOCKER_HOST=unix:///path/to/dedicated/docker.sock.",
+  ].join("\n");
+}
+
+function parseArgs(argv) {
+  const result = {
+    artifactsDir: null,
+    checkPatches: false,
+    commit: null,
+    list: false,
+    mutation: null,
+    parserReport: null,
+  };
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--help" || argument === "-h") {
+      console.log(usage());
+      process.exit(0);
+    }
+    if (argument === "--list") {
+      result.list = true;
+      continue;
+    }
+    if (argument === "--check-patches") {
+      result.checkPatches = true;
+      continue;
+    }
+    const [key, value] = argument.split("=", 2);
+    if (key === "--commit") result.commit = value ?? argv[++index];
+    else if (key === "--mutation") result.mutation = value ?? argv[++index];
+    else if (key === "--artifacts-dir") result.artifactsDir = value ?? argv[++index];
+    else if (key === "--self-test-parser") result.parserReport = value ?? argv[++index];
+    else throw new Error(`Unknown argument ${argument}\n${usage()}`);
+  }
+  return result;
+}
+
+function scrub(value) {
+  return String(value ?? "")
+    .replace(/(postgres(?:ql)?:\/\/[^:\s]+:)[^@\s]+@/gi, "$1[REDACTED]@")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[REDACTED_TOKEN]")
+    .replace(/((?:anon|service[_ -]?role|jwt[_ -]?secret|access[_ -]?token|api[_ -]?key)[^:=\n]*[:=])\s*[^\s,]+/gi, "$1 [REDACTED]");
+}
+
+function scrubJson(value) {
+  if (typeof value === "string") return scrub(value);
+  if (Array.isArray(value)) return value.map(scrubJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, scrubJson(nested)]),
+    );
+  }
+  return value;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function createMutationProjectName(mutation, pid, timestamp) {
+  const prefix = "seqmut-";
+  const suffix = `${pid}-${timestamp}`;
+  const availableLabelLength = MAX_SUPABASE_PROJECT_NAME_LENGTH - prefix.length - suffix.length - 1;
+  if (availableLabelLength < 1) {
+    throw new Error("Mutation project name cannot preserve its unique PID/timestamp suffix");
+  }
+  const label = mutation.replace(/[^a-zA-Z0-9-]/g, "-").slice(0, availableLabelLength);
+  if (!label) throw new Error("Mutation project name requires a non-empty mutation label");
+  return `${prefix}${label}-${suffix}`;
+}
+
+function parseVitestReport(stdout, stderr) {
+  const candidates = [
+    ...String(stdout ?? "").split("\n").reverse(),
+    ...String(stderr ?? "").split("\n").reverse(),
+  ];
+  for (const candidate of candidates) {
+    const trimmed = candidate.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const report = JSON.parse(trimmed);
+      if (
+        typeof report.success === "boolean" &&
+        Array.isArray(report.testResults)
+      ) return normalizeVitestReport(report);
+    } catch {
+      // Vitest may print diagnostics around its single-line JSON report.
+    }
+  }
+  return null;
+}
+
+function normalizeVitestReport(report) {
+  const assertions = report.testResults.flatMap((suite) => suite.assertionResults ?? []);
+  const executed = assertions.filter((assertion) =>
+    assertion.status === "passed" || assertion.status === "failed",
+  );
+  const failed = executed.filter((assertion) => assertion.status === "failed");
+  // Vitest increments numFailedTestSuites for an ordinary assertion failure.
+  // A failed suite is setup/import evidence only when it has no executed
+  // assertion result; treating the aggregate count as setup failure would
+  // reject every legitimate mutant kill.
+  const failedSuitesWithoutExecutedAssertions = report.testResults.filter((suite) => {
+    const suiteAssertions = suite.assertionResults ?? [];
+    const hasExecutedAssertion = suiteAssertions.some((assertion) =>
+      assertion.status === "passed" || assertion.status === "failed",
+    );
+    return !hasExecutedAssertion && suite.status === "failed";
+  }).length;
+  const setupFailures = failedSuitesWithoutExecutedAssertions > 0
+    ? failedSuitesWithoutExecutedAssertions
+    : executed.length === 0
+      ? report.numFailedTestSuites ?? 0
+      : 0;
+  return {
+    ...report,
+    success: failed.length === 0 && executed.length > 0 && setupFailures === 0,
+    numTotalTests: executed.length,
+    numPassedTests: executed.length - failed.length,
+    numFailedTests: failed.length,
+    numPendingTests: assertions.length - executed.length,
+    setupFailures,
+    testResults: [{ assertionResults: executed }],
+  };
+}
+
+function parseJsonDocument(stdout, stderr) {
+  const text = `${String(stdout ?? "")}\n${String(stderr ?? "")}`.trim();
+  try {
+    return JSON.parse(text);
+  } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start < 0 || end <= start) return null;
+    try {
+      return JSON.parse(text.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+  }
+}
+
+function parsePlaywrightReport(stdout, stderr) {
+  const report = parseJsonDocument(stdout, stderr);
+  if (!report || !Array.isArray(report.suites)) return null;
+  const assertions = [];
+  function visitSuite(suite, ancestors = []) {
+    const suiteTitle = typeof suite.title === "string" ? suite.title : "";
+    const nextAncestors = suiteTitle ? [...ancestors, suiteTitle] : ancestors;
+    for (const spec of suite.specs ?? []) {
+      const fullName = [...nextAncestors, spec.title].filter(Boolean).join(" ");
+      const tests = spec.tests ?? [];
+      for (const test of tests) {
+        if (test.outcome === "skipped" || (test.results ?? []).length === 0) continue;
+        const failed =
+          test.outcome === "unexpected" ||
+          (test.results ?? []).some((result) => result.status !== "passed");
+        const failureMessages = (test.results ?? []).flatMap((result) => {
+          const error = result.error;
+          if (!error) return [];
+          return [error.stack ?? error.message ?? String(error)];
+        });
+        assertions.push({ fullName, failureMessages, failed });
+      }
+    }
+    for (const child of suite.suites ?? []) visitSuite(child, nextAncestors);
+  }
+  for (const suite of report.suites) visitSuite(suite);
+  const failed = assertions.filter((assertion) => assertion.failed);
+  return {
+    success: assertions.length > 0 && failed.length === 0 && (report.errors ?? []).length === 0,
+    numTotalTests: assertions.length,
+    numFailedTests: failed.length,
+    setupFailures: (report.errors ?? []).length,
+    testResults: [{ assertionResults: assertions }],
+  };
+}
+
+function reportAssertions(report) {
+  return (report?.testResults ?? []).flatMap((suite) => suite.assertionResults ?? []);
+}
+
+function reportFailureMessages(report) {
+  return reportAssertions(report).flatMap((assertion) => assertion.failureMessages ?? []);
+}
+
+const ANSI_ESCAPE_PATTERN = new RegExp(String.fromCharCode(27) + "\\[[0-?]*[ -/]*[@-~]", "g");
+
+function stripAnsi(value) {
+  return String(value ?? "").replace(ANSI_ESCAPE_PATTERN, "");
+}
+
+function hasAssertionDiagnostic(messages, runner = "vitest") {
+  return messages.some((message) => {
+    const firstLine = stripAnsi(message).split(/\r?\n/, 1)[0].trim();
+    if (/^(?:TypeError|ReferenceError|SyntaxError):/i.test(firstLine)) return false;
+    if (runner === "playwright") {
+      return /^Error:\s*expect(?:\(|[.(]).*\.(?:to|not)[A-Za-z]*/i.test(firstLine);
+    }
+    return /^AssertionError:\s*expected\b/i.test(firstLine);
+  });
+}
+
+function sourceLineAt(source, index) {
+  return source.slice(0, index).split("\n").length;
+}
+
+function sourceLinesForRange(source, start, end) {
+  const first = sourceLineAt(source, start);
+  const last = sourceLineAt(source, end);
+  return Array.from({ length: last - first + 1 }, (_, offset) => first + offset);
+}
+
+function selectedSourceEnd(source, selectedIndex, selector) {
+  const nextTestIndex = source.slice(selectedIndex + selector.length).search(
+    /\n\s*(?:it|test)(?:\.each)?\s*\(/,
+  );
+  return nextTestIndex < 0
+    ? source.length
+    : selectedIndex + selector.length + nextTestIndex;
+}
+
+function assertionMarkers(spec) {
+  return spec.expectedFailureMarkers ?? (spec.expectedFailureMarker ? [spec.expectedFailureMarker] : []);
+}
+
+async function validateMutationMarkers(mutation) {
+  const specs = [mutation.target, ...(mutation.controls ?? [])];
+  for (const spec of specs) {
+    const markers = assertionMarkers(spec);
+    if (markers.length === 0) continue;
+    const source = await readFile(path.join(root, spec.file), "utf8");
+    const selector = spec.sourcePattern ?? spec.pattern;
+    const selectedIndex = source.indexOf(selector);
+    const selectedEnd = selectedIndex < 0
+      ? -1
+      : selectedSourceEnd(source, selectedIndex, selector);
+    const markerIndexes = selectedIndex < 0
+      ? []
+      : markers.map((marker) => source.indexOf(marker, selectedIndex))
+        .filter((markerIndex) => markerIndex >= 0 && markerIndex < selectedEnd);
+    if (selectedIndex < 0 || markerIndexes.length !== markers.length) {
+      throw new Error(`${mutation.name}: assertion marker is not contained by ${spec.file} :: ${selector}`);
+    }
+  }
+}
+
+async function assertFailureAtSelectedAssertion(result, label, spec, sourceRoot = worktree) {
+  const markers = assertionMarkers(spec);
+  if (markers.length === 0) {
+    throw new Error(`${label}: mutation manifest is missing an assertion source marker`);
+  }
+  const source = await readFile(path.join(sourceRoot, spec.file), "utf8");
+  const selector = spec.sourcePattern ?? spec.pattern;
+  const selectedIndex = source.indexOf(selector);
+  if (selectedIndex < 0) {
+    throw new Error(`${label}: selected source pattern is missing from ${spec.file}`);
+  }
+  const selectedEnd = selectedSourceEnd(source, selectedIndex, selector);
+  const markerIndexes = markers.map((marker) => source.indexOf(marker, selectedIndex));
+  if (markerIndexes.some((markerIndex) => markerIndex < 0 || markerIndex >= selectedEnd)) {
+    throw new Error(`${label}: expected assertion marker is outside the selected test in ${spec.file}`);
+  }
+  const markerLines = markerIndexes.flatMap((markerIndex, index) =>
+    sourceLinesForRange(source, markerIndex, markerIndex + markers[index].length),
+  );
+  const locations = [];
+  const targetToken = spec.file.replaceAll("\\", "/");
+  const locationPattern = new RegExp(
+    `${escapeRegex(targetToken)}(?::|\\()([0-9]+)(?::[0-9]+)?`,
+    "g",
+  );
+  for (const message of reportFailureMessages(result.report)) {
+    const normalized = String(message).replaceAll("\\", "/");
+    for (const match of normalized.matchAll(locationPattern)) locations.push(Number(match[1]));
+  }
+  if (!locations.some((line) => markerLines.includes(line))) {
+    throw new Error(
+      `${label}: failed assertion did not point at ${spec.file}:${markerLines.join(" or ")}; ` +
+      `source locations were ${locations.join(", ") || "none"}`,
+    );
+  }
+}
+
+function assertOnePassingTest(result, label, expectedFullName) {
+  if (result.exitCode !== 0 || !result.report || !result.report.success) {
+    throw new Error(`${label}: positive control failed or produced no valid report`);
+  }
+  if (result.report.setupFailures > 0) {
+    throw new Error(`${label}: setup/collection failures are not valid positive-control evidence`);
+  }
+  const assertions = reportAssertions(result.report);
+  if (assertions.length !== 1 || result.report.numTotalTests !== 1 || result.report.numFailedTests !== 0) {
+    throw new Error(`${label}: expected exactly one passing selected test`);
+  }
+  if (expectedFullName && !expectedFullName.test(assertions[0].fullName ?? "")) {
+    throw new Error(`${label}: passing test fullName did not match the selected contract`);
+  }
+  if ((assertions[0].failureMessages ?? []).length > 0) {
+    throw new Error(`${label}: passing test contained failure diagnostics`);
+  }
+}
+
+async function assertOneAssertionFailure(result, label, expectedFailure, expectedFullName, spec, options = {}) {
+  if (!result.report || result.report.numTotalTests !== 1 || result.report.numFailedTests !== 1) {
+    throw new Error(`${label}: mutation did not produce exactly one selected assertion failure`);
+  }
+  if (result.report.setupFailures > 0) {
+    throw new Error(`${label}: setup/collection failures are not mutation evidence`);
+  }
+  const assertions = reportAssertions(result.report);
+  if (assertions.length !== 1) {
+    throw new Error(`${label}: expected exactly one selected assertion diagnostic`);
+  }
+  if (expectedFullName && !assertions.some((assertion) => expectedFullName.test(assertion.fullName ?? ""))) {
+    throw new Error(`${label}: failed assertion fullName did not match the selected contract`);
+  }
+  const messages = reportFailureMessages(result.report);
+  if (messages.length === 0) throw new Error(`${label}: failure had no assertion diagnostics`);
+  const normalizedMessages = messages.map(stripAnsi);
+  if (!hasAssertionDiagnostic(normalizedMessages, spec.runner ?? "vitest")) {
+    throw new Error(`${label}: failure was a plain thrown error rather than a matcher assertion`);
+  }
+  const infrastructure = /failed to load|cannot find module|transform failed|unexpected token|syntaxerror|compile|econnrefused|connection refused|startup|timed out|no test files/i;
+  if (normalizedMessages.some((message) => infrastructure.test(message))) {
+    throw new Error(`${label}: mutation produced infrastructure/compile failure instead of assertion failure`);
+  }
+  const fixtureErrorNull = /(?:error|insert|update|delete).{0,100}(?:to be null|toBeNull|to be `null`)/is;
+  if (normalizedMessages.some((message) => fixtureErrorNull.test(message))) {
+    throw new Error(`${label}: failure matches a fixture/database-error null assertion rather than the mutation contract`);
+  }
+  if (expectedFailure && !normalizedMessages.some((message) => expectedFailure.test(message))) {
+    throw new Error(`${label}: failure did not match the expected mutation assertion`);
+  }
+  await assertFailureAtSelectedAssertion(result, label, spec, options.sourceRoot);
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+async function expectRejected(label, callback, messagePattern) {
+  let caught;
+  try {
+    await callback();
+  } catch (error) {
+    caught = error;
+  }
+  if (!caught) throw new Error(`${label}: expected the contract check to reject`);
+  if (messagePattern && !messagePattern.test(String(caught.message))) {
+    throw new Error(`${label}: rejection did not identify the expected contract violation: ${caught.message}`);
+  }
+}
+
+async function selfTestMutationFailureClassification(realReport) {
+  const spec = mutationDefinitions["advancement-suppressed"].target;
+  const source = await readFile(path.join(root, spec.file), "utf8");
+  const markerIndex = source.indexOf(assertionMarkers(spec)[0]);
+  if (markerIndex < 0) throw new Error("advancement mutation self-test marker is missing from the source");
+  const markerLine = sourceLineAt(source, markerIndex);
+  const representativeMessage = (firstLine, line = markerLine) =>
+    `${firstLine}\n    at /tmp/sequence-mutation/${spec.file}:${line}:24`;
+  const selectedFailure = reportAssertions(realReport).find((assertion) =>
+    assertion.status === "failed" && spec.expectedFullName.test(assertion.fullName ?? ""),
+  );
+  const report = selectedFailure
+    ? realReport
+    : {
+        success: false,
+        numTotalTests: 1,
+        numFailedTests: 1,
+        setupFailures: 0,
+        testResults: [{
+          assertionResults: [{
+            fullName: "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+            status: "failed",
+            failureMessages: [representativeMessage("AssertionError: expected { …(5) } to match object { status: 'active', …(1) }")],
+          }],
+        }],
+      };
+  const result = { exitCode: 1, report };
+  await assertOneAssertionFailure(
+    result,
+    "advancement mutation assertion",
+    spec.expectedFailure,
+    spec.expectedFullName,
+    spec,
+    { sourceRoot: root },
+  );
+
+  const withMessage = (message) => {
+    const mutated = cloneJson(report);
+    mutated.testResults[0].assertionResults[0].failureMessages = [message];
+    return { exitCode: 1, report: mutated };
+  };
+  await expectRejected(
+    "advancement wrong assertion line",
+    () => assertOneAssertionFailure(
+      withMessage(
+        representativeMessage(
+          "AssertionError: expected { …(5) } to match object { status: 'active', …(1) }",
+          markerLine - 1,
+        ),
+      ),
+      "advancement wrong line",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /failed assertion did not point/,
+  );
+  await expectRejected(
+    "advancement plain thrown error",
+    () => assertOneAssertionFailure(
+      withMessage(
+        representativeMessage("Error: expected { …(5) } to match object { status: 'active', …(1) }"),
+      ),
+      "advancement plain throw",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /plain thrown error/,
+  );
+  await expectRejected(
+    "advancement infrastructure error",
+    () => assertOneAssertionFailure(
+      withMessage(
+        representativeMessage("AssertionError: expected compile to succeed"),
+      ),
+      "advancement infrastructure",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /infrastructure\/compile failure/,
+  );
+  return selectedFailure ? "actual-report" : "representative-fixture";
+}
+
+async function selfTestBrowserMutationFailureClassification(realReport) {
+  const spec = mutationDefinitions["ui-persistence-dropped"].target;
+  const source = await readFile(path.join(root, spec.file), "utf8");
+  const markers = assertionMarkers(spec);
+  const markerIndexes = markers.map((marker) => source.indexOf(marker));
+  if (markerIndexes.some((index) => index < 0)) {
+    throw new Error("UI persistence mutation self-test marker is missing from the source");
+  }
+  const markerLines = markerIndexes.map((index) => sourceLineAt(source, index));
+  const representativeMessage = (firstLine, line = markerLines[0]) =>
+    `${firstLine}\n    at /tmp/sequence-mutation/${spec.file}:${line}:5`;
+  const selectedFailure = reportAssertions(realReport).find((assertion) =>
+    (assertion.status === "failed" || assertion.failed === true) &&
+      spec.expectedFullName.test(assertion.fullName ?? ""),
+  );
+  const report = selectedFailure
+    ? realReport
+    : {
+        success: false,
+        numTotalTests: 1,
+        numFailedTests: 1,
+        setupFailures: 0,
+        testResults: [{
+          assertionResults: [{
+            fullName: "sequence-readiness.local.spec.ts sequence readiness — local browser contract create/edit/enroll then persist pause, resume, cancel, and reload",
+            status: "failed",
+            failureMessages: [representativeMessage(
+              "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: \"Edited local description\"\nReceived: \"Local browser persistence contract\"",
+            )],
+          }],
+        }],
+      };
+  const result = { exitCode: 1, report };
+  await assertOneAssertionFailure(
+    result,
+    "UI persistence mutation assertion",
+    spec.expectedFailure,
+    spec.expectedFullName,
+    spec,
+    { sourceRoot: root },
+  );
+
+  const withMessage = (message) => {
+    const mutated = cloneJson(report);
+    mutated.testResults[0].assertionResults[0].failureMessages = [message];
+    return { exitCode: 1, report: mutated };
+  };
+  await expectRejected(
+    "UI persistence wrong assertion line",
+    () => assertOneAssertionFailure(
+      withMessage(representativeMessage(
+        "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: \"Edited local description\"\nReceived: \"Local browser persistence contract\"",
+        markerLines[0] - 1,
+      )),
+      "UI persistence wrong line",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /failed assertion did not point/,
+  );
+  await expectRejected(
+    "UI persistence plain thrown error",
+    () => assertOneAssertionFailure(
+      withMessage(representativeMessage("Error: persistence fixture unavailable")),
+      "UI persistence plain throw",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /plain thrown error/,
+  );
+  await expectRejected(
+    "UI persistence navigation error",
+    () => assertOneAssertionFailure(
+      withMessage(representativeMessage("Error: page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:3557")),
+      "UI persistence navigation failure",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /plain thrown error/,
+  );
+  await expectRejected(
+    "UI persistence whole-test timeout",
+    () => assertOneAssertionFailure(
+      withMessage(representativeMessage("Error: Test timeout of 120000ms exceeded.")),
+      "UI persistence whole-test timeout",
+      spec.expectedFailure,
+      spec.expectedFullName,
+      spec,
+      { sourceRoot: root },
+    ),
+    /plain thrown error/,
+  );
+  return selectedFailure ? "actual-report" : "representative-fixture";
+}
+
+function selfTestMutationProjectName() {
+  const truncatedName = createMutationProjectName(
+    "final-authorization-removed",
+    2286,
+    "mu5jxjdm",
+  );
+  if (truncatedName.length > MAX_SUPABASE_PROJECT_NAME_LENGTH ||
+      !truncatedName.endsWith("-2286-mu5jxjdm")) {
+    throw new Error("Mutation project-name self-test did not preserve the bounded unique suffix");
+  }
+  const otherPid = createMutationProjectName(
+    "final-authorization-removed",
+    2287,
+    "mu5jxjdm",
+  );
+  if (truncatedName === otherPid) {
+    throw new Error("Mutation project-name self-test collapsed distinct PID values");
+  }
+  return { truncatedName, otherPid };
+}
+
+function parseStatusJson(stdout) {
+  const text = String(stdout ?? "").trim();
+  try {
+    return JSON.parse(text);
+  } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) return JSON.parse(text.slice(start, end + 1));
+    throw new Error("Supabase status did not return JSON");
+  }
+}
+
+function commandSlug(command, args) {
+  return `${command}-${args.join("-")}`.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 120);
+}
+
+let activeChild;
+let cancelled = false;
+let cleaning = false;
+let commandCounter = 0;
+let artifactsDir;
+let supabaseStartAttempted = false;
+const forceKillTimers = new Map();
+
+function terminate(child) {
+  if (!child?.pid) return;
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch (error) {
+    if (error.code !== "ESRCH") console.error(`Could not terminate child group: ${error.message}`);
+  }
+  if (!forceKillTimers.has(child.pid)) {
+    const forceTimer = setTimeout(() => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch (error) {
+        if (error.code !== "ESRCH") console.error(`Could not force-terminate child group: ${error.message}`);
+      }
+    }, 10_000);
+    forceTimer.unref();
+    forceKillTimers.set(child.pid, forceTimer);
+  }
+}
+
+async function run(command, args, options = {}) {
+  if (cancelled && !cleaning) throw new Error("Mutation run cancelled");
+  const cwd = options.cwd ?? root;
+  const env = options.env ?? baseEnv;
+  const timeoutMs = options.timeoutMs ?? 300_000;
+  const id = `${String(++commandCounter).padStart(3, "0")}-${options.label ?? commandSlug(command, args)}`;
+  let stdout = "";
+  let stderr = "";
+  let timedOut = false;
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      detached: true,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    activeChild = child;
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminate(child);
+    }, timeoutMs);
+    timer.unref();
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      const forceTimer = forceKillTimers.get(child.pid);
+      if (forceTimer) clearTimeout(forceTimer);
+      forceKillTimers.delete(child.pid);
+      activeChild = undefined;
+      resolve({ code: code ?? 1, signal });
+    });
+  });
+  const safeStdout = scrub(stdout);
+  const safeStderr = scrub(stderr);
+  if (artifactsDir) {
+    await writeFile(path.join(artifactsDir, `${id}.stdout.log`), safeStdout);
+    await writeFile(path.join(artifactsDir, `${id}.stderr.log`), safeStderr);
+  }
+  if (timedOut) throw new Error(`${command} ${args.join(" ")} timed out`);
+  if (cancelled && !cleaning) throw new Error(`${command} ${args.join(" ")} cancelled`);
+  return { command, args, cwd, exitCode: result.code, signal: result.signal, stdout, stderr };
+}
+
+async function assertPortAvailable(port) {
+  await new Promise((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`Port ${port} availability check timed out`));
+    }, 2_000);
+    timeout.unref();
+    socket.once("connect", () => {
+      clearTimeout(timeout);
+      socket.destroy();
+      reject(new Error(`Port ${port} is already occupied; refusing to attach to an unknown process`));
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      socket.destroy();
+      if (error.code === "ECONNREFUSED") resolve();
+      else reject(new Error(`Port ${port} availability check failed: ${error.message}`));
+    });
+  });
+}
+
+async function checkCurrentPatch(mutation) {
+  const substitution = {
+    file: mutation.file ?? null,
+    kind: mutation.kind,
+    expected: mutation.expected ?? null,
+    occurrences: null,
+    anchorOccurrences: null,
+  };
+  if (mutation.file && mutation.from) {
+    const target = path.join(root, mutation.file);
+    const original = await readFile(target, "utf8");
+    const occurrences = original.split(mutation.from).length - 1;
+    const mutantOccurrences = original.split(mutation.to).length - 1;
+    substitution.occurrences = occurrences;
+    if (occurrences !== (mutation.expected ?? 1)) {
+      throw new Error(`${mutation.name}: dry-run expected ${mutation.expected ?? 1} exact source occurrence(s), found ${occurrences}`);
+    }
+    if (mutantOccurrences !== 0) {
+      throw new Error(`${mutation.name}: dry-run found an already-applied mutant substitution`);
+    }
+    if (mutation.anchor) {
+      const positions = [];
+      let searchFrom = 0;
+      while (true) {
+        const position = original.indexOf(mutation.from, searchFrom);
+        if (position < 0) break;
+        positions.push(position);
+        searchFrom = position + mutation.from.length;
+      }
+      const anchored = positions.filter((position) =>
+        original.slice(position, position + 1200).includes(mutation.anchor),
+      );
+      substitution.anchorOccurrences = anchored.length;
+      if (anchored.length !== 1) {
+        throw new Error(`${mutation.name}: dry-run expected one source occurrence adjacent to anchor, found ${anchored.length}`);
+      }
+    }
+  }
+  const specs = [mutation.target, ...(mutation.controls ?? [])];
+  for (const spec of specs) {
+    const source = await readFile(path.join(root, spec.file), "utf8");
+    const sourcePattern = spec.sourcePattern ?? spec.pattern;
+    if (!source.includes(sourcePattern)) {
+      throw new Error(`${mutation.name}: dry-run selected test pattern is missing: ${spec.file} :: ${sourcePattern}`);
+    }
+  }
+  await validateMutationMarkers(mutation);
+  if (mutation.kind === "postflight-ddl" && !mutation.sql) {
+    throw new Error(`${mutation.name}: dry-run postflight mutation has no SQL manifest`);
+  }
+  console.log(`[sequence-mutation] PATCH_CHECK ${JSON.stringify({
+    mutation: mutation.name,
+    ...substitution,
+    selectedTests: specs.map((spec) => ({ runner: spec.runner ?? "vitest", file: spec.file, pattern: spec.pattern })),
+  })}`);
+}
+
+function parseParserInput(contents) {
+  let document;
+  try {
+    document = JSON.parse(contents);
+  } catch {
+    document = null;
+  }
+  const record = document?.runner && document?.report
+    ? document
+    : document?.commands?.find((command) => command.label === "mutant-target")
+      ?? document?.tests?.mutant?.target;
+  if (record?.report) return { runner: record.runner ?? "vitest", report: record.report };
+  if (document?.suites) return { runner: "playwright", report: parsePlaywrightReport(contents, "") };
+  const vitest = parseVitestReport(contents, "");
+  return vitest ? { runner: "vitest", report: vitest } : null;
+}
+
+async function selfTestParser(reportPath) {
+  await validateMutationMarkers({
+    name: "all mutation contracts",
+    target: Object.values(mutationDefinitions)[0].target,
+    controls: Object.values(mutationDefinitions).flatMap((mutation) => [
+      mutation.target,
+    ]),
+  });
+  const parserInput = parseParserInput(await readFile(reportPath, "utf8"));
+  const realReport = parserInput?.report;
+  if (!realReport || realReport.numTotalTests < 1) {
+    throw new Error("Parser self-test could not normalize the real test report");
+  }
+  const projectNameCheck = selfTestMutationProjectName();
+  const mutationClassification = parserInput.runner === "playwright"
+    ? await selfTestBrowserMutationFailureClassification(realReport)
+    : await selfTestMutationFailureClassification(realReport);
+  if (realReport.numFailedTests > 0) {
+    if (realReport.numFailedTests !== 1 || realReport.setupFailures !== 0) {
+      throw new Error("Parser self-test misclassified the real assertion failure as setup/infrastructure failure");
+    }
+  } else if (!realReport.success) {
+    throw new Error("Parser self-test could not normalize the real passing Vitest report");
+  }
+  const passingWithSkipped = normalizeVitestReport({
+    success: true,
+    numFailedTestSuites: 0,
+    testResults: [{
+      status: "passed",
+      assertionResults: [
+        { fullName: "selected passing test", status: "passed", failureMessages: [] },
+        { fullName: "filtered pending test", status: "pending", failureMessages: [] },
+        { fullName: "filtered todo test", status: "todo", failureMessages: [] },
+      ],
+    }],
+  });
+  if (!passingWithSkipped.success || passingWithSkipped.numTotalTests !== 1 || passingWithSkipped.numFailedTests !== 0) {
+    throw new Error("Parser self-test did not exclude pending/todo Vitest assertions");
+  }
+  const selectedFailure = normalizeVitestReport({
+    success: false,
+    numFailedTestSuites: 0,
+    testResults: [{
+      status: "failed",
+      assertionResults: [
+        {
+          fullName: "selected failing test",
+          status: "failed",
+          failureMessages: ["AssertionError: expected actual to be contract\n    at selected.test.ts:1:1"],
+        },
+        { fullName: "filtered skipped test", status: "skipped", failureMessages: [] },
+      ],
+    }],
+  });
+  if (selectedFailure.success || selectedFailure.numTotalTests !== 1 || selectedFailure.numFailedTests !== 1) {
+    throw new Error("Parser self-test did not retain the selected Vitest failure");
+  }
+  if (selectedFailure.setupFailures !== 0) {
+    throw new Error("Parser self-test misclassified an ordinary assertion failure as setup failure");
+  }
+  if (!hasAssertionDiagnostic(reportFailureMessages(selectedFailure), "vitest")) {
+    throw new Error("Parser self-test did not recognize the representative Vitest matcher diagnostic");
+  }
+  if (hasAssertionDiagnostic(["TypeError: claim fixture unavailable\n    at reliability.integration.test.ts:1:1"], "vitest")) {
+    throw new Error("Parser self-test accepted a plain fixture TypeError as matcher evidence");
+  }
+  if (hasAssertionDiagnostic(["Error: expected claim fixture to be available\n    at reliability.integration.test.ts:1:1"], "vitest")) {
+    throw new Error("Parser self-test accepted a plain Error as matcher evidence");
+  }
+  const setupFailure = normalizeVitestReport({
+    success: false,
+    numFailedTestSuites: 1,
+    testResults: [{ status: "failed", assertionResults: [], message: "beforeEach failed" }],
+  });
+  if (setupFailure.success || setupFailure.numTotalTests !== 0 || setupFailure.setupFailures !== 1) {
+    throw new Error("Parser self-test did not reject a Vitest setup failure");
+  }
+  const playwright = parsePlaywrightReport(JSON.stringify({
+    errors: [],
+    suites: [{
+      title: "browser contract",
+      specs: [{
+        title: "selected passing test",
+        tests: [
+          { outcome: "expected", results: [{ status: "passed" }] },
+          { outcome: "skipped", results: [] },
+        ],
+      }],
+    }],
+  }), "");
+  if (!playwright?.success || playwright.numTotalTests !== 1 || playwright.numFailedTests !== 0) {
+    throw new Error("Parser self-test did not exclude skipped Playwright tests");
+  }
+  const playwrightFailure = parsePlaywrightReport(JSON.stringify({
+    errors: [],
+    suites: [{
+      title: "browser contract",
+      specs: [{
+        title: "selected failing test",
+        tests: [{
+          outcome: "unexpected",
+          results: [{
+            status: "failed",
+            error: {
+              stack: "Error: expect(locator).toHaveValue(expected)\n    at e2e/sequence-readiness.local.spec.ts:213:8",
+            },
+          }],
+        }],
+      }],
+    }],
+  }), "");
+  if (!playwrightFailure || playwrightFailure.numFailedTests !== 1 ||
+      !hasAssertionDiagnostic(reportFailureMessages(playwrightFailure), "playwright")) {
+    throw new Error("Parser self-test did not recognize the representative Playwright matcher diagnostic");
+  }
+  console.log(`[sequence-mutation] PARSER_CHECK ${JSON.stringify({
+    realRunner: parserInput.runner,
+    realTests: realReport.numTotalTests,
+    realFailures: realReport.numFailedTests,
+    skippedNormalization: passingWithSkipped.numTotalTests,
+    failureNormalization: selectedFailure.numFailedTests,
+    setupFailureNormalization: setupFailure.setupFailures,
+    playwrightTests: playwright.numTotalTests,
+    mutationClassification,
+    projectNameCheck,
+  })}`);
+}
+
+
+const proofMapPath = "/tmp/sandra-sequence-six-mutation-proofs-20260917.json";
+const proofOutputPath = "/tmp/sandra-sequence-six-mutation-adjudication-2ddeaf55-replay-20260917.json";
+const harnessSourcePath = path.join(root, "scripts/run-sequence-reliability-mutations.mjs");
+const proofEntries = JSON.parse(await readFile(proofMapPath, "utf8"));
+const harnessSource = await readFile(harnessSourcePath, "utf8");
+const retainedScriptPath = fileURLToPath(import.meta.url);
+const retainedScript = await readFile(retainedScriptPath, "utf8");
+const entrypointMarker = "const args = parseArgs(process.argv.slice(2));";
+const entrypointCharOffset = harnessSource.indexOf(entrypointMarker);
+if (entrypointCharOffset < 0) throw new Error("Current harness entrypoint marker is missing");
+const exactPrefix = harnessSource.slice(0, entrypointCharOffset);
+const extractedByteEnd = Buffer.byteLength(exactPrefix, "utf8");
+const retainedPrefix = Buffer.from(retainedScript, "utf8").subarray(0, extractedByteEnd).toString("utf8");
+const symbolNames = [
+  "reportAssertions",
+  "reportFailureMessages",
+  "hasAssertionDiagnostic",
+  "selectedSourceEnd",
+  "assertionMarkers",
+  "validateMutationMarkers",
+  "assertFailureAtSelectedAssertion",
+  "assertOnePassingTest",
+  "assertOneAssertionFailure",
+  "cloneJson",
+  "expectRejected",
+];
+function symbolRange(source, name) {
+  const startMatch = source.match(new RegExp(`^(?:async\\s+)?function\\s+${escapeRegex(name)}\\s*\\(`, "m"));
+  if (!startMatch || startMatch.index === undefined) throw new Error(`Missing harness symbol ${name}`);
+  const nextMatches = [...source.slice(startMatch.index + startMatch[0].length).matchAll(/^(?:async\s+)?function\s+[A-Za-z0-9_$]+\s*\(/gm)];
+  const nextStart = nextMatches.length
+    ? startMatch.index + startMatch[0].length + nextMatches[0].index
+    : entrypointCharOffset;
+  return { startChar: startMatch.index, endChar: nextStart };
+}
+const sourceSymbols = symbolNames.map((name) => {
+  const range = symbolRange(harnessSource, name);
+  const startByte = Buffer.byteLength(harnessSource.slice(0, range.startChar), "utf8");
+  const endByte = Buffer.byteLength(harnessSource.slice(0, range.endChar), "utf8");
+  const originalText = harnessSource.slice(range.startChar, range.endChar);
+  const retainedText = retainedScript.slice(range.startChar, range.endChar);
+  return {
+    name,
+    startByte,
+    endByte,
+    sha256: sha256(originalText),
+    retainedSha256: sha256(retainedText),
+    equal: originalText === retainedText,
+  };
+});
+function reportFailureLineMessages(report) {
+  return reportFailureMessages(report).map((message) => stripAnsi(message));
+}
+function targetMarkerLocations(spec, source) {
+  const selector = spec.sourcePattern ?? spec.pattern;
+  const selectedIndex = source.indexOf(selector);
+  if (selectedIndex < 0) throw new Error(`Selected source pattern missing: ${spec.file} :: ${selector}`);
+  const selectedEnd = selectedSourceEnd(source, selectedIndex, selector);
+  return assertionMarkers(spec).map((marker) => {
+    const index = source.indexOf(marker, selectedIndex);
+    if (index < 0 || index >= selectedEnd) {
+      throw new Error(`Selected marker missing from selected test: ${spec.file} :: ${marker}`);
+    }
+    return { marker, line: sourceLineAt(source, index) };
+  });
+}
+function actualFailureLines(report, spec) {
+  const locationPattern = new RegExp(`${escapeRegex(spec.file.replaceAll("\\\\", "/"))}(?::|\\()([0-9]+)(?::[0-9]+)?`, "g");
+  return [...new Set(reportFailureMessages(report).flatMap((message) =>
+    [...String(message).replaceAll("\\\\", "/").matchAll(locationPattern)].map((match) => Number(match[1])),
+  ))];
+}
+function sourceLocationWithLine(message, spec, line) {
+  const normalized = String(message).replaceAll("\\\\", "/");
+  const locationPattern = new RegExp(`${escapeRegex(spec.file)}:[0-9]+:[0-9]+`);
+  return locationPattern.test(normalized)
+    ? normalized.replace(locationPattern, `${spec.file}:${line}:1`)
+    : `${normalized}\n    at ${spec.file}:${line}:1`;
+}
+async function assertGuardRejections(result, label, spec, source) {
+  const markerLocations = targetMarkerLocations(spec, source);
+  const rawMessage = reportFailureMessages(result.report)[0];
+  if (!rawMessage) throw new Error(`${label}: no real failure message for guard checks`);
+  const cloneWith = (report, changes = {}) => ({
+    exitCode: 1,
+    report: { ...cloneJson(report), ...changes },
+  });
+  const cloneWithMessage = (message) => {
+    const clone = cloneJson(result.report);
+    clone.testResults[0].assertionResults[0].failureMessages = [message];
+    return { exitCode: 1, report: clone };
+  };
+  await expectRejected(
+    `${label} wrong-line guard`,
+    () => assertOneAssertionFailure(
+      cloneWithMessage(sourceLocationWithLine(rawMessage, spec, markerLocations[0].line - 1)),
+      `${label} wrong-line`, spec.expectedFailure, spec.expectedFullName, spec, { sourceRoot: root },
+    ),
+    /failed assertion did not point/,
+  );
+  await expectRejected(
+    `${label} plain-throw guard`,
+    () => assertOneAssertionFailure(
+      cloneWithMessage(`Error: plain fixture failure\n    at ${spec.file}:${markerLocations[0].line}:1`),
+      `${label} plain-throw`, spec.expectedFailure, spec.expectedFullName, spec, { sourceRoot: root },
+    ),
+    /plain thrown error/,
+  );
+  await expectRejected(
+    `${label} setup-failure guard`,
+    () => assertOneAssertionFailure(
+      cloneWith(result.report, { setupFailures: 1 }),
+      `${label} setup failure`, spec.expectedFailure, spec.expectedFullName, spec, { sourceRoot: root },
+    ),
+    /setup\/collection failures/,
+  );
+  await expectRejected(
+    `${label} zero-count guard`,
+    () => assertOneAssertionFailure(
+      cloneWith(result.report, { numTotalTests: 0, numFailedTests: 0 }),
+      `${label} zero count`, spec.expectedFailure, spec.expectedFullName, spec, { sourceRoot: root },
+    ),
+    /exactly one selected assertion failure/,
+  );
+  await expectRejected(
+    `${label} multiple-count guard`,
+    () => assertOneAssertionFailure(
+      cloneWith(result.report, { numTotalTests: 2, numFailedTests: 2 }),
+      `${label} multiple count`, spec.expectedFailure, spec.expectedFullName, spec, { sourceRoot: root },
+    ),
+    /exactly one selected assertion failure/,
+  );
+  await expectRejected(
+    `${label} compile-error guard`,
+    () => assertOneAssertionFailure(
+      cloneWithMessage(`AssertionError: expected fixture to be ready\ntransform failed while compiling selected module\n    at ${spec.file}:${markerLocations[0].line}:1`),
+      `${label} compile failure`, spec.expectedFailure, spec.expectedFullName, spec, { sourceRoot: root },
+    ),
+    /infrastructure\/compile failure/,
+  );
+  await expectRejected(
+    `${label} target-timeout guard`,
+    () => assertOneAssertionFailure(
+      cloneWithMessage(`Error: Test timeout of 900000ms exceeded.\n    at ${spec.file}:${markerLocations[0].line}:1`),
+      `${label} target timeout`, spec.expectedFailure, spec.expectedFullName, spec, { sourceRoot: root },
+    ),
+    /plain thrown error/,
+  );
+  return {
+    wrongLine: "rejected",
+    plainThrow: "rejected",
+    setupFailure: "rejected",
+    zeroCount: "rejected",
+    multipleCount: "rejected",
+    compileError: "rejected",
+    targetTimeout: "rejected",
+  };
+}
+const diagnostic = {
+  invocation: {
+    command: "npm exec --yes --package=node@24 -- node scripts/.sequence-mutation-proof-diagnostic.mjs",
+    cwd: root,
+    node: process.version,
+    executedScript: retainedScriptPath,
+    retainedScriptSha256: sha256(retainedScript),
+  },
+  harnessSourcePath,
+  harnessSha256: sha256(harnessSource),
+  extraction: {
+    fromByte: 0,
+    toByteExclusive: extractedByteEnd,
+    sourceEntryPointCharOffset: entrypointCharOffset,
+    sourcePrefixSha256: sha256(exactPrefix),
+    retainedPrefixSha256: sha256(retainedPrefix),
+    exactPrefixEqual: exactPrefix === retainedPrefix,
+    symbols: sourceSymbols,
+  },
+  sourceRoot: root,
+  mutations: [],
+};
+let failed = false;
+for (const entry of proofEntries) {
+  const mutation = mutationDefinitions[entry.mutation];
+  const artifactPath = `/tmp/sandra-sequence-mutation-${entry.commit.slice(0, 8)}-${entry.mutation}/evidence.json`;
+  const artifactDir = path.dirname(artifactPath);
+  const evidenceBytes = await readFile(artifactPath);
+  const evidence = JSON.parse(evidenceBytes.toString("utf8"));
+  const source = await readFile(path.join(root, mutation.target.file), "utf8");
+  const target = mutation.target;
+  const markerLocations = targetMarkerLocations(target, source);
+  const selectedSpec = {
+    runner: target.runner ?? "vitest",
+    file: target.file,
+    pattern: target.pattern,
+    expectedFullName: String(target.expectedFullName),
+    markers: markerLocations,
+  };
+  const phaseResults = {};
+  try {
+    for (const phaseName of ["baselineBefore", "mutant", "baselineAfter"]) {
+      const phase = evidence.tests[phaseName];
+      const phaseTarget = phase.target;
+      const expectedName = target.expectedFullName ?? new RegExp(escapeRegex(target.pattern));
+      if (phaseName === "mutant") {
+        await assertOneAssertionFailure(phaseTarget, `${entry.mutation} mutant target`, target.expectedFailure, expectedName, target, { sourceRoot: root });
+      } else {
+        assertOnePassingTest(phaseTarget, `${entry.mutation} ${phaseName} target`, expectedName);
+      }
+      const controls = [];
+      for (const [index, control] of phase.controls.entries()) {
+        const controlSpec = mutation.controls[index];
+        assertOnePassingTest(control, `${entry.mutation} ${phaseName} control ${index + 1}`, controlSpec.expectedFullName ?? new RegExp(escapeRegex(controlSpec.pattern)));
+        controls.push({ index: index + 1, fullName: reportAssertions(control.report)[0]?.fullName, status: "passed", numTotalTests: control.report.numTotalTests, numFailedTests: control.report.numFailedTests, setupFailures: control.report.setupFailures });
+      }
+      phaseResults[phaseName] = {
+        target: {
+          fullName: reportAssertions(phaseTarget.report)[0]?.fullName,
+          status: phaseName === "mutant" ? "expected-failure" : "passed",
+          numTotalTests: phaseTarget.report.numTotalTests,
+          numFailedTests: phaseTarget.report.numFailedTests,
+          setupFailures: phaseTarget.report.setupFailures,
+          actualFailureLines: phaseName === "mutant" ? actualFailureLines(phaseTarget.report, target) : [],
+          failureMessageSha256: phaseName === "mutant" ? sha256(reportFailureLineMessages(phaseTarget.report).join("\n")) : null,
+        },
+        controls,
+      };
+    }
+    const cleanupRaw = [];
+    for (const filename of (await (await import("node:fs/promises")).readdir(artifactDir)).filter((name) => /^0(?:2[2-9]|3[0-9])-.+\.(?:stdout|stderr)\.log$/.test(name)).sort()) {
+      const bytes = await readFile(path.join(artifactDir, filename));
+      cleanupRaw.push({ file: filename, bytes: bytes.byteLength, sha256: sha256(bytes) });
+    }
+    const postRestore = (evidence.preflight ?? []).filter((item) => item.phase === "after-restore");
+    const guardResults = await assertGuardRejections(evidence.tests.mutant.target, `${entry.mutation} mutant target`, target, source);
+    diagnostic.mutations.push({
+      mutation: entry.mutation,
+      artifactPath,
+      evidenceSha256: sha256(evidenceBytes),
+      commit: entry.commit,
+      run: entry.run,
+      selectedSpec,
+      phases: phaseResults,
+      guards: guardResults,
+      cleanupRaw,
+      postRestoreIndexProof: postRestore.map((item) => ({ postgresVersion: item.postgresVersion, transactionIsolation: item.transactionIsolation, indexes: item.indexes, activeClaimIndexPresent: item.activeClaimIndexPresent })),
+      result: "PASS",
+    });
+  } catch (error) {
+    failed = true;
+    diagnostic.mutations.push({ mutation: entry.mutation, artifactPath, evidenceSha256: sha256(evidenceBytes), commit: entry.commit, run: entry.run, selectedSpec, phases: phaseResults, result: "FAIL", error: String(error?.stack ?? error) });
+  }
+}
+await writeFile(proofOutputPath, `${JSON.stringify(diagnostic, null, 2)}\n`);
+console.log(JSON.stringify({ proofOutputPath, harnessSha256: diagnostic.harnessSha256, retainedScriptSha256: diagnostic.invocation.retainedScriptSha256, extraction: diagnostic.extraction, results: diagnostic.mutations.map((item) => ({ mutation: item.mutation, result: item.result, evidenceSha256: item.evidenceSha256, guards: item.guards, failureLines: item.phases?.mutant?.target?.actualFailureLines })) }, null, 2));
+if (failed) process.exitCode = 1;
+
+const closureProofOutputPath = "/tmp/sandra-sequence-six-mutation-adjudication-2ddeaf55-closure-20260917.json";
+const closureRetainedPath = "/tmp/sandra-sequence-six-mutation-adjudication-harness-2ddeaf55-closure-20260917.mjs";
+const closureExecutedPath = fileURLToPath(import.meta.url);
+const closureExecutedScript = await readFile(closureExecutedPath, "utf8");
+const closureMutationResults = [];
+let closureFailed = false;
+for (const entry of proofEntries) {
+  const mutation = mutationDefinitions[entry.mutation];
+  const artifactPath = `/tmp/sandra-sequence-mutation-${entry.commit.slice(0, 8)}-${entry.mutation}/evidence.json`;
+  const artifactDir = path.dirname(artifactPath);
+  const evidenceBytes = await readFile(artifactPath);
+  const evidence = JSON.parse(evidenceBytes.toString("utf8"));
+  const source = await readFile(path.join(root, mutation.target.file), "utf8");
+  const markerLocations = targetMarkerLocations(mutation.target, source);
+  const selectedSpec = {
+    runner: mutation.target.runner ?? "vitest",
+    file: mutation.target.file,
+    pattern: mutation.target.pattern,
+    expectedFullName: String(mutation.target.expectedFullName),
+    markers: markerLocations,
+  };
+  const phases = {};
+  try {
+    await validateMutationMarkers({ name: entry.mutation, target: mutation.target, controls: mutation.controls });
+    const validation = "PASS";
+    for (const phaseName of ["baselineBefore", "mutant", "baselineAfter"]) {
+      const phase = evidence.tests[phaseName];
+      const expectedName = mutation.target.expectedFullName ?? new RegExp(escapeRegex(mutation.target.pattern));
+      if (phaseName === "mutant") {
+        await assertOneAssertionFailure(
+          phase.target,
+          `${entry.mutation} mutant target`,
+          mutation.target.expectedFailure,
+          expectedName,
+          mutation.target,
+          { sourceRoot: root },
+        );
+      } else {
+        assertOnePassingTest(phase.target, `${entry.mutation} ${phaseName} target`, expectedName);
+      }
+      const controls = [];
+      for (const [index, control] of phase.controls.entries()) {
+        const controlSpec = mutation.controls[index];
+        assertOnePassingTest(
+          control,
+          `${entry.mutation} ${phaseName} control ${index + 1}`,
+          controlSpec.expectedFullName ?? new RegExp(escapeRegex(controlSpec.pattern)),
+        );
+        controls.push({
+          index: index + 1,
+          fullName: reportAssertions(control.report)[0]?.fullName,
+          status: "passed",
+          numTotalTests: control.report.numTotalTests,
+          numFailedTests: control.report.numFailedTests,
+          setupFailures: control.report.setupFailures,
+        });
+      }
+      phases[phaseName] = {
+        target: {
+          fullName: reportAssertions(phase.target.report)[0]?.fullName,
+          status: phaseName === "mutant" ? "expected-failure" : "passed",
+          numTotalTests: phase.target.report.numTotalTests,
+          numFailedTests: phase.target.report.numFailedTests,
+          setupFailures: phase.target.report.setupFailures,
+          actualFailureLines: phaseName === "mutant" ? actualFailureLines(phase.target.report, mutation.target) : [],
+          failureMessageSha256: phaseName === "mutant"
+            ? sha256(reportFailureLineMessages(phase.target.report).join("\n"))
+            : null,
+        },
+        controls,
+      };
+    }
+    const cleanupNames = (await (await import("node:fs/promises")).readdir(artifactDir))
+      .filter((name) => /(?:supabase-stop|docker-list-(?:container|volume)|git-worktree-remove)\.(?:stdout|stderr)\.log$/.test(name))
+      .sort();
+    const cleanupArtifacts = [];
+    for (const name of cleanupNames) {
+      const bytes = await readFile(path.join(artifactDir, name));
+      const item = { file: name, bytes: bytes.byteLength, sha256: sha256(bytes) };
+      if (bytes.byteLength > 0) item.content = scrub(bytes.toString("utf8"));
+      cleanupArtifacts.push(item);
+    }
+    const postRestoreIndexProof = (evidence.preflight ?? [])
+      .filter((item) => item.phase === "after-restore")
+      .map((item) => ({
+        postgresVersion: item.postgresVersion,
+        transactionIsolation: item.transactionIsolation,
+        indexes: item.indexes,
+        activeClaimIndexPresent: item.activeClaimIndexPresent,
+      }));
+    const guards = await assertGuardRejections(
+      evidence.tests.mutant.target,
+      `${entry.mutation} mutant target`,
+      mutation.target,
+      source,
+    );
+    closureMutationResults.push({
+      mutation: entry.mutation,
+      artifactPath,
+      evidenceSha256: sha256(evidenceBytes),
+      commit: entry.commit,
+      run: entry.run,
+      selectedSpec,
+      markerValidation: validation,
+      mutationRecord: evidence.mutationRecord,
+      phases,
+      guards,
+      cleanupArtifacts,
+      postRestoreIndexProof,
+      result: "PASS",
+    });
+  } catch (error) {
+    closureFailed = true;
+    closureMutationResults.push({
+      mutation: entry.mutation,
+      artifactPath,
+      evidenceSha256: sha256(evidenceBytes),
+      commit: entry.commit,
+      run: entry.run,
+      selectedSpec,
+      phases,
+      result: "FAIL",
+      error: String(error?.stack ?? error),
+    });
+  }
+}
+const closureReport = {
+  invocation: {
+    command: "npm exec --yes --package=node@24 -- node scripts/.sequence-mutation-proof-diagnostic-closure.mjs",
+    cwd: root,
+    node: process.version,
+    executedScript: closureExecutedPath,
+    retainedScript: closureRetainedPath,
+    executedScriptSha256: sha256(closureExecutedScript),
+    retainedScriptSha256Expected: sha256(closureExecutedScript),
+  },
+  harnessSourcePath,
+  harnessSha256: sha256(harnessSource),
+  extraction: {
+    fromByte: 0,
+    toByteExclusive: extractedByteEnd,
+    sourceEntryPointCharOffset: entrypointCharOffset,
+    sourcePrefixSha256: sha256(exactPrefix),
+    retainedPrefixSha256: sha256(retainedPrefix),
+    exactPrefixEqual: exactPrefix === retainedPrefix,
+    symbols: sourceSymbols,
+  },
+  sourceRoot: root,
+  mutations: closureMutationResults,
+};
+await writeFile(closureProofOutputPath, `${JSON.stringify(closureReport, null, 2)}\n`);
+console.log(JSON.stringify({
+  closureProofOutputPath,
+  executedScriptSha256: closureReport.invocation.executedScriptSha256,
+  harnessSha256: closureReport.harnessSha256,
+  mutations: closureMutationResults.map((item) => ({
+    mutation: item.mutation,
+    result: item.result,
+    markerValidation: item.markerValidation,
+    evidenceSha256: item.evidenceSha256,
+    mutationRecord: item.mutationRecord,
+    guards: item.guards,
+    actualFailureLines: item.phases?.mutant?.target?.actualFailureLines,
+    cleanupArtifacts: item.cleanupArtifacts?.length,
+  })),
+}, null, 2));
+if (closureFailed) process.exitCode = 1;
