@@ -146,4 +146,20 @@ describe("resumed rep SMS obligations", () => {
     expect(result).toEqual(expect.objectContaining({ data: { outcome: { status: "failed_not_dispatched", reason: "stale dispatch fence" } } }))
     expect(mocks.adminRpc).toHaveBeenNthCalledWith(2, "fn_record_rep_sms_obligation_result", expect.objectContaining({ p_state: "failed_not_dispatched", p_provider_error: "stale dispatch fence" }))
   })
+
+  it.each([
+    ["delivered", { state: "delivered", providerMessageId: "provider-delivered" }, "delivered"],
+    ["delivery_failed", { state: "delivery_failed", providerError: "carrier rejected" }, "provider_failed"],
+  ] as const)("returns an early %s result truthfully instead of reporting acceptance", async (_label, stored, expected) => {
+    mocks.readContext.mockResolvedValue(baseContext("required"))
+    mocks.adminRpc.mockResolvedValueOnce({ data: { ok: true, state: "sending", claimToken: "claim-1", claimGeneration: 1, assignmentId: "sender-1", toNumber: "+18165550123" }, error: null })
+      .mockResolvedValueOnce({ data: { ok: true, ...stored }, error: null })
+    mocks.dispatch.mockResolvedValue({ status: "sent", messageId: "message-1", externalId: "provider-1" })
+
+    const result = await sendRepSms({ propertyId: "property-1", obligationId: "obligation-1", assignmentId: "sender-1", composition })
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.data.outcome.status).toBe(expected)
+    expect(result.ok && result.data.outcome.status).not.toBe("sent")
+  })
 })

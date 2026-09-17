@@ -7,7 +7,7 @@ import { useOptionalSoftphone } from '@/components/softphone/softphone-provider'
 import { BookAppointmentPopover } from '@/components/appointments/book-appointment-popover';
 import type { Json } from '@/lib/supabase/types';
 import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow } from '@/lib/my-leads/queries';
-import { WorkflowRecoveryContext } from './_components/workflow-form';
+import { WorkflowRecoveryContext, type WorkflowReconciliation } from './_components/workflow-form';
 import { MyLeadsQueue } from './_components/queue';
 import { AcquisitionAttemptDialog } from './_components/attempt-dialog';
 import { AcquisitionReadinessDialog } from './_components/readiness-dialog';
@@ -56,7 +56,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   useEffect(()=>{pendingOpening.current=null;setOpeningStatus(null);mutationReads.current.clear();},[openingScope]);
   const activeDialog=useRef(dialog);activeDialog.current=dialog;
   const recoveredRow=useRef<{opening:NonNullable<typeof dialog>;row:QueueRow}|null>(null);
-  const [recovery,setRecovery]=useState<{opening:NonNullable<typeof dialog>;message:string;blocked:boolean;busy:boolean}|null>(null);
+  const [recovery,setRecovery]=useState<{opening:NonNullable<typeof dialog>;message:string;blocked:boolean;busy:boolean;reconciliation?:WorkflowReconciliation}|null>(null);
   const recoverDialog=async()=>{
     const opening=dialog;if(!opening||recovery?.busy)return;
     setRecovery({opening,message:'Checking current lead access…',blocked:true,busy:true});
@@ -195,7 +195,10 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     if(!dialog)return {ok:false as const,message:'Select a lead first.'};
     if(recovery?.opening===dialog&&(recovery.blocked||recovery.busy))return {ok:false as const,message:recovery.message};
     const row=recoveredRow.current?.opening===dialog?recoveredRow.current.row:dialog.row;
-    setRecovery(null);
+    // Keep the reconciliation receipt mounted while the exact original
+    // request is being replayed. Clearing it before the server action returns
+    // would briefly re-enable edited controls and make the replay ambiguous.
+    if(!(recovery?.opening===dialog&&recovery.reconciliation))setRecovery(null);
     // A command's idempotency key belongs to the opened submission, not to
     // the current draft contents. Before the RPC is known to have crossed its
     // boundary, a deterministic rejection may be retried with refreshed
@@ -218,13 +221,16 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       // response did not reach the browser. Retain the exact request so the
       // next click is a server-side replay instead of a second mutation.
       submission.current.uncertain=true;
+      if(activeDialog.current===dialog)setRecovery({opening:dialog,message:'Sandra could not confirm this save. The original request is preserved for reconciliation.',blocked:false,busy:false,reconciliation:{command,payload:submission.current.payload??input}});
       throw error;
     }
     if(!result.ok&&result.message==='The update was not confirmed. Retry with the same form.') {
       submission.current.uncertain=true;
+      if(activeDialog.current===dialog)setRecovery({opening:dialog,message:'Sandra could not confirm this save. The original request is preserved for reconciliation.',blocked:false,busy:false,reconciliation:{command,payload:submission.current.payload??input}});
     }
     if(!result.ok&&'code' in result&&(result.code==='FORBIDDEN'||result.code==='STALE_STATE')&&activeDialog.current===dialog)setRecovery({opening:dialog,message:result.message,blocked:true,busy:false});
     if(result.ok){
+      setRecovery(null);
       // Publish the refresh barrier before closing so a rapid next click is retained
       // and initialized from authorized post-command metadata, never the old row.
       const read=refresh();mutationReads.current.set(dialog.row.propertyId,{scope:openingScope,episodeId:dialog.row.assignmentEpisodeId,requestId:request.current,read});

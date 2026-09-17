@@ -117,3 +117,18 @@ it('records a stale dispatch fence as failed_not_dispatched', async()=>{
   expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'failed_not_dispatched',message:'stale dispatch fence'}});
   expect(mocks.adminRpc).toHaveBeenNthCalledWith(2,'fn_record_rep_sms_obligation_result',expect.objectContaining({p_state:'failed_not_dispatched'}));
 });
+
+it('returns an early delivery callback result truthfully instead of reporting acceptance', async()=>{
+  mocks.rpc.mockResolvedValue({data:{ok:true,attemptId:'attempt-early',obligationId:'obligation-early'},error:null});
+  mocks.adminRpc
+    .mockResolvedValueOnce({data:{ok:true,state:'sending',obligationId:'obligation-early',claimToken:'claim-early',claimGeneration:1,assignmentId:'sender-1',toNumber:'+18165550123'},error:null})
+    .mockResolvedValueOnce({data:{ok:true,state:'delivery_failed',providerError:'carrier rejected'},error:null});
+  mocks.dispatch.mockResolvedValue({status:'sent',messageId:'message-early',externalId:'provider-early'});
+  const result=await submitMyLeadCommand('log-attempt',{
+    propertyId:'lead',source:'manual',kind:'outreach',outcome:'no_answer',occurredAt:'2026-09-17T15:00:00.000Z',
+    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:1,templateId:'no-answer-callback-time',templateVersion:1,
+      initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
+      remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'ignored'},
+  });
+  expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'delivery_failed',message:'carrier rejected'}});
+});

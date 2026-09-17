@@ -3,6 +3,10 @@ import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { ProviderError } from "@/lib/errors/classes";
 
 vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget: vi.fn().mockResolvedValue(undefined) }));
+const adminRpc = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({ rpc: adminRpc }),
+}));
 
 // Mock every side-dependency sendSmsToContact touches *before* the fresh
 // automated-suppression re-check, so the test can drive the pipeline up to
@@ -455,6 +459,96 @@ describe("sendSmsToContact — ambiguous Sendillo outcomes", () => {
       messageId: "msg-failed",
       error: "Sendillo sender is missing",
     });
+  });
+});
+
+describe("sendSmsToContact — service-owned rep SMS retry fence", () => {
+  const receipt = (claimGeneration: number) => ({
+    receiptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    claimToken: claimGeneration === 1
+      ? "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+      : "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    claimGeneration,
+    orgId: PROPERTY_ROW.org_id,
+  });
+
+  it("records a proven pre-provider authorization failure, then permits the owner-fenced next generation", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const authorize = vi.fn()
+      .mockRejectedValueOnce(new Error("sender grant was revoked"))
+      .mockResolvedValueOnce(undefined);
+    adminRpc
+      .mockResolvedValueOnce({ data: { ok: true, state: "failed_not_dispatched" }, error: null })
+      .mockResolvedValueOnce({ data: { ok: true, state: "accepted", providerMessageId: "ext-1" }, error: null });
+
+    const first = await sendSmsToContact(
+      fakeSupabase({
+        contacts: [{ data: CONTACT_ROW, error: null }],
+        properties: [{ data: PROPERTY_ROW, error: null }],
+        messages: [
+          { data: { id: "msg-failed" }, error: null },
+          { data: null, error: null },
+        ],
+      }),
+      {
+        origin: "manual",
+        contactId: CONTACT_ID,
+        propertyId: PROPERTY_ID,
+        body: "hello",
+        from: "+18163706846",
+        repSmsReceipt: receipt(1),
+      },
+      { provider, authorize },
+    );
+
+    expect(first).toEqual({
+      status: "provider_failed",
+      messageId: "msg-failed",
+      error: "sender grant was revoked",
+      providerAttempted: false,
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+    expect(adminRpc).toHaveBeenNthCalledWith(1, "fn_record_rep_sms_delivery_result", expect.objectContaining({
+      p_receipt_id: receipt(1).receiptId,
+      p_claim_token: receipt(1).claimToken,
+      p_claim_generation: 1,
+      p_state: "failed_not_dispatched",
+      p_provider_error: "sender grant was revoked",
+    }));
+
+    const second = await sendSmsToContact(
+      fakeSupabase({
+        contacts: [{ data: CONTACT_ROW, error: null }],
+        properties: [{ data: PROPERTY_ROW, error: null }],
+        messages: [
+          { data: { id: "msg-retry" }, error: null },
+          { data: { id: "msg-retry" }, error: null },
+        ],
+        webhook_events: [{ data: [], error: null }],
+      }),
+      {
+        origin: "manual",
+        contactId: CONTACT_ID,
+        propertyId: PROPERTY_ID,
+        body: "hello",
+        from: "+18163706846",
+        repSmsReceipt: receipt(2),
+      },
+      { provider, authorize },
+    );
+
+    expect(second).toEqual({ status: "sent", messageId: "msg-retry", externalId: "ext-1" });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+    expect(authorize).toHaveBeenCalledWith("msg-failed");
+    expect(authorize).toHaveBeenCalledWith("msg-retry");
+    expect(adminRpc).toHaveBeenNthCalledWith(2, "fn_record_rep_sms_delivery_result", expect.objectContaining({
+      p_receipt_id: receipt(2).receiptId,
+      p_claim_token: receipt(2).claimToken,
+      p_claim_generation: 2,
+      p_state: "accepted",
+      p_provider_message_id: "ext-1",
+    }));
   });
 });
 

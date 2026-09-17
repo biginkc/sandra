@@ -453,18 +453,16 @@ describe('stale form recovery',()=>{
     const note=screen.getByLabelText('Note (optional)');
     await user.type(note,'Original draft');
     await user.click(screen.getByRole('button',{name:'Save attempt'}));
-    await screen.findByText("We couldn't save this change. Try again.");
-
-    await user.clear(note);
-    await user.type(note,'Edited after response loss');
-    await user.click(screen.getByRole('button',{name:'Save attempt'}));
+    await screen.findByText(/original request is preserved for reconciliation/);
+    expect(note).toHaveValue('Original draft');
+    expect(note).toBeDisabled();
+    expect(screen.getByRole('button',{name:'Reconcile saved change'})).toBeEnabled();
+    await user.click(screen.getByRole('button',{name:'Reconcile saved change'}));
     await waitFor(()=>expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
     expect(mocks.submitMyLeadCommand.mock.calls[0][1]).toMatchObject({note:'Original draft'});
-    // The key and payload are an inseparable replay pair. The visible draft
-    // may have been edited after the response was lost, but sending that edit
-    // under the original key would be rejected by the SQL receipt hash.
+    // The key and payload are an inseparable replay pair. The visible form is
+    // frozen to the original values while the saved request is reconciled.
     expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({note:'Original draft'});
-    expect(mocks.submitMyLeadCommand.mock.calls[1][1]).not.toMatchObject({note:'Edited after response loss'});
     expect(mocks.submitMyLeadCommand.mock.calls[1][1].idempotencyKey).toBe(mocks.submitMyLeadCommand.mock.calls[0][1].idempotencyKey);
   });
   it('ignores recovery finishing after cancellation and reopening the same lead',async()=>{

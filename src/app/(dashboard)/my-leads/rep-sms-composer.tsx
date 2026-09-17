@@ -35,7 +35,7 @@ export type RepSmsSendState =
 
 type RepSmsComposerProps = {
   propertyId: string
-  onSent?: (id: string) => void
+  onSent?: (id?: string) => void
   /** The exact saved phone used by an open Messages thread, when available. */
   replyToPhone?: string | null
   /** Optional curated catalog override for tests or a future rollout variant. */
@@ -55,45 +55,84 @@ type StoredRepSmsSubmission = {
   key: string
   composition: RepSmsComposition
   /** The sender and destination reviewed for this exact provider request. */
-  assignmentId?: string
-  to?: string
+  orgId: string
+  actorId: string
+  createdAt: number
+  assignmentId: string
+  from: string
+  to: string
 }
 
-function repSmsSubmissionStorageKey(propertyId: string): string {
+const REP_SMS_SUBMISSION_TTL_MS = 24 * 60 * 60 * 1000
+
+function repSmsSubmissionStorageKey(orgId: string, actorId: string, propertyId: string): string {
+  return `sandra:rep-sms:submission:${encodeURIComponent(orgId)}:${encodeURIComponent(actorId)}:${encodeURIComponent(propertyId)}`
+}
+
+function legacyRepSmsSubmissionStorageKey(propertyId: string): string {
   return `sandra:rep-sms:submission:${propertyId}`
 }
 
-function readStoredRepSmsSubmission(propertyId: string): StoredRepSmsSubmission | null {
-  if (typeof window === "undefined") return null
+function clearStoredRepSmsSubmission(orgId: string, actorId: string, propertyId: string): void {
+  if (typeof window === "undefined") return
   try {
-    const raw = window.localStorage.getItem(repSmsSubmissionStorageKey(propertyId))
+    window.localStorage.removeItem(repSmsSubmissionStorageKey(orgId, actorId, propertyId))
+  } catch { /* best effort */ }
+}
+
+function clearLegacyRepSmsSubmission(propertyId: string): void {
+  if (typeof window === "undefined") return
+  try { window.localStorage.removeItem(legacyRepSmsSubmissionStorageKey(propertyId)) } catch { /* best effort */ }
+}
+
+function readStoredRepSmsSubmission(orgId: string, actorId: string, propertyId: string): StoredRepSmsSubmission | null {
+  if (typeof window === "undefined") return null
+  const key = repSmsSubmissionStorageKey(orgId, actorId, propertyId)
+  try {
+    // Remove pre-scope records. They contain a message body with no verified
+    // account identity and must never be restored into another account.
+    clearLegacyRepSmsSubmission(propertyId)
+    const raw = window.localStorage.getItem(key)
     if (!raw) return null
     const value = JSON.parse(raw) as Partial<StoredRepSmsSubmission>
-    if (!value || typeof value.key !== "string" || !value.key.trim() || !value.composition || typeof value.composition !== "object") return null
+    const validIdentity = value.orgId === orgId && value.actorId === actorId
+    const validTimestamp = typeof value.createdAt === "number" && Number.isFinite(value.createdAt) && value.createdAt > 0 && Date.now() - value.createdAt <= REP_SMS_SUBMISSION_TTL_MS
+    const validRoute = typeof value.assignmentId === "string" && Boolean(value.assignmentId.trim()) && typeof value.from === "string" && Boolean(value.from.trim()) && typeof value.to === "string" && Boolean(value.to.trim())
+    if (!value || typeof value.key !== "string" || !value.key.trim() || !value.composition || typeof value.composition !== "object" || !validIdentity || !validTimestamp || !validRoute) {
+      window.localStorage.removeItem(key)
+      return null
+    }
+    let composition: RepSmsComposition
+    try {
+      composition = composeRepSms(value.composition)
+    } catch {
+      window.localStorage.removeItem(key)
+      return null
+    }
     return {
       key: value.key,
-      composition: value.composition as RepSmsComposition,
-      ...(typeof value.assignmentId === "string" && value.assignmentId.trim() ? { assignmentId: value.assignmentId } : {}),
-      ...(typeof value.to === "string" && value.to.trim() ? { to: value.to } : {}),
+      composition,
+      orgId,
+      actorId,
+      createdAt: value.createdAt as number,
+      assignmentId: value.assignmentId as string,
+      from: value.from as string,
+      to: value.to as string,
     }
   } catch {
+    try { window.localStorage.removeItem(key) } catch { /* best effort */ }
     return null
   }
 }
 
-function writeStoredRepSmsSubmission(propertyId: string, submission: StoredRepSmsSubmission): void {
+function writeStoredRepSmsSubmission(orgId: string, actorId: string, propertyId: string, submission: StoredRepSmsSubmission): void {
   if (typeof window === "undefined") return
   try {
-    window.localStorage.setItem(repSmsSubmissionStorageKey(propertyId), JSON.stringify(submission))
+    window.localStorage.setItem(repSmsSubmissionStorageKey(orgId, actorId, propertyId), JSON.stringify(submission))
   } catch {
     // Private browsing or a full storage quota must not block a send. The
     // server key still protects the current request while this tab remains.
   }
-}
-
-function clearStoredRepSmsSubmission(propertyId: string): void {
-  if (typeof window === "undefined") return
-  try { window.localStorage.removeItem(repSmsSubmissionStorageKey(propertyId)) } catch { /* best effort */ }
 }
 
 /**
@@ -187,6 +226,7 @@ export function RepSmsComposer({
   const [selectedTemplateId, setSelectedTemplateId] = useState("")
   const [remainder, setRemainder] = useState("")
   const [sendState, setSendState] = useState<SendState>(INITIAL_SEND_STATE)
+  const [restoredSubmissionBlocked, setRestoredSubmissionBlocked] = useState(false)
   const sendInFlight = useRef(false)
   const submission = useRef<StoredRepSmsSubmission | null>(null)
   const templateRequest = useRef(0)
@@ -203,6 +243,7 @@ export function RepSmsComposer({
     setSelectedTemplateId("")
     setRemainder("")
     setSendState(INITIAL_SEND_STATE)
+    setRestoredSubmissionBlocked(false)
     submission.current = null
   }, [propertyId, providedTemplates])
 
@@ -212,6 +253,8 @@ export function RepSmsComposer({
     setContext(null)
     setError(null)
     setSendState(INITIAL_SEND_STATE)
+    setRestoredSubmissionBlocked(false)
+    submission.current = null
     void loadRepSmsContext(propertyId)
       .then((result) => {
         if (!active) return
@@ -237,15 +280,21 @@ export function RepSmsComposer({
         } else if (obligation && REVIEW_ONLY_OBLIGATION_STATES.has(obligation.status)) {
           setSendState({ status: "unknown", message: `${obligation.blockedReason ?? `Saved follow-up is ${obligation.status.replaceAll("_", " ")}.`} Automatic retry is disabled; review or close the obligation.` })
         } else {
-          const stored = readStoredRepSmsSubmission(propertyId)
+          const stored = readStoredRepSmsSubmission(result.data.orgId, result.data.actorId, propertyId)
           if (stored) {
-            submission.current = stored
-            // Reconcile the exact reviewed route. If the assignment or phone
-            // disappeared, the server will fail closed rather than allowing a
-            // changed route under the original idempotency key.
-            if (stored.assignmentId && result.data.senders.some((sender) => sender.id === stored.assignmentId)) {
-              setSenderId(stored.assignmentId)
+            const savedSender = result.data.senders.find((sender) => sender.id === stored.assignmentId)
+            // A browser retry can outlive an owner changing or revoking the
+            // sender grant. Never silently fall back to a different number
+            // under the old idempotency key; fail closed until the context is
+            // refreshed and the exact assignment is available again.
+            if (!savedSender || savedSender.number !== stored.from) {
+              clearStoredRepSmsSubmission(result.data.orgId, result.data.actorId, propertyId)
+              setRestoredSubmissionBlocked(true)
+              setSendState({ status: "unknown", message: "The saved send cannot be safely restored because its exact texting number is no longer assigned. Ask an owner to restore that assignment, then retry." })
+              return
             }
+            submission.current = stored
+            setSenderId(savedSender.id)
             const storedComposition = stored.composition
             if (typeof storedComposition.introId === "string") setIntroId(storedComposition.introId)
             if (typeof storedComposition.templateId === "string") setSelectedTemplateId(storedComposition.templateId)
@@ -300,8 +349,8 @@ export function RepSmsComposer({
   const needsTemplate = Boolean(resumableObligationId)
   const missingTemplate = needsTemplate && !selectedTemplateId
   const tooLong = smsInfo.units > 1600
-  const canSend = Boolean(sender && recipient && remainder.trim() && composition && !missingTemplate && !tooLong && !reviewOnlyObligation && sendState.status !== "provider_unknown" && sendState.status !== "unknown" && !pending && !sendInFlight.current)
-  const canReconcile = Boolean(submission.current && sender && recipient && composition && !tooLong && !pending && !sendInFlight.current && (sendState.status === "provider_unknown" || sendState.status === "unknown" || sendState.status === "resume"))
+  const canSend = Boolean(!restoredSubmissionBlocked && sender && recipient && remainder.trim() && composition && !missingTemplate && !tooLong && !reviewOnlyObligation && sendState.status !== "provider_unknown" && sendState.status !== "unknown" && !pending && !sendInFlight.current)
+  const canReconcile = Boolean(!restoredSubmissionBlocked && submission.current && sender && recipient && composition && !tooLong && !pending && !sendInFlight.current && (sendState.status === "provider_unknown" || sendState.status === "unknown" || sendState.status === "resume"))
 
   const selectTemplate = (id: string) => {
     setSelectedTemplateId(id)
@@ -317,7 +366,7 @@ export function RepSmsComposer({
 
   const clearSubmission = () => {
     submission.current = null
-    clearStoredRepSmsSubmission(propertyId)
+    if (context) clearStoredRepSmsSubmission(context.orgId, context.actorId, propertyId)
   }
 
   const send = (mode: "send" | "reconcile" = "send") => {
@@ -330,10 +379,14 @@ export function RepSmsComposer({
         submission.current = {
           key: crypto.randomUUID(),
           composition: submittedComposition,
+          orgId: context?.orgId ?? "",
+          actorId: context?.actorId ?? "",
+          createdAt: Date.now(),
           assignmentId: sender.id,
+          from: sender.number,
           to: recipient,
         }
-        writeStoredRepSmsSubmission(propertyId, submission.current)
+        writeStoredRepSmsSubmission(context?.orgId ?? "", context?.actorId ?? "", propertyId, submission.current)
       }
       return submission.current.key
     })()
@@ -373,8 +426,8 @@ export function RepSmsComposer({
           if (!resumableObligationId) clearSubmission()
           setRemainder((current) => current === remainder ? "" : current)
           setSelectedTemplateId("")
-          if (onSent && "messageId" in result.data.outcome && typeof result.data.outcome.messageId === "string") {
-            onSent(result.data.outcome.messageId)
+          if (onSent) {
+            onSent("messageId" in result.data.outcome && typeof result.data.outcome.messageId === "string" ? result.data.outcome.messageId : undefined)
           }
           if (resumableObligationId) {
             // The accepted obligation is intentionally omitted by the context

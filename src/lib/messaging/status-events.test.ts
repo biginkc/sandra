@@ -187,6 +187,47 @@ describe("applyMessageStatusEvent", () => {
     });
   });
 
+  it("uses the service-owned receipt and exact message identity for a generic rep SMS", async () => {
+    const row = message({
+      metadata: {
+        repSms: {
+          provider: "sendillo",
+          providerAccountId: "account-from-message",
+          receiptId: "10000000-0000-4000-8000-000000000123",
+        },
+      } as Json,
+    });
+    const rpc = vi.fn(async () => ({ data: { ok: true, matched: true, state: "delivered" }, error: null }));
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
+    const { supabase } = makeSupabase({
+      messages: [row],
+      updatedRows: [{ id: row.id }],
+    });
+
+    await expect(applyMessageStatusEvent(supabase, "sendillo", {
+      kind: "delivered",
+      externalId: "provider-message-ledger",
+      timestamp: new Date("2026-06-24T15:01:00.000Z"),
+    })).resolves.toBe("updated");
+
+    expect(rpc).toHaveBeenCalledWith("fn_record_rep_sms_delivery_ledger_callback", {
+      p_provider: "sendillo",
+      p_provider_account_id: "account-from-message",
+      p_provider_message_id: "provider-message-ledger",
+      p_state: "delivered",
+      p_provider_status: "delivered",
+      p_provider_error: null,
+      p_metadata: {
+        source: "sendillo_status_webhook",
+        messageId: "msg-1",
+        messageOrgId: "org-1",
+        eventTimestamp: "2026-06-24T15:01:00.000Z",
+      },
+      p_org_id: "org-1",
+      p_receipt_id: "10000000-0000-4000-8000-000000000123",
+    });
+  });
+
   it("acknowledges an unmatched manual rep SMS receipt without retrying forever", async () => {
     const row = message({
       metadata: {
@@ -496,13 +537,16 @@ describe("applyMessageStatusEvent", () => {
 
     await expect(
       reconcileStoredStatusEvents(supabase, "sendillo", "provider-message-stored"),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ candidates: 1, processed: 1, failed: 0, failures: [] });
 
     expect(adminRpc).toHaveBeenCalledTimes(1);
     expect(transportRpc).not.toHaveBeenCalled();
     expect(webhookUpdates).toContainEqual({
       processing_status: "processed",
       processed_at: expect.any(String),
+      processing_started_at: null,
+      reconciliation_next_attempt_at: null,
+      reconciliation_quarantined_at: null,
     });
   });
 
@@ -564,11 +608,21 @@ describe("applyMessageStatusEvent", () => {
 
     await expect(
       reconcileStoredStatusEvents(supabase, "sendillo", "provider-message-retryable"),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({
+      candidates: 1,
+      processed: 0,
+      failed: 1,
+      failures: [{
+        eventType: "sms_status_delivered",
+        externalId: "provider-message-retryable",
+        message: "obligation bridge unavailable",
+      }],
+    });
 
     expect(webhookUpdates).toContainEqual({
       processing_status: "error",
       processed_at: expect.any(String),
+      processing_started_at: null,
       error_message: "obligation bridge unavailable",
     });
     expect(webhookUpdates).not.toContainEqual({

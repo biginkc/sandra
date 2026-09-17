@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState, type FormEvent } from "react"
+import { useContext, useEffect, useMemo, useState, type FormEvent } from "react"
 
 import {
   Dialog,
@@ -20,6 +20,8 @@ import {
   WorkflowDialogHeader,
   WorkflowFormError,
   centralDateTimeToIso,
+  centralDateTimeFromIso,
+  WorkflowRecoveryContext,
   useAcquisitionSubmit,
 } from "./workflow-form"
 import type {
@@ -101,12 +103,46 @@ export function AcquisitionAttemptDialog({
   // user from changing a field and accidentally generating a second attempt
   // with a new idempotency key while the follow-up is still unresolved.
   const [attemptRecorded, setAttemptRecorded] = useState(false)
-  const availableCalls = initialCallActivityId && !callReferenceOptions.some(call => call.id === initialCallActivityId)
-    ? [{ id: initialCallActivityId, label: "Selected Sandra call" }, ...callReferenceOptions]
-    : callReferenceOptions
-  const sandraAvailable = availableCalls.length > 0
   const [clientError, setClientError] = useState<string | null>(null)
   const [clientFieldErrors, setClientFieldErrors] = useState<Record<string, string>>({})
+  const recovery = useContext(WorkflowRecoveryContext)
+  const reconciliation = recovery?.reconciliation
+  const reconciliationLocked = Boolean(reconciliation)
+  const preservedCallId = reconciliationLocked && source === "sandra" && callActivityId && !callReferenceOptions.some(call => call.id === callActivityId)
+    ? callActivityId
+    : null
+  const availableCalls = initialCallActivityId && !callReferenceOptions.some(call => call.id === initialCallActivityId)
+    ? [{ id: initialCallActivityId, label: "Selected Sandra call" }, ...callReferenceOptions]
+    : preservedCallId
+      ? [{ id: preservedCallId, label: "Original saved Sandra call" }, ...callReferenceOptions]
+      : callReferenceOptions
+  const sandraAvailable = availableCalls.length > 0
+  useEffect(() => {
+    if (!reconciliation) return
+    const payload = reconciliation.payload
+    if (typeof payload.source === "string") setSource(payload.source as AcquisitionAttemptSource)
+    if (typeof payload.kind === "string") setKind(payload.kind as AcquisitionAttemptKind)
+    if (typeof payload.outcome === "string") setOutcome(payload.outcome as AcquisitionAttemptFormPayload["outcome"])
+    setOccurredAt(centralDateTimeFromIso(payload.occurredAt))
+    setNote(typeof payload.note === "string" ? payload.note : "")
+    setRecordingUrl(typeof payload.recordingUrl === "string" ? payload.recordingUrl : "")
+    setCallActivityId(typeof payload.callActivityId === "string" ? payload.callActivityId : "")
+    const followUp = payload.followUp && typeof payload.followUp === "object" && !Array.isArray(payload.followUp)
+      ? payload.followUp as Record<string, unknown>
+      : null
+    if (followUp) {
+      if (typeof followUp.introId === "string") setIntroId(followUp.introId)
+      if (typeof followUp.templateId === "string") setTemplateId(followUp.templateId)
+      if (typeof followUp.remainder === "string") setRemainder(followUp.remainder)
+    } else {
+      setIntroId(DEFAULT_REP_SMS_INTRODUCTION.id)
+      setTemplateId("")
+      setRemainder("")
+    }
+    setClientError(null)
+    setClientFieldErrors({})
+    setFollowUpState(null)
+  }, [reconciliation])
   const resetFields = () => {
     setSource(initialCallActivityId ? "sandra" : "dialpad")
     setKind("call")
@@ -264,7 +300,7 @@ export function AcquisitionAttemptDialog({
                 <select
                   id="acquisition-attempt-source"
                   value={source}
-                  disabled={attemptRecorded}
+                  disabled={attemptRecorded || reconciliationLocked}
                   onChange={(event) => {
                     const nextSource = event.target.value as AcquisitionAttemptSource
                     if (nextSource === "sandra" && !sandraAvailable) return
@@ -287,7 +323,7 @@ export function AcquisitionAttemptDialog({
                   <select
                     id="acquisition-attempt-kind"
                     value={kind}
-                    disabled={attemptRecorded}
+                disabled={attemptRecorded || reconciliationLocked}
                     onChange={(event) => setKind(event.target.value as AcquisitionAttemptKind)}
                     className={SELECT_FIELD_CLASS}
                   >
@@ -328,7 +364,7 @@ export function AcquisitionAttemptDialog({
                     id="acquisition-attempt-call-reference"
                     aria-label="Sandra call"
                     value={callActivityId}
-                    disabled={attemptRecorded}
+                disabled={attemptRecorded || reconciliationLocked}
                     onChange={(event) => setCallActivityId(event.target.value)}
                     aria-invalid={Boolean(clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId)}
                     aria-describedby={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId ? "acquisition-attempt-call-reference-error" : undefined}
@@ -359,7 +395,7 @@ export function AcquisitionAttemptDialog({
               <select
                 id="acquisition-attempt-outcome"
                 value={outcome}
-                disabled={attemptRecorded}
+                disabled={attemptRecorded || reconciliationLocked}
                 onChange={(event) => {
                   setOutcome(event.target.value as AcquisitionAttemptFormPayload["outcome"])
                   clearClientErrors()
@@ -391,7 +427,7 @@ export function AcquisitionAttemptDialog({
                     id="acquisition-follow-up-intro"
                     aria-label="Assistant introduction"
                     value={introId}
-                    disabled={attemptRecorded}
+                    disabled={attemptRecorded || reconciliationLocked}
                     onChange={(event) => {
                       setIntroId(event.target.value)
                       clearClientErrors()
@@ -413,7 +449,7 @@ export function AcquisitionAttemptDialog({
                     id="acquisition-follow-up-template"
                     aria-label="Curated follow-up template"
                     value={templateId}
-                    disabled={attemptRecorded}
+                    disabled={attemptRecorded || reconciliationLocked}
                     onChange={(event) => {
                       const nextId = event.target.value
                       setTemplateId(nextId)
@@ -439,7 +475,7 @@ export function AcquisitionAttemptDialog({
                     id="acquisition-follow-up-remainder"
                     aria-label="Editable follow-up remainder"
                     value={remainder}
-                    disabled={attemptRecorded}
+                    disabled={attemptRecorded || reconciliationLocked}
                     onChange={(event) => {
                       setRemainder(event.target.value)
                       clearClientErrors()
@@ -478,7 +514,7 @@ export function AcquisitionAttemptDialog({
               value={occurredAt}
               onChange={setOccurredAt}
               error={clientFieldErrors.occurredAt || submitState.fieldErrors.occurredAt}
-              disabled={attemptRecorded}
+              disabled={attemptRecorded || reconciliationLocked}
             />
 
             <div className="flex flex-col gap-1.5">
@@ -487,7 +523,7 @@ export function AcquisitionAttemptDialog({
                 id="acquisition-attempt-recording"
                 type="url"
                 value={recordingUrl}
-                disabled={attemptRecorded}
+                disabled={attemptRecorded || reconciliationLocked}
                 onChange={(event) => setRecordingUrl(event.target.value)}
                 placeholder="https://…"
                 className={TEXT_FIELD_CLASS}
@@ -500,7 +536,7 @@ export function AcquisitionAttemptDialog({
               <Textarea
                 id="acquisition-attempt-note"
                 value={note}
-                disabled={attemptRecorded}
+                disabled={attemptRecorded || reconciliationLocked}
                 onChange={(event) => setNote(event.target.value)}
                 placeholder="Add context for the next rep"
                 rows={3}

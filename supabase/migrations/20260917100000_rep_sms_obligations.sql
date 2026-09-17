@@ -523,8 +523,9 @@ begin
     select p.homeowner_contact_id into v_contact from public.properties p
       where p.id=v_o.property_id and p.org_id=p_org_id;
     if v_contact is null or not exists(select 1 from public.contacts c
+      cross join lateral unnest(array[c.phone_1,c.phone_2,c.phone_3]) as phone(phone_e164)
       where c.id=v_contact and c.org_id=p_org_id
-        and v_o.to_number in (c.phone_1,c.phone_2,c.phone_3)) then
+        and phone.phone_e164 is not null and phone.phone_e164=v_o.to_number) then
       v_reason:='recipient_changed';
     end if;
   end if;
@@ -624,7 +625,11 @@ begin
   else
     select * into v_contact from public.contacts c
       where c.id=v_property.homeowner_contact_id and c.org_id=v_o.org_id;
-    if not found or v_o.to_number not in (v_contact.phone_1,v_contact.phone_2,v_contact.phone_3)
+    if not found or not exists(
+      select 1
+      from unnest(array[v_contact.phone_1,v_contact.phone_2,v_contact.phone_3]) as phone(phone_e164)
+      where phone.phone_e164 is not null and phone.phone_e164=v_o.to_number
+    )
       or v_o.to_number !~ '^\+[1-9][0-9]{7,14}$' then
       v_reason:='recipient_changed';
     end if;

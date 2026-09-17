@@ -9,7 +9,7 @@ import { evaluateSuppression } from "./suppression";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
 import { selectBestSmsPhone, selectSmsPhoneByNumber } from "./sms-phone";
 import { getMessagingProvider } from "./registry";
-import { sendSmsToContact } from "./send";
+import { sendSmsToContact, type RepSmsDeliveryReceiptAuthority, type SendSmsOutcome } from "./send";
 import { sendilloFromEnvWithOptions } from "./providers/sendillo";
 import type { DialpadFromOption, MessagingProvider, ProviderSenderNumber } from "./types";
 import {
@@ -60,6 +60,23 @@ export type RepSmsObligationFence = {
   assignmentId: string;
   toNumber: string;
   compositionFingerprint: string;
+};
+
+type RepSmsDeliveryLedgerRecord = {
+  ok?: unknown;
+  receiptId?: unknown;
+  state?: unknown;
+  claimToken?: unknown;
+  claimGeneration?: unknown;
+  messageId?: unknown;
+  providerMessageId?: unknown;
+  providerError?: unknown;
+  reason?: unknown;
+};
+
+type RepSmsDeliveryLedgerRpc = {
+  data: unknown;
+  error: { message?: string; code?: string } | null;
 };
 
 export type RepSmsContext = {
@@ -379,6 +396,115 @@ export function createRepSmsObligationFence(input: {
   };
 }
 
+function ledgerRecord(value: unknown): RepSmsDeliveryLedgerRecord | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as RepSmsDeliveryLedgerRecord
+    : null;
+}
+
+function ledgerString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function replayRepSmsLedger(record: RepSmsDeliveryLedgerRecord): SendSmsOutcome | null {
+  const state = ledgerString(record.state);
+  const receiptId = ledgerString(record.receiptId);
+  if (!state || !receiptId) return null;
+  const messageId = ledgerString(record.messageId) ?? receiptId;
+  const providerMessageId = ledgerString(record.providerMessageId);
+  const error = ledgerString(record.providerError) ?? `The previous SMS request is ${state.replaceAll("_", " ")}.`;
+  if (state === "accepted" || state === "delivered") {
+    return providerMessageId
+      ? { status: "sent", messageId, externalId: providerMessageId }
+      : { status: "provider_unknown", messageId, error: "The previous SMS was accepted without a provider receipt." };
+  }
+  if (state === "delivery_failed") {
+    return { status: "provider_failed", messageId, error };
+  }
+  if (state === "unknown" || state === "sending" || state === "reserved") {
+    return { status: "provider_unknown", messageId, error };
+  }
+  if (state === "blocked") {
+    return { status: "db_error", messageId, error };
+  }
+  return null;
+}
+
+async function claimRepSmsDeliveryLedger(input: {
+  context: RepSmsContext;
+  provider: MessagingProvider;
+  sender: RepSmsSender;
+  propertyId: string;
+  toNumber: string;
+  body: string;
+  submissionKey: string;
+}): Promise<{ authority: RepSmsDeliveryReceiptAuthority } | { outcome: SendSmsOutcome }> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.submissionKey)) {
+    throw new Error("A stable SMS submission key is required. Refresh the composer before sending.");
+  }
+  const admin = createAdminClient() as unknown as {
+    rpc(name: string, args: Record<string, unknown>): Promise<RepSmsDeliveryLedgerRpc>;
+  };
+  const result = await admin.rpc("fn_claim_rep_sms_delivery", {
+    p_org_id: input.context.orgId,
+    p_actor_id: input.context.actorId,
+    p_submission_key: input.submissionKey,
+    p_property_id: input.propertyId,
+    p_contact_id: input.context.contactId,
+    p_sender_assignment_id: input.sender.id,
+    p_provider: input.provider.providerId,
+    p_provider_account_id: input.sender.providerAccountId,
+    p_provider_sender_id: input.sender.providerSenderId,
+    p_from_number: normalizePhone(input.sender.number) ?? input.sender.number.trim(),
+    p_to_number: input.toNumber,
+    p_body: input.body,
+  });
+  if (result.error) throw new Error(result.error.message ?? "SMS reservation could not be confirmed.");
+  const record = ledgerRecord(result.data);
+  if (!record) throw new Error("SMS reservation returned an invalid response. Refresh before sending.");
+  if (record.ok !== true) {
+    const replay = replayRepSmsLedger(record);
+    if (replay) return { outcome: replay };
+    throw new Error(ledgerString(record.reason) ?? "The previous SMS request is already in progress. Refresh before sending.");
+  }
+  const receiptId = ledgerString(record.receiptId);
+  const claimToken = ledgerString(record.claimToken);
+  const claimGeneration = typeof record.claimGeneration === "number" ? record.claimGeneration : null;
+  if (!receiptId || !claimToken || claimGeneration == null || !Number.isInteger(claimGeneration) || claimGeneration < 1) {
+    throw new Error("SMS reservation returned an invalid dispatch fence. Refresh before sending.");
+  }
+  return {
+    authority: {
+      receiptId,
+      claimToken,
+      claimGeneration,
+      orgId: input.context.orgId,
+    },
+  };
+}
+
+async function recordRepSmsLedgerResult(
+  authority: RepSmsDeliveryReceiptAuthority,
+  state: "failed_not_dispatched" | "unknown",
+  providerError: string,
+): Promise<boolean> {
+  try {
+    const admin = createAdminClient() as unknown as {
+      rpc(name: string, args: Record<string, unknown>): Promise<RepSmsDeliveryLedgerRpc>;
+    };
+    const result = await admin.rpc("fn_record_rep_sms_delivery_result", {
+      p_receipt_id: authority.receiptId,
+      p_claim_token: authority.claimToken,
+      p_claim_generation: authority.claimGeneration,
+      p_state: state,
+      p_provider_error: providerError,
+    });
+    return !result.error && ledgerRecord(result.data)?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 export type DispatchRepSmsInput = {
   propertyId: string;
   assignmentId: string;
@@ -404,7 +530,7 @@ export type DispatchRepSmsInput = {
  * decisions are server-owned; `sendSmsToContact` remains the single outbound
  * persistence/suppression/provider pipeline.
  */
-export async function dispatchRepSms(input: DispatchRepSmsInput) {
+export async function dispatchRepSms(input: DispatchRepSmsInput): Promise<SendSmsOutcome> {
   const composition = compositionFromInput(input);
   const context = await readRepSmsContext(input.propertyId);
   if (context.obligation && !input.obligationFence) {
@@ -436,6 +562,23 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
   const senderNumber = normalizePhone(sender.number) ?? sender.number.trim();
   const to = input.to?.trim() || undefined;
   const fence = input.obligationFence;
+  let deliveryAuthority: RepSmsDeliveryReceiptAuthority | null = null;
+  if (!fence) {
+    const toNumber = normalizePhone(to ?? context.phone ?? "");
+    if (toNumber) {
+      const claim = await claimRepSmsDeliveryLedger({
+        context,
+        provider,
+        sender,
+        propertyId: input.propertyId,
+        toNumber,
+        body: composition.finalBody,
+        submissionKey: input.idempotencyKey?.trim() ?? "",
+      });
+      if ("outcome" in claim) return claim.outcome;
+      deliveryAuthority = claim.authority;
+    }
+  }
   const metadata = {
     repSms: {
       workflow: "maria-through-mel",
@@ -453,6 +596,7 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
       // its external id on rep_sms_obligations; status-events uses this exact
       // id plus the stored org/provider/account identity to close that race.
       obligationId: fence?.obligationId ?? null,
+      receiptId: deliveryAuthority?.receiptId ?? null,
       from: senderNumber,
       introId: composition.introId,
       introVersion: composition.introVersion,
@@ -465,7 +609,6 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
       finalRemainder: composition.remainder,
     },
   };
-  const client = await createClient();
   if (fence && (!fence.obligationId || !fence.claimToken || !fence.actorId
     || !Number.isInteger(fence.claimGeneration) || fence.claimGeneration < 1
     || fence.propertyId !== input.propertyId
@@ -475,21 +618,29 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
     || fence.compositionFingerprint !== repSmsCompositionFingerprint(composition))) {
     throw new Error("The saved follow-up fence is invalid. Refresh before sending.");
   }
-  return sendSmsToContact(
-    client,
-    {
-      origin: "manual",
-      propertyId: input.propertyId,
-      contactId,
-      body: composition.finalBody,
-      from: senderNumber,
-      to,
-      metadata,
-      idempotencyKey: fence?.obligationId ?? input.idempotencyKey ?? null,
-    },
-    {
-      provider,
-      authorize: async () => {
+  let outcome: SendSmsOutcome;
+  try {
+    const client = await createClient();
+    outcome = await sendSmsToContact(
+      client,
+      {
+        origin: "manual",
+        propertyId: input.propertyId,
+        contactId,
+        body: composition.finalBody,
+        from: senderNumber,
+        to,
+        metadata,
+        // The browser-writable messages idempotency column is retained for
+        // legacy traffic only. Rep SMS replay is fenced by the service-owned
+        // ledger (or by the durable obligation fence), so never use the
+        // messages row as its authority.
+        idempotencyKey: null,
+        repSmsReceipt: deliveryAuthority,
+      },
+      {
+        provider,
+        authorize: async (messageId: string) => {
         // Re-read the queue/RLS/grant context after the pending breadcrumb is
         // written. A reassignment or revoked grant must stop before provider
         // dispatch even when the browser held an old composer open.
@@ -534,9 +685,60 @@ export async function dispatchRepSms(input: DispatchRepSmsInput) {
             );
           }
         }
+        if (deliveryAuthority) {
+          const admin = createAdminClient() as unknown as {
+            rpc(name: string, args: Record<string, unknown>): Promise<RepSmsDeliveryLedgerRpc>;
+          };
+          const marked = await admin.rpc("fn_mark_rep_sms_delivery_sending", {
+            p_receipt_id: deliveryAuthority.receiptId,
+            p_claim_token: deliveryAuthority.claimToken,
+            p_claim_generation: deliveryAuthority.claimGeneration,
+            p_message_id: messageId,
+          });
+          const markedRecord = ledgerRecord(marked.data);
+          if (marked.error || markedRecord?.ok !== true || markedRecord.state !== "sending") {
+            throw new Error(
+              marked.error?.message ?? "The SMS reservation is no longer authorized for dispatch. Refresh before sending.",
+            );
+          }
+        }
+        },
       },
-    },
-  );
+    );
+  } catch (error) {
+    if (!deliveryAuthority) throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    const recorded = await recordRepSmsLedgerResult(deliveryAuthority, "failed_not_dispatched", detail);
+    if (!recorded) {
+      return {
+        status: "provider_unknown",
+        messageId: deliveryAuthority.receiptId,
+        error: `${detail}. The durable non-dispatch result could not be confirmed; review before retrying.`,
+      };
+    }
+    return {
+      status: "provider_failed",
+      messageId: deliveryAuthority.receiptId,
+      error: detail,
+      providerAttempted: false,
+    };
+  }
+  if (deliveryAuthority && typeof outcome.status === "string" && outcome.status.startsWith("blocked_")) {
+    const detail = "reason" in outcome && typeof outcome.reason === "string"
+      ? outcome.reason
+      : "error" in outcome && typeof outcome.error === "string"
+        ? outcome.error
+        : "The SMS was blocked before provider dispatch.";
+    const recorded = await recordRepSmsLedgerResult(deliveryAuthority, "failed_not_dispatched", detail);
+    if (!recorded) {
+      return {
+        status: "provider_unknown",
+        messageId: deliveryAuthority.receiptId,
+        error: "The SMS was blocked locally, but its durable result could not be recorded. Review before retrying.",
+      };
+    }
+  }
+  return outcome;
 }
 
 async function assertFreshRepSuppression(args: {

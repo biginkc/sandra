@@ -121,9 +121,24 @@ async function persistResumedResult(
   if (result.error || !saved || saved.ok !== true) {
     return { status: "unknown" as const, reason: "Follow-up result could not be persisted; review the text history before retrying." };
   }
-  return state === "accepted"
-    ? { status: "sent" as const, messageId: messageId ?? (typeof saved.messageId === "string" ? saved.messageId : undefined), externalId: value ?? "" }
-    : { status: state, reason: value ?? `Follow-up ${state}.` };
+  // A delivery callback can settle the durable obligation while the provider
+  // result is still in flight. The RPC response is authoritative; never turn
+  // that stored terminal state back into an accepted result for the caller.
+  const storedState = saved.state === "delivered" || saved.state === "delivery_failed"
+    ? saved.state
+    : state;
+  const storedMessageId = messageId ?? (typeof saved.messageId === "string" ? saved.messageId : undefined);
+  const storedProviderId = typeof saved.providerMessageId === "string" ? saved.providerMessageId : value;
+  const storedError = typeof saved.providerError === "string" ? saved.providerError : value;
+  if (storedState === "delivered") {
+    return { status: "delivered" as const, messageId: storedMessageId, externalId: storedProviderId ?? "" };
+  }
+  if (storedState === "delivery_failed") {
+    return { status: "provider_failed" as const, messageId: storedMessageId ?? obligationId, error: storedError ?? "The provider reported delivery failure." };
+  }
+  return storedState === "accepted"
+    ? { status: "sent" as const, messageId: storedMessageId, externalId: storedProviderId ?? "" }
+    : { status: storedState, reason: storedError ?? `Follow-up ${storedState}.` };
 }
 
 async function resumeRepSms(input: DispatchRepSmsInput & { obligationId: string }) {

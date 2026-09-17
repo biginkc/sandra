@@ -27,7 +27,7 @@ try {
  create table memberships(org_id uuid,user_id uuid,role text default 'member',access_status text default 'active',deletion_prepared_at timestamptz,access_expires_at timestamptz,acquisitions_enabled boolean default true);
  create table acquisition_org_settings(org_id uuid primary key,my_leads_enabled boolean);
  create table contacts(id uuid,org_id uuid,first_name text,last_name text,phone_1 text,phone_2 text,phone_3 text,do_not_contact boolean);
- create table messages(id uuid primary key default gen_random_uuid(),org_id uuid,channel text,direction text,property_id uuid,contact_id uuid,body text not null,status text default 'pending',external_id text,error_message text,from_address text,to_address text,metadata jsonb);
+ create table messages(id uuid primary key default gen_random_uuid(),org_id uuid,channel text,direction text,property_id uuid,contact_id uuid,body text not null,status text default 'pending',provider text,external_id text,error_message text,from_address text,to_address text,metadata jsonb);
  create table properties(id uuid primary key,org_id uuid,assigned_user_id uuid,address text,city text,state text,zip text,status text default 'contacted',motivation_level text,homeowner_contact_id uuid,deleted_at timestamptz,is_dnc_locked boolean default false,unique(id,org_id));
  create table acquisition_assignment_episodes(id uuid primary key,org_id uuid,property_id uuid,assignee_user_id uuid,assigned_at timestamptz,initialized_at timestamptz default now(),ended_at timestamptz,eligible boolean default false,episode_kind text default 'live',first_call_started_at timestamptz,unique(id,property_id,org_id));
  create table acquisition_queue_states(property_id uuid,org_id uuid,stage text,version bigint default 1,stage_entered_at timestamptz default now(),motivation_kind text,motivation_text text,archived_at timestamptz,updated_at timestamptz default now());
@@ -40,6 +40,7 @@ try {
  create table lead_notes(id uuid primary key,org_id uuid,property_id uuid,author_user_id uuid,body text,created_at timestamptz default now());
  create table tasks(id uuid primary key,org_id uuid,related_property_id uuid,assignee_id uuid,type text,status text,due_at timestamptz,snoozed_until timestamptz,outcome text,title text);
  create table acquisition_appointment_attribution(task_id uuid,org_id uuid,accountable_user_id uuid);
+ create table webhook_events(id uuid primary key default gen_random_uuid(),org_id uuid,provider text,event_type text,external_id text,payload jsonb,processing_status text default 'pending',processing_started_at timestamptz,processed_at timestamptz,error_message text,request_hash text,received_at timestamptz default now(),signature_verified boolean default true,unique(provider,event_type,external_id));
  create function hugo_has_active_org_access(uuid) returns boolean language sql stable as $$select true$$;
  create function acquisition_working_deadline(timestamptz) returns timestamptz language sql as $$select $1+interval '4 hours'$$;
  create function my_leads_command_hash(text,uuid,uuid,jsonb) returns text language sql as $$select md5($1||$2::text||$3::text||$4::text)$$;
@@ -58,7 +59,19 @@ try {
  migration('20260917110000_rep_sms_obligation_read_models.sql');
  migration('20260917120000_rep_sms_delivery_completion_fence.sql');
  migration('20260917130000_rep_sms_idempotency.sql');
+ migration('20260917140000_rep_sms_delivery_ledger.sql');
+ migration('20260917150000_sendillo_status_reconciliation_retry.sql');
  assert.equal(sql("select count(*) from pg_indexes where schemaname='public' and indexname='messages_outbound_sms_idempotency_idx'"),'1');
+ assert.equal(sql("select count(*) from pg_tables where schemaname='public' and tablename='rep_sms_delivery_ledger'"),'1');
+ assert.equal(sql("select count(*) from information_schema.role_table_grants where table_schema='public' and table_name='rep_sms_delivery_ledger' and grantee in ('anon','authenticated','service_role')"),'0');
+ assert.equal(sql("select count(*) from pg_indexes where schemaname='public' and indexname='webhook_events_sendillo_reconciliation_due_idx'"),'1');
+ const retryEvent=id(60);
+ sql(`insert into webhook_events(id,org_id,provider,event_type,external_id,payload,processing_status) values('${retryEvent}','${org}','sendillo','sms_status_delivered','retry-event','{}','error')`);
+ const retryOne=JSON.parse(sql(`set role service_role; select fn_schedule_webhook_event_reconciliation_retry('sendillo','sms_status_delivered','retry-event','message not found',2)`));
+ assert.equal(retryOne.attempts,1);assert.equal(retryOne.quarantined,false);assert.ok(retryOne.nextAttemptAt);
+ sql(`update webhook_events set reconciliation_next_attempt_at=now() where id='${retryEvent}'`);
+ const retryTwo=JSON.parse(sql(`set role service_role; select fn_schedule_webhook_event_reconciliation_retry('sendillo','sms_status_delivered','retry-event','message not found',2)`));
+ assert.equal(retryTwo.attempts,2);assert.equal(retryTwo.quarantined,true);assert.equal(sql(`select reconciliation_quarantined_at is not null from webhook_events where id='${retryEvent}'`),'t');
  sql(`grant select on memberships,properties to authenticated;
  insert into memberships(org_id,user_id,role) values('${org}','${other}','member');
  insert into properties(id,org_id,assigned_user_id,address,status) values('${property}','${org}','${rep}','1 Test St','contacted');
@@ -168,18 +181,26 @@ try {
  assert.equal(claim.state,'sending');
  assert.equal(claim.providerAccountId,'account-1');
  assert.equal(Number(claim.claimGeneration),1);
- const fence=JSON.parse(sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${claim.obligationId}','${claim.claimToken}',${claim.claimGeneration},'${rep}')`));
- assert.equal(fence.ok,true);
- assert.equal(fence.providerAccountId,'account-1');
- assert.equal(as(rep,`select count(*) from rep_sms_obligation_audit where obligation_id='${claim.obligationId}' and action='dispatch_fence'`),'1');
- assert.throws(()=>sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${claim.obligationId}','${id(99)}',${claim.claimGeneration},'${rep}')`));
+const fence=JSON.parse(sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${claim.obligationId}','${claim.claimToken}',${claim.claimGeneration},'${rep}')`));
+assert.equal(fence.ok,true);
+assert.equal(fence.providerAccountId,'account-1');
+assert.equal(as(rep,`select count(*) from rep_sms_obligation_audit where obligation_id='${claim.obligationId}' and action='dispatch_fence'`),'1');
+// A valid recipient must still be present when one or more of the contact's
+// other phone slots are NULL. `NOT IN (phone_1,phone_2,phone_3)` is NULL-
+// unsafe and would otherwise allow a changed recipient through this fence.
+sql(`update contacts set phone_1='+18165559999',phone_2=null,phone_3=null where id='${id(12)}'`);
+assert.throws(()=>sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${claim.obligationId}','${claim.claimToken}',${claim.claimGeneration},'${rep}')`),/DISPATCH_FENCE_REJECTED: recipient_changed/);
+sql(`update contacts set phone_1='+18165551234',phone_2=null,phone_3=null where id='${id(12)}'`);
+const refenced=JSON.parse(sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${claim.obligationId}','${claim.claimToken}',${claim.claimGeneration},'${rep}')`));
+assert.equal(refenced.ok,true);
+assert.throws(()=>sql(`set role service_role; select fn_assert_rep_sms_obligation_dispatch('${claim.obligationId}','${id(99)}',${claim.claimGeneration},'${rep}')`));
 const accepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${claim.obligationId}','${claim.claimToken}','accepted','provider-1','accepted',null,null,'{}')`));
 assert.equal(accepted.state,'accepted');
 const wrongAccount=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','wrong-account','provider-1','delivered','delivered',null,'{}')`));
 assert.equal(wrongAccount.matched,false);
 const delivered=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery('sendillo','account-1','provider-1','delivered','delivered',null,'{}')`));
 assert.equal(delivered.state,'delivered');
-assert.equal(as(rep,`select count(*) from rep_sms_obligation_audit where obligation_id='${claim.obligationId}'`),'4');
+assert.equal(as(rep,`select count(*) from rep_sms_obligation_audit where obligation_id='${claim.obligationId}'`),'5');
 // A provider receipt can arrive while the fenced row is still `sending`,
 // before fn_record_rep_sms_obligation_result has written provider_message_id.
 // The exact org + obligation + provider + account path must bind that id and
@@ -226,6 +247,47 @@ assert.equal(failedNotDispatched.state,'failed_not_dispatched');
 const ownerRetry=JSON.parse(as(owner,`select fn_owner_correct_rep_sms_obligation('${retryObligationId}','retry','verified pre-dispatch failure')`));
 assert.equal(ownerRetry.state,'draft');
 assert.equal(as(rep,`select state from rep_sms_obligations where id='${retryObligationId}'`),'draft');
+// The owner correction is followed by a new claim generation and a provider
+// result. This is the only retryable branch; the service-owned fence prevents
+// an ambiguous or accepted row from issuing another request.
+const ownerRetryClaim=JSON.parse(sql(`set role service_role; select fn_claim_authorize_rep_sms_obligation('${org}','${retryObligationId}','${rep}','${composition}'::jsonb)`));
+assert.equal(ownerRetryClaim.state,'sending');
+assert.equal(Number(ownerRetryClaim.claimGeneration),2);
+const ownerRetryAccepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_obligation_result('${retryObligationId}','${ownerRetryClaim.claimToken}','accepted','provider-owner-retry','accepted',null,null,'{}')`));
+assert.equal(ownerRetryAccepted.state,'accepted');
+// A forged browser-writable messages row with the same key cannot become the
+// replay authority. The service-only ledger remains in its own reserved state.
+const ledgerKey=id(70);
+const senderId=sql(`select id from rep_sms_sender_assignments where org_id='${org}' and user_id='${rep}' and active and grant_status='active' order by is_default desc,label,id limit 1`);
+const senderProviderId=sql(`select provider_sender_id from rep_sms_sender_assignments where id='${senderId}'`);
+const senderPhone=sql(`select phone_e164 from rep_sms_sender_assignments where id='${senderId}'`);
+const ledgerClaim=JSON.parse(sql(`set role service_role; select fn_claim_rep_sms_delivery('${org}','${rep}','${ledgerKey}','${property}','${id(12)}','${senderId}','sendillo','account-1','${senderProviderId}','${senderPhone}','+18165551234','Ledger text')`));
+assert.equal(ledgerClaim.ok,true);
+// The production `messages` table is browser-writable for ordinary history
+// inserts. Grant the fixture role that capability so this test proves a
+// forged row cannot replace the service-owned ledger reservation.
+sql(`grant insert on messages to authenticated, service_role`);
+sql(`set role authenticated; select set_config('request.jwt.claim.sub','${rep}',false); insert into messages(id,org_id,channel,direction,property_id,contact_id,body,status,external_id,error_message,from_address,to_address,metadata,idempotency_key) values('${id(71)}','${org}','sms','outbound','${property}','${id(12)}','Ledger text','sent','forged-provider',null,'${senderPhone}','+18165551234','{}','${ledgerKey}')`);
+const ledgerReplay=JSON.parse(sql(`set role service_role; select fn_claim_rep_sms_delivery('${org}','${rep}','${ledgerKey}','${property}','${id(12)}','${senderId}','sendillo','account-1','${senderProviderId}','${senderPhone}','+18165551234','Ledger text')`));
+assert.equal(ledgerReplay.ok,false);assert.equal(ledgerReplay.state,'reserved');
+const ledgerMessage=id(72);
+sql(`set role service_role; insert into messages(id,org_id,channel,direction,property_id,contact_id,body,status,from_address,to_address,provider) values('${ledgerMessage}','${org}','sms','outbound','${property}','${id(12)}','Ledger text','pending','${senderPhone}','+18165551234','sendillo')`);
+const ledgerSending=JSON.parse(sql(`set role service_role; select fn_mark_rep_sms_delivery_sending('${ledgerClaim.receiptId}','${ledgerClaim.claimToken}',${ledgerClaim.claimGeneration},'${ledgerMessage}')`));
+assert.equal(ledgerSending.state,'sending');
+const ledgerAccepted=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_result('${ledgerClaim.receiptId}','${ledgerClaim.claimToken}',${ledgerClaim.claimGeneration},'accepted','ledger-provider-1','queued',null)`));
+assert.equal(ledgerAccepted.state,'accepted');
+const forgedLedgerCallback=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_ledger_callback('sendillo','account-1','ledger-provider-1','delivered','delivered',null,'{"messageId":"${id(71)}"}','${org}','${ledgerClaim.receiptId}')`));
+assert.equal(forgedLedgerCallback.identityMismatch,true);
+const ledgerCallback=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_ledger_callback('sendillo','account-1','ledger-provider-1','delivered','delivered',null,'{"messageId":"${ledgerMessage}"}','${org}','${ledgerClaim.receiptId}')`));
+assert.equal(ledgerCallback.state,'delivered');
+// A proven reservation failure preserves evidence and issues a new fenced
+// generation. Accepted state cannot be reclaimed.
+const failedKey=id(73);
+const failedClaim=JSON.parse(sql(`set role service_role; select fn_claim_rep_sms_delivery('${org}','${rep}','${failedKey}','${property}','${id(12)}','${senderId}','sendillo','account-1','${senderProviderId}','${senderPhone}','+18165551234','Retry ledger text')`));
+const failedResult=JSON.parse(sql(`set role service_role; select fn_record_rep_sms_delivery_result('${failedClaim.receiptId}','${failedClaim.claimToken}',${failedClaim.claimGeneration},'failed_not_dispatched',null,null,'authorization failed before provider request')`));
+assert.equal(failedResult.state,'failed_not_dispatched');
+const failedRetry=JSON.parse(sql(`set role service_role; select fn_claim_rep_sms_delivery('${org}','${rep}','${failedKey}','${property}','${id(12)}','${senderId}','sendillo','account-1','${senderProviderId}','${senderPhone}','+18165551234','Retry ledger text')`));
+assert.equal(failedRetry.ok,true);assert.equal(Number(failedRetry.claimGeneration),2);
  // A current assignee can read outstanding history, while the original actor
  // remains visible for audit. This tests the transfer side of RLS directly.
  sql(`update properties set assigned_user_id='${other}' where id='${property}'`);

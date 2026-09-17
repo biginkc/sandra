@@ -134,7 +134,7 @@ describe("RepSmsComposer obligation resume", () => {
     expect(remainder).toBeDisabled()
     const firstKey = mocks.send.mock.calls[0][0].idempotencyKey
     expect(firstKey).toMatch(/^[0-9a-f-]{36}$/i)
-    expect(window.localStorage.getItem("sandra:rep-sms:submission:property-1")).toContain(firstKey)
+    expect(window.localStorage.getItem("sandra:rep-sms:submission:org-1:rep-1:property-1")).toContain(firstKey)
 
     first.unmount()
     render(<RepSmsComposer propertyId="property-1" />)
@@ -144,7 +144,48 @@ describe("RepSmsComposer obligation resume", () => {
     await user.click(screen.getByRole("button", { name: "Reconcile saved send" }))
     await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(2))
     expect(mocks.send.mock.calls[1][0].idempotencyKey).toBe(firstKey)
-    expect(window.localStorage.getItem("sandra:rep-sms:submission:property-1")).toBeNull()
+    expect(window.localStorage.getItem("sandra:rep-sms:submission:org-1:rep-1:property-1")).toBeNull()
+  })
+
+  it("fails closed when a scoped saved send no longer has its exact sender assignment", async () => {
+    const savedAt = Date.now()
+    window.localStorage.setItem("sandra:rep-sms:submission:org-1:rep-1:property-1", JSON.stringify({
+      key: "saved-key",
+      orgId: "org-1",
+      actorId: "rep-1",
+      createdAt: savedAt,
+      assignmentId: "sender-removed",
+      from: "+18163706846",
+      to: "+18165550123",
+      composition: savedComposition,
+    }))
+    mocks.load.mockResolvedValue({ ok: true, data: genericContext() })
+    const user = userEvent.setup()
+    render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    await waitFor(() => expect(screen.getByText(/exact texting number is no longer assigned/)).toBeVisible())
+    expect(screen.getByRole("button", { name: "Send text" })).toBeDisabled()
+    expect(mocks.send).not.toHaveBeenCalled()
+  })
+
+  it("cleans an expired scoped saved send without restoring its body", async () => {
+    window.localStorage.setItem("sandra:rep-sms:submission:org-1:rep-1:property-1", JSON.stringify({
+      key: "expired-key",
+      orgId: "org-1",
+      actorId: "rep-1",
+      createdAt: Date.now() - 25 * 60 * 60 * 1000,
+      assignmentId: "sender-1",
+      from: "+18163706846",
+      to: "+18165550123",
+      composition: savedComposition,
+    }))
+    mocks.load.mockResolvedValue({ ok: true, data: genericContext() })
+    const user = userEvent.setup()
+    render(<RepSmsComposer propertyId="property-1" />)
+    await user.click(screen.getByRole("button", { name: "Text lead" }))
+    const remainder = await screen.findByLabelText("Editable message remainder")
+    expect(remainder).toHaveValue("")
+    expect(window.localStorage.getItem("sandra:rep-sms:submission:org-1:rep-1:property-1")).toBeNull()
   })
 
   it("refreshes authoritative context after an obligation is accepted before a new manual send", async () => {

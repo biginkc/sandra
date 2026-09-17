@@ -263,7 +263,15 @@ async function persistFollowUpResult(
     || (result.data as Record<string, unknown>).ok !== true) {
     return followUpResult('unknown', 'Attempt recorded. Follow-up result could not be persisted; refresh before retrying.');
   }
-  return followUpResult(state, state === 'accepted' ? null : value);
+  // Provider callbacks may win the race before this worker records its
+  // accepted result. Return the database's stored state so the Attempts UI
+  // cannot report an early delivery failure or delivery as accepted.
+  const saved = result.data as Record<string, unknown>;
+  const storedState = typeof saved.state === 'string' && isFollowUpStatus(saved.state)
+    ? saved.state
+    : state;
+  const storedError = typeof saved.providerError === 'string' ? saved.providerError : value;
+  return followUpResult(storedState, storedState === 'accepted' || storedState === 'delivered' ? null : storedError);
 }
 
 export async function changeAcquisitionDesignation(input:SetAcquisitionDesignationInput) {

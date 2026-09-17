@@ -84,7 +84,7 @@ describe("Lead Detail v2 integration contract", () => {
     expect(source).toContain("const acquisitionSmsPresentation = inlineReplyPhone");
     expect(source).toContain("? inlineSmsPresentation");
     expect(source).toContain(": smsPresentation;");
-    expect(source).toContain("<RepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} />");
+    expect(source).toContain("<LeadRepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} />");
     expect(source).toContain(
       "restrictionLabel={isAcquisitionMember ? acquisitionSmsPresentation.consentLabel : smsPresentation.consentLabel}",
     );
@@ -105,8 +105,8 @@ describe("Lead Detail v2 integration contract", () => {
     expect(source).toContain("collection.href");
     expect(source).toContain("collection.label");
     expect(source).toContain("<InlineReply");
-    expect(source.match(/<RepSmsComposer/g)).toHaveLength(1);
-    expect(source).toContain("<RepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} />");
+    expect(source.match(/<LeadRepSmsComposer/g)).toHaveLength(1);
+    expect(source).toContain("<LeadRepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} />");
   });
 
   it("marks lead messages read on open and includes call fallback time", () => {

@@ -5055,6 +5055,9 @@ export type Database = {
           provider: string
           request_hash: string | null
           received_at: string
+          reconciliation_attempts: number
+          reconciliation_next_attempt_at: string | null
+          reconciliation_quarantined_at: string | null
           signature_verified: boolean
         }
         Insert: {
@@ -5070,6 +5073,9 @@ export type Database = {
           provider: string
           request_hash?: string | null
           received_at?: string
+          reconciliation_attempts?: number
+          reconciliation_next_attempt_at?: string | null
+          reconciliation_quarantined_at?: string | null
           signature_verified?: boolean
         }
         Update: {
@@ -5085,6 +5091,9 @@ export type Database = {
           provider?: string
           request_hash?: string | null
           received_at?: string
+          reconciliation_attempts?: number
+          reconciliation_next_attempt_at?: string | null
+          reconciliation_quarantined_at?: string | null
           signature_verified?: boolean
         }
         Relationships: [
@@ -5401,6 +5410,11 @@ export type Database = {
       fn_assert_rep_sms_obligation_dispatch: { Args: { p_obligation_id: string; p_claim_token: string; p_claim_generation: number; p_actor_id: string }; Returns: Json }
       fn_record_rep_sms_obligation_result: { Args: { p_obligation_id: string; p_claim_token: string; p_state: string; p_provider_message_id?: string | null; p_provider_status?: string | null; p_provider_error?: string | null; p_retry_at?: string | null; p_metadata?: Json }; Returns: Json }
       fn_record_rep_sms_delivery: { Args: { p_provider: string; p_provider_account_id: string; p_provider_message_id: string; p_state: string; p_provider_status?: string | null; p_provider_error?: string | null; p_metadata?: Json; p_org_id?: string | null; p_obligation_id?: string | null }; Returns: Json }
+      fn_claim_rep_sms_delivery: { Args: { p_org_id: string; p_actor_id: string; p_submission_key: string; p_property_id: string; p_contact_id: string; p_sender_assignment_id: string; p_provider: string; p_provider_account_id: string; p_provider_sender_id: string; p_from_number: string; p_to_number: string; p_body: string; p_obligation_id?: string | null }; Returns: Json }
+      fn_mark_rep_sms_delivery_sending: { Args: { p_receipt_id: string; p_claim_token: string; p_claim_generation: number; p_message_id: string }; Returns: Json }
+      fn_record_rep_sms_delivery_result: { Args: { p_receipt_id: string; p_claim_token: string; p_claim_generation: number; p_state: string; p_provider_message_id?: string | null; p_provider_status?: string | null; p_provider_error?: string | null }; Returns: Json }
+      fn_record_rep_sms_delivery_ledger_callback: { Args: { p_provider: string; p_provider_account_id: string; p_provider_message_id: string; p_state: string; p_provider_status?: string | null; p_provider_error?: string | null; p_metadata?: Json; p_org_id?: string | null; p_receipt_id?: string | null }; Returns: Json }
+      fn_schedule_webhook_event_reconciliation_retry: { Args: { p_provider: string; p_event_type: string; p_external_id: string; p_error_message: string; p_max_attempts?: number }; Returns: Json }
       fn_owner_correct_rep_sms_obligation: { Args: { p_obligation_id: string; p_action: string; p_reason: string }; Returns: Json }
       ack_sentry_anomaly: {
         Args: {

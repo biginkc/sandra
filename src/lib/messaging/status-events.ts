@@ -27,6 +27,19 @@ type WebhookEventRow = Pick<
   "event_type" | "external_id" | "payload"
 >;
 
+export type StatusReconciliationFailure = {
+  eventType: string;
+  externalId: string;
+  message: string;
+};
+
+export type StatusReconciliationResult = {
+  candidates: number;
+  processed: number;
+  failed: number;
+  failures: StatusReconciliationFailure[];
+};
+
 export function statusWebhookEventType(kind: SmsStatusEvent["kind"]): string {
   return `sms_status_${kind}`;
 }
@@ -130,6 +143,35 @@ export async function recordRepSmsDeliveryFromMessage(
     // user client when this function is reached from sendSmsToContact's
     // reconciliation path, so never attempt the RPC on that client.
     const admin = createAdminClient();
+    if (identity.receiptId) {
+      const ledgerResult = await admin.rpc("fn_record_rep_sms_delivery_ledger_callback", {
+        p_provider: providerId,
+        p_provider_account_id: identity.providerAccountId,
+        p_provider_message_id: event.externalId,
+        p_state: event.kind === "delivered" ? "delivered" : "delivery_failed",
+        p_provider_status: event.kind,
+        p_provider_error:
+          event.kind === "failed"
+            ? event.errorMessage ?? "Provider reported delivery failure."
+            : null,
+        p_metadata: {
+          source: "sendillo_status_webhook",
+          messageId: message.id,
+          messageOrgId: message.org_id,
+          eventTimestamp: event.timestamp.toISOString(),
+        },
+        p_org_id: message.org_id,
+        p_receipt_id: identity.receiptId,
+      });
+      if (ledgerResult.error || !isSuccessfulRepSmsDeliveryResult(ledgerResult.data)) {
+        throw new Error(ledgerResult.error?.message ?? "Rep SMS receipt callback did not transition its ledger.");
+      }
+      // A no-answer follow-up owns both the protected transport receipt and
+      // the user-facing obligation. Settle both from the same provider
+      // callback; returning after the ledger write would leave a delivered
+      // text displayed as an outstanding required follow-up.
+      if (!identity.obligationId) return;
+    }
     const result = await admin.rpc("fn_record_rep_sms_delivery", {
       p_provider: providerId,
       p_provider_account_id: identity.providerAccountId,
@@ -204,7 +246,7 @@ function isUnmatchedRepSmsDeliveryResult(value: unknown): boolean {
 
 function readRepSmsDeliveryIdentity(
   metadata: Database["public"]["Tables"]["messages"]["Row"]["metadata"],
-): { provider: string; providerAccountId: string; obligationId?: string } | null {
+): { provider: string; providerAccountId: string; obligationId?: string; receiptId?: string } | null {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
     return null;
   }
@@ -215,6 +257,7 @@ function readRepSmsDeliveryIdentity(
   const provider = repSms.provider;
   const providerAccountId = repSms.providerAccountId;
   const obligationId = repSms.obligationId;
+  const receiptId = repSms.receiptId;
   if (
     typeof provider !== "string" ||
     !provider.trim() ||
@@ -228,6 +271,9 @@ function readRepSmsDeliveryIdentity(
     providerAccountId: providerAccountId.trim(),
     ...(typeof obligationId === "string" && obligationId.trim()
       ? { obligationId: obligationId.trim() }
+      : {}),
+    ...(typeof receiptId === "string" && receiptId.trim()
+      ? { receiptId: receiptId.trim() }
       : {}),
   };
 }
@@ -250,7 +296,7 @@ export async function reconcileStoredStatusEvents(
   supabase: SupabaseClient<Database>,
   providerId: string,
   externalId: string,
-) {
+): Promise<StatusReconciliationResult> {
   const eventTypes = [
     statusWebhookEventType("sent"),
     statusWebhookEventType("delivered"),
@@ -269,18 +315,22 @@ export async function reconcileStoredStatusEvents(
     throw new Error(`status webhook reconciliation lookup failed: ${error.message}`);
   }
 
+  let processed = 0;
+  const failures: StatusReconciliationFailure[] = [];
   for (const row of rows ?? []) {
     try {
       const event = parseStoredStatusEvent(row as WebhookEventRow);
       const outcome = await applyMessageStatusEvent(supabase, providerId, event);
       if (outcome === "unknown") {
+        const message = "message not found";
         await markWebhookEventError(
           supabase,
           providerId,
           row.event_type,
           row.external_id,
-          "message not found",
+          message,
         );
+        failures.push({ eventType: row.event_type, externalId: row.external_id, message });
         continue;
       }
       await markWebhookEventProcessed(
@@ -289,16 +339,26 @@ export async function reconcileStoredStatusEvents(
         row.event_type,
         row.external_id,
       );
+      processed += 1;
     } catch (reconcileError) {
+      const message = reconcileError instanceof Error ? reconcileError.message : String(reconcileError);
       await markWebhookEventError(
         supabase,
         providerId,
         row.event_type,
         row.external_id,
-        reconcileError instanceof Error ? reconcileError.message : String(reconcileError),
+        message,
       );
+      failures.push({ eventType: row.event_type, externalId: row.external_id, message });
     }
   }
+
+  return {
+    candidates: rows?.length ?? 0,
+    processed,
+    failed: failures.length,
+    failures,
+  };
 }
 
 function buildStatusUpdate(
@@ -422,6 +482,9 @@ async function markWebhookEventProcessed(
     .update({
       processing_status: "processed",
       processed_at: new Date().toISOString(),
+      processing_started_at: null,
+      reconciliation_next_attempt_at: null,
+      reconciliation_quarantined_at: null,
     })
     .eq("provider", provider)
     .eq("event_type", eventType)
@@ -449,6 +512,7 @@ async function markWebhookEventError(
     .update({
       processing_status: "error",
       processed_at: new Date().toISOString(),
+      processing_started_at: null,
       error_message: message,
     })
     .eq("provider", provider)
