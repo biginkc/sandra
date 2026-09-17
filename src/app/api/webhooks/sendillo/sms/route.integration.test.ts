@@ -655,6 +655,117 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     });
   });
 
+  it("pauses a reply to a Maria-through-Mel SMS with the takeover reason", async () => {
+    const phone = "+18165550140";
+    const contactId = await seedContact(phone);
+    const orgId = await getOrgId();
+    const { data: property, error: propertyError } = await supabase
+      .from("properties")
+      .insert({
+        address: "140 Sendillo Rep SMS Integration Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    if (propertyError || !property) {
+      throw new Error(`rep SMS property seed failed: ${propertyError?.message ?? "no property"}`);
+    }
+
+    const { data: sequence, error: sequenceError } = await supabase
+      .from("sequences")
+      .insert({
+        org_id: orgId,
+        name: "Sendillo rep SMS takeover integration",
+        active: true,
+      })
+      .select("id")
+      .single();
+    if (sequenceError || !sequence) {
+      throw new Error(`rep SMS sequence seed failed: ${sequenceError?.message ?? "no sequence"}`);
+    }
+    const { error: stepError } = await supabase.from("sequence_steps").insert({
+      sequence_id: sequence.id,
+      step_index: 0,
+      action_type: "send_sms",
+      template_body: "integration step",
+    });
+    if (stepError) throw new Error(`rep SMS step seed failed: ${stepError.message}`);
+    const { error: enrollmentError } = await supabase
+      .from("sequence_enrollments")
+      .insert({
+        org_id: orgId,
+        sequence_id: sequence.id,
+        property_id: property.id,
+        status: "active",
+        next_run_at: "2026-07-02T19:10:00.000Z",
+      });
+    if (enrollmentError) {
+      throw new Error(`rep SMS enrollment seed failed: ${enrollmentError.message}`);
+    }
+
+    const conversationId = "11111111-2222-4333-8444-555555555555";
+    const { error: outboundError } = await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "sendillo",
+      from_address: "+18164876899",
+      to_address: phone,
+      body: "Hey, this is Mel, Maria's assistant.",
+      contact_id: contactId,
+      property_id: property.id,
+      conversation_id: conversationId,
+      sent_at: "2026-07-02T19:09:00.000Z",
+      metadata: {
+        repSms: {
+          workflow: "maria-through-mel",
+          persona: "Mel",
+          assistant: "Maria",
+          actorUserId: "rep-1",
+          senderAssignmentId: "sender-1",
+        },
+      },
+    });
+    if (outboundError) throw new Error(`rep SMS outbound seed failed: ${outboundError.message}`);
+
+    const res = await POST(
+      makeSendilloInboundRequest({
+        messageId: "snd_rep_sms_takeover_pause_001",
+        from: phone,
+        body: "Yes, tell Maria I am interested.",
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(dispatchAiResponseSpy).not.toHaveBeenCalled();
+
+    const { data: enrollment } = await supabase
+      .from("sequence_enrollments")
+      .select("status, pause_reason")
+      .eq("sequence_id", sequence.id)
+      .eq("property_id", property.id)
+      .single();
+    expect(enrollment).toEqual({
+      status: "paused",
+      pause_reason: "rep_sms_human_takeover",
+    });
+
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("metadata")
+      .eq("external_id", "snd_rep_sms_takeover_pause_001")
+      .single();
+    expect(inbound?.metadata).toMatchObject({
+      processing: {
+        aiResponder: {
+          outcome: "escalated",
+          reason: "rep_sms_human_takeover",
+        },
+      },
+    });
+  });
+
   it("keeps the origin-main synchronous AI path when active reply delay is 0/0", async () => {
     await seedAiResponderConfig({
       delayMinSeconds: 0,

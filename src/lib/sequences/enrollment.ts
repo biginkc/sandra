@@ -182,7 +182,9 @@ export async function enrollLead(
 /**
  * Pause every active enrollment for a property with the given reason.
  * Called from:
- *   - the Dialpad inbound webhook on a regular reply (reason='inbound_reply')
+ *   - the inbound webhook on a regular reply (reason='inbound_reply')
+ *   - the inbound webhook on a reply to an audited rep SMS
+ *     (reason='rep_sms_human_takeover')
  *   - the STOP-keyword path (reason='consent_revoked', then caller flips
  *     those rows to 'opted_out' via `status` update — handled here via
  *     the `permanent` flag)

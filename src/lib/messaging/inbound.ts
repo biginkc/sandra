@@ -813,28 +813,6 @@ export async function handleInboundWebhook(
         }
       }
 
-      if (!inboundState.propertyEnrollmentsPausedAt) {
-        try {
-          await pausePropertyEnrollments(supabase, {
-            propertyId: effectivePropertyId,
-            reason: "inbound_reply",
-          });
-          await markInboundMessageState(supabase, insertOutcome.messageId, {
-            propertyEnrollmentsPausedAt: new Date().toISOString(),
-          });
-        } catch (e) {
-          reportError(e, {
-            tags: {
-              surface: `${provider.providerId}_webhook_sequence_pause_inbound`,
-            },
-            extra: {
-              propertyId: effectivePropertyId,
-              externalId: ev.externalId,
-            },
-          });
-        }
-      }
-
       // A reply to a human rep SMS belongs to that lead's assigned rep. The
       // outbound metadata is the durable handoff marker; record the takeover
       // before considering any AI path so both immediate and delayed replies
@@ -929,6 +907,47 @@ export async function handleInboundWebhook(
             ev.externalId,
             e,
           );
+        }
+      }
+
+      // Pause only after the rep-SMS source has been identified. A reply to
+      // an audited rep SMS must retain the precise takeover reason on the
+      // enrollment row; pausing before the lookup would overwrite it with
+      // the generic `inbound_reply` reason.
+      if (!inboundState.propertyEnrollmentsPausedAt) {
+        const pauseReason = repSmsHumanTakeover
+          ? REP_SMS_HUMAN_TAKEOVER_REASON
+          : "inbound_reply";
+        try {
+          await pausePropertyEnrollments(supabase, {
+            propertyId: effectivePropertyId,
+            reason: pauseReason,
+          });
+          await markInboundMessageState(supabase, insertOutcome.messageId, {
+            propertyEnrollmentsPausedAt: new Date().toISOString(),
+          });
+        } catch (e) {
+          reportError(e, {
+            tags: {
+              surface: `${provider.providerId}_webhook_sequence_pause_inbound`,
+            },
+            extra: {
+              propertyId: effectivePropertyId,
+              externalId: ev.externalId,
+              reason: pauseReason,
+            },
+          });
+          if (repSmsHumanTakeover) {
+            // The takeover has already been persisted, so an enrollment
+            // pause failure must be retried instead of acknowledged with an
+            // active sequence still able to send.
+            await failInboundWebhookForRetry(
+              supabase,
+              provider.providerId,
+              ev.externalId,
+              e,
+            );
+          }
         }
       }
 
