@@ -241,6 +241,7 @@ function expectSharedOutcomeControls({
 describe("<InboxDetail />", () => {
   beforeEach(() => {
     pushCalls.length = 0;
+    vi.spyOn(window, "open").mockReturnValue(null);
     replaceCalls.length = 0;
     refreshCalls.length = 0;
     navigationSearch = "";
@@ -1720,7 +1721,7 @@ describe("<InboxDetail />", () => {
     expect(pushCalls).toContain("/leads/prop-move");
   });
 
-  it("header Open prospect navigates without promoting", async () => {
+  it("header Open prospect opens a new window without promoting", async () => {
     const user = userEvent.setup();
     const data = makeData({
       contactId: "contact-header-move",
@@ -1739,7 +1740,12 @@ describe("<InboxDetail />", () => {
       "Open prospect",
     );
     expect(moveMessageThreadToLeadMock).not.toHaveBeenCalled();
-    expect(pushCalls).toContain("/leads/prop-header-move");
+    expect(window.open).toHaveBeenCalledWith(
+      "/leads/prop-header-move",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    expect(pushCalls).not.toContain("/leads/prop-header-move");
   });
 
   it("already-qualified rows open as leads while keeping outcome promotion disabled", async () => {
@@ -1766,7 +1772,11 @@ describe("<InboxDetail />", () => {
 
     expect(moveMessageThreadToLeadMock).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("inbox-detail-open-lead"));
-    expect(pushCalls).toContain("/leads/prop-open");
+    expect(window.open).toHaveBeenCalledWith(
+      "/leads/prop-open",
+      "_blank",
+      "noopener,noreferrer",
+    );
   });
 
   it("disables Move to Lead when the same property refreshes from prospect to lead", () => {

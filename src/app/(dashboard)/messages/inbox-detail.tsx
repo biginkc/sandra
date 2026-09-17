@@ -397,7 +397,6 @@ export function InboxDetail({
   const renderNowMs = nowMs ?? fallbackNowMs;
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [openLeadPending, startOpenLeadTransition] = useTransition();
   const [resolveOpen, setResolveOpen] = useState(false);
   const [replyRefreshGate, setReplyRefreshGate] =
     useState<ReplyRefreshGate | null>(null);
@@ -475,9 +474,12 @@ export function InboxDetail({
   const recordLabel = propertyIsLead ? "lead" : "prospect";
   const openLeadFromHeader = () => {
     if (!data.propertyId) return;
-    startOpenLeadTransition(() => {
-      router.push(`/leads/${data.propertyId}`);
-    });
+    if (typeof window === "undefined") return;
+    window.open(
+      `/leads/${data.propertyId}`,
+      "_blank",
+      "noopener,noreferrer",
+    );
   };
   const copy = async (value: string, label: string) => {
     const ok = await copyToClipboard(value);
@@ -746,7 +748,6 @@ export function InboxDetail({
             <Button
               type="button"
               onClick={openLeadFromHeader}
-              disabled={openLeadPending}
               variant="outline"
               size="sm"
               className="min-h-11"
