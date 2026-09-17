@@ -221,6 +221,26 @@ def make_org_and_prep(dest_prefix, n=1):
     return o, u, k, prep_id, item_ids, cids
 
 
+def re_prepare_and_accept(o, u, cid, label):
+    """The REAL 'manual resolution' path for an item stuck uncertain (no
+    auto-retry): a fresh capture/freeze/accept for the SAME conversation —
+    an operator re-preparing and re-accepting, exactly as an uncertain item
+    is actually resolved in this design (never a hand-rolled retry). The
+    destination-guard unique index (D-6(4)) only blocks a LIVE attempt in
+    {approved,claimed,dispatch_started}; 'uncertain' is deliberately outside
+    that set, so this legitimately succeeds. Returns (operation_id,
+    attempt_id) for the brand-new attempt."""
+    k2 = str(uuid.uuid4())
+    capture = json.loads(sql(authed(u, f"SELECT public.inbox_capture_reply_recipients(ARRAY['{cid}']::uuid[])::text;")))
+    draft = [{'conversationId': capture['items'][0]['conversation_id'], 'body': f'Hi there ({label})', 'dependencies': capture['items'][0]['dependencies'], 'exclusion': None}]
+    payload = json.dumps({'targets': [{'kind': 'conversation', 'id': cid}], 'drafts': draft, 'template': f'Hi there ({label})'}).replace("'", "''")
+    freeze = json.loads(sql(authed(u, f"SELECT public.inbox_freeze_reply_review('{payload}','{k2}')::text;")))
+    accept = json.loads(call_accept(o, u, k2, freeze['preparationId']))
+    op_id = accept['operation_id']
+    att_id = attempts_of(o, op_id)[0]
+    return op_id, att_id
+
+
 def call_accept(o, u, k, prep_id, expect_ok=True):
     q = authed(u, f"SELECT inbox_reply_send.accept('{o}','{u}','{k}','{prep_id}')::text;")
     return sql(q) if expect_ok else sql_fail(q)
@@ -360,7 +380,9 @@ try:
     acked = sql(f"SELECT inbox_reply_send.ack_dispatch('{oA}','{opA}',{entry['generation']})") == 't'
     need(acked, 'A.4 ack_dispatch should succeed once operation_dispatch_complete is true')
     need(sql(f"SELECT acknowledged_at IS NOT NULL FROM inbox_reply_send.dispatch_outbox WHERE org_id='{oA}' AND operation_id='{opA}'") == 't', 'A.4 outbox row not marked acknowledged')
-    record('A.4 claim_dispatch_batch -> ack_dispatch: outbox row acknowledged exactly once, only after dispatch-complete')
+    for a in (att_accept, att_uncertain, att_not_attempted):
+        need(send_count(a) == 1, f'A.4 checkpoint: attempt {a} should still show exactly 1 real transport call after ack, got {send_count(a)}')
+    record('A.4 claim_dispatch_batch -> ack_dispatch: outbox row acknowledged exactly once, only after dispatch-complete; send-log re-checked for all 3 attempts, still exactly 1 each')
 
     # --- A.5 callback for the provider_accepted attempt, via the REAL
     # synthetic callback envelope builder, translated the way the ingress
@@ -370,7 +392,9 @@ try:
     cb_result = call_wrapper(external_id_a, terminal_a)
     need(cb_result['kind'] == 'reconciled' and cb_result['result']['state'] == 'delivered', f'A.5 callback reconcile mismatch: {cb_result}')
     need(state_of(oA, att_accept) == 'delivered', 'A.5 attempt not delivered after callback')
-    record('A.5 synthetic callback (buildSyntheticReplyCallback, TS) -> reconciled via public.inbox_reply_reconcile_callback -> delivered')
+    for a in (att_accept, att_uncertain, att_not_attempted):
+        need(send_count(a) == 1, f'A.5 checkpoint: attempt {a} should still show exactly 1 real transport call after the callback reconcile, got {send_count(a)}')
+    record('A.5 synthetic callback (buildSyntheticReplyCallback, TS) -> reconciled via public.inbox_reply_reconcile_callback -> delivered; send-log re-checked for all 3 attempts, still exactly 1 each')
 
     # --- A.6 the full composed receipt lifecycle assertion ---
     # operation_status's own `dispatchComplete` is a NARROWER, wire-facing
@@ -389,7 +413,9 @@ try:
     need(status['dispatchComplete'] is False, f"A.6 dispatchComplete should be FALSE while attempt 2 is still uncertain (operation_status's narrower, fully-resolved notion): {status}")
     states = sorted(r['state'] for r in status['receipts'])
     need(states == sorted(['delivered', 'uncertain', 'confirmed_not_submitted']), f'A.6 unexpected receipt states: {states}')
-    record("A.6 composed lifecycle assertion: pending -> dispatch_started -> provider_accepted -> delivered traced end to end for attempt 1; operation_status receipts show {delivered, uncertain, confirmed_not_submitted}; dispatchComplete correctly FALSE (uncertain is dispatch-complete per A.3's worker-facing gate but not resolution-complete per operation_status's wire-facing gate — the two invariants are distinct and both hold)")
+    for a in (att_accept, att_uncertain, att_not_attempted):
+        need(send_count(a) == 1, f'A.6 checkpoint: attempt {a} should still show exactly 1 real transport call at the final lifecycle assertion, got {send_count(a)}')
+    record("A.6 composed lifecycle assertion: pending -> dispatch_started -> provider_accepted -> delivered traced end to end for attempt 1; operation_status receipts show {delivered, uncertain, confirmed_not_submitted}; dispatchComplete correctly FALSE (uncertain is dispatch-complete per A.3's worker-facing gate but not resolution-complete per operation_status's wire-facing gate — the two invariants are distinct and both hold); send-log re-checked for all 3 attempts one final time, still exactly 1 each")
 
     print(f'\nSECTION A (composed happy-path lifecycle) PASSED — {len(checks)} checks so far')
 
@@ -464,7 +490,7 @@ try:
     # --- B2: crash between the dispatch marker (dispatch_started committed)
     # and the provider call. Re-entry must NEVER issue a second token or make
     # a second provider call. ---
-    oB2, uB2, kB2, prepB2, _, _ = make_org_and_prep('+162255', n=1)
+    oB2, uB2, kB2, prepB2, _, cidsB2 = make_org_and_prep('+162255', n=1)
     resultB2 = json.loads(call_accept(oB2, uB2, kB2, prepB2))
     opB2 = resultB2['operation_id']
     attB2 = attempts_of(oB2, opB2)[0]
@@ -474,10 +500,15 @@ try:
     token_before = row_of(oB2, attB2)['token']
     need(token_before == dispatchB2['token'], 'B2 setup: marker token mismatch')
     need(state_of(oB2, attB2) == 'dispatch_started', 'B2 setup: marker not committed')
-    # "Crash" here = the provider call/response never happens. A redeploy
-    # restarts the worker, which re-enters via worker_claim on the same
-    # attempt (exactly runner.mjs's own claim-before-dispatch step, replayed
-    # by Restate against the SAME durable invocation).
+    # [Astra e2e gate round-2, finding B1] "Crash" here = the provider call
+    # is NEVER MADE at all — the crash happens strictly between the marker
+    # commit and the provider call itself. send_count MUST read 0 at this
+    # exact point: durable send-log evidence, not an assumption, that no
+    # real transport invocation has happened yet.
+    need(send_count(attB2) == 0, f'B2 pre-send checkpoint: no real transport call should have happened yet, got send_count={send_count(attB2)}')
+    # A redeploy restarts the worker, which re-enters via worker_claim on
+    # the same attempt (exactly runner.mjs's own claim-before-dispatch step,
+    # replayed by Restate against the SAME durable invocation).
     reentry = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{oB2}','{attB2}',60)::text;"))
     need(reentry == {'kind': 'existing', 'state': 'uncertain'}, f'B2 re-entry after the marker must land on uncertain with no new claim, got {reentry}')
     need(state_of(oB2, attB2) == 'uncertain', 'B2 attempt did not settle to uncertain on re-entry')
@@ -485,7 +516,19 @@ try:
     need(row_after['token'] == token_before, 'B2 dispatch_token changed on re-entry (a second token was issued)')
     stale = sql_fail(f"SELECT inbox_reply_send.worker_start_dispatch('{oB2}','{attB2}',{claimB2['generation']})::text;")
     need('INBOX_REPLY_STALE_CLAIM' in stale, f'B2 a second worker_start_dispatch on the re-entered attempt must be rejected, got: {stale}')
-    record('b2.1: real invariant — worker_claim re-entry on a dispatch_started attempt settles it to uncertain, keeps the SAME dispatch_token (no second token), and a further worker_start_dispatch is rejected (no second marker, no second provider call possible)')
+    need(send_count(attB2) == 0, f'B2 post-re-entry checkpoint: still zero real transport calls for this attempt (none was ever possible), got send_count={send_count(attB2)}')
+    record('b2.1: real invariant — worker_claim re-entry on a dispatch_started attempt settles it to uncertain, keeps the SAME dispatch_token (no second token), and a further worker_start_dispatch is rejected (no second marker, no second provider call possible); send-log confirms send_count==0 both before AND after re-entry — the crash genuinely happened before any real send, and none became possible')
+
+    # The REAL resolution path (no auto-retry — see B6's own live-attempt
+    # index proof): an operator re-prepares and re-accepts for the SAME
+    # conversation, driving a brand-new attempt through the REAL synthetic
+    # transport for its own genuine, single send.
+    op_b2_retry, att_b2_retry = re_prepare_and_accept(oB2, uB2, cidsB2[0], 'B2 resolution')
+    provider_b2_retry, persist_b2_retry, token_b2_retry = dispatch_attempt(oB2, att_b2_retry, key=cidsB2[0])
+    need(provider_b2_retry['kind'] == 'accepted', f'B2 resolution: expected the real resolution send to be accepted, got {provider_b2_retry}')
+    need(persist_b2_retry['state'] == 'provider_accepted', f'B2 resolution: expected provider_accepted, got {persist_b2_retry}')
+    need(send_count(cidsB2[0]) == 1, f'B2 resolution checkpoint: exactly ONE real transport call for this conversation across the whole boundary (the crashed marker never sent; the resolution genuinely did), got send_count={send_count(cidsB2[0])}')
+    record('b2.1b the real resolution: re-prepare + re-accept for the same conversation drives a brand-new attempt through the REAL synthetic transport — send_count for this conversation reaches exactly 1 (zero from the crashed marker, one from the genuine resolution send)')
 
     # MUTATION [Astra e2e gate, finding B3 — B2 must show a REAL failure of
     # the no-double-send invariant, not merely a surviving trigger backstop].
@@ -698,10 +741,31 @@ try:
     need(state_of(oB4b, attB4b) == 'provider_accepted', f'B4 MUTATION watched fail: the attempt is STRANDED at provider_accepted — its delivery callback was lost, never delivered')
     record('b4.3 MUTATION watched fail: with the durable-store step removed from the wrapper, an early callback for a REAL send is silently discarded — persist() still binds the reference, but nothing is left to drain, and the attempt is durably STRANDED at provider_accepted, never reaching delivered')
     restore_and_verify('public.inbox_reply_reconcile_callback')
-    restored_early = call_wrapper(ref_b4b, terminal_b4b)
-    need(restored_early['kind'] == 'reconciled' and restored_early['result']['state'] == 'delivered', f'B4 RESTORED: a redelivered callback against the (now-persisted) attempt should reconcile directly, got {restored_early}')
-    need(state_of(oB4b, attB4b) == 'delivered', 'B4 RESTORED: the previously-stranded attempt should now be recoverable via a callback redelivery')
-    record('b4.4 RESTORED and re-verified byte-exact against source; a fresh replay of the exact scenario (early callback -> stored -> persist -> drain) reaches delivered, not stranded')
+    # [Astra e2e gate round-2, finding B3] The restore must re-run the FULL
+    # boundary on a BRAND-NEW attempt/reference — reconciling ref_b4b (which
+    # is already persisted from the mutation above) only proves the matched
+    # path works, not that a callback arriving BEFORE persist is stored and
+    # later drained. Replay the exact early-callback -> stored -> persist ->
+    # drain -> delivered sequence end to end, asserting each step.
+    oB4c, uB4c, kB4c, prepB4c, _, _ = make_org_and_prep('+164257', n=1)
+    resultB4c = json.loads(call_accept(oB4c, uB4c, kB4c, prepB4c))
+    opB4c = resultB4c['operation_id']
+    attB4c = attempts_of(oB4c, opB4c)[0]
+    claimB4c = json.loads(sql(f"SELECT inbox_reply_send.worker_claim('{oB4c}','{attB4c}',60)::text;"))
+    dispatchB4c = json.loads(sql(f"SELECT inbox_reply_send.worker_start_dispatch('{oB4c}','{attB4c}',{claimB4c['generation']})::text;"))
+    providerB4c = send(dispatchB4c['from'], dispatchB4c['to'], dispatchB4c['body'], attB4c)
+    need(send_count(attB4c) == 1, f'B4 restore-replay setup: exactly one real transport call expected, got {send_count(attB4c)}')
+    ref_b4c, terminal_b4c = synthetic_callback(providerB4c['externalId'], 'delivered')
+    restored_early = call_wrapper(ref_b4c, terminal_b4c)
+    need(restored_early['kind'] == 'stored_unmatched', f'B4 RESTORED: a callback arriving before persist must be held again (durable-store step restored), got {restored_early}')
+    need(sql(f"SELECT count(*) FROM inbox_reply_send.unmatched_callbacks WHERE provider='sendillo' AND provider_reference='{ref_b4c}'") == '1', 'B4 RESTORED: held callback row missing')
+    restored_persist = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB4c}','{attB4c}','{dispatchB4c['token']}',{jsonb_literal(providerB4c)})::text;"))
+    need(restored_persist['state'] == 'provider_accepted', f'B4 RESTORED: persist did not bind the pre-arrived reference, got {restored_persist}')
+    restored_drain = json.loads(sql(f"SELECT inbox_reply_send.drain_unmatched('sendillo','{ref_b4c}')::text;"))
+    need(restored_drain['drained'] is True and restored_drain['result']['state'] == 'delivered', f'B4 RESTORED: drain did not reconcile the held callback, got {restored_drain}')
+    need(state_of(oB4c, attB4c) == 'delivered', 'B4 RESTORED: attempt not delivered after the replayed drain')
+    need(send_count(attB4c) == 1, f'B4 RESTORED: resolving the held callback must never call the transport again, got {send_count(attB4c)}')
+    record('b4.4 RESTORED and re-verified byte-exact against source, via a BRAND-NEW attempt/reference replaying the full boundary end to end: early callback -> stored_unmatched (durable-store step back in force) -> persist binds the reference -> drain reconciles exactly once -> delivered')
 
     # --- B5: duplicate callback + out-of-order terminal (delivery_failed
     # after delivered). First-terminal-wins; a contradiction is rejected as
@@ -793,26 +857,28 @@ END $$;
 
     # --- B6: an uncertain attempt stays uncertain, is never auto-retried
     # (structurally — the live-attempt unique index forbids a successor while
-    # non-terminal), and a callback that later resolves it (a delayed
-    # provider result eventually reporting accepted) is durably held/drained
-    # exactly like B4 — the documented limitation is "no auto-retry", not
-    # "the callback is lost".
-    # [Astra e2e gate, finding B2] The initial dispatch drives the REAL
-    # synthetic transport (dispatch_attempt(), same seam as Section
-    # A/B1-B5) scripted to uncertain — never a hand-injected result. Keyed
-    # by item_id (not attempt_id) here specifically: the concern this
-    # boundary guards against is "the same logical recipient sent twice",
-    # which spans a successor attempt with a DIFFERENT attempt_id — an
-    # attempt-id-keyed count would miss that. ---
-    oB6, uB6, kB6, prepB6, _, _ = make_org_and_prep('+166255', n=1)
+    # non-terminal), and its real resolution — a fresh accept driving a
+    # genuinely NEW send, since uncertain never auto-retries — reaches
+    # delivered via the REAL synthetic transport + REAL callback for that
+    # send's own externalId.
+    # [Astra e2e gate round-2, finding B2] NOTHING in this boundary is
+    # hand-injected: both the uncertain send AND its resolution send go
+    # through dispatch_attempt()/send() (the same seam as Section A/B1-B5),
+    # and the resolving callback is built via buildSyntheticReplyCallback
+    # for the REAL externalId the resolution send actually returned — never
+    # an invented externalId or a fabricated provider result. Keyed by
+    # conversation id (stable across the two separate accept()s, unlike
+    # item_id, which is minted fresh per preparation) so send_count reflects
+    # "how many times did this logical recipient actually get sent to". ---
+    oB6, uB6, kB6, prepB6, _, cidsB6 = make_org_and_prep('+166255', n=1)
     resultB6 = json.loads(call_accept(oB6, uB6, kB6, prepB6))
     opB6 = resultB6['operation_id']
     attB6 = attempts_of(oB6, opB6)[0]
     itemB6 = sql(f"SELECT item_id FROM inbox_reply_send.attempts WHERE org_id='{oB6}' AND id='{attB6}'")
-    provider_b6, persist_uncertain, token_b6 = dispatch_attempt(oB6, attB6, override={'kind': 'uncertain', 'reason': 'transport_or_timeout'}, key=itemB6)
+    provider_b6, persist_uncertain, token_b6 = dispatch_attempt(oB6, attB6, override={'kind': 'uncertain', 'reason': 'transport_or_timeout'}, key=cidsB6[0])
     need(provider_b6['kind'] == 'uncertain', f'B6 setup: synthetic double override did not take effect: {provider_b6}')
     need(persist_uncertain['state'] == 'uncertain', f'B6 setup: expected uncertain, got {persist_uncertain}')
-    need(send_count(itemB6) == 1, f'B6 setup: exactly one real transport call expected for this item, got {send_count(itemB6)}')
+    need(send_count(cidsB6[0]) == 1, f'B6 setup: exactly one real transport call expected for this conversation, got {send_count(cidsB6[0])}')
     # No automatic retry: a fresh successor attempt for the SAME
     # (preparation,item) is structurally blocked while the live row is
     # 'uncertain' (D-6(1) live-attempt partial unique — only
@@ -824,18 +890,24 @@ END $$;
                                 f"SELECT org_id,operation_id,preparation_id,item_id,attempt_ordinal+1,id,contact_id,from_e164,to_e164,body_hash,'approved' FROM inbox_reply_send.attempts WHERE org_id='{oB6}' AND id='{attB6}';")
     need('duplicate key' in dup_attempt_err.lower() or '23505' in dup_attempt_err, f'B6 a successor attempt while the live row is uncertain should be structurally blocked, got: {dup_attempt_err}')
     record('b6.1: while an attempt is uncertain, no successor attempt for the same item can even be inserted (live-attempt unique index) — structurally no auto-retry, matching the documented limitation')
-    # A delayed callback resolving it later is durably held, exactly like B4.
-    external_id_b6 = f"synthetic_{token_b6}_delayed"
-    ref_b6, term_b6 = synthetic_callback(external_id_b6, 'delivered')
-    early_b6 = call_wrapper(ref_b6, term_b6)
-    need(early_b6['kind'] == 'stored_unmatched', f'B6 expected the delayed callback to be held unmatched, got {early_b6}')
-    persist_late = json.loads(sql(f"SELECT inbox_reply_send.worker_persist('{oB6}','{attB6}','{token_b6}',{jsonb_literal({'kind': 'accepted', 'externalId': ref_b6, 'status': 'sent'})})::text;"))
-    need(persist_late['state'] == 'provider_accepted', f'B6 a delayed accepted result from uncertain must still bind, got {persist_late}')
-    drain_b6 = json.loads(sql(f"SELECT inbox_reply_send.drain_unmatched('sendillo','{ref_b6}')::text;"))
-    need(drain_b6['drained'] is True and drain_b6['result']['state'] == 'delivered', f'B6 delayed drain failed: {drain_b6}')
-    need(state_of(oB6, attB6) == 'delivered', 'B6 attempt not delivered after the delayed resolve')
-    need(send_count(itemB6) == 1, f'B6 resolving the delayed result/callback must never call the transport again, got {send_count(itemB6)}')
-    record("b6.2: the documented limitation is precisely scoped — an uncertain attempt's LATER delayed provider result (accepted) still binds, and its already-held callback still drains and delivers exactly once; nothing about being uncertain loses the callback, only auto-retry is withheld; send-log confirms exactly 1 real transport call for the whole lifecycle")
+
+    # The REAL resolution: since this specific attempt can never be
+    # re-dispatched (no auto-retry), an operator re-prepares and re-accepts
+    # for the SAME conversation — a brand-new attempt, driven through the
+    # REAL synthetic transport for its own genuine send, whose REAL
+    # externalId is then what a REAL callback resolves.
+    op_b6_retry, att_b6_retry = re_prepare_and_accept(oB6, uB6, cidsB6[0], 'B6 resolution')
+    provider_b6_retry, persist_b6_retry, token_b6_retry = dispatch_attempt(oB6, att_b6_retry, key=cidsB6[0])
+    need(provider_b6_retry['kind'] == 'accepted', f'B6 resolution: expected the real resolution send to be accepted, got {provider_b6_retry}')
+    need(persist_b6_retry['state'] == 'provider_accepted', f'B6 resolution: expected provider_accepted, got {persist_b6_retry}')
+    need(send_count(cidsB6[0]) == 2, f'B6 resolution checkpoint: exactly 2 real transport calls for this conversation (the uncertain one + the resolution one), got {send_count(cidsB6[0])}')
+    ref_b6, term_b6 = synthetic_callback(provider_b6_retry['externalId'], 'delivered')
+    resolved_b6 = call_wrapper(ref_b6, term_b6)
+    need(resolved_b6['kind'] == 'reconciled' and resolved_b6['result']['state'] == 'delivered', f'B6 resolution: callback for the REAL resolution externalId should reconcile to delivered, got {resolved_b6}')
+    need(state_of(oB6, att_b6_retry) == 'delivered', 'B6 resolution attempt not delivered after its own real callback')
+    need(state_of(oB6, attB6) == 'uncertain', 'B6 the ORIGINAL attempt must remain uncertain — it was never itself resolved, only superseded by a genuinely new send')
+    need(send_count(cidsB6[0]) == 2, f'B6 final checkpoint: the resolving callback must never trigger another real send, still expected 2, got {send_count(cidsB6[0])}')
+    record("b6.2: the documented limitation is precisely scoped — an uncertain attempt is never auto-retried, but the REAL resolution path (re-prepare + re-accept -> a brand-new attempt driven through the REAL synthetic transport -> a REAL callback for that send's own externalId) reaches delivered; send-log confirms exactly 2 real transport calls total for this conversation (the original uncertain send + the one genuine resolution send), never more")
 
     # MUTATION [Astra e2e gate, finding B3]: the D-6(1) live-attempt unique
     # index (inbox_reply_send_live_attempt) is the SOLE structural guard
