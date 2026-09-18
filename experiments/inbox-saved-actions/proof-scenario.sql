@@ -115,8 +115,21 @@ BEGIN
  RAISE NOTICE 'PASS get() recovers once assignee restored (control)';
 
  -- 8) promotion is a supported metadata step, but the prepare grammar
- -- consumes it before assignment. Save the standalone control, then reject
- -- the two demonstrated assign-then-command mismatches at SAVE.
+ -- consumes it before assignment. Standalone assignment and promote-then-
+ -- assign are valid; the two demonstrated assign-then-command mismatches
+ -- remain rejected at SAVE.
+ EXECUTE 'SET LOCAL ROLE authenticated';
+ a:=public.inbox_saved_action_create('Assign only',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','assign','userId',NULL))));
+ EXECUTE 'RESET ROLE';
+ IF a->'definition' IS DISTINCT FROM jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','assign','userId',NULL))) THEN RAISE EXCEPTION 'standalone assign definition was not saved: %',a; END IF;
+ RAISE NOTICE 'PASS standalone assign step accepted at save';
+
+ EXECUTE 'SET LOCAL ROLE authenticated';
+ a:=public.inbox_saved_action_create('Promote then assign',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','promote'),jsonb_build_object('type','assign','userId',assignee))));
+ EXECUTE 'RESET ROLE';
+ IF jsonb_array_length(a->'definition'->'steps')<>2 THEN RAISE EXCEPTION 'promote-then-assign definition was not saved: %',a; END IF;
+ RAISE NOTICE 'PASS promote-then-assign steps accepted at save';
+
  EXECUTE 'SET LOCAL ROLE authenticated';
  a:=public.inbox_saved_action_create('Promote',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','promote'))));
  EXECUTE 'RESET ROLE';

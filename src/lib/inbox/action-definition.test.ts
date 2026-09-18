@@ -47,6 +47,14 @@ describe("Inbox action input boundaries", () => {
       expect(parse({ ...request(), targets: mixed, definition: { version: 1, steps: [{ type }] } }).input.targets).toHaveLength(2);
     }
   });
+  it("accepts standalone assignment and promotion before assignment, while rejecting commands after assignment", () => {
+    for (const steps of [[{ type: "assign", userId: null }], [{ type: "promote" }, { type: "assign", userId: null }]]) {
+      expect(parse({ ...request(), definition: { version: 1, steps } }).input.definition.steps).toEqual(steps);
+    }
+    for (const steps of [[{ type: "assign", userId: null }, { type: "promote" }], [{ type: "assign", userId: null }, { type: "dismiss_unknown" }]]) {
+      expect(() => parse({ ...request(), definition: { version: 1, steps } })).toThrow(InvalidInboxActionError);
+    }
+  });
   it("rejects duplicate/conflicting steps, backwards dependency, or a reply before metadata", () => {
     for (const steps of [[...definition.steps].reverse(), [definition.steps[0], definition.steps[0]], [{ type: "dismiss_unknown" }, { type: "restore_unknown" }], [{ type: "assign", userId: null }, { type: "assign", userId: id(3) }], [{ type: "review_reply", text: "hello" }, { type: "promote" }], [{ type: "outcome", value: "nurture" }, { type: "assign", userId: null }, { type: "promote" }], [{ type: "outcome", value: "nurture" }, { type: "assign", userId: null }, { type: "dismiss_unknown" }], [{ type: "outcome", value: "nurture" }, { type: "assign", userId: null }, { type: "restore_unknown" }]]) {
       expect(() => parse({ ...request(), definition: { version: 1, steps } })).toThrow(InvalidInboxActionError);
