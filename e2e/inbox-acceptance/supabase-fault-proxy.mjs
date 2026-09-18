@@ -11,6 +11,12 @@ function upstreamUrl(value) {
   if (target.protocol !== "http:" && target.protocol !== "https:") {
     throw new Error("The acceptance Supabase target must use http or https.");
   }
+  if (!["localhost", "127.0.0.1", "[::1]", "::1"].includes(target.hostname)) {
+    throw new Error("The acceptance Supabase proxy target must be loopback.");
+  }
+  if (target.pathname !== "/" || target.search || target.hash) {
+    throw new Error("The acceptance Supabase target must be an origin without a path.");
+  }
   if (target.username || target.password) {
     throw new Error("The acceptance Supabase target must not contain credentials.");
   }
@@ -128,4 +134,3 @@ export async function startSupabaseFaultProxy({ targetUrl, port, token }) {
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
-
