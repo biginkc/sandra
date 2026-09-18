@@ -3,7 +3,7 @@
   "status": "BLOCKED_UNBUILT_CURRENT_SOURCE",
   "owner": "release-infra",
   "source_repository": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration",
-  "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd",
+  "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31",
   "services": {
     "operation-worker": {
       "Dockerfile": "253488776860278dd5abd1eb2a2f6babb4f6760d706f37ea837262948913afaf",
@@ -20,7 +20,7 @@
         "login": "inbox_action_worker",
         "status": "SOURCE_ONLY_UNBUILT"
       },
-      "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd"
+      "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31"
     },
     "reply-send-worker": {
       "Dockerfile": "98ec0bc8335b2db7b5ef40eb1237a37fc3350896a385c7762d06ee0c6fd04c66",
@@ -42,16 +42,16 @@
         "login": "inbox_reply_send_worker",
         "status": "SOURCE_ONLY_UNBUILT"
       },
-      "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd"
+      "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31"
     },
     "sync-relay": {
       "Dockerfile": "1e33ec793747bee85f0e390017074658da88b027a273c944faeda6625b0e5bbe",
       "server.mjs": "7c8e7d73dd69045676bce17aaad6479739ef129b89157a02b144b7207c9f5e2b",
       "railway.json": "b551f369a14ae01cb3c2b0ebaed8946ad939cb40c4981ab9d4c7abe901a5e221",
-      "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd"
+      "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31"
     },
     "projection-worker": {
-      "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd",
+      "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31",
       "Dockerfile": "f30e4fe8a1db80724fb8355c2f1eebe9a6ef40dc55fcc4fcbdc1af3cbd083091",
       "package.json": "93c75a66175e33248b6c6869d3b7881a3c23064168c532bdfd063a3c866a6050",
       "package-lock.json": "ce33cf8eabdd72dd596204ecad3612df265bf471766f478aa806123acec1c2da",
@@ -188,8 +188,8 @@
         "status": "PINNED_REFERENCE_UNRAN_COMPATIBILITY_UNPROVEN"
       },
       "operation-worker": {
-        "image": "sandra-inbox-action-worker:release-4850f8c",
-        "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd",
+        "image": "sandra-inbox-action-worker:release-94bf37f",
+        "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31",
         "build_context": "experiments/inbox-operation-worker",
         "current_image_digest": null,
         "role_packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
@@ -199,8 +199,8 @@
         "status": "SOURCE_ONLY_UNBUILT"
       },
       "reply-send-worker": {
-        "image": "sandra-inbox-reply-send-worker:release-4850f8c",
-        "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd",
+        "image": "sandra-inbox-reply-send-worker:release-94bf37f",
+        "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31",
         "build_context": "experiments/inbox-reply-send-worker",
         "current_image_digest": null,
         "role_packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
@@ -211,8 +211,8 @@
         "status": "SOURCE_ONLY_UNBUILT"
       },
       "projection-worker": {
-        "image": "sandra-inbox-projection-worker:release-4850f8c",
-        "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd",
+        "image": "sandra-inbox-projection-worker:release-94bf37f",
+        "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31",
         "build_context": "services/inbox-projection-worker",
         "current_image_digest": null,
         "role_packet": "experiments/inbox-release/generated/projection-worker-role.sql",
@@ -232,8 +232,8 @@
         "memory_bytes": 536870912,
         "cpus": 0.5,
         "status": "SOURCE_PACKAGED_UNRUN",
-        "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd",
-        "image": "sandra-inbox-sync-relay:release-4850f8c"
+        "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31",
+        "image": "sandra-inbox-sync-relay:release-94bf37f"
       }
     },
     "preflight_order": [
@@ -279,7 +279,7 @@
     },
     "restate_registration": {
       "helper": "experiments/inbox-release/register-restate-services.py",
-      "sha256": "69a8e22420c0d7471d24314866f4ce57cbdcb2de561c18656bc9628b70b80bcd",
+      "sha256": "2110f16189cc705bfcd27c99998227022ac4648be5a16f07e0106a9f000420ac",
       "admin_url": "http://127.0.0.1:9070",
       "worker_endpoints": {
         "InboxMetadataOperation": "http://127.0.0.1:9080",

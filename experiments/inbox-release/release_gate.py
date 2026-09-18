@@ -308,6 +308,26 @@ def verify_execution_stack_manifest() -> dict[str, Any]:
         return result("FAIL", f"execution stack source commit cannot be resolved: {exc.output.strip()}")
     if resolved_source_commit != source_commit:
         return result("FAIL", "execution stack source commit is not exact", expected=source_commit, actual=resolved_source_commit)
+    try:
+        backend_manifest = load_json(HERE / "backend-operation-reply-manifest.json")
+    except GateError as exc:
+        return result("FAIL", f"backend operation/reply manifest is unavailable: {exc}")
+    backend_source_commit = str(backend_manifest.get("source_commit", ""))
+    if backend_source_commit != source_commit:
+        return result(
+            "FAIL",
+            "execution stack and backend packet source commits differ",
+            execution_source_commit=source_commit,
+            backend_source_commit=backend_source_commit,
+        )
+    backend_repository = Path(str(backend_manifest.get("source_repository", "")))
+    if not backend_repository.is_dir() or backend_repository.resolve() != source_repository.resolve():
+        return result(
+            "FAIL",
+            "execution stack and backend packet source repositories differ",
+            execution_source_repository=str(source_repository),
+            backend_source_repository=str(backend_repository),
+        )
     source_paths = {
         "operation-worker": {
             "Dockerfile": "experiments/inbox-operation-worker/Dockerfile",
@@ -324,6 +344,9 @@ def verify_execution_stack_manifest() -> dict[str, Any]:
             "runner.mjs": "experiments/inbox-reply-send-worker/runner.mjs",
             "server.mjs": "experiments/inbox-reply-send-worker/server.mjs",
             "vendor/reply-provider.mjs": "experiments/inbox-reply-send-worker/vendor/reply-provider.mjs",
+            "vendor/test-transport.mjs": "experiments/inbox-reply-send-worker/vendor/test-transport.mjs",
+            "worker-role.sql": "experiments/inbox-reply-send-worker/worker-role.sql",
+            "worker.sql": "experiments/inbox-reply-send-worker/worker.sql",
         },
         "sync-relay": {
             "Dockerfile": "services/inbox-sync-relay/Dockerfile",
@@ -367,6 +390,58 @@ def verify_execution_stack_manifest() -> dict[str, Any]:
                 source_drift.append(f"{service_name}:{relative}: source worktree content drift")
     if source_drift:
         return result("FAIL", "execution stack source content drift", checked=source_checked, mismatches=source_drift)
+    overlay_paths = {
+        "operation-worker": {
+            "core.mjs": "experiments/inbox-operation-worker/core.mjs",
+            "core.test.mjs": "experiments/inbox-operation-worker/core.test.mjs",
+        },
+        "reply-send-worker": {
+            "core.mjs": "experiments/inbox-reply-send-worker/core.mjs",
+            "core.test.mjs": "experiments/inbox-reply-send-worker/core.test.mjs",
+        },
+        "projection-worker": {
+            "config.mjs": "services/inbox-projection-worker/config.mjs",
+            "config.test.mjs": "services/inbox-projection-worker/config.test.mjs",
+        },
+    }
+    overlay_drift: list[str] = []
+    for service_name, paths in overlay_paths.items():
+        service = services.get(service_name)
+        overlay = service.get("release_http_fixture_profile_overlay") if isinstance(service, dict) else None
+        if not isinstance(overlay, dict):
+            overlay_drift.append(f"{service_name}: release HTTP fixture profile overlay is missing")
+            continue
+        for field, relative in paths.items():
+            expected = overlay.get(field)
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                overlay_drift.append(f"{service_name}: overlay {field} hash is missing")
+                continue
+            try:
+                pinned = git_source_bytes(source_repository, source_commit, relative)
+            except GateError as exc:
+                overlay_drift.append(str(exc))
+                continue
+            if hashlib.sha256(pinned).hexdigest() != expected:
+                overlay_drift.append(f"{service_name}:{relative}: overlay pinned content drift")
+            worktree = source_repository / relative
+            if not worktree.is_file() or sha256(worktree) != expected:
+                overlay_drift.append(f"{service_name}:{relative}: overlay source worktree content drifted")
+    if overlay_drift:
+        return result("FAIL", "execution stack fixture overlay content drift", checked=source_checked, mismatches=overlay_drift)
+    runtime_services = manifest.get("runtime_definition", {}).get("services")
+    if not isinstance(runtime_services, dict):
+        return result("FAIL", "execution stack runtime service definitions are missing")
+    expected_tag = f"release-{source_commit[:7]}"
+    tag_drift: list[str] = []
+    for service_name in ("operation-worker", "reply-send-worker", "projection-worker", "relay"):
+        service = runtime_services.get(service_name)
+        image = service.get("image") if isinstance(service, dict) else None
+        image_without_digest = image.split("@", 1)[0] if isinstance(image, str) else ""
+        actual_tag = image_without_digest.rsplit(":", 1)[-1] if ":" in image_without_digest else ""
+        if actual_tag != expected_tag:
+            tag_drift.append(f"{service_name}: expected image tag {expected_tag}, got {actual_tag or '<missing>'}")
+    if tag_drift:
+        return result("FAIL", "execution stack service image tags do not match source commit", mismatches=tag_drift)
     projection = services.get("projection-worker") if isinstance(services, dict) else None
     if not isinstance(projection, dict):
         return result("FAIL", "execution stack has no pinned projection worker")
@@ -402,7 +477,7 @@ def verify_execution_stack_manifest() -> dict[str, Any]:
     role_packet = role_packet_path.read_text()
     if "current_database()<>'postgres'" not in role_packet or "marker='sandra-inbox-http-owned-synthetic-20260917'" not in role_packet or "CREATE ROLE inbox_projection_worker" not in role_packet or "inbox_t2_" in role_packet:
         return result("FAIL", "projection worker role packet is not release-guarded")
-    backend = load_json(HERE / "backend-operation-reply-manifest.json")
+    backend = backend_manifest
     backend_roles = {entry.get("path"): entry.get("sha256") for entry in backend.get("sql_sources", []) if isinstance(entry, dict)}
     for entry in order:
         if not isinstance(entry, dict) or entry.get("service") not in {"operation-worker", "reply-send-worker"}:

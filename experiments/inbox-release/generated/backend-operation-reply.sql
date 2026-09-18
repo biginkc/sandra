@@ -4,7 +4,7 @@ BEGIN;
 SET LOCAL lock_timeout='2s';
 SET LOCAL statement_timeout='30s';
 -- Pinned operation_foundation: experiments/inbox-operation-acceptance/setup.sql
--- source_sha256=04d34d74ef76dd11585ee45728e2a0a1f6e635cb2fd0376a4ef9b014ea12dae3
+-- source_sha256=37218be75c5c6b6aec0e4320b6189fc6687b674c72eb04f86ff2d37447fad012
 -- Private durable acceptance core. No application grants, canonical writes or provider calls.
 
 CREATE SCHEMA inbox_operations;
@@ -142,15 +142,22 @@ END $$;
 -- Call in the SAME transaction, before any canonical mutation. Keep this row lock
 -- through eligibility checks, the effect and finish_step. Never use across HTTP calls.
 CREATE FUNCTION inbox_operations.lock_step_for_effect(o uuid,op uuid,s uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE row inbox_operations.steps; prior jsonb;
+DECLARE row inbox_operations.steps; prior jsonb; predecessor_results jsonb:='[]'::jsonb; cursor uuid;
 BEGIN
  SELECT * INTO row FROM inbox_operations.steps WHERE org_id=o AND operation_id=op AND id=s FOR UPDATE;
  IF NOT FOUND OR row.state<>'running' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() THEN RAISE EXCEPTION 'Stale step claim';END IF;
- IF row.predecessor_id IS NOT NULL THEN
-  SELECT result INTO prior FROM inbox_operations.receipts WHERE org_id=o AND operation_id=op AND step_id=row.predecessor_id;
+ cursor:=row.predecessor_id;
+ WHILE cursor IS NOT NULL LOOP
+  SELECT r.result,st.predecessor_id INTO prior,cursor
+  FROM inbox_operations.steps st JOIN inbox_operations.receipts r ON r.org_id=st.org_id AND r.operation_id=st.operation_id AND r.step_id=st.id
+  WHERE st.org_id=o AND st.operation_id=op AND st.id=cursor;
   IF NOT FOUND THEN RAISE EXCEPTION 'Predecessor incomplete';END IF;
- END IF;
- RETURN jsonb_build_object('action',row.action,'payload',row.payload,'original_dependencies',row.dependencies,'predecessor_result',prior);
+  -- Prepend each older receipt so adapters receive the complete immutable
+  -- dependency history in execution order, while predecessor_result remains
+  -- the immediate receipt for target/SMS rebasing.
+  predecessor_results:=jsonb_build_array(prior)||predecessor_results;
+ END LOOP;
+ RETURN jsonb_build_object('action',row.action,'payload',row.payload,'original_dependencies',row.dependencies,'predecessor_result',CASE WHEN jsonb_array_length(predecessor_results)>0 THEN predecessor_results->-1 ELSE NULL END,'predecessor_results',predecessor_results);
 END $$;
 CREATE FUNCTION inbox_operations.finish_step(o uuid,op uuid,s uuid,g bigint,result jsonb) RETURNS bigint LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE v bigint;
@@ -705,11 +712,11 @@ REVOKE ALL ON FUNCTION inbox_operation_domain.apply_sms_opt_out(uuid,uuid,uuid,u
 
 
 -- Pinned operation_domain_apply: experiments/inbox-operation-domain/restrictive-apply.sql
--- source_sha256=79913e15bde62bfb5ab1a254476fa27f60e7180d6f86eba65ceebd02518e1499
+-- source_sha256=79dec51b3a2e8ed0cd87fc6f4e545a02c0550e539aebaf2edb4d33d152b24ab5
 -- Source-only candidate. Replace the private adapter only after reviewed scope/helper installation.
 CREATE OR REPLACE FUNCTION inbox_operation_domain.apply_property_step(o uuid,op uuid,s uuid,g bigint) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE shared_sms inbox_operation_domain.shared_sms_receipts; sms_original_policy jsonb; sms jsonb; sms_expected jsonb; sms_contact uuid; step jsonb; payload jsonb; expected jsonb; actual jsonb; requirements jsonb; prior jsonb;
+DECLARE shared_sms inbox_operation_domain.shared_sms_receipts; sms_original_policy jsonb; sms jsonb; sms_expected jsonb; sms_contact uuid; step jsonb; payload jsonb; expected jsonb; actual jsonb; requirements jsonb; prior jsonb; history jsonb; historical jsonb;
  requester uuid; assignee uuid; property_id uuid; p public.properties; member public.memberships;
  requirement jsonb; revised jsonb; result jsonb; changed boolean; disposition text; entry record; targets jsonb; target jsonb; target_revision bigint; resolved jsonb; target_results jsonb:='[]'; actor_count integer;
 BEGIN
@@ -775,14 +782,20 @@ BEGIN
  END LOOP;
  targets:=target_results;
 
- -- Only revisions expressly returned by this adapter may replace earlier values.
- IF prior IS NOT NULL AND prior<>'null'::jsonb THEN
-  IF prior->>'property_id' IS DISTINCT FROM property_id::text OR jsonb_typeof(prior->'revised_dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Invalid predecessor receipt';END IF;
-  FOR revised IN SELECT value FROM jsonb_array_elements(prior->'revised_dependencies') LOOP
+ -- Rebase every accepted predecessor in order. Each adapter receipt returns
+ -- only the dependency namespaces it changed, so the final step must merge
+ -- the whole chain rather than just the immediately preceding receipt.
+ history:=step->'predecessor_results';
+ IF jsonb_typeof(history) IS DISTINCT FROM 'array' THEN
+  history:=CASE WHEN prior IS NULL OR prior='null'::jsonb THEN '[]'::jsonb ELSE jsonb_build_array(prior) END;
+ END IF;
+ FOR historical IN SELECT value FROM jsonb_array_elements(history) LOOP
+  IF historical->>'property_id' IS DISTINCT FROM property_id::text OR jsonb_typeof(historical->'revised_dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Invalid predecessor receipt';END IF;
+  FOR revised IN SELECT value FROM jsonb_array_elements(historical->'revised_dependencies') LOOP
    IF NOT ((revised->>'namespace' IN ('property_identity','property_policy','property_outcome','property_assignment','property_reviews') AND revised->'key'=jsonb_build_array(property_id)) OR (sms_contact IS NOT NULL AND ((revised->>'namespace' IN ('contact_policy','contact_identity') AND revised->'key'=jsonb_build_array(sms_contact)) OR (revised->>'namespace'='contact_channel_consent' AND revised->'key'=jsonb_build_array(sms_contact,'sms'))))) OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(expected->'dependencies') d WHERE d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key') THEN RAISE EXCEPTION 'Invalid revised dependency';END IF;
    SELECT jsonb_set(expected,'{dependencies}',jsonb_agg(CASE WHEN d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key' THEN revised ELSE d END ORDER BY d->>'namespace',(d->'key')::text)) INTO expected FROM jsonb_array_elements(expected->'dependencies') d;
   END LOOP;
- END IF;
+ END LOOP;
  -- Reuse only this accepted operation's committed contact safety transition.
  -- Exact original preparation equality is required before rebasing shared keys.
  SELECT jsonb_build_object('org_id',o,'dependencies',coalesce(jsonb_agg(d ORDER BY d->>'namespace',(d->'key')::text),'[]')) INTO sms_original_policy FROM jsonb_array_elements(step->'original_dependencies'->'policy'->'dependencies') d WHERE d->>'namespace' IN ('contact_identity','contact_policy','contact_channel_consent');
@@ -851,7 +864,7 @@ END $$;
 -- result without pretending an ineligible row was changed.
 CREATE OR REPLACE FUNCTION inbox_operation_domain.apply_promotion_step(o uuid,op uuid,s uuid,g bigint) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE step jsonb;payload jsonb;expected jsonb;actual jsonb;requirements jsonb;requester uuid;property_id uuid;p public.properties;member public.memberships;changed boolean;outcome text;result jsonb;v bigint;actor_count integer;prior jsonb;targets jsonb;target jsonb;target_revision bigint;target_results jsonb:='[]';resolved jsonb;revised jsonb;requirement jsonb;
+DECLARE step jsonb;payload jsonb;expected jsonb;actual jsonb;requirements jsonb;requester uuid;property_id uuid;p public.properties;member public.memberships;changed boolean;outcome text;result jsonb;v bigint;actor_count integer;prior jsonb;history jsonb;historical jsonb;sms jsonb;sms_contact uuid;targets jsonb;target jsonb;target_revision bigint;target_results jsonb:='[]';resolved jsonb;revised jsonb;requirement jsonb;
 BEGIN
  step:=inbox_operations.lock_step_for_effect(o,op,s,g);
  IF step->>'action' IS DISTINCT FROM 'promote' THEN RAISE EXCEPTION 'Unsupported promotion effect';END IF;
@@ -867,13 +880,28 @@ BEGIN
  prior:=step->'predecessor_result';
  expected:=step->'original_dependencies'->'policy';
  IF expected->>'org_id' IS DISTINCT FROM o::text OR jsonb_typeof(expected->'dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Missing policy vector';END IF;
- IF prior IS NOT NULL AND prior<>'null'::jsonb THEN
-  IF prior->>'property_id' IS DISTINCT FROM property_id::text OR jsonb_typeof(prior->'revised_dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Invalid predecessor receipt';END IF;
-  FOR revised IN SELECT value FROM jsonb_array_elements(prior->'revised_dependencies') LOOP
-   IF revised->>'namespace' NOT IN ('property_identity','property_policy','property_outcome','property_assignment','property_reviews') OR revised->'key' IS DISTINCT FROM jsonb_build_array(property_id) OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(expected->'dependencies') d WHERE d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key') THEN RAISE EXCEPTION 'Invalid revised dependency';END IF;
+ history:=step->'predecessor_results';
+ IF jsonb_typeof(history) IS DISTINCT FROM 'array' THEN
+  history:=CASE WHEN prior IS NULL OR prior='null'::jsonb THEN '[]'::jsonb ELSE jsonb_build_array(prior) END;
+ END IF;
+ -- An opted-out predecessor carries the only trusted SMS context for later
+ -- metadata steps. Preserve that receipt context through promotion so the
+ -- following assignment can rebase contact revisions as well as property
+ -- revisions. The receipt is immutable and must agree with the prepared scope.
+ FOR historical IN SELECT value FROM jsonb_array_elements(history) LOOP
+  IF jsonb_typeof(historical->'sms')='object' AND historical->'sms'->>'contact_id' IS NOT NULL THEN
+   IF sms_contact IS NOT NULL AND sms_contact::text IS DISTINCT FROM historical->'sms'->>'contact_id' THEN RAISE EXCEPTION 'SMS predecessor contact mismatch';END IF;
+   sms:=historical->'sms';sms_contact:=(sms->>'contact_id')::uuid;
+  END IF;
+ END LOOP;
+ IF sms_contact IS NOT NULL AND step->'original_dependencies'->'sms_scope'->>'contact_id' IS DISTINCT FROM sms_contact::text THEN RAISE EXCEPTION 'SMS predecessor contact mismatch';END IF;
+ FOR historical IN SELECT value FROM jsonb_array_elements(history) LOOP
+  IF historical->>'property_id' IS DISTINCT FROM property_id::text OR jsonb_typeof(historical->'revised_dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Invalid predecessor receipt';END IF;
+  FOR revised IN SELECT value FROM jsonb_array_elements(historical->'revised_dependencies') LOOP
+   IF NOT ((revised->>'namespace' IN ('property_identity','property_policy','property_outcome','property_assignment','property_reviews') AND revised->'key'=jsonb_build_array(property_id)) OR (sms_contact IS NOT NULL AND ((revised->>'namespace' IN ('contact_policy','contact_identity') AND revised->'key'=jsonb_build_array(sms_contact)) OR (revised->>'namespace'='contact_channel_consent' AND revised->'key'=jsonb_build_array(sms_contact,'sms'))))) OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(expected->'dependencies') d WHERE d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key') THEN RAISE EXCEPTION 'Invalid revised dependency';END IF;
    SELECT jsonb_set(expected,'{dependencies}',jsonb_agg(CASE WHEN d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key' THEN revised ELSE d END ORDER BY d->>'namespace',(d->'key')::text)) INTO expected FROM jsonb_array_elements(expected->'dependencies') d;
   END LOOP;
- END IF;
+ END LOOP;
  targets:=CASE WHEN prior IS NOT NULL AND prior<>'null'::jsonb THEN prior->'target_revisions' ELSE step->'original_dependencies'->'targets' END;
  IF jsonb_typeof(targets) IS DISTINCT FROM 'array' OR jsonb_array_length(targets) NOT BETWEEN 1 AND 500 THEN RAISE EXCEPTION 'Missing bounded target vector';END IF;
  IF jsonb_array_length(targets)<>(SELECT count(*) FROM inbox_operations.item_steps WHERE org_id=o AND operation_id=op AND step_id=s) THEN RAISE EXCEPTION 'Incomplete target vector';END IF;
@@ -917,7 +945,7 @@ BEGIN
    INTO revised
    FROM jsonb_array_elements(actual->'dependencies') d
   WHERE d->>'namespace'='property_policy' AND d->'key'=jsonb_build_array(property_id);
- result:=jsonb_build_object('property_id',property_id,'action','promote','outcome',outcome,'changed',changed,'revised_dependencies',revised,'target_revisions',target_results);
+ result:=jsonb_build_object('property_id',property_id,'action','promote','outcome',outcome,'changed',changed,'revised_dependencies',revised,'target_revisions',target_results,'sms',sms);
  IF EXISTS(SELECT 1 FROM public.memberships WHERE org_id=o AND user_id=requester AND access_expires_at<=clock_timestamp()) THEN RAISE EXCEPTION 'Access expired during effect';END IF;
  PERFORM inbox_operations.finish_step(o,op,s,g,result);
  RETURN result;
@@ -1524,7 +1552,7 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_action_api FROM PUBLIC,anon,authenti
 
 
 -- Pinned operation_accept: experiments/inbox-operation-preparation/accept.sql
--- source_sha256=fdd19c945b24f40057ed1fe63e90833ef27217462e977bb8d14945163cae24a9
+-- source_sha256=64e8c37a9c7131e9801231985197ec90fb1071021c88bc613dfb82755968da04
 -- Completes the private acceptance assertions using current canonical authority.
 
 CREATE OR REPLACE FUNCTION inbox_operations.assert_request_access(o uuid,u uuid) RETURNS void
@@ -1532,7 +1560,7 @@ LANGUAGE plpgsql SET search_path='' AS $$
 BEGIN PERFORM inbox_action_api.authorize(o,u);END $$;
 CREATE OR REPLACE FUNCTION inbox_operations.assert_current_preparation(p uuid) RETURNS void
 LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE prep inbox_operations.preparations;binding inbox_action_api.preparation_requests;item jsonb;effect jsonb;target jsonb;expected jsonb;requirements jsonb;revision bigint;assignee uuid;
+DECLARE prep inbox_operations.preparations;binding inbox_action_api.preparation_requests;item jsonb;effect jsonb;target jsonb;expected jsonb;requirements jsonb;revision bigint;assignee uuid;unknown_snapshot jsonb;current_message_ids jsonb;unknown_group uuid;unknown_raw text;
 BEGIN
  SELECT * INTO prep FROM inbox_operations.preparations WHERE id=p;
  SELECT * INTO binding FROM inbox_action_api.preparation_requests WHERE preparation_id=p;
@@ -1540,6 +1568,54 @@ BEGIN
  PERFORM inbox_action_api.authorize(prep.org_id,prep.requester_id);
  IF prep.expires_at<=clock_timestamp() OR jsonb_array_length(prep.snapshot->'effects')=0 THEN RAISE EXCEPTION 'INBOX_ACTION_PREPARATION_EXPIRED_OR_EMPTY';END IF;
  FOR effect IN SELECT value FROM jsonb_array_elements(prep.snapshot->'effects') ORDER BY value->>'effect_key',(value->>'ordinal')::integer LOOP
+  -- Unknown-sender effects carry a frozen sender-group/message-id snapshot,
+  -- not property policy/target dependencies.  Validate that exact snapshot
+  -- against current canonical rows before accepting; routing it through the
+  -- property policy branch passes NULL requirements to inbox_policy.snapshot
+  -- and rejects every otherwise valid unknown dismissal/restoration.
+  IF effect->'dependencies' ? 'unknown_action' THEN
+   unknown_snapshot:=effect->'dependencies'->'unknown_action';
+   IF jsonb_typeof(unknown_snapshot) IS DISTINCT FROM 'object'
+      OR (SELECT count(*) FROM jsonb_object_keys(unknown_snapshot))<>4
+      OR NOT(unknown_snapshot ?& ARRAY['sender_group_id','raw_sender','revision','message_ids'])
+      OR jsonb_typeof(unknown_snapshot->'message_ids') IS DISTINCT FROM 'array'
+      OR effect->>'action' NOT IN ('dismiss_unknown','restore_unknown') THEN
+    RAISE EXCEPTION 'Unknown action snapshot changed' USING ERRCODE='P0001';
+   END IF;
+   unknown_group:=(unknown_snapshot->>'sender_group_id')::uuid;
+   SELECT g.raw_sender INTO unknown_raw
+   FROM inbox_message_capture.sender_groups g
+   WHERE g.org_id=prep.org_id AND g.sender_group_id=unknown_group
+   FOR SHARE;
+   IF unknown_raw IS NULL OR unknown_raw IS DISTINCT FROM unknown_snapshot->>'raw_sender' THEN
+    RAISE EXCEPTION 'Unknown sender identity changed' USING ERRCODE='P0001';
+   END IF;
+   SELECT v.revision INTO revision
+   FROM inbox_message_capture.versions v
+   WHERE v.org_id=prep.org_id AND v.namespace='unknown_action' AND v.target_id=unknown_group
+   FOR UPDATE;
+   -- A sender-group revision also advances when a later unknown message
+   -- arrives.  That is allowed: the immutable message-id workset below is
+   -- the authority for this accepted operation, so later arrivals remain
+   -- untouched by the worker.
+   IF revision IS NULL OR revision < (unknown_snapshot->>'revision')::bigint THEN
+    RAISE EXCEPTION 'Unknown action snapshot changed' USING ERRCODE='P0001';
+   END IF;
+   SELECT coalesce(jsonb_agg(to_jsonb(m.id) ORDER BY m.id),'[]'::jsonb) INTO current_message_ids
+   FROM jsonb_array_elements_text(unknown_snapshot->'message_ids') frozen
+   JOIN public.messages m ON m.id=frozen.value::uuid AND m.org_id=prep.org_id
+   WHERE m.channel='sms' AND m.direction='inbound'
+     AND m.contact_id IS NULL AND m.from_address=unknown_raw
+     AND CASE effect->>'action'
+       WHEN 'dismiss_unknown' THEN m.dismissed_at IS NULL
+       WHEN 'restore_unknown' THEN m.dismissed_at IS NOT NULL
+       ELSE false
+     END;
+   IF current_message_ids IS DISTINCT FROM unknown_snapshot->'message_ids' THEN
+    RAISE EXCEPTION 'Unknown action snapshot changed' USING ERRCODE='P0001';
+   END IF;
+   CONTINUE;
+  END IF;
   IF effect->'dependencies'->'sms_scope'->>'contact_id' IS NOT NULL THEN
    SELECT s.revision INTO revision FROM inbox_operation_domain.sms_scopes s WHERE s.org_id=prep.org_id AND s.contact_id=(effect->'dependencies'->'sms_scope'->>'contact_id')::uuid FOR UPDATE;
    IF NOT FOUND OR revision::text IS DISTINCT FROM effect->'dependencies'->'sms_scope'->>'revision' THEN RAISE EXCEPTION 'INBOX_ACTION_PREPARATION_CHANGED';END IF;

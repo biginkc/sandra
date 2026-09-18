@@ -2,20 +2,20 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration",
-  "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd",
+  "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
-    "sha256": "eb0f4073fbfe2814329ff38a4f0ab5da377859b39b0ad57ee215072c5f9947d4"
+    "sha256": "10af296ef4642b9b769b12f779d8b34924c74411ad3d7683c969db2ec0e7231d"
   },
   "sql_sources": [
     {
       "name": "operation_foundation",
       "kind": "sql",
       "path": "experiments/inbox-operation-acceptance/setup.sql",
-      "sha256": "04d34d74ef76dd11585ee45728e2a0a1f6e635cb2fd0376a4ef9b014ea12dae3",
-      "bytes": 14508,
-      "transformed_sha256": "53e8c8256092c68a743ecb21a10c5ae1d22b0b1ceab4cf46ca60bea9d1effd99"
+      "sha256": "37218be75c5c6b6aec0e4320b6189fc6687b674c72eb04f86ff2d37447fad012",
+      "bytes": 15121,
+      "transformed_sha256": "d54582e698e94a24e76803ad6713d29d9b38353ba92a4e754049b76656972f51"
     },
     {
       "name": "saved_actions_setup",
@@ -61,9 +61,9 @@
       "name": "operation_domain_apply",
       "kind": "sql",
       "path": "experiments/inbox-operation-domain/restrictive-apply.sql",
-      "sha256": "79913e15bde62bfb5ab1a254476fa27f60e7180d6f86eba65ceebd02518e1499",
-      "bytes": 29497,
-      "transformed_sha256": "c3f8610598ae3872253bcd6368adf268fd08f477cab79b3c564043ff212923e2"
+      "sha256": "79dec51b3a2e8ed0cd87fc6f4e545a02c0550e539aebaf2edb4d33d152b24ab5",
+      "bytes": 31410,
+      "transformed_sha256": "edaee5650127238e91e0207125b2aae5f4cf170c57ecde7dec9ec3359eb5455d"
     },
     {
       "name": "operation_setup",
@@ -93,9 +93,9 @@
       "name": "operation_accept",
       "kind": "sql",
       "path": "experiments/inbox-operation-preparation/accept.sql",
-      "sha256": "fdd19c945b24f40057ed1fe63e90833ef27217462e977bb8d14945163cae24a9",
-      "bytes": 8042,
-      "transformed_sha256": "c9c8e37cdffffbf2ce089fd0994615115b85de82ec894ccc9664214b93769e94"
+      "sha256": "64e8c37a9c7131e9801231985197ec90fb1071021c88bc613dfb82755968da04",
+      "bytes": 10854,
+      "transformed_sha256": "319217bdd80507d46ea83419ce62de5b26a5c991ee85f8bfd643a0f0a36c310b"
     },
     {
       "name": "operation_public_api",
