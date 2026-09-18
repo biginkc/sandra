@@ -88,6 +88,18 @@ it("keeps the current rows visible when a hard generation limit refuses a filter
   expect(screen.getByRole("button", { name: "Retry list" })).toBeInTheDocument();
 });
 
+it("refreshes the displayed filter after a refused filter change", async () => {
+  await loaded();
+  state.hardLimitWorksets = 1;
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "unread" } });
+  await screen.findByRole("alert");
+  const attemptsAfterLimit = state.worksetBodies.length;
+  fireEvent.click(screen.getByRole("button", { name: "Refresh view" }));
+  await waitFor(() => expect(state.worksetBodies).toHaveLength(attemptsAfterLimit + 1));
+  expect(state.worksetBodies.at(-1)?.filter).toEqual({ view: "all", hide_noise: true });
+  expect(screen.getByRole("combobox")).toHaveValue("all");
+});
+
 it("automatically retries a distinguished generation-rate response once", async () => {
   await loaded();
   vi.useFakeTimers({ shouldAdvanceTime: true });
