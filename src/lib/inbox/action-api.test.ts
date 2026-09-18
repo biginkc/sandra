@@ -16,6 +16,15 @@ afterEach(() => vi.unstubAllEnvs());
 const status = () => ({ operation_id: id(8), accepted_at: "2026-09-13T00:00:00Z", completed: true, result: "failed", items: [{ id: id(6), kind: "conversation", target_id: id(4), property_id: id(7), exclusion_code: null, step_ids: [id(9), id(10)], state: "conflicted", code: "record_changed" }], steps: [{ id: id(9), action: "outcome", state: "conflicted", code: "record_changed", receipt_version: "1", changed: false }, { id: id(10), action: "assign", state: "blocked", code: "predecessor_failed", receipt_version: "1", changed: false }] });
 describe("authoritative Inbox action transport", () => {
     it("derives requester/org from live authorization and accepts jsonb member ordering", async () => { const c = client([ok(actor), ok(prepared())]); const p = await c.repository.prepare(JSON.stringify(request), signal()) as PreparedInboxAction; expect(p.eligibleCount).toBe(1); expect(c.rpc.mock.calls[1]).toEqual(["inbox_prepare_action", { canonical_input: intent.canonicalInput, idempotency_key: id(3) }]); });
+    it("prepares an inline promotion followed by an outcome in the authored order", async () => {
+        const orderedRequest = { ...request, definition: { version: 1 as const, steps: [{ type: "promote" as const }, { type: "outcome" as const, value: "nurture" as const }] } };
+        const orderedIntent = parseInboxActionIntent(JSON.stringify(orderedRequest), { organizationId: id(1), requesterId: id(2) });
+        const row = { ...prepared(), input_hash: orderedIntent.inputHash, definition: orderedIntent.input.definition, effect_count: 2, metadata_effect_count: 2 };
+        const c = client([ok(actor), ok(row)]);
+        const result = await c.repository.prepare(JSON.stringify(orderedRequest), signal()) as PreparedInboxAction;
+        expect(result.definition.steps).toEqual(orderedRequest.definition.steps);
+        expect((c.rpc.mock.calls as unknown as [string, Record<string, unknown>][]).map(([name]) => name)).toEqual(["inbox_authorize_sync", "inbox_prepare_action"]);
+    });
     it("rejects client-supplied authority before prepare RPC", async () => { const c = client([ok(actor)]); await expect(c.repository.prepare(JSON.stringify({ ...request, organizationId: id(90) }), signal())).rejects.toMatchObject({ status: 400 }); expect(c.rpc).toHaveBeenCalledTimes(1); });
     it.each(["dnc", "callback_requested"])("keeps unsupported %s outcomes gated", async (value) => { const c = client([ok(actor)]); await expect(c.repository.prepare(JSON.stringify({ ...request, definition: { version: 1, steps: [{ type: "outcome", value }] } }), signal())).rejects.toMatchObject({ status: 400 }); expect(c.rpc).toHaveBeenCalledTimes(1); });
     it("rejects altered identity/hash, mapping and effect counts", async () => { for (const mutate of [(p: ReturnType<typeof prepared>) => { p.input_hash = "a".repeat(64); }, (p: ReturnType<typeof prepared>) => { p.items[0].target_id = id(98); }, (p: ReturnType<typeof prepared>) => { p.effect_count = 2; }]) {
@@ -74,6 +83,17 @@ describe("action review and recovery decoding", () => {
 });
 describe("saved-action prepare glue", () => {
     const savedRow = (definition: unknown, overrides: Record<string, unknown> = {}) => ({ id: id(20), version: 1, name: "Saved", definition, org_id: id(1), requester_id: id(2), is_active: true, created_at: "2026-09-14T00:00:00Z", ...overrides });
+    it("prepares a saved promotion-then-outcome snapshot after exact reference resolution", async () => {
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const savedDefinition = { version: 1 as const, steps: [{ type: "promote" as const }, { type: "outcome" as const, value: "nurture" as const }] };
+        const stored = savedRow(savedDefinition);
+        const savedIntent = parseInboxActionIntent(JSON.stringify(savedRequest), { organizationId: id(1), requesterId: id(2) }, { organizationId: id(1), requesterId: id(2), id: id(20), version: 1, definition: savedDefinition });
+        const row = { ...prepared(), input_hash: savedIntent.inputHash, definition: savedDefinition, effect_count: 2, metadata_effect_count: 2 };
+        const c = client([ok(actor), ok(stored), ok(row)]);
+        const result = await c.repository.prepare(JSON.stringify(savedRequest), signal()) as PreparedInboxAction;
+        expect(result.definition.steps).toEqual(savedDefinition.steps);
+        expect((c.rpc.mock.calls as unknown as [string, Record<string, unknown>][]).map(([name]) => name)).toEqual(["inbox_authorize_sync", "inbox_saved_action_get", "inbox_prepare_action"]);
+    });
     it("resolves the exact stored version via an authorized lookup and threads it into the metadata seam (never the raw client definition)", async () => {
         const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], savedAction: { id: id(20), version: 1 } };
         const savedDefinition = { version: 1, steps: [{ type: "outcome", value: "nurture" }] };

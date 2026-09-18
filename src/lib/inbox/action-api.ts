@@ -152,8 +152,8 @@ export function createInboxActionRepository(client: InboxActionClient) {
             }
             const metadataSteps = parsed.input.definition.steps.filter((step): step is Exclude<typeof step, { type: "review_reply" }> => step.type !== "review_reply");
             need(metadataSteps.length > 0 && metadataSteps.length <= 4, 400);
-            need(metadataSteps.every((step, index) => {
-                if (step.type === "outcome") return step.value !== "dnc" && index === 0;
+            need(metadataSteps.every((step) => {
+                if (step.type === "outcome") return step.value !== "dnc";
                 return step.type === "assign" || step.type === "promote" || step.type === "dismiss_unknown" || step.type === "restore_unknown";
             }), 400);
             const result = await retryReceiptTransaction(() => { signal.throwIfAborted(); return client.rpc("inbox_prepare_action", { canonical_input: parsed.canonicalInput, idempotency_key: parsed.idempotencyKey }).abortSignal(signal); });
