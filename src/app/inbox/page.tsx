@@ -4,6 +4,8 @@ import { createSupabaseInboxRepository, type InboxRpcClient } from "@/lib/inbox/
 import { InboxWorkspaceClient } from "@/components/inbox-workspace/workspace-client";
 import { inboxViews } from "@/lib/inbox/filter-contract";
 import { isInboxPilotRequest, type InboxPilotAuthClient } from "@/lib/inbox/pilot-cohort";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Inbox workspace · Sandra CRM" };
@@ -13,6 +15,9 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
   const params = await searchParams;
   const view = typeof params.view === "string" && (inboxViews as readonly string[]).includes(params.view) ? params.view as typeof inboxViews[number] : "all";
   const client = await createClient();
+  // The inbox workspace reads the same shared message surface as Messages.
+  // Enforce that boundary before the pilot check or canonical inbox RPC.
+  if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) notFound();
   // GL-4/G5: cohort gate before any inbox_* RPC. Outside the try below so
   // notFound()'s control-flow throw is never swallowed as "unavailable" —
   // a user outside the pilot allowlist gets the same not-found treatment

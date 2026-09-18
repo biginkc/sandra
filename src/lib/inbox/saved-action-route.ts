@@ -1,6 +1,8 @@
 import "server-only";
 
 import { createClient } from "@/lib/supabase/server";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { InvalidInboxActionError, parseInboxActionDefinition, type InboxActionDefinition } from "./action-definition";
 import { isInboxPilotRequest, type InboxPilotAuthClient } from "./pilot-cohort";
 import { isInboxSameOrigin } from "./same-origin";
@@ -111,6 +113,7 @@ export async function inboxSavedActionRoute(request: Request, action: SavedActio
     let row: Record<string, unknown> | undefined;
     if (action !== "list") { const raw = await readBody(request, signal); signal.throwIfAborted(); row = record(parseJson(raw)); }
     const client = await createClient();
+    if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) return Response.json({ error: "Not found" }, { status: 404, headers: responseHeaders });
     if (!(await isInboxPilotRequest(client as unknown as InboxPilotAuthClient))) return Response.json({ error: "Not found" }, { status: 404, headers: responseHeaders });
     const repository = createInboxSavedActionRepository(client as unknown as InboxSavedActionClient);
     if (action === "list") return Response.json({ items: await repository.list(signal) }, { headers: responseHeaders });

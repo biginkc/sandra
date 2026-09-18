@@ -3,11 +3,16 @@ import { createClient } from "@/lib/supabase/server";
 import { createSupabaseInboxRepository, type InboxRpcClient } from "@/lib/inbox/supabase-sync-repository";
 import { InboxOverview } from "@/components/inbox-workspace/inbox-overview";
 import { isInboxPilotRequest, type InboxPilotAuthClient } from "@/lib/inbox/pilot-cohort";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Inbox overview · Sandra CRM" };
 export default async function InboxOverviewPage() {
   if (process.env.INBOX_WORKSPACE_SERVER_ENABLED !== "1") notFound();
   const client = await createClient();
+  // Inbox overview is a shared Messages surface, so acquisitions-only
+  // members must be denied before cohort admission or the inbox context RPC.
+  if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) notFound();
   // GL-4/G5: cohort gate before any inbox_* RPC, kept outside the try below
   // so notFound() is never swallowed as "unavailable".
   if (!(await isInboxPilotRequest(client as unknown as InboxPilotAuthClient))) notFound();

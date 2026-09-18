@@ -3,6 +3,8 @@ import { createSupabaseInboxRepository, type InboxRpcClient } from "@/lib/inbox/
 import { createInboxSyncGateway } from "@/lib/inbox/sync-gateway";
 import { inboxSyncUpstream } from "@/lib/inbox/sync-upstream-config";
 import { isInboxPilotRequest, type InboxPilotAuthClient } from "@/lib/inbox/pilot-cohort";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 
 export async function GET(request: Request, { params }: { params: Promise<{ scopeId: string }> }) {
   const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
@@ -10,6 +12,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ scop
   try {
     const upstream = inboxSyncUpstream(process.env);
     const client = await createClient();
+    if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) return Response.json({ error: "Not found" }, { status: 404, headers });
     // GL-4/G5: pilot cohort gate before the inbox_* RPC below.
     if (!(await isInboxPilotRequest(client as unknown as InboxPilotAuthClient))) return Response.json({ error: "Not found" }, { status: 404, headers });
     const { scopeId } = await params;

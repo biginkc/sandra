@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST } from "./route";
-const mocks = vi.hoisted(() => ({ create: vi.fn(), acknowledge: vi.fn(), getUser: vi.fn() }));
+const mocks = vi.hoisted(() => ({ create: vi.fn(), acknowledge: vi.fn(), getUser: vi.fn(), memberships: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.create }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
 vi.mock("@/lib/inbox/read-api", async (importOriginal) => ({ ...await importOriginal<typeof import("@/lib/inbox/read-api")>(), createInboxReadRepository: () => ({ acknowledge: mocks.acknowledge }) }));
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const request = (body: string = JSON.stringify({ boundaryId: id, batch: 1 })) => new Request("https://example.com/api/inbox/read-acknowledgments", { method: "POST", headers: { "content-type": "application/json" }, body });
@@ -9,6 +10,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.create.mockResolvedValue({ auth: { getUser: mocks.getUser } });
   mocks.getUser.mockResolvedValue({ data: { user: { id } } });
+  mocks.memberships.mockResolvedValue([{ user_id: id, org_id: id, role: "owner", acquisitions_enabled: false, access_status: "active" }]);
   vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", id);
   mocks.acknowledge.mockResolvedValue({ acknowledged: true });
 });
@@ -21,6 +23,11 @@ describe("read-acknowledgments deployment boundary", () => {
   it("returns 404 and never calls the acknowledge RPC for a user outside the pilot allowlist (GL-4/G5)", async () => {
     vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1");
     mocks.getUser.mockResolvedValue({ data: { user: { id: "not-piloted-user" } } });
+    expect((await POST(request())).status).toBe(404); expect(mocks.acknowledge).not.toHaveBeenCalled();
+  });
+  it("returns 404 and never calls the acknowledge RPC for an acquisitions-only member", async () => {
+    vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); vi.stubEnv("INBOX_WORKSPACE_ROLLOUT_MODE", "all");
+    mocks.memberships.mockResolvedValue([{ user_id: id, org_id: id, role: "member", acquisitions_enabled: true, access_status: "active" }]);
     expect((await POST(request())).status).toBe(404); expect(mocks.acknowledge).not.toHaveBeenCalled();
   });
   // MUTATION: removing the pilot check in route.ts makes this fail — the

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "./route";
 import * as gateway from "@/lib/inbox/sync-gateway";
-const mocks = vi.hoisted(() => ({ create: vi.fn(), rpc: vi.fn(), getUser: vi.fn() }));
+const mocks = vi.hoisted(() => ({ create: vi.fn(), rpc: vi.fn(), getUser: vi.fn(), memberships: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.create }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const request = () => new Request(`https://example.com/api/inbox/sync/${id}`);
 const params = () => ({ params: Promise.resolve({ scopeId: id }) });
@@ -10,6 +11,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.create.mockResolvedValue({ rpc: mocks.rpc, auth: { getUser: mocks.getUser } });
   mocks.getUser.mockResolvedValue({ data: { user: { id } } });
+  mocks.memberships.mockResolvedValue([{ user_id: id, org_id: id, role: "owner", acquisitions_enabled: false, access_status: "active" }]);
   vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", id);
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
@@ -25,6 +27,11 @@ describe("sync deployment boundary", () => {
   it("returns 404 and never calls the sync RPC for a user outside the pilot allowlist (GL-4/G5)", async () => {
     vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); vi.stubEnv("INBOX_ELECTRIC_UPSTREAM_MODE", "owned-local"); vi.stubEnv("INBOX_ELECTRIC_SHAPE_URL", "http://127.0.0.1:58783/v1/shape"); vi.stubEnv("INBOX_ELECTRIC_PROJECTION_TABLE", "inbox_t2_bridge.summary_rows");
     mocks.getUser.mockResolvedValue({ data: { user: { id: "not-piloted-user" } } });
+    expect((await GET(request(), params())).status).toBe(404); expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+  it("returns 404 and never calls the sync RPC for an acquisitions-only member", async () => {
+    vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); vi.stubEnv("INBOX_WORKSPACE_ROLLOUT_MODE", "all"); vi.stubEnv("INBOX_ELECTRIC_UPSTREAM_MODE", "owned-local"); vi.stubEnv("INBOX_ELECTRIC_SHAPE_URL", "http://127.0.0.1:58783/v1/shape"); vi.stubEnv("INBOX_ELECTRIC_PROJECTION_TABLE", "inbox_t2_bridge.summary_rows");
+    mocks.memberships.mockResolvedValue([{ user_id: id, org_id: id, role: "member", acquisitions_enabled: true, access_status: "active" }]);
     expect((await GET(request(), params())).status).toBe(404); expect(mocks.rpc).not.toHaveBeenCalled();
   });
   // MUTATION: removing the pilot check in route.ts makes this fail — the

@@ -4,6 +4,8 @@ import { createSupabaseInboxRepository, type InboxRpcClient } from "@/lib/inbox/
 import { InboxHttpError } from "@/lib/inbox/http-error";
 import { isInboxPilotRequest, type InboxPilotAuthClient } from "@/lib/inbox/pilot-cohort";
 import { probeInboxWorksetUpdates, type InboxWorksetUpdateRpcClient } from "@/lib/inbox/workset-updates";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -17,6 +19,7 @@ export async function GET(request: Request) {
     const scopeId = url.searchParams.get("scopeId");
     if (!scopeId || !UUID.test(scopeId)) throw new InboxHttpError(400);
     const client = await createClient();
+    if (!canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow())) return Response.json({ error: "Not found" }, { status: 404, headers });
     // Keep the same pilot/session admission boundary as the existing workset
     // route before invoking the authenticated, scope-bound RPC.
     if (!(await isInboxPilotRequest(client as unknown as InboxPilotAuthClient))) return Response.json({ error: "Not found" }, { status: 404, headers });

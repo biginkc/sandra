@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ createClient: vi.fn(), pilot: vi.fn(), list: vi.fn(), create: vi.fn(), update: vi.fn(), deactivate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ createClient: vi.fn(), pilot: vi.fn(), memberships: vi.fn(), list: vi.fn(), create: vi.fn(), update: vi.fn(), deactivate: vi.fn() }));
 const SavedActionError = vi.hoisted(() => class extends Error { constructor(readonly status: number, code = "saved_action_unavailable") { super(code); } });
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
 vi.mock("./pilot-cohort", () => ({ isInboxPilotRequest: mocks.pilot }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
 vi.mock("./saved-action-api", () => ({ InboxSavedActionApiError: SavedActionError, createInboxSavedActionRepository: () => ({ list: mocks.list, create: mocks.create, update: mocks.update, deactivate: mocks.deactivate }) }));
 
 import { GET, POST, PATCH, DELETE } from "@/app/api/inbox/saved-actions/route";
@@ -19,6 +20,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.createClient.mockResolvedValue({});
   mocks.pilot.mockResolvedValue(true);
+  mocks.memberships.mockResolvedValue([{ user_id: id, org_id: id, role: "owner", acquisitions_enabled: false, access_status: "active" }]);
   mocks.list.mockResolvedValue([summary]);
   mocks.create.mockResolvedValue(summary);
   mocks.update.mockResolvedValue({ ...summary, version: 2 });
@@ -39,6 +41,11 @@ describe("saved action CRUD route boundary", () => {
     mocks.pilot.mockResolvedValue(false);
     expect((await GET(new Request("http://localhost/api/inbox/saved-actions"))).status).toBe(404);
     expect(mocks.createClient).toHaveBeenCalledOnce();
+    expect(mocks.list).not.toHaveBeenCalled();
+  });
+  it("returns 404 before repository calls for an acquisitions-only member", async () => {
+    mocks.memberships.mockResolvedValue([{ user_id: id, org_id: id, role: "member", acquisitions_enabled: true, access_status: "active" }]);
+    expect((await GET(new Request("http://localhost/api/inbox/saved-actions"))).status).toBe(404);
     expect(mocks.list).not.toHaveBeenCalled();
   });
 
