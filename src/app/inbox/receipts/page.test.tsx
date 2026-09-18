@@ -10,8 +10,8 @@ vi.mock("@/components/inbox-workspace/receipt-recovery", () => ({ InboxReceiptRe
 import InboxReceiptRecoveryPage from "./page";
 
 const identity = { orgId: "00000000-0000-4000-8000-000000000051", userId: "00000000-0000-4000-8000-000000000052", sessionId: "00000000-0000-4000-8000-000000000053", accessEpoch: "1", expiresAt: Date.now() + 60_000 };
-afterEach(() => cleanup());
-beforeEach(() => { mocks.client.mockReset(); mocks.context.mockReset(); mocks.memberships.mockReset(); mocks.recovery.mockClear(); mocks.memberships.mockResolvedValue([{ user_id: identity.userId, org_id: identity.orgId, role: "owner", acquisitions_enabled: false, access_status: "active" }]); });
+afterEach(() => { cleanup(); vi.unstubAllEnvs(); });
+beforeEach(() => { vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", identity.userId); mocks.client.mockReset(); mocks.context.mockReset(); mocks.memberships.mockReset(); mocks.recovery.mockClear(); mocks.memberships.mockResolvedValue([{ user_id: identity.userId, org_id: identity.orgId, role: "owner", acquisitions_enabled: false, access_status: "active" }]); });
 
 it("derives the recovery identity from authenticated server context", async () => {
   mocks.client.mockResolvedValue({ auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: identity.userId } }, error: null }) } });
@@ -37,7 +37,7 @@ it("fails closed for an active Acquisitions member before reading receipt contex
   expect(mocks.context).not.toHaveBeenCalled();
 });
 
-it("keeps receipt landing available for an authorized member when workspace admission flags are off", async () => {
+it("fails closed before receipt context when workspace admission flags are off", async () => {
   vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "0");
   vi.stubEnv("INBOX_ACTIONS_SERVER_ENABLED", "0");
   vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
@@ -45,6 +45,14 @@ it("keeps receipt landing available for an authorized member when workspace admi
   mocks.memberships.mockResolvedValue([{ user_id: identity.userId, org_id: identity.orgId, role: "member", acquisitions_enabled: false, access_status: "active" }]);
   mocks.context.mockResolvedValue(identity);
   render(await InboxReceiptRecoveryPage());
-  expect(screen.getByText("recovery client")).toBeVisible();
-  expect(mocks.context).toHaveBeenCalledTimes(1);
+  expect(screen.getByText("Action recovery unavailable")).toBeVisible();
+  expect(mocks.context).not.toHaveBeenCalled();
+});
+
+it("fails closed before receipt context for a non-pilot user", async () => {
+  vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", "another-user");
+  mocks.client.mockResolvedValue({ auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: identity.userId } }, error: null }) } });
+  render(await InboxReceiptRecoveryPage());
+  expect(screen.getByText("Action recovery unavailable")).toBeVisible();
+  expect(mocks.context).not.toHaveBeenCalled();
 });
