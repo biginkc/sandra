@@ -175,15 +175,16 @@ def main() -> int:
         code, output, stderr = sql(
             "BEGIN;"
             "UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton;"
-            "DO $$ BEGIN "
+            "CREATE TEMP TABLE probe_result(observed_state text, observed_message text) ON COMMIT DROP;"
+            "DO $$ DECLARE observed_state text:='UNEXPECTED_SUCCESS'; observed_message text:=''; BEGIN "
             "BEGIN PERFORM public.inbox_authorize_sync(NULL); "
             "EXCEPTION WHEN OTHERS THEN "
-            "IF SQLERRM <> 'INBOX_NOT_READY' THEN RAISE; END IF; END; "
-            "END $$;"
+            "GET STACKED DIAGNOSTICS observed_state=RETURNED_SQLSTATE, observed_message=MESSAGE_TEXT; END; "
+            "INSERT INTO pg_temp.probe_result VALUES(observed_state,observed_message); END $$;"
+            "SELECT observed_state||'|'||observed_message FROM pg_temp.probe_result;"
             "ROLLBACK;"
-            "SELECT 'INBOX_NOT_READY';"
         )
-        if code or output != "INBOX_NOT_READY":
+        if code or output != "55000|INBOX_NOT_READY":
             return fail("serving-disabled direct RPC did not fail closed with INBOX_NOT_READY: " + (stderr or output or "unexpected success"))
     else:
         code, _, stderr = sql("SELECT public.inbox_authorize_sync(NULL);")

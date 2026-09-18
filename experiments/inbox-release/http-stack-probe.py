@@ -107,6 +107,16 @@ def realtime_websocket_status() -> int:
         connection.close()
 
 
+def authenticated_credentials(result: dict) -> tuple[str, str] | None:
+    email = os.environ.get("INBOX_HTTP_USER_EMAIL")
+    password = os.environ.get("INBOX_HTTP_USER_PASSWORD")
+    if email and password:
+        return email, password
+    result["status"] = "BLOCKED"
+    result["authenticated_rpc"] = "BLOCKED: credentials not supplied"
+    return None
+
+
 def main() -> int:
     inspect = json.loads(docker("inspect", CONTAINER))[0]
     labels = inspect.get("Config", {}).get("Labels", {})
@@ -196,9 +206,12 @@ def main() -> int:
     if projection_health_status != 200:
         raise RuntimeError(f"Projection worker health failed: {projection_health_status}")
     result: dict = {"status": "PASS", "identity": identity, "base_url": BASE, "binding": "api:54321<->db:54322", "auth": "healthy", "rest": "openapi", "realtime": "running", "realtime_websocket": 101, "projection": "healthy", "bounded_services": ["db", "auth", "rest", "realtime", "projection", "gateway"]}
-    email = os.environ.get("INBOX_HTTP_USER_EMAIL")
-    password = os.environ.get("INBOX_HTTP_USER_PASSWORD")
-    if email and password:
+    credentials = authenticated_credentials(result)
+    if credentials is None:
+        print(json.dumps(result, indent=2))
+        return 3
+    else:
+        email, password = credentials
         status, auth = request("/auth/v1/token?grant_type=password", method="POST", body={"email": email, "password": password})
         if status != 200 or not auth.get("access_token"):
             raise RuntimeError(f"synthetic auth login failed: {status}")
@@ -211,8 +224,6 @@ def main() -> int:
             raise RuntimeError(f"authenticated counts RPC failed: {status}")
         result["authenticated_rpc"] = "PASS"
         result["synthetic_counts"] = counts["counts"]
-    else:
-        result["authenticated_rpc"] = "BLOCKED: credentials not supplied"
     print(json.dumps(result, indent=2))
     return 0
 

@@ -767,22 +767,57 @@ def check_acceptance_matrix(candidate_sha: str) -> dict[str, Any]:
         return result("BLOCKED", "acceptance run result artifact is not bound to HEAD", candidate_sha=candidate_sha)
     if not isinstance(run_results.get("rows"), list):
         return result("FAIL", "acceptance run result artifact has no rows")
+    result_rows = run_results["rows"]
+    if len(result_rows) != len(rows):
+        return result(
+            "BLOCKED",
+            "acceptance run result rows do not cover the matrix exactly",
+            matrix_rows=len(rows),
+            result_rows=len(result_rows),
+            candidate_sha=candidate_sha,
+        )
+    by_id: dict[str, dict[str, Any]] = {}
+    malformed_results: list[str] = []
+    for item in result_rows:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not isinstance(item.get("status"), str) or not isinstance(item.get("evidence"), str):
+            malformed_results.append("malformed row")
+            continue
+        row_id = item["id"]
+        if row_id in by_id:
+            malformed_results.append(f"duplicate row {row_id}")
+        by_id[row_id] = item
+    if malformed_results or set(by_id) != {row["id"] for row in rows}:
+        return result(
+            "BLOCKED",
+            "acceptance run result rows do not join one-to-one with the matrix",
+            result_errors=malformed_results or ["missing or unexpected row id"],
+            candidate_sha=candidate_sha,
+        )
     blocked = [row for row in rows if row["status"].lower().startswith(("blocked", "not run", "fail"))]
-    invalid_evidence = [
-        row
-        for row in rows
-        if row["status"].lower().startswith("pass")
-        and (row["evidence"] in {"Not run", ""} or not any(ROOT.joinpath(part).is_file() for part in re.findall(r"[A-Za-z0-9_./-]+", row["evidence"])))
-    ]
+    invalid_evidence: list[str] = []
+    mismatched_results: list[str] = []
+    for row in rows:
+        observed = by_id[row["id"]]
+        if not row["status"].lower().startswith("pass"):
+            continue
+        if observed["status"] != "pass" or observed["evidence"] != row["evidence"]:
+            mismatched_results.append(row["id"])
+            continue
+        evidence_path = Path(observed["evidence"])
+        if evidence_path.is_absolute() or ".." in evidence_path.parts or not str(evidence_path).startswith("test-results/inbox-acceptance-evidence/") or not (ROOT / evidence_path).is_file():
+            invalid_evidence.append(row["id"])
     if blocked:
         return result(
             "BLOCKED",
             f"{len(blocked)} acceptance rows are blocked, not run, or failing",
             rows=len(rows),
             blocked_ids=[row["id"] for row in blocked],
-            invalid_evidence=[row["id"] for row in invalid_evidence],
+            invalid_evidence=invalid_evidence,
+            mismatched_results=mismatched_results,
             candidate_sha=candidate_sha,
         )
+    if mismatched_results:
+        return result("BLOCKED", "matrix pass rows do not match their run outcomes", mismatched_results=mismatched_results, candidate_sha=candidate_sha)
     if invalid_evidence:
         return result("FAIL", "passing acceptance rows lack real artifacts", invalid_evidence=invalid_evidence)
     return result("PASS", "all acceptance rows have passing artifact-backed outcomes", rows=len(rows), candidate_sha=candidate_sha)

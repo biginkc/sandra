@@ -16,6 +16,11 @@ class ReleaseDbProbeTests(unittest.TestCase):
         self.assertEqual(module.EXPECTED_DATABASE, "sandra_inbox_release_20260917")
         self.assertEqual(module.EXPECTED_MARKER, "sandra-inbox-release-owned-synthetic")
         self.assertEqual(module.EXPECTED_PURPOSE, "sandra-inbox-projection-t2")
+
+    def test_http_read_probe_records_observed_sqlstate_and_message(self):
+        source = (HERE / "release_db_probe.py").read_text()
+        self.assertIn("observed_state||'|'||observed_message", source)
+        self.assertNotIn('SELECT \'INBOX_NOT_READY\'', source)
     def test_privileged_fixture_setup_precedes_authenticated_role(self):
         script = module.receipt_probe_sql(
             "11111111-1111-4111-8111-111111111111",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
 
 
@@ -34,6 +35,33 @@ class ReleaseGateStatusTests(unittest.TestCase):
         result = gate.check_acceptance_matrix("0" * 40)
         self.assertEqual(result["status"], "BLOCKED")
         self.assertIn("candidate SHA", result["detail"])
+
+    def test_acceptance_gate_rejects_empty_result_rows_even_with_current_sha(self) -> None:
+        sha = "a" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            matrix = root / "docs/performance/inbox-redesign/acceptance-matrix.md"
+            evidence = root / "test-results/inbox-acceptance-evidence/F01.png"
+            matrix.parent.mkdir(parents=True)
+            evidence.parent.mkdir(parents=True)
+            evidence.write_bytes(b"owned evidence")
+            matrix.write_text(
+                f"<!-- acceptance-run candidate_sha: {sha} -->\n"
+                "| ID | A | B | C | Status | Evidence |\n"
+                "|---|---|---|---|---|---|\n"
+                "| F01 | x | x | x | pass (run) | test-results/inbox-acceptance-evidence/F01.png |\n"
+            )
+            (root / "test-results/inbox-acceptance-results.json").write_text(
+                f'{{"candidate_sha":"{sha}","rows":[]}}\n'
+            )
+            old_root = gate.ROOT
+            gate.ROOT = root
+            try:
+                result = gate.check_acceptance_matrix(sha)
+            finally:
+                gate.ROOT = old_root
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("cover the matrix exactly", result["detail"])
 
 
 if __name__ == "__main__":
