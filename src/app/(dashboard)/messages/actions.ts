@@ -498,8 +498,10 @@ export type ContactSearchHit = {
 };
 
 /**
- * Search contacts for the Match dialog. Matches on name (first/last/entity)
- * AND phone fragments. Caps at 20 results — caller refines query if more.
+ * Search contacts for the Match dialog. Matches on the generated contact
+ * search text (including a full first+last name), individual name/entity
+ * fields, and phone fragments. Caps at 20 results — caller refines query if
+ * more.
  */
 export async function searchContactsForMatch(
   query: string,
@@ -521,6 +523,7 @@ export async function searchContactsForMatch(
       )
       .or(
         [
+          `search_text.ilike.${like}`,
           `first_name.ilike.${like}`,
           `last_name.ilike.${like}`,
           `entity_name.ilike.${like}`,

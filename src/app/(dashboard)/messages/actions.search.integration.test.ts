@@ -18,7 +18,7 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => mocks.serverClient,
 }));
 
-import { searchPropertiesForMatch } from "./actions";
+import { searchContactsForMatch, searchPropertiesForMatch } from "./actions";
 
 const serviceClient = createTestClient();
 const createdUserIds: string[] = [];
@@ -38,6 +38,25 @@ async function seedProperty(opts: {
     .select("id")
     .single();
   if (error || !data) throw error ?? new Error("seed property failed");
+  return data.id;
+}
+
+async function seedContact(opts: {
+  firstName: string;
+  lastName: string;
+  orgId: string;
+}): Promise<string> {
+  const { data, error } = await serviceClient
+    .from("contacts")
+    .insert({
+      org_id: opts.orgId,
+      first_name: opts.firstName,
+      last_name: opts.lastName,
+      phone_1_type: "unknown",
+    })
+    .select("id")
+    .single();
+  if (error || !data) throw error ?? new Error("seed contact failed");
   return data.id;
 }
 
@@ -78,5 +97,27 @@ describe("searchPropertiesForMatch (integration)", () => {
     const ids = result.data.map((hit) => hit.id);
     expect(ids).toContain(orgAPropertyId);
     expect(ids).not.toContain(orgBPropertyId);
+  });
+
+  it("matches a contact by the full first-and-last name", async () => {
+    const userA = await createOrgUser(serviceClient, {
+      orgId: BMH_ORG_ID,
+      email: `search-contacts-full-name-${Date.now()}@example.test`,
+      role: "member",
+    });
+    createdUserIds.push(userA.userId);
+    mocks.serverClient = clientForUser(userA.jwt);
+
+    const contactId = await seedContact({
+      orgId: BMH_ORG_ID,
+      firstName: "Existing",
+      lastName: "ContactU02",
+    });
+
+    const result = await searchContactsForMatch("Existing ContactU02");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.data.map((hit) => hit.id)).toContain(contactId);
   });
 });
