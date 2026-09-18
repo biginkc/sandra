@@ -152,7 +152,7 @@ def require_owned_container(
                 f"{name} ownership mismatch for {key}: "
                 f"expected {value!r}, got {labels.get(key)!r}"
             )
-    if component is not None and labels.get("component") not in {None, component}:
+    if component is not None and labels.get("component") != component:
         raise BootstrapError(
             f"{name} component mismatch: expected {component!r}, "
             f"got {labels.get('component')!r}"
@@ -1026,7 +1026,6 @@ def apply_bootstrap(env_file: Path) -> dict[str, Any]:
     else:
         # Idempotent already-complete runs still repair the explicit ledger
         # grant if a prior hardening/restart removed it.
-        apply_runtime_role()
         apply_broadcast_publication()
         docker("restart", REALTIME_CONTAINER)
         wait_for_rpc_ready(REALTIME_CONTAINER)

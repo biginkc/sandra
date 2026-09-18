@@ -20,6 +20,7 @@ import secrets
 import subprocess
 import sys
 import time
+from urllib.parse import urlencode
 import urllib.error
 import urllib.request
 
@@ -137,7 +138,11 @@ def wait_realtime_websocket(timeout: float = 30.0) -> None:
     while time.monotonic() < deadline:
         connection = http.client.HTTPConnection("127.0.0.1", 54321, timeout=2)
         try:
-            connection.request("GET", "/realtime/v1/websocket?vsn=1.0.0", headers={
+            query = {"vsn": "1.0.0"}
+            anon_key = os.environ.get("INBOX_HTTP_ANON_KEY")
+            if anon_key:
+                query["apikey"] = anon_key
+            connection.request("GET", "/realtime/v1/websocket?" + urlencode(query), headers={
                 "Connection": "Upgrade",
                 "Upgrade": "websocket",
                 "Sec-WebSocket-Version": "13",

@@ -38,5 +38,10 @@
   "relation-acl.json": "840d2b885da6052c624b91ef8e686c86dd6eded5e758ad006e68487629493bc8",
   "generate-catalog-pins.py": "294f8520a2bea024e175ee8217795900a8e3d90c95d8c397addd78f76ec2544a",
   "column-acl.json": "0e2d92be9a0252c009395a4353d7c5723b08f04ae67c5e92752e0f0d8231371a",
-  "catalog-pin-provenance.json": "71b91ff986963ee6e5eb3e4d712c28327199e04d364d7a7c23bee77d47866b34"
+  "catalog-pin-provenance.json": "71b91ff986963ee6e5eb3e4d712c28327199e04d364d7a7c23bee77d47866b34",
+  "generated/read-upgrade-current.sql": "f3753149bdf30c7294e14226f57758ef63c177b622f25aa4e1479342ea98a197",
+  "generated/read-upgrade-selection-review.sql": "351bc7634f2a93eb391702aa453e72b27201c1ecc58bd4db2f6d08a1b3ffbc8b",
+  "generated/read-upgrade-sync-authority.sql": "cb113e2eab582df2f071bcf3bce2d323e4356716c92f2eecc9c0c22fb0c545b3",
+  "generated/read-upgrade-unknown.sql": "78c3b66d25f05cab359d2929659bd64c0097cdaded20fbc0eb07625a99b4dbdd",
+  "generated/read-upgrade-workset-updates.sql": "e790aca0b4486caf8d4d9822c16ccaafb21e539c6620238717e7612bb027f186"
 }

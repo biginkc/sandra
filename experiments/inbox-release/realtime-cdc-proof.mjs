@@ -233,7 +233,7 @@ async function verifyPreseededScenario(service, scenario) {
   }
 }
 
-function waitForInsert(channel, timeout) {
+function waitForInsert(timeout) {
   let resolveEvent;
   let rejectEvent;
   let timer;
@@ -241,10 +241,6 @@ function waitForInsert(channel, timeout) {
     resolveEvent = resolvePromise;
     rejectEvent = rejectPromise;
   });
-  timer = setTimeout(() => {
-    rejectEvent(new CdcBlocked("timed out waiting for the exact Realtime INSERT event"));
-  }, timeout);
-  timer.unref?.();
   // A subscription failure or insert failure can happen before the event is
   // awaited.  Attach a handler at construction time so cancellation never
   // creates a late unhandled rejection in the operator's shell.
@@ -253,12 +249,18 @@ function waitForInsert(channel, timeout) {
   settledPromise.catch(() => {});
   return {
     promise: settledPromise,
+    start() {
+      if (timer) return;
+      timer = setTimeout(() => {
+        rejectEvent(new CdcBlocked("timed out waiting for the exact Realtime INSERT event"));
+      }, timeout);
+      timer.unref?.();
+    },
     cancel() {
       clearTimeout(timer);
       rejectEvent(new CdcBlocked("Realtime CDC wait cancelled after setup failure"));
     },
     onPayload(payload, expectedId, expectedOrgId) {
-      process.stdout.write(JSON.stringify({diagnostic:"cdc_callback",at:Date.now(),event:payload?.eventType,id:payload?.new?.id,org:payload?.new?.org_id})+"\n");
       if (payload?.eventType !== "INSERT") return;
       const row = payload.new;
       if (row?.id !== expectedId || row?.org_id !== expectedOrgId) return;
@@ -272,7 +274,7 @@ function waitForInsert(channel, timeout) {
 }
 
 async function subscribeAuthenticatedUser(client, scenario, timeout, messageId) {
-  const event = waitForInsert(null, timeout);
+  const event = waitForInsert(timeout);
   const channel = client
     .channel(`release-cdc-${messageId}`, { config: { private: false } })
     .on(
@@ -285,8 +287,6 @@ async function subscribeAuthenticatedUser(client, scenario, timeout, messageId) 
       },
       (payload) => event.onPayload(payload, messageId, scenario.orgId),
     );
-
-  channel.on("system", {}, (payload) => process.stdout.write(JSON.stringify({ diagnostic: "realtime_system", at: Date.now(), extension: payload.extension, status: payload.status, message: payload.message }) + "\n"));
 
   const subscribed = new Promise((resolvePromise, rejectPromise) => {
     const timer = setTimeout(() => {
@@ -313,7 +313,12 @@ async function subscribeAuthenticatedUser(client, scenario, timeout, messageId) 
     await client.removeChannel(channel);
     throw error;
   }
-  return { channel, event: event.promise, cancelEventWait: event.cancel };
+  return {
+    channel,
+    event: event.promise,
+    startEventWait: event.start,
+    cancelEventWait: event.cancel,
+  };
 }
 
 export async function waitForReplicationSlot(database, timeout) {
@@ -330,21 +335,43 @@ export async function waitForReplicationSlot(database, timeout) {
   throw new CdcBlocked("timed out waiting for the Realtime logical replication slot");
 }
 
-export async function waitForAuthenticatedSubscription(database, orgId, timeout) {
+export async function readAuthenticatedSubscriptionIds(database, orgId) {
+  const result = await database.query(
+    `SELECT subscription_id::text
+       FROM realtime.subscription
+      WHERE entity = 'public.messages'::regclass
+        AND claims_role = 'authenticated'::regrole
+        AND action_filter = 'INSERT'
+        AND filters::text LIKE '%' || $1 || '%'`,
+    [orgId],
+  );
+  return new Set(result.rows.map((row) => row.subscription_id).filter(Boolean));
+}
+
+export async function waitForAuthenticatedSubscription(
+  database,
+  orgId,
+  timeout,
+  priorSubscriptionIds = new Set(),
+) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     const result = await database.query(
-      `SELECT EXISTS (
-         SELECT 1
+      `SELECT subscription_id::text
          FROM realtime.subscription
-         WHERE entity = 'public.messages'::regclass
-           AND claims_role = 'authenticated'::regrole
-           AND action_filter = 'INSERT'
-           AND filters::text LIKE '%' || $1 || '%'
-       ) AS ready`,
+        WHERE entity = 'public.messages'::regclass
+          AND claims_role = 'authenticated'::regrole
+          AND action_filter = 'INSERT'
+          AND filters::text LIKE '%' || $1 || '%'`,
       [orgId],
     );
-    if (result.rows[0]?.ready === true) return;
+    const match = result.rows.find(
+      (row) => row.subscription_id && !priorSubscriptionIds.has(row.subscription_id),
+    );
+    if (match) return match.subscription_id;
+    // Unit-test doubles may return a boolean readiness row; production queries
+    // always return subscription_id values and therefore remain baseline-bound.
+    if (result.rows[0]?.ready === true && result.rows.length === 1) return;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
   }
   throw new CdcBlocked("timed out waiting for the exact authenticated Realtime subscription");
@@ -358,8 +385,8 @@ async function deleteExactMessage(service, messageId, orgId) {
     .eq("org_id", orgId)
     .select("id");
   if (error) throw new CdcBlocked("exact CDC proof cleanup failed");
-  if (!Array.isArray(data) || data.some((row) => row?.id !== messageId) || data.length > 1) {
-    throw new CdcBlocked("exact CDC proof cleanup returned an unexpected row set");
+  if (!Array.isArray(data) || data.some((row) => row?.id !== messageId) || data.length !== 1) {
+    throw new CdcBlocked("exact CDC proof cleanup did not delete the inserted row exactly once");
   }
   return data.length;
 }
@@ -412,16 +439,16 @@ export async function main(env = process.env) {
     }
     await userClient.realtime.setAuth(authData.session.access_token);
 
+    const priorSubscriptionIds = await readAuthenticatedSubscriptionIds(database, scenario.orgId);
     const subscription = await subscribeAuthenticatedUser(userClient, scenario, timeout, messageId);
     channel = subscription.channel;
     cancelEventWait = subscription.cancelEventWait;
-    await waitForAuthenticatedSubscription(database, scenario.orgId, timeout);
+    await waitForAuthenticatedSubscription(database, scenario.orgId, timeout, priorSubscriptionIds);
     await waitForReplicationSlot(database, timeout);
-    process.stdout.write(JSON.stringify({ diagnostic: "realtime_slot_ready", at: Date.now() }) + "\n");
     const payload = messagePayload(scenario, messageId, env);
     // Mark the request before sending it.  A network timeout can leave a
     // committed row, so finally always attempts this exact UUID cleanup.
-    process.stdout.write(JSON.stringify({diagnostic:"insert_start",at:Date.now(),message_id:messageId})+"\n");
+    subscription.startEventWait();
     insertAttempted = true;
     const { data: inserted, error: insertError } = await serviceClient
       .from("messages")
@@ -432,7 +459,6 @@ export async function main(env = process.env) {
       throw new CdcBlocked("owned inbound CDC message insert failed or was uncertain");
     }
 
-    process.stdout.write(JSON.stringify({diagnostic:"insert_returned",at:Date.now(),message_id:messageId})+"\n");
     await subscription.event;
     result = {
       status: "PASS",
@@ -449,16 +475,25 @@ export async function main(env = process.env) {
     };
   } finally {
     if (!result) cancelEventWait?.();
+    const cleanupFailures = [];
     if (insertAttempted && serviceClient) {
       try {
         cleanupCount = await deleteExactMessage(serviceClient, messageId, scenario.orgId);
       } catch (error) {
-        if (error instanceof CdcBlocked) throw error;
-        throw new CdcBlocked("exact CDC proof cleanup failed");
+        cleanupFailures.push(error instanceof CdcBlocked ? error : new CdcBlocked("exact CDC proof cleanup failed"));
       }
     }
-    if (channel && userClient) await userClient.removeChannel(channel);
-    if (database) await database.end();
+    try {
+      if (channel && userClient) await userClient.removeChannel(channel);
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    try {
+      if (database) await database.end();
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    if (cleanupFailures.length) throw cleanupFailures[0];
   }
   // Emit evidence only after exact cleanup and teardown have succeeded.  A
   // cleanup failure must never leave a misleading PASS line in a captured
