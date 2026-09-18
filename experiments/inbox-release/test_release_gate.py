@@ -52,7 +52,7 @@ class ReleaseGateStatusTests(unittest.TestCase):
                 "| F01 | x | x | x | pass (run) | test-results/inbox-acceptance-evidence/F01.png |\n"
             )
             (root / "test-results/inbox-acceptance-results.json").write_text(
-                f'{{"candidate_sha":"{sha}","rows":[]}}\n'
+                f'{{"candidate_sha":"{sha}","cleanup_ok":true,"rows":[]}}\n'
             )
             old_root = gate.ROOT
             gate.ROOT = root
@@ -62,6 +62,33 @@ class ReleaseGateStatusTests(unittest.TestCase):
                 gate.ROOT = old_root
         self.assertEqual(result["status"], "BLOCKED")
         self.assertIn("cover the matrix exactly", result["detail"])
+
+    def test_acceptance_gate_rejects_unproven_fixture_cleanup(self) -> None:
+        sha = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            matrix = root / "docs/performance/inbox-redesign/acceptance-matrix.md"
+            evidence = root / "test-results/inbox-acceptance-evidence/F01.png"
+            matrix.parent.mkdir(parents=True)
+            evidence.parent.mkdir(parents=True)
+            evidence.write_bytes(b"owned evidence")
+            matrix.write_text(
+                f"<!-- acceptance-run candidate_sha: {sha} -->\n"
+                "| ID | A | B | C | Status | Evidence |\n"
+                "|---|---|---|---|---|---|\n"
+                "| F01 | x | x | x | pass (run) | test-results/inbox-acceptance-evidence/F01.png |\n"
+            )
+            (root / "test-results/inbox-acceptance-results.json").write_text(
+                f'{{"candidate_sha":"{sha}","cleanup_ok":false,"rows":[{{"id":"F01","status":"pass","evidence":"test-results/inbox-acceptance-evidence/F01.png"}}]}}\n'
+            )
+            old_root = gate.ROOT
+            gate.ROOT = root
+            try:
+                result = gate.check_acceptance_matrix(sha)
+            finally:
+                gate.ROOT = old_root
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("cleanup", result["detail"])
 
 
 if __name__ == "__main__":

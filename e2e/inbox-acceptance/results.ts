@@ -33,6 +33,7 @@ export function resetResultsFile(): void {
       {
         candidate_sha: candidateSha(),
         run_started_at: new Date().toISOString(),
+        cleanup_ok: false,
         rows: [],
       },
       null,
@@ -47,6 +48,8 @@ export function resetResultsFile(): void {
 type ResultsFile = {
   candidate_sha: string;
   run_started_at: string;
+  cleanup_ok: boolean;
+  run_finished_at?: string;
   rows: RowOutcome[];
 };
 
@@ -59,14 +62,14 @@ function candidateSha(): string {
 
 function readResultsFile(): ResultsFile {
   if (!fs.existsSync(RESULTS_FILE)) {
-    return { candidate_sha: "", run_started_at: "", rows: [] };
+    return { candidate_sha: "", run_started_at: "", cleanup_ok: false, rows: [] };
   }
   const parsed: unknown = JSON.parse(fs.readFileSync(RESULTS_FILE, "utf8"));
   // Older checked-in artifacts were a bare row array. Read them so a failed
   // teardown can still report its rows, but their missing identity is a
   // deliberate release-gate failure rather than proof for a candidate.
   if (Array.isArray(parsed)) {
-    return { candidate_sha: "", run_started_at: "", rows: parsed as RowOutcome[] };
+    return { candidate_sha: "", run_started_at: "", cleanup_ok: false, rows: parsed as RowOutcome[] };
   }
   if (!parsed || typeof parsed !== "object") {
     throw new Error("acceptance results file must be an object");
@@ -78,8 +81,17 @@ function readResultsFile(): ResultsFile {
   return {
     candidate_sha: typeof file.candidate_sha === "string" ? file.candidate_sha : "",
     run_started_at: typeof file.run_started_at === "string" ? file.run_started_at : "",
+    cleanup_ok: file.cleanup_ok === true,
+    ...(typeof file.run_finished_at === "string" ? { run_finished_at: file.run_finished_at } : {}),
     rows: file.rows,
   };
+}
+
+export function markCleanupComplete(): void {
+  const file = readResultsFile();
+  file.cleanup_ok = true;
+  file.run_finished_at = new Date().toISOString();
+  writeResultsFile(file);
 }
 
 function writeResultsFile(file: ResultsFile): void {

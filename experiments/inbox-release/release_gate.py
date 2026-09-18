@@ -765,6 +765,8 @@ def check_acceptance_matrix(candidate_sha: str) -> dict[str, Any]:
         return result("FAIL", f"acceptance run result artifact is invalid: {exc}")
     if not isinstance(run_results, dict) or run_results.get("candidate_sha") != candidate_sha:
         return result("BLOCKED", "acceptance run result artifact is not bound to HEAD", candidate_sha=candidate_sha)
+    if run_results.get("cleanup_ok") is not True:
+        return result("BLOCKED", "acceptance fixture cleanup was not proven complete", candidate_sha=candidate_sha)
     if not isinstance(run_results.get("rows"), list):
         return result("FAIL", "acceptance run result artifact has no rows")
     result_rows = run_results["rows"]

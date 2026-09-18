@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 
 import { adminClient, DEFAULT_ORG_ID, ensureTestUser } from "../fixtures";
 import { seedAcceptanceThread } from "./seed";
-import { captureRowEvidence, purgeRowOutcomes, recordRowOutcome } from "./results";
+import { captureRowEvidence, purgeRowOutcomes, readMatrixResults, recordRowOutcome } from "./results";
 import { assertDisposableE2EDatabaseEnvironment } from "../../src/lib/supabase/e2e-target-safety";
 
 /**
@@ -40,8 +40,18 @@ test.beforeEach(async ({}, info) => {
 });
 test.afterEach(async ({ page }, info) => {
   const ids = ownedRows(info.title);
+  const preserved = new Map(
+    readMatrixResults()
+      .filter((outcome) => ids.includes(outcome.id) && outcome.status === "pass" && outcome.evidence.startsWith("test-results/inbox-acceptance-evidence/"))
+      .map((outcome) => [outcome.id, outcome] as const),
+  );
   purgeRowOutcomes(ids);
   for (const id of ids) {
+    const evidence = preserved.get(id);
+    if (evidence) {
+      recordRowOutcome(evidence);
+      continue;
+    }
     const passed = info.status === "passed";
     recordRowOutcome({ id, status: passed ? "pass" : info.status === "skipped" ? "skip" : "fail",
       evidence: passed ? await captureRowEvidence(page, id) : info.error?.message ?? `Test ${info.status}` });
@@ -316,6 +326,13 @@ test("F07/F08/F09/F10 — open a conversation, read history, mark-read, identity
   await expect(history).toContainText("opened conversation inbound body");
   await expect(history).toContainText("opened conversation outbound reply");
 
+  // Capture each row while the UI state it asserts is visible. afterEach
+  // preserves these durable screenshots instead of replacing them with one
+  // final closed-list image.
+  const f10Evidence = await captureRowEvidence(page, "F10");
+  const f07Evidence = await captureRowEvidence(page, "F07");
+  const f08Evidence = await captureRowEvidence(page, "F08");
+
   // F09 — automatic mark-read: opening the conversation triggers the
   // read-acknowledgment round trip; assert the DB-side effect directly
   // (read_at gets set on the latest inbound message) rather than a
@@ -333,15 +350,16 @@ test("F07/F08/F09/F10 — open a conversation, read history, mark-read, identity
       return data?.read_at ?? null;
     }, { timeout: 10_000 })
     .not.toBeNull();
+  const f09Evidence = await captureRowEvidence(page, "F09");
 
   // F07 (close) — close returns to the list.
   await page.getByRole("button", { name: "Close conversation details" }).click();
   await expect(detail).toHaveCount(0);
 
-  recordRowOutcome({ id: "F07", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
-  recordRowOutcome({ id: "F08", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
-  recordRowOutcome({ id: "F09", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
-  recordRowOutcome({ id: "F10", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F07-F10" });
+  recordRowOutcome({ id: "F07", status: "pass", evidence: f07Evidence });
+  recordRowOutcome({ id: "F08", status: "pass", evidence: f08Evidence });
+  recordRowOutcome({ id: "F09", status: "pass", evidence: f09Evidence });
+  recordRowOutcome({ id: "F10", status: "pass", evidence: f10Evidence });
 });
 
 async function runBulkOutcome(
