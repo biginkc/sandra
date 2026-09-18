@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { nextVirtualScrollTop, planWork, WorkloadBlocked, waitForDetailState } from "./adapter.mjs";
+import { findRow, nextVirtualScrollTop, planWork, WorkloadBlocked, waitForDetailState } from "./adapter.mjs";
 
 const id = (number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 
@@ -77,4 +77,50 @@ test("bounded virtual scrolling reaches a row beyond the initially mounted viewp
     scrollTop = next;
   }
   assert.equal(mounted, true);
+});
+
+test("browser-local virtualized workset mounts a row outside the initial viewport", async () => {
+  const { chromium } = await import("@playwright/test");
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 900, height: 800 } });
+  const orgId = id(900);
+  const targetId = id(990);
+  const conversationIds = Array.from({ length: 120 }, (_, index) => id(900 + index));
+  await page.setContent(`
+    <style>
+      [role=list][aria-label="Inbox conversations"] { width: 800px; height: 600px; overflow: auto; }
+      .canvas { position: relative; height: 8640px; }
+      [data-workspace-row] { position: absolute; height: 72px; width: 100%; }
+    </style>
+    <div role="list" aria-label="Inbox conversations" aria-busy="false"><div class="canvas"></div></div>
+    <button type="button" aria-label="Next 500" disabled>Next 500</button>
+    <script>
+      const list = document.querySelector('[role=list]');
+      const canvas = list.querySelector('.canvas');
+      const total = 120;
+      const org = ${JSON.stringify(orgId)};
+      const ids = ${JSON.stringify(conversationIds)};
+      function render() {
+        canvas.querySelectorAll('[data-workspace-row]').forEach((row) => row.remove());
+        const first = Math.floor(list.scrollTop / 72);
+        for (let index = first; index < Math.min(total, first + 12); index += 1) {
+          const row = document.createElement('div');
+          row.setAttribute('role', 'listitem');
+          row.setAttribute('aria-setsize', String(total));
+          row.dataset.workspaceRow = JSON.stringify([org, 'conversation', ids[index]]);
+          row.style.top = (index * 72) + 'px';
+          canvas.append(row);
+        }
+      }
+      list.addEventListener('scroll', render);
+      render();
+    </script>
+  `);
+  try {
+    const row = await findRow(page, orgId, targetId);
+    assert.equal(await row.getAttribute("data-workspace-row"), JSON.stringify([orgId, "conversation", targetId]));
+    assert.equal(await page.getByRole("list", { name: "Inbox conversations", exact: true }).evaluate((element) => element.scrollTop > 0), true);
+  } finally {
+    await browser.close();
+  }
 });

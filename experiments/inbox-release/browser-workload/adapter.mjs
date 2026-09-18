@@ -223,7 +223,7 @@ async function browserJson(page, path, method = "GET", payload) {
   return result.body;
 }
 
-async function findRow(page, orgId, conversationId) {
+export async function findRow(page, orgId, conversationId) {
   const expected = JSON.stringify([orgId, "conversation", conversationId]);
   const list = page.getByRole("list", { name: "Inbox conversations", exact: true });
   const maxAttempts = 80;
