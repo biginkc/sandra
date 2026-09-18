@@ -19,6 +19,10 @@ vi.mock("@/app/(dashboard)/messages/assign-dropdown", () => ({
 vi.mock("@/components/appointments/book-appointment-popover", () => ({
   BookAppointmentPopover: () => <button type="button">Book appointment</button>,
 }));
+vi.mock("@/app/(dashboard)/messages/resolve-to-property-dialog", () => ({
+  ResolveToPropertyDialog: ({ open, sourceConversationId, contactId }: { open: boolean; sourceConversationId: string; contactId: string }) =>
+    open ? <div data-testid="resolve-dialog-open" data-conversation-id={sourceConversationId} data-contact-id={contactId} /> : null,
+}));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
 }));
@@ -72,4 +76,14 @@ it("uses existing authorized individual mutations for promotion and outcome corr
   await waitFor(() => expect(onChanged).toHaveBeenCalled());
   fireEvent.click(screen.getByRole("button", { name: "Follow up" }));
   await waitFor(() => expect(mocks.dispo).toHaveBeenCalledWith(context.propertyId, "nurture"));
+});
+
+it("offers the existing property resolution flow for a known contact without a linked property", () => {
+  const unresolved = { ...context, propertyId: null, propertyAddress: null, propertyStatus: null };
+  render(<InboxKnownConversationActions context={unresolved} currentUserId={context.conversationId} onChanged={vi.fn()} />);
+
+  fireEvent.click(screen.getByTestId("resolve-to-property-open"));
+
+  expect(screen.getByTestId("resolve-dialog-open")).toHaveAttribute("data-conversation-id", unresolved.conversationId);
+  expect(screen.getByTestId("resolve-dialog-open")).toHaveAttribute("data-contact-id", unresolved.contactId!);
 });

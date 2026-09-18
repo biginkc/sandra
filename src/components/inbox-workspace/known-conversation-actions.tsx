@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { BookAppointmentPopover } from "@/components/appointments/book-appointment-popover";
 import { AssignDropdown } from "@/app/(dashboard)/messages/assign-dropdown";
+import { ResolveToPropertyDialog } from "@/app/(dashboard)/messages/resolve-to-property-dialog";
 import {
   confirmAiDispositionReview,
   moveMessageThreadToLead,
@@ -102,6 +103,7 @@ export function InboxKnownConversationActions({ context, currentUserId, onChange
   const [status, setStatus] = useState<string>();
   const [correction, setCorrection] = useState<OutreachDispo>("nurture");
   const [reviewVisible, setReviewVisible] = useState(context.aiDispositionReview !== null);
+  const [resolveOpen, setResolveOpen] = useState(false);
 
   const canMutateProperty = Boolean(context.propertyId) && !context.isDncLocked && !pending;
   const hasBadThreadNumber = context.outreachDispo === "wrong_number" || context.outreachDispo === "bad_number";
@@ -155,6 +157,7 @@ export function InboxKnownConversationActions({ context, currentUserId, onChange
     <section aria-label="Conversation actions" className="mt-4 space-y-4 rounded border p-3">
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="font-medium">Individual actions</h3>
+        {context.contactId && !context.propertyId && <button type="button" className="rounded border px-3 py-2 text-sm" data-testid="resolve-to-property-open" onClick={() => setResolveOpen(true)}>Resolve to property</button>}
         {context.propertyId && <AssignDropdown propertyId={context.propertyId} initialAssigneeId={context.assigneeId} initialAssigneeEmail={context.assigneeLabel} currentUserId={currentUserId} />}
         {context.propertyId && <button type="button" className="rounded border px-3 py-2 text-sm" disabled={!canMutateProperty || isLead} onClick={promote}>{isLead ? "Already a lead" : "Move to Lead"}</button>}
         {context.propertyId && <a className="rounded border px-3 py-2 text-sm" href={`/leads/${encodeURIComponent(context.propertyId)}`}>Open lead</a>}
@@ -175,6 +178,7 @@ export function InboxKnownConversationActions({ context, currentUserId, onChange
 
       {status && <p role="status">{status}</p>}
       {context.isDncLocked && <p role="note">This property is permanently locked; mutation controls are disabled.</p>}
+      {context.contactId && !context.propertyId && <ResolveToPropertyDialog open={resolveOpen} onOpenChange={setResolveOpen} sourceConversationId={context.conversationId} contactId={context.contactId} />}
     </section>
   );
 }
