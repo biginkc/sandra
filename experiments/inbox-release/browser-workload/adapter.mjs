@@ -223,12 +223,13 @@ async function browserJson(page, path, method = "GET", payload) {
   return result.body;
 }
 
-export async function findRow(page, orgId, conversationId) {
+export async function findRow(page, orgId, conversationId, { timeoutMs = 15_000 } = {}) {
   const expected = JSON.stringify([orgId, "conversation", conversationId]);
   const list = page.getByRole("list", { name: "Inbox conversations", exact: true });
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + timeoutMs;
   let attempts = 0;
   for (;;) {
+    if (Date.now() >= deadline) break;
     const state = await list.evaluate((element, target) => {
       const rows = [...element.querySelectorAll("[data-workspace-row]")];
       const mountedIndex = rows.findIndex((row) => row.getAttribute("data-workspace-row") === target);
@@ -258,7 +259,7 @@ export async function findRow(page, orgId, conversationId) {
     const scrollTravel = Math.max(0, state.scrollHeight - state.clientHeight);
     const declaredTravel = Math.max(0, state.setSize * 72 - state.clientHeight);
     const scanBound = Math.ceil(Math.max(scrollTravel, declaredTravel) / step) + 2;
-    if (Date.now() >= deadline || attempts >= scanBound) break;
+    if (attempts >= scanBound) break;
     const nextTop = nextVirtualScrollTop(state);
     if (nextTop === state.scrollTop) break;
     await list.evaluate((element, top) => { element.scrollTop = top; }, nextTop);

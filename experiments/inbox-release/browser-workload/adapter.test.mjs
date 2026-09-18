@@ -124,3 +124,18 @@ test("browser-local virtualized workset mounts a row outside the initial viewpor
     await browser.close();
   }
 });
+
+test("bounded row lookup stops when the list never reports a ready workset", async () => {
+  const { chromium } = await import("@playwright/test");
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  await page.setContent('<div role="list" aria-label="Inbox conversations" aria-busy="true"></div>');
+  try {
+    await assert.rejects(
+      () => findRow(page, id(901), id(902), { timeoutMs: 20 }),
+      (error) => error instanceof WorkloadBlocked && /absent after scanning/.test(error.message),
+    );
+  } finally {
+    await browser.close();
+  }
+});
