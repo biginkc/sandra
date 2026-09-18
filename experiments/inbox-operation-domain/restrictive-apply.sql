@@ -149,7 +149,7 @@ END $$;
 -- result without pretending an ineligible row was changed.
 CREATE OR REPLACE FUNCTION inbox_operation_domain.apply_promotion_step(o uuid,op uuid,s uuid,g bigint) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE step jsonb;payload jsonb;expected jsonb;actual jsonb;requirements jsonb;requester uuid;property_id uuid;p public.properties;member public.memberships;changed boolean;outcome text;result jsonb;v bigint;actor_count integer;prior jsonb;history jsonb;historical jsonb;targets jsonb;target jsonb;target_revision bigint;target_results jsonb:='[]';resolved jsonb;revised jsonb;requirement jsonb;
+DECLARE step jsonb;payload jsonb;expected jsonb;actual jsonb;requirements jsonb;requester uuid;property_id uuid;p public.properties;member public.memberships;changed boolean;outcome text;result jsonb;v bigint;actor_count integer;prior jsonb;history jsonb;historical jsonb;sms jsonb;sms_contact uuid;targets jsonb;target jsonb;target_revision bigint;target_results jsonb:='[]';resolved jsonb;revised jsonb;requirement jsonb;
 BEGIN
  step:=inbox_operations.lock_step_for_effect(o,op,s,g);
  IF step->>'action' IS DISTINCT FROM 'promote' THEN RAISE EXCEPTION 'Unsupported promotion effect';END IF;
@@ -169,10 +169,21 @@ BEGIN
  IF jsonb_typeof(history) IS DISTINCT FROM 'array' THEN
   history:=CASE WHEN prior IS NULL OR prior='null'::jsonb THEN '[]'::jsonb ELSE jsonb_build_array(prior) END;
  END IF;
+ -- An opted-out predecessor carries the only trusted SMS context for later
+ -- metadata steps. Preserve that receipt context through promotion so the
+ -- following assignment can rebase contact revisions as well as property
+ -- revisions. The receipt is immutable and must agree with the prepared scope.
+ FOR historical IN SELECT value FROM jsonb_array_elements(history) LOOP
+  IF jsonb_typeof(historical->'sms')='object' AND historical->'sms'->>'contact_id' IS NOT NULL THEN
+   IF sms_contact IS NOT NULL AND sms_contact::text IS DISTINCT FROM historical->'sms'->>'contact_id' THEN RAISE EXCEPTION 'SMS predecessor contact mismatch';END IF;
+   sms:=historical->'sms';sms_contact:=(sms->>'contact_id')::uuid;
+  END IF;
+ END LOOP;
+ IF sms_contact IS NOT NULL AND step->'original_dependencies'->'sms_scope'->>'contact_id' IS DISTINCT FROM sms_contact::text THEN RAISE EXCEPTION 'SMS predecessor contact mismatch';END IF;
  FOR historical IN SELECT value FROM jsonb_array_elements(history) LOOP
   IF historical->>'property_id' IS DISTINCT FROM property_id::text OR jsonb_typeof(historical->'revised_dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Invalid predecessor receipt';END IF;
   FOR revised IN SELECT value FROM jsonb_array_elements(historical->'revised_dependencies') LOOP
-   IF revised->>'namespace' NOT IN ('property_identity','property_policy','property_outcome','property_assignment','property_reviews') OR revised->'key' IS DISTINCT FROM jsonb_build_array(property_id) OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(expected->'dependencies') d WHERE d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key') THEN RAISE EXCEPTION 'Invalid revised dependency';END IF;
+   IF NOT ((revised->>'namespace' IN ('property_identity','property_policy','property_outcome','property_assignment','property_reviews') AND revised->'key'=jsonb_build_array(property_id)) OR (sms_contact IS NOT NULL AND ((revised->>'namespace' IN ('contact_policy','contact_identity') AND revised->'key'=jsonb_build_array(sms_contact)) OR (revised->>'namespace'='contact_channel_consent' AND revised->'key'=jsonb_build_array(sms_contact,'sms'))))) OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(expected->'dependencies') d WHERE d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key') THEN RAISE EXCEPTION 'Invalid revised dependency';END IF;
    SELECT jsonb_set(expected,'{dependencies}',jsonb_agg(CASE WHEN d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key' THEN revised ELSE d END ORDER BY d->>'namespace',(d->'key')::text)) INTO expected FROM jsonb_array_elements(expected->'dependencies') d;
   END LOOP;
  END LOOP;
@@ -219,7 +230,7 @@ BEGIN
    INTO revised
    FROM jsonb_array_elements(actual->'dependencies') d
   WHERE d->>'namespace'='property_policy' AND d->'key'=jsonb_build_array(property_id);
- result:=jsonb_build_object('property_id',property_id,'action','promote','outcome',outcome,'changed',changed,'revised_dependencies',revised,'target_revisions',target_results);
+ result:=jsonb_build_object('property_id',property_id,'action','promote','outcome',outcome,'changed',changed,'revised_dependencies',revised,'target_revisions',target_results,'sms',sms);
  IF EXISTS(SELECT 1 FROM public.memberships WHERE org_id=o AND user_id=requester AND access_expires_at<=clock_timestamp()) THEN RAISE EXCEPTION 'Access expired during effect';END IF;
  PERFORM inbox_operations.finish_step(o,op,s,g,result);
  RETURN result;
