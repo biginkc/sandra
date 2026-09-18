@@ -1,6 +1,7 @@
 import { expect, test } from "./fixture";
+import { resetAcceptanceFixture } from "./cleanup";
 
-import { adminClient, ensureTestUser, resetTenantTables } from "../fixtures";
+import { adminClient, ensureTestUser } from "../fixtures";
 import { seedQueuedMessage } from "./seed";
 import { armOutboxInitialReadFailure } from "./fault-proxy";
 import { captureRowEvidence, purgeRowOutcomes, readMatrixResults, recordRowOutcome } from "./results";
@@ -33,7 +34,7 @@ let admin: ReturnType<typeof adminClient>;
 
 test.beforeAll(async () => {
   admin = adminClient();
-  await resetTenantTables(admin);
+  await resetAcceptanceFixture(admin);
   await ensureTestUser(admin);
 });
 
@@ -206,7 +207,7 @@ test("O02 — Send next releases the head-of-queue message via that click alone"
   // existence when "Send next" is clicked — no ambiguity about which
   // row is "head of queue", and nothing else in the whole DB state
   // could account for it becoming "sent" besides this click.
-  await resetTenantTables(admin);
+  await resetAcceptanceFixture(admin);
   await ensureTestUser(admin);
   const target = await seedQueuedMessage(admin, { addressTag: "ACC-O02-ONLY", body: "o02 isolated body", scheduledForOffsetMin: -2 });
 

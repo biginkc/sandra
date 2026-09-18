@@ -1,5 +1,6 @@
 import sharedGlobalSetup from "../global-setup";
-import { adminClient, DEFAULT_ORG_ID, deleteOrgScopedFixtureRows, countOrgScopedFixtureRows } from "../fixtures";
+import { adminClient, DEFAULT_ORG_ID } from "../fixtures";
+import { resetAcceptanceFixture } from "./cleanup";
 import { resetResultsFile, readMatrixResults } from "./results";
 import { resetMatrixForRun, applyRunOutcomesToMatrix, assertFullAcceptance } from "./matrix";
 
@@ -16,9 +17,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       const outcomes = readMatrixResults();
       applyRunOutcomesToMatrix(outcomes);
       const admin = adminClient();
-      await deleteOrgScopedFixtureRows(admin, DEFAULT_ORG_ID);
-      const remaining = await countOrgScopedFixtureRows(admin, DEFAULT_ORG_ID);
-      if (remaining !== 0) throw new Error(`Inbox acceptance cleanup left ${remaining} fixture rows`);
+      await resetAcceptanceFixture(admin, DEFAULT_ORG_ID);
       assertFullAcceptance(outcomes);
     } finally {
       await sharedTeardown();

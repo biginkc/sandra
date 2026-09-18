@@ -1,10 +1,10 @@
 import { expect, test, type Page, type Request } from "./fixture";
+import { resetAcceptanceFixture } from "./cleanup";
 
 import {
   adminClient,
   DEFAULT_ORG_ID,
   ensureTestUser,
-  resetTenantTables,
 } from "../fixtures";
 import {
   captureRowEvidence,
@@ -178,7 +178,7 @@ test.describe.serial("Inbox reviewed replies (runtime-unproven)", () => {
   test.beforeEach(async ({}, testInfo) => {
     purgeRowOutcomes(ROW_OWNERSHIP[testInfo.title] ?? []);
     templateIds = [];
-    await resetTenantTables(admin);
+    await resetAcceptanceFixture(admin);
     await ensureTestUser(admin);
   });
 

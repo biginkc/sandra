@@ -1,7 +1,8 @@
 import { expect, test } from "./fixture";
+import { resetAcceptanceFixture } from "./cleanup";
 import { randomUUID } from "node:crypto";
 
-import { adminClient, ensureTestUser, resetTenantTables } from "../fixtures";
+import { adminClient, ensureTestUser } from "../fixtures";
 import { seedAcceptanceThread } from "./seed";
 import { captureRowEvidence, purgeRowOutcomes, recordRowOutcome } from "./results";
 
@@ -40,7 +41,7 @@ test.afterEach(async ({ page }, info) => {
 
 test.beforeAll(async () => {
   admin = adminClient();
-  await resetTenantTables(admin);
+  await resetAcceptanceFixture(admin);
   await ensureTestUser(admin);
   await ensureTestUser(admin, { principal: "assignee" });
 });
@@ -124,7 +125,7 @@ test("F04 — needs_outcome view excludes threads with an outcome", async ({ pag
 });
 
 test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => {
-  await resetTenantTables(admin);
+  await resetAcceptanceFixture(admin);
   await ensureTestUser(admin);
   const dnc = await seedAcceptanceThread(admin, {
     phone: "+18165551006",
@@ -201,7 +202,7 @@ test("F06 — rows order by most recent activity", async ({ page }) => {
   // Isolate the page-boundary proof from earlier serial rows. The fixture is
   // inserted in two bounded service-role batches plus one message batch;
   // there are no 500 browser actions and no provider calls.
-  await resetTenantTables(admin);
+  await resetAcceptanceFixture(admin);
   await ensureTestUser(admin);
   const { newestName, oldestName } = await seedOrderedInboxPage(501);
 

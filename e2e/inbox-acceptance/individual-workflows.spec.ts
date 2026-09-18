@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 
 import { expect, test, type Page } from "./fixture";
+import { resetAcceptanceFixture } from "./cleanup";
 
 import {
   adminClient,
   DEFAULT_ORG_ID,
   ensureTestUser,
-  resetTenantTables,
   seedProspects,
 } from "../fixtures";
 import {
@@ -96,7 +96,7 @@ test.describe.serial("Inbox individual workflows (runtime-unproven)", () => {
 
   test.beforeAll(async () => {
     admin = adminClient();
-    await resetTenantTables(admin);
+    await resetAcceptanceFixture(admin);
     await ensureTestUser(admin);
   });
 
@@ -104,7 +104,7 @@ test.describe.serial("Inbox individual workflows (runtime-unproven)", () => {
     // Keep each domain assertion isolated. This suite is serial because the
     // acceptance fixture is shared, but each row still starts from a clean
     // persisted state and a fresh mock delivery catalog.
-    await resetTenantTables(admin);
+    await resetAcceptanceFixture(admin);
     await ensureTestUser(admin);
   });
 

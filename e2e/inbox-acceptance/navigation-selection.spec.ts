@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "./fixture";
+import { resetAcceptanceFixture } from "./cleanup";
 
-import { adminClient, ensureTestUser, resetTenantTables } from "../fixtures";
+import { adminClient, ensureTestUser } from "../fixtures";
 import { captureRowEvidence, purgeRowOutcomes, readMatrixResults, recordRowOutcome } from "./results";
 import { seedAcceptanceThread, type SeededThread } from "./seed";
 
@@ -40,13 +41,13 @@ test.describe("Inbox navigation and selection", () => {
 
   test.beforeAll(async () => {
     admin = adminClient();
-    await resetTenantTables(admin);
+    await resetAcceptanceFixture(admin);
     await ensureTestUser(admin);
   });
 
   test.beforeEach(async ({}, testInfo) => {
     purgeRowOutcomes(ROW_OWNERSHIP[testInfo.title] ?? []);
-    await resetTenantTables(admin);
+    await resetAcceptanceFixture(admin);
     await ensureTestUser(admin);
   });
 
