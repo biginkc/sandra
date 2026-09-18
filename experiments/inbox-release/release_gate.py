@@ -71,8 +71,11 @@ def git_sha() -> str:
     return result.stdout.strip()
 
 
-def run_command(label: str, command: list[str], *, timeout: int = 180) -> dict[str, Any]:
+def run_command(label: str, command: list[str], *, timeout: int = 180, env_overrides: dict[str, str] | None = None) -> dict[str, Any]:
     started = time.perf_counter()
+    command_env = os.environ.copy()
+    if env_overrides:
+        command_env.update(env_overrides)
     result = subprocess.run(
         command,
         cwd=ROOT,
@@ -80,7 +83,7 @@ def run_command(label: str, command: list[str], *, timeout: int = 180) -> dict[s
         capture_output=True,
         timeout=timeout,
         check=False,
-        env=os.environ.copy(),
+        env=command_env,
     )
     elapsed = (time.perf_counter() - started) * 1000
     return {
@@ -719,6 +722,7 @@ def reduce_gate_statuses(results: dict[str, Any], required: list[str]) -> dict[s
         "acceptance_matrix",
         "rollback_admission",
         "rollback_receipt_read",
+        "release_database_identity",
     }
     return {
         key: value["status"]
@@ -728,7 +732,7 @@ def reduce_gate_statuses(results: dict[str, Any], required: list[str]) -> dict[s
 
 
 def authoritative_rollback_gate(live_probe: dict[str, Any]) -> dict[str, Any]:
-    """Keep the release-database probe authoritative over fixture evidence."""
+    """Keep the live HTTP command/receipt probe authoritative over evidence files."""
     return live_probe
 
 
@@ -874,23 +878,38 @@ def main() -> int:
     results["installed_schema_exact"] = installed_result
     commands.extend(installed_commands)
     if args.run_installed:
-        probe = run_command(
-            "release database identity and rollback admission probe",
+        release_probe = run_command(
+            "release database identity and read rollback probe",
             [sys.executable, str(HERE / "release_db_probe.py")],
             timeout=90,
         )
-        commands.append(probe)
-        if probe["returncode"] == 0:
-            results["rollback_admission"] = result("PASS", "release database identity and serving-disabled direct RPC proof passed", command=probe)
-        elif probe["returncode"] == 3:
-            results["rollback_admission"] = result("BLOCKED", "direct rollback proof passed but operation receipt wrappers are not installed", command=probe)
+        commands.append(release_probe)
+        if release_probe["returncode"] in (0, 3) and f'"database": "{manifest["fixture_policy"]["release_database"]}"' in release_probe["stdout_tail"] and '"direct_read_rpc": "INBOX_NOT_READY"' in release_probe["stdout_tail"]:
+            results["release_database_identity"] = result("PASS", "release database identity and read rollback proof passed", command=release_probe)
         else:
-            results["rollback_admission"] = result("FAIL", "release database identity or rollback admission proof failed", command=probe)
+            results["release_database_identity"] = result("FAIL", "release database identity or read rollback proof failed", command=release_probe)
+
+        http_probe = run_command(
+            "HTTP runtime command and receipt rollback probe",
+            [sys.executable, str(HERE / "release_db_probe.py")],
+            timeout=90,
+            env_overrides={
+                "INBOX_RELEASE_PROBE_TARGET": "http",
+                "INBOX_RELEASE_HTTP_DATABASE_MARKER": manifest["fixture_policy"]["http_fixture"]["database_marker"],
+            },
+        )
+        commands.append(http_probe)
+        if http_probe["returncode"] == 0:
+            results["rollback_admission"] = result("PASS", "HTTP runtime command admission and receipt rollback proof passed", command=http_probe)
+        elif http_probe["returncode"] == 3:
+            results["rollback_admission"] = result("BLOCKED", "HTTP runtime rollback probe reached the fixture but reviewed command wrappers are not installed", command=http_probe)
+        else:
+            results["rollback_admission"] = result("FAIL", "HTTP runtime command admission or receipt rollback proof failed", command=http_probe)
     else:
-        results["rollback_admission"] = result("BLOCKED", "release database probe not requested")
-    # Keep the live probe as the authoritative rollback gate.  Evidence files
-    # can document a separately reproduced HTTP fixture check, but they must
-    # never turn an unrun or failed release-database probe into a pass.
+        results["rollback_admission"] = result("BLOCKED", "owned rollback probes not requested")
+    # Keep the live HTTP command/receipt probe authoritative. Evidence files
+    # can document a separately reproduced fixture check, but they must never
+    # turn an unrun or failed live probe into a pass.
     results["rollback_receipt_read"] = authoritative_rollback_gate(results["rollback_admission"])
     results["acceptance_matrix"] = check_acceptance_matrix(candidate_sha)
     evidence_result = check_evidence(args.evidence_dir, candidate_sha, manifest)

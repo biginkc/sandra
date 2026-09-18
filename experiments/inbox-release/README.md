@@ -157,6 +157,13 @@ requires an enabled family plus an organization/user cohort row (or explicit
 `all` mode). The rollback packet disables every family in the same transaction
 as `serving_enabled=false`, preserving receipt reads.
 
+Rollback probing follows this fixture split: the dedicated release database is
+probed for identity and serving-disabled read rejection, while the marked HTTP
+runtime database is probed for command-family admission and authenticated
+operation/reply receipt recovery. The operation/reply packet targets the HTTP
+fixture by contract; requiring those wrappers from the read/install database
+would make a valid installation impossible to certify.
+
 The package intentionally does not import unreviewed operation or provider
 SQL. If those adapters are absent, the installed rollback probe reports a
 blocker. If present, it invokes the public prepare RPC after rollback inside a

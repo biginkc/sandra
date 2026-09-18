@@ -12,6 +12,10 @@ spec.loader.exec_module(module)
 
 
 class ReleaseDbProbeTests(unittest.TestCase):
+    def test_targets_are_explicitly_separated(self):
+        self.assertEqual(module.EXPECTED_DATABASE, "sandra_inbox_release_20260917")
+        self.assertEqual(module.EXPECTED_MARKER, "sandra-inbox-release-owned-synthetic")
+        self.assertEqual(module.EXPECTED_PURPOSE, "sandra-inbox-projection-t2")
     def test_privileged_fixture_setup_precedes_authenticated_role(self):
         script = module.receipt_probe_sql(
             "11111111-1111-4111-8111-111111111111",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only identity and admission probe for the owned release database."""
+"""Probe rollback admission on one explicitly owned release fixture."""
 
 from __future__ import annotations
 
@@ -17,10 +17,24 @@ SOCKET = os.environ.get(
     "unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock",
 )
 CONTAINER = "sandra-inbox-projection-t2-db"
-DATABASE = os.environ.get("INBOX_RELEASE_DATABASE", "")
-MARKER = os.environ.get("INBOX_RELEASE_FIXTURE_MARKER", "")
-EXPECTED_DATABASE = "sandra_inbox_release_20260917"
-EXPECTED_MARKER = "sandra-inbox-release-owned-synthetic"
+TARGET = os.environ.get("INBOX_RELEASE_PROBE_TARGET", "release-db")
+if TARGET == "release-db":
+    DATABASE = os.environ.get("INBOX_RELEASE_DATABASE", "")
+    MARKER = os.environ.get("INBOX_RELEASE_FIXTURE_MARKER", "")
+    EXPECTED_DATABASE = "sandra_inbox_release_20260917"
+    EXPECTED_MARKER = "sandra-inbox-release-owned-synthetic"
+    EXPECTED_PURPOSE = "sandra-inbox-projection-t2"
+    EXPECTED_INITIAL_SERVING = "false"
+elif TARGET == "http":
+    CONTAINER = "sandra-inbox-release-http-db-20260917"
+    DATABASE = "postgres"
+    MARKER = os.environ.get("INBOX_RELEASE_HTTP_DATABASE_MARKER", "")
+    EXPECTED_DATABASE = "postgres"
+    EXPECTED_MARKER = "sandra-inbox-http-owned-synthetic-20260917"
+    EXPECTED_PURPOSE = "sandra-inbox-release-http"
+    EXPECTED_INITIAL_SERVING = "true"
+else:
+    raise RuntimeError("INBOX_RELEASE_PROBE_TARGET must be release-db or http")
 
 RECEIPT_EXPECTED_ERRORS: dict[str, tuple[str, ...]] = {
     "public.inbox_operation_status(uuid)": ("INBOX_ACTION_OPERATION_UNAVAILABLE",),
@@ -136,7 +150,7 @@ def main() -> int:
         details = json.loads(inspect.stdout)[0]
     except (ValueError, IndexError) as exc:
         return fail(f"guarded release container metadata is invalid: {exc}")
-    if details.get("Config", {}).get("Labels", {}).get("purpose") != "sandra-inbox-projection-t2":
+    if details.get("Config", {}).get("Labels", {}).get("purpose") != EXPECTED_PURPOSE:
         return fail("release probe found the wrong container ownership label")
 
     code, identity, stderr = sql(
@@ -146,7 +160,7 @@ def main() -> int:
     )
     if code:
         return fail(f"release database identity query failed: {stderr}")
-    expected_identity = f"{EXPECTED_DATABASE}|{EXPECTED_MARKER}|false"
+    expected_identity = f"{EXPECTED_DATABASE}|{EXPECTED_MARKER}|{EXPECTED_INITIAL_SERVING}"
     if identity != expected_identity:
         return fail(f"wrong release database identity or serving state: {identity!r}")
 
@@ -154,12 +168,30 @@ def main() -> int:
     # before it attempts any session or membership lookup. This is the
     # rollback admission proof; the private operation receipt probe below is
     # deliberately blocked until the operation wrappers are installed.
-    code, _, stderr = sql("SELECT public.inbox_authorize_sync(NULL);")
-    if code == 0 or "INBOX_NOT_READY" not in stderr:
-        return fail(
-            "serving-disabled direct RPC did not fail closed with INBOX_NOT_READY: "
-            + (stderr or "unexpected success")
+    if TARGET == "http":
+        # The HTTP fixture starts serving so the full stack can be exercised.
+        # Disable only inside this transaction and assert the direct read RPC
+        # fails closed, then roll back before any other probe runs.
+        code, output, stderr = sql(
+            "BEGIN;"
+            "UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton;"
+            "DO $$ BEGIN "
+            "BEGIN PERFORM public.inbox_authorize_sync(NULL); "
+            "EXCEPTION WHEN OTHERS THEN "
+            "IF SQLERRM <> 'INBOX_NOT_READY' THEN RAISE; END IF; END; "
+            "END $$;"
+            "ROLLBACK;"
+            "SELECT 'INBOX_NOT_READY';"
         )
+        if code or output != "INBOX_NOT_READY":
+            return fail("serving-disabled direct RPC did not fail closed with INBOX_NOT_READY: " + (stderr or output or "unexpected success"))
+    else:
+        code, _, stderr = sql("SELECT public.inbox_authorize_sync(NULL);")
+        if code == 0 or "INBOX_NOT_READY" not in stderr:
+            return fail(
+                "serving-disabled direct RPC did not fail closed with INBOX_NOT_READY: "
+                + (stderr or "unexpected success")
+            )
 
     code, wrappers, stderr = sql(
         "SELECT coalesce(jsonb_agg(p.oid::regprocedure::text ORDER BY 1),'[]') "
@@ -172,6 +204,9 @@ def main() -> int:
         return fail(f"operation wrapper inventory query failed: {stderr}")
     wrapper_names = json.loads(wrappers or "[]")
     wrapper_names_compact = {name.replace(" ", "") for name in wrapper_names}
+    def has_wrapper(signature: str) -> bool:
+        compact = signature.replace(" ", "")
+        return compact in wrapper_names_compact or compact.removeprefix("public.") in wrapper_names_compact
     # Receipt status/recovery must stay authenticated and callable while
     # serving and new-command admission are disabled.  Exercise every
     # available reviewed public status/recovery wrapper with a real temporary
@@ -186,7 +221,7 @@ def main() -> int:
     }
     receipt_checks: dict[str, str] = {}
     for signature, invocation in receipt_specs.items():
-        if signature not in wrapper_names_compact:
+        if not has_wrapper(signature):
             continue
         actor = str(uuid.uuid4())
         session = str(uuid.uuid4())
@@ -205,11 +240,24 @@ def main() -> int:
     # blocker rather than being replaced by a helper-only assertion.
     direct_prepare = "BLOCKED"
     direct_prepare_detail = "operation prepare wrapper is not installed"
-    if "public.inbox_prepare_action(text,uuid)" in wrapper_names_compact:
+    if has_wrapper("public.inbox_prepare_action(text,uuid)"):
+        actor = str(uuid.uuid4())
+        session = str(uuid.uuid4())
+        org = str(uuid.uuid4())
+        claims = json.dumps(
+            {"sub": actor, "session_id": session, "role": "authenticated", "exp": 4102444800},
+            separators=(",", ":"),
+        ).replace("'", "''")
         code, output, stderr = sql(
             "BEGIN;"
+            f"INSERT INTO auth.users(id,email,role) VALUES('{actor}','{actor}@example.invalid','authenticated');"
+            f"INSERT INTO organizations(id,name) VALUES('{org}','release command probe {org}');"
+            f"INSERT INTO memberships(user_id,org_id,role,access_status) VALUES('{actor}','{org}','owner','active');"
+            f"INSERT INTO auth.sessions(id,user_id,not_after) VALUES('{session}','{actor}',clock_timestamp()+interval '1 hour');"
             "UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton;"
             "UPDATE inbox_control.command_admission SET enabled=false,updated_at=clock_timestamp();"
+            "SET LOCAL ROLE authenticated;"
+            f"SET LOCAL request.jwt.claims='{claims}';"
             "DO $$ DECLARE passed boolean:=false; BEGIN "
             "BEGIN PERFORM public.inbox_prepare_action('{}',gen_random_uuid()); "
             "EXCEPTION WHEN OTHERS THEN "
@@ -226,6 +274,7 @@ def main() -> int:
         direct_prepare_detail = output or "rollback_prepare_denied"
     result = {
         "status": "PASS" if wrapper_names and direct_prepare == "PASS" else "BLOCKED",
+        "target": TARGET,
         "database": EXPECTED_DATABASE,
         "marker": EXPECTED_MARKER,
         "serving_enabled": False,
