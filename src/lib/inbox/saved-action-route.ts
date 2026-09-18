@@ -50,16 +50,25 @@ async function readBody(request: Request, signal: AbortSignal): Promise<string> 
   if (!reader) invalid(400);
   const chunks: Uint8Array[] = [];
   let size = 0;
+  const cancel = () => { void reader.cancel().catch(() => { /* the stream may already be closed */ }); };
+  signal.addEventListener("abort", cancel, { once: true });
   try {
     for (;;) {
       signal.throwIfAborted();
-      const part = await reader.read();
+      let abortListener: (() => void) | undefined;
+      const aborted = new Promise<never>((_, reject) => {
+        abortListener = () => reject(signal.reason ?? new DOMException("Request aborted", "AbortError"));
+        signal.addEventListener("abort", abortListener, { once: true });
+      });
+      let part: ReadableStreamReadResult<Uint8Array>;
+      try { part = await Promise.race([reader.read(), aborted]); }
+      finally { if (abortListener) signal.removeEventListener("abort", abortListener); }
       if (part.done) break;
       size += part.value.byteLength;
-      if (size > MAX_BODY_BYTES) invalid(413, "body_too_large");
+      if (size > MAX_BODY_BYTES) { cancel(); invalid(413, "body_too_large"); }
       chunks.push(part.value);
     }
-  } finally { reader.releaseLock(); }
+  } finally { signal.removeEventListener("abort", cancel); reader.releaseLock(); }
   const bytes = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
@@ -83,7 +92,6 @@ function definition(value: unknown): InboxActionDefinition {
 }
 
 function id(value: unknown): string { if (typeof value !== "string" || !UUID.test(value)) invalid(); return value; }
-function version(value: unknown): number { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) invalid(); return value; }
 
 function errorResponse(error: unknown): Response {
   const status = error instanceof InboxSavedActionApiError ? error.status : error instanceof InvalidInboxActionError ? 400 : 503;
@@ -101,7 +109,7 @@ export async function inboxSavedActionRoute(request: Request, action: SavedActio
     const url = new URL(request.url);
     if (url.search || !isInboxSameOrigin(request)) throw new InboxSavedActionApiError(403, "request_forbidden");
     let row: Record<string, unknown> | undefined;
-    if (action !== "list") row = record(parseJson(await readBody(request, signal)));
+    if (action !== "list") { const raw = await readBody(request, signal); signal.throwIfAborted(); row = record(parseJson(raw)); }
     const client = await createClient();
     if (!(await isInboxPilotRequest(client as unknown as InboxPilotAuthClient))) return Response.json({ error: "Not found" }, { status: 404, headers: responseHeaders });
     const repository = createInboxSavedActionRepository(client as unknown as InboxSavedActionClient);

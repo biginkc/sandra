@@ -75,4 +75,18 @@ describe("saved action CRUD route boundary", () => {
     expect((await POST(new Request("http://localhost/api/inbox/saved-actions", { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" }))).status).toBe(415);
     expect(mocks.create).not.toHaveBeenCalled();
   });
+
+  it("cancels a body that is still streaming when the request aborts", async () => {
+    const controller = new AbortController();
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+    const request = { url: "http://localhost/api/inbox/saved-actions", headers: new Headers({ "content-type": "application/json" }), body: stream, signal: controller.signal } as unknown as Request;
+    const response = POST(request);
+    await Promise.resolve();
+    controller.abort();
+    const result = await response;
+    expect(result.status).toBe(503);
+    expect(cancelled).toBe(true);
+    expect(mocks.createClient).not.toHaveBeenCalled();
+  });
 });
