@@ -128,6 +128,11 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
     for (let partition = 0; partition < Math.max(1, Math.ceil(scope.orderedIds.length / 100)); partition++) {
       if (!active()) break;
       const allowed = new Set(scope.orderedIds.slice(partition * 100, (partition + 1) * 100));
+    // Electric may replay historical updates/deletes before the initial
+    // up-to-date marker. Those deletes describe rows that never belonged to
+    // this client's current collection and must not invalidate a selection;
+    // after the marker, deletes are live and authoritative.
+    let initialCatchup = true;
     const key = (r: WorkspaceSummary) => {
       if (!uuid.test(r.org_id) || !uuid.test(r.target_id) || !["known_conversation", "unknown_sender"].includes(r.target_kind)) { fail("permission_lost"); throw Error("Invalid summary identity"); }
       const id = workspaceId(r.target_kind === "known_conversation"
@@ -150,10 +155,11 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
         const removed: WorkspaceId[] = [];
         for (const message of messages) {
           if (message?.headers?.control === "must-refetch") { fail("resync_required"); throw Error("Snapshot reset required"); }
+          if (message?.headers?.control === "up-to-date") initialCatchup = false;
           // Electric parses PostgreSQL wire strings (including boolean) using its schema.
           // Validate identity here; validate complete typed rows only after parsing/merge.
           if (message?.headers?.operation === "insert") key(message.value);
-          if (message?.headers?.operation === "delete") removed.push(key(message.value));
+          if (message?.headers?.operation === "delete" && !initialCatchup) removed.push(key(message.value));
         }
         if (removed.length && authorizedNow()) options.onInvalidated?.([...new Set(removed)]);
       }

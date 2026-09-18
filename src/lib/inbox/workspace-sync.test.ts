@@ -121,6 +121,39 @@ describe("bounded workspace synchronization lifecycle",()=> {
     await vi.waitFor(()=>expect(sync.getSnapshot().rows).toEqual([]));
     expect(invalidated).toHaveBeenCalledExactlyOnceWith(scope.orderedIds);
   });
+  it("does not invalidate a selection for deletes replayed during initial catch-up", async () => {
+    let requests = 0;
+    let next: ((response: Response) => void) | undefined;
+    const identity = { org_id: org, target_id: target, target_kind: "known_conversation" as const };
+    const current = { ...summary, name: "Current row", preview: "Current preview" };
+    const response = (messages: unknown[], offset: string) => new Response(JSON.stringify([
+      ...messages,
+      { headers: { control: "up-to-date", global_last_seen_lsn: "0" } },
+    ]), { headers: {
+      "content-type": "application/json", "electric-handle": "historical-sync",
+      "electric-offset": offset, "electric-schema": "{}", "electric-cursor": "1",
+    } });
+    const fetcher = vi.fn<typeof fetch>(() => {
+      if (++requests === 1) return Promise.resolve(response([
+        { key: target, headers: { operation: "insert" }, value: { ...summary, name: "Initial row" } },
+        { key: target, headers: { operation: "update" }, value: { ...summary, preview: "Historical update" } },
+        { key: target, headers: { operation: "delete" }, value: identity },
+        { key: target, headers: { operation: "insert" }, value: { ...summary, name: "Reinserted row" } },
+        { key: target, headers: { operation: "delete" }, value: identity },
+        { key: target, headers: { operation: "insert" }, value: current },
+      ], "0_0"));
+      return new Promise<Response>(resolve => { next = resolve; });
+    });
+    const { sync, invalidated } = setup(fetcher);
+    sync.replace({ ...scope, scopeId: "12121212-1212-4121-8121-121212121212" });
+    await vi.waitFor(() => expect(sync.getSnapshot().state).toBe("live"));
+    expect(sync.getSnapshot().rows).toEqual([summaryRow(current)]);
+    expect(invalidated).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(next).toBeDefined());
+    next!(response([{ key: target, headers: { operation: "delete" }, value: identity }], "1_0"));
+    await vi.waitFor(() => expect(sync.getSnapshot().rows).toEqual([]));
+    expect(invalidated).toHaveBeenCalledExactlyOnceWith(scope.orderedIds);
+  });
   it("hydrates through actual Electric and TanStack collection then clears on reset",async()=> {
     let requests=0;
     const fetcher=vi.fn<typeof fetch>(()=> {
