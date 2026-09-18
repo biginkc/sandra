@@ -24,7 +24,8 @@ $$;
 -- explicit user refresh that creates a new scope with this metadata.
 ALTER TABLE inbox_bridge.worksets
   ADD COLUMN IF NOT EXISTS source_cursor_id uuid,
-  ADD COLUMN IF NOT EXISTS source_cursor_bound boolean NOT NULL DEFAULT false;
+  ADD COLUMN IF NOT EXISTS source_cursor_bound boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS source_page_limit integer;
 
 DO $$
 BEGIN
@@ -36,6 +37,24 @@ BEGIN
     ALTER TABLE inbox_bridge.worksets
       ADD CONSTRAINT worksets_source_cursor_origin_check
       CHECK (source_cursor_bound OR source_cursor_id IS NULL);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'inbox_bridge.worksets'::regclass
+      AND conname = 'worksets_source_page_limit_check'
+  ) THEN
+    ALTER TABLE inbox_bridge.worksets
+      ADD CONSTRAINT worksets_source_page_limit_check
+      CHECK (source_page_limit IS NULL OR source_page_limit BETWEEN 1 AND 500);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'inbox_bridge.worksets'::regclass
+      AND conname = 'worksets_source_origin_complete_check'
+  ) THEN
+    ALTER TABLE inbox_bridge.worksets
+      ADD CONSTRAINT worksets_source_origin_complete_check
+      CHECK (NOT source_cursor_bound OR source_page_limit IS NOT NULL);
   END IF;
 END;
 $$;
@@ -175,7 +194,7 @@ BEGIN
   INSERT INTO inbox_bridge.worksets(
     org_id, user_id, session_id, access_epoch, generation,
     created_at, expires_at, filter, targets, handles,
-    source_cursor_id, source_cursor_bound
+    source_cursor_id, source_cursor_bound, source_page_limit
   )
   VALUES (
     org_id, u, sid, e, coalesce(gen, 0) + 1,
@@ -188,7 +207,8 @@ BEGIN
         FROM generate_series(1, greatest(1, (jsonb_array_length(ids) + 99) / 100))
     ),
     cursor_id,
-    true
+    true,
+    n
   )
   RETURNING * INTO created;
 
@@ -231,6 +251,7 @@ SET statement_timeout = '10s'
 AS $$
 DECLARE
   a jsonb;
+  after jsonb;
   w inbox_bridge.worksets;
   cursor_row inbox_bridge.cursors;
   current_targets jsonb;
@@ -293,8 +314,8 @@ BEGIN
     END IF;
   END IF;
 
-  page_limit := jsonb_array_length(w.targets);
-  IF page_limit < 1 OR page_limit > 500 THEN
+  page_limit := w.source_page_limit;
+  IF page_limit IS NULL OR page_limit < 1 OR page_limit > 500 THEN
     RAISE EXCEPTION 'INBOX_SCOPE_UNAVAILABLE' USING ERRCODE = '42501';
   END IF;
 
@@ -317,6 +338,18 @@ BEGIN
       has_cursor,
       page_limit
     ) rows;
+
+  -- Re-read identity after the bounded bridge.page call.  A revocation or
+  -- epoch change that commits while the probe is running must invalidate the
+  -- result instead of returning a late arrival signal for a stale scope.
+  after := inbox_bridge.authorize_serving(w.org_id);
+  IF after->>'user_id' IS DISTINCT FROM a->>'user_id'
+     OR after->>'session_id' IS DISTINCT FROM a->>'session_id'
+     OR after->>'org_id' IS DISTINCT FROM a->>'org_id'
+     OR after->>'access_epoch' IS DISTINCT FROM a->>'access_epoch'
+     OR (after->>'expires_at')::timestamptz <= clock_timestamp() THEN
+    RAISE EXCEPTION 'INBOX_ACCESS_CHANGED' USING ERRCODE = '42501';
+  END IF;
 
   RETURN jsonb_build_object(
     'has_updates', current_targets IS DISTINCT FROM w.targets,
