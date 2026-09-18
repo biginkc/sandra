@@ -23,6 +23,33 @@ type WorksetUpdates = { scopeId: string; orgId: string; requesterId: string; ses
 type SelectionReviewBackendItem = { kind: "conversation" | "unknown_sender_group"; id: string; status: "matching" | "outside_filter" | "unavailable"; name: string | null };
 type SelectionReviewItem = { id: WorkspaceId; status: "matching_loaded" | "matching_unloaded" | "outside_filter" | "unavailable"; name: string };
 type SelectionReviewState = { status: "loading" | "ready" | "error"; generation: string; ids: readonly WorkspaceId[]; filter: InboxFilter; items: SelectionReviewItem[]; error?: string };
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+
+function worksetStorageKey(identity: InboxQueryIdentity): string {
+  return ["inbox-workset", identity.orgId, identity.userId, identity.sessionId, identity.accessEpoch]
+    .map(value => encodeURIComponent(value))
+    .join(":");
+}
+
+function readStoredWorksetId(identity: InboxQueryIdentity): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const value = window.sessionStorage.getItem(worksetStorageKey(identity));
+    return value && UUID.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeWorksetId(identity: InboxQueryIdentity, scopeId: string): void {
+  if (typeof window === "undefined" || !UUID.test(scopeId)) return;
+  try { window.sessionStorage.setItem(worksetStorageKey(identity), scopeId); } catch { /* storage is an optional reload optimization */ }
+}
+
+function clearStoredWorksetId(identity: InboxQueryIdentity): void {
+  if (typeof window === "undefined") return;
+  try { window.sessionStorage.removeItem(worksetStorageKey(identity)); } catch { /* storage is an optional reload optimization */ }
+}
 
 function newSelectionReviewGeneration(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -88,7 +115,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const [error, setError] = useState<string>();
   const [counts, setCounts] = useState<InboxCounts>();
   const [countsError, setCountsError] = useState(false);
-  const scope = useRef<Scope | null>(null);
+  const scope = useRef<{ scopeId: string } | Scope | null>(null);
   const sync = useRef<ReturnType<typeof createWorkspaceSync> | null>(null);
   const request = useRef<AbortController | null>(null);
   const sequence = useRef(0);
@@ -102,12 +129,13 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     if (denied.current) return;
     denied.current = true; sequence.current++;
     request.current?.abort(); clearActions.current(); cache.close();
+    clearStoredWorksetId(identity);
     selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null;
     worksetUpdateSequence.current++; worksetUpdateRequest.current?.abort(); worksetUpdateRequest.current = null;
     setSelectionNames(new Map()); setSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setReview(false);
     setSelectionReview(null); setPageScope(null); setWorksetUpdateLabel(undefined); setWorksetUpdateError(false);
     sync.current?.revoke(); setSnapshot({ state: "permission_lost", rows: [] }); setBusy(false);
-  }, [cache]);
+  }, [cache, identity]);
   /** A single item-scoped denial (404): only this target is affected. Invalidate its
    * cached detail, prune it from selection the same way the sync adapter's authoritative
    * onInvalidated does below (selected IDs must never silently become replacement rows,
@@ -169,7 +197,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
       if (controller.signal.aborted) return;
       if (value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch) { accessLost(); return; }
       if (!(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean" || typeof value.generation !== "string" || value.generation.length === 0) throw Error("Invalid workspace response");
-      setInvalidatedIds([]); sync.current!.replace(value); scope.current = value; setPageScope(value); setNextCursor(value.nextCursor); setFilter(next);
+      setInvalidatedIds([]); sync.current!.replace(value); scope.current = value; storeWorksetId(identity, value.scopeId); setPageScope(value); setNextCursor(value.nextCursor); setFilter(next);
     } catch (failure) {
       if (!controller.signal.aborted && !denied.current) setError(failure instanceof Error ? failure.message : "Could not load conversations.");
     } finally { if (!controller.signal.aborted) setBusy(false); }
@@ -202,8 +230,14 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageScope]);
   useEffect(() => {
-    // Each mount owns its transport and no browser persistence. A stale request
-    // cannot publish after unmount even when the server completed its scope.
+    // Each mount owns its transport and memory cache. A stale request
+    // cannot publish after unmount even when the server completed its scope. The
+    // scope identity itself is retained in this tab so a normal reload/navigation
+    // can atomically replace the prior server scope instead of consuming another
+    // active generation. It is keyed by the full authenticated identity and is
+    // never trusted as row or tenant authority.
+    const rememberedScopeId = readStoredWorksetId(identity);
+    if (rememberedScopeId) scope.current = { scopeId: rememberedScopeId };
     const adapter = createWorkspaceSync({ origin: window.location.origin, onChange: setSnapshot, onAccessBoundary: accessLost,
       onInvalidated: ids => {
         selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null; setReview(false); setSelectionReview(null);

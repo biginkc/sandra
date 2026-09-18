@@ -3,14 +3,14 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InboxWorkspaceClient } from "./workspace-client";
 import { workspaceId } from "./selection";
 import type { WorkspaceRow } from "./inbox-workspace";
-const state = vi.hoisted(() => ({ callbacks: null as null | { onChange: (value: unknown) => void; onAccessBoundary: () => void; onInvalidated: (ids: readonly string[]) => void }, replacements: [] as unknown[], deny: false, itemUnavailable: false, detailUnavailable: false, selectionUnavailable: false, deferNextSelectionReview: false, resolveDeferredSelectionReview: null as null | (() => void), worksetUpdates: "none" as "none" | "has" | "required" | "error" }));
+const state = vi.hoisted(() => ({ callbacks: null as null | { onChange: (value: unknown) => void; onAccessBoundary: () => void; onInvalidated: (ids: readonly string[]) => void }, replacements: [] as unknown[], worksetBodies: [] as Array<Record<string, unknown>>, deny: false, itemUnavailable: false, detailUnavailable: false, selectionUnavailable: false, deferNextSelectionReview: false, resolveDeferredSelectionReview: null as null | (() => void), worksetUpdates: "none" as "none" | "has" | "required" | "error" }));
 vi.mock("@/lib/inbox/workspace-sync", () => ({ createWorkspaceSync: (callbacks: typeof state.callbacks) => {
   state.callbacks = callbacks;
   return { replace: (value: unknown) => { state.replacements.push(value); }, reset: () => callbacks?.onChange({ state: "resync_required", rows: [] }), revoke: () => callbacks?.onChange({ state: "permission_lost", rows: [] }) };
 } }));
 vi.mock("@/app/(dashboard)/messages/assign-dropdown", () => ({ AssignDropdown: () => <button type="button">Change assignee</button> }));
 vi.mock("@/components/appointments/book-appointment-popover", () => ({ BookAppointmentPopover: () => <button type="button">Book appointment</button> }));
-const orgId = "00000000-0000-4000-8000-000000000001", userId = "00000000-0000-4000-8000-000000000002", sessionId = "00000000-0000-4000-8000-000000000003";
+const orgId = "00000000-0000-4000-8000-000000000001", userId = "00000000-0000-4000-8000-000000000002", sessionId = "00000000-0000-4000-8000-000000000003", scopeId = "00000000-0000-4000-8000-000000000008";
 const conversationId = "00000000-0000-4000-8000-000000000004";
 const identity = { orgId, userId, sessionId, accessEpoch: "1", expiresAt: Date.now() + 60000 };
 const row: WorkspaceRow = { target: { kind: "conversation", orgId, conversationId }, name: "Ada", context: "123 Oak", preview: "A real conversation", timeLabel: "Now", outcomeLabel: "Needs outcome", assignedLabel: "Unassigned" };
@@ -22,7 +22,8 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ x: 0, y: 0, left: 0, top: 0, width: 900, height: 600, right: 900, bottom: 600, toJSON: () => ({}) }));
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 600 });
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 900 });
-  calls = []; state.replacements = []; state.deny = false; state.itemUnavailable = false; state.detailUnavailable = false; state.selectionUnavailable = false; state.deferNextSelectionReview = false; state.resolveDeferredSelectionReview = null; state.worksetUpdates = "none";
+  calls = []; state.replacements = []; state.worksetBodies = []; state.deny = false; state.itemUnavailable = false; state.detailUnavailable = false; state.selectionUnavailable = false; state.deferNextSelectionReview = false; state.resolveDeferredSelectionReview = null; state.worksetUpdates = "none";
+  window.sessionStorage.clear();
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     calls.push(url);
     if (url.includes("/selection-review")) {
@@ -36,13 +37,17 @@ beforeEach(() => {
     }
     if (url.includes("/workset-updates")) {
       if (state.worksetUpdates === "error") return Response.json({}, { status: 503 });
-      return Response.json({ scopeId: "scope", orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: "generation-1", hasUpdates: state.worksetUpdates === "has", refreshRequired: state.worksetUpdates === "required" });
+      return Response.json({ scopeId, orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: "generation-1", hasUpdates: state.worksetUpdates === "has", refreshRequired: state.worksetUpdates === "required" });
     }
     if (url.includes("/detail")) return state.detailUnavailable ? Response.json({}, { status: 404 }) : Response.json({ orgId, requesterId: userId, conversationId, ...detailFields, history: [{ id: "message", direction: "inbound", body: "Hello from history", createdAtRaw: new Date().toISOString(), readAtRaw: null, inboundRevision: "1" }], readBoundary: "boundary", boundaryExpiresAt: new Date(Date.now() + 60000).toISOString(), captureGeneration: "capture", headRevision: "1" });
     if (url.includes("/counts")) return Response.json({ accessEpoch: "1", asOf: new Date().toISOString(), counts: { all: 1000, unread: 10 } });
     if (url.includes("read-acknowledgments")) return state.itemUnavailable ? Response.json({}, { status: 404 }) : Response.json({ boundaryId: "boundary", batch: 0, changed: 1, completed: true });
     if (state.deny) return Response.json({}, { status: 403 });
-    return Response.json({ scopeId: "scope", orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: "generation-1", expiresAt: Date.now() + 60000, orderedIds: [workspaceId(row.target)], nextCursor: null, refreshed: false });
+    if (url.endsWith("/worksets")) {
+      state.worksetBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return Response.json({ scopeId, orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: "generation-1", expiresAt: Date.now() + 60000, orderedIds: [workspaceId(row.target)], nextCursor: null, refreshed: false });
+    }
+    return Response.json({ scopeId, orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: "generation-1", expiresAt: Date.now() + 60000, orderedIds: [workspaceId(row.target)], nextCursor: null, refreshed: false });
   }));
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -51,6 +56,24 @@ async function loaded() {
   await waitFor(() => expect(state.replacements).toHaveLength(1));
   act(() => state.callbacks!.onChange({ state: "live", rows: [row] }));
 }
+it("reuses the prior scope when the workspace remounts in the same browser session", async () => {
+  await loaded();
+  expect(state.worksetBodies[0]?.replacesScopeId).toBeUndefined();
+  cleanup();
+  state.replacements = [];
+  await loaded();
+  expect(state.worksetBodies[1]?.replacesScopeId).toBe(scopeId);
+});
+
+it("does not reuse a scope across an access-epoch change", async () => {
+  await loaded();
+  cleanup();
+  state.replacements = [];
+  render(<InboxWorkspaceClient identity={{ ...identity, accessEpoch: "2" }} initialFilter={{ view: "all", hide_noise: true }} />);
+  await waitFor(() => expect(state.worksetBodies).toHaveLength(2));
+  expect(state.worksetBodies[1]?.replacesScopeId).toBeUndefined();
+});
+
 it("selection never fetches history; opening and revisiting use the bounded detail cache", async () => {
   await loaded();
   fireEvent.click(screen.getByRole("checkbox", { name: "Select Ada" }));
