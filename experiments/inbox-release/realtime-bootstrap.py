@@ -412,7 +412,9 @@ def read_migration_state() -> dict[str, Any]:
         "'rolcreatedb', r.rolcreatedb, "
         "'rolcreaterole', r.rolcreaterole, "
         "'rolbypassrls', r.rolbypassrls, "
-        "'authenticated_member', pg_has_role('supabase_realtime_admin', 'authenticated', 'MEMBER'), "
+        "'anon_set', pg_has_role('supabase_realtime_admin', 'anon', 'SET'), "
+        "'authenticated_set', pg_has_role('supabase_realtime_admin', 'authenticated', 'SET'), "
+        "'service_role_set', pg_has_role('supabase_realtime_admin', 'service_role', 'SET'), "
         "'set_log_min_messages', has_parameter_privilege("
         "'supabase_realtime_admin', 'log_min_messages', 'SET')) "
         "FROM pg_roles r WHERE r.rolname='supabase_realtime_admin';"
@@ -420,6 +422,14 @@ def read_migration_state() -> dict[str, Any]:
     ledger_select = sql_query(
         "SELECT has_table_privilege('supabase_realtime_admin', "
         "'realtime.schema_migrations', 'SELECT');"
+    )
+    ledger_write = sql_query(
+        "SELECT has_table_privilege('supabase_realtime_admin', "
+        "'realtime.schema_migrations', 'INSERT') "
+        "AND has_table_privilege('supabase_realtime_admin', "
+        "'realtime.schema_migrations', 'UPDATE') "
+        "AND has_table_privilege('supabase_realtime_admin', "
+        "'realtime.schema_migrations', 'DELETE');"
     )
     try:
         role_data = json.loads(role)
@@ -434,6 +444,7 @@ def read_migration_state() -> dict[str, Any]:
         "migration_count": migration_count_value,
         "columns": tuple(filter(None, columns.split(","))),
         "schema_migrations_select": ledger_select.strip() == "t",
+        "schema_migrations_write": ledger_write.strip() == "t",
         "role": role_data,
     }
 
@@ -451,8 +462,10 @@ def runtime_role_sql() -> str:
     return (
         "BEGIN;\n"
         "ALTER ROLE supabase_realtime_admin WITH REPLICATION;\n"
+        "GRANT anon TO supabase_realtime_admin WITH INHERIT FALSE, SET TRUE;\n"
         "GRANT authenticated TO supabase_realtime_admin WITH INHERIT FALSE, SET TRUE;\n"
-        "GRANT SELECT ON TABLE realtime.schema_migrations TO supabase_realtime_admin;\n"
+        "GRANT service_role TO supabase_realtime_admin WITH INHERIT FALSE, SET TRUE;\n"
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE realtime.schema_migrations TO supabase_realtime_admin;\n"
         "GRANT SET ON PARAMETER log_min_messages TO supabase_realtime_admin;\n"
         "COMMIT;"
     )
@@ -548,14 +561,17 @@ def require_runtime_role_minimum(state: MigrationState) -> None:
     prohibited = ("rolsuper", "rolcreatedb", "rolcreaterole", "rolbypassrls")
     if any(role.get(key) for key in prohibited):
         raise BootstrapError("Realtime runtime role has an unsafe elevated attribute")
-    if not role.get("authenticated_member"):
-        raise BootstrapError("Realtime runtime role cannot SET ROLE authenticated")
+    for role_name in ("anon_set", "authenticated_set", "service_role_set"):
+        if not role.get(role_name):
+            raise BootstrapError(f"Realtime runtime role cannot SET ROLE {role_name.removesuffix('_set')}")
     if not role.get("rolreplication"):
         raise BootstrapError("Realtime runtime role lacks logical replication privilege")
     if not role.get("set_log_min_messages"):
         raise BootstrapError("Realtime runtime role lacks SET log_min_messages privilege")
     if not state.get("schema_migrations_select"):
         raise BootstrapError("Realtime runtime role lacks SELECT on realtime.schema_migrations")
+    if not state.get("schema_migrations_write"):
+        raise BootstrapError("Realtime runtime role lacks migration metadata write privileges")
 
 
 def build_migration_run_args(
@@ -690,7 +706,7 @@ def wait_for(
     raise BootstrapError(f"Timed out after {timeout:.0f}s waiting for Realtime migration state")
 
 
-def cleanup_migration_container(temp_name: str) -> None:
+def cleanup_migration_container(temp_name: str, *, restart: bool = True) -> None:
     """Remove the helper and always attempt to restore the long-running node."""
 
     cleanup_error: Exception | None = None
@@ -698,6 +714,11 @@ def cleanup_migration_container(temp_name: str) -> None:
         docker("rm", "-f", temp_name, check=False)
     except Exception as exc:  # Docker timeout/transport failure must not skip restart.
         cleanup_error = exc
+
+    if not restart:
+        if cleanup_error is not None:
+            raise BootstrapError("Temporary Realtime migration container cleanup failed") from cleanup_error
+        return
 
     try:
         # A failed start must be visible to the caller; check=False would leave
@@ -727,7 +748,7 @@ def cleanup_and_repair_runtime(
     cleanup_error: Exception | None = None
     repair_errors: list[Exception] = []
     try:
-        cleanup_migration_container(temp_name)
+        cleanup_migration_container(temp_name, restart=False)
     except Exception as exc:
         cleanup_error = exc
     for repair in (apply_runtime_role, apply_broadcast_publication):
@@ -738,6 +759,16 @@ def cleanup_and_repair_runtime(
     repair_error: Exception | None = None
     if repair_errors:
         repair_error = BootstrapError("; ".join(str(error) for error in repair_errors))
+    try:
+        # Start only after grants/publication are repaired; otherwise the
+        # pinned image can establish a broken CDC connection before repair.
+        docker("start", REALTIME_CONTAINER)
+        wait_for_rpc_ready(REALTIME_CONTAINER)
+    except Exception as exc:
+        if repair_error is None:
+            repair_error = exc
+        else:
+            repair_error = BootstrapError(f"{repair_error}; {exc}")
     return cleanup_error, repair_error
 
 

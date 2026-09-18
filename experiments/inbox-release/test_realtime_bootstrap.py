@@ -51,10 +51,13 @@ class RealtimeBootstrapTest(unittest.TestCase):
                     "rolcreatedb": False,
                     "rolcreaterole": False,
                     "rolbypassrls": False,
-                    "authenticated_member": True,
+                    "anon_set": True,
+                    "authenticated_set": True,
+                    "service_role_set": True,
                     "set_log_min_messages": True,
                 },
                 "schema_migrations_select": True,
+                "schema_migrations_write": True,
             }
         )
         sql = realtime_bootstrap.runtime_role_sql()
@@ -63,7 +66,10 @@ class RealtimeBootstrapTest(unittest.TestCase):
             "GRANT authenticated TO supabase_realtime_admin WITH INHERIT FALSE, SET TRUE",
             sql,
         )
-        self.assertIn("GRANT SELECT ON TABLE realtime.schema_migrations TO supabase_realtime_admin", sql)
+        self.assertIn(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE realtime.schema_migrations TO supabase_realtime_admin",
+            sql,
+        )
         self.assertIn("GRANT SET ON PARAMETER log_min_messages", sql)
         self.assertNotIn("SUPERUSER", sql.upper())
 
@@ -153,10 +159,13 @@ class RealtimeBootstrapTest(unittest.TestCase):
                 "rolcreatedb": False,
                 "rolcreaterole": False,
                 "rolbypassrls": False,
-                "authenticated_member": True,
+                "anon_set": True,
+                "authenticated_set": True,
+                "service_role_set": True,
                 "set_log_min_messages": True,
             },
             "schema_migrations_select": True,
+            "schema_migrations_write": True,
         }
         tenant = {"settings_fingerprint": "same", "migrations_ran": 1}
         events: list[str] = []
@@ -295,10 +304,13 @@ class RealtimeBootstrapTest(unittest.TestCase):
             "rolcreatedb",
             "rolcreaterole",
             "rolbypassrls",
-            "authenticated_member",
+            "anon_set",
+            "authenticated_set",
+            "service_role_set",
             "rolreplication",
             "set_log_min_messages",
             "schema_migrations_select",
+            "schema_migrations_write",
         ):
             with self.subTest(key=key):
                 role = {
@@ -308,18 +320,28 @@ class RealtimeBootstrapTest(unittest.TestCase):
                     "rolcreatedb": False,
                     "rolcreaterole": False,
                     "rolbypassrls": False,
-                    "authenticated_member": True,
+                    "anon_set": True,
+                    "authenticated_set": True,
+                    "service_role_set": True,
                     "set_log_min_messages": True,
                     "schema_migrations_select": True,
+                    "schema_migrations_write": True,
                 }
                 role[key] = False if key in {
                     "rolreplication",
                     "set_log_min_messages",
                     "schema_migrations_select",
-                    "authenticated_member",
+                    "anon_set",
+                    "authenticated_set",
+                    "service_role_set",
                 } else True
+                state = {"role": role, "schema_migrations_select": True, "schema_migrations_write": True}
+                if key == "schema_migrations_select":
+                    state["schema_migrations_select"] = False
+                if key == "schema_migrations_write":
+                    state["schema_migrations_write"] = False
                 with self.assertRaises(realtime_bootstrap.BootstrapError):
-                    realtime_bootstrap.require_runtime_role_minimum({"role": role})
+                    realtime_bootstrap.require_runtime_role_minimum(state)
 
 
     def test_fixture_identity_and_network_guards_are_exact(self) -> None:
@@ -393,17 +415,20 @@ class RealtimeBootstrapTest(unittest.TestCase):
                         "rolcreatedb": False,
                         "rolcreaterole": False,
                         "rolbypassrls": False,
-                        "authenticated_member": True,
+                        "anon_set": True,
+                        "authenticated_set": True,
+                        "service_role_set": True,
                         "set_log_min_messages": True,
                     }
                 ),
+                "t",
                 "t",
             ],
         ) as sql_call:
             state = realtime_bootstrap.read_migration_state()
         self.assertEqual(state["migration_count"], 82)
         self.assertTrue(state["schema_migrations_select"])
-        self.assertEqual(sql_call.call_count, 5)
+        self.assertEqual(sql_call.call_count, 6)
         self.assertIn("count(*)::text FROM realtime.schema_migrations", sql_call.call_args_list[1].args[0])
 
 
