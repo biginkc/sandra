@@ -252,6 +252,7 @@ AS $$
 DECLARE
   a jsonb;
   after jsonb;
+  after_scope inbox_bridge.worksets;
   w inbox_bridge.worksets;
   cursor_row inbox_bridge.cursors;
   current_targets jsonb;
@@ -349,6 +350,23 @@ BEGIN
      OR after->>'access_epoch' IS DISTINCT FROM a->>'access_epoch'
      OR (after->>'expires_at')::timestamptz <= clock_timestamp() THEN
     RAISE EXCEPTION 'INBOX_ACCESS_CHANGED' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT * INTO after_scope FROM inbox_bridge.worksets WHERE id = scope_id;
+  IF NOT FOUND
+     OR after_scope.revoked
+     OR after_scope.expires_at <= clock_timestamp()
+     OR after_scope.org_id IS DISTINCT FROM w.org_id
+     OR after_scope.user_id IS DISTINCT FROM w.user_id
+     OR after_scope.session_id IS DISTINCT FROM w.session_id
+     OR after_scope.access_epoch IS DISTINCT FROM w.access_epoch
+     OR after_scope.generation IS DISTINCT FROM w.generation
+     OR after_scope.filter IS DISTINCT FROM w.filter
+     OR after_scope.targets IS DISTINCT FROM w.targets
+     OR after_scope.source_cursor_id IS DISTINCT FROM w.source_cursor_id
+     OR after_scope.source_cursor_bound IS DISTINCT FROM w.source_cursor_bound
+     OR after_scope.source_page_limit IS DISTINCT FROM w.source_page_limit THEN
+    RAISE EXCEPTION 'INBOX_SCOPE_UNAVAILABLE' USING ERRCODE = '42501';
   END IF;
 
   RETURN jsonb_build_object(
