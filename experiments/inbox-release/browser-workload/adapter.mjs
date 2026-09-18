@@ -93,6 +93,7 @@ function scenarioEntries(value) {
   return entries.map((raw, index) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new WorkloadBlocked(`scenario ${index} must be an object`);
     const tenantId = requiredString(raw.tenantId ?? raw.tenant_id, `scenario ${index}.tenantId`);
+    const operatorId = uuid(raw.operatorId ?? raw.operator_id ?? raw.userId ?? raw.user_id, `scenario ${index}.operatorId`);
     const orgId = uuid(raw.orgId ?? raw.org_id, `scenario ${index}.orgId`);
     const storageState = requiredString(raw.storageState ?? raw.storage_state, `scenario ${index}.storageState`);
     const assigneeId = uuid(raw.assigneeId ?? raw.assignee_id, `scenario ${index}.assigneeId`);
@@ -103,6 +104,7 @@ function scenarioEntries(value) {
     const appUrl = raw.appUrl ?? raw.app_url;
     return Object.freeze({
       tenantId,
+      operatorId,
       orgId,
       storageState: isAbsolute(storageState) ? storageState : resolve(process.cwd(), storageState),
       assigneeId,
@@ -115,19 +117,26 @@ function scenarioEntries(value) {
 }
 
 export function planWork({ scenarios, cycles, concurrency, tenantCount }) {
-  if (!Array.isArray(scenarios) || scenarios.length < Math.max(concurrency, tenantCount)) {
-    throw new WorkloadBlocked(`scenario mapping must provide one distinct auth state per measured concurrency/tenant slot (need ${Math.max(concurrency, tenantCount)})`);
+  if (!Array.isArray(scenarios) || scenarios.length !== concurrency) {
+    throw new WorkloadBlocked(`scenario mapping must provide exactly one operator state per measured concurrency slot (need ${concurrency})`);
   }
-  if (new Set(scenarios.map((scenario) => scenario.tenantId)).size !== scenarios.length) throw new WorkloadBlocked("scenario tenant ids must be unique");
+  if (new Set(scenarios.map((scenario) => scenario.operatorId)).size !== scenarios.length) throw new WorkloadBlocked("operator ids must be unique even when operators share an org");
   if (new Set(scenarios.map((scenario) => scenario.storageState)).size !== scenarios.length) throw new WorkloadBlocked("one storage state cannot represent multiple measured tenants/operators");
+  if (new Set(scenarios.map((scenario) => scenario.orgId)).size !== tenantCount) throw new WorkloadBlocked(`scenario mapping must exercise exactly ${tenantCount} measured org tenants`);
+  if (cycles < scenarios.length) throw new WorkloadBlocked(`work cycles must exercise every measured concurrency slot (need ${scenarios.length})`);
   const jobs = [];
+  const targets = new Set();
   for (let index = 0; index < cycles; index += 1) {
     const scenario = scenarios[index % scenarios.length];
     const targetIndex = Math.floor(index / scenarios.length);
     const conversationId = scenario.conversationIds[targetIndex];
     if (!conversationId) throw new WorkloadBlocked(`scenario ${scenario.tenantId} has no unique pre-seeded conversation for cycle ${index + 1}`);
+    const target = `${scenario.orgId}:${conversationId}`;
+    if (targets.has(target)) throw new WorkloadBlocked(`conversation ${conversationId} is scheduled more than once`);
+    targets.add(target);
     jobs.push({ index, scenario, conversationId });
   }
+  if (new Set(jobs.map((job) => job.scenario.orgId)).size !== tenantCount) throw new WorkloadBlocked(`planned cycles did not exercise exactly ${tenantCount} measured org tenants`);
   return jobs;
 }
 
@@ -175,6 +184,19 @@ function sleep(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, Math.max(0, milliseconds)));
 }
 
+/** A detail shell is not an inspection result. Require at least one rendered
+ * history row and fail early if the pane has rendered an error. */
+export async function waitForDetailState(readState, timeoutMs = 15_000, intervalMs = 50) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await readState();
+    if (state === "ready") return;
+    if (state === "error") throw new WorkloadBlocked("conversation detail rendered an error");
+    await sleep(intervalMs);
+  }
+  throw new WorkloadBlocked("conversation detail did not render history before the bound");
+}
+
 async function browserJson(page, path, method = "GET", payload) {
   const result = await page.evaluate(async ({ path: requestPath, method: requestMethod, payload: requestPayload }) => {
     const response = await fetch(requestPath, {
@@ -214,7 +236,16 @@ async function terminalReply(page, operationId, deadline) {
   let latest;
   while (Date.now() < deadline) {
     latest = await browserJson(page, `/api/inbox/replies/${encodeURIComponent(operationId)}`);
-    if (latest.dispatchComplete === true) return latest;
+    if (latest.dispatchComplete === true) {
+      if (!Array.isArray(latest.receipts) || latest.receipts.length === 0) throw new WorkloadBlocked("reply operation completed without a receipt");
+      const itemIds = new Set();
+      for (const receipt of latest.receipts) {
+        if (!receipt || typeof receipt !== "object" || typeof receipt.itemId !== "string" || itemIds.has(receipt.itemId)) throw new WorkloadBlocked("reply operation returned duplicate or malformed receipts");
+        if (receipt.state !== "provider_accepted" && receipt.state !== "delivered") throw new WorkloadBlocked(`reply operation ended with receipt state ${String(receipt.state)}`);
+        itemIds.add(receipt.itemId);
+      }
+      return latest;
+    }
     await sleep(250);
   }
   throw new WorkloadBlocked(`reply operation ${operationId} did not reach a terminal receipt before the bound`);
@@ -232,7 +263,12 @@ async function runCycle(browser, input, job, sample) {
     const row = await findRow(page, scenario.orgId, job.conversationId);
     const firstOpenStart = performance.now();
     await row.getByRole("button", { name: /^Open / }).click();
-    await page.getByRole("complementary", { name: "Open conversation", exact: true }).waitFor({ state: "visible", timeout: 15_000 });
+    await waitForDetailState(async () => page.evaluate(() => {
+      const detail = document.querySelector('aside[aria-label="Open conversation"]');
+      if (!detail) return "loading";
+      if (detail.querySelector('[role="alert"]')) return "error";
+      return detail.querySelector('[aria-label="Conversation history"] ol > li') ? "ready" : "loading";
+    }));
     emitTiming(input.profile.name, "first_open", performance.now() - firstOpenStart, sample);
 
     const close = page.getByRole("button", { name: "Close conversation details", exact: true });
@@ -240,7 +276,12 @@ async function runCycle(browser, input, job, sample) {
     const revisitStart = performance.now();
     const revisitRow = await findRow(page, scenario.orgId, job.conversationId);
     await revisitRow.getByRole("button", { name: /^Open / }).click();
-    await page.getByRole("complementary", { name: "Open conversation", exact: true }).waitFor({ state: "visible", timeout: 15_000 });
+    await waitForDetailState(async () => page.evaluate(() => {
+      const detail = document.querySelector('aside[aria-label="Open conversation"]');
+      if (!detail) return "loading";
+      if (detail.querySelector('[role="alert"]')) return "error";
+      return detail.querySelector('[aria-label="Conversation history"] ol > li') ? "ready" : "loading";
+    }));
     emitTiming(input.profile.name, "revisit", performance.now() - revisitStart, sample);
 
     await page.getByRole("button", { name: "Close conversation details", exact: true }).click();
@@ -267,7 +308,7 @@ async function runCycle(browser, input, job, sample) {
     const acceptedMetadata = await browserJson(page, "/api/inbox/actions/accept", "POST", { preparationId: metadataPreparationId, idempotencyKey: actionKey });
     const metadataOperationId = uuid(acceptedMetadata.operationId, "metadata operationId");
     const metadataStatus = await terminalAction(page, metadataOperationId, deadline);
-    if (metadataStatus.result !== "succeeded" && metadataStatus.result !== "partial") throw new WorkloadBlocked(`metadata operation ended ${String(metadataStatus.result)}`);
+    if (metadataStatus.result !== "succeeded") throw new WorkloadBlocked(`metadata operation ended ${String(metadataStatus.result)}`);
     const metadataRecovery = await browserJson(page, `/api/inbox/operations/recover?preparationId=${encodeURIComponent(metadataPreparationId)}&idempotencyKey=${encodeURIComponent(actionKey)}`);
     if (metadataRecovery.state !== "accepted") throw new WorkloadBlocked("metadata recovery did not return the accepted receipt");
 
@@ -280,7 +321,7 @@ async function runCycle(browser, input, job, sample) {
     const replyRecovery = await browserJson(page, `/api/inbox/replies/recover?preparationId=${encodeURIComponent(replyPreparationId)}&idempotencyKey=${encodeURIComponent(replyKey)}`);
     if (replyRecovery.state !== "accepted") throw new WorkloadBlocked("reply recovery did not return the accepted receipt");
 
-    return { orgId: scenario.orgId, conversationId: job.conversationId, metadataOperationId, replyOperationId };
+    return { orgId: scenario.orgId, conversationId: job.conversationId, metadataOperationId, metadataPreparationId, replyPreparationId, replyOperationId, outcome: scenario.outcome, assigneeId: scenario.assigneeId, replyTemplate: scenario.replyTemplate };
   } finally {
     await context.close();
   }
@@ -311,12 +352,33 @@ async function verifyDatabaseIdentity(client, env) {
 }
 
 async function verifyPersistedCycle(client, result) {
-  const metadata = await client.query("SELECT id FROM inbox_operations.operations WHERE org_id=$1 AND id=$2", [result.orgId, result.metadataOperationId]);
+  const metadata = await client.query("SELECT id, definition FROM inbox_operations.operations WHERE org_id=$1 AND id=$2", [result.orgId, result.metadataOperationId]);
   if (metadata.rowCount !== 1) throw new WorkloadBlocked("accepted metadata operation is not persisted");
-  const item = await client.query("SELECT id FROM inbox_operations.items WHERE org_id=$1 AND operation_id=$2 AND target_kind='conversation' AND target_id=$3", [result.orgId, result.metadataOperationId, result.conversationId]);
+  const definition = metadata.rows[0].definition;
+  const storedSteps = definition && Array.isArray(definition.steps) ? definition.steps : [];
+  const storedReply = storedSteps.at(-1);
+  if (!storedReply || storedReply.type !== "review_reply" || storedReply.text !== result.replyTemplate) throw new WorkloadBlocked("metadata operation did not retain the immutable reviewed-reply template");
+  const steps = await client.query("SELECT action, state, payload FROM inbox_operations.steps WHERE org_id=$1 AND operation_id=$2 ORDER BY ordinal", [result.orgId, result.metadataOperationId]);
+  if (steps.rowCount !== 2 || steps.rows.some((step) => step.state !== "succeeded")) throw new WorkloadBlocked("metadata operation has missing or non-successful steps");
+  const outcome = steps.rows.find((step) => step.action === "outcome");
+  const assignment = steps.rows.find((step) => step.action === "assign");
+  if (!outcome || !assignment || outcome.payload?.value !== result.outcome || assignment.payload?.user_id !== result.assigneeId) throw new WorkloadBlocked("metadata operation steps do not retain the requested outcome and assignment");
+  const item = await client.query("SELECT id, resolution->>'property_id' AS property_id, exclusion_code FROM inbox_operations.items WHERE org_id=$1 AND operation_id=$2 AND target_kind='conversation' AND target_id=$3", [result.orgId, result.metadataOperationId, result.conversationId]);
   if (item.rowCount !== 1) throw new WorkloadBlocked("metadata operation did not retain the selected conversation");
+  if (item.rows[0].exclusion_code !== null || !UUID.test(item.rows[0].property_id ?? "")) throw new WorkloadBlocked("metadata operation did not retain an eligible property target");
+  const property = await client.query("SELECT outreach_dispo, assigned_user_id FROM public.properties WHERE org_id=$1 AND id=$2", [result.orgId, item.rows[0].property_id]);
+  if (property.rowCount !== 1 || property.rows[0].outreach_dispo !== result.outcome || property.rows[0].assigned_user_id !== result.assigneeId) throw new WorkloadBlocked("metadata side effects do not match the requested outcome and assignment");
+  const replyPreparation = await client.query("SELECT id, canonical_input FROM inbox_reply_review.preparations WHERE org_id=$1 AND id=$2", [result.orgId, result.replyPreparationId]);
+  if (replyPreparation.rowCount !== 1 || typeof replyPreparation.rows[0].canonical_input !== "string" || !replyPreparation.rows[0].canonical_input.includes(result.conversationId)) throw new WorkloadBlocked("reply preparation did not retain the selected conversation");
   const reply = await client.query("SELECT id FROM inbox_reply_send.operations WHERE org_id=$1 AND id=$2", [result.orgId, result.replyOperationId]);
   if (reply.rowCount !== 1) throw new WorkloadBlocked("accepted reply operation is not persisted");
+  const attempts = await client.query("SELECT item_id, state, receipt_version FROM inbox_reply_send.attempts WHERE org_id=$1 AND operation_id=$2 ORDER BY item_id, attempt_ordinal", [result.orgId, result.replyOperationId]);
+  const attemptItems = new Set();
+  if (attempts.rowCount === 0) throw new WorkloadBlocked("reply operation has no persisted receipt");
+  for (const attempt of attempts.rows) {
+    if (attemptItems.has(attempt.item_id) || (attempt.state !== "provider_accepted" && attempt.state !== "delivered") || Number(attempt.receipt_version) <= 0) throw new WorkloadBlocked("reply operation has duplicate or unsuccessful provider-double receipts");
+    attemptItems.add(attempt.item_id);
+  }
 }
 
 export async function main(env = process.env) {
@@ -325,20 +387,22 @@ export async function main(env = process.env) {
   const { Client } = await import("pg");
   const database = new Client({ connectionString: input.databaseUrl, connectionTimeoutMillis: 5_000, statement_timeout: 3_000 });
   await database.connect();
-  await database.query("BEGIN TRANSACTION READ ONLY");
+  let browser;
   try {
-    await verifyDatabaseIdentity(database, env);
-  } finally {
-    await database.query("ROLLBACK").catch(() => {});
-  }
-  const browser = await chromium.launch({ headless: env.INBOX_RELEASE_HEADLESS !== "false" });
-  const startedAt = performance.now();
-  try {
+    await database.query("BEGIN TRANSACTION READ ONLY");
+    try {
+      await verifyDatabaseIdentity(database, env);
+    } finally {
+      await database.query("ROLLBACK").catch(() => {});
+    }
+    browser = await chromium.launch({ headless: env.INBOX_RELEASE_HEADLESS !== "false" });
+    const startedAt = performance.now();
     const results = await withConcurrency(input.jobs, input.profile.dimensions.concurrency, async (job) => {
       const delay = job.index * input.arrivalIntervalMs - (performance.now() - startedAt);
       if (delay > 0) await sleep(delay);
       return runCycle(browser, input, job, job.index + 1);
     });
+    if (new Set(results.map((result) => result.metadataOperationId)).size !== results.length || new Set(results.map((result) => result.replyOperationId)).size !== results.length) throw new WorkloadBlocked("workload produced duplicate operation receipts");
     await database.query("BEGIN TRANSACTION READ ONLY");
     try {
       await verifyDatabaseIdentity(database, env);
@@ -347,7 +411,7 @@ export async function main(env = process.env) {
       await database.query("ROLLBACK").catch(() => {});
     }
   } finally {
-    await browser.close();
+    await browser?.close();
     await database.end();
   }
   return 0;
