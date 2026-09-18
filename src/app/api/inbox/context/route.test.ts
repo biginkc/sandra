@@ -1,11 +1,12 @@
 import { afterEach, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ client: vi.fn(), context: vi.fn(), getUser: vi.fn() }));
+const mocks = vi.hoisted(() => ({ client: vi.fn(), context: vi.fn(), getUser: vi.fn(), memberships: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.client }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
 vi.mock("@/lib/inbox/supabase-sync-repository", () => ({ createSupabaseInboxRepository: () => ({ getContext: mocks.context }) }));
 import { GET } from "./route";
 import { InboxHttpError } from "@/lib/inbox/http-error";
 const PILOT_USER = "pilot-user-1";
-const asPilotUser = () => { mocks.client.mockResolvedValue({ auth: { getUser: mocks.getUser } }); mocks.getUser.mockResolvedValue({ data: { user: { id: PILOT_USER } } }); vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", PILOT_USER); };
+const asPilotUser = () => { mocks.client.mockResolvedValue({ auth: { getUser: mocks.getUser } }); mocks.getUser.mockResolvedValue({ data: { user: { id: PILOT_USER } } }); mocks.memberships.mockResolvedValue([{ user_id: PILOT_USER, org_id: "org", role: "owner", acquisitions_enabled: false, access_status: "active" }]); vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", PILOT_USER); };
 afterEach(() => { vi.clearAllMocks(); vi.unstubAllEnvs(); });
 it("does not create a client when the server flag is disabled", async () => {
   vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "0");
@@ -33,6 +34,12 @@ it("returns only canonical context and explicitly forbids caching", async () => 
   const response = await GET(new Request("https://sandra.example/api/inbox/context"));
   expect(response.status).toBe(200); expect(response.headers.get("cache-control")).toContain("no-store");
   expect(await response.json()).toEqual({ orgId: "org", sessionId: "session" });
+});
+it("returns 404 and never calls the context RPC for an active Acquisitions member", async () => {
+  vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); asPilotUser(); vi.stubEnv("INBOX_WORKSPACE_ROLLOUT_MODE", "all");
+  mocks.memberships.mockResolvedValue([{ user_id: PILOT_USER, org_id: "org", role: "member", acquisitions_enabled: true, access_status: "active" }]);
+  expect((await GET(new Request("https://sandra.example/api/inbox/context"))).status).toBe(404);
+  expect(mocks.context).not.toHaveBeenCalled();
 });
 it("preserves canonical authentication denial without exposing private error details", async () => {
   vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1"); asPilotUser(); mocks.context.mockRejectedValue(new InboxHttpError(401));

@@ -4,6 +4,8 @@ import { createInboxReplyRepository, InboxReplyApiError, type InboxReplyClient }
 import { InvalidInboxActionError } from "./action-definition";
 import { isInboxSameOrigin } from "./same-origin";
 import { isInboxPilotRequest, type InboxPilotAuthClient } from "./pilot-cohort";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 // Mirrors action-route.ts's shape (flag-first, same-origin, json-only, body
 // cap, deadline, error mapping) for the bulk-reply lane. action-route.ts
@@ -65,6 +67,8 @@ export async function inboxReplyRoute(request: Request, action: "prepare" | "acc
         }
         const client = await createClient();
         if (admission && !(await isInboxPilotRequest(client as unknown as InboxPilotAuthClient)))
+            return Response.json({ error: "Not found" }, { status: 404, headers });
+        if (admission && !canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow()))
             return Response.json({ error: "Not found" }, { status: 404, headers });
         const repository = createInboxReplyRepository(client as unknown as InboxReplyClient);
         if (action === "prepare")

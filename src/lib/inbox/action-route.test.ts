@@ -1,13 +1,14 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ createClient: vi.fn(), prepare: vi.fn(), accept: vi.fn(), status: vi.fn(), assignees: vi.fn(), recover: vi.fn() }));
+const mocks = vi.hoisted(() => ({ createClient: vi.fn(), prepare: vi.fn(), accept: vi.fn(), status: vi.fn(), assignees: vi.fn(), recover: vi.fn(), memberships: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
 vi.mock("./action-api", async (importOriginal) => ({ ...await importOriginal<typeof import("./action-api")>(), createInboxActionRepository: () => ({ prepare: mocks.prepare, accept: mocks.accept, status: mocks.status, assignees: mocks.assignees, recover: mocks.recover }) }));
 import { POST as prepare } from "@/app/api/inbox/actions/prepare/route";
 import { POST as accept } from "@/app/api/inbox/actions/accept/route";
 import { GET as status } from "@/app/api/inbox/operations/[operationId]/route";
 const id = "abcdef00-0000-4000-8000-000000000001";
 const request = (body: string, headers: Record<string, string> = {}) => new Request("http://localhost/api/inbox/actions/prepare", { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
-beforeEach(() => { vi.stubEnv("INBOX_ACTIONS_SERVER_ENABLED", "1"); vi.clearAllMocks(); mocks.createClient.mockResolvedValue({ auth: { getUser: async () => ({ data: { user: { id } } }) } }); vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", id); mocks.prepare.mockResolvedValue({ prepared: true }); mocks.accept.mockResolvedValue({ operationId: id }); mocks.status.mockResolvedValue({ operationId: id }); });
+beforeEach(() => { vi.stubEnv("INBOX_ACTIONS_SERVER_ENABLED", "1"); vi.clearAllMocks(); mocks.createClient.mockResolvedValue({ auth: { getUser: async () => ({ data: { user: { id } } }) } }); vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", id); mocks.memberships.mockResolvedValue([{ user_id: id, org_id: "org", role: "owner", acquisitions_enabled: false, access_status: "active" }]); mocks.prepare.mockResolvedValue({ prepared: true }); mocks.accept.mockResolvedValue({ operationId: id }); mocks.status.mockResolvedValue({ operationId: id }); });
 afterEach(() => vi.unstubAllEnvs());
 describe("disabled-by-default action routes", () => {
     it("does not construct a client or read a body when disabled", async () => { vi.stubEnv("INBOX_ACTIONS_SERVER_ENABLED", "0"); expect((await prepare(request("{}"))).status).toBe(404); expect(mocks.createClient).not.toHaveBeenCalled(); });
@@ -53,6 +54,24 @@ it("rejects new preparation and acceptance outside the cohort before repository 
   expect((await accept(request("{}"))).status).toBe(404);
   expect(mocks.prepare).not.toHaveBeenCalled();
   expect(mocks.accept).not.toHaveBeenCalled();
+});
+
+it("rejects an active Acquisitions member before action repository admission", async () => {
+  vi.stubEnv("INBOX_WORKSPACE_ROLLOUT_MODE", "all");
+  mocks.memberships.mockResolvedValue([{ user_id: id, org_id: "org", role: "member", acquisitions_enabled: true, access_status: "active" }]);
+  expect((await prepare(request("{}"))).status).toBe(404);
+  expect((await accept(request(JSON.stringify({ preparationId: id, idempotencyKey: id })))).status).toBe(404);
+  expect(mocks.prepare).not.toHaveBeenCalled();
+  expect(mocks.accept).not.toHaveBeenCalled();
+});
+
+it("keeps status and recovery available without the shared-surface admission check", async () => {
+  vi.stubEnv("INBOX_ACTIONS_SERVER_ENABLED", "0");
+  mocks.memberships.mockRejectedValue(new Error("membership lookup should not run for receipts"));
+  mocks.recover.mockResolvedValue({ state: "accepted" });
+  expect((await status(new Request(`http://localhost/api/inbox/operations/${id}`), { params: Promise.resolve({ operationId: id }) })).status).toBe(200);
+  expect((await recover(new Request(`http://localhost/api/inbox/operations/recover?preparationId=${id}&idempotencyKey=${id}`))).status).toBe(200);
+  expect(mocks.memberships).not.toHaveBeenCalled();
 });
 
 it("keeps receipt status and recovery available after admission rollback", async () => {

@@ -4,6 +4,8 @@ import { createInboxActionRepository, InboxActionApiError, type InboxActionClien
 import { InvalidInboxActionError, parseInboxActionAcceptance } from "./action-definition";
 import { isInboxSameOrigin } from "./same-origin";
 import { isInboxPilotRequest, type InboxPilotAuthClient } from "./pilot-cohort";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 export async function inboxActionRoute(request: Request, action: "prepare" | "accept" | "status" | "assignees" | "recover", operationId?: string) {
     // Admission stops on rollback; authenticated receipt reads remain available.
@@ -56,6 +58,8 @@ export async function inboxActionRoute(request: Request, action: "prepare" | "ac
         }
         const client = await createClient();
         if (admission && !(await isInboxPilotRequest(client as unknown as InboxPilotAuthClient)))
+            return Response.json({ error: "Not found" }, { status: 404, headers });
+        if (admission && !canAccessMessagesAndLeadsBoard(await getCallerMembershipsOrThrow()))
             return Response.json({ error: "Not found" }, { status: 404, headers });
         const repository = createInboxActionRepository(client as unknown as InboxActionClient);
         if (action === "prepare")

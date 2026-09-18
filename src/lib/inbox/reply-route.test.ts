@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ createClient: vi.fn(), prepare: vi.fn(), accept: vi.fn(), recover: vi.fn(), status: vi.fn() }));
+const mocks = vi.hoisted(() => ({ createClient: vi.fn(), prepare: vi.fn(), accept: vi.fn(), recover: vi.fn(), status: vi.fn(), memberships: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
 vi.mock("./reply-api", async (importOriginal) => ({ ...await importOriginal<typeof import("./reply-api")>(), createInboxReplyRepository: () => ({ prepare: mocks.prepare, accept: mocks.accept, recover: mocks.recover, status: mocks.status }) }));
 import { POST as prepare } from "@/app/api/inbox/replies/prepare/route";
 import { POST as accept } from "@/app/api/inbox/replies/accept/route";
@@ -10,7 +11,7 @@ import { InboxReplyApiError } from "./reply-api";
 const id = "abcdef00-0000-4000-8000-000000000001";
 const request = (body: string, headers: Record<string, string> = {}) => new Request("http://localhost/api/inbox/replies/prepare", { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
 beforeEach(() => {
-  vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "1"); vi.clearAllMocks(); mocks.createClient.mockResolvedValue({ auth: { getUser: async () => ({ data: { user: { id } } }) } }); vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", id);
+  vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "1"); vi.clearAllMocks(); mocks.createClient.mockResolvedValue({ auth: { getUser: async () => ({ data: { user: { id } } }) } }); vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", id); mocks.memberships.mockResolvedValue([{ user_id: id, org_id: "org", role: "owner", acquisitions_enabled: false, access_status: "active" }]);
   mocks.prepare.mockResolvedValue({ preparationId: id, idempotencyKey: id, inputHash: "a".repeat(64), expiresAt: "2026-09-14T00:00:00Z", items: [], recipientCount: 0, blockers: ["empty"] });
   mocks.accept.mockResolvedValue({ preparationId: id, idempotencyKey: id, operationId: id });
   mocks.recover.mockResolvedValue({ state: "prepared", preparationId: id, idempotencyKey: id });
@@ -191,4 +192,21 @@ it("rejects new preparation and acceptance outside the cohort before repository 
   expect((await accept(request("{}"))).status).toBe(404);
   expect(mocks.prepare).not.toHaveBeenCalled();
   expect(mocks.accept).not.toHaveBeenCalled();
+});
+
+it("rejects an active Acquisitions member before reply repository admission", async () => {
+  vi.stubEnv("INBOX_WORKSPACE_ROLLOUT_MODE", "all");
+  mocks.memberships.mockResolvedValue([{ user_id: id, org_id: "org", role: "member", acquisitions_enabled: true, access_status: "active" }]);
+  expect((await prepare(request("{}"))).status).toBe(404);
+  expect((await accept(new Request("http://localhost/api/inbox/replies/accept", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ preparationId: id, idempotencyKey: id }) }))).status).toBe(404);
+  expect(mocks.prepare).not.toHaveBeenCalled();
+  expect(mocks.accept).not.toHaveBeenCalled();
+});
+
+it("keeps reply status and recovery available without the shared-surface admission check", async () => {
+  vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
+  mocks.memberships.mockRejectedValue(new Error("membership lookup should not run for receipts"));
+  expect((await statusRoute(new Request(`http://localhost/api/inbox/replies/${id}`), { params: Promise.resolve({ operationId: id }) })).status).toBe(200);
+  expect((await recover(new Request(`http://localhost/api/inbox/replies/recover?preparationId=${id}&idempotencyKey=${id}`))).status).toBe(200);
+  expect(mocks.memberships).not.toHaveBeenCalled();
 });
