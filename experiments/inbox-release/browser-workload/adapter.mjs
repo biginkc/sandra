@@ -12,7 +12,7 @@
  * no placeholder timings, queue values, or system metrics are emitted.
  */
 
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,8 @@ import { randomUUID } from "node:crypto";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const REQUIRED_PROFILE_KEYS = ["arrival_rate_rps", "concurrency", "tenant_count", "history_skew"];
+const MEASURED_TIMING_EVENTS = new Set(["first_open", "revisit", "selection", "ingestion", "queue"]);
+const MEASURED_METRICS = new Set(["arrival_rate_rps", "operator_arrival_rate_rps"]);
 
 export class WorkloadBlocked extends Error {
   constructor(message) {
@@ -183,9 +185,67 @@ export async function loadRuntimeInput(env = process.env) {
   return Object.freeze({ profile, appUrl, databaseUrl, scenarios, cycles, jobs, arrivalIntervalMs: 1000 / profile.dimensions.arrival_rate_rps });
 }
 
+export function measuredRecord(type, profile, fields) {
+  requiredString(profile, "measurement profile");
+  if (type === "timing") {
+    if (!MEASURED_TIMING_EVENTS.has(fields?.event)) throw new WorkloadBlocked(`unsupported timing event: ${String(fields?.event)}`);
+    if (!Number.isFinite(fields?.duration_ms) || fields.duration_ms < 0) throw new WorkloadBlocked(`invalid observed duration for ${fields?.event}`);
+    return { type, profile, event: fields.event, duration_ms: fields.duration_ms, sample: fields.sample };
+  }
+  if (type === "metric") {
+    if (!MEASURED_METRICS.has(fields?.name)) throw new WorkloadBlocked(`unsupported measured metric: ${String(fields?.name)}`);
+    if (!Number.isFinite(fields?.value) || fields.value < 0) throw new WorkloadBlocked(`invalid observed metric for ${fields?.name}`);
+    return { type, profile, name: fields.name, value: fields.value, sample: fields.sample };
+  }
+  throw new WorkloadBlocked(`unsupported measurement type: ${type}`);
+}
+
+/**
+ * Convert a source-fixture/provider-double observation into the only valid
+ * ingestion timing record. A browser navigation to a row that already
+ * existed before the workload began cannot satisfy this contract: the source
+ * arrival timestamp, source message id, and projected version are all
+ * required. The release runner currently has no source-arrival injector, so
+ * this remains an explicit adapter contract rather than a fabricated sample.
+ */
+export function sourceArrivalTiming(profile, observation) {
+  requiredString(profile, "measurement profile");
+  if (!observation || typeof observation !== "object" || Array.isArray(observation)) {
+    throw new WorkloadBlocked("source-arrival observation must be an object");
+  }
+  const targetId = uuid(observation.targetId ?? observation.target_id, "source-arrival targetId");
+  const sourceMessageId = uuid(observation.sourceMessageId ?? observation.source_message_id, "source-arrival sourceMessageId");
+  const arrivalAtMs = Number(observation.arrivalAtMs ?? observation.arrival_at_ms);
+  const observedAtMs = Number(observation.observedAtMs ?? observation.observed_at_ms);
+  if (!Number.isFinite(arrivalAtMs) || arrivalAtMs < 0) throw new WorkloadBlocked("source-arrival arrivalAtMs must be a finite non-negative timestamp");
+  if (!Number.isFinite(observedAtMs) || observedAtMs < 0) throw new WorkloadBlocked("source-arrival observedAtMs must be a finite non-negative timestamp");
+  if (observedAtMs <= arrivalAtMs) throw new WorkloadBlocked("source-arrival observation must occur after source arrival");
+  const projectedVersion = positiveInteger(observation.projectedVersion ?? observation.projected_version, "source-arrival projectedVersion");
+  const inboundRevision = positiveInteger(observation.inboundRevision ?? observation.inbound_revision, "source-arrival inboundRevision");
+  const sourceCaptureGeneration = positiveInteger(observation.sourceCaptureGeneration ?? observation.source_capture_generation, "source-arrival sourceCaptureGeneration");
+  return measuredRecord("timing", profile, {
+    event: "ingestion",
+    duration_ms: observedAtMs - arrivalAtMs,
+    sample: {
+      boundary: "source_arrival_to_exact_projected_version",
+      source: "owned_provider_double_or_source_fixture",
+      targetId,
+      sourceMessageId,
+      inboundRevision,
+      sourceCaptureGeneration,
+      arrivalAtMs,
+      observedAtMs,
+      projectedVersion,
+    },
+  });
+}
+
 function emitTiming(profile, event, durationMs, sample) {
-  if (!Number.isFinite(durationMs) || durationMs < 0) throw new Error(`invalid observed duration for ${event}`);
-  process.stdout.write(`${JSON.stringify({ type: "timing", profile, event, duration_ms: durationMs, sample })}\n`);
+  process.stdout.write(`${JSON.stringify(measuredRecord("timing", profile, { event, duration_ms: durationMs, sample }))}\n`);
+}
+
+function emitMetric(profile, name, value, sample) {
+  process.stdout.write(`${JSON.stringify(measuredRecord("metric", profile, { name, value, sample }))}\n`);
 }
 
 function sleep(milliseconds) {
@@ -311,12 +371,16 @@ async function terminalReply(page, operationId, deadline) {
   throw new WorkloadBlocked(`reply operation ${operationId} did not reach a terminal receipt before the bound`);
 }
 
-async function runCycle(browser, input, job, sample) {
+async function runCycle(browser, input, job, sample, onCycleStart) {
   const scenario = job.scenario;
   const context = await browser.newContext({ baseURL: scenario.appUrl ?? input.appUrl, storageState: scenario.storageState });
   const page = await context.newPage();
   const deadline = Date.now() + positiveNumber(process.env.INBOX_RELEASE_CYCLE_TIMEOUT_MS ?? 120_000, "INBOX_RELEASE_CYCLE_TIMEOUT_MS");
   try {
+    // The readiness signal is deliberately after browser context/page
+    // creation.  A launched browser with no active cycle must not unblock
+    // the fault/resource adapter.
+    await onCycleStart?.();
     await page.goto("/inbox?view=all", { waitUntil: "domcontentloaded", timeout: 30_000 });
     const list = page.getByRole("list", { name: "Inbox conversations", exact: true });
     await list.waitFor({ state: "visible", timeout: 30_000 });
@@ -354,6 +418,7 @@ async function runCycle(browser, input, job, sample) {
     emitTiming(input.profile.name, "selection", performance.now() - selectionStart, sample);
 
     const actionKey = randomUUID();
+    const metadataQueueStart = performance.now();
     const metadataPrepared = await browserJson(page, "/api/inbox/actions/prepare", "POST", {
       idempotencyKey: actionKey,
       targets: [{ kind: "conversation", id: job.conversationId }],
@@ -369,15 +434,26 @@ async function runCycle(browser, input, job, sample) {
     const metadataOperationId = uuid(acceptedMetadata.operationId, "metadata operationId");
     const metadataStatus = await terminalAction(page, metadataOperationId, deadline);
     if (metadataStatus.result !== "succeeded") throw new WorkloadBlocked(`metadata operation ended ${String(metadataStatus.result)}`);
+    emitTiming(input.profile.name, "queue", performance.now() - metadataQueueStart, {
+      phase: "metadata_accept_to_terminal_receipt",
+      operationId: metadataOperationId,
+      sample,
+    });
     const metadataRecovery = await browserJson(page, `/api/inbox/operations/recover?preparationId=${encodeURIComponent(metadataPreparationId)}&idempotencyKey=${encodeURIComponent(actionKey)}`);
     if (metadataRecovery.state !== "accepted") throw new WorkloadBlocked("metadata recovery did not return the accepted receipt");
 
     const replyKey = randomUUID();
+    const replyQueueStart = performance.now();
     const replyPrepared = await browserJson(page, "/api/inbox/replies/prepare", "POST", { sourceOperationId: metadataOperationId, idempotencyKey: replyKey });
     const replyPreparationId = uuid(replyPrepared.preparationId, "reply preparationId");
     const acceptedReply = await browserJson(page, "/api/inbox/replies/accept", "POST", { preparationId: replyPreparationId, idempotencyKey: replyKey });
     const replyOperationId = uuid(acceptedReply.operationId, "reply operationId");
     await terminalReply(page, replyOperationId, deadline);
+    emitTiming(input.profile.name, "queue", performance.now() - replyQueueStart, {
+      phase: "reply_accept_to_terminal_receipt",
+      operationId: replyOperationId,
+      sample,
+    });
     const replyRecovery = await browserJson(page, `/api/inbox/replies/recover?preparationId=${encodeURIComponent(replyPreparationId)}&idempotencyKey=${encodeURIComponent(replyKey)}`);
     if (replyRecovery.state !== "accepted") throw new WorkloadBlocked("reply recovery did not return the accepted receipt");
 
@@ -399,6 +475,36 @@ async function withConcurrency(jobs, concurrency, task) {
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, worker));
   return results;
+}
+
+/**
+ * Run the measured browser cycles and expose the first real cycle boundary.
+ * The boundary is reached by runCycle only after it has created a browser
+ * context and page, so readiness cannot be published during browser launch
+ * or database preflight.
+ */
+export async function runWorkloadCycles({ browser, input, jobs, concurrency, onFirstCycleStart, cycleRunner = runCycle }) {
+  const startedAt = performance.now();
+  const cycleStarts = [];
+  let firstCycleStarted = false;
+  let firstCycleReady;
+  const markFirstCycleStarted = async () => {
+    if (!firstCycleReady) {
+      firstCycleStarted = true;
+      firstCycleReady = Promise.resolve().then(() => onFirstCycleStart?.());
+    }
+    await firstCycleReady;
+  };
+  const results = await withConcurrency(jobs, concurrency, async (job) => {
+    const delay = job.index * input.arrivalIntervalMs - (performance.now() - startedAt);
+    if (delay > 0) await sleep(delay);
+    cycleStarts.push(performance.now());
+    return cycleRunner(browser, input, job, job.index + 1, markFirstCycleStarted);
+  });
+  // Keep this explicit so future changes cannot accidentally make an empty
+  // plan look ready to the fault adapter.
+  if (jobs.length > 0 && !firstCycleStarted) throw new WorkloadBlocked("workload completed without an observed browser cycle start");
+  return { results, cycleStarts };
 }
 
 async function verifyDatabaseIdentity(client, env) {
@@ -441,6 +547,16 @@ async function verifyPersistedCycle(client, result) {
   }
 }
 
+async function signalWorkloadReady(env, profile) {
+  const markerPath = env.INBOX_RELEASE_WORKLOAD_READY_FILE;
+  if (!markerPath) return;
+  try {
+    await writeFile(markerPath, JSON.stringify({ profile, ready_at_unix_ms: Date.now() }) + "\n", { flag: "wx" });
+  } catch (error) {
+    throw new WorkloadBlocked(`cannot publish workload-ready marker: ${markerPath}`);
+  }
+}
+
 export async function main(env = process.env) {
   const input = await loadRuntimeInput(env);
   const { chromium } = await import("@playwright/test");
@@ -456,12 +572,24 @@ export async function main(env = process.env) {
       await database.query("ROLLBACK").catch(() => {});
     }
     browser = await chromium.launch({ headless: env.INBOX_RELEASE_HEADLESS !== "false" });
-    const startedAt = performance.now();
-    const results = await withConcurrency(input.jobs, input.profile.dimensions.concurrency, async (job) => {
-      const delay = job.index * input.arrivalIntervalMs - (performance.now() - startedAt);
-      if (delay > 0) await sleep(delay);
-      return runCycle(browser, input, job, job.index + 1);
+    const { results, cycleStarts } = await runWorkloadCycles({
+      browser,
+      input,
+      jobs: input.jobs,
+      concurrency: input.profile.dimensions.concurrency,
+      onFirstCycleStart: () => signalWorkloadReady(env, input.profile.name),
     });
+    if (cycleStarts.length < 2) throw new WorkloadBlocked("at least two observed cycle starts are required to measure arrival rate");
+    cycleStarts.sort((left, right) => left - right);
+    for (let index = 1; index < cycleStarts.length; index += 1) {
+      const intervalMs = cycleStarts[index] - cycleStarts[index - 1];
+      if (!(intervalMs > 0)) throw new WorkloadBlocked("arrival interval was not measurable at the workload clock resolution");
+      emitMetric(input.profile.name, "operator_arrival_rate_rps", 1000 / intervalMs, {
+        basis: "observed_operator_cycle_start_interval",
+        interval_ms: intervalMs,
+        sample: index,
+      });
+    }
     if (new Set(results.map((result) => result.metadataOperationId)).size !== results.length || new Set(results.map((result) => result.replyOperationId)).size !== results.length) throw new WorkloadBlocked("workload produced duplicate operation receipts");
     await database.query("BEGIN TRANSACTION READ ONLY");
     try {

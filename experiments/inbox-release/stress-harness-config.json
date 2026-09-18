@@ -27,6 +27,22 @@
   "required_timing_events": ["first_open", "revisit", "selection", "ingestion", "queue"],
   "required_system_metrics": ["cpu_percent", "memory_bytes", "locks", "connections"],
   "required_recovery": true,
+  "source_fixture": {
+    "adapter": "experiments/inbox-release/browser-workload/source-arrival-adapter.mjs",
+    "requires_explicit_opt_in": true,
+    "target": "exact loopback HTTP fixture and exact database marker",
+    "message_scope": "explicit pre-seeded org/conversation/contact/property/sender identity",
+    "cleanup": "adapter writes an owned message-id manifest; no broad or implicit cleanup",
+    "schedule": "open_loop",
+    "message_count_env": "INBOX_RELEASE_SOURCE_MESSAGE_COUNT",
+    "message_bound_env": "INBOX_RELEASE_SOURCE_MAX_MESSAGES",
+    "bound_rule": "count must be explicit and no greater than the operator-supplied bound"
+  },
+  "resource_sampling": {
+    "interval_ms": 2500,
+    "window_ms": 10000,
+    "synchronized_with_workload": true
+  },
   "timing_threshold_source": "experiments/inbox-release/release-manifest.json",
   "timing_thresholds": {
     "first_open_p95_ms": null,
@@ -36,7 +52,8 @@
   "measurement_protocol": {
     "input": "JSONL emitted by the workload and fault adapters",
     "timing_record": {"type": "timing", "event": "first_open|revisit|selection|ingestion|queue", "duration_ms": "positive number"},
-    "metric_record": {"type": "metric", "name": "cpu_percent|memory_bytes|locks|connections", "value": "non-negative number"},
+    "metric_record": {"type": "metric", "name": "cpu_percent|memory_bytes|locks|connections|operator_arrival_rate_rps", "value": "non-negative number"},
+    "ingestion_record": {"type": "timing", "event": "ingestion", "sample.boundary": "source_arrival_to_exact_projected_version", "sample.sourceMessageId": "provider-double/source-fixture id", "sample.inboundRevision": "positive server-owned public.messages.inbox_inbound_revision identity", "sample.sourceCaptureGeneration": "positive post-commit inbox_message_capture.dirty.generation cutoff", "sample.projectedVersion": "positive integer target source_generation after coherent catch-up"},
     "recovery_record": {"type": "recovery", "fault": "owned fixture fault name", "recovered": "boolean", "duration_ms": "positive number"},
     "adapter_contract": "The adapter must report real observations from the marked isolated target; synthetic or historical-only values are rejected by the release gate."
   },

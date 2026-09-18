@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { findRow, nextVirtualScrollTop, planWork, waitForDetailState, waitForSelectionFeedback, WorkloadBlocked } from "./adapter.mjs";
+import { findRow, measuredRecord, nextVirtualScrollTop, planWork, runWorkloadCycles, sourceArrivalTiming, waitForDetailState, waitForSelectionFeedback, WorkloadBlocked } from "./adapter.mjs";
 
 const id = (number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 
@@ -50,6 +50,112 @@ test("rejects a measured workload without enough distinct pre-seeded targets", (
     () => planWork({ scenarios: [{ ...scenario(1, 1), orgId: id(1) }, { ...scenario(2, 1), orgId: id(2) }], cycles: 3, concurrency: 2, tenantCount: 2 }),
     (error) => error instanceof WorkloadBlocked && /no unique pre-seeded conversation/.test(error.message),
   );
+});
+
+test("counts only delayed source arrival to the exact projected version", () => {
+  const record = sourceArrivalTiming("current", {
+    targetId: id(700),
+    sourceMessageId: id(701),
+    inboundRevision: 3,
+    sourceCaptureGeneration: 8,
+    arrivalAtMs: 10_000,
+    observedAtMs: 10_250,
+    projectedVersion: 4,
+  });
+  assert.deepEqual(record, {
+    type: "timing",
+    profile: "current",
+    event: "ingestion",
+    duration_ms: 250,
+    sample: {
+      boundary: "source_arrival_to_exact_projected_version",
+      source: "owned_provider_double_or_source_fixture",
+      targetId: id(700),
+      sourceMessageId: id(701),
+      inboundRevision: 3,
+      sourceCaptureGeneration: 8,
+      arrivalAtMs: 10_000,
+      observedAtMs: 10_250,
+      projectedVersion: 4,
+    },
+  });
+});
+
+test("does not count a preexisting row as source ingestion", () => {
+  assert.throws(
+    () => sourceArrivalTiming("current", {
+      targetId: id(702),
+      sourceMessageId: id(703),
+      observedAtMs: 10_250,
+      projectedVersion: 1,
+    }),
+    (error) => error instanceof WorkloadBlocked && /arrivalAtMs/.test(error.message),
+  );
+  assert.throws(
+    () => sourceArrivalTiming("current", {
+      targetId: id(702),
+      sourceMessageId: id(703),
+      arrivalAtMs: 10_250,
+      observedAtMs: 10_250,
+      projectedVersion: 1,
+    }),
+    (error) => error instanceof WorkloadBlocked && /after source arrival/.test(error.message),
+  );
+});
+
+test("emits bounded observed operator arrival records", () => {
+  assert.deepEqual(
+    measuredRecord("metric", "three_x", {
+      name: "operator_arrival_rate_rps",
+      value: 3.25,
+      sample: { basis: "observed_operator_cycle_start_interval" },
+    }),
+    {
+      type: "metric",
+      profile: "three_x",
+      name: "operator_arrival_rate_rps",
+      value: 3.25,
+      sample: { basis: "observed_operator_cycle_start_interval" },
+    },
+  );
+  assert.throws(() => measuredRecord("timing", "current", { event: "queue", duration_ms: -1 }), WorkloadBlocked);
+  assert.throws(() => measuredRecord("metric", "current", { name: "operator_arrival_rate_rps", value: Number.NaN }), WorkloadBlocked);
+});
+
+test("publishes readiness only after the first browser cycle starts", async () => {
+  const events = [];
+  let browserLaunched = false;
+  let releaseLaunch;
+  const launch = new Promise((resolve) => { releaseLaunch = resolve; });
+  const jobs = [{ index: 0, scenario: {}, conversationId: id(800) }, { index: 1, scenario: {}, conversationId: id(801) }];
+  const run = launch.then(() => runWorkloadCycles({
+    browser: {},
+    input: { arrivalIntervalMs: 0 },
+    jobs,
+    concurrency: 2,
+    onFirstCycleStart: () => {
+      assert.equal(browserLaunched, true);
+      events.push("ready");
+    },
+    cycleRunner: async (_browser, _input, _job, _sample, onCycleStart) => {
+      events.push("cycle-open");
+      await onCycleStart();
+      events.push("cycle-work");
+      return { metadataOperationId: `metadata-${_job.index}`, replyOperationId: `reply-${_job.index}` };
+    },
+  }));
+
+  // A delayed browser launch must not publish the marker or start a cycle.
+  await Promise.resolve();
+  assert.deepEqual(events, []);
+  browserLaunched = true;
+  releaseLaunch();
+  await run;
+  assert.equal(events.filter((event) => event === "ready").length, 1);
+  const readyIndex = events.indexOf("ready");
+  assert.ok(readyIndex >= 0);
+  assert.ok(events.slice(0, readyIndex).every((event) => event === "cycle-open"));
+  assert.ok(events.slice(readyIndex + 1).includes("cycle-work"));
 });
 
 test("does not count the detail shell before delayed history content is ready", async () => {

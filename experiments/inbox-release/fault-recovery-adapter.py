@@ -20,9 +20,9 @@ import secrets
 import subprocess
 import sys
 import time
-from urllib.parse import urlencode
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,17 +37,12 @@ CONTAINERS = {
     "gateway": "sandra-inbox-release-http-kong-20260917",
     "realtime": "sandra-inbox-release-http-realtime-20260917",
     "projection": "sandra-inbox-release-projection-worker-20260917",
+    "restate": "sandra-inbox-release-restate-20260917",
+    "electric": "sandra-inbox-release-electric-20260917",
+    "operation-worker": "sandra-inbox-release-operation-worker-20260917",
+    "reply-worker": "sandra-inbox-release-reply-worker-20260917",
+    "relay": "sandra-inbox-release-relay-20260917",
 }
-if os.environ.get("INBOX_RELEASE_FULL_RUNTIME") == "1":
-    CONTAINERS.update(
-        {
-            "restate": "sandra-inbox-release-restate-20260917",
-            "electric": "sandra-inbox-release-electric-20260917",
-            "operation-worker": "sandra-inbox-release-operation-worker-20260917",
-            "reply-worker": "sandra-inbox-release-reply-worker-20260917",
-            "relay": "sandra-inbox-release-relay-20260917",
-        }
-    )
 RETIRED_PROJECTION = "sandra-inbox-release-http-projection-20260917"
 HEALTH = {
     "db": ("db", None),
@@ -56,18 +51,36 @@ HEALTH = {
     "gateway": ("http", "http://127.0.0.1:54321/auth/v1/health"),
     "realtime": ("http", "http://127.0.0.1:54321/realtime/v1/"),
     "projection": ("http", "http://127.0.0.1:59081/health"),
+    "restate": ("http", "http://127.0.0.1:9070/health"),
+    "electric": ("http", "http://127.0.0.1:58787/health"),
+    "operation-worker": ("http", "http://127.0.0.1:9080/readyz"),
+    "reply-worker": ("http", "http://127.0.0.1:9081/readyz"),
+    "relay": ("http", "http://127.0.0.1:58787/health"),
 }
-if os.environ.get("INBOX_RELEASE_FULL_RUNTIME") == "1":
-    HEALTH.update(
-        {
-            "restate": ("http", "http://127.0.0.1:9070/health"),
-            "electric": ("relay", "http://127.0.0.1:58787/health"),
-            "operation-worker": ("http", "http://127.0.0.1:9080/readyz"),
-            "reply-worker": ("http", "http://127.0.0.1:9081/readyz"),
-            "relay": ("http", "http://127.0.0.1:58787/health"),
-        }
-    )
 FAULTS = set(CONTAINERS)
+HTTP_FIXTURE_SERVICES = {"db", "auth", "rest", "gateway", "realtime"}
+RUNTIME_SERVICES = set(CONTAINERS) - HTTP_FIXTURE_SERVICES
+RUNTIME_COMPONENTS = {
+    "projection": "projection-worker",
+    "reply-worker": "reply-send-worker",
+}
+
+
+def active_services() -> set[str]:
+    services = set(HTTP_FIXTURE_SERVICES) | {"projection"}
+    if os.environ.get("INBOX_RELEASE_FULL_RUNTIME") == "1":
+        services |= RUNTIME_SERVICES
+    return services
+
+
+def normalize_faults(value: object) -> list[str]:
+    if not isinstance(value, list) or not value or len(value) > 8 or any(not isinstance(item, str) for item in value):
+        fail("INBOX_RELEASE_FAULTS must be a non-empty array of at most eight fault names")
+    normalized = [item[:-8] if item.endswith("_restart") else item for item in value]
+    unsupported = sorted(set(normalized) - FAULTS)
+    if unsupported:
+        fail(f"unsupported fault name: {unsupported}")
+    return normalized
 
 
 def fail(message: str) -> None:
@@ -87,23 +100,21 @@ def inspect(name: str) -> dict:
         fail(f"expected one owned container: {name}")
     row = rows[0]
     labels = row.get("Config", {}).get("Labels", {})
-    runtime_components = {CONTAINERS["projection"]}
-    if os.environ.get("INBOX_RELEASE_FULL_RUNTIME") == "1":
-        runtime_components.update(
-            CONTAINERS[key]
-            for key in ("restate", "electric", "operation-worker", "reply-worker", "relay")
-        )
-    expected_purpose = "sandra-inbox-release-runtime" if name in runtime_components else "sandra-inbox-release-http"
+    runtime_names = {CONTAINERS[service] for service in RUNTIME_SERVICES}
+    expected_purpose = "sandra-inbox-release-runtime" if name in runtime_names else "sandra-inbox-release-http"
     if labels.get("purpose") != expected_purpose or labels.get("owner") != "release-infra" or labels.get("marker") != MARKER:
         fail(f"ownership marker mismatch: {name}")
-    if name == CONTAINERS["projection"] and labels.get("component") != "projection-worker":
-        fail(f"projection component marker mismatch: {name}")
+    expected_component = next((service for service, container in CONTAINERS.items() if container == name and service in RUNTIME_SERVICES), None)
+    if expected_component is not None:
+        expected_component = RUNTIME_COMPONENTS.get(expected_component, expected_component)
+        if labels.get("component") != expected_component:
+            fail(f"runtime component marker mismatch: {name}")
     if row.get("State", {}).get("Status") != "running":
         fail(f"container is not running: {name}")
     return row
 
 
-def verify_target() -> None:
+def verify_target(required_faults: set[str]) -> None:
     if os.environ.get("INBOX_RELEASE_TARGET_PROBED") != "true":
         fail("independent target probe is required")
     if os.environ.get("INBOX_RELEASE_TARGET_CONTAINER_MARKER") != MARKER or os.environ.get("INBOX_RELEASE_TARGET_DATABASE_MARKER") != DATABASE_MARKER:
@@ -112,8 +123,11 @@ def verify_target() -> None:
         fail("provider traffic is not explicitly disabled")
     if os.environ.get("INBOX_RELEASE_CUSTOMER_SENDS", "false") != "false":
         fail("customer sends are forbidden")
-    for name in CONTAINERS.values():
-        inspect(name)
+    required_services = set(HTTP_FIXTURE_SERVICES) | {"projection"}
+    if os.environ.get("INBOX_RELEASE_FULL_RUNTIME") == "1" or required_faults & RUNTIME_SERVICES:
+        required_services = set(CONTAINERS)
+    for service in sorted(required_services):
+        inspect(CONTAINERS[service])
     retired = json.loads(docker("inspect", RETIRED_PROJECTION)) if _exists(RETIRED_PROJECTION) else []
     if retired:
         if len(retired) != 1:
@@ -211,10 +225,30 @@ def bytes_value(value: str) -> int:
 
 
 def resources() -> list[dict]:
-    stats = json.loads("[" + ",".join(docker("stats", "--no-stream", "--format", "{{json .}}", name).splitlines()[0] for name in CONTAINERS.values()) + "]")
+    """Read all owned container stats from one Docker CLI snapshot.
+
+    Docker accepts multiple names in one invocation and emits one JSON object
+    per name. The checked-in fixture cadence is measured against that batched
+    call, so require a complete batch and aggregate only that single timestamp.
+    """
+    services = sorted(active_services())
+    names = [CONTAINERS[service] for service in services]
+    raw = docker("stats", "--no-stream", "--format", "{{json .}}", *names)
+    stats = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            stats.append(json.loads(line))
+        except json.JSONDecodeError:
+            fail("Docker stats emitted a non-JSON snapshot row")
+    by_name = {row.get("Name"): row for row in stats if isinstance(row, dict) and isinstance(row.get("Name"), str)}
+    if set(by_name) != set(names):
+        fail(f"Docker stats snapshot is incomplete: expected {len(names)} containers, got {len(by_name)}")
     cpu = 0.0
     memory = 0
-    for row in stats:
+    for name in names:
+        row = by_name[name]
         cpu += float(row["CPUPerc"].rstrip("%"))
         memory += bytes_value(row["MemUsage"].split("/")[0].strip())
     db = CONTAINERS["db"]
@@ -226,6 +260,90 @@ def resources() -> list[dict]:
         {"type": "metric", "profile": profile, "name": "connections", "value": float(connections)},
         {"type": "metric", "profile": profile, "name": "locks", "value": float(locks)},
     ]
+
+
+def positive_env_ms(name: str) -> float:
+    raw = os.environ.get(name)
+    try:
+        value = float(raw) if raw is not None else 0.0
+    except ValueError:
+        value = 0.0
+    if not value or value <= 0:
+        fail(f"{name} must be a positive millisecond value")
+    return value
+
+
+def wait_for_workload_ready(timeout: float = 30.0) -> None:
+    marker_path = os.environ.get("INBOX_RELEASE_WORKLOAD_READY_FILE")
+    if not marker_path:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if os.path.isfile(marker_path):
+            return
+        time.sleep(0.05)
+    fail(f"workload did not publish its ready marker: {marker_path}")
+
+
+def resource_sampling_summary(sample_times: list[float], interval_ms: float, window_ms: float) -> dict:
+    """Validate coverage and report the cadence actually observed.
+
+    The expected count is derived from the configured window and interval,
+    with a two-sample floor so a short test cannot pass on one snapshot. The
+    caller must buffer observations until this contract passes; no incomplete
+    sample set is emitted as evidence.
+    """
+    expected_samples = max(2, int(window_ms // interval_ms))
+    if len(sample_times) < expected_samples:
+        fail(
+            "resource sampling coverage is insufficient: "
+            f"expected at least {expected_samples} batched samples, got {len(sample_times)}"
+        )
+    intervals_ms = [
+        (sample_times[index] - sample_times[index - 1]) * 1000
+        for index in range(1, len(sample_times))
+    ]
+    if any(interval <= 0 for interval in intervals_ms):
+        fail("resource sampling timestamps are not strictly increasing")
+    elapsed_ms = (sample_times[-1] - sample_times[0]) * 1000
+    return {
+        "sample_count": len(sample_times),
+        "coverage_elapsed_ms": elapsed_ms,
+        "configured_interval_ms": interval_ms,
+        "configured_window_ms": window_ms,
+        "actual_interval_mean_ms": sum(intervals_ms) / len(intervals_ms),
+        "actual_interval_min_ms": min(intervals_ms),
+        "actual_interval_max_ms": max(intervals_ms),
+    }
+
+
+def sample_resources() -> None:
+    interval_ms = positive_env_ms("INBOX_RELEASE_RESOURCE_SAMPLE_INTERVAL_MS")
+    window_ms = positive_env_ms("INBOX_RELEASE_RESOURCE_SAMPLE_WINDOW_MS")
+    deadline = time.monotonic() + window_ms / 1000
+    observations: list[tuple[float, list[dict]]] = []
+    while time.monotonic() < deadline or not observations:
+        sampled_at = time.monotonic()
+        observations.append((sampled_at, resources()))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        # Schedule from the initial sample rather than sleeping for the
+        # interval after each batch.  This keeps a slow Docker call visible in
+        # the measured cadence instead of silently extending the window.
+        next_sample = observations[0][0] + len(observations) * interval_ms / 1000
+        time.sleep(max(0.0, min(next_sample - time.monotonic(), remaining)))
+    summary = resource_sampling_summary([sampled_at for sampled_at, _records in observations], interval_ms, window_ms)
+    first_sample = observations[0][0]
+    for index, (sampled_at, records) in enumerate(observations):
+        sample_metadata = {
+            **summary,
+            "sample_index": index,
+            "sampled_at_ms_from_start": (sampled_at - first_sample) * 1000,
+        }
+        for record in records:
+            record["resource_sampling"] = sample_metadata
+            print(json.dumps(record, sort_keys=True), flush=True)
 
 
 def recover(kind: str) -> None:
@@ -241,11 +359,6 @@ def recover(kind: str) -> None:
         wait_db()
     elif service == "realtime":
         wait_realtime_websocket()
-    elif service == "electric":
-        # Electric is internal-only. The marked relay's health path is the
-        # observable upstream check and must recover after Electric restarts.
-        assert url is not None
-        wait_http(url)
     else:
         assert url is not None
         wait_http(url)
@@ -261,13 +374,14 @@ def recover(kind: str) -> None:
 
 def main() -> int:
     try:
-        verify_target()
         raw = os.environ.get("INBOX_RELEASE_FAULTS", "")
         if not raw:
             fail("INBOX_RELEASE_FAULTS must explicitly name real fixture faults")
         faults = json.loads(raw)
-        if not isinstance(faults, list) or not faults or len(faults) > 8 or any(not isinstance(value, str) for value in faults):
-            fail("INBOX_RELEASE_FAULTS must be a non-empty array of at most eight fault names")
+        normalized_faults = set(normalize_faults(faults))
+        verify_target(normalized_faults)
+        wait_for_workload_ready()
+        sample_resources()
         for kind in faults:
             recover(kind)
         return 0

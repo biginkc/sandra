@@ -14,6 +14,18 @@ SPEC.loader.exec_module(MODULE)
 
 
 class FaultRecoveryProbeTests(TestCase):
+    def test_resource_sampling_summary_matches_measured_fixture_cadence(self) -> None:
+        summary = MODULE.resource_sampling_summary(
+            [0.0, 2.5, 5.0, 7.5],
+            interval_ms=2500,
+            window_ms=10000,
+        )
+        self.assertEqual(summary["sample_count"], 4)
+        self.assertAlmostEqual(summary["actual_interval_mean_ms"], 2500.0)
+
+        with self.assertRaises(RuntimeError):
+            MODULE.resource_sampling_summary([0.0, 2.5], interval_ms=2500, window_ms=10000)
+
     def test_full_runtime_services_are_supervised_after_dependency_loss(self) -> None:
         compose = (MODULE_PATH.parent / "execution-stack-compose.yml").read_text()
         for service in ("restate", "electric", "operation-worker", "reply-send-worker", "projection-worker", "relay"):
