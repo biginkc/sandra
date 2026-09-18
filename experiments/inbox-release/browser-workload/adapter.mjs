@@ -398,9 +398,23 @@ async function runCycle(browser, input, job, sample, onCycleStart) {
       page = await context.newPage();
       await page.setExtraHTTPHeaders({ "Cache-Control": "no-cache" });
     }
-    await page.goto("/inbox?view=all", { waitUntil: "domcontentloaded", timeout: 30_000 });
-    const list = page.getByRole("list", { name: "Inbox conversations", exact: true });
-    await list.waitFor({ state: "visible", timeout: 30_000 });
+    const loadList = async () => {
+      await page.goto("/inbox?view=all", { waitUntil: "domcontentloaded", timeout: 30_000 });
+      const list = page.getByRole("list", { name: "Inbox conversations", exact: true });
+      await list.waitFor({ state: "visible", timeout: 30_000 });
+      return list;
+    };
+    let list = await loadList();
+    // Workset creation is deliberately rate-limited server-side. A concurrent
+    // workload must observe the retry contract instead of treating a 429
+    // fallback shell as an empty Inbox.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const retryVisible = await page.getByRole("button", { name: "Retry list", exact: true }).count() > 0
+        || (await list.textContent())?.includes("Please wait before refreshing this view.");
+      if (!retryVisible) break;
+      await sleep(1_100);
+      list = await loadList();
+    }
     if (input.scenario === "reconnect") {
       await context.setOffline(true);
       await sleep(100);
@@ -520,7 +534,13 @@ export async function runWorkloadCycles({ browser, input, jobs, concurrency, onF
     await firstCycleReady;
   };
   const results = await withConcurrency(jobs, concurrency, async (job) => {
-    const delay = job.index * input.arrivalIntervalMs - (performance.now() - startedAt);
+    const burstCount = Math.min(3, jobs.length);
+    const scheduledOffset = input.scenario === "burst"
+      ? (job.index < burstCount
+        ? job.index * Math.max(1, input.arrivalIntervalMs / 10)
+        : burstCount * input.arrivalIntervalMs + (job.index - burstCount) * input.arrivalIntervalMs)
+      : job.index * input.arrivalIntervalMs;
+    const delay = scheduledOffset - (performance.now() - startedAt);
     if (delay > 0) await sleep(delay);
     cycleStarts.push(performance.now());
     return cycleRunner(browser, input, job, job.index + 1, markFirstCycleStarted);
