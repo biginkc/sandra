@@ -80,6 +80,55 @@ The probe also performs a WebSocket upgrade at `/realtime/v1/websocket` and
 requires HTTP 101; the marked gateway must route that request to Realtime's
 `/socket/websocket` endpoint. A 200 health response alone is insufficient.
 
+`realtime-cdc-proof.mjs` is the narrow authenticated CDC proof for that
+fixture. It requires the independent probe's exact API/database and identity
+markers, signs in the ordinary acceptance user with the anon key, subscribes
+to `public.messages` filtered to the explicitly supplied organization, and
+waits for `SUBSCRIBED` before inserting one generated UUID through the service
+client. It passes only when the subscribed client receives a WebSocket
+`postgres_changes` `INSERT` for that same UUID and organization. The proof
+does not REST-poll for the event, call a provider, or exercise outbound
+delivery. Its `finally` path deletes only that UUID within that organization,
+including after an uncertain insert response.
+
+The operator supplies the private runtime environment and the already
+pre-seeded scenario identities; the script never prints keys or passwords:
+
+```sh
+node experiments/inbox-release/realtime-cdc-proof.mjs
+```
+
+Required scenario variables are `INBOX_HTTP_CDC_ORG_ID`,
+`INBOX_HTTP_CDC_CONVERSATION_ID`, `INBOX_HTTP_CDC_CONTACT_ID`,
+`INBOX_HTTP_CDC_PROPERTY_ID`, `INBOX_HTTP_CDC_FROM_ADDRESS`, and
+`INBOX_HTTP_CDC_TO_ADDRESS`. The runtime environment must also provide the
+exact target markers, `INBOX_HTTP_ANON_KEY`, service key, existing acceptance
+user credentials, `INBOX_NO_PROVIDER=1`, and the exact loopback API/database
+values described above. `test_realtime_cdc_proof.mjs` exercises the guard and
+scenario validation without connecting to the fixture.
+
+The pinned image's tenant migrations require an administrative migration
+connection even when the long-running CDC process uses a constrained role.
+`realtime-bootstrap.py` is the reproducible repair path for the local fixture:
+its default mode is read-only, and `--apply` first validates the database
+marker, network/container labels, running image ID, and cached digest. It then
+grants only `REPLICATION` and `SET log_min_messages` to
+`supabase_realtime_admin`, runs the pinned image's pending migrations in a
+temporary marked container as `supabase_admin`, and restores the long-running
+container with the constrained role. The private migration env file is never
+read or printed by the script. The apply path requires both
+`INBOX_RELEASE_ALLOW_RUNTIME_MUTATION=1` and an explicit owner-readable
+`--migration-env-file`; it refuses shared or unmarked targets, image pulls,
+and incomplete migration catalogs. The temporary process does not self-seed;
+it must advance the existing `realtime-dev` tenant's migration ledger. Before
+stopping the service and after restoring it, the script asks the pinned image
+to decrypt the tenant settings and requires the effective `db_user` to remain
+`supabase_realtime_admin`; it also fingerprints the encrypted settings to
+reject any rewrite. It checks migration `20260709120000` and the
+`action_filter`/`selected_columns` subscription columns before reporting
+completion. A separate WebSocket/subscription probe remains required for
+functional event delivery.
+
 The packet also records the coordinator policy: exact-head Opus 5 approval is
 required, approval is invalidated by any new commit, and the coordinator gate
 must be satisfied before release status can advance.
@@ -217,8 +266,71 @@ reports timing budgets from the approved release manifest and keeps ingestion,
 queue, system, and recovery thresholds unjudged until the coordinator supplies
 and measures them.
 
+The browser workload adapter does not call navigation to a pre-seeded row
+ingestion. That row existed before the workload and therefore measures only
+read/load time. Ingestion remains missing until an owned provider-double or
+source-fixture adapter supplies a source message id and arrival timestamp and
+the read probe observes that exact message at a positive projected version.
+`sourceArrivalTiming` is the checked-in contract for that record and rejects
+observations without an arrival timestamp or with no delay. The checked-in
+`browser-workload/source-arrival-adapter.mjs` is the owned source-fixture
+path: it requires an exact pre-seeded org/conversation/contact/property/sender
+scenario, inserts only new inbound synthetic messages through the local
+Supabase service client, and polls the exact `last_message_id`, source
+generation, bridge revision, and filter revision over a read-only PostgreSQL
+connection. Each inserted message is read back in one post-commit query that
+captures its server-owned `public.messages.inbox_inbound_revision` as identity
+evidence and the target's `inbox_message_capture.dirty.generation` as the
+projection cutoff. The timing sample requires both values, but readiness uses
+only the dirty-generation counter because inbound revision is a separate
+per-conversation counter. A coalesced worker may have advanced
+`last_message_id` to a later message, which is valid after that generation
+catch-up and is recorded in the manifest rather than treated as
+intermediate-message loss. The adapter requires an explicit message count and
+operator-supplied bound (`INBOX_RELEASE_SOURCE_MESSAGE_COUNT` and
+`INBOX_RELEASE_SOURCE_MAX_MESSAGES`, with count no greater than the bound),
+schedules those inserts open-loop, and writes an ID manifest for cleanup
+ownership. The checked-in harness does not fill either value from historical
+volume data; absent workload dimensions remain blocked.
+It requires
+`INBOX_RELEASE_SOURCE_FIXTURE_ENABLED=1` and the runner's explicit
+`--source-arrival-command`; without those inputs ingestion remains blocked.
+The adapter accepts the private service key from `INBOX_RELEASE_SERVICE_ROLE_KEY`
+or the existing ignored fixture variable `HTTP_SERVICE_ROLE_KEY`, and accepts
+the exact database DSN from `INBOX_RELEASE_DATABASE_URL` or the projection
+fixture variable `INBOX_PROJECTION_DATABASE_URL`.
+Source IDs are planned and atomically written to the manifest before the first
+insert request. The bounded source schedule is open-loop: projection
+completion cannot delay later arrivals. Set
+`INBOX_RELEASE_SOURCE_BURST_SIZE`, `INBOX_RELEASE_SOURCE_BURST_GAP_MS`, and
+`INBOX_RELEASE_SOURCE_START_DELAY_MS` only for a measured fixture profile; a
+request error or timeout records that planned id as `uncertain` and aborts
+without retrying it. Each successful id is observed independently by exact
+message id and projection generation, and a skipped/unobservable id blocks
+the run rather than being attributed to a later projected row. The runner
+also passes the checked-in database purpose into the adapter's identity guard;
+the live fixture identity table's marker is the authoritative database row.
+The adapter names
+its cycle-start rate `operator_arrival_rate_rps`; it is the workload/operator
+arrival rate, not a new-message ingestion rate. Queue timings remain explicitly
+accept-to-terminal-receipt timings for metadata and reply operations. These
+records are emitted only after the corresponding observations; they are not
+inferred from configured rates. The runner starts the workload and
+source, workload, and fault/resource adapters together, and
+the fault adapter waits for the workload-ready marker before taking a bounded
+resource sample window. CPU, memory, lock, and connection records come from
+the marked containers and database. No threshold is invented for those records.
+
 `fault-recovery-adapter.py` is the checked-in fault/resource adapter. It
 requires `INBOX_RELEASE_FAULTS` to name real marked-container restarts, checks
 the Docker labels and database marker before every mutation, and emits only
 observed recovery and resource records. It returns `BLOCKED` when the owned
 fixture is stopped or any marker/health check is unavailable.
+
+When `INBOX_RELEASE_FULL_RUNTIME=1`, the same ownership guard includes the
+marked Restate, Electric, operation-worker, reply-worker, and relay containers.
+Recovery checks use Restate `/health`, operation/reply `/readyz`, relay `/health`,
+and the relay health path as the Electric upstream check. Supported fault names
+are the manifest container keys with an optional `_restart` suffix. The
+full-runtime process is still source-only until its images, role/publication,
+and registration receipts exist.
