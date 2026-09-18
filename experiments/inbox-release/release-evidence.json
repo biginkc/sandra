@@ -1,0 +1,44 @@
+{
+  "status": "RELEASE_CANDIDATE_WITH_BLOCKED_STRESS_GATES",
+  "candidate_sha": "d9fb0d8554ebe0396e1e56fea671e3e8cc712cb3",
+  "flags": {
+    "production_inbox_actions_server_enabled": "off",
+    "production_inbox_replies_server_enabled": "off",
+    "production_inbox_workspace_server_enabled": "off",
+    "acceptance_fixture_flags": "on"
+  },
+  "provider_traffic": false,
+  "customer_sends": false,
+  "owned_fixture": {
+    "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
+    "runtime_marker": "sandra-inbox-release-http-owned-20260917",
+    "base_url": "http://127.0.0.1:54321",
+    "database": "postgres",
+    "realtime_image_digest": "sha256:3211f8ebd59edcd0aa772186f1c8249c82c6b1ae5565f40dedb7aa93e951fe37"
+  },
+  "gates": {
+    "source_manifest": "PASS",
+    "acceptance_matrix": "PASS: 50 rows, 52 Playwright tests",
+    "http_stack_probe": "PASS: authenticated RPCs, WebSocket 101, projection health",
+    "worker_recovery": "PASS: realtime_restart 3020.6ms; projection_restart 1320.9ms",
+    "stress_harness_unit": "PASS: 6 tests",
+    "stress_measurements": "BLOCKED_UNJUDGED"
+  },
+  "validation": {
+    "release_unit_tests": "PASS: 42 tests",
+    "production_install_unit_tests": "PASS: 15 tests",
+    "inbox_vitest": "PASS: 562 tests",
+    "typecheck": "PASS",
+    "realtime_bootstrap_tests": "PASS: 23 tests",
+    "realtime_cdc_tests": "PASS: 8 tests"
+  },
+  "blocked_gates": [
+    "current_volume_stress: measured arrival rate, concurrency, tenant count, and history skew are not supplied",
+    "three_x_volume_stress: measured arrival rate, concurrency, tenant count, and history skew are not supplied",
+    "installed_schema_exact: PR611 is listed as an unmerged dependency",
+    "worker_recovery: PR607 is listed as an unmerged dependency",
+    "relay_parity: PR606 is listed as an unmerged dependency",
+    "pilot_enablement: PR610 is listed as an unmerged dependency"
+  ],
+  "scope": "Owned rehearsal evidence only; no production deployment or pilot enablement claim."
+}
