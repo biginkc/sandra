@@ -72,7 +72,7 @@ it("retains metadata selection and offers an explicit reply review after termina
     if (url.endsWith("/actions/prepare")) return Response.json({ preparationId: "00000000-0000-4000-8000-000000000007", idempotencyKey: body?.idempotencyKey, expiresAt: new Date(Date.now() + 60_000).toISOString(), definition: comboSaved.definition, items: [{ id: "item", target: { kind: "conversation", id: conversationId }, exclusion: null }], eligibleCount: 1, excludedCount: 0, effectCount: 1, followUp: { kind: "review_reply" } });
     if (url.startsWith("/api/inbox/operations/recover")) return Response.json({ state: "pending", operation: null });
     if (url.endsWith("/actions/accept")) return Response.json({ operationId: "00000000-0000-4000-8000-000000000008" });
-    if (url.endsWith("/operations/00000000-0000-4000-8000-000000000008")) return Response.json({ operationId: "00000000-0000-4000-8000-000000000008", completed: true, result: "succeeded", items: [], steps: [] });
+    if (url.endsWith("/operations/00000000-0000-4000-8000-000000000008")) return Response.json({ operationId: "00000000-0000-4000-8000-000000000008", completed: true, result: "partial", items: [{ id: "item", target: { kind: "conversation", id: conversationId }, state: "conflicted", code: "source_changed", exclusion: null }], steps: [] });
     if (url.endsWith("/replies/prepare")) return Response.json({ preparationId: "00000000-0000-4000-8000-000000000009", idempotencyKey: body?.idempotencyKey, expiresAt: new Date(Date.now() + 60_000).toISOString(), items: [{ id: "reply-item", target: { kind: "conversation", id: conversationId }, exclusion: null, recipient: { contactName: "Ada", propertyAddress: "123 Oak", renderedBody: "Hi there", to: "+15555550100" } }], recipientCount: 1, blockers: [] });
     return Response.json({});
   }));
@@ -82,6 +82,8 @@ it("retains metadata selection and offers an explicit reply review after termina
   fireEvent.click(screen.getByRole("button", { name: "Review saved action" }));
   await screen.findByText("1 eligible · 0 excluded · 1 changes");
   fireEvent.click(screen.getByRole("button", { name: "Accept reviewed action" }));
+  const metadataResults = await screen.findByRole("region", { name: "Saved action results" });
+  expect(metadataResults).toHaveTextContent("Ada: conflicted (source_changed)");
   await screen.findByRole("button", { name: "Review reply" });
   fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
   await screen.findByRole("region", { name: "Review saved reply" });
@@ -207,4 +209,28 @@ it("recovers an accepted action after reload and polls its standalone receipt", 
   expect(calls.some(url => url.startsWith("/api/inbox/operations/recover?preparationId="))).toBe(true);
   expect(screen.getByRole("link", { name: "Open action receipt" })).toHaveAttribute("href", `/inbox/operations/${operationId}`);
   expect(sessionStorage.getItem(key)).toBeNull();
+});
+
+it("shows a pending recovery affordance and clears it once the review expires", async () => {
+  const preparationId = "00000000-0000-4000-8000-000000000014";
+  const idempotencyKey = "00000000-0000-4000-8000-000000000015";
+  const key = `inbox-saved-action-recovery:${JSON.stringify([orgId, userId, userId, "1"])}`;
+  sessionStorage.setItem(key, JSON.stringify({ kind: "metadata", preparationId, idempotencyKey }));
+  let recoverCalls = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url === "/api/inbox/saved-actions") return Response.json({ items: [saved] });
+    if (url.startsWith("/api/inbox/operations/recover")) {
+      recoverCalls++;
+      return recoverCalls === 1 ? Response.json({ state: "pending", operation: null }) : Response.json({ state: "expired_not_accepted", operation: null });
+    }
+    return Response.json({});
+  }));
+  render(<Harness />);
+  await screen.findByText("The earlier action has not been confirmed yet. Its original identifiers are retained.");
+  expect(screen.getByRole("link", { name: "Open standalone recovery" })).toHaveAttribute("href", "/inbox/receipts");
+  fireEvent.click(screen.getByRole("button", { name: "Check earlier action" }));
+  await waitFor(() => expect(recoverCalls).toBe(2));
+  await waitFor(() => expect(screen.queryByText("The earlier action has not been confirmed yet. Its original identifiers are retained.")).toBeNull());
+  expect(sessionStorage.getItem(key)).toBeNull();
+  expect(screen.getByRole("button", { name: "Nurture + owner" })).not.toBeDisabled();
 });

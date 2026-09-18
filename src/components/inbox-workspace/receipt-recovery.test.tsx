@@ -45,3 +45,12 @@ it("removes only the matching expired entry", async () => {
   const remaining = JSON.parse(sessionStorage.getItem(storage)!);
   expect(remaining).toEqual({ kind: "reply", preparationId: prepB, idempotencyKey: keyB });
 });
+
+it("reads reply-composer recovery records from their identity-scoped registry", async () => {
+  const key = `inbox-reply-recovery:${JSON.stringify(Object.values(identity))}`;
+  sessionStorage.setItem(key, JSON.stringify({ kind: "reply", preparationId: prepA, idempotencyKey: keyA }));
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ state: "accepted", operation: { operationId: "00000000-0000-4000-8000-000000000040" } })));
+  render(<InboxReceiptRecovery identity={identity} />);
+  await screen.findByText("Accepted. Open the durable receipt to inspect progress.");
+  expect(screen.getByRole("link", { name: "Open receipt" })).toHaveAttribute("href", "/inbox/replies/00000000-0000-4000-8000-000000000040");
+});

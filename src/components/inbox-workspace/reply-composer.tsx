@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { TemplatePicker } from "@/app/(dashboard)/templates/template-picker";
+import type { InboxQueryIdentity } from "@/lib/inbox/workspace-query";
+import { forgetRecoveryEntry, recoveryStorageKey, rememberRecoveryEntry } from "./recovery-registry";
 
 type ReplyItem = { id: string; target: { kind: "conversation" | "unknown_sender_group"; id: string }; exclusion: string | null; recipient: null | { contactName: string; propertyAddress: string; renderedBody: string; to: string } };
 type PreparedReply = { preparationId: string; idempotencyKey: string; expiresAt: string; items: readonly ReplyItem[]; recipientCount: number; blockers: readonly string[] };
@@ -33,10 +35,11 @@ function decode(value: unknown, key: string, conversationId: string): PreparedRe
 /** Single-conversation composer using the reviewed bulk-reply route. It never
  * calls a provider or accepts from browser text until the server freezes the
  * recipient route and rendered body. */
-export function InboxReplyComposer({ conversationId, enabled = false }: { conversationId: string; enabled?: boolean }) {
+export function InboxReplyComposer({ conversationId, identity, enabled = false }: { conversationId: string; identity: InboxQueryIdentity; enabled?: boolean }) {
   const [state, setState] = useState<State>({ body: "", stage: "idle" });
   const [retry, setRetry] = useState(0);
   const request = useRef<AbortController | null>(null);
+  const recoveryStorage = recoveryStorageKey("inbox-reply-recovery", identity);
   useEffect(() => {
     request.current?.abort();
     setState({ body: "", stage: "idle" });
@@ -60,6 +63,9 @@ export function InboxReplyComposer({ conversationId, enabled = false }: { conver
   const accept = async () => {
     if (!state.prepared || state.stage !== "prepared" || state.prepared.recipientCount !== 1 || state.prepared.blockers.length || Date.parse(state.prepared.expiresAt) <= Date.now()) return;
     const prepared = state.prepared;
+    const recoveryEntry = { kind: "reply" as const, preparationId: prepared.preparationId, idempotencyKey: prepared.idempotencyKey };
+    try { rememberRecoveryEntry(recoveryStorage, recoveryEntry); }
+    catch { setState(current => ({ ...current, error: "This tab already has unresolved Inbox work. Check the receipt recovery page before accepting another reply." })); return; }
     const controller = new AbortController(); request.current?.abort(); request.current = controller;
     setState(current => ({ ...current, stage: "accepting", error: undefined }));
     try {
@@ -72,7 +78,10 @@ export function InboxReplyComposer({ conversationId, enabled = false }: { conver
           setState(current => ({ ...current, stage: "accepted", operationId, error: undefined }));
           return;
         }
-        if (recovered?.state === "expired_not_accepted") throw new Error("This review expired. Prepare the reply again.");
+        if (recovered?.state === "expired_not_accepted") {
+          forgetRecoveryEntry(recoveryStorage, recoveryEntry);
+          throw new Error("This review expired. Prepare the reply again.");
+        }
       }
       const response = await fetch("/api/inbox/replies/accept", { method: "POST", headers: { "content-type": "application/json" }, credentials: "same-origin", cache: "no-store", redirect: "error", body: JSON.stringify({ preparationId: prepared.preparationId, idempotencyKey: prepared.idempotencyKey }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]) });
       if (!response.ok) throw new Error("We could not confirm whether this reply started. Retry safely with this same review.");
@@ -85,6 +94,7 @@ export function InboxReplyComposer({ conversationId, enabled = false }: { conver
   useEffect(() => () => request.current?.abort(), []);
   useEffect(() => {
     if (!state.operationId) return;
+    const recoveryEntry = state.prepared ? { preparationId: state.prepared.preparationId, idempotencyKey: state.prepared.idempotencyKey } : null;
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
     async function poll() {
       try {
@@ -94,6 +104,7 @@ export function InboxReplyComposer({ conversationId, enabled = false }: { conver
         if (!value || value.operationId !== state.operationId || !Array.isArray(value.receipts)) throw new Error("Reply progress could not be verified.");
         if (value.dispatchComplete === true) {
           setState(current => ({ ...current, stage: "accepted", result: receiptResult(value.receipts), error: undefined }));
+          if (recoveryEntry) forgetRecoveryEntry(recoveryStorage, recoveryEntry);
           return;
         }
         timer = setTimeout(() => void poll(), 1000);
@@ -101,7 +112,7 @@ export function InboxReplyComposer({ conversationId, enabled = false }: { conver
     }
     void poll();
     return () => { controller.abort(); if (timer) clearTimeout(timer); };
-  }, [state.operationId, retry]);
+  }, [recoveryStorage, retry, state.operationId, state.prepared?.idempotencyKey, state.prepared?.preparationId]);
   if (!enabled) return null;
   const pending = state.stage === "preparing" || state.stage === "accepting";
   const editBody = (body: string) => setState(current => ({ body, stage: "idle", error: undefined }));

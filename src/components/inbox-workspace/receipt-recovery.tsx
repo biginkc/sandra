@@ -5,17 +5,23 @@ import type { InboxQueryIdentity } from "@/lib/inbox/workspace-query";
 import { parseRecoveryEntries, recoveryStorageKey, type RecoveryEntry, type RecoveryKind } from "./recovery-registry";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-type Entry = RecoveryEntry & { source: "action" | "saved"; id: string; state: "checking" | "pending" | "accepted" | "expired" | "error"; operationId?: string; error?: string };
+type Entry = RecoveryEntry & { source: "action" | "saved" | "reply"; id: string; state: "checking" | "pending" | "accepted" | "expired" | "error"; operationId?: string; error?: string };
+
+const prefixes = [
+  ["action", "inbox-action-recovery"],
+  ["saved", "inbox-saved-action-recovery"],
+  ["reply", "inbox-reply-recovery"],
+] as const;
 
 function readEntries(identity: InboxQueryIdentity): Entry[] {
   const records: Entry[] = [];
-  for (const [source, prefix] of [["action", "inbox-action-recovery"], ["saved", "inbox-saved-action-recovery"]] as const) {
+  for (const [source, prefix] of prefixes) {
     const key = recoveryStorageKey(prefix, identity);
     let values: RecoveryEntry[];
     try { values = parseRecoveryEntries(sessionStorage.getItem(key)); } catch { continue; }
     values.forEach((entry, index) => {
       if (!UUID.test(entry.preparationId) || !UUID.test(entry.idempotencyKey)) return;
-      const kind: RecoveryKind = source === "action" ? "metadata" : entry.kind === "reply" ? "reply" : "metadata";
+      const kind: RecoveryKind = source === "action" ? "metadata" : source === "reply" ? "reply" : entry.kind === "reply" ? "reply" : "metadata";
       records.push({ ...entry, kind, source, id: `${source}:${entry.preparationId}:${entry.idempotencyKey}:${index}`, state: "checking" });
     });
   }
@@ -31,7 +37,7 @@ export function InboxReceiptRecovery({ identity }: { identity: InboxQueryIdentit
   useEffect(() => { reload(); }, [reload]);
 
   const removeExpired = useCallback((entry: Entry) => {
-    const prefix = entry.source === "action" ? "inbox-action-recovery" : "inbox-saved-action-recovery";
+    const prefix = prefixes.find(([source]) => source === entry.source)?.[1] ?? "inbox-saved-action-recovery";
     const key = recoveryStorageKey(prefix, identity);
     try {
       const current = parseRecoveryEntries(sessionStorage.getItem(key));
