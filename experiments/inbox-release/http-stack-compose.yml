@@ -174,17 +174,18 @@ services:
     cpus: 0.25
 
   projection:
-    image: sandra-inbox-projection-worker:release-20260917
+    image: sandra-inbox-projection-worker:release-4850f8c
     pull_policy: never
-    container_name: sandra-inbox-release-http-projection-20260917
+    container_name: sandra-inbox-release-projection-worker-20260917
     restart: "no"
     network_mode: host
     env_file:
       - ${HTTP_PROJECTION_ENV_FILE:?set HTTP_PROJECTION_ENV_FILE to an ignored populated file}
     labels:
-      purpose: sandra-inbox-release-http
+      purpose: sandra-inbox-release-runtime
       owner: release-infra
       marker: sandra-inbox-release-http-owned-20260917
+      component: projection-worker
     mem_limit: 256m
     cpus: 0.25
 

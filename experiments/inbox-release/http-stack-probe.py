@@ -22,13 +22,14 @@ BASE = os.environ.get("INBOX_HTTP_BASE_URL", "http://127.0.0.1:54321")
 CONTAINER = "sandra-inbox-release-http-db-20260917"
 GATEWAY = "sandra-inbox-release-http-kong-20260917"
 REALTIME = "sandra-inbox-release-http-realtime-20260917"
-PROJECTION = "sandra-inbox-release-http-projection-20260917"
+PROJECTION = "sandra-inbox-release-projection-worker-20260917"
 AUTH = "sandra-inbox-release-http-auth-20260917"
 REST = "sandra-inbox-release-http-rest-20260917"
 MARKER = "sandra-inbox-release-http-owned-20260917"
 NETWORK = "sandra-inbox-release-http-20260917"
 REALTIME_DIGEST = "sha256:3211f8ebd59edcd0aa772186f1c8249c82c6b1ae5565f40dedb7aa93e951fe37"
-PROJECTION_DIGEST = "sha256:23776b77652be03e4619b5379f6070b1688fa2a2f9159a3dae9fc4f9fc41a283"
+PROJECTION_DIGEST = "sha256:ddc0a18b7682fa4a4a2e6d33f30477bf7bb65a69f42667b68f0fe3a62d8694b9"
+PROJECTION_IMAGE = "sandra-inbox-projection-worker:release-4850f8c"
 ORG = os.environ.get("INBOX_HTTP_ORG_ID", "11111111-1111-4111-8111-111111111111")
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -158,7 +159,7 @@ def main() -> int:
         raise RuntimeError("HTTP fixture Realtime image digest drift")
     projection = json.loads(docker("inspect", PROJECTION))[0]
     projection_labels = projection.get("Config", {}).get("Labels", {})
-    if projection_labels.get("purpose") != "sandra-inbox-release-http" or projection_labels.get("owner") != "release-infra" or projection_labels.get("marker") != MARKER:
+    if projection_labels.get("purpose") != "sandra-inbox-release-runtime" or projection_labels.get("owner") != "release-infra" or projection_labels.get("marker") != MARKER or projection_labels.get("component") != "projection-worker":
         raise RuntimeError("HTTP fixture projection ownership marker mismatch")
     if projection.get("State", {}).get("Status") != "running":
         raise RuntimeError("HTTP fixture projection worker is not running")
@@ -167,7 +168,7 @@ def main() -> int:
     if projection.get("HostConfig", {}).get("Memory") != 268435456 or projection.get("HostConfig", {}).get("NanoCpus") != 250000000:
         raise RuntimeError("HTTP fixture projection resource bound drift")
     projection_image = projection.get("Config", {}).get("Image")
-    if projection_image != "sandra-inbox-projection-worker:release-20260917":
+    if projection_image != PROJECTION_IMAGE:
         raise RuntimeError("HTTP fixture projection image tag drift")
     projection_image_inspect = json.loads(docker("image", "inspect", projection_image))[0]
     if projection_image_inspect.get("Id") != PROJECTION_DIGEST:
