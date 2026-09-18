@@ -190,7 +190,10 @@ BEGIN
  ELSIF p.status IS DISTINCT FROM 'prospect' THEN outcome:='already_lead';
  ELSE
   requirements:=jsonb_build_object('org_id',o,'dependencies',expected->'dependencies');
-  actual:=inbox_t2_policy.snapshot(o,expected->'dependencies');
+  SELECT coalesce(jsonb_agg(jsonb_build_object('namespace',d->>'namespace','key',d->'key') ORDER BY d->>'namespace',(d->'key')::text),'[]'::jsonb)
+    INTO requirements
+    FROM jsonb_array_elements(expected->'dependencies') d;
+  actual:=inbox_t2_policy.snapshot(o,requirements);
   IF actual IS DISTINCT FROM expected THEN RAISE EXCEPTION 'Dependency conflict';END IF;
   UPDATE public.properties SET status='new_lead',qualified_at=clock_timestamp(),qualified_by=requester::text,updated_at=clock_timestamp() WHERE org_id=o AND id=property_id AND status='prospect' AND is_dnc_locked=false;
   IF NOT FOUND THEN RAISE EXCEPTION 'Guarded promotion write lost ownership' USING ERRCODE='40001';END IF;
@@ -198,7 +201,10 @@ BEGIN
   outcome:='promoted';
  END IF;
  changed:=outcome='promoted';
- actual:=inbox_t2_policy.snapshot(o,expected->'dependencies');
+ SELECT coalesce(jsonb_agg(jsonb_build_object('namespace',d->>'namespace','key',d->'key') ORDER BY d->>'namespace',(d->'key')::text),'[]'::jsonb)
+   INTO requirements
+   FROM jsonb_array_elements(expected->'dependencies') d;
+ actual:=inbox_t2_policy.snapshot(o,requirements);
  SELECT coalesce(jsonb_agg(d ORDER BY d->>'namespace',(d->'key')::text),'[]'::jsonb)
    INTO revised
    FROM jsonb_array_elements(actual->'dependencies') d
