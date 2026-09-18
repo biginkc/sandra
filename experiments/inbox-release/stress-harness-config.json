@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "status": "HARNESS_ONLY_NO_MEASUREMENTS",
+  "target_manifest": "experiments/inbox-release/http-stack-manifest.json",
+  "target_identity": {
+    "owner": "release-infra",
+    "container_label_marker": "sandra-inbox-release-http-owned-20260917",
+    "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
+    "database_purpose": "sandra-inbox-release-http",
+    "provider_traffic": false,
+    "customer_sends": false
+  },
+  "profiles": {
+    "current": {
+      "arrival_rate_rps": null,
+      "concurrency": null,
+      "tenant_count": null,
+      "history_skew": null
+    },
+    "three_x": {
+      "arrival_rate_rps": null,
+      "concurrency": null,
+      "tenant_count": null,
+      "history_skew": null
+    }
+  },
+  "required_timing_events": ["first_open", "revisit", "selection", "ingestion", "queue"],
+  "required_system_metrics": ["cpu_percent", "memory_bytes", "locks", "connections"],
+  "required_recovery": true,
+  "timing_threshold_source": "experiments/inbox-release/release-manifest.json",
+  "timing_thresholds": {
+    "first_open_p95_ms": null,
+    "revisit_p95_ms": null,
+    "selection_p95_ms": null
+  },
+  "measurement_protocol": {
+    "input": "JSONL emitted by the workload and fault adapters",
+    "timing_record": {"type": "timing", "event": "first_open|revisit|selection|ingestion|queue", "duration_ms": "positive number"},
+    "metric_record": {"type": "metric", "name": "cpu_percent|memory_bytes|locks|connections", "value": "non-negative number"},
+    "recovery_record": {"type": "recovery", "fault": "owned fixture fault name", "recovered": "boolean", "duration_ms": "positive number"},
+    "adapter_contract": "The adapter must report real observations from the marked isolated target; synthetic or historical-only values are rejected by the release gate."
+  },
+  "unknown_threshold_policy": "UNJUDGED; never convert missing thresholds or missing profile dimensions into a pass"
+}

@@ -63,6 +63,13 @@ test('databaseConfiguration rejects a non-plaintext-fixture, non-supabase host',
   assert.throws(() => databaseConfiguration({ INBOX_REPLY_SEND_DATABASE_URL: 'postgres://u:p@evil.example:5432/db' }), /Unapproved production database host/);
 });
 
+test('databaseConfiguration accepts only the marked release HTTP fixture with the constrained login', () => {
+  const env = { NODE_ENV: 'test', INBOX_ACTION_LOCAL_FIXTURE: '1', INBOX_ACTION_FIXTURE_PROFILE: 'release-http', INBOX_REPLY_SEND_OWNED_FIXTURE_PLAINTEXT: 'true', INBOX_REPLY_SEND_FIXTURE_MARKER: 'sandra-inbox-http-owned-synthetic-20260917', INBOX_REPLY_SEND_FIXTURE_OWNER: 'release-infra', INBOX_REPLY_SEND_FIXTURE_PURPOSE: 'sandra-inbox-release-http', INBOX_REPLY_SEND_FIXTURE_LABELS_VERIFIED: 'true', INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@127.0.0.1:54322/postgres' };
+  const config = databaseConfiguration(env);
+  assert.equal(config.port, 54322); assert.equal(config.ssl, false); assert.equal(config.user, 'inbox_reply_send_worker');
+  for (const patch of [{ INBOX_REPLY_SEND_FIXTURE_MARKER: 'wrong' }, { INBOX_REPLY_SEND_FIXTURE_OWNER: 'postgres' }, { INBOX_REPLY_SEND_FIXTURE_PURPOSE: 'shared' }, { INBOX_REPLY_SEND_FIXTURE_LABELS_VERIFIED: 'false' }, { INBOX_REPLY_SEND_OWNED_FIXTURE_PLAINTEXT: 'false' }, { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@127.0.0.1:54321/postgres' }, { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@127.0.0.1:54322/other' }, { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://postgres:synthetic@127.0.0.1:54322/postgres' }, { NODE_ENV: 'production' }, { INBOX_ACTION_LOCAL_FIXTURE: '0' }]) assert.throws(() => databaseConfiguration({ ...env, ...patch }));
+});
+
 test('createReadinessProbe caches a successful result for its TTL', async () => {
   let calls = 0;
   let now = 0;

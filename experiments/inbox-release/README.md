@@ -122,3 +122,24 @@ manifest: `http-stack-compose.yml`, `http-stack-kong.yml`, and the two
 secret-free environment examples. The Compose template uses `pull_policy:
 never`, exact ownership labels, bounded services, and the `/socket` Realtime
 upstream mapping; a missing cached image fails closed instead of pulling.
+
+The action and reply workers have a source-only local profile for this fixture.
+It accepts only `127.0.0.1:54322/postgres` in test mode, requires the database
+identity marker `sandra-inbox-http-owned-synthetic-20260917`, the container
+label marker `sandra-inbox-release-http-owned-20260917`, the
+`sandra-inbox-release-http` purpose, and verified labels, then authenticates as
+the constrained `inbox_action_worker` or `inbox_reply_send_worker` login. The
+historical aliases and production certificate path remain separate. The
+profile is recorded as an unbuilt overlay in `execution-stack-manifest.json`;
+no worker launch is implied.
+
+`stress-harness-config.json` and `run-stress-recovery.py` provide the actual
+current/three-times workload and fault-recovery execution contract. A workload
+adapter and a fault adapter must emit JSONL timing, CPU/memory/lock/connection,
+and recovery observations against the independently probed owned target. The
+checked-in profiles intentionally have no arrival, concurrency, tenant, or
+history values, so `--validate-config` reports `BLOCKED_UNJUDGED`. Missing
+measurements and missing thresholds cannot certify a pass; the runner only
+reports timing budgets from the approved release manifest and keeps ingestion,
+queue, system, and recovery thresholds unjudged until the coordinator supplies
+and measures them.

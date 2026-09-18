@@ -264,6 +264,7 @@ def main() -> int:
             "reply_worker": "experiments/inbox-reply-send-worker",
             "sync_relay": "services/inbox-sync-relay",
             "projection": "services/inbox-projection-worker",
+            "local_release_fixture_profile": "SOURCE_ONLY_READY_UNBUILT: operation/reply adapters accept only marked 127.0.0.1:54322/postgres with constrained worker logins; production TLS and historical aliases remain unchanged",
             "provider_traffic": False,
             "customer_sends": False,
         },

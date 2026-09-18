@@ -10,7 +10,16 @@
       "package.json": "0bdc3fa5f6ffb7cea32841bf1d3307aef1f7beeec8794d689cda5ce25f2cff24",
       "package-lock.json": "0b6abafac1b331c4857c9459659a11d425a4b52d9be76ae2c72322ac7a11d7e8",
       "core.mjs": "13f460f8c2853c34211956317b1345830998010de2962ec37e2ef47f9fe8e265",
-      "server.mjs": "cdde01d18962dec67f68324bce668ea1be326ba17ec69acd658a0bbf4b71343c"
+      "server.mjs": "cdde01d18962dec67f68324bce668ea1be326ba17ec69acd658a0bbf4b71343c",
+      "release_http_fixture_profile_overlay": {
+        "core.mjs": "7bbc4c01faa5e82e0ec211b4d396342df02ae7e51f2371a9797153366dd07c03",
+        "core.test.mjs": "47d1559e2f4d5da557323d93ff7171e8ea9993d705450b76c57eb1b84cd9fa7c",
+        "target": "127.0.0.1:54322/postgres",
+        "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
+        "container_label_marker": "sandra-inbox-release-http-owned-20260917",
+        "login": "inbox_action_worker",
+        "status": "SOURCE_ONLY_UNBUILT"
+      }
     },
     "reply-send-worker": {
       "Dockerfile": "910306b915a0d7cf213ae22f8bbb73eee324665204757283b8eeeeed9af9a7fa",
@@ -21,7 +30,16 @@
       "vendor/reply-provider.mjs": "2847add8a5d1e87e671c04949f13487e10f6af81209635fb622ea253c659b75f",
       "vendor/test-transport.mjs": "b346a492edff21297fed9f72d294528512727485fe3a4555e43c4c5510aabf36",
       "worker-role.sql": "086f384ecb54a0966e16aa3d007cd767a73e3ba06faa120141c36926858de465",
-      "worker.sql": "a4c4a5229a74a538addeec29e153e4633c1c3dbf2bd5e91cc5fa1f28a475486c"
+      "worker.sql": "a4c4a5229a74a538addeec29e153e4633c1c3dbf2bd5e91cc5fa1f28a475486c",
+      "release_http_fixture_profile_overlay": {
+        "core.mjs": "348635dd33ce979d503b8489fc581c071f271bc93f5a5e17bcc3dbd87d5ef4e5",
+        "core.test.mjs": "22a04fee57fc0a22209789e9e2c06a7daa5ebefa95ea2efb18e113faebf9c50b",
+        "target": "127.0.0.1:54322/postgres",
+        "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
+        "container_label_marker": "sandra-inbox-release-http-owned-20260917",
+        "login": "inbox_reply_send_worker",
+        "status": "SOURCE_ONLY_UNBUILT"
+      }
     },
     "sync-relay": {
       "Dockerfile": "1e33ec793747bee85f0e390017074658da88b027a273c944faeda6625b0e5bbe",
