@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { randomUUID } from "node:crypto";
 
 import { adminClient, ensureTestUser, resetTenantTables } from "../fixtures";
 import { seedAcceptanceThread } from "./seed";
@@ -123,6 +124,8 @@ test("F04 — needs_outcome view excludes threads with an outcome", async ({ pag
 });
 
 test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => {
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
   const dnc = await seedAcceptanceThread(admin, {
     phone: "+18165551006",
     addressTag: "ACC-F05-DNC",
@@ -134,6 +137,11 @@ test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => 
   await page.goto("/inbox?view=all");
   const list = page.getByRole("list", { name: "Inbox conversations" });
   await expect(page.getByLabel(/Hide DNC and test conversations/)).toBeChecked();
+  await expect(page.getByText(/\d+ loaded$/, { exact: false })).toBeVisible({ timeout: 20_000 });
+  // The default projection must exclude the DNC conversation before the
+  // operator changes the noise filter. Merely proving re-inclusion after the
+  // toggle would allow a backend that ignores the default hide policy.
+  await expect(list.getByText(dnc.contactName)).toHaveCount(0);
 
   await page.getByLabel(/Hide DNC and test conversations/).uncheck();
   await expect(list.getByText(dnc.contactName)).toBeVisible();
@@ -141,27 +149,76 @@ test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => 
   recordRowOutcome({ id: "F05", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F05" });
 });
 
+async function seedOrderedInboxPage(count: number): Promise<{ newestName: string; oldestName: string }> {
+  const now = Date.now();
+  const contacts = Array.from({ length: count }, (_, index) => ({
+    id: randomUUID(),
+    first_name: "Page",
+    last_name: `F06-${String(index).padStart(3, "0")}`,
+    phone_1: `+1816556${String(1000 + index).padStart(4, "0")}`,
+    phone_1_type: "mobile",
+  }));
+  const { error: contactError } = await admin.from("contacts").insert(contacts);
+  expect(contactError).toBeNull();
+
+  const properties = contacts.map((contact, index) => ({
+    id: randomUUID(),
+    address: `ACC-F06-${String(index).padStart(3, "0")} PAGE`,
+    state: "MO",
+    status: "new_lead",
+    cass_status: "verified",
+    city: "Kansas City",
+    zip: "64151",
+    market: "Kansas City",
+    homeowner_contact_id: contact.id,
+  }));
+  const { error: propertyError } = await admin.from("properties").insert(properties);
+  expect(propertyError).toBeNull();
+
+  const messages = properties.map((property, index) => ({
+    id: randomUUID(),
+    channel: "sms",
+    direction: "inbound",
+    status: "received",
+    conversation_id: randomUUID(),
+    contact_id: contacts[index].id,
+    property_id: property.id,
+    from_address: contacts[index].phone_1,
+    to_address: "+18162804181",
+    body: `ordered activity ${String(index).padStart(3, "0")}`,
+    created_at: new Date(now - index * 60_000).toISOString(),
+  }));
+  const { error: messageError } = await admin.from("messages").insert(messages);
+  expect(messageError).toBeNull();
+
+  return {
+    newestName: "Page F06-000",
+    oldestName: `Page F06-${String(count - 1).padStart(3, "0")}`,
+  };
+}
+
 test("F06 — rows order by most recent activity", async ({ page }) => {
-  const older = await seedAcceptanceThread(admin, {
-    phone: "+18165551007",
-    addressTag: "ACC-F06-OLD",
-    contactName: { first: "Older", last: "Activity" },
-    messages: [{ direction: "inbound", body: "older activity", createdAtOffsetMin: -300 }],
-  });
-  const newer = await seedAcceptanceThread(admin, {
-    phone: "+18165551008",
-    addressTag: "ACC-F06-NEW",
-    contactName: { first: "Newer", last: "Activity" },
-    messages: [{ direction: "inbound", body: "newer activity", createdAtOffsetMin: -1 }],
-  });
+  // Isolate the page-boundary proof from earlier serial rows. The fixture is
+  // inserted in two bounded service-role batches plus one message batch;
+  // there are no 500 browser actions and no provider calls.
+  await resetTenantTables(admin);
+  await ensureTestUser(admin);
+  const { newestName, oldestName } = await seedOrderedInboxPage(501);
 
   await page.goto("/inbox?view=all");
   const list = page.getByRole("list", { name: "Inbox conversations" });
-  await expect(list.getByText(newer.contactName)).toBeVisible();
-  await expect(list.getByText(older.contactName)).toBeVisible();
+  await expect(page.getByText("500 loaded", { exact: true })).toBeVisible({ timeout: 20_000 });
   const rows = list.getByRole("listitem");
-  const firstRowText = await rows.first().innerText();
-  expect(firstRowText).toContain(newer.contactName);
+  await expect(rows.first()).toContainText(newestName);
+
+  const nextPage = page.getByRole("button", { name: "Next 500", exact: true });
+  await expect(nextPage).toBeEnabled();
+  await nextPage.click();
+  await expect(page.getByText("1 loaded", { exact: true })).toBeVisible({ timeout: 20_000 });
+  await expect(nextPage).toBeDisabled();
+  await expect(list.getByText(oldestName)).toBeVisible();
+  await expect(rows.first()).toContainText(oldestName);
+  await expect(list.getByText(newestName)).toHaveCount(0);
 
   recordRowOutcome({ id: "F06", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F06" });
 });
