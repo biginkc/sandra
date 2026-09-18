@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { expect, test, type Page } from "./fixture";
-import { resetAcceptanceFixture } from "./cleanup";
+import { resetAcceptanceFixture, waitForAcceptanceProjectionTarget } from "./cleanup";
 
 import {
   adminClient,
@@ -500,6 +500,7 @@ async function seedUnknownSender(fromAddress: string, bodies: readonly string[])
     expect(data).not.toBeNull();
     messageIds.push(data!.id);
   }
+  await waitForAcceptanceProjectionTarget({ kind: "unknown_sender", rawSender: fromAddress, dismissed: false });
   return { fromAddress, messageIds };
 }
 
@@ -529,5 +530,6 @@ async function seedPropertylessKnownThread(phone: string, addressTag: string, fi
   }).select("id").single();
   expect(error).toBeNull();
   expect(message).not.toBeNull();
+  await waitForAcceptanceProjectionTarget({ kind: "known_conversation", id: conversationId, unread: true });
   return { contactId: contact!.id, contactName: `${first} ${last}`, messageId: message!.id, conversationId };
 }

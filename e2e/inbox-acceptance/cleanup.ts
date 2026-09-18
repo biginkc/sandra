@@ -30,6 +30,10 @@ const ACCEPTANCE_DATABASE_MARKER =
 const DRAIN_ATTEMPTS = 40;
 const DRAIN_INTERVAL_MS = 250;
 
+export type AcceptanceProjectionTarget =
+  | { kind: "known_conversation"; id: string; unread: boolean }
+  | { kind: "unknown_sender"; rawSender: string; dismissed: boolean };
+
 /**
  * Read only, org-scoped projection state. The queue/work tables are private
  * worker state, so this intentionally uses the guarded postgres connection
@@ -125,6 +129,102 @@ async function openProjectionProbe(): Promise<Client> {
     throw error;
   }
   return client;
+}
+
+/**
+ * Wait for one fixture target to be represented by the current projection
+ * generation before opening a browser workset. Canonical inserts enqueue the
+ * projection asynchronously, so a seed helper returning only after its
+ * source INSERT commits is not enough to make a subsequent workset include
+ * that target. This is a read-only probe; it never refreshes a mounted
+ * browser scope and therefore preserves the arrival test's explicit-refresh
+ * contract.
+ */
+export async function waitForAcceptanceProjectionTarget(
+  target: AcceptanceProjectionTarget,
+  orgId: string = DEFAULT_ORG_ID,
+): Promise<void> {
+  const probe = await openProjectionProbe();
+  try {
+    for (let attempt = 0; attempt < DRAIN_ATTEMPTS; attempt += 1) {
+      const result = target.kind === "known_conversation"
+        ? await probe.query<{ ready: boolean }>(
+            `
+              SELECT EXISTS (
+                SELECT 1
+                  FROM inbox_maintained.rows m
+                  JOIN inbox_message_capture.dirty d
+                    ON d.org_id = m.org_id
+                   AND d.target_kind = m.target_kind
+                   AND d.target_id = m.target_id
+                  JOIN inbox_bridge.summaries s
+                    ON s.org_id = m.org_id
+                   AND s.target_kind = m.target_kind
+                   AND s.target_id = m.target_id
+                  JOIN inbox_bridge.filter_rows f
+                    ON f.org_id = m.org_id
+                   AND f.target_kind = m.target_kind
+                   AND f.target_id = m.target_id
+                 WHERE m.org_id = $1::uuid
+                   AND m.target_kind = 'known_conversation'
+                   AND m.target_id = $2::uuid
+                   AND (m.summary->>'exists') = 'true'
+                   AND d.generation = m.source_generation
+                   AND s.projection_revision = m.revision
+                   AND f.revision = m.revision
+                   AND s.unread IS NOT DISTINCT FROM $3::boolean
+                   AND f.unread IS NOT DISTINCT FROM $3::boolean
+              ) AS ready
+            `,
+            [orgId, target.id, target.unread],
+          )
+        : await probe.query<{ ready: boolean }>(
+            `
+              SELECT EXISTS (
+                SELECT 1
+                  FROM inbox_maintained.rows m
+                  JOIN inbox_message_capture.dirty d
+                    ON d.org_id = m.org_id
+                   AND d.target_kind = m.target_kind
+                   AND d.target_id = m.target_id
+                  JOIN inbox_message_capture.sender_groups g
+                    ON g.org_id = m.org_id
+                   AND g.sender_group_id = m.target_id
+                  JOIN inbox_bridge.summaries s
+                    ON s.org_id = m.org_id
+                   AND s.target_kind = m.target_kind
+                   AND s.target_id = m.target_id
+                  JOIN inbox_bridge.filter_rows f
+                    ON f.org_id = m.org_id
+                   AND f.target_kind = m.target_kind
+                   AND f.target_id = m.target_id
+                 WHERE m.org_id = $1::uuid
+                   AND m.target_kind = 'unknown_sender'
+                   AND g.raw_sender = $2::text
+                   AND (m.summary->>'exists') = 'true'
+                   AND d.generation = m.source_generation
+                   AND s.projection_revision = m.revision
+                   AND f.revision = m.revision
+                   AND ${target.dismissed ? "s.visible_dismissed AND f.unknown_dismissed" : "s.visible_active AND f.unknown_active"}
+              ) AS ready
+            `,
+            [orgId, target.rawSender],
+          );
+      if (result.rows[0]?.ready === true) return;
+      if (attempt + 1 < DRAIN_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, DRAIN_INTERVAL_MS));
+      }
+    }
+  } finally {
+    await probe.end();
+  }
+
+  const label = target.kind === "known_conversation"
+    ? `${target.kind}:${target.id}`
+    : `${target.kind}:${target.rawSender}`;
+  throw new Error(
+    `Acceptance fixture projection did not publish ${label} within ${(DRAIN_ATTEMPTS * DRAIN_INTERVAL_MS) / 1000}s.`,
+  );
 }
 
 /**

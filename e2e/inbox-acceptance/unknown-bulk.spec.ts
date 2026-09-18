@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "./fixture";
-import { resetAcceptanceFixture } from "./cleanup";
+import { resetAcceptanceFixture, waitForAcceptanceProjectionTarget } from "./cleanup";
 
 import {
   adminClient,
@@ -184,6 +184,7 @@ async function seedUnknownSender(
   for (const [index, body] of bodies.entries()) {
     messageIds.push(await insertUnknownMessage(fromAddress, body, dismissed, index));
   }
+  await waitForAcceptanceProjectionTarget({ kind: "unknown_sender", rawSender: fromAddress, dismissed });
   return { fromAddress, messageIds };
 }
 

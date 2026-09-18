@@ -85,7 +85,9 @@ test.describe("Inbox navigation and selection", () => {
     await expect(page.getByRole("heading", { name: "Inbox overview" })).toBeVisible();
 
     await page.getByRole("link", { name: "Open Inbox workspace" }).click();
-    await expect(page).toHaveURL(/\/inbox\?view=all$/);
+    // The overview's canonical workspace link is /inbox; the server defaults
+    // its initial filter to All without serializing ?view=all.
+    await expect(page).toHaveURL(/\/inbox$/);
     await expect(page.getByRole("heading", { name: "Inbox workspace" })).toBeVisible();
 
     await page.getByRole("button", { name: "← Back to Inbox overview" }).click();
@@ -226,7 +228,14 @@ test.describe("Inbox navigation and selection", () => {
     // server workset remains mounted. The new thread is newer and should be
     // reported by workset-updates, but it must not enter the resident page or
     // replace the selected ID before the operator refreshes explicitly.
-    const arriving = await seedSelectionThread("ARRIVAL-NEW", "New", "Arrival", { read: false, createdAtOffsetMin: -1 });
+    const arriving = await seedSelectionThread("ARRIVAL-NEW", "New", "Arrival", {
+      read: false,
+      createdAtOffsetMin: -1,
+      // This row is deliberately inserted after the workset is mounted. Its
+      // projection must remain an observed live arrival for the indicator test;
+      // waiting here would turn it into a pre-open readiness check.
+      waitForProjection: false,
+    });
     const indicator = page.getByRole("button", { name: /New conversations available/ });
     await expect(indicator).toBeVisible({ timeout: 20_000 });
     await expect(list.getByText(arriving.contactName, { exact: true })).toHaveCount(0);
@@ -254,7 +263,7 @@ async function seedSelectionThread(
   addressTag: string,
   first: string,
   last: string,
-  options: { read?: boolean; createdAtOffsetMin?: number } = {},
+  options: { read?: boolean; createdAtOffsetMin?: number; waitForProjection?: boolean } = {},
 ): Promise<SeededThread> {
   selectionPhoneCounter += 1;
   return seedAcceptanceThread(admin, {
@@ -262,6 +271,7 @@ async function seedSelectionThread(
     addressTag,
     contactName: { first, last },
     messages: [{ direction: "inbound", body: `${addressTag} selection body`, createdAtOffsetMin: options.createdAtOffsetMin ?? -2, read: options.read ?? false }],
+    waitForProjection: options.waitForProjection,
   });
 }
 

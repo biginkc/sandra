@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "../../src/lib/supabase/types";
 import { DEFAULT_ORG_ID, E2E_MOCK_BUSINESS_NUMBER, seedProspects } from "../fixtures";
 import { ensureConversationIdForThread } from "../../src/lib/messages/threading";
+import { waitForAcceptanceProjectionTarget } from "./cleanup";
 
 /**
  * Shared fixture seeding for the inbox acceptance matrix runner
@@ -45,6 +46,8 @@ export async function seedAcceptanceThread(
     propertyStatus?: string;
     messages: SeededMessage[];
     assigneeId?: string | null;
+    /** Set false only when the caller intentionally seeds after opening a workset. */
+    waitForProjection?: boolean;
   },
 ): Promise<SeededThread> {
   const { data: contact, error: contactError } = await admin
@@ -92,6 +95,17 @@ export async function seedAcceptanceThread(
       read_at: m.direction === "inbound" && m.read === true ? new Date().toISOString() : null,
     });
     if (msgError) throw new Error(`seedAcceptanceThread: message insert failed: ${msgError.message}`);
+  }
+
+  // The source INSERT commits before the private projection worker publishes
+  // summaries/filter rows. Wait for the exact target and final unread state
+  // so a following workset snapshot cannot freeze before this fixture row.
+  if (opts.messages.length > 0 && opts.waitForProjection !== false) {
+    await waitForAcceptanceProjectionTarget({
+      kind: "known_conversation",
+      id: conversationId,
+      unread: opts.messages.some((message) => message.direction === "inbound" && message.read !== true),
+    });
   }
 
   return {
