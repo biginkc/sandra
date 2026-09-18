@@ -15,6 +15,10 @@ import { seedAcceptanceThread } from "./seed";
  * saved-action vertical slice and does not alter the shared matrix contract.
  */
 test.describe.configure({ mode: "serial" });
+test.skip(
+  process.env.INBOX_ACCEPTANCE_RUN !== "1",
+  "Use playwright.inbox-acceptance.config.ts for the owned saved-action fixture.",
+);
 
 type SavedDefinition = {
   version: 1;
