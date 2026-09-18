@@ -82,14 +82,14 @@ test("bounded virtual scrolling reaches a row beyond the initially mounted viewp
 test("browser-local virtualized workset mounts a row outside the initial viewport", async () => {
   const { chromium } = await import("@playwright/test");
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 900, height: 800 } });
+  const page = await browser.newPage({ viewport: { width: 900, height: 500 } });
   const orgId = id(900);
-  const targetId = id(990);
-  const conversationIds = Array.from({ length: 120 }, (_, index) => id(900 + index));
+  const targetId = id(1499);
+  const conversationIds = Array.from({ length: 500 }, (_, index) => id(1000 + index));
   await page.setContent(`
     <style>
-      [role=list][aria-label="Inbox conversations"] { width: 800px; height: 600px; overflow: auto; }
-      .canvas { position: relative; height: 8640px; }
+      [role=list][aria-label="Inbox conversations"] { width: 800px; height: 300px; overflow: auto; }
+      .canvas { position: relative; height: 36000px; }
       [data-workspace-row] { position: absolute; height: 72px; width: 100%; }
     </style>
     <div role="list" aria-label="Inbox conversations" aria-busy="false"><div class="canvas"></div></div>
@@ -97,7 +97,7 @@ test("browser-local virtualized workset mounts a row outside the initial viewpor
     <script>
       const list = document.querySelector('[role=list]');
       const canvas = list.querySelector('.canvas');
-      const total = 120;
+      const total = 500;
       const org = ${JSON.stringify(orgId)};
       const ids = ${JSON.stringify(conversationIds)};
       function render() {
