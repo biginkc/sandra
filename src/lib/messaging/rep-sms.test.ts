@@ -43,7 +43,7 @@ describe("rep SMS obligation fences", () => {
   it("binds the server-created claim to the exact lead, sender, recipient, and composition", () => {
     const composition = composeRepSms({
       introId: "mel-maria-assistant-1",
-      introVersion: 1,
+      introVersion: 2,
       templateId: "no-answer-callback-time",
       templateVersion: 1,
       remainder: "Maria wasn't able to reach you. What time would work for her to call you back?",

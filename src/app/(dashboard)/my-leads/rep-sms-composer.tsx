@@ -591,7 +591,7 @@ export function RepSmsComposer({
             </select>
           </div>
           <p className="mt-2 text-foreground">{introduction.body}</p>
-          <p className="mt-1 text-xs text-muted-foreground">Choose an approved Mel-as-Maria&apos;s-assistant introduction. It stays read-only in the final message; the follow-up remainder stays editable below.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Choose an approved Mel-with-BMH-as-Maria&apos;s-assistant introduction. It stays read-only in the final message; the follow-up remainder stays editable below.</p>
         </div>
 
         <div className="space-y-1.5">

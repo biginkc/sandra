@@ -23,11 +23,14 @@ vi.mock("./opt-out-phone", () => ({
 vi.mock("./quiet-hours", () => ({
   checkQuietHours: vi.fn(),
 }));
+vi.mock("./status-events", () => ({
+  reconcileStoredStatusEvents: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("@/lib/messages/threading", () => ({
   ensureConversationIdForThread: vi.fn(),
 }));
 
-import { sendSmsToContact } from "./send";
+import { releaseQueuedMessage, sendSmsToContact } from "./send";
 import { getMessagingProvider } from "./registry";
 import { getConsentState } from "./consent";
 import { isSmsPhoneSuppressed } from "./opt-out-phone";
@@ -46,6 +49,7 @@ function chain(result: { data: unknown; error: { message: string } | null }) {
     eq: () => builder,
     neq: () => builder,
     in: () => builder,
+    not: () => builder,
     order: () => builder,
     limit: () => builder,
     insert: () => builder,
@@ -248,6 +252,355 @@ describe("sendSmsToContact — fail-closed fresh-state suppression re-check", ()
 
     expect(provider.sendSms).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ status: "sent", messageId: "msg-2" });
+  });
+});
+
+describe("releaseQueuedMessage — claimed payload", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("rejects an explicitly marked anonymous opener before any database or provider write", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({});
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "Hi there, would you consider a cash offer?",
+      requiresOpeningIdentity: true,
+    });
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      error: 'Opening SMS must identify the sender as "Mel with BMH".',
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("checks the BMH phone pair before an unmarked first send", async () => {
+    const provider = {
+      ...fakeProvider(),
+      providerId: "sendillo",
+      getDefaultFromNumber: () => "+18165551234",
+    };
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.stubEnv("SENDILLO_ORG_ID", PROPERTY_ROW.org_id);
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [
+        { data: [], error: null }, // sticky sender lookup
+        { data: [], error: null }, // delivered outbound evidence
+        { data: [], error: null }, // inbound conversation evidence
+      ],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "Hi there, would you consider a cash offer?",
+    });
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      error: 'Opening SMS must identify the sender as "Mel with BMH".',
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("enforces the fixed BMH organization even when the provider id changes", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const fixedBmhProperty = {
+      ...PROPERTY_ROW,
+      org_id: "00000000-0000-0000-0000-000000000bbb",
+    };
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: fixedBmhProperty, error: null }],
+      messages: [
+        { data: [], error: null },
+        { data: [], error: null },
+      ],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "Would you consider a cash offer?",
+      from: "+18165551234",
+    });
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      error: 'Opening SMS must identify the sender as "Mel with BMH".',
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["delivered outbound", [{ id: "outbound-1" }], []],
+    ["inbound reply", [], [{ id: "inbound-1" }]],
+  ])("allows an anonymous follow-up when history has %s", async (_label, outbound, inbound) => {
+    const provider = {
+      ...fakeProvider(),
+      providerId: "sendillo",
+    };
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.stubEnv("SENDILLO_ORG_ID", PROPERTY_ROW.org_id);
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [
+        { data: outbound, error: null },
+        { data: inbound, error: null },
+        { data: { id: "message-follow-up" }, error: null },
+        { data: { id: "message-follow-up" }, error: null },
+      ],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "Just checking whether you had a chance to consider it.",
+      from: "+18165551234",
+    });
+
+    expect(outcome).toMatchObject({ status: "sent", messageId: "message-follow-up" });
+    expect(provider.sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when opening history cannot be read", async () => {
+    const provider = {
+      ...fakeProvider(),
+      providerId: "sendillo",
+    };
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.stubEnv("SENDILLO_ORG_ID", PROPERTY_ROW.org_id);
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [
+        { data: null, error: { message: "history unavailable" } },
+        { data: [], error: null },
+      ],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "Would you consider a cash offer?",
+      from: "+18165551234",
+    });
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      error: "opening history lookup failed: history unavailable",
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("rejects an anonymous legacy queued opener without metadata", async () => {
+    const provider = {
+      ...fakeProvider(),
+      providerId: "sendillo",
+    };
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.stubEnv("SENDILLO_ORG_ID", PROPERTY_ROW.org_id);
+    const supabase = fakeSupabase({
+      messages: [
+        {
+          data: {
+            id: "legacy-queued-opener",
+            status: "queued",
+            provider: "sendillo",
+            org_id: PROPERTY_ROW.org_id,
+            campaign_id: null,
+            contact_id: CONTACT_ID,
+            property_id: PROPERTY_ID,
+            body: "Would you consider a cash offer?",
+            from_address: "+18165551234",
+            to_address: CONTACT_ROW.phone_1,
+            scheduled_for: null,
+            metadata: { sendOrigin: "automated" },
+          },
+          error: null,
+        },
+        { data: [], error: null },
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+    });
+
+    const outcome = await releaseQueuedMessage(supabase, "legacy-queued-opener");
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      messageId: "legacy-queued-opener",
+      error: 'Opening SMS must identify the sender as "Mel with BMH".',
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("rejects an anonymous first opener before queueing", async () => {
+    const provider = {
+      ...fakeProvider(),
+      providerId: "sendillo",
+    };
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.stubEnv("SENDILLO_ORG_ID", PROPERTY_ROW.org_id);
+    const supabase = fakeSupabase({
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+      messages: [
+        { data: [], error: null },
+        { data: [], error: null },
+      ],
+    });
+
+    const outcome = await sendSmsToContact(supabase, {
+      origin: "manual",
+      contactId: CONTACT_ID,
+      propertyId: PROPERTY_ID,
+      body: "Would you consider a cash offer?",
+      from: "+18165551234",
+      queueOnly: true,
+    });
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      error: 'Opening SMS must identify the sender as "Mel with BMH".',
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("sends the body returned by the queued→pending claim", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const firstBody = "Hi there, Mel with BMH here. Previous opener.";
+    const claimedBody = "Hi there, Mel with BMH here. Current opener.";
+    const supabase = fakeSupabase({
+      messages: [
+        {
+          data: {
+            id: "queued-1",
+            status: "queued",
+            provider: provider.providerId,
+            org_id: PROPERTY_ROW.org_id,
+            campaign_id: null,
+            contact_id: CONTACT_ID,
+            property_id: PROPERTY_ID,
+            body: firstBody,
+            from_address: "+18165551234",
+            to_address: CONTACT_ROW.phone_1,
+            scheduled_for: null,
+            metadata: { sendOrigin: "manual", openingIdentityRequired: true },
+          },
+          error: null,
+        },
+        { data: { id: "queued-1", body: claimedBody }, error: null },
+        { data: { id: "queued-1" }, error: null },
+      ],
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+    });
+
+    const outcome = await releaseQueuedMessage(supabase, "queued-1");
+
+    expect(outcome).toMatchObject({ status: "sent", messageId: "queued-1" });
+    expect(provider.sendSms).toHaveBeenCalledWith({
+      to: CONTACT_ROW.phone_1,
+      body: claimedBody,
+      from: "+18165551234",
+    });
+  });
+
+  it("rejects a claimed opener that loses its identity before provider dispatch", async () => {
+    const provider = fakeProvider();
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    const supabase = fakeSupabase({
+      messages: [
+        {
+          data: {
+            id: "queued-2",
+            status: "queued",
+            provider: provider.providerId,
+            org_id: PROPERTY_ROW.org_id,
+            campaign_id: null,
+            contact_id: CONTACT_ID,
+            property_id: PROPERTY_ID,
+            body: "Hi there, Mel with BMH here. Previous opener.",
+            from_address: "+18165551234",
+            to_address: CONTACT_ROW.phone_1,
+            scheduled_for: null,
+            metadata: { sendOrigin: "manual", openingIdentityRequired: true },
+          },
+          error: null,
+        },
+        { data: { id: "queued-2", body: "Anonymous edited opener." }, error: null },
+        { data: { id: "queued-2" }, error: null },
+      ],
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+    });
+
+    const outcome = await releaseQueuedMessage(supabase, "queued-2");
+
+    expect(outcome).toMatchObject({ status: "db_error", messageId: "queued-2" });
+    expect(outcome).toHaveProperty("error", 'Opening SMS must identify the sender as "Mel with BMH".');
+    expect(provider.sendSms).not.toHaveBeenCalled();
+  });
+
+  it("rechecks a claimed anonymous body when a direct queue edit races the claim", async () => {
+    const provider = {
+      ...fakeProvider(),
+      providerId: "sendillo",
+    };
+    vi.mocked(getMessagingProvider).mockReturnValue(provider);
+    vi.stubEnv("SENDILLO_ORG_ID", PROPERTY_ROW.org_id);
+    const supabase = fakeSupabase({
+      messages: [
+        {
+          data: {
+            id: "queued-race",
+            status: "queued",
+            provider: "sendillo",
+            org_id: PROPERTY_ROW.org_id,
+            campaign_id: null,
+            contact_id: CONTACT_ID,
+            property_id: PROPERTY_ID,
+            body: "Hi, Mel with BMH here. Previous opener.",
+            from_address: "+18165551234",
+            to_address: CONTACT_ROW.phone_1,
+            scheduled_for: null,
+            metadata: { sendOrigin: "manual" },
+          },
+          error: null,
+        },
+        { data: { id: "queued-race", body: "Anonymous edited opener." }, error: null },
+        { data: [], error: null },
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+      contacts: [{ data: CONTACT_ROW, error: null }],
+      properties: [{ data: PROPERTY_ROW, error: null }],
+    });
+
+    const outcome = await releaseQueuedMessage(supabase, "queued-race");
+
+    expect(outcome).toEqual({
+      status: "db_error",
+      messageId: "queued-race",
+      error: 'Opening SMS must identify the sender as "Mel with BMH".',
+    });
+    expect(provider.sendSms).not.toHaveBeenCalled();
   });
 });
 
@@ -476,6 +829,9 @@ describe("sendSmsToContact — ambiguous Sendillo outcomes", () => {
   beforeEach(() => {
     vi.stubEnv("SENDILLO_ORG_ID", PROPERTY_ROW.org_id);
   });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
 
   it.each([
     ["transport", { transportFailure: true }],
@@ -503,7 +859,7 @@ describe("sendSmsToContact — ambiguous Sendillo outcomes", () => {
       origin: "manual",
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
-      body: "hello",
+      body: "Hi, Mel with BMH here.",
       from: "+18165551234",
     });
 
@@ -536,7 +892,7 @@ describe("sendSmsToContact — ambiguous Sendillo outcomes", () => {
       origin: "manual",
       contactId: CONTACT_ID,
       propertyId: PROPERTY_ID,
-      body: "hello",
+      body: "Hi, Mel with BMH here.",
       from: "+18165551234",
     });
 

@@ -121,7 +121,7 @@ async function main() {
       step_index: 0,
       delay_after_previous_minutes: 0,
       action_type: "send_sms",
-      template_body: `${UNIQUE_BODY} — Reply STOP.`,
+      template_body: `Mel with BMH. ${UNIQUE_BODY} - Reply STOP.`,
     })
     .select("id")
     .single();

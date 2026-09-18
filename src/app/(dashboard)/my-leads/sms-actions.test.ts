@@ -31,12 +31,12 @@ const ORIGINAL_SENDILLO_ORG_ID = process.env.SENDILLO_ORG_ID
 
 const composition = {
   introId: "mel-maria-assistant-1",
-  introVersion: 1,
+  introVersion: 2,
   templateId: "no-answer-callback-time",
   templateVersion: 1,
   initialRemainder: "Maria wasn't able to reach you. What time would work for her to call you back?",
   remainder: "Maria wasn't able to reach you. What time would work for her to call you back?",
-  initialBody: "Hey, this is Mel, Maria's assistant.\n\nMaria wasn't able to reach you. What time would work for her to call you back?",
+  initialBody: "Hey, this is Mel with BMH, Maria's assistant.\n\nMaria wasn't able to reach you. What time would work for her to call you back?",
 }
 
 const baseContext = (status: string) => ({

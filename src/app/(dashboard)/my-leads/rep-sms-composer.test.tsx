@@ -10,12 +10,12 @@ import { RepSmsComposer } from "./rep-sms-composer"
 const savedComposition = {
   policyVersion: 1,
   introId: "mel-maria-assistant-1",
-  introVersion: 1,
+  introVersion: 2,
   templateId: "no-answer-callback-time",
   templateVersion: 1,
   initialRemainder: "Maria wasn't able to reach you. What time would work for her to call you back?",
   remainder: "Please text Maria a time that works.",
-  body: "Hey, this is Mel, Maria's assistant.\n\nPlease text Maria a time that works.",
+  body: "Hey, this is Mel with BMH, Maria's assistant.\n\nPlease text Maria a time that works.",
 }
 
 const context = (status: string) => ({

@@ -26,7 +26,7 @@ const CONTACT_ID = "22222222-2222-4222-8222-222222222222";
 const PROPERTY_ID = "33333333-3333-4333-8333-333333333333";
 const ORG_ID = "44444444-4444-4444-8444-444444444444";
 const RECEIPT = { externalId: "accepted-external-id", providerStatus: "queued", raw: { accepted: true } };
-const success = { data: { id: MESSAGE_ID }, error: null };
+const success = { data: { id: MESSAGE_ID, body: "hello" }, error: null };
 type Result = { data: unknown; error: { code?: string; message: string } | null };
 type Write = { payload: Record<string, unknown>; filters: Array<[string, unknown]>; accepted: boolean };
 

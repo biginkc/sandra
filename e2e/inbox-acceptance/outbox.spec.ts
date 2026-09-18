@@ -90,7 +90,7 @@ test("O03/O07 — send one and delete a queued message", async ({ page }) => {
   // scheduledForOffsetMin is negative (already due) — releaseQueuedMessage
   // returns "blocked_not_due" (a silent no-op, no toast, no row removal)
   // for a message still scheduled in the future.
-  const sendTarget = await seedQueuedMessage(admin, { addressTag: "ACC-O03-SEND", body: "o03 send target", scheduledForOffsetMin: -1 });
+  const sendTarget = await seedQueuedMessage(admin, { addressTag: "ACC-O03-SEND", body: "Mel with BMH. o03 send target", scheduledForOffsetMin: -1 });
   const deleteTarget = await seedQueuedMessage(admin, { addressTag: "ACC-O07-DELETE", body: "o07 delete target", scheduledForOffsetMin: 6 });
 
   await page.goto("/messages?tab=outbox");
@@ -156,8 +156,8 @@ test("O04/O05 — auto-send start/pause, cadence input", async ({ page }) => {
   // (queue-panel.tsx's auto-send effect sends immediately on start, not
   // just on the cadence tick). That immediate send is exactly why O02
   // is NOT in this test — see the O02 test below.
-  await seedQueuedMessage(admin, { addressTag: "ACC-O045-A", body: "o045 body one", scheduledForOffsetMin: -2 });
-  await seedQueuedMessage(admin, { addressTag: "ACC-O045-B", body: "o045 body two", scheduledForOffsetMin: -1 });
+  await seedQueuedMessage(admin, { addressTag: "ACC-O045-A", body: "Mel with BMH. o045 body one", scheduledForOffsetMin: -2 });
+  await seedQueuedMessage(admin, { addressTag: "ACC-O045-B", body: "Mel with BMH. o045 body two", scheduledForOffsetMin: -1 });
 
   await page.goto("/messages?tab=outbox");
   await expect(page.getByTestId("outbox-card-list")).toBeVisible();
@@ -202,7 +202,7 @@ test("O02 — Send next releases the head-of-queue message via that click alone"
   // could account for it becoming "sent" besides this click.
   await resetTenantTables(admin);
   await ensureTestUser(admin);
-  const target = await seedQueuedMessage(admin, { addressTag: "ACC-O02-ONLY", body: "o02 isolated body", scheduledForOffsetMin: -2 });
+  const target = await seedQueuedMessage(admin, { addressTag: "ACC-O02-ONLY", body: "Mel with BMH. o02 isolated body", scheduledForOffsetMin: -2 });
 
   await page.goto("/messages?tab=outbox");
   const sendNext = page.getByRole("button", { name: "Send next" });
