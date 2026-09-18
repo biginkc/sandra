@@ -207,6 +207,27 @@ function addIdExclusion<T extends { not: (column: string, operator: string, valu
   return ids.size === 0 ? query : query.not("id", "in", `(${[...ids].join(",")})`);
 }
 
+function isRetryableSupabaseTransportError(error: unknown): boolean {
+  return error instanceof Error && /fetch failed|network|socket/i.test(error.message);
+}
+
+async function retrySupabaseCleanup<T>(label: string, operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isRetryableSupabaseTransportError(error) || attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      process.stdout.write(`${JSON.stringify({
+        type: "acceptance_cleanup_retry",
+        operation: label,
+        attempt: attempt + 2,
+      })}\n`);
+    }
+  }
+  throw new Error(`unreachable cleanup retry state for ${label}`);
+}
+
 /**
  * DNC-aware equivalent of deleteOrgScopedFixtureRows. It deliberately uses
  * the same ordinary source deletes and leaves all locked properties and
@@ -608,9 +629,15 @@ export async function resetAcceptanceFixture(
     await deleteAcceptanceSavedActions(probe, orgId);
     await deleteAcceptanceDispositionReviews(probe, orgId);
     if (protection.lockedPropertyIds.size === 0 && protection.retainedContactIds.size === 0) {
-      await deleteOrgScopedFixtureRows(admin, orgId);
+      await retrySupabaseCleanup(
+        "ordinary_fixture_rows",
+        () => deleteOrgScopedFixtureRows(admin, orgId),
+      );
     } else {
-      retainedPropertyIds = await deleteDncAwareFixtureRows(admin, orgId, protection);
+      retainedPropertyIds = await retrySupabaseCleanup(
+        "dnc_aware_fixture_rows",
+        () => deleteDncAwareFixtureRows(admin, orgId, protection),
+      );
     }
 
     // Keep the existing org-scoped count as a diagnostic contract. A
@@ -648,4 +675,257 @@ export async function resetAcceptanceFixture(
     );
   }
 
+}
+
+/**
+ * Remove the per-run acceptance organization after its source rows and
+ * projection tombstones have been verified. The owner guard is disabled only
+ * inside this rollback-scoped disposable-fixture transaction; production
+ * requests never reach this path. Refuse a shared-tenant id or a mismatched
+ * organization name before any destructive statement.
+ */
+export async function deleteAcceptanceOrganization(): Promise<void> {
+  const configured = process.env.INBOX_ACCEPTANCE_ORG_ID?.trim();
+  if (!configured) return;
+  const runSlug = process.env.E2E_RUN_SLUG?.trim();
+  if (!runSlug) {
+    throw new Error("acceptance cleanup requires the exact E2E run slug");
+  }
+
+  const probe = await openProjectionProbe();
+  try {
+    await probe.query("BEGIN");
+    const org = await probe.query<{ name: string }>(
+      "SELECT name FROM public.organizations WHERE id = $1::uuid",
+      [DEFAULT_ORG_ID],
+    );
+    if (org.rowCount === 0) {
+      await probe.query("COMMIT");
+      return;
+    }
+    if (!org.rows[0]!.name.startsWith("Sandra Inbox Acceptance ")) {
+      throw new Error("refusing to delete a non-disposable acceptance organization");
+    }
+
+    // The disposable tenant deliberately exercises immutable/DNC and
+    // append-only paths. Its final teardown must remove those rows too, but
+    // ordinary DELETE is correctly rejected by their production triggers.
+    // Disable only user triggers inside this exact marker-bound transaction;
+    // foreign-key triggers remain enabled. Delete in a child-first order
+    // discovered from the live FK graph so RI still proves the teardown is
+    // structurally valid. Whole-database content signatures prove that no
+    // foreign tenant row changed.
+    type TableMeta = { oid: string; qualified: string; hasOrgId: boolean };
+    type ForeignKey = {
+      child: string;
+      parent: string;
+      childColumns: string[];
+      parentColumns: string[];
+      blocksDelete: boolean;
+    };
+    const tableResult = await probe.query<TableMeta>(`
+      SELECT c.oid::text AS oid,
+             format('%I.%I', n.nspname, c.relname) AS qualified,
+             EXISTS (
+               SELECT 1
+                 FROM pg_attribute a
+                WHERE a.attrelid = c.oid
+                  AND a.attname = 'org_id'
+                  AND NOT a.attisdropped
+             ) AS "hasOrgId"
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE c.relkind = 'r'
+         AND n.nspname NOT LIKE 'pg_%'
+         AND n.nspname <> 'information_schema'
+    `);
+    const tables = new Map(tableResult.rows.map((row) => [row.oid, row]));
+    const fkResult = await probe.query<ForeignKey>(`
+      SELECT fk.conrelid::text AS child,
+             fk.confrelid::text AS parent,
+             (fk.confdeltype IN ('a', 'r')) AS "blocksDelete",
+             array_agg(format('%I', child_attr.attname) ORDER BY child_key.ord) AS "childColumns",
+             array_agg(format('%I', parent_attr.attname) ORDER BY child_key.ord) AS "parentColumns"
+        FROM pg_constraint fk
+        JOIN pg_class child_table ON child_table.oid = fk.conrelid
+        JOIN pg_namespace child_ns ON child_ns.oid = child_table.relnamespace
+        JOIN pg_class parent_table ON parent_table.oid = fk.confrelid
+        JOIN pg_namespace parent_ns ON parent_ns.oid = parent_table.relnamespace
+        JOIN unnest(fk.conkey) WITH ORDINALITY AS child_key(attnum, ord) ON true
+        JOIN unnest(fk.confkey) WITH ORDINALITY AS parent_key(attnum, ord)
+          ON parent_key.ord = child_key.ord
+        JOIN pg_attribute child_attr
+          ON child_attr.attrelid = fk.conrelid
+         AND child_attr.attnum = child_key.attnum
+        JOIN pg_attribute parent_attr
+          ON parent_attr.attrelid = fk.confrelid
+         AND parent_attr.attnum = parent_key.attnum
+       WHERE fk.contype = 'f'
+         AND child_table.relkind = 'r'
+         AND parent_table.relkind = 'r'
+         AND child_ns.nspname NOT LIKE 'pg_%'
+         AND parent_ns.nspname NOT LIKE 'pg_%'
+         AND child_ns.nspname <> 'information_schema'
+         AND parent_ns.nspname <> 'information_schema'
+       GROUP BY fk.conrelid, fk.confrelid, fk.confdeltype, fk.oid
+    `);
+    const foreignKeys = fkResult.rows.filter(
+      (fk) => tables.has(fk.child) && tables.has(fk.parent),
+    );
+    const affected = new Set(
+      [...tables.values()]
+        .filter((table) => table.hasOrgId)
+        .map((table) => table.oid),
+    );
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const fk of foreignKeys) {
+        if (affected.has(fk.parent) && !affected.has(fk.child)) {
+          affected.add(fk.child);
+          grew = true;
+        }
+      }
+    }
+
+    const directFks = foreignKeys.filter(
+      (fk) =>
+        fk.blocksDelete && affected.has(fk.child) && affected.has(fk.parent),
+    );
+    const uniqueDirectFks = directFks.filter((fk, index, all) =>
+      all.findIndex(
+        (candidate) =>
+          candidate.child === fk.child && candidate.parent === fk.parent,
+      ) === index,
+    );
+    const indegree = new Map([...affected].map((oid) => [oid, 0]));
+    for (const fk of uniqueDirectFks) {
+      if (fk.child === fk.parent) continue;
+      indegree.set(fk.parent, (indegree.get(fk.parent) ?? 0) + 1);
+    }
+    const ready = [...indegree]
+      .filter(([, degree]) => degree === 0)
+      .map(([oid]) => oid);
+    const deleteOrder: string[] = [];
+    while (ready.length > 0) {
+      const oid = ready.shift()!;
+      deleteOrder.push(oid);
+      for (const parent of uniqueDirectFks
+        .filter((fk) => fk.child === oid && fk.child !== fk.parent)
+        .map((fk) => fk.parent)) {
+        const degree = (indegree.get(parent) ?? 0) - 1;
+        indegree.set(parent, degree);
+        if (degree === 0) ready.push(parent);
+      }
+    }
+    // A remaining cycle would be a schema error for a target cleanup. Keep
+    // it visible rather than silently broadening a predicate.
+    if (deleteOrder.length !== affected.size) {
+      throw new Error("acceptance cleanup found a cyclic FK dependency");
+    }
+
+    const predicateFor = (
+      oid: string,
+      alias: string,
+      stack = new Set<string>(),
+    ): string => {
+      const table = tables.get(oid);
+      if (!table) return "FALSE";
+      if (table.hasOrgId) return `${alias}."org_id" = $1::uuid`;
+      if (stack.has(oid)) return "FALSE";
+      const nextStack = new Set(stack).add(oid);
+      const branches = foreignKeys
+        .filter(
+          (fk) =>
+            fk.blocksDelete && fk.child === oid && affected.has(fk.parent),
+        )
+        .map((fk, index) => {
+          const parentAlias = `${alias}_p${index}`;
+          const join = fk.childColumns
+            .map(
+              (column, columnIndex) =>
+                `${alias}.${column} = ${parentAlias}.${fk.parentColumns[columnIndex]}`,
+            )
+            .join(" AND ");
+          return `EXISTS (SELECT 1 FROM ${tables.get(fk.parent)!.qualified} ${parentAlias} WHERE ${join} AND ${predicateFor(fk.parent, parentAlias, nextStack)})`;
+        });
+      return branches.length > 0 ? `(${branches.join(" OR ")})` : "FALSE";
+    };
+
+    for (const oid of deleteOrder) {
+      const table = tables.get(oid)!;
+      await probe.query(`ALTER TABLE ${table.qualified} DISABLE TRIGGER USER`);
+    }
+    for (const oid of deleteOrder) {
+      const table = tables.get(oid)!;
+      await probe.query(
+        `DELETE FROM ${table.qualified} AS target WHERE ($1::uuid IS NOT NULL AND ${predicateFor(oid, "target")})`,
+        [DEFAULT_ORG_ID],
+      );
+    }
+    await probe.query(
+      "DELETE FROM public.organizations WHERE id = $1::uuid",
+      [DEFAULT_ORG_ID],
+    );
+    // A reply-context snapshot has no FK to organizations because it is an
+    // immutable projection cache. Remove the exact tenant rows again after
+    // the source delete: a queued reply-context write can commit after the
+    // ordinary org-scoped tables have drained, and whole-database proof must
+    // still see zero residual rows for this run.
+    await probe.query(
+      "DELETE FROM inbox_reply_context.versions WHERE org_id = $1::uuid",
+      [DEFAULT_ORG_ID],
+    );
+
+    // Auth users are job-scoped resources rather than tenant rows. Keep the
+    // cleanup exact by matching the identity guard's run_slug metadata, then
+    // remove only their non-cascading bridge/audit artifacts before the
+    // auth.users delete. Cascading auth children (identities, sessions, and
+    // memberships) are left to their declared foreign keys.
+    await probe.query(
+      `CREATE TEMP TABLE acceptance_run_users ON COMMIT DROP AS
+         SELECT id
+           FROM auth.users
+          WHERE raw_app_meta_data->>'run_slug' = $1::text
+            AND raw_app_meta_data->>'owner' = 'github-actions'
+            AND raw_app_meta_data->>'purpose' = 'ci-e2e'`,
+      [runSlug],
+    );
+    await probe.query(
+      `DELETE FROM auth.audit_log_entries audit
+       WHERE audit.payload::text LIKE '%' || $1::text || '%'
+          OR EXISTS (
+               SELECT 1
+                 FROM acceptance_run_users users
+                WHERE audit.payload::text LIKE '%' || users.id::text || '%'
+             )`,
+      [runSlug],
+    );
+    await probe.query(
+      `DELETE FROM auth.users users
+       USING acceptance_run_users run_users
+       WHERE users.id = run_users.id`,
+    );
+    // Deleting auth.users cascades memberships and sessions; both production
+    // triggers advance/create an access epoch. Remove the exact run users'
+    // epochs only after those cascades have completed, otherwise teardown
+    // would leave one orphaned epoch behind and fail whole-database proof.
+    await probe.query(
+      `DELETE FROM inbox_bridge.access_epochs epochs
+        USING acceptance_run_users users
+       WHERE epochs.user_id = users.id`,
+    );
+    for (const oid of deleteOrder) {
+      const table = tables.get(oid)!;
+      await probe.query(`ALTER TABLE ${table.qualified} ENABLE TRIGGER USER`);
+    }
+    await probe.query("COMMIT");
+  } catch (error) {
+    await probe.query("ROLLBACK").catch(() => undefined);
+    throw new Error(
+      `Inbox acceptance cleanup could not remove disposable organization: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    await probe.end();
+  }
 }

@@ -174,6 +174,7 @@ test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => 
 async function seedOrderedInboxPage(count: number): Promise<{ newestName: string; oldestName: string }> {
   const now = Date.now();
   const contacts = Array.from({ length: count }, (_, index) => ({
+    org_id: DEFAULT_ORG_ID,
     id: randomUUID(),
     first_name: "Page",
     last_name: `F06-${String(index).padStart(3, "0")}`,
@@ -184,6 +185,7 @@ async function seedOrderedInboxPage(count: number): Promise<{ newestName: string
   expect(contactError).toBeNull();
 
   const properties = contacts.map((contact, index) => ({
+    org_id: DEFAULT_ORG_ID,
     id: randomUUID(),
     address: `ACC-F06-${String(index).padStart(3, "0")} PAGE`,
     state: "MO",
@@ -198,6 +200,7 @@ async function seedOrderedInboxPage(count: number): Promise<{ newestName: string
   expect(propertyError).toBeNull();
 
   const messages = properties.map((property, index) => ({
+    org_id: DEFAULT_ORG_ID,
     id: randomUUID(),
     channel: "sms",
     direction: "inbound",

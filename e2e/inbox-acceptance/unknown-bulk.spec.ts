@@ -197,6 +197,7 @@ async function insertUnknownMessage(
   const { data, error } = await admin
     .from("messages")
     .insert({
+      org_id: DEFAULT_ORG_ID,
       channel: "sms",
       direction: "inbound",
       status: "received",

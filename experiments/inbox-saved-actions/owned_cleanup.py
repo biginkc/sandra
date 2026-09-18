@@ -163,6 +163,7 @@ COUNTER_COLUMN_ALLOWLIST = frozenset({
     'public.memberships.my_leads_revision',
     'public.messages.inbox_inbound_revision',
     'inbox_reply_context.versions.revision',
+    'inbox_bridge.access_epochs.revision',
     'inbox_reply_send.attempts.generation',
     'inbox_reply_send.attempts.receipt_version',
     'inbox_reply_send.callback_receipts.lease_generation',

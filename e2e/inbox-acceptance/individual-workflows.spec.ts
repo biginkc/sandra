@@ -491,6 +491,7 @@ async function seedUnknownSender(fromAddress: string, bodies: readonly string[])
   const messageIds: string[] = [];
   for (const [index, body] of bodies.entries()) {
     const { data, error } = await admin.from("messages").insert({
+      org_id: DEFAULT_ORG_ID,
       channel: "sms",
       direction: "inbound",
       status: "received",
@@ -511,6 +512,7 @@ async function seedUnknownSender(fromAddress: string, bodies: readonly string[])
 
 async function seedPropertylessKnownThread(phone: string, addressTag: string, first: string, last: string): Promise<{ contactId: string; contactName: string; messageId: string; conversationId: string }> {
   const { data: contact, error: contactError } = await admin.from("contacts").insert({
+    org_id: DEFAULT_ORG_ID,
     first_name: first,
     last_name: last,
     phone_1: phone,
@@ -523,6 +525,7 @@ async function seedPropertylessKnownThread(phone: string, addressTag: string, fi
   expect(propertyError).toBeNull();
   const conversationId = randomUUID();
   const { data: message, error } = await admin.from("messages").insert({
+    org_id: DEFAULT_ORG_ID,
     channel: "sms",
     direction: "inbound",
     status: "received",

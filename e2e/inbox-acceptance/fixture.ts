@@ -48,11 +48,19 @@ async function openAcceptanceAuthSession(): Promise<AcceptanceAuthSession> {
     },
   });
 
-  const { error } = await auth.auth.signInWithPassword({
-    email: TEST_USER_EMAIL,
-    password: TEST_USER_PASSWORD,
-  });
-  if (error) throw error;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { error } = await auth.auth.signInWithPassword({
+      email: TEST_USER_EMAIL,
+      password: TEST_USER_PASSWORD,
+    });
+    if (!error) break;
+    // The disposable GoTrue container occasionally closes an idle HTTP
+    // socket while the serial suite is between rows. Retry that observed
+    // transport failure without hiding credential or configuration errors.
+    const retryable = /fetch failed|network|socket/i.test(error.message);
+    if (!retryable || attempt === 2) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+  }
   if (cookieJar.size === 0) {
     throw new Error(
       "Inbox acceptance auth fixture sign-in returned no browser cookies.",

@@ -127,7 +127,44 @@ async function seedMockDeliveryCatalog(
  * Stage 1 introduced membership-scoped RLS — without a membership row in
  * this org, the test user can't read or write tenant data.
  */
-export const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+/**
+ * The acceptance harness may supply a per-run disposable organization.  Other
+ * E2E suites keep the historical shared tenant when the override is absent.
+ * The release proof uses the override so rows created by one acceptance run
+ * can be removed without treating the production-like tenant as owned.
+ */
+export const DEFAULT_ORG_ID =
+  process.env.INBOX_ACCEPTANCE_ORG_ID?.trim() ||
+  "00000000-0000-0000-0000-000000000bbb";
+
+export async function ensureAcceptanceOrganization(
+  client: SupabaseClient<Database>,
+): Promise<void> {
+  const configured = process.env.INBOX_ACCEPTANCE_ORG_ID?.trim();
+  if (!configured) return;
+
+  const { data: existing, error: readError } = await client
+    .from("organizations")
+    .select("id,name")
+    .eq("id", DEFAULT_ORG_ID)
+    .maybeSingle();
+  if (readError) throw readError;
+  if (existing) {
+    const expectedPrefix = "Sandra Inbox Acceptance ";
+    if (!existing.name.startsWith(expectedPrefix)) {
+      throw new Error(
+        `acceptance organization ${DEFAULT_ORG_ID} is not a disposable run organization`,
+      );
+    }
+    return;
+  }
+
+  const { error: insertError } = await client.from("organizations").insert({
+    id: DEFAULT_ORG_ID,
+    name: `Sandra Inbox Acceptance ${E2E_RUN_ENVIRONMENT.runSlug}`,
+  });
+  if (insertError) throw insertError;
+}
 
 /**
  * Ensure this run's namespaced E2E user exists in auth.users, can sign in with
@@ -241,6 +278,7 @@ export async function seedProspects(
   addressPrefix = "E2E",
 ): Promise<SeededProspect[]> {
   const rows = Array.from({ length: count }, (_, i) => ({
+    org_id: DEFAULT_ORG_ID,
     address: `${addressPrefix} ${i + 1} Golden Path Ln`,
     state: "MO",
     status: "prospect",

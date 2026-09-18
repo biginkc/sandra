@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { defineConfig, devices } from "@playwright/test";
 
@@ -57,6 +57,21 @@ for (const key of [
 }
 const e2eRunEnvironment = ensureE2ERunEnvironment();
 const e2ePrimaryIdentity = identityForPrincipal(e2eRunEnvironment);
+
+function acceptanceOrganizationId(runSlug: string): string {
+  const digest = createHash("sha256")
+    .update(`sandra-inbox-acceptance-org:${runSlug}`)
+    .digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+process.env.INBOX_ACCEPTANCE_ORG_ID =
+  process.env.INBOX_ACCEPTANCE_ORG_ID ??
+  acceptanceOrganizationId(e2ePrimaryIdentity.runSlug);
 
 const supabaseUrl =
   process.env.TEST_SUPABASE_URL ?? env.TEST_SUPABASE_URL ?? "";
@@ -115,6 +130,8 @@ const webServerEnv: Record<string, string> = {
   E2E_RUN_SLUG: e2ePrimaryIdentity.runSlug,
   E2E_TEST_USER_EMAIL: e2ePrimaryIdentity.email,
   E2E_TEST_USER_PASSWORD: e2ePrimaryIdentity.password,
+  INBOX_ACCEPTANCE_RUN: "1",
+  INBOX_ACCEPTANCE_ORG_ID: process.env.INBOX_ACCEPTANCE_ORG_ID,
   NEXT_PUBLIC_HUGO_SSO: "1",
   E2E_AUTH_BYPASS: "1",
   MESSAGING_PROVIDER: "mock",

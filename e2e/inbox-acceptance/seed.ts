@@ -60,6 +60,7 @@ export async function seedAcceptanceThread(
   const { data: contact, error: contactError } = await admin
     .from("contacts")
     .insert({
+      org_id: DEFAULT_ORG_ID,
       first_name: opts.contactName.first,
       last_name: opts.contactName.last,
       phone_1: opts.phone,
@@ -91,6 +92,7 @@ export async function seedAcceptanceThread(
     const createdAt = new Date(Date.now() + m.createdAtOffsetMin * 60_000).toISOString();
     const businessNumber = opts.businessNumber ?? "+18162804181";
     const { error: msgError } = await admin.from("messages").insert({
+      org_id: DEFAULT_ORG_ID,
       channel: "sms",
       direction: m.direction,
       status: m.direction === "inbound" ? "received" : "sent",
@@ -148,6 +150,7 @@ export async function seedQueuedMessage(
   const { data: contact, error: contactError } = await admin
     .from("contacts")
     .insert({
+      org_id: DEFAULT_ORG_ID,
       first_name: "Outbox",
       last_name: opts.addressTag,
       phone_1: phone,
@@ -171,6 +174,7 @@ export async function seedQueuedMessage(
   const { data: message, error } = await admin
     .from("messages")
     .insert({
+      org_id: DEFAULT_ORG_ID,
       channel: "sms",
       direction: "outbound",
       status: "queued",
