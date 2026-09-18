@@ -61,7 +61,12 @@ describe("My Leads workflow dialogs", () => {
       />
     )
 
-    await user.type(screen.getByLabelText("Motivation"), "Needs to sell before moving")
+    const motivation = screen.getByLabelText("Motivation")
+    // Base UI's modal focus handoff can settle after the first interaction in
+    // this file. Explicitly focus the real control before typing so the test
+    // exercises the textarea rather than racing the dialog's initial focus.
+    await user.click(motivation)
+    await user.type(motivation, "Needs to sell before moving")
     await user.selectOptions(screen.getByLabelText("Temperature (optional)"), "hot")
     await user.click(screen.getByRole("button", { name: "Save readiness" }))
 
