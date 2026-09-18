@@ -155,7 +155,11 @@ run_case('extra_composite_type_in_companion_schema',
 run_case('composite_attribute_dropped',
  lambda: sql("ALTER TYPE inbox_bridge.cursor_context DROP ATTRIBUTE cursor_target"),
  lambda: sql("ALTER TYPE inbox_bridge.cursor_context ADD ATTRIBUTE cursor_target uuid"),
- 'column set drift on inbox_bridge.cursor_context')
+ # The verifier rejects this before the live column-set comparison because the
+ # reviewed complete column pin set contains the dropped attribute.  Assert
+ # that load-bearing fail-closed signal rather than requiring a later branch's
+ # diagnostic wording.
+ 'column-acl.json contains pins for columns absent from the candidate')
 
 # 8e. Add an attribute the source does not declare.
 run_case('composite_attribute_added',
