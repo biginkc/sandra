@@ -1,10 +1,12 @@
 import { expect, test } from "./fixture";
 import { resetAcceptanceFixture } from "./cleanup";
+import { Client } from "pg";
 import { randomUUID } from "node:crypto";
 
-import { adminClient, ensureTestUser } from "../fixtures";
+import { adminClient, DEFAULT_ORG_ID, ensureTestUser } from "../fixtures";
 import { seedAcceptanceThread } from "./seed";
 import { captureRowEvidence, purgeRowOutcomes, recordRowOutcome } from "./results";
+import { assertDisposableE2EDatabaseEnvironment } from "../../src/lib/supabase/e2e-target-safety";
 
 /**
  * Inbox acceptance matrix runner — F02-F10 (existing read/search/filter/
@@ -202,6 +204,57 @@ async function seedOrderedInboxPage(count: number): Promise<{ newestName: string
   };
 }
 
+/**
+ * Workset creation snapshots the maintained projection, not the canonical
+ * source tables. The bulk F06 seed intentionally exercises the 500-row page
+ * boundary, so wait for the exact page predicate to be projected before
+ * creating the scope. This is a read-only disposable-fixture probe; without
+ * it, the first workset can legitimately freeze a partially projected page.
+ */
+async function waitForOrderedProjection(expectedCount: number): Promise<void> {
+  const databaseUrl = process.env.E2E_CI_SUPABASE_DB_URL;
+  if (process.env.E2E_DISPOSABLE_DATABASE !== "1" || databaseUrl !== "postgresql://postgres:postgres@127.0.0.1:54322/postgres") {
+    throw new Error("F06 projection readiness requires the exact disposable loopback database.");
+  }
+  assertDisposableE2EDatabaseEnvironment(process.env.TEST_SUPABASE_URL ?? "", {
+    ...process.env,
+    E2E_CI_SUPABASE_DB_URL: databaseUrl,
+  });
+
+  const client = new Client({ connectionString: databaseUrl, ssl: false });
+  await client.connect();
+  try {
+    const identity = await client.query<{ marker: string | null }>(
+      "SELECT marker FROM install_fixture.identity LIMIT 1",
+    );
+    if (identity.rows[0]?.marker !== "sandra-inbox-http-owned-synthetic-20260917") {
+      throw new Error("F06 projection readiness database identity marker mismatch.");
+    }
+
+    await expect.poll(async () => {
+      await client.query("BEGIN READ ONLY");
+      try {
+        const result = await client.query<{ count: string }>(
+          `SELECT count(*)::text AS count
+             FROM inbox_bridge.filter_rows
+            WHERE org_id = $1::uuid
+              AND target_kind = 'known_conversation'
+              AND has_recent
+              AND NOT is_noise`,
+          [DEFAULT_ORG_ID],
+        );
+        await client.query("COMMIT");
+        return Number(result.rows[0]?.count ?? -1);
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      }
+    }, { timeout: 20_000, intervals: [250, 500, 1_000, 2_000] }).toBe(expectedCount);
+  } finally {
+    await client.end();
+  }
+}
+
 test("F06 — rows order by most recent activity", async ({ page }) => {
   // Isolate the page-boundary proof from earlier serial rows. The fixture is
   // inserted in two bounded service-role batches plus one message batch;
@@ -209,6 +262,7 @@ test("F06 — rows order by most recent activity", async ({ page }) => {
   await resetAcceptanceFixture(admin);
   await ensureTestUser(admin);
   const { newestName, oldestName } = await seedOrderedInboxPage(501);
+  await waitForOrderedProjection(501);
 
   await page.goto("/inbox?view=all");
   const list = page.getByRole("list", { name: "Inbox conversations" });
