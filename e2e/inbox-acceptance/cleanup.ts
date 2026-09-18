@@ -151,7 +151,7 @@ async function readCleanupProtection(
 ): Promise<CleanupProtection> {
   const { data: lockedProperties, error: lockedPropertiesError } = await admin
     .from("properties")
-    .select("id,homeowner_contact_id")
+    .select("id,homeowner_contact_id,agent_contact_id")
     .eq("org_id", orgId)
     .eq("is_dnc_locked", true);
   if (lockedPropertiesError) {
@@ -165,7 +165,7 @@ async function readCleanupProtection(
   );
   const retainedContactIds = new Set(
     (lockedProperties ?? [])
-      .map((row) => row.homeowner_contact_id)
+      .flatMap((row) => [row.homeowner_contact_id, row.agent_contact_id])
       .filter((id): id is string => typeof id === "string"),
   );
 
@@ -422,6 +422,14 @@ export async function resetAcceptanceFixture(
   let lastState: AcceptanceProjectionState | undefined;
   try {
     const protection = await readCleanupProtection(admin, orgId);
+    if (protection.lockedPropertyIds.size > 0 || protection.retainedContactIds.size > 0) {
+      process.stdout.write(`${JSON.stringify({
+        type: "acceptance_cleanup_retention",
+        reason: "permanent_dnc_compliance_lock",
+        retained_property_ids: [...protection.lockedPropertyIds].sort(),
+        retained_contact_ids: [...protection.retainedContactIds].sort(),
+      })}\n`);
+    }
     let retainedPropertyIds = new Set(protection.retainedPropertyIds);
     if (protection.lockedPropertyIds.size === 0 && protection.retainedContactIds.size === 0) {
       await deleteOrgScopedFixtureRows(admin, orgId);
