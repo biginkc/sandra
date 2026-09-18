@@ -18,28 +18,32 @@
       "head": "4f7a0c331eeb4d263828d517ec3dbd5cc392f1d5",
       "role": "installed-catalog verifier and installer CI",
       "required_for": ["installed_schema_exact"],
-      "status": "unmerged"
+      "status": "integrated_ancestor",
+      "integrated_in_candidate": true
     },
     {
       "id": "PR607",
       "head": "b2e1313f43b7be5a306e876b73faebeaf6088d58",
       "role": "per-item projection poison tolerance",
       "required_for": ["worker_recovery"],
-      "status": "unmerged"
+      "status": "integrated_ancestor",
+      "integrated_in_candidate": true
     },
     {
       "id": "PR606",
       "head": "4c6d490800d51becaf2ad0174f9e1426e9e94b1b",
       "role": "Next/relay token parity and owned-local proof",
       "required_for": ["relay_parity"],
-      "status": "unmerged"
+      "status": "integrated_ancestor",
+      "integrated_in_candidate": true
     },
     {
       "id": "PR610",
       "head": "854304dabd236e830545884b1564d5a0f2dedfbe",
       "role": "per-user pilot cohort gate",
       "required_for": ["pilot_enablement"],
-      "status": "unmerged"
+      "status": "integrated_ancestor",
+      "integrated_in_candidate": true
     }
   ],
   "budgets": {

@@ -1,6 +1,7 @@
 {
-  "status": "RELEASE_CANDIDATE_WITH_BLOCKED_STRESS_GATES",
-  "candidate_sha": "d9fb0d8554ebe0396e1e56fea671e3e8cc712cb3",
+  "status": "RELEASE_CANDIDATE_WITH_BLOCKED_RUNTIME_AND_STRESS_GATES",
+  "candidate_sha": "a91fdd1036e77b91e50ad56558763c7c3fca4abd",
+  "evidence_scope": "This packet records the exact source candidate tested before the evidence-metadata commit. The generated release-gate packet is authoritative for the final commit SHA.",
   "flags": {
     "production_inbox_actions_server_enabled": "off",
     "production_inbox_replies_server_enabled": "off",
@@ -18,27 +19,25 @@
   },
   "gates": {
     "source_manifest": "PASS",
-    "acceptance_matrix": "PASS: 50 rows, 52 Playwright tests",
+    "acceptance_matrix": "BLOCKED: 50 rows are specified, but the exact-head owned browser rerun stops at /api/inbox/sync with HTTP 503 unexpected_failure before F02/F11 can complete",
     "http_stack_probe": "PASS: authenticated RPCs, WebSocket 101, projection health",
     "worker_recovery": "PASS: realtime_restart 3020.6ms; projection_restart 1320.9ms",
     "stress_harness_unit": "PASS: 6 tests",
     "stress_measurements": "BLOCKED_UNJUDGED"
   },
   "validation": {
-    "release_unit_tests": "PASS: 42 tests",
+    "release_unit_tests": "PASS: 43 tests",
     "production_install_unit_tests": "PASS: 15 tests",
-    "inbox_vitest": "PASS: 562 tests",
+    "inbox_vitest": "PASS: 570 tests",
     "typecheck": "PASS",
     "realtime_bootstrap_tests": "PASS: 23 tests",
     "realtime_cdc_tests": "PASS: 8 tests"
   },
   "blocked_gates": [
+    "browser_acceptance_runtime: the owned release stack returns HTTP 503 unexpected_failure from /api/inbox/sync despite a direct relay HTTP 200 probe; session/workset authority alignment remains unresolved",
     "current_volume_stress: measured arrival rate, concurrency, tenant count, and history skew are not supplied",
     "three_x_volume_stress: measured arrival rate, concurrency, tenant count, and history skew are not supplied",
-    "installed_schema_exact: PR611 is listed as an unmerged dependency",
-    "worker_recovery: PR607 is listed as an unmerged dependency",
-    "relay_parity: PR606 is listed as an unmerged dependency",
-    "pilot_enablement: PR610 is listed as an unmerged dependency"
+    "pilot_enablement: production deployment and pilot enablement remain intentionally disabled"
   ],
   "scope": "Owned rehearsal evidence only; no production deployment or pilot enablement claim."
 }
