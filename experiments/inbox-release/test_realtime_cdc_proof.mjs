@@ -11,6 +11,8 @@ import {
   FIXTURE_DATABASE_URL,
   assertFixtureEnvironment,
   readCdcScenario,
+  waitForAuthenticatedSubscription,
+  waitForReplicationSlot,
 } from "./realtime-cdc-proof.mjs";
 
 const scenario = {
@@ -85,4 +87,52 @@ test("CDC scenario accepts the authoritative version-zero acceptance organizatio
     INBOX_HTTP_CDC_ORG_ID: "00000000-0000-0000-0000-000000000bbb",
   }));
   assert.equal(parsed.orgId, "00000000-0000-0000-0000-000000000bbb");
+});
+
+test("CDC proof waits for the active logical replication slot before insertion", async () => {
+  let calls = 0;
+  const database = {
+    async query() {
+      calls += 1;
+      return { rows: [{ ready: calls > 1 }] };
+    },
+  };
+  await waitForReplicationSlot(database, 1000);
+  assert.equal(calls, 2);
+});
+
+test("CDC proof fails closed when the logical replication slot never becomes active", async () => {
+  await assert.rejects(
+    () => waitForReplicationSlot({
+      async query() {
+        return { rows: [{ ready: false }] };
+      },
+    }, 1000),
+    /logical replication slot/,
+  );
+});
+
+test("CDC proof waits for the exact authenticated INSERT subscription", async () => {
+  let calls = 0;
+  const database = {
+    async query(sql, params) {
+      assert.match(sql, /claims_role = 'authenticated'/);
+      assert.deepEqual(params, [scenario.INBOX_HTTP_CDC_ORG_ID]);
+      calls += 1;
+      return { rows: [{ ready: calls > 1 }] };
+    },
+  };
+  await waitForAuthenticatedSubscription(database, scenario.INBOX_HTTP_CDC_ORG_ID, 1000);
+  assert.equal(calls, 2);
+});
+
+test("CDC proof fails closed when the exact subscription never appears", async () => {
+  await assert.rejects(
+    () => waitForAuthenticatedSubscription({
+      async query() {
+        return { rows: [{ ready: false }] };
+      },
+    }, scenario.INBOX_HTTP_CDC_ORG_ID, 1000),
+    /exact authenticated Realtime subscription/,
+  );
 });

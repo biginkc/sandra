@@ -258,6 +258,7 @@ function waitForInsert(channel, timeout) {
       rejectEvent(new CdcBlocked("Realtime CDC wait cancelled after setup failure"));
     },
     onPayload(payload, expectedId, expectedOrgId) {
+      process.stdout.write(JSON.stringify({diagnostic:"cdc_callback",at:Date.now(),event:payload?.eventType,id:payload?.new?.id,org:payload?.new?.org_id})+"\n");
       if (payload?.eventType !== "INSERT") return;
       const row = payload.new;
       if (row?.id !== expectedId || row?.org_id !== expectedOrgId) return;
@@ -285,6 +286,8 @@ async function subscribeAuthenticatedUser(client, scenario, timeout, messageId) 
       (payload) => event.onPayload(payload, messageId, scenario.orgId),
     );
 
+  channel.on("system", {}, (payload) => process.stdout.write(JSON.stringify({ diagnostic: "realtime_system", at: Date.now(), extension: payload.extension, status: payload.status, message: payload.message }) + "\n"));
+
   const subscribed = new Promise((resolvePromise, rejectPromise) => {
     const timer = setTimeout(() => {
       rejectPromise(new CdcBlocked("timed out waiting for authenticated Realtime SUBSCRIBED"));
@@ -311,6 +314,40 @@ async function subscribeAuthenticatedUser(client, scenario, timeout, messageId) 
     throw error;
   }
   return { channel, event: event.promise, cancelEventWait: event.cancel };
+}
+
+export async function waitForReplicationSlot(database, timeout) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const result = await database.query(
+      "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name LIKE 'supabase_realtime_replication_slot%' AND active) AS ready",
+    );
+    if (result.rows[0]?.ready === true) {
+      return;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  }
+  throw new CdcBlocked("timed out waiting for the Realtime logical replication slot");
+}
+
+export async function waitForAuthenticatedSubscription(database, orgId, timeout) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const result = await database.query(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM realtime.subscription
+         WHERE entity = 'public.messages'::regclass
+           AND claims_role = 'authenticated'::regrole
+           AND action_filter = 'INSERT'
+           AND filters::text LIKE '%' || $1 || '%'
+       ) AS ready`,
+      [orgId],
+    );
+    if (result.rows[0]?.ready === true) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  }
+  throw new CdcBlocked("timed out waiting for the exact authenticated Realtime subscription");
 }
 
 async function deleteExactMessage(service, messageId, orgId) {
@@ -378,9 +415,13 @@ export async function main(env = process.env) {
     const subscription = await subscribeAuthenticatedUser(userClient, scenario, timeout, messageId);
     channel = subscription.channel;
     cancelEventWait = subscription.cancelEventWait;
+    await waitForAuthenticatedSubscription(database, scenario.orgId, timeout);
+    await waitForReplicationSlot(database, timeout);
+    process.stdout.write(JSON.stringify({ diagnostic: "realtime_slot_ready", at: Date.now() }) + "\n");
     const payload = messagePayload(scenario, messageId, env);
     // Mark the request before sending it.  A network timeout can leave a
     // committed row, so finally always attempts this exact UUID cleanup.
+    process.stdout.write(JSON.stringify({diagnostic:"insert_start",at:Date.now(),message_id:messageId})+"\n");
     insertAttempted = true;
     const { data: inserted, error: insertError } = await serviceClient
       .from("messages")
@@ -391,6 +432,7 @@ export async function main(env = process.env) {
       throw new CdcBlocked("owned inbound CDC message insert failed or was uncertain");
     }
 
+    process.stdout.write(JSON.stringify({diagnostic:"insert_returned",at:Date.now(),message_id:messageId})+"\n");
     await subscription.event;
     result = {
       status: "PASS",
