@@ -9,7 +9,7 @@ import type { WorkspaceId } from "./selection";
 const outcomes: readonly [
     InboxMetadataOutcome,
     string
-][] = [["wrong_number", "Wrong number"], ["bad_number", "Bad number"], ["not_interested", "Not interested"], ["needs_sequence", "Needs sequence"], ["nurture", "Nurture"], ["opted_out", "SMS opt-out"]];
+][] = [["wrong_number", "Wrong number"], ["bad_number", "Bad number"], ["not_interested", "Not interested"], ["needs_sequence", "Needs sequence"], ["nurture", "Follow up"], ["opted_out", "SMS opt-out"]];
 const exclusionLabels: Record<string, string> = { unsupported_target: "This sender group needs individual attention", unsupported_action: "This action is unavailable", permanent_dnc_not_enabled: "Permanent DNC is not available here", conversation_unavailable: "Conversation is no longer available", property_unavailable: "No eligible property is linked", property_locked: "The linked property cannot be changed", training_target: "Training records cannot be changed here", assignee_unavailable: "Assignee is unavailable", scope_too_large: "This selection is too large", source_baseline_unavailable: "Current data could not be verified" };
 type Draft = {
     request: PrepareInboxActionRequest;

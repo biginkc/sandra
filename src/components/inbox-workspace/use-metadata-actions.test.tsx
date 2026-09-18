@@ -53,7 +53,7 @@ it("keeps an uncertain acceptance on its original key and blocks competing actio
         return Response.json({ operationId: "00000000-0000-4000-8000-000000000004", acceptedAt: complete.acceptedAt });
     } return Response.json(complete); }));
     render(<Harness />);
-    fireEvent.click(screen.getByRole("button", { name: "Nurture" }));
+    fireEvent.click(screen.getByRole("button", { name: "Follow up" }));
     fireEvent.click(await screen.findByRole("button", { name: "Apply to 1 conversations" }));
     const retry = await screen.findByRole("button", { name: "Retry apply safely" });
     expect(screen.getByRole("button", { name: "Not interested", hidden: true })).toBeDisabled();
@@ -66,7 +66,7 @@ it("keeps an uncertain acceptance on its original key and blocks competing actio
 it("does not offer an action when server preparation changes the selected identity", async () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => { const value = prepared(JSON.parse(String(init.body))); value.items[0].target = { kind: "conversation", id: "different" }; return Response.json(value); }));
     render(<Harness />);
-    fireEvent.click(screen.getByRole("button", { name: "Nurture" }));
+    fireEvent.click(screen.getByRole("button", { name: "Follow up" }));
     await screen.findByText("The action review did not match this selection.");
     expect(screen.queryByRole("button", { name: /Apply to/ })).not.toBeInTheDocument();
 });
@@ -75,7 +75,7 @@ it("clears an in-flight review and ignores its late response", async () => {
     let body!: PrepareInboxActionRequest;
     vi.stubGlobal("fetch", vi.fn((_url: string, init: RequestInit) => { body = JSON.parse(String(init.body)); return new Promise<Response>(r => { resolve = r; }); }));
     render(<Harness />);
-    fireEvent.click(screen.getByRole("button", { name: "Nurture" }));
+    fireEvent.click(screen.getByRole("button", { name: "Follow up" }));
     fireEvent.click(screen.getByRole("button", { name: "Clear private action state", hidden: true }));
     resolve(Response.json(prepared(body)));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
@@ -84,14 +84,14 @@ it("keeps disabled deployment flags from exposing or preparing actions", () => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
     render(<Harness enabled={false}/>);
-    expect(screen.queryByRole("button", { name: "Nurture" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Follow up" })).not.toBeInTheDocument();
     expect(fetch).not.toHaveBeenCalled();
 });
 it("shows exclusions and cannot accept an entirely ineligible selection", async () => {
     const fetch = vi.fn(async (_url: string, init: RequestInit) => { const value = prepared(JSON.parse(String(init.body))); return Response.json({ ...value, items: [{ ...value.items[0], propertyId: null, exclusion: "property_unavailable" }], eligibleCount: 0, excludedCount: 1, affectedPropertyCount: 0, effectCount: 0 }); });
     vi.stubGlobal("fetch", fetch);
     render(<Harness />);
-    fireEvent.click(screen.getByRole("button", { name: "Nurture" }));
+    fireEvent.click(screen.getByRole("button", { name: "Follow up" }));
     await screen.findByText("Ada: No eligible property is linked");
     expect(screen.getByRole("button", { name: "Apply to 0 conversations" })).toBeDisabled();
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -100,7 +100,7 @@ it("requests parent access cleanup on a canonical preparation denial", async () 
     const onAccessLost = vi.fn();
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({}, { status: 403 })));
     render(<Harness onAccessLost={onAccessLost}/>);
-    fireEvent.click(screen.getByRole("button", { name: "Nurture" }));
+    fireEvent.click(screen.getByRole("button", { name: "Follow up" }));
     await waitFor(() => expect(onAccessLost).toHaveBeenCalledOnce());
     expect(screen.queryByRole("button", { name: /Apply to/ })).not.toBeInTheDocument();
 });
@@ -114,7 +114,7 @@ it("reviews canonical assignee choice and both ordered changes before acceptance
     const assignee = await screen.findByRole("combobox", { name: "Assign to" });
     fireEvent.change(screen.getByRole("combobox", { name: "Outcome" }), { target: { value: "nurture" } });
     fireEvent.change(assignee, { target: { value: id } }); fireEvent.click(screen.getByRole("button", { name: "Review both changes" }));
-    await screen.findByText("Outcome: Nurture; Assign to VA Example");
+    await screen.findByText("Outcome: Follow up; Assign to VA Example");
     expect(request?.definition.steps).toEqual([{ type: "outcome", value: "nurture" }, { type: "assign", userId: id }]);
     expect(screen.getByText(/2 changes/)).toBeInTheDocument();
 });
@@ -142,5 +142,5 @@ it("offers SMS opt-out separately from permanent DNC with authoritative expanded
 });
 
 it("disables metadata actions with an explicit reason above the500-target bound", () => {
-  render(<Harness selectionCount={501}/>); expect(screen.getByRole("button", {name:"Nurture"})).toBeDisabled(); expect(screen.getByRole("button", {name:"Nurture"})).toHaveAttribute("title", expect.stringContaining("at most 500"));
+  render(<Harness selectionCount={501}/>); expect(screen.getByRole("button", {name:"Follow up"})).toBeDisabled(); expect(screen.getByRole("button", {name:"Follow up"})).toHaveAttribute("title", expect.stringContaining("at most 500"));
 });
