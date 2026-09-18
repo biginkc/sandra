@@ -190,6 +190,218 @@ describe("sendSmsToContact (integration)", () => {
     }
   });
 
+  it("requires identity for an anonymous first send despite wrong-business, failed, and queued history, then preserves an established reply", async () => {
+    await withSafeSendWindow(async () => {
+      const phone = "+18165553001";
+      const { contactId, propertyId } = await seed({ phone, withConsent: true });
+      const orgId = await getOrgId();
+
+      const { error: anchorError } = await supabase.from("messages").insert([
+        {
+          org_id: orgId,
+          channel: "sms",
+          direction: "inbound",
+          status: "received",
+          provider: "mock",
+          created_at: "2026-07-02T17:59:00.000Z",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: phone,
+          to_address: MOCK_SENDER_SECONDARY,
+          body: "Inbound message to the other business number",
+        },
+        {
+          org_id: orgId,
+          channel: "sms",
+          direction: "outbound",
+          status: "failed",
+          provider: "mock",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: MOCK_SENDER_PRIMARY,
+          to_address: phone,
+          body: "Failed anonymous opener",
+        },
+        {
+          org_id: orgId,
+          channel: "sms",
+          direction: "outbound",
+          status: "queued",
+          provider: "mock",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: MOCK_SENDER_PRIMARY,
+          to_address: phone,
+          body: "Queued anonymous opener",
+        },
+      ]);
+      expect(anchorError).toBeNull();
+
+      const callsBefore = getMockMessageLog().length;
+      const anonymous = await sendSmsToContact(supabase, {
+        origin: "manual",
+        contactId,
+        propertyId,
+        from: MOCK_SENDER_PRIMARY,
+        body: "Anonymous first touch",
+      });
+      expect(anonymous.status).toBe("db_error");
+      if (anonymous.status === "db_error") {
+        expect(anonymous.error).toMatch(/Opening SMS must identify the sender/i);
+      }
+      expect(getMockMessageLog()).toHaveLength(callsBefore);
+
+      const establishedReply = {
+        channel: "sms" as const,
+        direction: "inbound" as const,
+        status: "received" as const,
+        provider: "mock" as const,
+        created_at: "2026-07-02T18:00:00.000Z",
+        contact_id: contactId,
+        property_id: propertyId,
+        from_address: phone,
+        to_address: MOCK_SENDER_PRIMARY,
+        body: "Inbound message to the established business number",
+      };
+      const { data: inbound, error: inboundError } = await supabase
+        .from("messages")
+        .insert(establishedReply)
+        .select("id")
+        .single();
+      expect(inboundError).toBeNull();
+      expect(inbound?.id).toBeTruthy();
+
+      const replyBody = "Reply from the established conversation";
+      const reply = await sendSmsToContact(supabase, {
+        origin: "manual",
+        contactId,
+        propertyId,
+        body: replyBody,
+      });
+      expect(reply.status).toBe("sent");
+      if (reply.status !== "sent") return;
+      expect(getMockMessageLog()).toHaveLength(callsBefore + 1);
+      expect(getMockMessageLog().at(-1)?.input.body).toBe(replyBody);
+
+      const { data: replyRow, error: replyRowError } = await supabase
+        .from("messages")
+        .select("status, body, from_address, to_address")
+        .eq("id", reply.messageId)
+        .single();
+      expect(replyRowError).toBeNull();
+      expect(replyRow).toMatchObject({
+        status: "sent",
+        body: replyBody,
+        from_address: MOCK_SENDER_PRIMARY,
+        to_address: phone,
+      });
+    });
+  });
+
+  it("blocks an unmarked legacy queued opener without matching history but releases unchanged after matching inbound", async () => {
+    await withSafeSendWindow(async () => {
+      const phone = "+18165553002";
+      const { contactId, propertyId } = await seed({ phone, withConsent: true });
+      const orgId = await getOrgId();
+
+      const { data: queued, error: queuedInsertError } = await supabase
+        .from("messages")
+        .insert({
+          org_id: orgId,
+          channel: "sms",
+          direction: "outbound",
+          status: "queued",
+          provider: "mock",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: MOCK_SENDER_PRIMARY,
+          to_address: phone,
+          body: "Legacy queued anonymous opener",
+        })
+        .select("id")
+        .single();
+      expect(queuedInsertError).toBeNull();
+      expect(queued?.id).toBeTruthy();
+      if (!queued) return;
+
+      const callsBefore = getMockMessageLog().length;
+      const blocked = await releaseQueuedMessage(supabase, queued.id);
+      expect(blocked.status).toBe("db_error");
+      if (blocked.status === "db_error") {
+        expect(blocked.error).toMatch(/Opening SMS must identify the sender/i);
+      }
+      expect(getMockMessageLog()).toHaveLength(callsBefore);
+
+      const { data: blockedRow, error: blockedRowError } = await supabase
+        .from("messages")
+        .select("status, error_message")
+        .eq("id", queued.id)
+        .single();
+      expect(blockedRowError).toBeNull();
+      expect(blockedRow?.status).toBe("failed");
+      expect(blockedRow?.error_message).toMatch(/Opening SMS must identify the sender/i);
+
+      const { data: inbound, error: inboundError } = await supabase
+        .from("messages")
+        .insert({
+          org_id: orgId,
+          channel: "sms",
+          direction: "inbound",
+          status: "received",
+          provider: "mock",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: phone,
+          to_address: MOCK_SENDER_PRIMARY,
+          body: "Matching inbound reply",
+        })
+        .select("id")
+        .single();
+      expect(inboundError).toBeNull();
+      expect(inbound?.id).toBeTruthy();
+
+      const releasedBody = "Legacy queued reply after inbound";
+      const { data: releasable, error: releasableInsertError } = await supabase
+        .from("messages")
+        .insert({
+          org_id: orgId,
+          channel: "sms",
+          direction: "outbound",
+          status: "queued",
+          provider: "mock",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: MOCK_SENDER_PRIMARY,
+          to_address: phone,
+          body: releasedBody,
+        })
+        .select("id")
+        .single();
+      expect(releasableInsertError).toBeNull();
+      expect(releasable?.id).toBeTruthy();
+      if (!releasable) return;
+
+      const release = await releaseQueuedMessage(supabase, releasable.id);
+      expect(release.status).toBe("sent");
+      if (release.status !== "sent") return;
+      expect(getMockMessageLog()).toHaveLength(callsBefore + 1);
+      expect(getMockMessageLog().at(-1)?.input.body).toBe(releasedBody);
+
+      const { data: releasedRow, error: releasedRowError } = await supabase
+        .from("messages")
+        .select("status, body, from_address, to_address")
+        .eq("id", releasable.id)
+        .single();
+      expect(releasedRowError).toBeNull();
+      expect(releasedRow).toMatchObject({
+        status: "sent",
+        body: releasedBody,
+        from_address: MOCK_SENDER_PRIMARY,
+        to_address: phone,
+      });
+    });
+  });
+
   it("blocks an explicit unapproved immediate sender before provider use", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-07-02T18:00:00Z"));
@@ -221,7 +433,7 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("does not block when no consent event exists and quiet hours allow sending", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
     const { contactId, propertyId } = await seed({ withConsent: false });
     try {
@@ -247,12 +459,17 @@ describe("sendSmsToContact (integration)", () => {
 
   it("blocks with blocked_terminal_dispo when contact has opted out after opt-in", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
-    await recordConsentEvent(supabase, {
+    const optOut = await recordConsentEvent(supabase, {
       contactId,
       channel: "sms",
       eventType: "opt_out",
       source: "integration-test-opt-out",
+      // Keep the opt-out strictly later than seed()'s opt-in. PostgreSQL
+      // timestamps can otherwise tie and leave latest-event ordering to the
+      // query's secondary plan order.
+      occurredAt: new Date(Date.now() + 1000),
     });
+    expect(optOut.inserted).toBe(true);
     const outcome = await sendSmsToContact(supabase, {
       origin: "manual",
       contactId,
@@ -285,7 +502,7 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("blocks a re-imported contact when the same phone is suppressed", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
     const phone = "+18165551801";
     const original = await seed({ phone, withConsent: true });
@@ -403,7 +620,7 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("blocks immediately on terminal outreach_dispo before inserting a message", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
     const { contactId, propertyId } = await seed({ withConsent: true });
     await supabase
@@ -464,7 +681,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "automated",
         contactId,
         propertyId,
-        body: "AI responder reply that must not fire",
+        body: "AI responder reply that must not fire Mel with BMH.",
       });
 
       expect(outcome.status).toBe("blocked_automated_suppressed");
@@ -561,7 +778,7 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("stamps campaign_id on an immediate send when campaignId is provided", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
     const { contactId, propertyId } = await seed({ withConsent: true });
 
@@ -1243,7 +1460,7 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("send-now: consent + quiet-hours gates still apply with queueOnly=false", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
 
     // No consent no longer blocks unless the contact explicitly opted out.
