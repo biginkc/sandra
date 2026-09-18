@@ -40,7 +40,7 @@ type MetadataPrepared = {
   affectedPropertyCount?: number;
   effectCount?: number;
   smsSafetySummary?: { contacts: number; linkedProperties: number; activeEnrollments: number } | null;
-  followUp?: { kind: "review_reply"; template: string };
+  followUp?: { kind: "review_reply" };
 };
 
 type ReplyPrepared = {
@@ -67,7 +67,7 @@ type Draft = {
   acceptAttempted?: boolean;
 };
 type FollowUpDraft = {
-  request: { sourceOperationId: string; idempotencyKey: string; template: string };
+  request: { sourceOperationId: string; idempotencyKey: string };
   prepared?: ReplyPrepared;
   stage: "preparing" | "prepared" | "accepting" | "accepted";
   operationId?: string;
@@ -139,7 +139,7 @@ function isMetadataPrepared(value: unknown): value is MetadataPrepared {
   const row = object(value);
   const followUp = row && row.followUp;
   const candidate = object(followUp);
-  return !!row && typeof row.preparationId === "string" && typeof row.idempotencyKey === "string" && Array.isArray(row.items) && Number.isSafeInteger(row.eligibleCount) && Number.isSafeInteger(row.excludedCount) && (followUp === undefined || (!!candidate && candidate.kind === "review_reply" && typeof candidate.template === "string" && candidate.template.trim().length > 0 && candidate.template.length <= 1600));
+  return !!row && typeof row.preparationId === "string" && typeof row.idempotencyKey === "string" && Array.isArray(row.items) && Number.isSafeInteger(row.eligibleCount) && Number.isSafeInteger(row.excludedCount) && (followUp === undefined || (!!candidate && candidate.kind === "review_reply"));
 }
 
 function replyReceiptResult(value: unknown): string {
@@ -179,6 +179,13 @@ function verifyPreparedTargets(items: readonly { target: Target }[], request: Dr
   if (actual.size !== expected.size || [...expected].some(target => !actual.has(target))) throw new Error("The saved action review did not match this selection.");
 }
 
+function verifyReplyTargets(items: readonly { target: Target }[], targets: readonly Target[]): void {
+  if (items.length !== targets.length) throw new Error("The reply review did not match the saved selection.");
+  const expected = new Set(targets.map(target => `${target.kind}:${target.id}`));
+  const actual = new Set(items.map(item => `${item.target.kind}:${item.target.id}`));
+  if (actual.size !== expected.size || [...expected].some(target => !actual.has(target))) throw new Error("The reply review did not match the saved selection.");
+}
+
 interface Options {
   enabled: boolean;
   identity: InboxQueryIdentity;
@@ -211,6 +218,8 @@ export function useInboxSavedActions(options: Options) {
   const [assignees, setAssignees] = useState<readonly Assignee[]>([]);
   const [assigneesError, setAssigneesError] = useState<string>();
   const controller = useRef<AbortController | null>(null);
+  const followUpController = useRef<AbortController | null>(null);
+  const followUpGeneration = useRef(0);
   const latest = useRef(options);
   latest.current = options;
 
@@ -336,18 +345,25 @@ export function useInboxSavedActions(options: Options) {
   async function prepareFollowUp() {
     const prepared = draft?.prepared?.kind === "metadata" ? draft.prepared.value : null;
     if (!draft?.operationId || !draft.result || !prepared?.followUp || followUp) return;
-    const request = { sourceOperationId: draft.operationId, idempotencyKey: crypto.randomUUID(), template: prepared.followUp.template };
+    const request = { sourceOperationId: draft.operationId, idempotencyKey: crypto.randomUUID() };
+    const sourceTargets = draft.request.targets;
+    const token = ++followUpGeneration.current;
+    followUpController.current?.abort();
+    const preparationController = new AbortController();
+    followUpController.current = preparationController;
     setFollowUp({ request, stage: "preparing" });
     try {
-      const raw = object(await requestJson("/api/inbox/replies/prepare", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request) }));
+      const raw = object(await requestJson("/api/inbox/replies/prepare", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request), signal: preparationController.signal }));
       const value = raw && object(raw.prepared) ? raw.prepared : raw;
-      if (!isReplyPrepared(value) || value.idempotencyKey !== request.idempotencyKey || !Number.isFinite(Date.parse(value.expiresAt)) || value.items.length > 500 || value.recipientCount < 0 || value.recipientCount > value.items.length) throw new Error("Reply review could not be verified.");
+      if (!isReplyPrepared(value) || value.idempotencyKey !== request.idempotencyKey || !Number.isFinite(Date.parse(value.expiresAt)) || value.items.length > 500 || value.recipientCount < 1 || value.recipientCount > 50 || value.recipientCount > value.items.length) throw new Error("Reply review could not be verified.");
+      verifyReplyTargets(value.items, sourceTargets);
+      if (token !== followUpGeneration.current || preparationController.signal.aborted) return;
       setFollowUp({ request, stage: "prepared", prepared: value });
-    } catch (error) { setFollowUp({ request, stage: "prepared", error: error instanceof Error ? error.message : "Reply review could not be prepared." }); }
+    } catch (error) { if (token === followUpGeneration.current && !preparationController.signal.aborted) setFollowUp({ request, stage: "prepared", error: error instanceof Error ? error.message : "Reply review could not be prepared." }); }
   }
 
   async function acceptFollowUp() {
-    if (!followUp?.prepared || followUp.stage !== "prepared" || followUp.prepared.recipientCount !== 1 || followUp.prepared.blockers.length || (followUp.error && !followUp.operationId)) return;
+    if (!followUp?.prepared || followUp.stage !== "prepared" || followUp.prepared.recipientCount < 1 || followUp.prepared.recipientCount > 50 || followUp.prepared.blockers.length) return;
     const next = { ...followUp, stage: "accepting" as const, error: undefined };
     setFollowUp(next);
     try {
@@ -415,8 +431,12 @@ export function useInboxSavedActions(options: Options) {
     return () => { abort.abort(); if (timer) clearTimeout(timer); };
   }, [followUp?.operationId, requestJson]);
 
+  useEffect(() => () => { followUpGeneration.current++; followUpController.current?.abort(); }, []);
+
   const clear = useCallback(() => {
     controller.current?.abort();
+    followUpGeneration.current++;
+    followUpController.current?.abort();
     if (draft?.operationId) setReceipt({ operationId: draft.operationId, kind: draft.prepared?.kind ?? "metadata", result: draft.result, error: draft.error });
     if (followUp?.operationId) setFollowUpReceipt({ operationId: followUp.operationId, kind: "reply", result: followUp.result, error: followUp.error });
     setDraft(null);
@@ -435,7 +455,7 @@ export function useInboxSavedActions(options: Options) {
 
   const builder = <Dialog open={builderOpen} onOpenChange={setBuilderOpen}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>{editing ? "Edit saved action" : "Create saved action"}</DialogTitle><DialogDescription>Choose a bounded set of reviewed steps. The server validates and rechecks each referenced entity when you use it.</DialogDescription><label>Name<input aria-label="Saved action name" maxLength={120} value={builderName} onChange={event => setBuilderName(event.target.value)} /></label>{assigneesError && <p role="alert">{assigneesError}</p>}<div className="mt-3 space-y-3"><strong>Steps</strong>{builderSteps.map((step, index) => <div className="flex flex-wrap items-end gap-2" key={index}><label>Step {index + 1}<select aria-label={`Step ${index + 1} type`} value={step.type} onChange={event => { const type = event.target.value as SavedActionStep["type"]; setBuilderSteps(previous => previous.map((current, position) => position === index ? type === "outcome" ? { type, value: "nurture" } : type === "assign" ? { type, userId: null } : type === "review_reply" ? { type, text: "" } : { type } : current)); }}><option value="outcome">Outcome</option><option value="assign">Assignment</option><option value="promote">Move to lead</option><option value="dismiss_unknown">Dismiss unknown</option><option value="restore_unknown">Restore unknown</option><option value="review_reply">Reviewed reply</option></select></label>{step.type === "outcome" && <label>Outcome<select aria-label={`Step ${index + 1} outcome`} value={step.value} onChange={event => setBuilderSteps(previous => previous.map((current, position) => position === index ? { ...current, value: event.target.value } : current))}>{outcomes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}{step.type === "assign" && <label>Assign to<select aria-label={`Step ${index + 1} assignee`} value={step.userId ?? ""} onChange={event => setBuilderSteps(previous => previous.map((current, position) => position === index ? { ...current, userId: event.target.value || null } : current))}><option value="">Unassigned</option>{assignees.map(member => <option key={member.userId} value={member.userId}>{member.label}</option>)}{step.userId && !assignees.some(member => member.userId === step.userId) && <option value={step.userId}>Current assignee</option>}</select></label>}{step.type === "review_reply" && <label className="min-w-[18rem]">Reply text<textarea aria-label={`Step ${index + 1} reply text`} maxLength={1600} value={step.text} onChange={event => setBuilderSteps(previous => previous.map((current, position) => position === index ? { ...current, text: event.target.value } : current))} /></label>}<button type="button" onClick={() => setBuilderSteps(previous => previous.filter((_, position) => position !== index))} disabled={builderSteps.length <= 1}>Remove</button></div>)}<button type="button" onClick={() => setBuilderSteps(previous => previous.length < 5 ? [...previous, { type: "outcome", value: "nurture" }] : previous)} disabled={builderSteps.length >= 5}>Add step</button></div>{builderError && <p role="alert">{builderError}</p>}<div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={() => setBuilderOpen(false)}>Cancel</button><button type="button" onClick={() => void saveBuilder()} disabled={saving}>{saving ? "Saving…" : editing ? "Save changes" : "Save action"}</button></div><div className="mt-5 border-t pt-3"><h3>Existing saved actions</h3>{items.length ? <ul>{items.map(item => <li key={item.id} className="flex items-center justify-between gap-3 py-1"><span>{item.name}</span><span className="flex gap-2"><button type="button" onClick={() => openBuilder(item)}>Edit</button><button type="button" onClick={() => void remove(item)}>Delete</button></span></li>)}</ul> : <p>No saved actions yet.</p>}{deleteError && <p role="alert">{deleteError}</p>}</div></DialogContent></Dialog>;
 
-  const review = <Dialog open={!!draft} onOpenChange={open => { if (!open && draft?.stage !== "accepting" && followUp?.stage !== "accepting") clear(); }}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>Review saved action · {draft?.saved.name}</DialogTitle><DialogDescription>Check the authoritative eligibility result before applying this saved combination.</DialogDescription>{draft?.stage === "preparing" ? <p role="status">Checking current records…</p> : draft && !draft.prepared ? <p role="alert">{draft.error ?? "Saved action review unavailable."}</p> : draft?.prepared && <>{draft.prepared.kind === "reply" ? <><p>{draft.prepared.value.recipientCount} recipients · {draft.prepared.value.blockers.length ? `Blocked: ${draft.prepared.value.blockers.join(", ")}` : "Ready for reviewed send"}</p><ul>{draft.prepared.value.items.map(item => <li key={item.id}>{draft.names.get(`${item.target.kind}:${item.target.id}`) ?? "Selected conversation"}: {item.exclusion ?? (item.recipient ? `Ready for send to ${item.recipient.contactName}` : "Needs attention")}{item.recipient && <small className="block whitespace-pre-wrap">{item.recipient.renderedBody}</small>}</li>)}</ul></> : <><p>{draft.prepared.value.eligibleCount} eligible · {draft.prepared.value.excludedCount} excluded · {draft.prepared.value.effectCount ?? 0} changes</p><ul>{draft.prepared.value.items.map(item => <li key={item.id}>{draft.names.get(`${item.target.kind}:${item.target.id}`) ?? "Selected conversation"}: {item.exclusion ?? "Eligible"}</li>)}</ul>{draft.result && draft.prepared.value.followUp && !followUp && <button type="button" onClick={() => void prepareFollowUp()}>Review reply</button>}</>}{draft.error && <p role="alert">{draft.error}</p>}<button type="button" disabled={draft.stage === "accepting" || !!draft.operationId || (!!draft.prepared && (draft.prepared.kind === "reply" ? draft.prepared.value.recipientCount === 0 || draft.prepared.value.blockers.length > 0 : draft.prepared.value.eligibleCount === 0))} onClick={() => void accept()}>{draft.stage === "accepting" ? "Applying…" : draft.operationId ? "Accepted · checking progress…" : draft.acceptAttempted ? "Retry action safely" : "Accept reviewed action"}</button>{draft.operationId && <p role="status">Accepted. Checking durable progress…</p>}</>}{followUp?.stage === "preparing" && <p role="status">Checking reply recipients…</p>}{followUp && !followUp.prepared && followUp.stage !== "preparing" && <p role="alert">{followUp.error ?? "Reply review unavailable."}</p>}{followUp?.prepared && <section aria-label="Review saved reply"><h3>Review reply</h3><p>{followUp.prepared.recipientCount} recipients · {followUp.prepared.blockers.length ? `Blocked: ${followUp.prepared.blockers.join(", ")}` : "Ready for reviewed send"}</p><ul>{followUp.prepared.items.map(item => <li key={item.id}>{item.exclusion ?? (item.recipient ? `Ready to send to ${item.recipient.contactName}` : "Needs attention")}{item.recipient && <small className="block whitespace-pre-wrap">{item.recipient.renderedBody}</small>}</li>)}</ul>{followUp.error && <p role="alert">{followUp.error}</p>}<button type="button" disabled={followUp.stage === "accepting" || !!followUp.operationId || followUp.prepared.recipientCount !== 1 || followUp.prepared.blockers.length > 0} onClick={() => void acceptFollowUp()}>{followUp.stage === "accepting" ? "Accepting…" : followUp.operationId ? "Accepted · checking progress…" : "Accept reviewed reply"}</button></section>}</DialogContent></Dialog>;
+  const review = <Dialog open={!!draft} onOpenChange={open => { if (!open && draft?.stage !== "accepting" && followUp?.stage !== "accepting") clear(); }}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>Review saved action · {draft?.saved.name}</DialogTitle><DialogDescription>Check the authoritative eligibility result before applying this saved combination.</DialogDescription>{draft?.stage === "preparing" ? <p role="status">Checking current records…</p> : draft && !draft.prepared ? <p role="alert">{draft.error ?? "Saved action review unavailable."}</p> : draft?.prepared && <>{draft.prepared.kind === "reply" ? <><p>{draft.prepared.value.recipientCount} recipients · {draft.prepared.value.blockers.length ? `Blocked: ${draft.prepared.value.blockers.join(", ")}` : "Ready for reviewed send"}</p><ul>{draft.prepared.value.items.map(item => <li key={item.id}>{draft.names.get(`${item.target.kind}:${item.target.id}`) ?? "Selected conversation"}: {item.exclusion ?? (item.recipient ? `Ready for send to ${item.recipient.contactName}` : "Needs attention")}{item.recipient && <small className="block whitespace-pre-wrap">{item.recipient.renderedBody}</small>}</li>)}</ul></> : <><p>{draft.prepared.value.eligibleCount} eligible · {draft.prepared.value.excludedCount} excluded · {draft.prepared.value.effectCount ?? 0} changes</p><ul>{draft.prepared.value.items.map(item => <li key={item.id}>{draft.names.get(`${item.target.kind}:${item.target.id}`) ?? "Selected conversation"}: {item.exclusion ?? "Eligible"}</li>)}</ul>{draft.result && draft.prepared.value.followUp && !followUp && <button type="button" onClick={() => void prepareFollowUp()}>Review reply</button>}</>}{draft.error && <p role="alert">{draft.error}</p>}<button type="button" disabled={draft.stage === "accepting" || !!draft.operationId || (!!draft.prepared && (draft.prepared.kind === "reply" ? draft.prepared.value.recipientCount === 0 || draft.prepared.value.blockers.length > 0 : draft.prepared.value.eligibleCount === 0))} onClick={() => void accept()}>{draft.stage === "accepting" ? "Applying…" : draft.operationId ? "Accepted · checking progress…" : draft.acceptAttempted ? "Retry action safely" : "Accept reviewed action"}</button>{draft.operationId && <p role="status">Accepted. Checking durable progress…</p>}</>}{followUp?.stage === "preparing" && <p role="status">Checking reply recipients…</p>}{followUp && !followUp.prepared && followUp.stage !== "preparing" && <p role="alert">{followUp.error ?? "Reply review unavailable."}</p>}{followUp?.prepared && <section aria-label="Review saved reply"><h3>Review reply</h3><p>{followUp.prepared.recipientCount} recipients · {followUp.prepared.blockers.length ? `Blocked: ${followUp.prepared.blockers.join(", ")}` : "Ready for reviewed send"}</p><ul>{followUp.prepared.items.map(item => <li key={item.id}>{item.exclusion ?? (item.recipient ? `Ready to send to ${item.recipient.contactName}` : "Needs attention")}{item.recipient && <small className="block whitespace-pre-wrap">{item.recipient.renderedBody}</small>}</li>)}</ul>{followUp.error && <p role="alert">{followUp.error}</p>}<button type="button" disabled={followUp.stage === "accepting" || !!followUp.operationId || followUp.prepared.recipientCount < 1 || followUp.prepared.recipientCount > 50 || followUp.prepared.blockers.length > 0} onClick={() => void acceptFollowUp()}>{followUp.stage === "accepting" ? "Accepting…" : followUp.operationId ? "Accepted · checking progress…" : "Accept reviewed reply"}</button></section>}</DialogContent></Dialog>;
   const activeReceipts = [draft?.operationId ? { operationId: draft.operationId, kind: draft.prepared?.kind ?? "metadata", result: draft.result, error: draft.error } : receipt, followUp?.operationId ? { operationId: followUp.operationId, kind: "reply" as const, result: followUp.result, error: followUp.error } : followUpReceipt].filter((value): value is Receipt => !!value);
   const activity: ReactNode = activeReceipts.length ? <>{activeReceipts.map((activeReceipt, index) => <section aria-label="Saved action progress" key={`${activeReceipt.operationId}:${index}`}><p role="status">{activeReceipt.error ?? (activeReceipt.result ? `Saved action ${activeReceipt.result}.` : "Saved action accepted. Checking durable progress…")}</p><a href={`${activeReceipt.kind === "reply" ? "/api/inbox/replies/" : "/api/inbox/operations/"}${encodeURIComponent(activeReceipt.operationId)}`}>Open action receipt</a></section>)}</> : null;
   return { items, actions, prepare, review, activity, picker, builder, clear, refresh: load, replyStep, isReplyAction: (actionId: string) => !!replyStep(actionFromId(actionId)?.definition ?? { version: 1, steps: [] }) };

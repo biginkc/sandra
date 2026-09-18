@@ -6,6 +6,7 @@ import { workspaceId, type WorkspaceId } from "./selection";
 const orgId = "00000000-0000-4000-8000-000000000001";
 const userId = "00000000-0000-4000-8000-000000000002";
 const conversationId = "00000000-0000-4000-8000-000000000003";
+const conversationId2 = "00000000-0000-4000-8000-00000000000a";
 const savedId = "00000000-0000-4000-8000-000000000004";
 const target = workspaceId({ orgId, kind: "conversation", conversationId });
 const saved: SavedActionSummary = { id: savedId, version: 1, name: "Nurture + owner", createdAt: new Date().toISOString(), definition: { version: 1, steps: [{ type: "outcome", value: "nurture" }, { type: "assign", userId: null }] } };
@@ -66,7 +67,7 @@ it("retains metadata selection and offers an explicit reply review after termina
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined;
     calls.push({ url, body });
     if (url === "/api/inbox/saved-actions") return Response.json({ items: [comboSaved] });
-    if (url.endsWith("/actions/prepare")) return Response.json({ preparationId: "00000000-0000-4000-8000-000000000007", idempotencyKey: body?.idempotencyKey, expiresAt: new Date(Date.now() + 60_000).toISOString(), definition: comboSaved.definition, items: [{ id: "item", target: { kind: "conversation", id: conversationId }, exclusion: null }], eligibleCount: 1, excludedCount: 0, effectCount: 1, followUp: { kind: "review_reply", template: "Hi there" } });
+    if (url.endsWith("/actions/prepare")) return Response.json({ preparationId: "00000000-0000-4000-8000-000000000007", idempotencyKey: body?.idempotencyKey, expiresAt: new Date(Date.now() + 60_000).toISOString(), definition: comboSaved.definition, items: [{ id: "item", target: { kind: "conversation", id: conversationId }, exclusion: null }], eligibleCount: 1, excludedCount: 0, effectCount: 1, followUp: { kind: "review_reply" } });
     if (url.startsWith("/api/inbox/actions/recover")) return Response.json({ state: "pending", operation: null });
     if (url.endsWith("/actions/accept")) return Response.json({ operationId: "00000000-0000-4000-8000-000000000008" });
     if (url.endsWith("/operations/00000000-0000-4000-8000-000000000008")) return Response.json({ operationId: "00000000-0000-4000-8000-000000000008", completed: true, result: "succeeded", items: [], steps: [] });
@@ -83,9 +84,44 @@ it("retains metadata selection and offers an explicit reply review after termina
   fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
   await screen.findByRole("region", { name: "Review saved reply" });
   const replyRequest = calls.find(call => call.url.endsWith("/replies/prepare"));
-  expect(replyRequest?.body).toMatchObject({ sourceOperationId: "00000000-0000-4000-8000-000000000008", template: "Hi there" });
+  expect(replyRequest?.body).toMatchObject({ sourceOperationId: "00000000-0000-4000-8000-000000000008" });
+  expect(replyRequest?.body).not.toHaveProperty("template");
   expect(replyRequest?.body).not.toHaveProperty("targets");
   expect(calls.some(call => call.url.endsWith("/replies/accept"))).toBe(false);
+});
+
+it("keeps a multi-recipient reply review and recovers an uncertain acceptance", async () => {
+  const selected = [target, workspaceId({ orgId, kind: "conversation", conversationId: conversationId2 })] as readonly WorkspaceId[];
+  let recoverCalls = 0;
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    calls.push(url);
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined;
+    if (url === "/api/inbox/saved-actions") return Response.json({ items: [comboSaved] });
+    if (url.endsWith("/actions/prepare")) return Response.json({ preparationId: "00000000-0000-4000-8000-00000000000b", idempotencyKey: body?.idempotencyKey, expiresAt: new Date(Date.now() + 60_000).toISOString(), definition: comboSaved.definition, items: [{ id: "item-a", target: { kind: "conversation", id: conversationId }, exclusion: null }, { id: "item-b", target: { kind: "conversation", id: conversationId2 }, exclusion: null }], eligibleCount: 2, excludedCount: 0, effectCount: 2, followUp: { kind: "review_reply" } });
+    if (url.startsWith("/api/inbox/actions/recover")) return Response.json({ state: "pending", operation: null });
+    if (url.endsWith("/actions/accept")) return Response.json({ operationId: "00000000-0000-4000-8000-00000000000c" });
+    if (url.endsWith("/operations/00000000-0000-4000-8000-00000000000c")) return Response.json({ operationId: "00000000-0000-4000-8000-00000000000c", completed: true, result: "succeeded", items: [], steps: [] });
+    if (url.endsWith("/replies/prepare")) return Response.json({ preparationId: "00000000-0000-4000-8000-00000000000d", idempotencyKey: body?.idempotencyKey, expiresAt: new Date(Date.now() + 60_000).toISOString(), items: [{ id: "reply-a", target: { kind: "conversation", id: conversationId }, exclusion: null, recipient: { contactName: "Ada", propertyAddress: "123 Oak", renderedBody: "Hi there", to: "+15555550100" } }, { id: "reply-b", target: { kind: "conversation", id: conversationId2 }, exclusion: null, recipient: { contactName: "Bea", propertyAddress: "456 Pine", renderedBody: "Hi there", to: "+15555550101" } }], recipientCount: 2, blockers: [] });
+    if (url.startsWith("/api/inbox/replies/recover")) { recoverCalls++; return recoverCalls === 1 ? Response.json({ state: "prepared", preparationId: "00000000-0000-4000-8000-00000000000d", idempotencyKey: body?.idempotencyKey }) : Response.json({ state: "accepted", operation: { operationId: "00000000-0000-4000-8000-00000000000e" } }); }
+    if (url.endsWith("/replies/accept")) throw new Error("lost response");
+    if (url.endsWith("/replies/00000000-0000-4000-8000-00000000000e")) return Response.json({ operationId: "00000000-0000-4000-8000-00000000000e", dispatchComplete: true, receipts: [{ state: "delivered", reason: null }, { state: "delivered", reason: null }], items: [] });
+    throw new Error(`unexpected request ${url}`);
+  }));
+  render(<Harness values={[comboSaved]} selected={selected} />);
+  await screen.findByRole("button", { name: "Outcome then reply" });
+  fireEvent.change(screen.getByRole("combobox", { name: "Saved action" }), { target: { value: `saved:${comboSaved.id}:${comboSaved.version}` } });
+  fireEvent.click(screen.getByRole("button", { name: "Review saved action" }));
+  await screen.findByText("2 eligible · 0 excluded · 2 changes");
+  fireEvent.click(screen.getByRole("button", { name: "Accept reviewed action" }));
+  await screen.findByRole("button", { name: "Review reply" });
+  fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+  await screen.findByText("2 recipients · Ready for reviewed send");
+  fireEvent.click(screen.getByRole("button", { name: "Accept reviewed reply" }));
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "Accept reviewed reply" }));
+  await screen.findByText("Saved action succeeded.");
+  expect(calls.filter(url => url.endsWith("/replies/accept"))).toHaveLength(1);
 });
 
 it("saves and edits definitions through the CRUD route without including client targets", async () => {
