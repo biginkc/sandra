@@ -5,8 +5,8 @@ import { parseInboxActionDefinition, InvalidInboxActionError, type InboxActionAu
 
 /** RPC surface for the personal saved-action definitions backend
  * (experiments/inbox-saved-actions/{setup,public-api}.sql). Personal
- * visibility only; no picker/builder UI, no promotion, no unknown
- * dismiss/restore here (later pieces). */
+ * visibility only; durable metadata executors and the picker/builder remain
+ * separate from this transport repository. */
 type SavedActionDatabase = Omit<Database, "public"> & {
     public: Omit<Database["public"], "Functions"> & {
         Functions: Database["public"]["Functions"] & {
@@ -147,11 +147,10 @@ export function savedActionReferenceFromRaw(raw: string): { id: string; version:
     return { id: ref.id, version: Number(ref.version) };
 }
 
-/** True only for a saved definition that is a SINGLE review_reply step — the
- * only shape review_reply-typed saved actions may take (validated again,
- * independently, by inbox_saved_actions.validate_definition at save AND at
- * every get()). Such a saved action hands off to the bulk-reply prepare/
- * accept lane and is NEVER passed to the metadata action seam. */
+/** True only for a standalone saved definition whose sole step is
+ * review_reply. Mixed definitions use reviewReplyFollowUp() after their
+ * metadata prefix completes; this predicate is kept for the separate
+ * standalone hand-off path. */
 export function isReviewReplySavedDefinition(definition: InboxActionDefinition): definition is InboxActionDefinition & { steps: readonly [{ type: "review_reply"; text: string }] } {
     return definition.steps.length === 1 && definition.steps[0].type === "review_reply";
 }
