@@ -140,6 +140,14 @@ export function planWork({ scenarios, cycles, concurrency, tenantCount }) {
   return jobs;
 }
 
+/** Advance a virtualized list by less than one viewport so rows in the middle
+ * of a bounded workset are mounted before the adapter declares a miss. */
+export function nextVirtualScrollTop({ scrollTop, scrollHeight, clientHeight, rowHeight = 72 }) {
+  const maximum = Math.max(0, scrollHeight - clientHeight);
+  if (!Number.isFinite(scrollTop) || !Number.isFinite(maximum) || scrollTop >= maximum) return maximum;
+  return Math.min(maximum, scrollTop + Math.max(rowHeight, clientHeight * 0.8));
+}
+
 export async function loadRuntimeInput(env = process.env) {
   assertRunnerContext(env);
   const profile = readProfile(env);
@@ -217,9 +225,44 @@ async function browserJson(page, path, method = "GET", payload) {
 
 async function findRow(page, orgId, conversationId) {
   const expected = JSON.stringify([orgId, "conversation", conversationId]);
-  const index = await page.locator("[data-workspace-row]").evaluateAll((rows, target) => rows.findIndex((row) => row.getAttribute("data-workspace-row") === target), expected);
-  if (index < 0) throw new WorkloadBlocked(`pre-seeded conversation ${conversationId} is not in the authenticated workset`);
-  return page.locator("[data-workspace-row]").nth(index);
+  const list = page.getByRole("list", { name: "Inbox conversations", exact: true });
+  const maxAttempts = 80;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const state = await list.evaluate((element, target) => {
+      const rows = [...element.querySelectorAll("[data-workspace-row]")];
+      const mountedIndex = rows.findIndex((row) => row.getAttribute("data-workspace-row") === target);
+      const first = rows[0];
+      const empty = !element.querySelector("[data-workspace-row]") && element.textContent?.includes("No conversations in this view.") === true;
+      return {
+        mountedIndex,
+        mountedCount: rows.length,
+        setSize: first ? Number(first.getAttribute("aria-setsize")) : null,
+        scrollTop: element.scrollTop,
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+        busy: element.getAttribute("aria-busy") === "true",
+        empty,
+        error: Boolean(element.querySelector('[role="alert"]')),
+      };
+    }, expected);
+    if (state.error) throw new WorkloadBlocked("authenticated workset rendered an error while locating the pre-seeded conversation");
+    if (state.mountedIndex >= 0) return list.locator("[data-workspace-row]").nth(state.mountedIndex);
+    if (state.empty && !state.busy) throw new WorkloadBlocked(`conversation ${conversationId} is absent from the authenticated workset`);
+    if (!Number.isSafeInteger(state.setSize) || state.setSize < 0) {
+      await sleep(50);
+      continue;
+    }
+    if (state.setSize > 500) throw new WorkloadBlocked(`conversation ${conversationId} is outside the bounded 500-row workset`);
+    const nextTop = nextVirtualScrollTop(state);
+    if (nextTop === state.scrollTop) break;
+    await list.evaluate((element, top) => { element.scrollTop = top; }, nextTop);
+    await sleep(25);
+  }
+  const nextPage = page.getByRole("button", { name: "Next 500", exact: true });
+  if (await nextPage.count() > 0 && !(await nextPage.isDisabled())) {
+    throw new WorkloadBlocked(`conversation ${conversationId} is outside the current canonical page; paged workset navigation requires an explicit scenario page binding`);
+  }
+  throw new WorkloadBlocked(`conversation ${conversationId} is absent after scanning the mounted authenticated workset`);
 }
 
 async function terminalAction(page, operationId, deadline) {

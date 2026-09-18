@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { planWork, WorkloadBlocked } from "./adapter.mjs";
+import { nextVirtualScrollTop, planWork, WorkloadBlocked, waitForDetailState } from "./adapter.mjs";
 
 const id = (number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 
@@ -55,6 +55,26 @@ test("rejects a measured workload without enough distinct pre-seeded targets", (
 test("does not count the detail shell before delayed history content is ready", async () => {
   let state = "loading";
   setTimeout(() => { state = "ready"; }, 10);
-  await (await import("./adapter.mjs")).waitForDetailState(async () => state, 100, 1);
+  await waitForDetailState(async () => state, 100, 1);
   assert.equal(state, "ready");
+});
+
+test("bounded virtual scrolling reaches a row beyond the initially mounted viewport", () => {
+  const clientHeight = 600;
+  const rowHeight = 72;
+  let scrollTop = 0;
+  const targetIndex = 30;
+  let mounted = false;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const first = Math.floor(scrollTop / rowHeight);
+    const last = Math.floor((scrollTop + clientHeight - 1) / rowHeight);
+    if (targetIndex >= first && targetIndex <= last) {
+      mounted = true;
+      break;
+    }
+    const next = nextVirtualScrollTop({ scrollTop, scrollHeight: 500 * rowHeight, clientHeight, rowHeight });
+    if (next === scrollTop) break;
+    scrollTop = next;
+  }
+  assert.equal(mounted, true);
 });
