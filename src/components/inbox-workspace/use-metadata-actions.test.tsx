@@ -141,6 +141,23 @@ it("offers SMS opt-out separately from permanent DNC with authoritative expanded
     expect(screen.getByRole("note")).toHaveTextContent("2 linked properties");
 });
 
+it.each([
+  ["Move to lead", "promote"],
+  ["Dismiss unknown", "dismiss_unknown"],
+  ["Restore unknown", "restore_unknown"],
+] as const)("reviews the direct %s selection step before accepting", async (label, type) => {
+  let body: PrepareInboxActionRequest | undefined;
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body));
+    return Response.json({ ...prepared(body!), definition: body!.definition });
+  }));
+  render(<Harness />);
+  fireEvent.click(screen.getByRole("button", { name: label }));
+  await screen.findByText(label);
+  expect(body?.definition.steps).toEqual([{ type }]);
+  expect(screen.getByRole("button", { name: "Apply to 1 conversations" })).toBeEnabled();
+});
+
 it("disables metadata actions with an explicit reason above the500-target bound", () => {
   render(<Harness selectionCount={501}/>); expect(screen.getByRole("button", {name:"Follow up"})).toBeDisabled(); expect(screen.getByRole("button", {name:"Follow up"})).toHaveAttribute("title", expect.stringContaining("at most 500"));
 });
