@@ -26,6 +26,7 @@ import {
   type SuppressionDecision,
 } from "./suppression";
 import { assertSendilloOrganizationScope } from "./rep-sms-scope";
+import { hasOpeningIdentity, openingIdentityError } from "./opening-identity";
 
 /**
  * Core "send one outbound SMS" operation. Called from the lead-detail
@@ -153,6 +154,66 @@ async function preserveRepSmsPreDispatchFailure(
 function normalizeMaybePhone(value: string | null | undefined): string | null {
   if (!value?.trim()) return null;
   return normalizePhone(value) ?? value.trim();
+}
+
+const BMH_OPENING_IDENTITY_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+
+function shouldEnforceBmhOpeningIdentity(orgId: string): boolean {
+  return (
+    orgId === BMH_OPENING_IDENTITY_ORG_ID ||
+    process.env.SENDILLO_ORG_ID?.trim() === orgId
+  );
+}
+
+async function loadConversationOpeningEvidence(
+  supabase: SupabaseClient<Database>,
+  args: { orgId: string; customerPhone: string; businessPhone: string },
+): Promise<
+  | { ok: true; hasDeliveredOutbound: boolean; hasInbound: boolean }
+  | { ok: false; error: string }
+> {
+  const customerPhone = normalizeMaybePhone(args.customerPhone) ?? args.customerPhone;
+  const businessPhone = normalizeMaybePhone(args.businessPhone) ?? args.businessPhone;
+  try {
+    const [outbound, inbound] = await Promise.all([
+      supabase
+        .from("messages")
+        .select("id")
+        .eq("org_id", args.orgId)
+        .eq("channel", "sms")
+        .eq("direction", "outbound")
+        .eq("to_address", customerPhone)
+        .eq("from_address", businessPhone)
+        .in("status", ["sent", "delivered"])
+        .limit(1),
+      supabase
+        .from("messages")
+        .select("id")
+        .eq("org_id", args.orgId)
+        .eq("channel", "sms")
+        .eq("direction", "inbound")
+        .eq("from_address", customerPhone)
+        .eq("to_address", businessPhone)
+        .eq("status", "received")
+        .limit(1),
+    ]);
+    if (outbound.error || inbound.error) {
+      return {
+        ok: false,
+        error: outbound.error?.message ?? inbound.error?.message ?? "opening history lookup failed",
+      };
+    }
+    return {
+      ok: true,
+      hasDeliveredOutbound: (outbound.data?.length ?? 0) > 0,
+      hasInbound: (inbound.data?.length ?? 0) > 0,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function repSmsIdempotencyConflict(
@@ -396,6 +457,12 @@ export type SendSmsInput = {
    * still validate it against the approved sender catalog before any send.
    */
   allowDefaultFromWhenNoSticky?: boolean;
+  /**
+   * Mark a known cold opener so the transport can reject copy that omits the
+   * fixed sender identity. This validates only the marked opener; it never
+   * rewrites follow-ups, replies, or human-composed messages.
+   */
+  requiresOpeningIdentity?: boolean;
   /** Tenant-scoped replay key for a manual rep SMS submission. */
   idempotencyKey?: string | null;
   /**
@@ -479,6 +546,14 @@ export async function sendSmsToContact(
     );
     if (existing.error) return { status: "db_error", error: existing.error };
     if (existing.row) return repSmsIdempotencyReplay(existing.row, input);
+  }
+
+  // Validate a marked opener only after the keyed replay fast path has had a
+  // chance to return its durable result. New opener requests still fail
+  // before queue or provider writes.
+  if (input.requiresOpeningIdentity) {
+    const identityError = openingIdentityError(input.body);
+    if (identityError) return { status: "db_error", error: identityError };
   }
 
   // QUEUE-ONLY shortcut — skip consent + quiet-hours checks (they'll
@@ -647,6 +722,38 @@ export async function sendSmsToContact(
   });
   if (!fromResolution.ok) return preserveRepSmsPreDispatchFailure(input, fromResolution.outcome);
   const fromAddress = fromResolution.fromAddress;
+  if (
+    !input.queueOnly &&
+    !hasOpeningIdentity(input.body) &&
+    shouldEnforceBmhOpeningIdentity(propertyResult.data.org_id)
+  ) {
+    if (!fromAddress) {
+      return preserveRepSmsPreDispatchFailure(input, {
+        status: "db_error",
+        error: openingIdentityError(input.body) ?? "Opening SMS identity is required.",
+      });
+    }
+    const evidence = await loadConversationOpeningEvidence(supabase, {
+      orgId: propertyResult.data.org_id,
+      customerPhone: normalizedToPhone,
+      businessPhone: fromAddress,
+    });
+    if (!evidence.ok) {
+      return preserveRepSmsPreDispatchFailure(input, {
+        status: "db_error",
+        error: `opening history lookup failed: ${evidence.error}`,
+      });
+    }
+    // An inbound message establishes an existing conversation even when the
+    // provider has no successful outbound receipt yet. Failed, pending, and
+    // queued rows intentionally do not count as identity evidence.
+    if (!evidence.hasDeliveredOutbound && !evidence.hasInbound && !hasOpeningIdentity(input.body)) {
+      return preserveRepSmsPreDispatchFailure(input, {
+        status: "db_error",
+        error: openingIdentityError(input.body) ?? "Opening SMS identity is required.",
+      });
+    }
+  }
   const inputMetadata =
     input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
       ? input.metadata
@@ -1030,6 +1137,31 @@ async function queueForLater(
   });
   if (!fromResolution.ok) return fromResolution.outcome;
   const fromAddress = fromResolution.fromAddress;
+  if (
+    !hasOpeningIdentity(input.body) &&
+    shouldEnforceBmhOpeningIdentity(propertyResult.data.org_id)
+  ) {
+    if (!fromAddress) {
+      return {
+        status: "db_error",
+        error: openingIdentityError(input.body) ?? "Opening SMS identity is required.",
+      };
+    }
+    const evidence = await loadConversationOpeningEvidence(supabase, {
+      orgId: propertyResult.data.org_id,
+      customerPhone: normalizedToPhone,
+      businessPhone: fromAddress,
+    });
+    if (!evidence.ok) {
+      return { status: "db_error", error: `opening history lookup failed: ${evidence.error}` };
+    }
+    if (!evidence.hasDeliveredOutbound && !evidence.hasInbound) {
+      return {
+        status: "db_error",
+        error: openingIdentityError(input.body) ?? "Opening SMS identity is required.",
+      };
+    }
+  }
   const campaignPause = await campaignIsPaused(supabase, input.campaignId);
   if (campaignPause.error) {
     return { status: "db_error", error: campaignPause.error };
@@ -1043,6 +1175,9 @@ async function queueForLater(
   const metadataWithOrigin: Json = {
     ...(readMetadataRecord(input.metadata ?? null) ?? {}),
     sendOrigin: input.origin,
+    ...(input.requiresOpeningIdentity
+      ? { openingIdentityRequired: true }
+      : {}),
   } as Json;
   const { data: queued, error } = await supabase
     .from("messages")
@@ -1137,6 +1272,9 @@ export async function releaseQueuedMessage(
     }
     return { status: "db_error", error: `message is ${msg.status}, not queued` };
   }
+  const queuedMetadata = readMetadataRecord(msg.metadata);
+  const requiresOpeningIdentity = queuedMetadata?.openingIdentityRequired === true;
+  const enforceOpeningIdentityAtClaim = requiresOpeningIdentity;
   const campaignPause = await pauseQueuedMessageIfCampaignPaused(
     supabase,
     msg.id,
@@ -1152,11 +1290,51 @@ export async function releaseQueuedMessage(
       retryAt: msg.scheduled_for,
     };
   }
+  if (requiresOpeningIdentity && !hasOpeningIdentity(msg.body)) {
+    const identityError = openingIdentityError(msg.body);
+    if (identityError) {
+      await failQueuedMessage(supabase, msg.id, identityError);
+      return { status: "db_error", messageId: msg.id, error: identityError };
+    }
+  }
   if (!msg.contact_id || !msg.property_id || !msg.to_address) {
     return {
       status: "db_error",
       error: "queued message missing contact/property/to_address",
     };
+  }
+  // Legacy queued rows may predate the openingIdentityRequired metadata. For
+  // the configured BMH Sendillo tenant, use the actual phone pair and only
+  // delivered outbound or inbound history as evidence that this is already
+  // an established conversation. Queued, failed, and pending rows do not
+  // suppress this check, so a legacy anonymous first touch fails safely.
+  if (
+    !hasOpeningIdentity(msg.body) &&
+    !requiresOpeningIdentity &&
+    shouldEnforceBmhOpeningIdentity(msg.org_id)
+  ) {
+    if (!msg.from_address) {
+      const identityError = openingIdentityError(msg.body) ?? "Opening SMS identity is required.";
+      await failQueuedMessage(supabase, msg.id, identityError);
+      return { status: "db_error", messageId: msg.id, error: identityError };
+    }
+    const evidence = await loadConversationOpeningEvidence(supabase, {
+      orgId: msg.org_id,
+      customerPhone: msg.to_address,
+      businessPhone: msg.from_address,
+    });
+    if (!evidence.ok) {
+      return {
+        status: "db_error",
+        messageId: msg.id,
+        error: `opening history lookup failed: ${evidence.error}`,
+      };
+    }
+    if (!evidence.hasDeliveredOutbound && !evidence.hasInbound) {
+      const identityError = openingIdentityError(msg.body) ?? "Opening SMS identity is required.";
+      await failQueuedMessage(supabase, msg.id, identityError);
+      return { status: "db_error", messageId: msg.id, error: identityError };
+    }
   }
   if (msg.provider !== provider.providerId) {
     const error =
@@ -1321,10 +1499,7 @@ export async function releaseQueuedMessage(
   // double-sending. The `eq("status", "queued")` guard means the UPDATE
   // only applies if nobody else grabbed it first; we check rowcount
   // indirectly via a re-read.
-  const currentMetadata =
-    msg.metadata && typeof msg.metadata === "object" && !Array.isArray(msg.metadata)
-      ? msg.metadata
-      : null;
+  const currentMetadata = queuedMetadata;
   const pendingAt = new Date().toISOString();
   const { data: claimed, error: flipError } = await supabase
     .from("messages")
@@ -1340,7 +1515,7 @@ export async function releaseQueuedMessage(
     })
     .eq("id", msg.id)
     .eq("status", "queued")
-    .select("id")
+    .select("id, body")
     .maybeSingle();
   if (flipError) {
     return { status: "db_error", error: flipError.message };
@@ -1349,6 +1524,75 @@ export async function releaseQueuedMessage(
     return {
       status: "db_error",
       error: "another worker claimed this queued message",
+    };
+  }
+  if (typeof claimed.body !== "string") {
+    const error = "queued message claim did not return its body";
+    await supabase
+      .from("messages")
+      .update({
+        status: "failed",
+        failed_at: new Date().toISOString(),
+        error_message: error,
+      })
+      .eq("id", msg.id)
+      .eq("status", "pending");
+    return { status: "db_error", messageId: msg.id, error };
+  }
+  let claimedIdentityError =
+    enforceOpeningIdentityAtClaim && !hasOpeningIdentity(claimed.body)
+      ? openingIdentityError(claimed.body)
+      : null;
+  // A direct queue update can change the body between the initial read and
+  // the CAS claim. Re-check an anonymous claimed body against the phone-pair
+  // history so a first-touch row cannot race its identity guard away. An
+  // established conversation may continue with a human-composed follow-up.
+  if (
+    !claimedIdentityError &&
+    !requiresOpeningIdentity &&
+    !hasOpeningIdentity(claimed.body) &&
+    shouldEnforceBmhOpeningIdentity(msg.org_id)
+  ) {
+    if (!msg.from_address) {
+      claimedIdentityError = openingIdentityError(claimed.body) ?? "Opening SMS identity is required.";
+    } else {
+      const evidence = await loadConversationOpeningEvidence(supabase, {
+        orgId: msg.org_id,
+        customerPhone: msg.to_address,
+        businessPhone: msg.from_address,
+      });
+      if (!evidence.ok) {
+        const error = `opening history lookup failed: ${evidence.error}`;
+        await supabase
+          .from("messages")
+          .update({
+            status: "failed",
+            failed_at: new Date().toISOString(),
+            error_message: error,
+          })
+          .eq("id", msg.id)
+          .eq("status", "pending");
+        return { status: "db_error", messageId: msg.id, error };
+      }
+      if (!evidence.hasDeliveredOutbound && !evidence.hasInbound) {
+        claimedIdentityError = openingIdentityError(claimed.body) ?? "Opening SMS identity is required.";
+      }
+    }
+  }
+  if (claimedIdentityError) {
+    await supabase
+      .from("messages")
+      .update({
+        status: "failed",
+        failed_at: new Date().toISOString(),
+        error_message: claimedIdentityError,
+      })
+      .eq("id", msg.id)
+      .eq("status", "pending");
+    return {
+      status: "db_error",
+      messageId: msg.id,
+      error: claimedIdentityError,
     };
   }
 
@@ -1451,7 +1695,7 @@ export async function releaseQueuedMessage(
     // The queued row keeps the exact sender snapshot for audit/retry review.
     const result = await provider.sendSms({
       to: msg.to_address,
-      body: msg.body,
+      body: claimed.body,
       from: msg.from_address ?? undefined,
     });
     providerAccepted = true;

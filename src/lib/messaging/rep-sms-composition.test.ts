@@ -46,6 +46,11 @@ describe("rep SMS composition", () => {
   it("rejects stale or unknown copy selections", () => {
     expect(() => composeRepSms({
       introId: REP_SMS_INTRODUCTIONS[0].id,
+      introVersion: 1,
+      remainder: "Please text Maria a time that works.",
+    })).toThrow("introduction changed");
+    expect(() => composeRepSms({
+      introId: REP_SMS_INTRODUCTIONS[0].id,
       introVersion: 99,
       remainder: "Please text Maria a time that works.",
     })).toThrow("introduction changed");
@@ -57,6 +62,14 @@ describe("rep SMS composition", () => {
       templateId: "untrusted-template",
       remainder: "Please text Maria a time that works.",
     })).toThrow("approved texting template");
+  });
+
+  it("keeps every approved introduction on the literal Mel with BMH identity", () => {
+    expect(REP_SMS_INTRODUCTIONS).toHaveLength(3);
+    for (const intro of REP_SMS_INTRODUCTIONS) {
+      expect(intro.version).toBe(2);
+      expect(intro.body).toContain("Mel with BMH");
+    }
   });
 
   it("rejects pasted duplicate introductions and empty or oversized messages", () => {
@@ -71,6 +84,16 @@ describe("rep SMS composition", () => {
     const result = composeRepSms({ body: "Please text Maria a time that works." });
     expect(result.templateOrigin).toBe("manual");
     expect(result.finalBody).toBe(`${DEFAULT_REP_SMS_INTRODUCTION.body}\n\nPlease text Maria a time that works.`);
+  });
+
+  it("rehydrates a body-only draft with the previous intro copy", () => {
+    const result = composeRepSms({
+      body: "Hey, this is Mel, Maria's assistant.\n\nPlease text Maria a time that works.",
+    });
+    expect(result.finalBody).toBe(
+      "Hey, this is Mel with BMH, Maria's assistant.\n\nPlease text Maria a time that works.",
+    );
+    expect(result.introVersion).toBe(2);
   });
 
   it("does not double-prefix a legacy full body from the first composer", () => {

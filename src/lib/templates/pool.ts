@@ -13,11 +13,12 @@ type PoolTemplate = {
  * Pick one template from a named pool deterministically.
  *
  * The same seed always returns the same template, so retries and replays
- * produce the same body. Different seeds distribute uniformly across the
- * pool via SHA-256 hash mod pool size.
+ * produce the same body. Different seeds distribute deterministically across
+ * the pool via SHA-256 hash mod pool size; this is distribution, not a strict
+ * no-repeat rotation.
  *
  * @param seed  Typically enrollment.id (sequences) or the batch position
- *              string (bulk send) so every recipient gets a distinct variant.
+ *              string (bulk send) to distribute recipients deterministically.
  */
 export async function pickFromPool(
   supabase: SupabaseClient<Database>,

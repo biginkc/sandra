@@ -24,7 +24,7 @@ test("production canary verifies sequence tick delivery and lead-thread UI", asy
   const address = `${env.label} Sequence ${token} 1301 Tick Dr`;
   const contactLastName = `PROD-CANARY SEQUENCE ${token}`;
   const sequenceName = `${env.label} Sequence ${token}`;
-  const body = `${env.label} sequence SMS ${token} Reply STOP.`;
+  const body = `Mel with BMH. ${env.label} sequence SMS ${token} Reply STOP.`;
   let sequenceId: string | null = null;
   let stepId: string | null = null;
   let enrollmentId: string | null = null;

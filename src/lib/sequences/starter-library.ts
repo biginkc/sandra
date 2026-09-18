@@ -38,7 +38,7 @@ export const STARTER_SEQUENCES: ReadonlyArray<StarterSequence> = [
         delay_after_previous_minutes: 0,
         action_type: "send_sms",
         template_body:
-          "{{#if first_name}}Hi {{first_name}}, {{/if}}this is {{my_first_name}} with {{company_name}}. I saw your property at {{property_address}}. Would you consider a cash offer? {{opt_out}}",
+          "{{#if first_name}}Hi {{first_name}}, {{/if}}this is Mel with BMH. I saw your property at {{property_address}}. Would you consider a cash offer? {{opt_out}}",
       },
       {
         delay_after_previous_minutes: 60 * 24 * 2,

@@ -298,7 +298,7 @@ async function seedSequenceEnrollment(
       step_index: 0,
       action_type: "send_sms",
       delay_after_previous_minutes: 0,
-      template_body: `${tag} step`,
+      template_body: `Mel with BMH. ${tag} step`,
     })
     .select("id")
     .single();
@@ -371,7 +371,7 @@ async function runThreadMode(
   const seeded = await seedCoreEntities(supabase, ids);
   await seedConsent(supabase, seeded.contactId);
 
-  const outboundBody = `${tag} outbound`;
+  const outboundBody = `Mel with BMH. ${tag} outbound`;
   const replyBody = `${tag} reply`;
 
   const queued = await send.sendSmsToContact(supabase, {

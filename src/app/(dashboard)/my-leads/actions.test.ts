@@ -64,14 +64,14 @@ it('records a no-answer attempt, claims the exact obligation, and persists provi
     .mockResolvedValueOnce({data:{ok:true,state:'accepted'},error:null});
   const result=await submitMyLeadCommand('log-attempt',{
     propertyId:'lead',source:'manual',kind:'outreach',outcome:'no_answer',occurredAt:'2026-09-17T15:00:00.000Z',
-    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:1,templateId:'no-answer-callback-time',templateVersion:1,
+    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
       initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       body:'forged body'},
     smsBody:'forged body',
   });
   expect(result).toEqual({ok:true,attemptRecorded:true,followUp:{status:'accepted',message:null}});
-  expect(mocks.rpc).toHaveBeenCalledWith('fn_log_acquisition_attempt',{p_input:expect.objectContaining({orgId:'actual-org',smsBody:'Hey, this is Mel, Maria\'s assistant.\n\nMaria wasn\'t able to reach you. What time would work for her to call you back?'} )});
+  expect(mocks.rpc).toHaveBeenCalledWith('fn_log_acquisition_attempt',{p_input:expect.objectContaining({orgId:'actual-org',smsBody:'Hey, this is Mel with BMH, Maria\'s assistant.\n\nMaria wasn\'t able to reach you. What time would work for her to call you back?'} )});
   expect(mocks.adminRpc).toHaveBeenNthCalledWith(1,'fn_claim_authorize_rep_sms_obligation',expect.objectContaining({p_obligation_id:'obligation-1',p_actor_id:'actor'}));
   expect(mocks.dispatch).toHaveBeenCalledWith(expect.objectContaining({propertyId:'lead',assignmentId:'sender-1',to:'+18165550123',obligationFence:expect.objectContaining({obligationId:'obligation-1',claimToken:'claim-1',claimGeneration:1,actorId:'actor',propertyId:'lead',assignmentId:'sender-1',toNumber:'+18165550123'})}));
   expect(mocks.adminRpc).toHaveBeenNthCalledWith(2,'fn_record_rep_sms_obligation_result',expect.objectContaining({p_obligation_id:'obligation-1',p_claim_token:'claim-1',p_state:'accepted',p_provider_message_id:'provider-message'}));
@@ -90,7 +90,7 @@ it('does not dispatch a second SMS when concurrent submissions observe the exact
     return {data:{ok:true,state:'accepted'},error:null};
   });
   const input={propertyId:'lead',source:'manual',kind:'outreach',outcome:'no_answer',occurredAt:'2026-09-17T15:00:00.000Z',
-    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:1,templateId:'no-answer-callback-time',templateVersion:1,
+    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
       initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'ignored'}} as const;
   const [first,second]=await Promise.all([submitMyLeadCommand('log-attempt',input),submitMyLeadCommand('log-attempt',input)]);
@@ -110,7 +110,7 @@ it('records a stale dispatch fence as failed_not_dispatched', async()=>{
   mocks.dispatch.mockResolvedValue({status:'provider_failed',messageId:'message',error:'stale dispatch fence',providerAttempted:false});
   const result=await submitMyLeadCommand('log-attempt',{
     propertyId:'lead',source:'manual',kind:'outreach',outcome:'no_answer',occurredAt:'2026-09-17T15:00:00.000Z',
-    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:1,templateId:'no-answer-callback-time',templateVersion:1,
+    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
       initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'ignored'},
   });
@@ -126,7 +126,7 @@ it('returns an early delivery callback result truthfully instead of reporting ac
   mocks.dispatch.mockResolvedValue({status:'sent',messageId:'message-early',externalId:'provider-early'});
   const result=await submitMyLeadCommand('log-attempt',{
     propertyId:'lead',source:'manual',kind:'outreach',outcome:'no_answer',occurredAt:'2026-09-17T15:00:00.000Z',
-    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:1,templateId:'no-answer-callback-time',templateVersion:1,
+    followUp:{policyVersion:1,introId:'mel-maria-assistant-1',introVersion:2,templateId:'no-answer-callback-time',templateVersion:1,
       initialRemainder:"Maria wasn't able to reach you. What time would work for her to call you back?",
       remainder:"Maria wasn't able to reach you. What time would work for her to call you back?",body:'ignored'},
   });

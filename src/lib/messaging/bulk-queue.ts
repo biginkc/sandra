@@ -479,6 +479,7 @@ export async function queueSmsBatch(
       campaignId: opts.campaignId,
       queueOnly: true,
       scheduledFor,
+      requiresOpeningIdentity: opts.templateCategory === "Opener - Homeowner",
     });
 
     if (outcome.status === "queued" || outcome.status === "paused") {

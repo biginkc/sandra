@@ -120,7 +120,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "Hey — quick question about your property",
+        body: "Hey — quick question about your property Mel with BMH.",
       });
       expect(outcome.status).toBe("sent");
 
@@ -229,7 +229,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "hi",
+        body: "hi Mel with BMH.",
       });
       expect(outcome.status).toBe("sent");
 
@@ -494,7 +494,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "See you at 2pm tomorrow!",
+        body: "See you at 2pm tomorrow! Mel with BMH.",
       });
 
       expect(outcome.status).toBe("sent");
@@ -541,7 +541,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "this is queued, not sent",
+      body: "this is queued, not sent Mel with BMH.",
       queueOnly: true,
     });
     expect(outcome.status).toBe("queued");
@@ -579,7 +579,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "campaign send",
+        body: "campaign send Mel with BMH.",
         campaignId: campaign!.id,
       });
       expect(outcome.status).toBe("sent");
@@ -612,7 +612,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued campaign send",
+      body: "queued campaign send Mel with BMH.",
       queueOnly: true,
       campaignId: campaign!.id,
     });
@@ -645,7 +645,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "held campaign send",
+      body: "held campaign send Mel with BMH.",
       queueOnly: true,
       scheduledFor,
       campaignId: campaign!.id,
@@ -684,7 +684,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued before pause",
+      body: "queued before pause Mel with BMH.",
       queueOnly: true,
       scheduledFor: new Date(Date.now() - 1000),
       campaignId: campaign!.id,
@@ -725,7 +725,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "first send",
+        body: "first send Mel with BMH.",
       });
       expect(first.status).toBe("sent");
 
@@ -763,7 +763,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "queued then released",
+        body: "queued then released Mel with BMH.",
         queueOnly: true,
       });
       expect(queue.status).toBe("queued");
@@ -810,7 +810,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued before classification",
+      body: "queued before classification Mel with BMH.",
       queueOnly: true,
     });
     expect(queue.status).toBe("queued");
@@ -849,7 +849,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued while consented",
+      body: "queued while consented Mel with BMH.",
       queueOnly: true,
     });
     expect(queue.status).toBe("queued");
@@ -882,7 +882,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "automated",
         contactId,
         propertyId,
-        body: "queued before the property was booked",
+        body: "queued before the property was booked Mel with BMH.",
         queueOnly: true,
       });
       expect(queue.status).toBe("queued");
@@ -923,7 +923,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "see you at 2pm tomorrow!",
+        body: "see you at 2pm tomorrow! Mel with BMH.",
         queueOnly: true,
       });
       expect(queue.status).toBe("queued");
@@ -953,7 +953,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued before phone suppression",
+      body: "queued before phone suppression Mel with BMH.",
       queueOnly: true,
     });
     expect(queue.status).toBe("queued");
@@ -990,7 +990,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued before wrong-number reply",
+      body: "queued before wrong-number reply Mel with BMH.",
       queueOnly: true,
     });
     expect(queue.status).toBe("queued");
@@ -1030,7 +1030,7 @@ describe("sendSmsToContact (integration)", () => {
         property_id: propertyId,
         from_address: "+18163706846",
         to_address: "+18165559999",
-        body: "provider mismatch",
+        body: "provider mismatch Mel with BMH.",
       })
       .select("id")
       .single();
@@ -1073,7 +1073,7 @@ describe("sendSmsToContact (integration)", () => {
         property_id: propertyId,
         from_address: "+12073049295",
         to_address: "+18165559999",
-        body: "old sender",
+        body: "old sender Mel with BMH.",
       })
       .select("id")
       .single();
@@ -1114,7 +1114,7 @@ describe("sendSmsToContact (integration)", () => {
         property_id: propertyId,
         from_address: null,
         to_address: "+18165559999",
-        body: "missing sender snapshot",
+        body: "missing sender snapshot Mel with BMH.",
       })
       .select("id")
       .single();
@@ -1158,7 +1158,7 @@ describe("sendSmsToContact (integration)", () => {
         property_id: propertyId,
         from_address: "+18164876899",
         to_address: "+18165559999",
-        body: "sender inventory never synced",
+        body: "sender inventory never synced Mel with BMH.",
       })
       .select("id")
       .single();
@@ -1187,7 +1187,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "queued metadata survives release",
+        body: "queued metadata survives release Mel with BMH.",
         queueOnly: true,
         metadata: {
           source: "send.integration.test",
@@ -1226,7 +1226,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "live reply from cockpit",
+        body: "live reply from cockpit Mel with BMH.",
         queueOnly: false,
       });
       expect(outcome.status).toBe("sent");
@@ -1253,7 +1253,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId: a.contactId,
         propertyId: a.propertyId,
-        body: "should be allowed",
+        body: "should be allowed Mel with BMH.",
         queueOnly: false,
       });
       expect(noConsent.status).toBe("sent");
@@ -1284,7 +1284,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "FAIL: force the mock to reject",
+        body: "FAIL: force the mock to reject Mel with BMH.",
       });
       expect(outcome.status).toBe("provider_failed");
 
@@ -1313,7 +1313,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "FAIL-RATE_LIMIT: defer this queued message",
+        body: "FAIL-RATE_LIMIT: defer this queued message Mel with BMH.",
         queueOnly: true,
       });
       expect(queue.status).toBe("queued");
@@ -1363,7 +1363,7 @@ describe("sendSmsToContact (integration)", () => {
       await supabase
         .from("messages")
         .update({
-          body: "Recovered provider send",
+          body: "Recovered provider send Mel with BMH.",
           scheduled_for: new Date(Date.now() - 1000).toISOString(),
         })
         .eq("id", queue.messageId);
@@ -1401,7 +1401,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "FAIL-RATE_LIMIT: defer this queued campaign message",
+        body: "FAIL-RATE_LIMIT: defer this queued campaign message Mel with BMH.",
         queueOnly: true,
         scheduledFor: new Date(Date.now() - 1000),
         campaignId: campaign!.id,
@@ -1443,7 +1443,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "FAIL-RATE_LIMIT: cap this queued message",
+        body: "FAIL-RATE_LIMIT: cap this queued message Mel with BMH.",
         queueOnly: true,
         metadata: {
           providerRetry: {
@@ -1485,7 +1485,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "FAIL-CARRIER_BLOCK: do not retry this queued message",
+        body: "FAIL-CARRIER_BLOCK: do not retry this queued message Mel with BMH.",
         queueOnly: true,
       });
       expect(queue.status).toBe("queued");
@@ -1540,7 +1540,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "queued from the campaign sender",
+        body: "queued from the campaign sender Mel with BMH.",
         from: MOCK_SENDER_SECONDARY,
         campaignId: campaign!.id,
         queueOnly: true,
@@ -1563,7 +1563,7 @@ describe("sendSmsToContact (integration)", () => {
       // never an env default.
       const lastCall = getMockMessageLog().at(-1);
       expect(lastCall?.input.from).toBe(MOCK_SENDER_SECONDARY);
-      expect(lastCall?.body).toBe("queued from the campaign sender");
+      expect(lastCall?.body).toBe("queued from the campaign sender Mel with BMH.");
     } finally {
       vi.useRealTimers();
     }
@@ -1582,7 +1582,7 @@ describe("sendSmsToContact (integration)", () => {
         property_id: propertyId,
         from_address: "+15550009999",
         to_address: "+18165559999",
-        body: "queued from an unapproved sender",
+        body: "queued from an unapproved sender Mel with BMH.",
       })
       .select("id")
       .single();
@@ -1611,7 +1611,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued from a deactivated sender",
+      body: "queued from a deactivated sender Mel with BMH.",
       from: MOCK_SENDER_SECONDARY,
       queueOnly: true,
     });
@@ -1648,7 +1648,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued before the first catalog sync",
+      body: "queued before the first catalog sync Mel with BMH.",
       queueOnly: true,
     });
     expect(queue.status).toBe("queued");
@@ -1702,7 +1702,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "hello from the primary sender",
+        body: "hello from the primary sender Mel with BMH.",
         from: MOCK_SENDER_PRIMARY,
       });
       expect(primarySend.status).toBe("sent");
@@ -1710,7 +1710,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "hello from the secondary sender",
+        body: "hello from the secondary sender Mel with BMH.",
         from: MOCK_SENDER_SECONDARY,
       });
       expect(secondarySend.status).toBe("sent");

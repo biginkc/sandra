@@ -16,7 +16,7 @@ import { dispatchRepSms, readRepSmsContext } from "./rep-sms";
 
 const composition = {
   introId: "mel-maria-assistant-1",
-  introVersion: 1,
+  introVersion: 2,
   templateId: "no-answer-callback-time",
   templateVersion: 1,
   initialRemainder: "Maria wasn't able to reach you. What time would work for her to call you back?",
@@ -95,7 +95,7 @@ describe("dispatchRepSms durable generic reservation", () => {
       assignmentId: "sender-1",
       from: "+18163706846",
       to: "+18165550123",
-      body: "Hey, this is Mel, Maria's assistant.\n\nPlease text Maria a time that works.",
+      body: "Hey, this is Mel with BMH, Maria's assistant.\n\nPlease text Maria a time that works.",
       composition,
       providerMessageId: "provider-1",
       providerError: null,
@@ -186,7 +186,7 @@ describe("dispatchRepSms durable generic reservation", () => {
       p_submission_key: input.idempotencyKey,
       p_property_id: input.propertyId,
       p_contact_id: "contact-1",
-      p_body: "Hey, this is Mel, Maria's assistant.\n\nPlease text Maria a time that works.",
+      p_body: "Hey, this is Mel with BMH, Maria's assistant.\n\nPlease text Maria a time that works.",
       p_composition: expect.objectContaining({ remainder: composition.remainder }),
     }));
     expect(mocks.adminRpc).toHaveBeenNthCalledWith(2, "fn_record_rep_sms_delivery_result", expect.objectContaining({
