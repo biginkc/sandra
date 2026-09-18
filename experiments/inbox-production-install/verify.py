@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Verify compiler determinism and, with --installed, the exact guarded installed schema."""
-import argparse,ast,hashlib,json,re,shutil,subprocess,sys
+import argparse,ast,hashlib,json,os,re,shutil,subprocess,sys
 from pathlib import Path
 P=Path(__file__).resolve().parent
-ap=argparse.ArgumentParser();ap.add_argument('--installed',action='store_true');ap.add_argument('--selftest',action='store_true');ap.add_argument('--source-only',action='store_true');a=ap.parse_args()
+ap=argparse.ArgumentParser();ap.add_argument('--installed',action='store_true');ap.add_argument('--selftest',action='store_true');ap.add_argument('--source-only',action='store_true');ap.add_argument('--target',choices=('release-db','http'),default=os.environ.get('INBOX_RELEASE_TARGET_PROFILE','release-db'));a=ap.parse_args()
+os.environ['INBOX_RELEASE_TARGET_PROFILE']=a.target
 manifest=P/'source-manifest.json'
 if manifest.exists():
  for name,digest in json.loads(manifest.read_text()).items():
@@ -18,7 +19,7 @@ for f in P.glob('*.py'):ast.parse(f.read_text(),filename=str(f))
 # hash-checked above, just wrote.
 shutil.rmtree(P/'generated',ignore_errors=True)
 subprocess.run([sys.executable,str(P/'build.py')],check=True)
-subprocess.run([sys.executable,str(P/'read-companion.py')],check=True)
+subprocess.run([sys.executable,str(P/'read-companion.py'),'--target',a.target],check=True)
 foundation=P/'generated/install-candidate.sql';cand=foundation.read_text();digest=hashlib.sha256(foundation.read_bytes()).hexdigest()
 companion_path=P/'generated/read-companion.sql'
 companion=companion_path.read_text() if companion_path.exists() else ''
@@ -507,7 +508,10 @@ if a.selftest:
  # so breaking any of them the way Astra did breaks this too (verified
  # below each assertion's comment, and proven by deliberately reverting
  # each one during this round's testing).
- from fixture_db import guard,sql
+ if a.target=='http':
+  from http_fixture_db import guard,sql
+ else:
+  from fixture_db import guard,sql
  guard()
  def must_pass(label,fn):
   try:fn()
@@ -654,7 +658,10 @@ if a.selftest:
  sys.exit(0)
 
 if a.installed:
- from fixture_db import guard,sql
+ if a.target=='http':
+  from http_fixture_db import guard,sql
+ else:
+  from fixture_db import guard,sql
  guard()
  private_arr='ARRAY['+','.join("'"+x+"'" for x in private_schemas)+']::text[]'
  # Composite types (pg_class.relkind='c') go into the SAME name-matched columns
@@ -1179,7 +1186,7 @@ COMMIT;
 
  if snap['replica_identity']!='f':raise RuntimeError('Projection replica identity drift')
  if snap['privilege_exposure']!=0:raise RuntimeError('Private helper exposed to browser/service roles')
- result={'foundation_sha256':digest,'installed_function_bodies':len(functions_src),'installed_tables':len(all_tables),'installed_composite_types':len(composite_types),'installed_indexes':len(expected_index),'installed_triggers':len(expected_triggers),'installed_constraints':sum(len(extract_constraints_for_table(t)) for t in constraint_tables),'installed_rls_tables':len(rls_tables),'private_schemas_scanned':len(private_schemas),'private_helper_exposure_count':0,'replica_identity':'FULL','snapshot_isolation':'REPEATABLE READ, READ ONLY, single transaction','scope':'Read-only owned fixture catalog proof (plus a throwaway verify_scratch schema, created and dropped within this same run, used only to let Postgres itself canonically render the expected side of every function/constraint/index/trigger/default comparison -- byte-exact pg_get_functiondef/pg_get_constraintdef/pg_get_indexdef/pg_get_triggerdef/pg_get_expr comparison, no custom text normalization, plus separately pinned function/table/schema/type owner and function/relation ACL checks, plus FK/constraint enforcement-trigger-enabled checks, plus table persistence/rewrite-rule/RLS-policy/extra-trigger checks applied uniformly to every table this candidate declares -- private-schema AND explicitly-owned public tables alike) taken from one consistent REPEATABLE READ snapshot for the live side, not merely name presence; excludes runtime throughput and production schema equivalence, and COMMENT metadata (cosmetic, not security-relevant)'}
+ result={'foundation_sha256':digest,'target_profile':a.target,'installed_function_bodies':len(functions_src),'installed_tables':len(all_tables),'installed_composite_types':len(composite_types),'installed_indexes':len(expected_index),'installed_triggers':len(expected_triggers),'installed_constraints':sum(len(extract_constraints_for_table(t)) for t in constraint_tables),'installed_rls_tables':len(rls_tables),'private_schemas_scanned':len(private_schemas),'private_helper_exposure_count':0,'replica_identity':'FULL','snapshot_isolation':'REPEATABLE READ, READ ONLY, single transaction','scope':'Read-only owned fixture catalog proof (plus a throwaway verify_scratch schema, created and dropped within this same run, used only to let Postgres itself canonically render the expected side of every function/constraint/index/trigger/default comparison -- byte-exact pg_get_functiondef/pg_get_constraintdef/pg_get_indexdef/pg_get_triggerdef/pg_get_expr comparison, no custom text normalization, plus separately pinned function/table/schema/type owner and function/relation ACL checks, plus FK/constraint enforcement-trigger-enabled checks, plus table persistence/rewrite-rule/RLS-policy/extra-trigger checks applied uniformly to every table this candidate declares -- private-schema AND explicitly-owned public tables alike) taken from one consistent REPEATABLE READ snapshot for the live side, not merely name presence; excludes runtime throughput and production schema equivalence, and COMMENT metadata (cosmetic, not security-relevant)'}
  (P/'catalog-evidence.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
 else:
  print('Source syntax, pinned transforms and installation receipt hash verified')
