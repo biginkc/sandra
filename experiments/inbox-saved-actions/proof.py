@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Mutation-first proof for the personal saved-action definitions backend
 (setup.sql/public-api.sql): immutable versions, requester+org scoping,
-reference validation at SAVE and again at EXECUTE (get()), disabled
-gated-step-type rejection (promote/dismiss_unknown/restore_unknown/dnc),
+reference validation at SAVE and again at EXECUTE (get()), gated
+step-type rejection (dnc),
 stale-version rejection after edit/deactivate, and public-wrapper
 least-privilege. Owned fixture only.
 
@@ -16,7 +16,7 @@ correctness — owned_cleanup's discover/snapshot_baseline/assert_clean are
 still run around it as an independent, whole-DB content-signature check
 that the rollback really left zero residual (per the brief: reuse
 owned_cleanup.py for the proof residual check)."""
-import json, subprocess, sys
+import json, re, subprocess, sys
 from pathlib import Path
 P = Path(__file__).resolve().parent
 sys.path.insert(0, str(P.parent / 'inbox-projection' / 'fixture'))
@@ -64,6 +64,23 @@ if sql("SELECT to_regnamespace('inbox_saved_actions') IS NULL") == 't':
     print('INSTALLED inbox_saved_actions schema')
 else:
     print('inbox_saved_actions already installed; reusing')
+
+# The owned fixture is intentionally reusable, but a reused schema must still
+# execute the candidate validator.  A prior proof run can have installed an
+# older definition grammar; skipping DDL here would make this proof exercise
+# stale live code while reporting the current source as green.  Reapply only
+# the validator (the table/RPC installation remains immutable and is still
+# guarded by the first-install branch above).
+setup_source = (P / 'setup.sql').read_text()
+match = re.search(r'(?s)CREATE FUNCTION inbox_saved_actions\.validate_definition\(.*?\nEND \$\$;', setup_source)
+if not match:
+    raise RuntimeError('Could not extract saved-action validator from setup.sql')
+validator = match.group(0).replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION', 1)
+r = subprocess.run(D + ['exec', '-i', N, 'psql', '-XqAt', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'],
+                   input=validator, text=True, capture_output=True, timeout=30)
+if r.returncode:
+    raise RuntimeError(f'validate_definition reconciliation failed: {r.stderr}')
+print('RECONCILED inbox_saved_actions.validate_definition from candidate source')
 
 # Re-apply the authoritative inbox_action_api.prepare saved-reference guard
 # and stored-snapshot binding every run. This is idempotent and cheap even

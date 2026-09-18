@@ -10,7 +10,15 @@ export function inboxSyncUpstream(env: NodeJS.ProcessEnv) {
     if (!["development", "test"].includes(env.NODE_ENV ?? "") || url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) || !url.port) throw Error("Invalid owned local Inbox upstream");
     return { electricUrl, projectionTable };
   }
-  const token = env.INBOX_ELECTRIC_RELAY_TOKEN;
-  if (mode !== "relay" || url.protocol !== "https:" || !token || !/^[A-Za-z0-9_-]{32,256}$/.test(token)) throw Error("Missing private Inbox relay configuration");
-  return { electricUrl, projectionTable, upstreamHeaders: { authorization: `Bearer ${token}` } };
+  if (mode === "owned-relay") {
+    if (!["development", "test"].includes(env.NODE_ENV ?? "") || url.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) || !url.port || !token(env.INBOX_ELECTRIC_RELAY_TOKEN)) throw Error("Invalid owned relay Inbox upstream");
+    return { electricUrl, projectionTable, upstreamHeaders: { authorization: `Bearer ${env.INBOX_ELECTRIC_RELAY_TOKEN}` } };
+  }
+  const relayToken = env.INBOX_ELECTRIC_RELAY_TOKEN;
+  if (mode !== "relay" || url.protocol !== "https:" || !token(relayToken)) throw Error("Missing private Inbox relay configuration");
+  return { electricUrl, projectionTable, upstreamHeaders: { authorization: `Bearer ${relayToken}` } };
+}
+
+function token(value: string | undefined): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{32,256}$/.test(value);
 }

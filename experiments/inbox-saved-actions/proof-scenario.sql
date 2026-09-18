@@ -114,10 +114,8 @@ BEGIN
  IF a->>'version'<>'2' THEN RAISE EXCEPTION 'get() did not recover after restoring eligibility: %',a; END IF;
  RAISE NOTICE 'PASS get() recovers once assignee restored (control)';
 
- -- 8) the saved-action backend only persists the reviewed #642 grammar:
- -- outcome/assign metadata pairs or one standalone review_reply hand-off.
- -- Promotion and unknown-sender commands stay disabled here until their
- -- executor contract is reviewed and wired through this lane.
+ -- 8) the saved-action backend accepts every reviewed durable step and keeps
+ -- review_reply as the final hand-off after any valid metadata prefix.
  EXECUTE 'SET LOCAL ROLE authenticated';
  a:=public.inbox_saved_action_create('Assign only',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','assign','userId',NULL))));
  EXECUTE 'RESET ROLE';
@@ -125,17 +123,18 @@ BEGIN
  RAISE NOTICE 'PASS standalone assign step accepted at save';
 
  FOR msg IN SELECT unnest(ARRAY['promote','dismiss_unknown','restore_unknown']) LOOP
-  failed:=false;
-  BEGIN
-   EXECUTE 'SET LOCAL ROLE authenticated';
-   PERFORM public.inbox_saved_action_create('Disabled '||msg,jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type',msg))));
-   EXECUTE 'RESET ROLE';
-  EXCEPTION WHEN raise_exception THEN
-   IF SQLERRM='INBOX_SAVED_ACTION_STEP_TYPE_DISABLED' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
-  END;
-  IF NOT failed THEN RAISE EXCEPTION 'DISABLED SAVED STEP ADMITTED: %',msg; END IF;
-  RAISE NOTICE 'PASS disabled saved step rejected at save: %',msg;
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  a:=public.inbox_saved_action_create('Enabled '||msg,jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type',msg))));
+  EXECUTE 'RESET ROLE';
+  IF a->'definition'->'steps'->0->>'type'<>msg THEN RAISE EXCEPTION 'durable saved step was not persisted: %',msg; END IF;
+  RAISE NOTICE 'PASS durable saved step accepted at save: %',msg;
  END LOOP;
+
+ EXECUTE 'SET LOCAL ROLE authenticated';
+ a:=public.inbox_saved_action_create('Metadata plus reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','outcome','value','nurture'),jsonb_build_object('type','promote'),jsonb_build_object('type','assign','userId',assignee),jsonb_build_object('type','review_reply','text','Hi {{first_name}}'))));
+ EXECUTE 'RESET ROLE';
+ IF jsonb_array_length(a->'definition'->'steps')<>4 OR a->'definition'->'steps'->3->>'type'<>'review_reply' THEN RAISE EXCEPTION 'mixed metadata/reply definition was not saved: %',a; END IF;
+ RAISE NOTICE 'PASS metadata prefix plus final review_reply accepted at save';
 
  EXECUTE 'SET LOCAL ROLE authenticated';
  a:=public.inbox_saved_action_create('Reviewed reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','review_reply','text','Hi {{first_name}}'))));

@@ -86,6 +86,14 @@ process.env.E2E_TEST_USER_EMAIL = e2ePrimaryIdentity.email;
 process.env.E2E_TEST_USER_PASSWORD = e2ePrimaryIdentity.password;
 process.env.E2E_QUIET_HOURS_NOW =
   process.env.E2E_QUIET_HOURS_NOW ?? "2026-05-09T16:00:00.000Z";
+// Keep reply fixtures inside the deterministic 08:00–21:00 acceptance
+// window. The SQL policy evaluates the seeded property's state using the
+// database clock, while the TypeScript policy uses E2E_QUIET_HOURS_NOW; an
+// implicit MO default therefore becomes wall-clock dependent. OH is noon in
+// the pinned 16:00Z fixture time. Callers may still override this explicitly
+// when exercising a blocked quiet-hours row.
+process.env.INBOX_ACCEPTANCE_REPLY_STATE =
+  process.env.INBOX_ACCEPTANCE_REPLY_STATE ?? "OH";
 
 const browserChannel =
   process.env.PLAYWRIGHT_BROWSER_CHANNEL === "chrome" ? "chrome" : undefined;
@@ -114,6 +122,7 @@ const webServerEnv: Record<string, string> = {
   SKIP_INTENT_GATE: "1",
   ADMIN_EMAILS: e2ePrimaryIdentity.email,
   E2E_QUIET_HOURS_NOW: process.env.E2E_QUIET_HOURS_NOW,
+  INBOX_ACCEPTANCE_REPLY_STATE: process.env.INBOX_ACCEPTANCE_REPLY_STATE,
   NODE_ENV: "development",
   // Acceptance-harness-only: turns on the new /inbox workspace routes for
   // THIS webServer process only. Never set in prod deploy config.

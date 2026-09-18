@@ -254,17 +254,36 @@ async function deleteDncAwareFixtureRows(
     );
   }
 
-  let propertiesQuery = admin
-    .from("properties")
-    .delete()
-    .eq("org_id", orgId)
-    .eq("is_dnc_locked", false);
-  propertiesQuery = addIdExclusion(propertiesQuery, retainedPropertyIds);
-  const { error: propertiesError } = await propertiesQuery;
-  if (propertiesError) {
+  // Keep the exclusion local. Encoding every append-only lead-event property
+  // id in one PostgREST `not.in` URL can exceed the gateway's request limit
+  // and produce a misleading empty-message 502 during teardown.
+  const { data: candidateProperties, error: candidatePropertiesError } =
+    await admin
+      .from("properties")
+      .select("id")
+      .eq("org_id", orgId)
+      .eq("is_dnc_locked", false);
+  if (candidatePropertiesError) {
     throw new Error(
-      `Inbox acceptance DNC-aware cleanup failed to clear ordinary properties: ${propertiesError.message}`,
+      `Inbox acceptance DNC-aware cleanup failed to list ordinary properties: ${candidatePropertiesError.message}`,
     );
+  }
+  const retained = new Set(retainedPropertyIds);
+  const deletablePropertyIds = (candidateProperties ?? [])
+    .map((row) => row.id)
+    .filter((id) => !retained.has(id));
+  for (let offset = 0; offset < deletablePropertyIds.length; offset += 50) {
+    const { error: propertiesError } = await admin
+      .from("properties")
+      .delete()
+      .eq("org_id", orgId)
+      .eq("is_dnc_locked", false)
+      .in("id", deletablePropertyIds.slice(offset, offset + 50));
+    if (propertiesError) {
+      throw new Error(
+        `Inbox acceptance DNC-aware cleanup failed to clear ordinary properties: ${propertiesError.message}`,
+      );
+    }
   }
   return retainedPropertyIds;
 }
@@ -371,15 +390,14 @@ async function countCleanableRows(
   if (contactsError) throw new Error(`Inbox acceptance cleanup could not count ordinary contacts: ${contactsError.message}`);
   total += contactsCount ?? 0;
 
-  let propertiesQuery = admin
+  const { data: propertyRows, error: propertiesError } = await admin
     .from("properties")
-    .select("id", { count: "exact", head: true })
+    .select("id")
     .eq("org_id", orgId)
     .eq("is_dnc_locked", false);
-  propertiesQuery = addIdExclusion(propertiesQuery, retainedPropertyIds);
-  const { count: propertiesCount, error: propertiesError } = await propertiesQuery;
-  if (propertiesError) throw new Error(`Inbox acceptance cleanup could not count ordinary properties: ${propertiesError.message}`);
-  return total + (propertiesCount ?? 0);
+  if (propertiesError) throw new Error(`Inbox acceptance cleanup could not list ordinary properties: ${propertiesError.message}`);
+  const retained = new Set(retainedPropertyIds);
+  return total + (propertyRows ?? []).filter((row) => !retained.has(row.id)).length;
 }
 
 /**

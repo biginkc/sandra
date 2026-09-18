@@ -343,19 +343,33 @@ export async function deleteOrgScopedFixtureRows(
     );
   }
 
-  let propertiesQuery = client.from("properties").delete().eq("org_id", orgId);
-  if (retainedPropertyIds.length > 0) {
-    propertiesQuery = propertiesQuery.not(
-      "id",
-      "in",
-      `(${retainedPropertyIds.join(",")})`,
+  // Do not put the append-only ledger's full property-id set into one
+  // PostgREST `not.in` URL. A busy fixture can make that URL large enough for
+  // Kong to return 502 before PostgreSQL sees the request. Read the bounded
+  // org-scoped candidate set, remove retained ids locally, then delete in
+  // small id batches.
+  const { data: candidateProperties, error: candidatePropertiesError } =
+    await client.from("properties").select("id").eq("org_id", orgId);
+  if (candidatePropertiesError) {
+    throw new Error(
+      `deleteOrgScopedFixtureRows: failed to list properties for org ${orgId}: ${candidatePropertiesError.message}`,
     );
   }
-  const { error: propertiesError } = await propertiesQuery;
-  if (propertiesError) {
-    throw new Error(
-      `deleteOrgScopedFixtureRows: failed to clear properties for org ${orgId}: ${propertiesError.message}`,
-    );
+  const retained = new Set(retainedPropertyIds);
+  const deletablePropertyIds = (candidateProperties ?? [])
+    .map((row) => row.id)
+    .filter((id) => !retained.has(id));
+  for (let offset = 0; offset < deletablePropertyIds.length; offset += 50) {
+    const { error: propertiesError } = await client
+      .from("properties")
+      .delete()
+      .eq("org_id", orgId)
+      .in("id", deletablePropertyIds.slice(offset, offset + 50));
+    if (propertiesError) {
+      throw new Error(
+        `deleteOrgScopedFixtureRows: failed to clear properties for org ${orgId}: ${propertiesError.message}`,
+      );
+    }
   }
 }
 
@@ -398,7 +412,18 @@ export async function countOrgScopedFixtureRows(
       .select("id", { count: "exact", head: true })
       .eq("org_id", orgId);
     if (table === "properties" && retainedPropertyIds.length > 0) {
-      query = query.not("id", "in", `(${retainedPropertyIds.join(",")})`);
+      const { data: propertyRows, error: propertyRowsError } = await client
+        .from("properties")
+        .select("id")
+        .eq("org_id", orgId);
+      if (propertyRowsError) {
+        throw new Error(
+          `countOrgScopedFixtureRows: failed to list properties for org ${orgId}: ${propertyRowsError.message}`,
+        );
+      }
+      const retained = new Set(retainedPropertyIds);
+      total += (propertyRows ?? []).filter((row) => !retained.has(row.id)).length;
+      continue;
     }
     const { count, error } = await query;
     if (error) {

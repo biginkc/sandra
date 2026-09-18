@@ -40,7 +40,7 @@ BEGIN
         ({q(m2)},org,{q(c2)},'sms','inbound','received','dismiss two',sender,NULL);
  SELECT sender_group_id INTO STRICT group_id FROM inbox_t2_message_capture.sender_groups WHERE org_id=org AND raw_sender=sender;
  SELECT revision INTO STRICT rev FROM inbox_t2_message_capture.versions WHERE org_id=org AND namespace='unknown_action' AND target_id=group_id;
- payload:=jsonb_build_object('sender_group_id',group_id,'raw_sender',sender,'revision',rev::text,'message_ids',jsonb_build_array({q(m1)}::jsonb,{q(m2)}::jsonb));
+ payload:=jsonb_build_object('sender_group_id',group_id,'raw_sender',sender,'revision',rev::text,'message_ids',jsonb_build_array(to_jsonb({q(m1)}::text),to_jsonb({q(m2)}::text)));
  canonical:=jsonb_build_object('purpose','prepare_action','organizationId',org::text,'requesterId',requester::text,'targets',jsonb_build_array(jsonb_build_object('kind','unknown_sender_group','id',group_id::text)),'definition',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','dismiss_unknown'))),'savedAction',NULL);
  INSERT INTO inbox_operations.preparations(id,org_id,requester_id,canonical_input,input_hash,definition,snapshot,expires_at)
  VALUES ({q(prep_d)},org,requester,canonical::text,encode(sha256(convert_to('sandra:inbox:action:v1','UTF8')||decode('00','hex')||convert_to(canonical::text,'UTF8')),'hex'),canonical->'definition',jsonb_build_object('items',jsonb_build_array()),clock_timestamp()+interval '1 hour');
@@ -61,7 +61,7 @@ BEGIN
  VALUES ({q(m4)},org,{q(c4)},'sms','inbound','received','restore one',sender,clock_timestamp()),
         ({q(m5)},org,{q(c5)},'sms','inbound','received','restore two',sender,clock_timestamp());
  SELECT revision INTO STRICT rev FROM inbox_t2_message_capture.versions WHERE org_id=org AND namespace='unknown_action' AND target_id=group_id;
- payload:=jsonb_build_object('sender_group_id',group_id,'raw_sender',sender,'revision',rev::text,'message_ids',jsonb_build_array({q(m4)}::jsonb,{q(m5)}::jsonb));
+ payload:=jsonb_build_object('sender_group_id',group_id,'raw_sender',sender,'revision',rev::text,'message_ids',jsonb_build_array(to_jsonb({q(m4)}::text),to_jsonb({q(m5)}::text)));
  canonical:=jsonb_build_object('purpose','prepare_action','organizationId',org::text,'requesterId',requester::text,'targets',jsonb_build_array(jsonb_build_object('kind','unknown_sender_group','id',group_id::text)),'definition',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','restore_unknown'))),'savedAction',NULL);
  INSERT INTO inbox_operations.preparations(id,org_id,requester_id,canonical_input,input_hash,definition,snapshot,expires_at)
  VALUES ({q(prep_r)},org,requester,canonical::text,encode(sha256(convert_to('sandra:inbox:action:v1','UTF8')||decode('00','hex')||convert_to(canonical::text,'UTF8')),'hex'),canonical->'definition',jsonb_build_object('items',jsonb_build_array()),clock_timestamp()+interval '1 hour');
