@@ -893,6 +893,8 @@ def apply_bootstrap(env_file: Path) -> dict[str, Any]:
         # grant if a prior hardening/restart removed it.
         apply_runtime_role()
         apply_broadcast_publication()
+        docker("restart", REALTIME_CONTAINER)
+        wait_for_rpc_ready(REALTIME_CONTAINER)
     state = read_migration_state()
     tenant = read_tenant_state()
     require_tenant_settings_unchanged(before_tenant, tenant)
