@@ -8,12 +8,16 @@ import { createWorkspaceSync, type SyncSnapshot, type WorkspaceScope } from "@/l
 import { createInboxQueryCache, type InboxQueryIdentity } from "@/lib/inbox/workspace-query";
 import { inboxViews, type InboxFilter, type InboxCounts } from "@/lib/inbox/filter-contract";
 import { ConversationHistory, type InboxDetailSnapshot } from "./conversation-history";
+import { UnknownSenderHistory, type UnknownSenderHistorySnapshot } from "./unknown-sender-history";
 import { useInboxMetadataActions } from "./use-metadata-actions";
+import { useInboxSavedActions } from "./saved-actions";
+import { InboxReplyComposer } from "./reply-composer";
+import { ConversationLinks } from "./conversation-links";
 
 const labels: Record<InboxFilter["view"], string> = { active: "All", all: "All", mine: "Assigned to me", unassigned: "Unassigned", unread: "Unread", escalated: "Needs review", dispo: "Has outcome", needs_outcome: "Needs outcome", unknown: "Unknown senders", dismissed: "Dismissed" };
 type Scope = WorkspaceScope & { nextCursor: string | null; refreshed: boolean };
-type Open = { id: WorkspaceId; generation: number; row?: WorkspaceRow; data?: InboxDetailSnapshot; error?: string };
-export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled = false }: { identity: InboxQueryIdentity & { expiresAt: number }; initialFilter: InboxFilter; actionsEnabled?: boolean }) {
+type Open = { id: WorkspaceId; generation: number; row?: WorkspaceRow; data?: InboxDetailSnapshot; unknownData?: UnknownSenderHistorySnapshot; error?: string };
+export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled = false, replyEnabled = false }: { identity: InboxQueryIdentity & { expiresAt: number }; initialFilter: InboxFilter; actionsEnabled?: boolean; replyEnabled?: boolean }) {
   const [cache] = useState(() => createInboxQueryCache(identity));
   const [snapshot, setSnapshot] = useState<SyncSnapshot>({ state: "loading", rows: [] });
   const [filter, setFilter] = useState(initialFilter);
@@ -64,6 +68,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const unavailableSenderGroup = useCallback((senderGroupId: string) =>
     invalidateTarget({ kind: "unknown_sender_group", orgId: identity.orgId, senderGroupId }), [invalidateTarget, identity.orgId]);
   const metadata = useInboxMetadataActions({ enabled: actionsEnabled, selectionCount: selected.length, identity, orgId: identity.orgId, names: selectionNames, cache, onAccessLost: accessLost, onCompleted: () => { void load(filter); } });
+  const saved = useInboxSavedActions({ enabled: actionsEnabled, identity, selectedIds: selected, names: selectionNames, onAccessLost: accessLost, onCompleted: () => { void load(filter); } });
   useEffect(() => { clearActions.current = metadata.clear; }, [metadata.clear]);
   async function json<T>(url: string, init: RequestInit, signal: AbortSignal, notFound?: () => void): Promise<T> {
     const response = await fetch(url, { ...init, signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]), credentials: "same-origin", cache: "no-store", redirect: "error" });
@@ -142,10 +147,19 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     const row = snapshot.rows.find(value => workspaceId(value.target) === id);
     const parts: unknown = JSON.parse(id);
     setOpened({ id, generation, row });
-    if (!Array.isArray(parts) || parts[0] !== identity.orgId || parts[1] !== "conversation") {
-      setOpened({ id, generation, row, error: "Unknown sender details are not connected to this preview yet." }); return;
+    if (!Array.isArray(parts) || parts[0] !== identity.orgId || !["conversation", "unknown_sender_group"].includes(parts[1] as string) || typeof parts[2] !== "string") {
+      setOpened({ id, generation, row, error: "This conversation identity could not be verified." }); return;
     }
+    const targetKind = parts[1] as "conversation" | "unknown_sender_group";
     const conversationId = parts[2] as string;
+    if (targetKind === "unknown_sender_group") {
+      try {
+        const value = await cache.read<UnknownSenderHistorySnapshot>("detail", `unknown:${id}`, signal => json(`/api/inbox/unknown-senders/${conversationId}/history?orgId=${identity.orgId}`, {}, signal, () => unavailableSenderGroup(conversationId)), fresh);
+        if (value.orgId !== identity.orgId || value.senderGroupId !== conversationId || !Array.isArray(value.history) || value.history.length > 50) throw Error("Unknown sender response did not match the request.");
+        if (sequence.current === generation && !denied.current) setOpened({ id, generation, row, unknownData: value });
+      } catch (failure) { if (sequence.current === generation && !denied.current) setOpened({ id, generation, row, error: failure instanceof Error ? failure.message : "Unknown sender unavailable." }); }
+      return;
+    }
     try {
       // A 404 here means this conversation became item-inaccessible between workset
       // capture and Open (dismissed, purged cursor, etc.) — remove it from the row/
@@ -155,20 +169,24 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
       if (sequence.current === generation && !denied.current) setOpened({ id, generation, row, data: value });
     } catch (failure) { if (sequence.current === generation && !denied.current) setOpened({ id, generation, row, error: failure instanceof Error ? failure.message : "Conversation unavailable." }); }
   }
+  const actionItems = [...metadata.actions, ...saved.actions];
+  const prepareAction = (actionId: string, ids: readonly WorkspaceId[]) => actionId.startsWith("saved:") ? void saved.prepare(actionId, ids) : void metadata.prepare(actionId, ids);
   return <QueryClientProvider client={cache.client}>
     <InboxWorkspace scopeLabel={labels[filter.view]} rows={snapshot.rows} invalidatedIds={invalidatedIds} selectedIds={selected} openId={opened?.id ?? null}
       onSelectionChange={select} onOpen={id => void open(id)} onCloseDetail={() => { sequence.current++; activeOpen.current = null; setOpened(null); }}
       onBack={() => { window.location.href = "/inbox/overview"; }} onReviewSelection={() => setReview(true)}
-      actions={metadata.actions} onAction={metadata.prepare} connection={{ state: snapshot.state === "permission_lost" ? "permission_lost" : snapshot.state === "live" ? "live" : snapshot.state === "resync_required" ? "offline" : "updating", label: snapshot.state === "permission_lost" ? "Your access has changed. Reload to continue." : snapshot.state === "live" ? "Current workspace is synchronized" : snapshot.state === "resync_required" ? "Refresh this view to reconnect" : "Loading workspace…" }}
+      actions={actionItems} onAction={prepareAction} connection={{ state: snapshot.state === "permission_lost" ? "permission_lost" : snapshot.state === "live" ? "live" : snapshot.state === "resync_required" ? "offline" : "updating", label: snapshot.state === "permission_lost" ? "Your access has changed. Reload to continue." : snapshot.state === "live" ? "Current workspace is synchronized" : snapshot.state === "resync_required" ? "Refresh this view to reconnect" : "Loading workspace…" }}
       listState={busy || snapshot.state === "loading" ? "loading" : "ready"} listError={error} onRetryList={() => void load(filter)}
       toolbar={<><form onSubmit={event => { event.preventDefault(); void load({ ...filter, search }); }}><label>Search <input aria-label="Search conversations" maxLength={100} value={search} onChange={event => setSearch(event.target.value)} disabled={busy} /></label><button disabled={busy}>Search</button></form>
         <label>View <select value={filter.view} disabled={busy} onChange={event => void load({ ...filter, view: event.target.value as InboxFilter["view"] })}>{inboxViews.filter(view => view !== "active").map(view => <option key={view} value={view}>{labels[view]}</option>)}</select></label>
         <label><input type="checkbox" checked={filter.hide_noise ?? true} disabled={busy} onChange={event => void load({ ...filter, hide_noise: event.target.checked })} /> Hide DNC and test conversations</label>
-        <span role="status">{counts ? `${counts.counts[filter.view === "active" ? "all" : filter.view]} matching · counted ${new Date(counts.asOf).toLocaleTimeString()}` : countsError ? "Counts unavailable" : "Loading counts…"}</span>{countsError && <button type="button" onClick={() => void loadCounts(filter, true)}>Retry counts</button>}</>}
+        <span role="status">{counts ? `${counts.counts[filter.view === "active" ? "all" : filter.view]} matching · counted ${new Date(counts.asOf).toLocaleTimeString()}` : countsError ? "Counts unavailable" : "Loading counts…"}</span>{countsError && <button type="button" onClick={() => void loadCounts(filter, true)}>Retry counts</button>}{actionsEnabled ? saved.picker : null}</>}
       pageControl={<><span>{snapshot.rows.length} loaded</span><button disabled={busy} onClick={() => void load(filter)}>Refresh view</button><button disabled={busy || !nextCursor} onClick={() => void load(filter, nextCursor)}>Next 500</button></>}
-      detail={opened ? { targetId: opened.id, title: opened.row?.name ?? "Conversation", context: opened.row?.context, state: opened.error ? "error" : opened.data ? "ready" : "loading", error: opened.error, onRetry: () => void open(opened.id, true), content: opened.data ? <ConversationHistory orgId={identity.orgId} conversationId={opened.data.conversationId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.data }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={unavailable} /> : undefined } : undefined}
-      activity={metadata.activity ?? <p>{actionsEnabled ? "Select an action to review eligible records. Replies and remaining individual tools are being connected." : "Bulk actions and remaining individual tools are being connected."}</p>} />
+      detail={opened ? { targetId: opened.id, title: opened.row?.name ?? "Conversation", context: opened.row?.context, state: opened.error ? "error" : opened.data || opened.unknownData ? "ready" : "loading", error: opened.error, onRetry: () => void open(opened.id, true), headerActions: opened.data ? <ConversationLinks conversationId={opened.data.conversationId} /> : undefined, content: opened.data ? <><ConversationHistory orgId={identity.orgId} conversationId={opened.data.conversationId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.data }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={unavailable} /><InboxReplyComposer key={`${identity.orgId}:${opened.data.conversationId}`} conversationId={opened.data.conversationId} enabled={replyEnabled} /></> : opened.unknownData ? <UnknownSenderHistory orgId={identity.orgId} senderGroupId={opened.unknownData.senderGroupId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.unknownData }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={unavailableSenderGroup} /> : undefined } : undefined}
+      activity={<>{metadata.activity ?? <p>{actionsEnabled ? "Select an action to review eligible records." : "Bulk actions and remaining individual tools are being connected."}</p>}{saved.activity}</>} />
     {metadata.review}
+    {saved.review}
+    {actionsEnabled ? saved.builder : null}
     <Dialog open={review} onOpenChange={setReview}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>{selected.length} selected conversations</DialogTitle><DialogDescription>Remove any conversations that do not belong in this group, including those outside the current view.</DialogDescription><ul>{selected.map(id => <li className="flex items-center justify-between gap-4 py-2" key={id}>{selectionNames.get(id)}<button onClick={() => select(selected.filter(value => value !== id))}>Remove</button></li>)}</ul></DialogContent></Dialog>
   </QueryClientProvider>;
 }

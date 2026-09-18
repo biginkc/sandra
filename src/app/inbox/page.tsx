@@ -23,5 +23,5 @@ export default async function InboxPage({ searchParams }: { searchParams: Promis
     context = await createSupabaseInboxRepository(client as unknown as InboxRpcClient).getContext(AbortSignal.timeout(15_000));
   } catch { /* Missing schema or canonical access remains unavailable. */ }
   if (!context) return <main><h1>Inbox workspace unavailable</h1><p>Your current access could not be verified. Return to Messages or reload to try again.</p><a href="/messages">Back to Messages</a></main>;
-  return <InboxWorkspaceClient key={`${context.orgId}:${context.userId}:${context.sessionId}:${context.accessEpoch}`} identity={context} actionsEnabled={process.env.INBOX_ACTIONS_SERVER_ENABLED === "1"} initialFilter={{ view, hide_noise: true }} />;
+  return <InboxWorkspaceClient key={`${context.orgId}:${context.userId}:${context.sessionId}:${context.accessEpoch}`} identity={context} actionsEnabled={process.env.INBOX_ACTIONS_SERVER_ENABLED === "1"} replyEnabled={process.env.INBOX_REPLIES_SERVER_ENABLED === "1"} initialFilter={{ view, hide_noise: true }} />;
 }

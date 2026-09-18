@@ -36,7 +36,7 @@ export interface InboxWorkspaceProps {
   listError?: string;
   onRetryList?: () => void;
   pageControl?: ReactNode;
-  detail?: { targetId: WorkspaceId; title: string; context?: string; state: "ready" | "loading" | "error"; content?: ReactNode; error?: string; onRetry?: () => void };
+  detail?: { targetId: WorkspaceId; title: string; context?: string; state: "ready" | "loading" | "error"; content?: ReactNode; error?: string; onRetry?: () => void; headerActions?: ReactNode };
   activity?: ReactNode;
   newMessagesLabel?: string;
   onRefreshRows?: () => void;
@@ -153,7 +153,7 @@ export function InboxWorkspace(props: InboxWorkspaceProps) {
           {box&&<div aria-hidden="true" className={styles.rectangle} style={{left:box.left,top:box.top,width:box.right-box.left,height:box.bottom-box.top}}/>}
         </div><footer className={styles.page}>{props.pageControl}</footer>
       </section>
-      {openId&&<aside className={styles.detail} aria-label="Open conversation"><header><div><h2>{detail?.title??"Conversation"}</h2><p>{detail?.context}</p></div><button ref={closeButton} type="button" onClick={closeDetail} aria-label="Close conversation details">Close</button></header><div className={styles.detailContent}>{!detail||detail.state==="loading"?<p role="status">Loading conversation…</p>:detail.state==="error"?<div role="alert">{detail.error??"Conversation unavailable."}{detail.onRetry&&<button type="button" onClick={detail.onRetry}>Retry conversation</button>}</div>:detail.content}</div></aside>}
+      {openId&&<aside className={styles.detail} aria-label="Open conversation"><header><div><h2>{detail?.title??"Conversation"}</h2><p>{detail?.context}</p>{detail?.headerActions&&<div className="mt-2 flex flex-wrap gap-2">{detail.headerActions}</div>}</div><button ref={closeButton} type="button" onClick={closeDetail} aria-label="Close conversation details">Close</button></header><div className={styles.detailContent}>{!detail||detail.state==="loading"?<p role="status">Loading conversation…</p>:detail.state==="error"?<div role="alert">{detail.error??"Conversation unavailable."}{detail.onRetry&&<button type="button" onClick={detail.onRetry}>Retry conversation</button>}</div>:detail.content}</div></aside>}
       <aside ref={actionRail} className={styles.actions} aria-label="Actions for selection"><h2>Actions · click or drop</h2><p className={styles.dragStatus} role="status">{visual?.mode==="action"?`Dragging ${visual.selected.length} selected · Escape to cancel`:selectedIds.length?`${selectedIds.length} selected · click or drag`:"Select conversations to act"}</p>{props.actions.map((action)=><div key={action.id}><button type="button" data-workspace-action={action.id} className={`${styles.action} ${action.prominent?styles.prominent:""} ${dropId===action.id?styles.drop:""}`} disabled={!selectedIds.length||action.pending||!!action.disabledReason} onClick={()=>clickAction(action)}><span>{action.label}</span>{action.pending&&<small>In progress…</small>}</button>{(action.disabledReason||action.description)&&<small>{action.disabledReason??action.description}</small>}{action.error&&<p role="alert" className={styles.error}>{action.error}</p>}</div>)}{!props.actions.length&&<p>No actions available.</p>}{props.activity&&<div className={styles.activity}>{props.activity}</div>}</aside>
     </div></>}
   </section>;
