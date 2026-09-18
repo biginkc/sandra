@@ -117,12 +117,13 @@ test.describe("Inbox navigation and selection", () => {
     // Checkbox toggles are the keyboard and Cmd/Ctrl-safe equivalent of the
     // nonstandard Shift-click gesture; the nested control must not replace the
     // existing selected group through the row click handler.
-    await page.getByLabel(`Select ${second.contactName}`).click({ modifiers: ["Control"] });
+    const selectionModifier = process.platform === "darwin" ? "Meta" : "Control";
+    await page.getByLabel(`Select ${second.contactName}`).click({ modifiers: [selectionModifier] });
     await expect(page.getByText("2 selected", { exact: true })).toBeVisible();
     await expect(page.getByLabel(`Select ${first.contactName}`)).toBeChecked();
     await expect(page.getByLabel(`Select ${second.contactName}`)).toBeChecked();
     await expect(page.getByLabel(`Select ${third.contactName}`)).not.toBeChecked();
-    await page.getByLabel(`Select ${third.contactName}`).click({ modifiers: ["Meta"] });
+    await page.getByLabel(`Select ${third.contactName}`).click({ modifiers: [selectionModifier] });
     await expect(page.getByText("3 selected", { exact: true })).toBeVisible();
     await expect(page.getByLabel(`Select ${first.contactName}`)).toBeChecked();
     await expect(page.getByLabel(`Select ${second.contactName}`)).toBeChecked();

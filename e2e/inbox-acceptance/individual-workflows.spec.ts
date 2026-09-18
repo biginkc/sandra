@@ -462,8 +462,6 @@ async function seedReviewFixture(phone: string, addressTag: string, first: strin
     contactName: { first, last },
     messages: [{ direction: "inbound", body: `${addressTag} review source`, createdAtOffsetMin: -2 }],
   });
-  const { error } = await admin.from("properties").update({ outreach_dispo: "not_interested" }).eq("id", thread.propertyId);
-  expect(error).toBeNull();
   return thread;
 }
 
@@ -471,18 +469,22 @@ async function addPendingReview(thread: SeededThread, disposition: "not_interest
   const { data: inbound, error: inboundError } = await admin.from("messages").select("id").eq("conversation_id", thread.threadId).eq("direction", "inbound").single();
   expect(inboundError).toBeNull();
   expect(inbound).not.toBeNull();
-  const { data: review, error } = await admin.from("ai_disposition_reviews").insert({
-    org_id: DEFAULT_ORG_ID,
-    property_id: thread.propertyId,
-    conversation_id: thread.threadId,
-    source_inbound_message_id: inbound!.id,
-    disposition,
-    ai_reason: "fixture review reason",
-    status: "pending",
-  }).select("id").single();
+  // Reviews are created only by the trusted worker RPC; direct INSERT is
+  // intentionally denied even to service_role. Exercise that normal path.
+  const { data: review, error } = await admin.rpc("fn_apply_ai_disposition_with_review", {
+    p_property_id: thread.propertyId,
+    p_conversation_id: thread.threadId,
+    p_source_inbound_message_id: inbound!.id,
+    p_disposition: disposition,
+    p_ai_reason: "fixture review reason",
+  });
   expect(error).toBeNull();
-  expect(review).not.toBeNull();
-  return review!.id;
+  expect(review).toMatchObject({ status: "applied", reviewStatus: "pending", reviewId: expect.any(String) });
+  if (!review || typeof review !== "object" || Array.isArray(review) || typeof review.reviewId !== "string") {
+    throw new Error("AI review fixture RPC did not return its persisted review ID.");
+  }
+  await waitForAcceptanceProjectionTarget({ kind: "known_conversation", id: thread.threadId, unread: true });
+  return review.reviewId;
 }
 
 async function seedUnknownSender(fromAddress: string, bodies: readonly string[]): Promise<UnknownSeed> {
