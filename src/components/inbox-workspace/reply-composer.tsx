@@ -8,6 +8,17 @@ type PreparedReply = { preparationId: string; idempotencyKey: string; expiresAt:
 type State = { body: string; stage: "idle" | "preparing" | "prepared" | "accepting" | "accepted"; prepared?: PreparedReply; operationId?: string; result?: string; error?: string };
 
 function object(value: unknown): Record<string, unknown> | null { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null; }
+function receiptResult(value: unknown): string {
+  if (!Array.isArray(value) || value.length > 500) throw new Error("Reply progress could not be verified.");
+  const rows = value.map(raw => {
+    const row = object(raw);
+    if (!row || typeof row.state !== "string" || (row.reason !== null && typeof row.reason !== "string")) throw new Error("Reply progress could not be verified.");
+    return { state: row.state, reason: row.reason as string | null };
+  });
+  if (!rows.length) return "completed";
+  const attention = rows.filter(row => !["provider_accepted", "delivered"].includes(row.state));
+  return attention.length ? attention.map(row => row.reason ? `${row.state}: ${row.reason}` : row.state).join(", ") : "succeeded";
+}
 function decode(value: unknown, key: string, conversationId: string): PreparedReply {
   const row = object(value);
   const prepared = row && object(row.prepared) ? row.prepared : row;
@@ -82,7 +93,7 @@ export function InboxReplyComposer({ conversationId, enabled = false }: { conver
         const value = object(await response.json());
         if (!value || value.operationId !== state.operationId || !Array.isArray(value.receipts)) throw new Error("Reply progress could not be verified.");
         if (value.dispatchComplete === true) {
-          setState(current => ({ ...current, stage: "accepted", result: typeof value.result === "string" ? value.result : "completed", error: undefined }));
+          setState(current => ({ ...current, stage: "accepted", result: receiptResult(value.receipts), error: undefined }));
           return;
         }
         timer = setTimeout(() => void poll(), 1000);

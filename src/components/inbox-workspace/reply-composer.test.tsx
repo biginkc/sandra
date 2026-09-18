@@ -50,7 +50,7 @@ it("recovers the same acceptance key and displays the terminal reply receipt", a
     if (url.endsWith("/replies/prepare")) return Response.json(prepared(conversationA, JSON.parse(String(init?.body)).idempotencyKey));
     if (url.startsWith("/api/inbox/replies/recover")) return Response.json({ state: "prepared", preparationId, idempotencyKey: JSON.parse(String(init?.body ?? "{}"))?.idempotencyKey ?? "" });
     if (url.endsWith("/replies/accept")) return Response.json({ operationId });
-    if (url.endsWith(`/replies/${operationId}`)) return Response.json({ operationId, dispatchComplete: true, result: "succeeded", receipts: [], items: [] });
+    if (url.endsWith(`/replies/${operationId}`)) return Response.json({ operationId, dispatchComplete: true, receipts: [{ state: "delivered", reason: null }], items: [] });
     throw new Error(`unexpected request ${url}`);
   }));
   render(<InboxReplyComposer conversationId={conversationA} enabled />);
