@@ -51,11 +51,6 @@ jobs:
       - name: Provision disposable E2E database
         run: node scripts/provision-e2e-local-database.mjs
 
-      - name: Verify SMS delivery and opening identity on disposable database
-        env:
-          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
-        run: npx vitest run --config vitest.integration.config.ts src/lib/messaging/send.integration.test.ts
-
       - name: Generate job-scoped E2E identity
         run: npx tsx scripts/e2e-identity-lifecycle.ts emit
 
@@ -97,6 +92,12 @@ jobs:
       - name: Clean up exact-run E2E identities and verify browser-QA isolation
         if: always()
         run: npx tsx scripts/e2e-identity-lifecycle.ts cleanup
+      - name: Verify SMS delivery and opening identity on disposable database
+        if: success()
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+        run: npx vitest run --config vitest.integration.config.ts src/lib/messaging/send.integration.test.ts
+
       - name: Verify eSign canary lease on disposable database
         if: success()
         env:
