@@ -1,0 +1,194 @@
+name: sandra-inbox-release-http-20260917
+
+# Disposable local fixture template. pull_policy=never is deliberate: a
+# missing cached image fails instead of pulling, spending money, or changing
+# the capacity budget. Populate an ignored env file first.
+services:
+  db:
+    image: public.ecr.aws/supabase/postgres:17.6.1.165
+    pull_policy: never
+    container_name: sandra-inbox-release-http-db-20260917
+    restart: "no"
+    command: ["postgres", "-D", "/etc/postgresql"]
+    environment:
+      POSTGRES_PASSWORD: "${HTTP_DB_PASSWORD:?set HTTP_DB_PASSWORD in an ignored env file}"
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      JWT_SECRET: "${HTTP_JWT_SECRET:?set HTTP_JWT_SECRET in an ignored env file}"
+    ports:
+      - "127.0.0.1:54322:5432"
+    volumes:
+      - sandra_inbox_release_http_pgdata_20260917:/var/lib/postgresql/data
+    networks:
+      release_http:
+        aliases: [db]
+    labels:
+      purpose: sandra-inbox-release-http
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+    mem_limit: 768m
+    cpus: 1.0
+
+  auth:
+    image: public.ecr.aws/supabase/gotrue:v2.196.0
+    pull_policy: never
+    container_name: sandra-inbox-release-http-auth-20260917
+    restart: "no"
+    command: ["auth"]
+    environment:
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: "${HTTP_AUTH_DB_URL:?set HTTP_AUTH_DB_URL in an ignored env file}"
+      GOTRUE_DB_NAMESPACE: auth
+      GOTRUE_SITE_URL: http://127.0.0.1:54321
+      GOTRUE_URI_ALLOW_LIST: http://127.0.0.1:54321
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_SECRET: "${HTTP_JWT_SECRET:?set HTTP_JWT_SECRET in an ignored env file}"
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_EXP: "3600"
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      GOTRUE_OPERATOR_TOKEN: "${HTTP_OPERATOR_TOKEN:?set HTTP_OPERATOR_TOKEN in an ignored env file}"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_SMTP_HOST: 127.0.0.1
+      GOTRUE_SMTP_PORT: "1025"
+      API_EXTERNAL_URL: http://127.0.0.1:54321/auth/v1
+      GOTRUE_JWT_ADMIN_ROLES: service_role,supabase_admin
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+    depends_on:
+      db:
+        condition: service_started
+    networks:
+      release_http:
+        aliases: [auth]
+    labels:
+      purpose: sandra-inbox-release-http
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+    mem_limit: 256m
+    cpus: 0.25
+
+  rest:
+    image: public.ecr.aws/supabase/postgrest:v16.1
+    pull_policy: never
+    container_name: sandra-inbox-release-http-rest-20260917
+    restart: "no"
+    environment:
+      PGRST_DB_URI: "${HTTP_REST_DB_URI:?set HTTP_REST_DB_URI in an ignored env file}"
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions,inbox_bridge,inbox_control
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_MAX_ROWS: "1000"
+      PGRST_JWT_SECRET: "${HTTP_JWT_SECRET:?set HTTP_JWT_SECRET in an ignored env file}"
+      PGRST_SERVER_PORT: "3000"
+    depends_on:
+      db:
+        condition: service_started
+    networks:
+      release_http:
+        aliases: [rest]
+    labels:
+      purpose: sandra-inbox-release-http
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+    mem_limit: 128m
+    cpus: 0.25
+
+  realtime:
+    image: public.ecr.aws/supabase/realtime:v2.129.3
+    pull_policy: never
+    container_name: sandra-inbox-release-http-realtime-20260917
+    restart: "no"
+    command: ["/app/bin/server"]
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: postgres
+      DB_USER: supabase_realtime_admin
+      DB_PASSWORD: "${HTTP_REALTIME_DB_PASSWORD:?set HTTP_REALTIME_DB_PASSWORD in an ignored env file}"
+      DB_SSL: "false"
+      DB_IP_VERSION: ipv4
+      API_JWT_SECRET: "${HTTP_JWT_SECRET:?set HTTP_JWT_SECRET in an ignored env file}"
+      METRICS_JWT_SECRET: "${HTTP_JWT_SECRET:?set HTTP_JWT_SECRET in an ignored env file}"
+      SECRET_KEY_BASE: "${HTTP_REALTIME_SECRET_KEY_BASE:?set HTTP_REALTIME_SECRET_KEY_BASE in an ignored env file}"
+      ERL_AFLAGS: -proto_dist inet_tcp
+      PORT: "4000"
+      RUN_JANITOR: "false"
+      SEED_SELF_HOST: "true"
+      DB_POOL_SIZE: "3"
+      MAX_CONNECTIONS: "3"
+      DNS_NODES: ""
+      LOG_LEVEL: warn
+      RLIMIT_NOFILE: "1024"
+      APP_NAME: realtime
+      DB_ENC_KEY: "${HTTP_REALTIME_DB_ENC_KEY:?set HTTP_REALTIME_DB_ENC_KEY in an ignored env file}"
+      MIX_ENV: prod
+      ECTO_IPV6: "true"
+    depends_on:
+      db:
+        condition: service_started
+    networks:
+      release_http:
+        aliases: [realtime]
+    labels:
+      purpose: sandra-inbox-release-http
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+    mem_limit: 384m
+    cpus: 0.5
+
+  gateway:
+    image: public.ecr.aws/supabase/kong:2.8.1
+    pull_policy: never
+    container_name: sandra-inbox-release-http-kong-20260917
+    restart: "no"
+    command: ["kong", "docker-start"]
+    environment:
+      KONG_DATABASE: off
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_ADMIN_LISTEN: "off"
+      KONG_NGINX_WORKER_PROCESSES: "1"
+    ports:
+      - "127.0.0.1:54321:8000"
+    volumes:
+      - ./http-stack-kong.yml:/home/kong/kong.yml:ro
+    depends_on:
+      auth:
+        condition: service_started
+      rest:
+        condition: service_started
+      realtime:
+        condition: service_started
+    networks:
+      release_http:
+        aliases: [gateway]
+    labels:
+      purpose: sandra-inbox-release-http
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+    mem_limit: 128m
+    cpus: 0.25
+
+  projection:
+    image: sandra-inbox-projection-worker:release-20260917
+    pull_policy: never
+    container_name: sandra-inbox-release-http-projection-20260917
+    restart: "no"
+    network_mode: host
+    env_file:
+      - ${HTTP_PROJECTION_ENV_FILE:?set HTTP_PROJECTION_ENV_FILE to an ignored populated file}
+    labels:
+      purpose: sandra-inbox-release-http
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+    mem_limit: 256m
+    cpus: 0.25
+
+volumes:
+  sandra_inbox_release_http_pgdata_20260917:
+    name: sandra_inbox_release_http_pgdata_20260917
+
+networks:
+  release_http:
+    name: sandra-inbox-release-http-20260917

@@ -150,6 +150,48 @@ def verify_source_manifest() -> dict[str, Any]:
     return result("PASS", "all source-manifest hashes match", checked=checked)
 
 
+def verify_backend_packet() -> dict[str, Any]:
+    """Verify the exact-source operation/reply packet without installing it."""
+    manifest_path = HERE / "backend-operation-reply-manifest.json"
+    try:
+        manifest = load_json(manifest_path)
+    except GateError as exc:
+        return result("FAIL", str(exc))
+    if manifest.get("schema_version") != 2 or manifest.get("status") != "PENDING_REVIEW_NO_INSTALL":
+        return result("FAIL", "backend packet must remain explicitly pending review")
+    packet_info = manifest.get("sql_packet")
+    if not isinstance(packet_info, dict):
+        return result("FAIL", "backend packet has no generated SQL receipt")
+    packet = ROOT / str(packet_info.get("path", ""))
+    if not packet.is_file():
+        return result("FAIL", f"generated backend packet is missing: {packet}")
+    actual_hash = sha256(packet)
+    if actual_hash != packet_info.get("sha256"):
+        return result("FAIL", "generated backend packet hash drift", expected=packet_info.get("sha256"), actual=actual_hash)
+    sql = packet.read_text()
+    required = (
+        "admit_command('action_prepare')",
+        "admit_command('action_accept')",
+        "admit_command('reply_prepare')",
+        "admit_command('reply_accept')",
+        "current_database()<>'sandra_inbox_release_20260917'",
+        "install_fixture.identity",
+    )
+    missing = [needle for needle in required if needle not in sql]
+    if missing:
+        return result("FAIL", "backend packet is missing required guarded transforms", missing=missing)
+    if "inbox_t2_" in sql or "inbox_fixture.identity" in sql:
+        return result("FAIL", "backend packet retains historical fixture references")
+    recovery = re.search(r"CREATE FUNCTION inbox_reply_send\.recover\([^$]+?AS \$\$(.*?)(?:\$\$;)", sql, re.S)
+    if recovery is None or "require_admission" in recovery.group(1):
+        return result("FAIL", "reply recovery is still admission-gated")
+    sources = manifest.get("sql_sources")
+    runtime = manifest.get("runtime_sources")
+    if not isinstance(sources, list) or len(sources) != 23 or not isinstance(runtime, list) or len(runtime) != 14:
+        return result("FAIL", "backend packet source inventory is incomplete", sql_sources=len(sources or []), runtime_sources=len(runtime or []))
+    return result("PASS", "exact backend operation/reply packet assembled and hash-verified", packet_sha256=actual_hash, sql_sources=len(sources), runtime_sources=len(runtime))
+
+
 def verify_compiled_package() -> tuple[dict[str, Any], list[dict[str, Any]]]:
     commands = [
         run_command(
@@ -411,12 +453,15 @@ def main() -> int:
     if args.run_safe:
         package_result, package_commands = verify_compiled_package()
         service_result, service_commands = run_service_checks()
+        backend_result = verify_backend_packet()
         results["candidate_package"] = package_result
         results["service_unit_checks"] = service_result
+        results["backend_packet"] = backend_result
         commands.extend(package_commands + service_commands)
     else:
         results["candidate_package"] = result("BLOCKED", "safe checks not requested")
         results["service_unit_checks"] = result("BLOCKED", "safe checks not requested")
+        results["backend_packet"] = result("BLOCKED", "safe checks not requested")
 
     installed_result, installed_commands = installed_gate(args.run_installed, manifest)
     results["installed_schema_exact"] = installed_result
@@ -466,7 +511,7 @@ def main() -> int:
     statuses = {
         key: value["status"]
         for key, value in results.items()
-        if key in required or key in {"candidate_package", "service_unit_checks", "installed_schema_exact", "acceptance_matrix"}
+        if key in required or key in {"candidate_package", "service_unit_checks", "backend_packet", "installed_schema_exact", "acceptance_matrix"}
     }
     failures = sorted(key for key, status in statuses.items() if status == "FAIL")
     blockers = sorted(key for key, status in statuses.items() if status == "BLOCKED")

@@ -2,6 +2,8 @@
   "schema_version": 1,
   "status": "BLOCKED_UNBUILT_CURRENT_SOURCE",
   "owner": "release-infra",
+  "source_repository": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration",
+  "source_commit": "0c23afcac1216e658f642d41d89ff2d7ce1e9477",
   "services": {
     "operation-worker": {
       "Dockerfile": "253488776860278dd5abd1eb2a2f6babb4f6760d706f37ea837262948913afaf",
@@ -20,6 +22,11 @@
       "vendor/test-transport.mjs": "b346a492edff21297fed9f72d294528512727485fe3a4555e43c4c5510aabf36",
       "worker-role.sql": "086f384ecb54a0966e16aa3d007cd767a73e3ba06faa120141c36926858de465",
       "worker.sql": "a4c4a5229a74a538addeec29e153e4633c1c3dbf2bd5e91cc5fa1f28a475486c"
+    },
+    "sync-relay": {
+      "Dockerfile": "1e33ec793747bee85f0e390017074658da88b027a273c944faeda6625b0e5bbe",
+      "server.mjs": "7c8e7d73dd69045676bce17aaad6479739ef129b89157a02b144b7207c9f5e2b",
+      "railway.json": "b551f369a14ae01cb3c2b0ebaed8946ad939cb40c4981ab9d4c7abe901a5e221"
     }
   },
   "base_images": {
@@ -31,7 +38,7 @@
   "requirements": {
     "operation_command_adapters": "required for action prepare/accept and saved CRUD; absent from installed release DB",
     "reply_command_adapters": "required for reply prepare/accept; absent from installed release DB",
-    "projection_worker": "requires worker-role.sql and worker grants on target DB; absent on HTTP fixture",
+    "projection_worker": "requires worker-role.sql and worker grants on target DB; verified separately on the owned HTTP fixture",
     "current_source_build": "required before execution image is accepted; no current image claim is made",
     "provider_traffic": "forbidden",
     "customer_sends": "forbidden"

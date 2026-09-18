@@ -42,6 +42,12 @@
     "host_port": 59081
   },
   "database_endpoint": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+  "templates": {
+    "compose": "experiments/inbox-release/http-stack-compose.yml",
+    "kong": "experiments/inbox-release/http-stack-kong.yml",
+    "env_example": "experiments/inbox-release/http-stack.env.example",
+    "projection_env_example": "experiments/inbox-release/http-stack-projection.env.example"
+  },
   "database": "postgres",
   "serving_enabled": true,
   "provider_traffic": "forbidden",
