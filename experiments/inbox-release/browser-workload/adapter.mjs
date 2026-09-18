@@ -117,8 +117,8 @@ function scenarioEntries(value) {
 }
 
 export function planWork({ scenarios, cycles, concurrency, tenantCount }) {
-  if (!Array.isArray(scenarios) || scenarios.length !== concurrency) {
-    throw new WorkloadBlocked(`scenario mapping must provide exactly one operator state per measured concurrency slot (need ${concurrency})`);
+  if (!Array.isArray(scenarios) || scenarios.length < concurrency) {
+    throw new WorkloadBlocked(`scenario mapping must provide at least one operator state per measured concurrency slot (need ${concurrency})`);
   }
   if (new Set(scenarios.map((scenario) => scenario.operatorId)).size !== scenarios.length) throw new WorkloadBlocked("operator ids must be unique even when operators share an org");
   if (new Set(scenarios.map((scenario) => scenario.storageState)).size !== scenarios.length) throw new WorkloadBlocked("one storage state cannot represent multiple measured tenants/operators");

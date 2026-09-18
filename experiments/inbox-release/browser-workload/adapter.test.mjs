@@ -32,6 +32,12 @@ test("allows concurrent operators to share an org while keeping auth states dist
   assert.equal(new Set(jobs.map((job) => job.scenario.operatorId)).size, 2);
 });
 
+test("exercises extra operator mappings instead of silently ignoring them", () => {
+  const scenarios = [scenario(1), { ...scenario(2), orgId: id(1) }, { ...scenario(3), orgId: id(1) }];
+  const jobs = planWork({ scenarios, cycles: 3, concurrency: 2, tenantCount: 1 });
+  assert.deepEqual(jobs.map((job) => job.scenario.operatorId), [id(201), id(202), id(203)]);
+});
+
 test("rejects one auth state being reused for multiple measured operators", () => {
   assert.throws(
     () => planWork({ scenarios: [{ ...scenario(1), tenantId: "tenant-a" }, { ...scenario(1), tenantId: "tenant-b", operatorId: id(202) }], cycles: 2, concurrency: 2, tenantCount: 1 }),
