@@ -14,8 +14,8 @@ import unittest
 
 
 HERE = Path(__file__).resolve().parent
-EXPECTED_COMMIT = "be2eb8c1719120e0bf9ef3f363233c7a012c64f3"
-EXPECTED_PACKET_SHA256 = "9127b423b0212dd38a24eeb9f7ea64f96474eb90919e650a4d62348eff22040a"
+EXPECTED_COMMIT = "68555650bb5b09b9d2f01a4c0429da1f12c91840"
+EXPECTED_PACKET_SHA256 = "c5b45ebd46aaecc0c956eb6fac0c83b31d8bc9de6c3c10acbfa99c7d47db1b7a"
 
 
 def load_module(name: str, path: Path):
