@@ -38,6 +38,16 @@ CONTAINERS = {
     "realtime": "sandra-inbox-release-http-realtime-20260917",
     "projection": "sandra-inbox-release-projection-worker-20260917",
 }
+if os.environ.get("INBOX_RELEASE_FULL_RUNTIME") == "1":
+    CONTAINERS.update(
+        {
+            "restate": "sandra-inbox-release-restate-20260917",
+            "electric": "sandra-inbox-release-electric-20260917",
+            "operation-worker": "sandra-inbox-release-operation-worker-20260917",
+            "reply-worker": "sandra-inbox-release-reply-worker-20260917",
+            "relay": "sandra-inbox-release-relay-20260917",
+        }
+    )
 RETIRED_PROJECTION = "sandra-inbox-release-http-projection-20260917"
 HEALTH = {
     "db": ("db", None),
@@ -47,6 +57,16 @@ HEALTH = {
     "realtime": ("http", "http://127.0.0.1:54321/realtime/v1/"),
     "projection": ("http", "http://127.0.0.1:59081/health"),
 }
+if os.environ.get("INBOX_RELEASE_FULL_RUNTIME") == "1":
+    HEALTH.update(
+        {
+            "restate": ("http", "http://127.0.0.1:9070/health"),
+            "electric": ("relay", "http://127.0.0.1:58787/health"),
+            "operation-worker": ("http", "http://127.0.0.1:9080/readyz"),
+            "reply-worker": ("http", "http://127.0.0.1:9081/readyz"),
+            "relay": ("http", "http://127.0.0.1:58787/health"),
+        }
+    )
 FAULTS = set(CONTAINERS)
 
 
@@ -67,7 +87,13 @@ def inspect(name: str) -> dict:
         fail(f"expected one owned container: {name}")
     row = rows[0]
     labels = row.get("Config", {}).get("Labels", {})
-    expected_purpose = "sandra-inbox-release-runtime" if name == CONTAINERS["projection"] else "sandra-inbox-release-http"
+    runtime_components = {CONTAINERS["projection"]}
+    if os.environ.get("INBOX_RELEASE_FULL_RUNTIME") == "1":
+        runtime_components.update(
+            CONTAINERS[key]
+            for key in ("restate", "electric", "operation-worker", "reply-worker", "relay")
+        )
+    expected_purpose = "sandra-inbox-release-runtime" if name in runtime_components else "sandra-inbox-release-http"
     if labels.get("purpose") != expected_purpose or labels.get("owner") != "release-infra" or labels.get("marker") != MARKER:
         fail(f"ownership marker mismatch: {name}")
     if name == CONTAINERS["projection"] and labels.get("component") != "projection-worker":
@@ -215,6 +241,11 @@ def recover(kind: str) -> None:
         wait_db()
     elif service == "realtime":
         wait_realtime_websocket()
+    elif service == "electric":
+        # Electric is internal-only. The marked relay's health path is the
+        # observable upstream check and must recover after Electric restarts.
+        assert url is not None
+        wait_http(url)
     else:
         assert url is not None
         wait_http(url)

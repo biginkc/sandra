@@ -1,6 +1,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import re
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -13,6 +14,17 @@ SPEC.loader.exec_module(MODULE)
 
 
 class FaultRecoveryProbeTests(TestCase):
+    def test_full_runtime_services_are_supervised_after_dependency_loss(self) -> None:
+        compose = (MODULE_PATH.parent / "execution-stack-compose.yml").read_text()
+        for service in ("restate", "electric", "operation-worker", "reply-send-worker", "projection-worker", "relay"):
+            match = re.search(
+                rf"^  {re.escape(service)}:\n(?P<body>.*?)(?=^  [a-z-]+:|^volumes:)",
+                compose,
+                re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, service)
+            self.assertIn("restart: unless-stopped", match.group("body"), service)
+
     def test_realtime_probe_includes_fixture_anon_key(self) -> None:
         with patch.dict(os.environ, {"INBOX_HTTP_ANON_KEY": "anon/key+owned"}):
             with patch.object(MODULE.http.client, "HTTPConnection") as connection_factory:
