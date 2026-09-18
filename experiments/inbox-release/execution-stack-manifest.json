@@ -3,7 +3,7 @@
   "status": "BLOCKED_UNBUILT_CURRENT_SOURCE",
   "owner": "release-infra",
   "source_repository": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration",
-  "source_commit": "28765326a7dd1ce9080c4c6beca1bf564417908d",
+  "source_commit": "fcffde3827da164df85c6ef2e2b4a094f79b512c",
   "services": {
     "operation-worker": {
       "Dockerfile": "253488776860278dd5abd1eb2a2f6babb4f6760d706f37ea837262948913afaf",
@@ -22,8 +22,9 @@
       }
     },
     "reply-send-worker": {
-      "Dockerfile": "910306b915a0d7cf213ae22f8bbb73eee324665204757283b8eeeeed9af9a7fa",
+      "Dockerfile": "98ec0bc8335b2db7b5ef40eb1237a37fc3350896a385c7762d06ee0c6fd04c66",
       "package.json": "d1b67cc34e2ffc6250407aa145d5f63666b6ec89c9deb99bbf417533831d8286",
+      "package-lock.json": "c40f2cf81253d61988e9d90438fbde767c4b4bf30eec9796a63c702bea494a2b",
       "core.mjs": "6d0380b385840532bf52a35d7598c18ae8921e78a83aadfe08bcf0de4483e314",
       "runner.mjs": "6cc46d4cb25943611a3c91d80c83b451278a8611225ce33ff4931f85191beb0b",
       "server.mjs": "e071daa5b94c70426001955686cb967ac5dc9a42da372534596ff7a45af6ef7b",
@@ -45,8 +46,54 @@
       "Dockerfile": "1e33ec793747bee85f0e390017074658da88b027a273c944faeda6625b0e5bbe",
       "server.mjs": "7c8e7d73dd69045676bce17aaad6479739ef129b89157a02b144b7207c9f5e2b",
       "railway.json": "b551f369a14ae01cb3c2b0ebaed8946ad939cb40c4981ab9d4c7abe901a5e221"
+    },
+    "projection-worker": {
+      "source_commit": "fcffde3827da164df85c6ef2e2b4a094f79b512c",
+      "Dockerfile": "f30e4fe8a1db80724fb8355c2f1eebe9a6ef40dc55fcc4fcbdc1af3cbd083091",
+      "package.json": "93c75a66175e33248b6c6869d3b7881a3c23064168c532bdfd063a3c866a6050",
+      "package-lock.json": "ce33cf8eabdd72dd596204ecad3612df265bf471766f478aa806123acec1c2da",
+      "core.mjs": "c6f69dcb87044eadbfa1db6363919125f1927d7f63595f7f1951db80d5962810",
+      "config.mjs": "03c621a1f9af0990dccb2bc23df356203f0f73a08948b8a09bbcc8811b3c7e38",
+      "server.mjs": "62327570590cae707314f1bca4b689876e407b31df78bf9e1e29cd12da17c0d9",
+      "worker-role.sql": "e44f574ff5fc11eb3f5a47ef95778798a01260d756022228967dcc439922df30",
+      "config.test.mjs": "51253097f5a28e61b6f9bab64ec51b7a96a74c1ee23b59fe711805d41fdcb81e",
+      "release_http_fixture_profile_overlay": {
+        "config.mjs": "03c621a1f9af0990dccb2bc23df356203f0f73a08948b8a09bbcc8811b3c7e38",
+        "config.test.mjs": "51253097f5a28e61b6f9bab64ec51b7a96a74c1ee23b59fe711805d41fdcb81e",
+        "target": "127.0.0.1:54322/postgres",
+        "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
+        "container_label_marker": "sandra-inbox-release-http-owned-20260917",
+        "login": "inbox_projection_worker",
+        "status": "SOURCE_ONLY_UNBUILT"
+      }
     }
   },
+  "database_role_install_order": [
+    {
+      "service": "projection-worker",
+      "source": "services/inbox-projection-worker/worker-role.sql",
+      "sha256": "e44f574ff5fc11eb3f5a47ef95778798a01260d756022228967dcc439922df30",
+      "must_apply_before": "projection-worker runtime",
+      "login_provisioning": "separate reviewed hosting operation; role packet creates NOLOGIN role only",
+      "packet": "experiments/inbox-release/generated/projection-worker-role.sql",
+      "packet_sha256": "02062e227b29c0d575255013dd9c5b93cf5a0624b6cbe105264b059d2d52114f",
+      "assembler": "experiments/inbox-release/assemble-worker-role-packet.py"
+    },
+    {
+      "service": "operation-worker",
+      "source": "experiments/inbox-operation-preparation/worker-role.sql",
+      "sha256": "a686aec664667bf60e2a7507e5fad03508de5bc9d3d49265a3480797d3039948",
+      "packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
+      "must_apply_before": "operation-worker runtime"
+    },
+    {
+      "service": "reply-send-worker",
+      "source": "experiments/inbox-reply-send-worker/worker-role.sql",
+      "sha256": "086f384ecb54a0966e16aa3d007cd767a73e3ba06faa120141c36926858de465",
+      "packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
+      "must_apply_before": "reply-send-worker runtime"
+    }
+  ],
   "base_images": {
     "node": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
     "cached_historical_action": "sandra-inbox-action-worker:20260913",
@@ -65,7 +112,9 @@
     "operation_worker_memory_bytes": 268435456,
     "operation_worker_cpus": 0.25,
     "reply_worker_memory_bytes": 268435456,
-    "reply_worker_cpus": 0.25
+    "reply_worker_cpus": 0.25,
+    "projection_worker_memory_bytes": 268435456,
+    "projection_worker_cpus": 0.25
   },
   "safety": {
     "shared_stack_excluded": true,

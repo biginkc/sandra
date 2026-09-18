@@ -22,6 +22,85 @@ CREATE TABLE inbox_read.receipts (
 ALTER TABLE inbox_read.boundaries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE inbox_read.receipts ENABLE ROW LEVEL SECURITY;
 
+-- The history/detail projection above deliberately contains only message
+-- bodies and receipt metadata.  Individual controls also need the
+-- conversation's authoritative target and safety context.  Resolve that
+-- context from the canonical tables in the same caller statement; never infer
+-- property, phone, AI-review, responder, or DNC state from the history page.
+-- This helper is private to inbox_read.detail/history_page and is not a
+-- browser API by itself.
+CREATE FUNCTION inbox_read.authoritative_context(o uuid,c uuid) RETURNS jsonb
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
+WITH latest AS (
+ SELECT m.* FROM public.messages m
+ WHERE m.org_id=o AND m.conversation_id=c AND m.channel='sms'
+ ORDER BY m.created_at DESC,m.id DESC LIMIT 1
+), contact_ref AS (
+ SELECT m.contact_id FROM public.messages m
+ WHERE m.org_id=o AND m.conversation_id=c AND m.channel='sms' AND m.contact_id IS NOT NULL
+ ORDER BY m.created_at DESC,m.id DESC LIMIT 1
+), property_ref AS (
+ SELECT coalesce(
+  (SELECT r.property_id FROM public.ai_disposition_reviews r
+   WHERE r.org_id=o AND r.conversation_id=c AND r.status='pending'
+   ORDER BY r.created_at DESC,r.id DESC LIMIT 1),
+  (SELECT m.property_id FROM public.messages m
+   WHERE m.org_id=o AND m.conversation_id=c AND m.channel='sms' AND m.property_id IS NOT NULL
+   ORDER BY m.created_at DESC,m.id DESC LIMIT 1)
+ ) AS property_id
+), pending_review AS (
+ SELECT r.id,r.status,r.disposition,r.ai_reason,r.source_inbound_message_id,r.created_at,
+  (SELECT m.body FROM public.messages m WHERE m.id=r.source_inbound_message_id
+   AND m.org_id=o AND m.conversation_id=c AND m.channel='sms' AND m.direction='inbound') AS source_message_body
+ FROM public.ai_disposition_reviews r
+ WHERE r.org_id=o AND r.conversation_id=c AND r.status='pending'
+ ORDER BY r.created_at DESC,r.id DESC LIMIT 1
+), thread_state AS (
+ SELECT t.ai_responder_status,t.ai_responder_reason,t.ai_responder_status_at,
+  t.ai_last_delivery_status,t.ai_last_delivery_error
+ FROM public.message_threads t WHERE t.org_id=o AND t.conversation_id=c LIMIT 1
+), phones AS (
+ SELECT CASE WHEN length(digits)=11 AND left(digits,1)='1' THEN '+'||digits
+  WHEN length(digits)=10 THEN '+1'||digits ELSE NULL END AS phone_e164
+ FROM (SELECT regexp_replace(coalesce(CASE WHEN (SELECT direction FROM latest)='inbound'
+  THEN (SELECT from_address FROM latest) ELSE (SELECT to_address FROM latest) END,''),'[^0-9]','','g') AS digits) q
+), contacts AS (
+ SELECT c.* FROM public.contacts c WHERE c.org_id=o AND c.id=(SELECT contact_id FROM contact_ref)
+), properties AS (
+ SELECT p.* FROM public.properties p WHERE p.org_id=o AND p.id=(SELECT property_id FROM property_ref)
+)
+SELECT jsonb_build_object(
+ 'conversation_id',c,'contact_id',(SELECT contact_id FROM contact_ref),
+ 'contact_name',coalesce((SELECT entity_name FROM contacts),nullif(concat_ws(' ',(SELECT first_name FROM contacts),(SELECT last_name FROM contacts)),'')),
+ 'thread_customer_phone',CASE WHEN (SELECT direction FROM latest)='inbound' THEN (SELECT from_address FROM latest) ELSE (SELECT to_address FROM latest) END,
+ 'thread_business_phone',CASE WHEN (SELECT direction FROM latest)='inbound' THEN (SELECT to_address FROM latest) ELSE (SELECT from_address FROM latest) END,
+ 'property_id',(SELECT property_id FROM property_ref),
+ 'property_address',nullif(concat_ws(', ',(SELECT address FROM properties),(SELECT city FROM properties),(SELECT state FROM properties)),''),
+ 'assignee_id',(SELECT assigned_user_id FROM properties),
+ 'property_status',(SELECT status FROM properties),
+ 'outreach_dispo',(SELECT outreach_dispo FROM properties),
+ 'ai_disposition_review_id',(SELECT id FROM pending_review),
+ 'ai_disposition_review_status',(SELECT status FROM pending_review),
+ 'ai_disposition_review_disposition',(SELECT disposition FROM pending_review),
+ 'ai_disposition_review_reason',(SELECT ai_reason FROM pending_review),
+ 'ai_disposition_review_source_inbound_message_id',(SELECT source_inbound_message_id FROM pending_review),
+ 'ai_disposition_review_source_message_body',(SELECT source_message_body FROM pending_review),
+ 'ai_disposition_review_created_at',(SELECT created_at FROM pending_review),
+ 'contact_do_not_contact',coalesce((SELECT do_not_contact FROM contacts),false),
+ 'contact_sms_opted_out',coalesce((SELECT sms_opted_out FROM contacts),false),
+ 'phone_suppressed',CASE WHEN (SELECT contact_id FROM contact_ref) IS NULL THEN NULL ELSE EXISTS(SELECT 1 FROM public.sms_phone_suppressions s
+   WHERE s.org_id=o AND s.channel='sms' AND s.phone_e164=(SELECT phone_e164 FROM phones)) END,
+ 'sms_safety_read_failed',false,
+ 'is_dnc_locked',coalesce((SELECT is_dnc_locked FROM properties),false),
+ 'ai_responder_status',(SELECT ai_responder_status FROM thread_state),
+ 'ai_responder_reason',(SELECT ai_responder_reason FROM thread_state),
+ 'ai_responder_status_at',(SELECT ai_responder_status_at FROM thread_state),
+ 'ai_last_delivery_status',(SELECT ai_last_delivery_status FROM thread_state),
+ 'ai_last_delivery_error',(SELECT ai_last_delivery_error FROM thread_state)
+);
+$$;
+REVOKE ALL ON FUNCTION inbox_read.authoritative_context(uuid,uuid) FROM PUBLIC,anon,authenticated,service_role;
+
 -- The data snapshot and its stored boundary are created in ONE statement. The
 -- STABLE canonical detail function and generation CTE share that statement snapshot.
 -- No message is marked read here; recording a boundary does not acknowledge it.
@@ -33,7 +112,7 @@ BEGIN
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=(a->>'user_id')::uuid FOR UPDATE;
  a:=inbox_bridge.authorize_serving(o);
  WITH snapshot AS MATERIALIZED (
-  SELECT inbox_authenticated_detail.detail_v2(o,c) AS data,
+  SELECT inbox_authenticated_detail.detail_v2(o,c) || inbox_read.authoritative_context(o,c) AS data,
    g.generation FROM inbox_capture_boundary.generation g WHERE singleton IS TRUE
  ), recorded AS (
   INSERT INTO inbox_read.boundaries(requester_id,org_id,conversation_id,generation,revision,created_at,expires_at,session_id,access_epoch)
@@ -168,7 +247,8 @@ BEGIN
   IF boundary.expires_at<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_READ_EXPIRED' USING ERRCODE='55000';END IF;
   -- Reuse the canonical measured keyset query. No message update and no new read
   -- boundary: later/backdated arrivals cannot extend the acknowledged snapshot.
-  result:=inbox_authenticated_detail.detail_v2(o,c,position.before_at,position.before_id);
+  result:=inbox_authenticated_detail.detail_v2(o,c,position.before_at,position.before_id)
+    || inbox_read.authoritative_context(o,c);
   result:=result||jsonb_build_object('read_boundary',boundary.id,'boundary_expires_at',boundary.expires_at,
    'capture_generation',boundary.generation,'head_revision',boundary.revision::text);
  END IF;
@@ -304,6 +384,100 @@ REVOKE ALL ON FUNCTION inbox_bridge.authorized_scope(uuid),inbox_bridge.finalize
 REVOKE ALL ON FUNCTION public.inbox_sync_snapshot_v1(uuid),public.inbox_sync_finalize_v1(uuid,jsonb,integer,text,text) FROM PUBLIC,anon,service_role;
 GRANT EXECUTE ON FUNCTION public.inbox_sync_snapshot_v1(uuid),public.inbox_sync_finalize_v1(uuid,jsonb,integer,text,text) TO authenticated;
 NOTIFY pgrst,'reload schema';
+
+
+-- Release companion guard; apply after the core read schema and maintained rows exist.
+
+SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
+
+-- Reviewed read companion; install after inbox_read and serving authorization.
+-- Selection classification uses the workset predicate on at most 100 requested
+-- maintained rows. It never loads the complete matching workset.
+CREATE OR REPLACE FUNCTION inbox_read.review_selection(o uuid,f jsonb,targets jsonb)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=''
+SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+DECLARE a jsonb; after_access jsonb; u uuid; result jsonb; target jsonb;
+BEGIN
+ a:=inbox_bridge.authorize_serving(o);u:=(a->>'user_id')::uuid;
+ f:=inbox_bridge.normalize_filter(f);
+ IF jsonb_typeof(targets) IS DISTINCT FROM 'array' THEN
+  RAISE EXCEPTION 'INBOX_INVALID_WORKSET' USING ERRCODE='22023';
+ END IF;
+ IF jsonb_array_length(targets)<1 OR jsonb_array_length(targets)>100 THEN
+  RAISE EXCEPTION 'INBOX_INVALID_WORKSET' USING ERRCODE='22023';
+ END IF;
+ FOR target IN SELECT value FROM jsonb_array_elements(targets) LOOP
+  IF jsonb_typeof(target) IS DISTINCT FROM 'object' OR
+   (target-ARRAY['kind','id'])<>'{}'::jsonb OR
+   jsonb_typeof(target->'kind') IS DISTINCT FROM 'string' OR
+   target->>'kind' NOT IN ('conversation','unknown_sender_group') OR
+   jsonb_typeof(target->'id') IS DISTINCT FROM 'string' OR
+   (target->>'id') !~ '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' THEN
+   RAISE EXCEPTION 'INBOX_INVALID_WORKSET' USING ERRCODE='22023';
+  END IF;
+ END LOOP;
+ IF (SELECT count(DISTINCT (value->>'kind',value->>'id')) FROM jsonb_array_elements(targets))<>jsonb_array_length(targets) THEN
+  RAISE EXCEPTION 'INBOX_INVALID_WORKSET' USING ERRCODE='22023';
+ END IF;
+ WITH requested AS MATERIALIZED (
+  SELECT value->>'kind' kind,(value->>'id')::uuid id,ordinal,
+   CASE value->>'kind' WHEN 'conversation' THEN 'known_conversation' ELSE 'unknown_sender' END target_kind
+  FROM jsonb_array_elements(targets) WITH ORDINALITY t(value,ordinal)
+ ), p AS (SELECT f->>'view' AS view,(f->>'hide_noise')::boolean AS hide_noise,f->>'search' AS q),
+ candidates AS MATERIALIZED (
+  SELECT r.target_kind,r.target_id,r.summary s
+  FROM requested t JOIN inbox_maintained.rows r ON r.org_id=o AND r.target_kind=t.target_kind AND r.target_id=t.id
+  WHERE coalesce((r.summary->>'exists')::boolean,false)
+  AND CASE WHEN t.kind='conversation' THEN EXISTS(SELECT 1 FROM public.messages m
+    WHERE m.org_id=o AND m.conversation_id=t.id AND m.channel='sms')
+   ELSE EXISTS(SELECT 1 FROM public.messages m WHERE m.org_id=o AND m.channel='sms'
+    AND m.direction='inbound' AND m.contact_id IS NULL AND m.from_address=r.summary->>'raw_sender_key') END
+ ), matching AS (
+  SELECT c.target_kind,c.target_id FROM candidates c CROSS JOIN p
+-- BEGIN canonical workset matching predicate
+ WHERE CASE WHEN c.target_kind='unknown_sender' THEN
+  -- Existing unknown loader does not consume known-conversation search input.
+  CASE p.view WHEN 'active' THEN coalesce((c.s->>'visible_unknown')::boolean,false) WHEN 'unknown' THEN coalesce((c.s->>'visible_unknown')::boolean,false) WHEN 'dismissed' THEN coalesce((c.s->>'visible_dismissed')::boolean,false) ELSE false END
+ ELSE
+  CASE p.view WHEN 'unknown' THEN false WHEN 'dismissed' THEN false
+   WHEN 'dispo' THEN (c.s->>'ai_disposition_review_id') IS NOT NULL AND NOT coalesce((c.s->>'is_test_traffic')::boolean,false)
+   ELSE coalesce((c.s->>'has_recent')::boolean,false) AND (NOT p.hide_noise OR NOT coalesce((c.s->>'is_noise')::boolean,false)) AND
+    CASE p.view WHEN 'mine' THEN c.s->>'property_status' IS NOT NULL AND c.s->>'property_status'<>'prospect' AND c.s->>'assigned_user_id'=u::text
+     WHEN 'unassigned' THEN c.s->>'property_status' IS NOT NULL AND c.s->>'property_status'<>'prospect' AND c.s->>'assigned_user_id' IS NULL
+     WHEN 'unread' THEN coalesce((c.s->>'unread_count')::bigint,0)>0
+     WHEN 'escalated' THEN c.s->>'ai_responder_status'='escalated'
+     WHEN 'needs_outcome' THEN coalesce((c.s->>'needs_outcome')::boolean,false)
+     ELSE true END END
+  AND (p.q IS NULL OR EXISTS(SELECT 1 FROM public.contacts ct WHERE ct.id=(c.s->>'contact_id')::uuid AND ct.org_id=o AND
+    (ct.search_text ILIKE '%'||replace(replace(replace(lower(p.q),E'\\',E'\\\\'),'%',E'\\%'),'_',E'\\_')||'%' ESCAPE E'\\'
+    OR (length(regexp_replace(p.q,'[^0-9]','','g'))>=3 AND ct.phone_digits ILIKE '%'||regexp_replace(p.q,'[^0-9]','','g')||'%')))
+   OR EXISTS(SELECT 1 FROM public.messages m WHERE m.org_id=o AND m.conversation_id=c.target_id AND m.channel='sms' AND m.fts @@ public.search_prefix_tsquery(p.q)))
+ END
+-- END canonical workset matching predicate
+ )
+ SELECT coalesce(jsonb_agg(jsonb_build_object('kind',t.kind,'id',t.id,
+  'status',CASE WHEN c.target_id IS NULL THEN 'unavailable' WHEN m.target_id IS NULL THEN 'outside_filter' ELSE 'matching' END,
+  'name',CASE WHEN c.target_id IS NULL THEN NULL ELSE left(coalesce(nullif(c.s->>'contact_name',''),nullif(c.s->>'thread_customer_phone',''),nullif(c.s->>'raw_sender_key',''),'Conversation'),2000) END)
+  ORDER BY t.ordinal),'[]'::jsonb) INTO result
+ FROM requested t LEFT JOIN candidates c ON c.target_kind=t.target_kind AND c.target_id=t.id
+ LEFT JOIN matching m ON m.target_kind=t.target_kind AND m.target_id=t.id;
+ after_access:=inbox_bridge.authorize_serving(o);
+ IF (after_access->>'user_id',after_access->>'session_id',after_access->>'access_epoch') IS DISTINCT FROM
+  (a->>'user_id',a->>'session_id',a->>'access_epoch') THEN
+  RAISE EXCEPTION 'INBOX_ORG_DENIED' USING ERRCODE='42501';
+ END IF;
+ RETURN jsonb_build_object('org_id',o,'requester_id',a->>'user_id','session_id',a->>'session_id',
+  'access_epoch',a->>'access_epoch','items',result);
+END $$;
+REVOKE ALL ON FUNCTION inbox_read.review_selection(uuid,jsonb,jsonb) FROM PUBLIC,anon,authenticated,service_role;
+CREATE OR REPLACE FUNCTION public.inbox_review_selection(org_id uuid,filter jsonb,targets jsonb)
+RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path=''
+SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+ SELECT inbox_read.review_selection(org_id,filter,targets)
+$$;
+REVOKE ALL ON FUNCTION public.inbox_review_selection(uuid,jsonb,jsonb) FROM PUBLIC,anon,service_role;
+GRANT EXECUTE ON FUNCTION public.inbox_review_selection(uuid,jsonb,jsonb) TO authenticated;
+
 
 
 -- Separate read companion addition. Never deletes operation or safety receipts.

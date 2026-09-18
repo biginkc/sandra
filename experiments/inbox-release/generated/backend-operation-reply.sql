@@ -188,7 +188,7 @@ END $$;
 
 
 -- Pinned saved_actions_setup: experiments/inbox-saved-actions/setup.sql
--- source_sha256=3acbfe66b1e7fa924217f9361d8ef1189d5485f0393d3e2a7c2a879d6dc4986d
+-- source_sha256=0d4816d10daa156db37826ad9bc3df1ea3fb0a949dcf2012f35481cc1ce7316b
 -- Personal saved-action definitions (DoD#3 backend). Immutable per-version
 -- rows feeding the EXISTING `saved` seam in action-definition.ts
 -- (parseInboxActionIntent's 3rd argument). No picker/builder UI, no
@@ -266,7 +266,10 @@ BEGIN
   RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
  END IF;
  IF array_position(types,'assign') IS NOT NULL
-  AND (array_position(types,'outcome') IS NULL OR array_position(types,'outcome')>array_position(types,'assign')) THEN
+  AND (array_position(types,'outcome') IS NULL OR array_position(types,'outcome')>array_position(types,'assign')
+   OR (array_position(types,'promote') IS NOT NULL AND array_position(types,'promote')>array_position(types,'assign'))
+   OR (array_position(types,'dismiss_unknown') IS NOT NULL AND array_position(types,'dismiss_unknown')>array_position(types,'assign'))
+   OR (array_position(types,'restore_unknown') IS NOT NULL AND array_position(types,'restore_unknown')>array_position(types,'assign'))) THEN
   RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
  END IF;
  IF array_position(types,'dismiss_unknown') IS NOT NULL AND array_position(types,'restore_unknown') IS NOT NULL THEN
@@ -1610,7 +1613,7 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_action_api FROM PUBLIC,anon,authenti
 
 
 -- Pinned operation_public_api: experiments/inbox-operation-preparation/public-api.sql
--- source_sha256=45bafaf0f48c30c9cb98e1bd808b9d2112b7c191c692ee6de4302f1f624bc768
+-- source_sha256=4169ce78710ccddbf33011b7572a95b7c06599016d29df2ec51d1e4ac7f966d8
 -- Authenticated wrappers carry identity through verified JWT/session authority;
 -- callers never supply requester, eligibility or captured version claims.
 
@@ -1623,7 +1626,7 @@ LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$
  SELECT inbox_action_api.accept(preparation_id,idempotency_key)
 $$;
 CREATE FUNCTION public.inbox_operation_status(operation_id uuid) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
  SELECT inbox_action_api.status(operation_id)
 $$;
 REVOKE ALL ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_accept_action(uuid,uuid),public.inbox_operation_status(uuid) FROM PUBLIC,anon,service_role;
@@ -1632,7 +1635,7 @@ GRANT EXECUTE ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_ac
 
 
 -- Pinned operation_review_recovery: experiments/inbox-operation-preparation/review.sql
--- source_sha256=faae82983465db8dd5624cd8fcc8bf5f44916fb2994afa30460f1e6832695eab
+-- source_sha256=78c7a3c4d388f49c5600ab8f76660ad11f6c89d49d652a6c2256f537f4416ede
 -- Additive review/recovery endpoints; no caller-supplied policy or identity.
 
 CREATE FUNCTION inbox_action_api.prepare_review(canonical_input text,k uuid) RETURNS jsonb
@@ -1668,7 +1671,7 @@ BEGIN
  RETURN jsonb_build_object('members',members);
 END $$;
 CREATE FUNCTION public.inbox_action_assignees() RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_action_api.assignees() $$;
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_action_api.assignees() $$;
 CREATE FUNCTION inbox_action_api.recover(p uuid,k uuid) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE a jsonb;result jsonb;binding inbox_action_api.preparation_requests;operation inbox_operations.operations;expires timestamptz;
@@ -1691,7 +1694,7 @@ BEGIN
  RETURN result;
 END $$;
 CREATE FUNCTION public.inbox_recover_operation(preparation_id uuid,idempotency_key uuid) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_action_api.recover(preparation_id,idempotency_key) $$;
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_action_api.recover(preparation_id,idempotency_key) $$;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_action_api FROM PUBLIC,anon,authenticated,service_role;
 REVOKE ALL ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_action_assignees(),public.inbox_recover_operation(uuid,uuid) FROM PUBLIC,anon,service_role;
 GRANT EXECUTE ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_action_assignees(),public.inbox_recover_operation(uuid,uuid) TO authenticated;

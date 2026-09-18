@@ -30,6 +30,25 @@ class HarnessBlocked(RuntimeError):
     pass
 
 
+# Keep the worst observed state when combining independent measurements.  A
+# later event with no approved threshold must not erase a measured failure
+# from an earlier event (the old last-write-wins assignment did exactly that).
+STATUS_RANK = {
+    "MEASURED": 0,
+    "UNJUDGED": 1,
+    "BLOCKED": 2,
+    "FAIL": 3,
+}
+
+
+def merge_status(current: str, candidate: str) -> str:
+    if candidate not in STATUS_RANK:
+        raise HarnessBlocked(f"unknown aggregate status: {candidate}")
+    if current not in STATUS_RANK:
+        raise HarnessBlocked(f"unknown aggregate status: {current}")
+    return candidate if STATUS_RANK[candidate] > STATUS_RANK[current] else current
+
+
 def read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text())
@@ -141,7 +160,7 @@ def validate_records(config: dict[str, Any], release: dict[str, Any], profile: s
     for event, values in by_event.items():
         if not values:
             timing[event] = {"status": "MISSING", "sample_count": 0}
-            timing_status = "BLOCKED"
+            timing_status = merge_status(timing_status, "BLOCKED")
             continue
         stats: dict[str, Any] = {"status": "MEASURED", "sample_count": len(values), "p95_ms": percentile(values, .95), "p99_ms": percentile(values, .99)}
         budget_key = f"{event}_p95_ms"
@@ -151,13 +170,13 @@ def validate_records(config: dict[str, Any], release: dict[str, Any], profile: s
             stats["exceedances_p95"] = sum(value > budget for value in values)
             if len(values) < min_samples:
                 stats["status"] = "INSUFFICIENT_SAMPLES"
-                timing_status = "BLOCKED"
+                timing_status = merge_status(timing_status, "BLOCKED")
             elif stats["p95_ms"] > budget:
                 stats["status"] = "FAIL"
-                timing_status = "FAIL"
+                timing_status = merge_status(timing_status, "FAIL")
         else:
             stats["status"] = "UNJUDGED_NO_THRESHOLD"
-            timing_status = "UNJUDGED"
+            timing_status = merge_status(timing_status, "UNJUDGED")
         timing[event] = stats
 
     metrics: dict[str, Any] = {}
@@ -172,7 +191,7 @@ def validate_records(config: dict[str, Any], release: dict[str, Any], profile: s
                 raise HarnessBlocked(f"invalid system metric: {name}")
             values.append(float(value))
         metrics[name] = {"sample_count": len(values), "p95": percentile(values, .95) if values else None, "status": "UNJUDGED_NO_THRESHOLD" if values else "MISSING"}
-        metric_status = "UNJUDGED" if values else "BLOCKED"
+        metric_status = merge_status(metric_status, "UNJUDGED" if values else "BLOCKED")
 
     recovery = []
     for record in records["recovery"]:
@@ -183,9 +202,10 @@ def validate_records(config: dict[str, Any], release: dict[str, Any], profile: s
             raise HarnessBlocked("recovery record needs a positive duration_ms")
         recovery.append({"fault": record["fault"], "recovered": True, "duration_ms": duration})
     recovery_status = "MEASURED" if recovery else "BLOCKED"
-    overall = "PASS" if timing_status == "MEASURED" and metric_status == "MEASURED" and recovery_status == "MEASURED" else "UNJUDGED"
-    if "FAIL" in {timing_status, metric_status, recovery_status}:
-        overall = "FAIL"
+    aggregate_status = "MEASURED"
+    for status in (timing_status, metric_status, recovery_status):
+        aggregate_status = merge_status(aggregate_status, status)
+    overall = {0: "PASS", 1: "UNJUDGED", 2: "BLOCKED", 3: "FAIL"}[STATUS_RANK[aggregate_status]]
     return {"profile": profile, "profile_dimensions": profile_dimensions(config, profile), "overall": overall, "timing": timing, "system_metrics": metrics, "recovery": {"status": recovery_status, "faults": recovery}}
 
 

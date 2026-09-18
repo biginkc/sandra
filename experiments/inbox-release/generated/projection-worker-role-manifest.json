@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "status": "SOURCE_ONLY_UNINSTALLED",
+  "source_repository": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration",
+  "source_commit": "fcffde3827da164df85c6ef2e2b4a094f79b512c",
+  "source_path": "services/inbox-projection-worker/worker-role.sql",
+  "source_sha256": "e44f574ff5fc11eb3f5a47ef95778798a01260d756022228967dcc439922df30",
+  "packet_path": "experiments/inbox-release/generated/projection-worker-role.sql",
+  "packet_sha256": "02062e227b29c0d575255013dd9c5b93cf5a0624b6cbe105264b059d2d52114f",
+  "database": "sandra_inbox_release_20260917",
+  "marker": "sandra-inbox-release-owned-synthetic",
+  "apply_requires": [
+    "INBOX_RELEASE_DATABASE",
+    "INBOX_RELEASE_FIXTURE_MARKER",
+    "INBOX_RELEASE_SERVING_ENABLED=false"
+  ]
+}

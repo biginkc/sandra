@@ -84,6 +84,20 @@ The packet also records the coordinator policy: exact-head Opus 5 approval is
 required, approval is invalidated by any new commit, and the coordinator gate
 must be satisfied before release status can advance.
 
+The projection role packet is assembled with the exact coordinator source and
+can only be applied through the guarded release-database command:
+
+```sh
+python3 experiments/inbox-release/assemble-worker-role-packet.py \
+  --source-repo "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration" \
+  --commit 28765326a7dd1ce9080c4c6beca1bf564417908d
+```
+
+The command above only emits the packet and receipt. Applying it requires the
+explicit release database and marker environment variables plus
+`--apply`; it runs the packet's database identity guard and never accepts the
+backend-owned install database.
+
 The candidate separates session/membership authority from serving admission.
 `inbox_bridge.authorize()` remains available to authenticated receipt and
 recovery paths while read-serving callers use `authorize_serving()`. New
@@ -106,6 +120,15 @@ worker source hashes and the cached Node base image, while leaving their build
 status blocked until the current source is built and matching command adapters
 and worker grants are installed. Historical cached worker images do not
 certify compatibility with this candidate.
+
+The same execution manifest now pins the projection worker source, its
+`worker-role.sql`, bounded local-fixture profile, and the database-role install
+order. The projection role packet must be applied before its runtime starts;
+the packet creates a constrained `NOLOGIN` role and does not provision a
+credential. Operation and reply role packets remain in the generated backend
+packet and must likewise precede their runtimes. A hosting review must create
+the separate constrained login and prove its grants before any worker image is
+accepted.
 
 The exact backend operation/reply source packet is recorded separately in
 `backend-operation-reply-manifest.json`. It is pinned to the coordinator-supplied
@@ -143,3 +166,9 @@ measurements and missing thresholds cannot certify a pass; the runner only
 reports timing budgets from the approved release manifest and keeps ingestion,
 queue, system, and recovery thresholds unjudged until the coordinator supplies
 and measures them.
+
+`fault-recovery-adapter.py` is the checked-in fault/resource adapter. It
+requires `INBOX_RELEASE_FAULTS` to name real marked-container restarts, checks
+the Docker labels and database marker before every mutation, and emits only
+observed recovery and resource records. It returns `BLOCKED` when the owned
+fixture is stopped or any marker/health check is unavailable.

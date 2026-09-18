@@ -3,8 +3,8 @@
     "path": "experiments/inbox-post-render-read/setup.sql",
     "commit": "db852ee9",
     "source_file": "experiments/inbox-production-install/reviewed-read/01-inbox-post-render-read-setup.sql",
-    "source_sha256": "955693a70b6fe44f85a22fda0f9310b64eda011386a55c18a05cade8a84c0f09",
-    "compiled_sha256": "12e0dd8d0f750ad2728a655088cdd6d9265817a37016bab0d6b0c20b68234c2c"
+    "source_sha256": "1e16c93ed1a5716dcc6bb4517ffc6cb504e34f3d90fb190700683d96bd14c3b8",
+    "compiled_sha256": "bb83939459baf16cf1b660cb80f17767e80a4c4ed610f2ceabada42547d08d88"
   },
   {
     "path": "experiments/inbox-post-render-read/public-api.sql",
@@ -17,8 +17,8 @@
     "path": "experiments/inbox-history-paging/setup.sql",
     "commit": "db852ee9",
     "source_file": "experiments/inbox-production-install/reviewed-read/03-inbox-history-paging-setup.sql",
-    "source_sha256": "8b44f376f75d2be90d54c0537a521985a2212137df74a0594feecb0b7b7e402b",
-    "compiled_sha256": "97e8321819c2bc4982e16e23ac147281215e85e88a02ae731aeb732cb4494fe0"
+    "source_sha256": "6f64ed1141797560d7860a23983ebc991ceada19fad430f3bfe7233b22d2f21a",
+    "compiled_sha256": "c7d9473a16ff725de018b39ec2ad01664860c1d60b943e909396b4f98b5e0e4e"
   },
   {
     "path": "experiments/inbox-unknown-history/setup.sql",
@@ -38,5 +38,13 @@
     "rename_prefix": null,
     "compiled_sha256": "844d21b0f71bd0aa8348dfc7b790ca0e151d47e37f285d1537e1b98e212b4113",
     "upgrade_name": "sync-authority"
+  },
+  {
+    "path": "experiments/inbox-selection-review/selection-review.sql",
+    "commit": "b7d9e96f",
+    "source_file": "experiments/inbox-production-install/selection-review.sql",
+    "source_sha256": "acbdb0ff600ab4beb4c86bb02a8a2b9d7f4d4241fb060facf6b91cf9bac6d7d5",
+    "fixture_guard": "install_fixture.identity",
+    "compiled_sha256": "6c4dbc2390c13634c1c173210941e0933a2f64695f5c3f398f64cbf91e914640"
   }
 ]

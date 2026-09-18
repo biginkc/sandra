@@ -1,7 +1,7 @@
 FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 WORKDIR /app
-COPY --chown=node:node package.json ./
-RUN npm install --omit=dev --ignore-scripts && npm cache clean --force
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --chown=node:node core.mjs runner.mjs server.mjs ./
 COPY --chown=node:node vendor/reply-provider.mjs ./vendor/reply-provider.mjs
 USER node

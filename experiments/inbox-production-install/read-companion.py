@@ -6,6 +6,16 @@ P=Path(__file__).resolve().parent;ROOT=P.parent.parent
 sys.path.insert(0,str(P.parent/'inbox-projection/fixture'))
 from transaction_envelope import normalize
 parser=argparse.ArgumentParser();parser.add_argument('--owned-fixture',action='store_true');parser.add_argument('--verify-only',action='store_true');args=parser.parse_args()
+DETAIL_CONTEXT_FIELDS=(
+ 'property_id','contact_id','contact_name','property_address','property_status',
+ 'outreach_dispo','assignee_id','thread_customer_phone','thread_business_phone',
+ 'contact_do_not_contact','contact_sms_opted_out','phone_suppressed',
+ 'sms_safety_read_failed','is_dnc_locked','ai_disposition_review_id',
+ 'ai_disposition_review_status','ai_disposition_review_disposition',
+ 'ai_disposition_review_reason','ai_disposition_review_source_inbound_message_id',
+ 'ai_disposition_review_source_message_body','ai_disposition_review_created_at',
+ 'ai_responder_status','ai_responder_reason','ai_responder_status_at',
+ 'ai_last_delivery_status','ai_last_delivery_error')
 manifest=json.loads((P/'read-companion-manifest.json').read_text());chunks=[];concurrent_indexes=[]
 for entry in manifest:
  raw=(ROOT/entry['source_file']).read_bytes()
@@ -34,6 +44,12 @@ for entry in manifest:
  if hashlib.sha256(s.encode()).hexdigest()!=entry['compiled_sha256']:raise RuntimeError('Companion transformation drift')
  chunks.append(s)
 compiled="BEGIN;SET LOCAL lock_timeout='2s';SET LOCAL statement_timeout='30s';\n"+'\n'.join(chunks)+'\n'+(P/'read-retention.sql').read_text()+(P/'unknown-retention.sql').read_text()+(P/'harden-private.sql').read_text()+'COMMIT;\n'
+if 'authoritative_context' not in compiled or any("'"+field+"'" not in compiled for field in DETAIL_CONTEXT_FIELDS):
+ raise RuntimeError('Read companion is missing authoritative detail action context')
+# The cursor path must merge the same context; checking only the first-page
+# helper would let a later page regress to transcript-only data.
+if 'detail_v2(o,c,position.before_at,position.before_id)' not in compiled or '|| inbox_read.authoritative_context' not in compiled:
+ raise RuntimeError('Read history cursor path is missing authoritative detail context')
 (P/'generated/read-companion.sql').write_text(compiled)
 (P/'generated/read-indexes.json').write_text(json.dumps(concurrent_indexes,indent=2)+'\n')
 for i,q in enumerate(concurrent_indexes,1):(P/f'generated/read-index-{i:02d}.sql').write_text(q+'\n')

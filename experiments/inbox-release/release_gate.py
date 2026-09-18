@@ -189,13 +189,77 @@ def verify_backend_packet() -> dict[str, Any]:
         return result("FAIL", "reply recovery is still admission-gated")
     sources = manifest.get("sql_sources")
     runtime = manifest.get("runtime_sources")
-    if not isinstance(sources, list) or len(sources) != 26 or not isinstance(runtime, list) or len(runtime) != 14:
+    if not isinstance(sources, list) or len(sources) != 26 or not isinstance(runtime, list) or len(runtime) != 15:
         return result("FAIL", "backend packet source inventory is incomplete", sql_sources=len(sources or []), runtime_sources=len(runtime or []))
     source_names = {item.get("name") for item in sources if isinstance(item, dict)}
     required_source_names = {"saved_actions_setup", "saved_actions_public_api", "saved_actions_prepare_reference"}
     if not required_source_names.issubset(source_names):
         return result("FAIL", "saved-action source packet is incomplete", missing=sorted(required_source_names - source_names))
+    runtime_names = {item.get("name") for item in runtime if isinstance(item, dict)}
+    if "reply_worker_lock" not in runtime_names:
+        return result("FAIL", "reply worker package lock is not pinned in the runtime packet")
     return result("PASS", "exact backend operation/reply packet assembled and hash-verified", packet_sha256=actual_hash, sql_sources=len(sources), runtime_sources=len(runtime))
+
+
+def verify_execution_stack_manifest() -> dict[str, Any]:
+    """Check that every executable service has a pinned source and role order.
+
+    This is intentionally a manifest check, not a build claim.  The current
+    worker images are still unbuilt; the exact source commit and all role
+    packets must be present before a later build can produce evidence.
+    """
+    path = HERE / "execution-stack-manifest.json"
+    try:
+        manifest = load_json(path)
+    except GateError as exc:
+        return result("FAIL", str(exc))
+    services = manifest.get("services")
+    projection = services.get("projection-worker") if isinstance(services, dict) else None
+    if not isinstance(projection, dict):
+        return result("FAIL", "execution stack has no pinned projection worker")
+    required_files = (
+        "Dockerfile",
+        "package.json",
+        "package-lock.json",
+        "core.mjs",
+        "config.mjs",
+        "server.mjs",
+        "worker-role.sql",
+        "config.test.mjs",
+    )
+    invalid = [
+        name
+        for name in required_files
+        if not isinstance(projection.get(name), str) or not re.fullmatch(r"[0-9a-f]{64}", projection[name])
+    ]
+    if invalid:
+        return result("FAIL", "projection worker source hashes are incomplete", missing=invalid)
+    overlay = projection.get("release_http_fixture_profile_overlay")
+    if not isinstance(overlay, dict) or overlay.get("target") != "127.0.0.1:54322/postgres" or overlay.get("database_marker") != "sandra-inbox-http-owned-synthetic-20260917" or overlay.get("container_label_marker") != "sandra-inbox-release-http-owned-20260917" or overlay.get("login") != "inbox_projection_worker":
+        return result("FAIL", "projection worker fixture profile is not pinned to the owned target")
+    order = manifest.get("database_role_install_order")
+    if not isinstance(order, list):
+        return result("FAIL", "database role install order is missing")
+    projection_order = next((entry for entry in order if isinstance(entry, dict) and entry.get("service") == "projection-worker"), None)
+    if not isinstance(projection_order, dict) or projection_order.get("source") != "services/inbox-projection-worker/worker-role.sql" or projection_order.get("sha256") != projection["worker-role.sql"]:
+        return result("FAIL", "projection worker role packet is not pinned in install order")
+    role_packet_path = ROOT / str(projection_order.get("packet", ""))
+    if not role_packet_path.is_file() or sha256(role_packet_path) != projection_order.get("packet_sha256"):
+        return result("FAIL", "projection worker executable role packet is missing or hash-drifted")
+    role_packet = role_packet_path.read_text()
+    if "current_database()<>'sandra_inbox_release_20260917'" not in role_packet or "marker='sandra-inbox-release-owned-synthetic'" not in role_packet or "CREATE ROLE inbox_projection_worker" not in role_packet or "inbox_t2_" in role_packet:
+        return result("FAIL", "projection worker role packet is not release-guarded")
+    backend = load_json(HERE / "backend-operation-reply-manifest.json")
+    backend_roles = {entry.get("path"): entry.get("sha256") for entry in backend.get("sql_sources", []) if isinstance(entry, dict)}
+    for entry in order:
+        if not isinstance(entry, dict) or entry.get("service") not in {"operation-worker", "reply-send-worker"}:
+            continue
+        if entry.get("sha256") != backend_roles.get(entry.get("source")):
+            return result("FAIL", f"{entry.get('service')} role hash is not tied to the backend packet")
+    bounds = manifest.get("resource_bounds")
+    if not isinstance(bounds, dict) or bounds.get("projection_worker_memory_bytes") != 268435456 or bounds.get("projection_worker_cpus") != 0.25:
+        return result("FAIL", "projection worker resource bounds are missing")
+    return result("PASS", "projection worker source, role packet, fixture profile, and bounds are pinned", source_commit=projection.get("source_commit"), role_sha256=projection["worker-role.sql"])
 
 
 def verify_compiled_package() -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -463,11 +527,13 @@ def main() -> int:
         results["candidate_package"] = package_result
         results["service_unit_checks"] = service_result
         results["backend_packet"] = backend_result
+        results["execution_stack"] = verify_execution_stack_manifest()
         commands.extend(package_commands + service_commands)
     else:
         results["candidate_package"] = result("BLOCKED", "safe checks not requested")
         results["service_unit_checks"] = result("BLOCKED", "safe checks not requested")
         results["backend_packet"] = result("BLOCKED", "safe checks not requested")
+        results["execution_stack"] = result("BLOCKED", "safe checks not requested")
 
     installed_result, installed_commands = installed_gate(args.run_installed, manifest)
     results["installed_schema_exact"] = installed_result
@@ -517,7 +583,7 @@ def main() -> int:
     statuses = {
         key: value["status"]
         for key, value in results.items()
-        if key in required or key in {"candidate_package", "service_unit_checks", "backend_packet", "installed_schema_exact", "acceptance_matrix"}
+        if key in required or key in {"candidate_package", "service_unit_checks", "backend_packet", "execution_stack", "installed_schema_exact", "acceptance_matrix"}
     }
     failures = sorted(key for key, status in statuses.items() if status == "FAIL")
     blockers = sorted(key for key, status in statuses.items() if status == "BLOCKED")

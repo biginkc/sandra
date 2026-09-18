@@ -25,6 +25,85 @@ CREATE TABLE inbox_t2_read.receipts (
 ALTER TABLE inbox_t2_read.boundaries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE inbox_t2_read.receipts ENABLE ROW LEVEL SECURITY;
 
+-- The history/detail projection above deliberately contains only message
+-- bodies and receipt metadata.  Individual controls also need the
+-- conversation's authoritative target and safety context.  Resolve that
+-- context from the canonical tables in the same caller statement; never infer
+-- property, phone, AI-review, responder, or DNC state from the history page.
+-- This helper is private to inbox_t2_read.detail/history_page and is not a
+-- browser API by itself.
+CREATE FUNCTION inbox_t2_read.authoritative_context(o uuid,c uuid) RETURNS jsonb
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
+WITH latest AS (
+ SELECT m.* FROM public.messages m
+ WHERE m.org_id=o AND m.conversation_id=c AND m.channel='sms'
+ ORDER BY m.created_at DESC,m.id DESC LIMIT 1
+), contact_ref AS (
+ SELECT m.contact_id FROM public.messages m
+ WHERE m.org_id=o AND m.conversation_id=c AND m.channel='sms' AND m.contact_id IS NOT NULL
+ ORDER BY m.created_at DESC,m.id DESC LIMIT 1
+), property_ref AS (
+ SELECT coalesce(
+  (SELECT r.property_id FROM public.ai_disposition_reviews r
+   WHERE r.org_id=o AND r.conversation_id=c AND r.status='pending'
+   ORDER BY r.created_at DESC,r.id DESC LIMIT 1),
+  (SELECT m.property_id FROM public.messages m
+   WHERE m.org_id=o AND m.conversation_id=c AND m.channel='sms' AND m.property_id IS NOT NULL
+   ORDER BY m.created_at DESC,m.id DESC LIMIT 1)
+ ) AS property_id
+), pending_review AS (
+ SELECT r.id,r.status,r.disposition,r.ai_reason,r.source_inbound_message_id,r.created_at,
+  (SELECT m.body FROM public.messages m WHERE m.id=r.source_inbound_message_id
+   AND m.org_id=o AND m.conversation_id=c AND m.channel='sms' AND m.direction='inbound') AS source_message_body
+ FROM public.ai_disposition_reviews r
+ WHERE r.org_id=o AND r.conversation_id=c AND r.status='pending'
+ ORDER BY r.created_at DESC,r.id DESC LIMIT 1
+), thread_state AS (
+ SELECT t.ai_responder_status,t.ai_responder_reason,t.ai_responder_status_at,
+  t.ai_last_delivery_status,t.ai_last_delivery_error
+ FROM public.message_threads t WHERE t.org_id=o AND t.conversation_id=c LIMIT 1
+), phones AS (
+ SELECT CASE WHEN length(digits)=11 AND left(digits,1)='1' THEN '+'||digits
+  WHEN length(digits)=10 THEN '+1'||digits ELSE NULL END AS phone_e164
+ FROM (SELECT regexp_replace(coalesce(CASE WHEN (SELECT direction FROM latest)='inbound'
+  THEN (SELECT from_address FROM latest) ELSE (SELECT to_address FROM latest) END,''),'[^0-9]','','g') AS digits) q
+), contacts AS (
+ SELECT c.* FROM public.contacts c WHERE c.org_id=o AND c.id=(SELECT contact_id FROM contact_ref)
+), properties AS (
+ SELECT p.* FROM public.properties p WHERE p.org_id=o AND p.id=(SELECT property_id FROM property_ref)
+)
+SELECT jsonb_build_object(
+ 'conversation_id',c,'contact_id',(SELECT contact_id FROM contact_ref),
+ 'contact_name',coalesce((SELECT entity_name FROM contacts),nullif(concat_ws(' ',(SELECT first_name FROM contacts),(SELECT last_name FROM contacts)),'')),
+ 'thread_customer_phone',CASE WHEN (SELECT direction FROM latest)='inbound' THEN (SELECT from_address FROM latest) ELSE (SELECT to_address FROM latest) END,
+ 'thread_business_phone',CASE WHEN (SELECT direction FROM latest)='inbound' THEN (SELECT to_address FROM latest) ELSE (SELECT from_address FROM latest) END,
+ 'property_id',(SELECT property_id FROM property_ref),
+ 'property_address',nullif(concat_ws(', ',(SELECT address FROM properties),(SELECT city FROM properties),(SELECT state FROM properties)),''),
+ 'assignee_id',(SELECT assigned_user_id FROM properties),
+ 'property_status',(SELECT status FROM properties),
+ 'outreach_dispo',(SELECT outreach_dispo FROM properties),
+ 'ai_disposition_review_id',(SELECT id FROM pending_review),
+ 'ai_disposition_review_status',(SELECT status FROM pending_review),
+ 'ai_disposition_review_disposition',(SELECT disposition FROM pending_review),
+ 'ai_disposition_review_reason',(SELECT ai_reason FROM pending_review),
+ 'ai_disposition_review_source_inbound_message_id',(SELECT source_inbound_message_id FROM pending_review),
+ 'ai_disposition_review_source_message_body',(SELECT source_message_body FROM pending_review),
+ 'ai_disposition_review_created_at',(SELECT created_at FROM pending_review),
+ 'contact_do_not_contact',coalesce((SELECT do_not_contact FROM contacts),false),
+ 'contact_sms_opted_out',coalesce((SELECT sms_opted_out FROM contacts),false),
+ 'phone_suppressed',CASE WHEN (SELECT contact_id FROM contact_ref) IS NULL THEN NULL ELSE EXISTS(SELECT 1 FROM public.sms_phone_suppressions s
+   WHERE s.org_id=o AND s.channel='sms' AND s.phone_e164=(SELECT phone_e164 FROM phones)) END,
+ 'sms_safety_read_failed',false,
+ 'is_dnc_locked',coalesce((SELECT is_dnc_locked FROM properties),false),
+ 'ai_responder_status',(SELECT ai_responder_status FROM thread_state),
+ 'ai_responder_reason',(SELECT ai_responder_reason FROM thread_state),
+ 'ai_responder_status_at',(SELECT ai_responder_status_at FROM thread_state),
+ 'ai_last_delivery_status',(SELECT ai_last_delivery_status FROM thread_state),
+ 'ai_last_delivery_error',(SELECT ai_last_delivery_error FROM thread_state)
+);
+$$;
+REVOKE ALL ON FUNCTION inbox_t2_read.authoritative_context(uuid,uuid) FROM PUBLIC,anon,authenticated,service_role;
+
 -- The data snapshot and its stored boundary are created in ONE statement. The
 -- STABLE canonical detail function and generation CTE share that statement snapshot.
 -- No message is marked read here; recording a boundary does not acknowledge it.
@@ -36,7 +115,7 @@ BEGIN
  PERFORM 1 FROM inbox_t2_bridge.access_epochs WHERE user_id=(a->>'user_id')::uuid FOR UPDATE;
  a:=inbox_t2_bridge.authorize(o);
  WITH snapshot AS MATERIALIZED (
-  SELECT inbox_t2_authenticated_detail.detail_v2(o,c) AS data,
+  SELECT inbox_t2_authenticated_detail.detail_v2(o,c) || inbox_t2_read.authoritative_context(o,c) AS data,
    g.generation FROM inbox_t2_capture_boundary.generation g WHERE singleton IS TRUE
  ), recorded AS (
   INSERT INTO inbox_t2_read.boundaries(requester_id,org_id,conversation_id,generation,revision,created_at,expires_at,session_id,access_epoch)

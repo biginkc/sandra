@@ -41,6 +41,19 @@ class StressHarnessTests(unittest.TestCase):
         with self.assertRaises(module.HarnessBlocked):
             module.validate_records(config, release, "current", module.parse_records(json.dumps({"type": "timing", "event": "first_open", "duration_ms": -1}), "current"))
 
+    def test_measured_failure_is_not_erased_by_later_unjudged_event(self):
+        config, _target, release = module.load_config(HERE / "stress-harness-config.json")
+        config["profiles"]["current"] = {"arrival_rate_rps": 1, "concurrency": 1, "tenant_count": 1, "history_skew": 1}
+        records = {"timing": [], "metric": [], "recovery": [{"fault": "projection_restart", "recovered": True, "duration_ms": 12.0}]}
+        for event in config["required_timing_events"]:
+            duration = 100000.0 if event == "first_open" else 1.0
+            records["timing"].extend({"type": "timing", "event": event, "duration_ms": duration} for _ in range(10))
+        for name in config["required_system_metrics"]:
+            records["metric"].append({"type": "metric", "name": name, "value": 1.0})
+        result = module.validate_records(config, release, "current", records)
+        self.assertEqual(result["timing"]["first_open"]["status"], "FAIL")
+        self.assertEqual(result["overall"], "FAIL")
+
 
 if __name__ == "__main__":
     unittest.main()

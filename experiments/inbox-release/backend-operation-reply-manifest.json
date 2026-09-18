@@ -2,11 +2,11 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration",
-  "source_commit": "28765326a7dd1ce9080c4c6beca1bf564417908d",
+  "source_commit": "fcffde3827da164df85c6ef2e2b4a094f79b512c",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
-    "sha256": "80a860decc888c1df5d19eb12076625623d0bddba79903a36713ce9a0cf2d455"
+    "sha256": "e60764ae880e49f69ebaf8b6ba2681e3d060fc6a4281f4b7625527c3c5d0c25a"
   },
   "sql_sources": [
     {
@@ -21,9 +21,9 @@
       "name": "saved_actions_setup",
       "kind": "sql",
       "path": "experiments/inbox-saved-actions/setup.sql",
-      "sha256": "3acbfe66b1e7fa924217f9361d8ef1189d5485f0393d3e2a7c2a879d6dc4986d",
-      "bytes": 13153,
-      "transformed_sha256": "a6256e2f58457f494aac73d138cf1f923a2f4c89f2ff1db5494f6c4e67f619ea"
+      "sha256": "0d4816d10daa156db37826ad9bc3df1ea3fb0a949dcf2012f35481cc1ce7316b",
+      "bytes": 13542,
+      "transformed_sha256": "ea966bae5013cdf22cea4fbacb674fc508acff16e863bc9459847e81bcd06bb4"
     },
     {
       "name": "saved_actions_public_api",
@@ -101,17 +101,17 @@
       "name": "operation_public_api",
       "kind": "sql",
       "path": "experiments/inbox-operation-preparation/public-api.sql",
-      "sha256": "45bafaf0f48c30c9cb98e1bd808b9d2112b7c191c692ee6de4302f1f624bc768",
-      "bytes": 1127,
-      "transformed_sha256": "76c07a94df3c133b2a2ea6029495d55ea59ce73ff06ab6ca1291308967d6ba27"
+      "sha256": "4169ce78710ccddbf33011b7572a95b7c06599016d29df2ec51d1e4ac7f966d8",
+      "bytes": 1177,
+      "transformed_sha256": "e8cb1dcd9727b757f41da4f1574b8669a25f3988d24aaa95a28944c87b2e7f6a"
     },
     {
       "name": "operation_review_recovery",
       "kind": "sql",
       "path": "experiments/inbox-operation-preparation/review.sql",
-      "sha256": "faae82983465db8dd5624cd8fcc8bf5f44916fb2994afa30460f1e6832695eab",
-      "bytes": 4958,
-      "transformed_sha256": "d2e01801eed3294adca1ad1969ed36f33420a4b7ae8012d45a2484e540608555"
+      "sha256": "78c7a3c4d388f49c5600ab8f76660ad11f6c89d49d652a6c2256f537f4416ede",
+      "bytes": 5058,
+      "transformed_sha256": "7b86921b88f6fcc8b86bd58c506da05fee44c056619dea5a38f10ec217bffee0"
     },
     {
       "name": "operation_worker_role",
@@ -244,8 +244,8 @@
       "name": "operation_worker_core",
       "kind": "runtime",
       "path": "experiments/inbox-operation-worker/core.mjs",
-      "sha256": "13f460f8c2853c34211956317b1345830998010de2962ec37e2ef47f9fe8e265",
-      "bytes": 7603
+      "sha256": "7bbc4c01faa5e82e0ec211b4d396342df02ae7e51f2371a9797153366dd07c03",
+      "bytes": 8290
     },
     {
       "name": "operation_worker_server",
@@ -269,11 +269,21 @@
       "bytes": 228
     },
     {
+      "name": "reply_worker_lock",
+      "kind": "runtime",
+      "path": "experiments/inbox-reply-send-worker/package-lock.json",
+      "sha256": "c40f2cf81253d61988e9d90438fbde767c4b4bf30eec9796a63c702bea494a2b",
+      "bytes": 6400,
+      "source": "release-infra-working-tree",
+      "source_commit": null,
+      "local_overlay": true
+    },
+    {
       "name": "reply_worker_core",
       "kind": "runtime",
       "path": "experiments/inbox-reply-send-worker/core.mjs",
-      "sha256": "6d0380b385840532bf52a35d7598c18ae8921e78a83aadfe08bcf0de4483e314",
-      "bytes": 8466
+      "sha256": "348635dd33ce979d503b8489fc581c071f271bc93f5a5e17bcc3dbd87d5ef4e5",
+      "bytes": 9274
     },
     {
       "name": "reply_worker_runner",

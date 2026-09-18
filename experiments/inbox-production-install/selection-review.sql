@@ -1,3 +1,11 @@
+-- Release companion guard; apply after the core read schema and maintained rows exist.
+BEGIN;
+SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
+DO $$ BEGIN
+ IF current_user<>'postgres' OR current_database()<>'sandra_inbox_release_20260917' OR NOT EXISTS(
+  SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-release-owned-synthetic'
+ ) THEN RAISE EXCEPTION 'Owned release fixture required'; END IF;
+END $$;
 -- Reviewed read companion; install after inbox_read and serving authorization.
 -- Selection classification uses the workset predicate on at most 100 requested
 -- maintained rows. It never loads the complete matching workset.
@@ -85,3 +93,5 @@ SET lock_timeout='3s' SET statement_timeout='15s' AS $$
 $$;
 REVOKE ALL ON FUNCTION public.inbox_review_selection(uuid,jsonb,jsonb) FROM PUBLIC,anon,service_role;
 GRANT EXECUTE ON FUNCTION public.inbox_review_selection(uuid,jsonb,jsonb) TO authenticated;
+
+COMMIT;
