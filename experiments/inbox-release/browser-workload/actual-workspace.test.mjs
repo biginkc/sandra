@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { chromium, expect } from "@playwright/test";
 import { build } from "esbuild";
+import { findRow, waitForSelectionFeedback } from "./adapter.mjs";
 
 /**
  * Browser-local workload contract for the real InboxWorkspace component.
@@ -24,6 +25,8 @@ const fixture = fileURLToPath(new URL("./actual-workspace.fixture.tsx", import.m
 const runtime = await mkdtemp(join(tmpdir(), "sandra-inbox-workload-"));
 const bundlePath = join(runtime, "actual-workspace.js");
 const cssPath = join(runtime, "actual-workspace.css");
+const orgId = "00000000-0000-4000-8000-000000000001";
+const conversationIdFor = (index) => `00000000-0000-4000-8000-${String(index + 100).padStart(12, "0")}`;
 
 await build({
   entryPoints: [fixture],
@@ -79,30 +82,31 @@ try {
   await expect(page.getByTestId("adapter-ready")).toBeVisible();
 
   const list = page.getByRole("list", { name: "Inbox conversations" });
-  const firstRow = list.getByRole("listitem").first();
+  const firstRow = await findRow(page, orgId, conversationIdFor(0));
   await expect(firstRow).toContainText("Person 0");
   await firstRow.getByRole("button", { name: "Open Person 0" }).click();
   await expect(page.getByTestId("inspection")).toHaveText("Inspection for Person 0");
   await page.getByRole("button", { name: "Close conversation details" }).click();
   await expect(page.getByRole("complementary", { name: "Open conversation" })).toHaveCount(0);
-  await list.getByRole("listitem").first().getByRole("button", { name: "Open Person 0" }).click();
+  const revisitRow = await findRow(page, orgId, conversationIdFor(0));
+  await revisitRow.getByRole("button", { name: "Open Person 0" }).click();
   await expect(page.getByTestId("inspection")).toHaveText("Inspection for Person 0");
   await expect(page.getByTestId("transport-log")).toContainText("inspect:");
   await page.getByRole("button", { name: "Close conversation details" }).click();
 
-  await page.getByLabel("Select Person 0").check();
+  const selectionRow = await findRow(page, orgId, conversationIdFor(0));
+  await selectionRow.getByLabel("Select Person 0").check();
+  await waitForSelectionFeedback(page, 1);
   await expect(page.getByText("1 selected", { exact: true })).toHaveCount(1);
   await expect(page.getByText("1 selected")).toHaveCount(2);
 
   const mountedBeforeScroll = await list.getByRole("listitem").count();
   expect(mountedBeforeScroll).toBeLessThan(120);
   await expect(list.getByText("Person 119", { exact: true })).toHaveCount(0);
-  await list.evaluate((element) => {
-    element.scrollTop = element.scrollHeight;
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
-  await expect(list.getByText("Person 119", { exact: true })).toBeVisible();
-  await list.getByLabel("Select Person 119").check();
+  const offscreenRow = await findRow(page, orgId, conversationIdFor(119));
+  await expect(offscreenRow).toContainText("Person 119");
+  await offscreenRow.getByLabel("Select Person 119").check();
+  await waitForSelectionFeedback(page, 2);
   await expect(page.getByText("2 selected", { exact: true })).toHaveCount(1);
   await expect(page.getByTestId("transport-log")).toContainText("select:1|select:2");
 
