@@ -79,3 +79,10 @@ test("CDC scenario requires explicit pre-seeded tenant identities", () => {
     /INBOX_HTTP_CDC_FROM_ADDRESS is required/,
   );
 });
+
+test("CDC scenario accepts the authoritative version-zero acceptance organization UUID", () => {
+  const parsed = readCdcScenario(validEnvironment({
+    INBOX_HTTP_CDC_ORG_ID: "00000000-0000-0000-0000-000000000bbb",
+  }));
+  assert.equal(parsed.orgId, "00000000-0000-0000-0000-000000000bbb");
+});

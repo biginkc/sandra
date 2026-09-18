@@ -26,7 +26,10 @@ export const FIXTURE_DATABASE_URL = "postgresql://postgres:postgres@127.0.0.1:54
 export const FIXTURE_CONTAINER_MARKER = "sandra-inbox-release-http-owned-20260917";
 export const FIXTURE_DATABASE_MARKER = "sandra-inbox-http-owned-synthetic-20260917";
 export const FIXTURE_DATABASE_PURPOSE = "sandra-inbox-release-http";
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// PostgreSQL accepts the full canonical UUID shape, including legacy UUIDs
+// whose version/variant nibbles are zero or otherwise outside RFC 4122.  The
+// owned acceptance organization is 00000000-0000-0000-0000-000000000bbb.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 class CdcBlocked extends Error {
   constructor(message) {
@@ -176,6 +179,60 @@ async function verifyDatabaseIdentity(database) {
   }
 }
 
+async function verifyPreseededScenario(service, scenario) {
+  const [contactResult, propertyResult, threadResult] = await Promise.all([
+    service
+      .from("contacts")
+      .select("id,org_id,phone_1")
+      .eq("id", scenario.contactId)
+      .eq("org_id", scenario.orgId)
+      .maybeSingle(),
+    service
+      .from("properties")
+      .select("id,org_id,homeowner_contact_id")
+      .eq("id", scenario.propertyId)
+      .eq("org_id", scenario.orgId)
+      .maybeSingle(),
+    service
+      .from("message_threads")
+      .select("conversation_id,org_id,contact_id,property_id")
+      .eq("conversation_id", scenario.conversationId)
+      .eq("org_id", scenario.orgId)
+      .eq("contact_id", scenario.contactId)
+      .eq("property_id", scenario.propertyId)
+      .maybeSingle(),
+  ]);
+  const contact = contactResult.data;
+  const property = propertyResult.data;
+  const thread = threadResult.data;
+  if (
+    contactResult.error
+    || !contact
+    || contact.org_id !== scenario.orgId
+    || contact.phone_1 !== scenario.fromAddress
+  ) {
+    throw new CdcBlocked("CDC scenario contact is not pre-seeded in the supplied organization");
+  }
+  if (
+    propertyResult.error
+    || !property
+    || property.org_id !== scenario.orgId
+    || property.homeowner_contact_id !== scenario.contactId
+  ) {
+    throw new CdcBlocked("CDC scenario property/contact relationship is not pre-seeded exactly");
+  }
+  if (
+    threadResult.error
+    || !thread
+    || thread.conversation_id !== scenario.conversationId
+    || thread.org_id !== scenario.orgId
+    || thread.contact_id !== scenario.contactId
+    || thread.property_id !== scenario.propertyId
+  ) {
+    throw new CdcBlocked("CDC scenario conversation relationship is not pre-seeded exactly");
+  }
+}
+
 function waitForInsert(channel, timeout) {
   let resolveEvent;
   let rejectEvent;
@@ -303,6 +360,11 @@ export async function main(env = process.env) {
     });
     await database.connect();
     await verifyDatabaseIdentity(database);
+    // These service-role reads bind every supplied ID to one existing,
+    // organization-scoped acceptance thread before any source mutation. They
+    // are setup validation, not event polling; the proof still requires the
+    // subsequent WebSocket CDC payload for the generated message UUID.
+    await verifyPreseededScenario(serviceClient, scenario);
 
     const { data: authData, error: authError } = await userClient.auth.signInWithPassword({
       email: fixture.email,
