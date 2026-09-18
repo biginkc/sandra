@@ -150,7 +150,7 @@ describe("My Leads workflow dialogs", () => {
       note: null,
       recordingUrl: null,
       callActivityId: null,
-      smsBody: "Hey, this is Mel, Maria's assistant.\n\nPlease text Maria a time that works.",
+      smsBody: "Hey, this is Mel with BMH, Maria's assistant.\n\nPlease text Maria a time that works.",
       followUp: expect.objectContaining({
         policyVersion: 1,
         introId: "mel-maria-assistant-1",

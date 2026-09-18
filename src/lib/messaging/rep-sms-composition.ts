@@ -21,6 +21,30 @@ export type RepSmsIntroduction = {
 export const REP_SMS_INTRODUCTIONS: readonly RepSmsIntroduction[] = [
   {
     id: "mel-maria-assistant-1",
+    version: 2,
+    body: "Hey, this is Mel with BMH, Maria's assistant.",
+  },
+  {
+    id: "mel-maria-assistant-2",
+    version: 2,
+    body: "Hi, Mel with BMH here. I'm Maria's assistant.",
+  },
+  {
+    id: "mel-maria-assistant-3",
+    version: 2,
+    body: "Hello, this is Mel with BMH, Maria's assistant. I'm helping coordinate with Maria.",
+  },
+] as const;
+
+/**
+ * Prefixes emitted before the identity copy was corrected. They remain
+ * recognized only for body-only legacy drafts so a recovery can keep the
+ * editable remainder while rebuilding the approved prefix. A structured
+ * draft that supplies introVersion=1 still fails the version fence.
+ */
+const LEGACY_REP_SMS_INTRODUCTIONS: readonly RepSmsIntroduction[] = [
+  {
+    id: "mel-maria-assistant-1",
     version: 1,
     body: "Hey, this is Mel, Maria's assistant.",
   },
@@ -126,7 +150,7 @@ function cleanRemainder(value: string | null | undefined): string {
 
 function hasApprovedIntroduction(value: string): boolean {
   const normalized = value.trim().toLocaleLowerCase();
-  return REP_SMS_INTRODUCTIONS.some((intro) =>
+  return [...REP_SMS_INTRODUCTIONS, ...LEGACY_REP_SMS_INTRODUCTIONS].some((intro) =>
     normalized.includes(intro.body.toLocaleLowerCase()),
   );
 }
@@ -151,6 +175,19 @@ function splitLegacyFullBody(value: string): {
       return {
         introduction,
         remainder: candidate.slice(introduction.body.length).trim(),
+      };
+    }
+  }
+  for (const legacy of LEGACY_REP_SMS_INTRODUCTIONS) {
+    const introduction = REP_SMS_INTRODUCTIONS.find((candidate) => candidate.id === legacy.id);
+    if (!introduction) continue;
+    if (candidate === legacy.body) {
+      return { introduction, remainder: "" };
+    }
+    if (candidate.startsWith(`${legacy.body}\n`)) {
+      return {
+        introduction,
+        remainder: candidate.slice(legacy.body.length).trim(),
       };
     }
   }

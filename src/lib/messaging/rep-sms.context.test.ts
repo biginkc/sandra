@@ -5,7 +5,7 @@ vi.mock("@/lib/supabase/server", () => ({ createClient }));
 
 import { readRepSmsContext } from "./rep-sms";
 
-const body = "Hey, this is Mel, Maria's assistant.\n\nPlease text Maria a time that works.";
+const body = "Hey, this is Mel with BMH, Maria's assistant.\n\nPlease text Maria a time that works.";
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -51,7 +51,7 @@ describe("readRepSmsContext generic SMS recovery", () => {
                   body,
                   composition: {
                     introId: "mel-maria-assistant-1",
-                    introVersion: 1,
+                    introVersion: 2,
                     templateId: "no-answer-callback-time",
                     templateVersion: 1,
                     remainder: "Please text Maria a time that works.",

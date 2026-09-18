@@ -325,6 +325,8 @@ export async function processEnrollmentTick(
       body: finalBody,
       requireStickyFrom: true,
       allowDefaultFromWhenNoSticky: true,
+      requiresOpeningIdentity:
+        step.step_index === 0 && step.template_category === "Opener - Homeowner",
     });
 
     switch (outcome.status) {

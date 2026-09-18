@@ -267,7 +267,7 @@ async function main(): Promise<void> {
           step_index: 0,
           action_type: "send_sms",
           delay_after_previous_minutes: 0,
-          template_body: `${tag} step`,
+          template_body: `Mel with BMH. ${tag} step`,
         })
         .select("id")
         .single();

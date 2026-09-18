@@ -120,7 +120,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "Hey — quick question about your property",
+        body: "Hey — quick question about your property Mel with BMH.",
       });
       expect(outcome.status).toBe("sent");
 
@@ -190,6 +190,220 @@ describe("sendSmsToContact (integration)", () => {
     }
   });
 
+  it("requires identity for an anonymous first send despite wrong-business, failed, and queued history, then preserves an established reply", async () => {
+    await withSafeSendWindow(async () => {
+      const phone = "+18165553001";
+      const { contactId, propertyId } = await seed({ phone, withConsent: true });
+      const orgId = await getOrgId();
+
+      const { error: anchorError } = await supabase.from("messages").insert([
+        {
+          org_id: orgId,
+          channel: "sms",
+          direction: "inbound",
+          status: "received",
+          provider: "mock",
+          created_at: "2026-07-02T17:59:00.000Z",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: phone,
+          to_address: MOCK_SENDER_SECONDARY,
+          body: "Inbound message to the other business number",
+        },
+        {
+          org_id: orgId,
+          channel: "sms",
+          direction: "outbound",
+          status: "failed",
+          provider: "mock",
+          created_at: "2026-07-02T17:59:10.000Z",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: MOCK_SENDER_PRIMARY,
+          to_address: phone,
+          body: "Failed anonymous opener",
+        },
+        {
+          org_id: orgId,
+          channel: "sms",
+          direction: "outbound",
+          status: "queued",
+          provider: "mock",
+          created_at: "2026-07-02T17:59:20.000Z",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: MOCK_SENDER_PRIMARY,
+          to_address: phone,
+          body: "Queued anonymous opener",
+        },
+      ]);
+      expect(anchorError).toBeNull();
+
+      const callsBefore = getMockMessageLog().length;
+      const anonymous = await sendSmsToContact(supabase, {
+        origin: "manual",
+        contactId,
+        propertyId,
+        from: MOCK_SENDER_PRIMARY,
+        body: "Anonymous first touch",
+      });
+      expect(anonymous.status).toBe("db_error");
+      if (anonymous.status === "db_error") {
+        expect(anonymous.error).toMatch(/Opening SMS must identify the sender/i);
+      }
+      expect(getMockMessageLog()).toHaveLength(callsBefore);
+
+      const establishedReply = {
+        channel: "sms" as const,
+        direction: "inbound" as const,
+        status: "received" as const,
+        provider: "mock" as const,
+        created_at: "2026-07-02T18:00:00.000Z",
+        contact_id: contactId,
+        property_id: propertyId,
+        from_address: phone,
+        to_address: MOCK_SENDER_PRIMARY,
+        body: "Inbound message to the established business number",
+      };
+      const { data: inbound, error: inboundError } = await supabase
+        .from("messages")
+        .insert(establishedReply)
+        .select("id")
+        .single();
+      expect(inboundError).toBeNull();
+      expect(inbound?.id).toBeTruthy();
+
+      const replyBody = "Reply from the established conversation";
+      const reply = await sendSmsToContact(supabase, {
+        origin: "manual",
+        contactId,
+        propertyId,
+        body: replyBody,
+      });
+      expect(reply.status).toBe("sent");
+      if (reply.status !== "sent") return;
+      expect(getMockMessageLog()).toHaveLength(callsBefore + 1);
+      expect(getMockMessageLog().at(-1)?.input.body).toBe(replyBody);
+
+      const { data: replyRow, error: replyRowError } = await supabase
+        .from("messages")
+        .select("status, body, from_address, to_address")
+        .eq("id", reply.messageId)
+        .single();
+      expect(replyRowError).toBeNull();
+      expect(replyRow).toMatchObject({
+        status: "sent",
+        body: replyBody,
+        from_address: MOCK_SENDER_PRIMARY,
+        to_address: phone,
+      });
+    });
+  });
+
+  it("blocks an unmarked legacy queued opener without matching history but releases unchanged after matching inbound", async () => {
+    await withSafeSendWindow(async () => {
+      const phone = "+18165553002";
+      const { contactId, propertyId } = await seed({ phone, withConsent: true });
+      const orgId = await getOrgId();
+
+      const { data: queued, error: queuedInsertError } = await supabase
+        .from("messages")
+        .insert({
+          org_id: orgId,
+          channel: "sms",
+          direction: "outbound",
+          status: "queued",
+          provider: "mock",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: MOCK_SENDER_PRIMARY,
+          to_address: phone,
+          body: "Legacy queued anonymous opener",
+        })
+        .select("id")
+        .single();
+      expect(queuedInsertError).toBeNull();
+      expect(queued?.id).toBeTruthy();
+      if (!queued) return;
+
+      const callsBefore = getMockMessageLog().length;
+      const blocked = await releaseQueuedMessage(supabase, queued.id);
+      expect(blocked.status).toBe("db_error");
+      if (blocked.status === "db_error") {
+        expect(blocked.error).toMatch(/Opening SMS must identify the sender/i);
+      }
+      expect(getMockMessageLog()).toHaveLength(callsBefore);
+
+      const { data: blockedRow, error: blockedRowError } = await supabase
+        .from("messages")
+        .select("status, error_message")
+        .eq("id", queued.id)
+        .single();
+      expect(blockedRowError).toBeNull();
+      expect(blockedRow?.status).toBe("failed");
+      expect(blockedRow?.error_message).toMatch(/Opening SMS must identify the sender/i);
+
+      const { data: inbound, error: inboundError } = await supabase
+        .from("messages")
+        .insert({
+          org_id: orgId,
+          channel: "sms",
+          direction: "inbound",
+          status: "received",
+          provider: "mock",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: phone,
+          to_address: MOCK_SENDER_PRIMARY,
+          body: "Matching inbound reply",
+        })
+        .select("id")
+        .single();
+      expect(inboundError).toBeNull();
+      expect(inbound?.id).toBeTruthy();
+
+      const releasedBody = "Legacy queued reply after inbound";
+      const { data: releasable, error: releasableInsertError } = await supabase
+        .from("messages")
+        .insert({
+          org_id: orgId,
+          channel: "sms",
+          direction: "outbound",
+          status: "queued",
+          provider: "mock",
+          contact_id: contactId,
+          property_id: propertyId,
+          from_address: MOCK_SENDER_PRIMARY,
+          to_address: phone,
+          body: releasedBody,
+        })
+        .select("id")
+        .single();
+      expect(releasableInsertError).toBeNull();
+      expect(releasable?.id).toBeTruthy();
+      if (!releasable) return;
+
+      const release = await releaseQueuedMessage(supabase, releasable.id);
+      expect(release.status).toBe("sent");
+      if (release.status !== "sent") return;
+      expect(getMockMessageLog()).toHaveLength(callsBefore + 1);
+      expect(getMockMessageLog().at(-1)?.input.body).toBe(releasedBody);
+
+      const { data: releasedRow, error: releasedRowError } = await supabase
+        .from("messages")
+        .select("status, body, from_address, to_address")
+        .eq("id", releasable.id)
+        .single();
+      expect(releasedRowError).toBeNull();
+      expect(releasedRow).toMatchObject({
+        status: "sent",
+        body: releasedBody,
+        from_address: MOCK_SENDER_PRIMARY,
+        to_address: phone,
+      });
+    });
+  });
+
   it("blocks an explicit unapproved immediate sender before provider use", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-07-02T18:00:00Z"));
@@ -221,7 +435,7 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("does not block when no consent event exists and quiet hours allow sending", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
     const { contactId, propertyId } = await seed({ withConsent: false });
     try {
@@ -229,7 +443,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "hi",
+        body: "hi Mel with BMH.",
       });
       expect(outcome.status).toBe("sent");
 
@@ -247,12 +461,17 @@ describe("sendSmsToContact (integration)", () => {
 
   it("blocks with blocked_terminal_dispo when contact has opted out after opt-in", async () => {
     const { contactId, propertyId } = await seed({ withConsent: true });
-    await recordConsentEvent(supabase, {
+    const optOut = await recordConsentEvent(supabase, {
       contactId,
       channel: "sms",
       eventType: "opt_out",
       source: "integration-test-opt-out",
+      // Keep the opt-out strictly later than seed()'s opt-in. PostgreSQL
+      // timestamps can otherwise tie and leave latest-event ordering to the
+      // query's secondary plan order.
+      occurredAt: new Date(Date.now() + 1000),
     });
+    expect(optOut.inserted).toBe(true);
     const outcome = await sendSmsToContact(supabase, {
       origin: "manual",
       contactId,
@@ -285,7 +504,7 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("blocks a re-imported contact when the same phone is suppressed", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
     const phone = "+18165551801";
     const original = await seed({ phone, withConsent: true });
@@ -403,7 +622,7 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("blocks immediately on terminal outreach_dispo before inserting a message", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
     const { contactId, propertyId } = await seed({ withConsent: true });
     await supabase
@@ -464,7 +683,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "automated",
         contactId,
         propertyId,
-        body: "AI responder reply that must not fire",
+        body: "AI responder reply that must not fire Mel with BMH.",
       });
 
       expect(outcome.status).toBe("blocked_automated_suppressed");
@@ -494,7 +713,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "See you at 2pm tomorrow!",
+        body: "See you at 2pm tomorrow! Mel with BMH.",
       });
 
       expect(outcome.status).toBe("sent");
@@ -541,7 +760,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "this is queued, not sent",
+      body: "this is queued, not sent Mel with BMH.",
       queueOnly: true,
     });
     expect(outcome.status).toBe("queued");
@@ -561,7 +780,7 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("stamps campaign_id on an immediate send when campaignId is provided", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
     const { contactId, propertyId } = await seed({ withConsent: true });
 
@@ -579,7 +798,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "campaign send",
+        body: "campaign send Mel with BMH.",
         campaignId: campaign!.id,
       });
       expect(outcome.status).toBe("sent");
@@ -612,7 +831,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued campaign send",
+      body: "queued campaign send Mel with BMH.",
       queueOnly: true,
       campaignId: campaign!.id,
     });
@@ -645,7 +864,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "held campaign send",
+      body: "held campaign send Mel with BMH.",
       queueOnly: true,
       scheduledFor,
       campaignId: campaign!.id,
@@ -684,7 +903,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued before pause",
+      body: "queued before pause Mel with BMH.",
       queueOnly: true,
       scheduledFor: new Date(Date.now() - 1000),
       campaignId: campaign!.id,
@@ -725,7 +944,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "first send",
+        body: "first send Mel with BMH.",
       });
       expect(first.status).toBe("sent");
 
@@ -763,7 +982,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "queued then released",
+        body: "queued then released Mel with BMH.",
         queueOnly: true,
       });
       expect(queue.status).toBe("queued");
@@ -810,7 +1029,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued before classification",
+      body: "queued before classification Mel with BMH.",
       queueOnly: true,
     });
     expect(queue.status).toBe("queued");
@@ -849,7 +1068,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued while consented",
+      body: "queued while consented Mel with BMH.",
       queueOnly: true,
     });
     expect(queue.status).toBe("queued");
@@ -882,7 +1101,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "automated",
         contactId,
         propertyId,
-        body: "queued before the property was booked",
+        body: "queued before the property was booked Mel with BMH.",
         queueOnly: true,
       });
       expect(queue.status).toBe("queued");
@@ -923,7 +1142,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "see you at 2pm tomorrow!",
+        body: "see you at 2pm tomorrow! Mel with BMH.",
         queueOnly: true,
       });
       expect(queue.status).toBe("queued");
@@ -953,7 +1172,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued before phone suppression",
+      body: "queued before phone suppression Mel with BMH.",
       queueOnly: true,
     });
     expect(queue.status).toBe("queued");
@@ -990,7 +1209,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued before wrong-number reply",
+      body: "queued before wrong-number reply Mel with BMH.",
       queueOnly: true,
     });
     expect(queue.status).toBe("queued");
@@ -1030,7 +1249,7 @@ describe("sendSmsToContact (integration)", () => {
         property_id: propertyId,
         from_address: "+18163706846",
         to_address: "+18165559999",
-        body: "provider mismatch",
+        body: "provider mismatch Mel with BMH.",
       })
       .select("id")
       .single();
@@ -1073,7 +1292,7 @@ describe("sendSmsToContact (integration)", () => {
         property_id: propertyId,
         from_address: "+12073049295",
         to_address: "+18165559999",
-        body: "old sender",
+        body: "old sender Mel with BMH.",
       })
       .select("id")
       .single();
@@ -1114,7 +1333,7 @@ describe("sendSmsToContact (integration)", () => {
         property_id: propertyId,
         from_address: null,
         to_address: "+18165559999",
-        body: "missing sender snapshot",
+        body: "missing sender snapshot Mel with BMH.",
       })
       .select("id")
       .single();
@@ -1158,7 +1377,7 @@ describe("sendSmsToContact (integration)", () => {
         property_id: propertyId,
         from_address: "+18164876899",
         to_address: "+18165559999",
-        body: "sender inventory never synced",
+        body: "sender inventory never synced Mel with BMH.",
       })
       .select("id")
       .single();
@@ -1187,7 +1406,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "queued metadata survives release",
+        body: "queued metadata survives release Mel with BMH.",
         queueOnly: true,
         metadata: {
           source: "send.integration.test",
@@ -1226,7 +1445,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "live reply from cockpit",
+        body: "live reply from cockpit Mel with BMH.",
         queueOnly: false,
       });
       expect(outcome.status).toBe("sent");
@@ -1243,7 +1462,7 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("send-now: consent + quiet-hours gates still apply with queueOnly=false", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-06-08T18:00:00Z"));
 
     // No consent no longer blocks unless the contact explicitly opted out.
@@ -1253,7 +1472,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId: a.contactId,
         propertyId: a.propertyId,
-        body: "should be allowed",
+        body: "should be allowed Mel with BMH.",
         queueOnly: false,
       });
       expect(noConsent.status).toBe("sent");
@@ -1284,7 +1503,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "FAIL: force the mock to reject",
+        body: "FAIL: force the mock to reject Mel with BMH.",
       });
       expect(outcome.status).toBe("provider_failed");
 
@@ -1313,7 +1532,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "FAIL-RATE_LIMIT: defer this queued message",
+        body: "FAIL-RATE_LIMIT: defer this queued message Mel with BMH.",
         queueOnly: true,
       });
       expect(queue.status).toBe("queued");
@@ -1363,7 +1582,7 @@ describe("sendSmsToContact (integration)", () => {
       await supabase
         .from("messages")
         .update({
-          body: "Recovered provider send",
+          body: "Recovered provider send Mel with BMH.",
           scheduled_for: new Date(Date.now() - 1000).toISOString(),
         })
         .eq("id", queue.messageId);
@@ -1401,7 +1620,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "FAIL-RATE_LIMIT: defer this queued campaign message",
+        body: "FAIL-RATE_LIMIT: defer this queued campaign message Mel with BMH.",
         queueOnly: true,
         scheduledFor: new Date(Date.now() - 1000),
         campaignId: campaign!.id,
@@ -1443,7 +1662,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "FAIL-RATE_LIMIT: cap this queued message",
+        body: "FAIL-RATE_LIMIT: cap this queued message Mel with BMH.",
         queueOnly: true,
         metadata: {
           providerRetry: {
@@ -1485,7 +1704,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "FAIL-CARRIER_BLOCK: do not retry this queued message",
+        body: "FAIL-CARRIER_BLOCK: do not retry this queued message Mel with BMH.",
         queueOnly: true,
       });
       expect(queue.status).toBe("queued");
@@ -1540,7 +1759,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "queued from the campaign sender",
+        body: "queued from the campaign sender Mel with BMH.",
         from: MOCK_SENDER_SECONDARY,
         campaignId: campaign!.id,
         queueOnly: true,
@@ -1563,7 +1782,7 @@ describe("sendSmsToContact (integration)", () => {
       // never an env default.
       const lastCall = getMockMessageLog().at(-1);
       expect(lastCall?.input.from).toBe(MOCK_SENDER_SECONDARY);
-      expect(lastCall?.body).toBe("queued from the campaign sender");
+      expect(lastCall?.body).toBe("queued from the campaign sender Mel with BMH.");
     } finally {
       vi.useRealTimers();
     }
@@ -1582,7 +1801,7 @@ describe("sendSmsToContact (integration)", () => {
         property_id: propertyId,
         from_address: "+15550009999",
         to_address: "+18165559999",
-        body: "queued from an unapproved sender",
+        body: "queued from an unapproved sender Mel with BMH.",
       })
       .select("id")
       .single();
@@ -1611,7 +1830,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued from a deactivated sender",
+      body: "queued from a deactivated sender Mel with BMH.",
       from: MOCK_SENDER_SECONDARY,
       queueOnly: true,
     });
@@ -1648,7 +1867,7 @@ describe("sendSmsToContact (integration)", () => {
       origin: "manual",
       contactId,
       propertyId,
-      body: "queued before the first catalog sync",
+      body: "queued before the first catalog sync Mel with BMH.",
       queueOnly: true,
     });
     expect(queue.status).toBe("queued");
@@ -1702,7 +1921,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "hello from the primary sender",
+        body: "hello from the primary sender Mel with BMH.",
         from: MOCK_SENDER_PRIMARY,
       });
       expect(primarySend.status).toBe("sent");
@@ -1710,7 +1929,7 @@ describe("sendSmsToContact (integration)", () => {
         origin: "manual",
         contactId,
         propertyId,
-        body: "hello from the secondary sender",
+        body: "hello from the secondary sender Mel with BMH.",
         from: MOCK_SENDER_SECONDARY,
       });
       expect(secondarySend.status).toBe("sent");

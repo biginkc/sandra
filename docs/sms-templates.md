@@ -1,8 +1,14 @@
 # SMS Template Library: Sandra CRM
 
-Curated SMS templates for two audiences: **distressed homeowners** (cold outreach + reply handlers) and **listing agents** (acquisition + reply handlers). Patterns synthesized from publicly-available scripts and frameworks used by Brent Daniels (TTP), Pace Morby (SubTo), Jerry Norton, Steve Trang (Objection Proof), Zack Boothe (DFD Mastery), Max Maxwell, King Khang, Kyle Krason, Lili Thompson, Danny B., plus platform-published templates from BatchLeads, Launch Control, REI Reply, REI/kit, DealMachine, SimpleTexting, RealEstateSkills, PropertyLeads, and Carrot. Compliance guidance reflects the carrier and FCC landscape as of mid-2025.
+Curated SMS templates for two audiences: **distressed homeowners** (cold outreach + reply handlers) and **listing agents** (acquisition + reply handlers). Patterns synthesized from publicly-available scripts and frameworks used by Brent Daniels (TTP), Pace Morby (SubTo), Jerry Norton, Steve Trang (Objection Proof), Zack Boothe (DFD Mastery), Max Maxwell, King Khang, Kyle Krason, Lili Thompson, Danny B., plus platform-published templates from BatchLeads, Launch Control, REI Reply, REI/kit, DealMachine, SimpleTexting, RealEstateSkills, PropertyLeads, and Carrot.
 
 Source URLs are listed in the "References" section at the end so any template can be traced back to the pattern it's based on.
+
+## Current production policy: identify the sender in every opening source
+
+Every opening SMS source for BMH must contain the exact literal **“Mel with BMH”**. This applies to the 15-row `Opener - Homeowner` pool, the homeowner and agent/FSBO opener rows when present, and step 0 of the `First touch new lead` sequence. The durable migration updates only the approved historical copy, so an already-new row is a no-op and a later custom edit is preserved. Follow-ups and replies keep their existing copy and variable behavior.
+
+The anonymous opener examples elsewhere in this document are historical source material. They describe the patterns that informed the original library and are retained for provenance; they are obsolete for current BMH opening sends and must not be reintroduced as new opener copy. Carrier and provider requirements change, so verify the active provider rules and obtain current legal guidance before launching a campaign. This document records copy policy and implementation behavior, not a legal conclusion.
 
 ---
 
@@ -32,16 +38,9 @@ If you need anything beyond these (e.g. an `agent_first_name` distinct from `fir
 
 ---
 
-## The single most important finding before you write any cold opener
+## Before you write or change an opening source
 
-The carrier rules changed materially in 2025 and most "guru" content predates the change.
-
-- **A2P 10DLC registration is mandatory.** Since Feb 1, 2025, US carriers (Verizon, T-Mobile, AT&T) block, not throttle, 100% of unregistered traffic. Brand + each campaign use-case must be registered with The Campaign Registry.
-- **Touch-1 cold openers cannot contain filtered keywords.** BatchLeads' published filter list (and broadly accurate across the major carriers): _interested, selling, offer, property, cash, local investor, purchase, looking, mortgage, loan, insurance, debt, lend, buy, buying, sell._ Templates containing any of these in touch 1 will be filtered. Once the recipient **replies**, you're "in conversation" and these words become safe.
-- **TCPA "express written consent" is required for marketing messages** sent through any platform that qualifies as an autodialer. The Sandra composer already gates on `blocked_no_consent` and supports operator-attested consent capture, that's the right pattern. A cold list without consent should never be sent into; capture consent at the form/landing-page/recorded-call stage and record it via the existing `captureConsent` action before any template ships.
-- **FCC revocation rule (effective April 11, 2025):** any common opt-out word, STOP, CANCEL, UNSUBSCRIBE, REMOVE, QUIT, END, OPT OUT, "stop texting," "leave me alone," "take me off the list", must be honored within 10 business days, with at most a single confirmation reply within 5 minutes. After that, no marketing to that number across any campaign.
-- **Quiet hours:** no sends before 8am or after 9pm recipient-local time (CTIA standard, carrier-enforced).
-- **Template variation:** rotate at least 10-20 variants of every recurring template so the carrier doesn't fingerprint your account as a bot. The duplicates below in each section are intentional, they're the variant pool, not "pick the best one."
+The opening identity rule is the first check: include **“Mel with BMH”** in the opening body itself. Keep the approved opener variants distinct, use the renderer's fallback syntax for names, and do not assume that a historical source's carrier or legal guidance is still current. Confirm the provider's active requirements and the organization's consent and opt-out workflow before sending.
 
 ---
 
@@ -50,7 +49,7 @@ The carrier rules changed materially in 2025 and most "guru" content predates th
 These nine patterns showed up across 6+ independent sources:
 
 1. **Lead with curiosity, not a pitch.** The dominant 2024-2025 cold opener is one ownership question and nothing else.
-2. **Confirm ownership in touch 1, never pitch.** No "cash," no "offer," no "sell" until they reply.
+2. **Confirm ownership in touch 1, keep the ask simple.** The current BMH opener pool uses a short identity line and one clear question.
 3. **Acknowledge the awkwardness.** "Sorry to bother," "I know this is random," "out of the blue", softens the cold contact and is in nearly every coach's script.
 4. **One question per text.** Multi-question texts get ignored. Yes/no or simple-answer questions get reply rates.
 5. **Deflect price questions with condition questions** (Jerry Norton, Steve Trang). Quoting a number by text anchors the seller against you and kills the call.
@@ -67,37 +66,59 @@ Each entry below is structured as `Name | Category | Content` so it can be impor
 
 ## Category 1: `Outreach - Homeowner` (Initial cold openers, touch 1)
 
-These are the touch-1 templates. **Every one of them is engineered to contain zero filtered keywords** so they get past carrier filters. Variation matters, rotate them, don't pick a favorite.
+These are the five named touch-1 templates in the original `Outreach - Homeowner` library. They now use the approved BMH identity in the body.
 
 ### Ownership confirm (BatchLeads consensus pattern)
 
-> Are you the owner of {{property_address}}?
+> Mel with BMH here. We're local home buyers. Are you the owner of {{property_address}}?
 
-Why it works: pure curiosity, single yes/no, zero filtered words, under 60 characters with sample data. Highest-deliverability opener in the 2024-2025 carrier environment.
+Why it works: it identifies the sender, gives a short context cue, and asks one direct ownership question.
 
 ### Awkward + ownership (Brent Daniels / Kyle Krason pattern adapted to SMS)
 
-> {{first_name | Hey there}}, sorry to bother. I think you might own {{property_address}}? - {{my_first_name}}
+> Hi {{first_name | there}}, I'm Mel with BMH, a local home buyer. Do you own {{property_address}}?
 
-Why it works: "I think you might" is mildly assumptive without being aggressive. Self-identifies the sender. "Sorry to bother" disarms.
+Why it works: the sender is named up front, the local context is brief, and the ownership question is easy to answer.
 
 ### Random acknowledgment (Lili Thompson / Danny B. pattern)
 
-> Hi {{first_name | there}}, I know this is random. Looking for the owner of {{property_address}}. That you?
+> Hi {{first_name | there}}, Mel with BMH here. We buy homes locally. Are you the owner of {{property_address}}?
 
-Why it works: "Random" is the highest-frequency disarmer across the top-10 cold scripts.
+Why it works: the sender and local context are clear before the ownership question.
 
 ### Local + named sender
 
-> {{first_name | Hi}}, {{my_first_name}} here in {{city | your area}}. Quick question: still own the place at {{property_address}}?
+> Hi {{first_name | there}}, I'm Mel with BMH. We're local home buyers. Do you still own {{property_address}}?
 
-Why it works: Hyperlocal anchor builds credibility. "Still own" implies you've done research without being creepy.
+Why it works: it identifies the sender and asks a direct ownership question without relying on a name field.
 
 ### Soft owner-check
 
-> Hey {{first_name | there}}, quick one - are you still tied to {{property_address}}? - {{my_first_name}}
+> Hey {{first_name | there}}, Mel with BMH here. We're local home buyers. Are you still tied to {{property_address}}?
 
 Why it works: "Tied to" is intentionally vague and works for owners, executors, heirs, ex-spouses on title.
+
+### Current `Opener - Homeowner` pool
+
+The 15 system-managed opener variants use the same identity rule. Their exact database names and current bodies are:
+
+```
+Opener: still owner (casual)       | Hi {{first_name | there}}, Mel with BMH here. We're local home buyers. Any interest in a cash offer for {{property_address}}?
+Opener: quick question (direct)    | Hey {{first_name | there}}, I'm Mel with BMH. We buy homes locally. Would you consider a cash offer on {{property_address}}?
+Opener: still yours (brief)        | Hi {{first_name | there}}, I'm Mel with BMH, a local home-buying team. Open to a cash offer for {{property_address}}?
+Opener: named sender + owner check | Hey {{first_name | there}}, Mel with BMH here. We're local cash buyers. Have you thought about selling {{property_address}}?
+Opener: named sender + quick one   | Hi {{first_name | there}}, I'm Mel with BMH. We're local home buyers. Would you like a cash offer on {{property_address}}?
+Opener: random question            | Hi {{first_name | there}}, Mel with BMH here. We buy homes locally. Would selling {{property_address}} for cash interest you?
+Opener: out of the blue            | Hey {{first_name | there}}, I'm Mel with BMH, a local home-buying team. Would you consider selling {{property_address}}?
+Opener: hope not too random         | Hi {{first_name | there}}, Mel with BMH here. We're local cash buyers. Open to discussing an offer for {{property_address}}?
+Opener: weird text + confirm        | Hi {{first_name | there}}, I'm Mel with BMH. We buy homes locally. Is a cash offer for {{property_address}} worth discussing?
+Opener: local sender + tied to      | Hey {{first_name | there}}, Mel with BMH here. We're local home buyers. Would a cash offer on {{property_address}} interest you?
+Opener: right person                 | Hi {{first_name | there}}, I'm Mel with BMH. We're local cash buyers. Can we discuss a cash offer for {{property_address}}?
+Opener: still linked                 | Hey {{first_name | there}}, I'm Mel with BMH. We buy houses locally. Is selling {{property_address}} something you'd consider?
+Opener: named + is this yours        | Hi {{first_name | there}}, Mel with BMH here. We're local home buyers. Interested in hearing a cash offer for {{property_address}}?
+Opener: apology + still own          | Hi {{first_name | there}}, I'm Mel with BMH. We buy homes locally for cash. Are you considering selling {{property_address}}?
+Opener: local area + do you own      | Hey {{first_name | there}}, Mel with BMH here. We're local home buyers. Could we talk about a cash offer for {{property_address}}?
+```
 
 ## Category 2: `Outreach - Homeowner` (Follow-up sequence)
 
@@ -119,11 +140,11 @@ Cadence (consensus across Launch Control, REI Reply, REI/kit, BatchLeads): **Day
 
 > {{first_name | Hi}}, I'll stop reaching out unless I hear back. Reply STOP to opt out anytime. - {{my_first_name}}
 
-The break-up text is the **only** template that should mention STOP explicitly, including STOP in every text reduces deliverability. The auto-reply handler covers all the other revocation phrases.
+Keep opt-out language in the designated break-up and identification paths. Review the provider's current opt-out handling before sending; the auto-reply handler covers the other revocation phrases.
 
 ## Category 3: `Reply - Homeowner` (Objection / question handlers)
 
-Once the recipient has replied, the carrier "in-conversation" status relaxes filtering and you can use `cash`, `offer`, `sell`, etc.
+These handlers are intended for an existing reply conversation, so they can use the fuller qualification language that would be out of place in a short opener.
 
 ### "Who are you?" / "Why are you texting me?"
 
@@ -171,7 +192,7 @@ Pattern source: Steve Trang. Surfaces the real objection without re-pitching.
 
 > You're removed, sorry for the bother. Have a good one.
 
-**Critical:** this should be the only message ever sent to this number after a STOP. The composer already supports per-channel consent state, make sure the SMS provider sets the contact's consent record to revoked the moment any STOP variant is detected, across all campaigns.
+The responder emits one confirmation and records the contact's revoked consent state. Do not send additional marketing after that state is recorded.
 
 ### "Are you a real person?" / "Is this a bot?"
 
@@ -241,11 +262,11 @@ Phone is the right first channel for listing agents (Brent Daniels' 2025 agent s
 
 ### Active listing, after missed call
 
-> Hi {{first_name | there}}, {{my_first_name}} here, left you a VM on your listing at {{property_address}}. Active cash buyer locally, got 2 min?
+> Hi {{first_name | there}}, Mel with BMH here. I left you a VM on your listing at {{property_address}}. We're local cash buyers. Got 2 min?
 
 ### Expired listing
 
-> Hi {{first_name}}, saw {{property_address}} expired. Active cash buyer in {{market | the area}}, interested if your seller is still open.
+> Hi {{first_name | there}}, I'm Mel with BMH. We're local cash buyers. I saw {{property_address}} expired. Is your seller still open to an offer?
 
 ### Bump (Day 3)
 
@@ -311,9 +332,9 @@ Pattern source: RealEstateSkills 15-step framework. Dual-agency offer unlocks mo
 
 ### Identification (first message of every new conversation, if not in opener)
 
-> {{my_first_name}} with {{company_name}}. Reply STOP to opt out.
+> Mel with BMH. Reply STOP to opt out.
 
-Use this only as a postscript on the **first** outbound message in a new conversation, including it on every text reduces engagement and isn't required by the rule.
+Use this only when the opening message does not already identify the sender. The current opening policy requires the literal `Mel with BMH` in the opening body.
 
 ---
 
@@ -323,11 +344,11 @@ If you want to bulk-load these via a script (or paste them into a CSV) the rows 
 
 ```
 NAME | CATEGORY | CONTENT
-Owner check (consensus) | Outreach - Homeowner | Are you the owner of {{property_address}}?
-Awkward owner check | Outreach - Homeowner | {{first_name | Hey there}}, sorry to bother. I think you might own {{property_address}}? - {{my_first_name}}
-Random + owner check | Outreach - Homeowner | Hi {{first_name | there}}, I know this is random. Looking for the owner of {{property_address}}. That you?
-Local sender + still own | Outreach - Homeowner | {{first_name | Hi}}, {{my_first_name}} here in {{city | your area}}. Quick question: still own the place at {{property_address}}?
-Soft tied-to check | Outreach - Homeowner | Hey {{first_name | there}}, quick one - are you still tied to {{property_address}}? - {{my_first_name}}
+Owner check (consensus) | Outreach - Homeowner | Mel with BMH here. We're local home buyers. Are you the owner of {{property_address}}?
+Awkward owner check | Outreach - Homeowner | Hi {{first_name | there}}, I'm Mel with BMH, a local home buyer. Do you own {{property_address}}?
+Random + owner check | Outreach - Homeowner | Hi {{first_name | there}}, Mel with BMH here. We buy homes locally. Are you the owner of {{property_address}}?
+Local sender + still own | Outreach - Homeowner | Hi {{first_name | there}}, I'm Mel with BMH. We're local home buyers. Do you still own {{property_address}}?
+Soft tied-to check | Outreach - Homeowner | Hey {{first_name | there}}, Mel with BMH here. We're local home buyers. Are you still tied to {{property_address}}?
 Touch 2, bump | Outreach - Homeowner | Hey {{first_name | there}}, didn't want my last text to get buried. Still you on {{property_address}}?
 Touch 3, soft close | Outreach - Homeowner | {{first_name | Hi}}, last try from me on {{property_address}}. Even a "wrong house" helps me close the loop.
 Touch 4, re-engage | Outreach - Homeowner | {{first_name | Hey}}, circling back on {{property_address}}. Anything change on your end? No pressure either way.
@@ -351,8 +372,8 @@ Reply: Maybe what price (range pivot) | Reply - Homeowner | Depends on condition
 Reply: How fast | Reply - Homeowner | 7-14 days, all cash. Title sets the actual date but we don't drag our feet.
 Reply: Send email | Reply - Homeowner | Will do, what's the best email? I'll send a one-pager and details before we talk.
 Reply: Call me | Reply - Homeowner | Absolutely, what's a good time today or tomorrow? I'll keep it under 5 minutes.
-Agent: Active listing post-VM | Outreach - Agent | Hi {{first_name | there}}, {{my_first_name}} here, left you a VM on your listing at {{property_address}}. Active cash buyer locally, got 2 min?
-Agent: Expired listing | Outreach - Agent | Hi {{first_name}}, saw {{property_address}} expired. Active cash buyer in {{market | the area}}, interested if your seller is still open.
+Agent: Active listing post-VM | Outreach - Agent | Hi {{first_name | there}}, Mel with BMH here. I left you a VM on your listing at {{property_address}}. We're local cash buyers. Got 2 min?
+Agent: Expired listing | Outreach - Agent | Hi {{first_name | there}}, I'm Mel with BMH. We're local cash buyers. I saw {{property_address}} expired. Is your seller still open to an offer?
 Agent: Bump | Outreach - Agent | Hey {{first_name}}, circling back on {{property_address}}. Worth a quick chat? - {{my_first_name}}
 Agent: Break-up | Outreach - Agent | Last bump on {{property_address}}, {{first_name}}. If it's not a fit, no worries, happy to be on your buyer list. Reply STOP to opt out.
 Agent reply: Who are you with | Reply - Agent | {{my_first_name}} with {{company_name}}, active cash buyer in {{market | your area}}. Close fast, full co-op to listing side.
@@ -365,7 +386,7 @@ Agent reply: Speed + contingencies | Reply - Agent | 7-14 days, no financing or 
 Agent reply: Commission | Reply - Agent | Full co-op to listing side, paid at close per the MLS. No haggling on your fee.
 Agent reply: Not interested | Reply - Agent | All good, appreciate the reply. If anything comes across that needs a fast cash close, keep me in mind.
 Agent reply: Offer on this one | Reply - Agent | Need to see condition + run comps. Can I get inside this week? Same-day written offer once I've walked it.
-First-message identification | Compliance | {{my_first_name}} with {{company_name}}. Reply STOP to opt out.
+First-message identification | Compliance | Mel with BMH. Reply STOP to opt out.
 ```
 
 ---
@@ -393,7 +414,7 @@ Platforms:
 - RealEstateSkills, Wholesaling with agents: <https://www.realestateskills.com/blog/wholesaling-with-real-estate-agents>
 - PropertyLeads, Wholesale text message scripts: <https://www.propertyleads.com/wholesale-text-message-script/>
 
-Compliance (verify directly with your SMS provider before launching campaigns):
+Provider/compliance sources to verify directly before launching campaigns:
 - A2P 10DLC compliance overview (Apten): <https://www.apten.ai/blog/a2p-dlc-compliance-2026>
 - DMText TCPA + 10DLC compliance checklist: <https://www.dmtext.com/blog/sms-compliance-checklist-2025>
 - CloudContact 10DLC update 2025: <https://cloudcontactai.com/10dlc-registration-and-regulation-recent-update/>
