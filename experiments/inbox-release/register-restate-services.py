@@ -18,6 +18,7 @@ import subprocess
 import sys
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 
 MARKER = "sandra-inbox-release-http-owned-20260917"
@@ -165,12 +166,40 @@ def http_json(url: str, *, method: str = "GET", payload: dict | None = None) -> 
     return status, body
 
 
+def canonical_root_endpoint(value: object) -> tuple[str, str, int | None, str] | None:
+    """Normalize only the optional slash on an HTTP service root.
+
+    Restate's deployment registry returns service roots with a trailing slash
+    even when registration accepted the slashless URI.  Host, explicit port,
+    scheme, query, fragment, credentials, and every non-root path remain
+    significant and are rejected from normalization.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() != "http" or parsed.username or parsed.password:
+            return None
+        if parsed.hostname is None or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+            return None
+        port = parsed.port
+    except ValueError:
+        return None
+    return (parsed.scheme.lower(), parsed.hostname.lower(), port, "/")
+
+
+def deployment_uri_matches(actual: object, expected: str) -> bool:
+    actual_root = canonical_root_endpoint(actual)
+    expected_root = canonical_root_endpoint(expected)
+    return actual_root is not None and actual_root == expected_root
+
+
 def deployment_matches(registry: dict, endpoint: str, service: str) -> dict | None:
     deployments = registry.get("deployments")
     if not isinstance(deployments, list):
         raise GuardError("Restate deployment registry has no deployments list")
     for deployment in deployments:
-        if not isinstance(deployment, dict) or deployment.get("uri") != endpoint:
+        if not isinstance(deployment, dict) or not deployment_uri_matches(deployment.get("uri"), endpoint):
             continue
         if not deployment.get("id") or not isinstance(deployment.get("sdk_version"), str) or not deployment["sdk_version"]:
             raise GuardError(f"Restate deployment for {endpoint} has no immutable ID/SDK version")
