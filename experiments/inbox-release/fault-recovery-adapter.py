@@ -35,8 +35,9 @@ CONTAINERS = {
     "rest": "sandra-inbox-release-http-rest-20260917",
     "gateway": "sandra-inbox-release-http-kong-20260917",
     "realtime": "sandra-inbox-release-http-realtime-20260917",
-    "projection": "sandra-inbox-release-http-projection-20260917",
+    "projection": "sandra-inbox-release-projection-worker-20260917",
 }
+RETIRED_PROJECTION = "sandra-inbox-release-http-projection-20260917"
 HEALTH = {
     "db": ("db", None),
     "auth": ("http", "http://127.0.0.1:54321/auth/v1/health"),
@@ -65,8 +66,11 @@ def inspect(name: str) -> dict:
         fail(f"expected one owned container: {name}")
     row = rows[0]
     labels = row.get("Config", {}).get("Labels", {})
-    if labels.get("purpose") != "sandra-inbox-release-http" or labels.get("owner") != "release-infra" or labels.get("marker") != MARKER:
+    expected_purpose = "sandra-inbox-release-runtime" if name == CONTAINERS["projection"] else "sandra-inbox-release-http"
+    if labels.get("purpose") != expected_purpose or labels.get("owner") != "release-infra" or labels.get("marker") != MARKER:
         fail(f"ownership marker mismatch: {name}")
+    if name == CONTAINERS["projection"] and labels.get("component") != "projection-worker":
+        fail(f"projection component marker mismatch: {name}")
     if row.get("State", {}).get("Status") != "running":
         fail(f"container is not running: {name}")
     return row
@@ -83,10 +87,35 @@ def verify_target() -> None:
         fail("customer sends are forbidden")
     for name in CONTAINERS.values():
         inspect(name)
+    retired = json.loads(docker("inspect", RETIRED_PROJECTION)) if _exists(RETIRED_PROJECTION) else []
+    if retired:
+        if len(retired) != 1:
+            fail(f"expected one retired projection container: {RETIRED_PROJECTION}")
+        retired_row = retired[0]
+        retired_labels = retired_row.get("Config", {}).get("Labels", {})
+        if retired_labels.get("purpose") != "sandra-inbox-release-http" or retired_labels.get("owner") != "release-infra" or retired_labels.get("marker") != MARKER:
+            fail(f"retired projection ownership marker mismatch: {RETIRED_PROJECTION}")
+        if retired_row.get("State", {}).get("Status") == "running":
+            fail(f"retired projection must remain stopped: {RETIRED_PROJECTION}")
     db = CONTAINERS["db"]
     identity = docker("exec", db, "psql", "-XqAt", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", "SELECT current_database()||'|'||(SELECT marker FROM install_fixture.identity)||'|'||(SELECT serving_enabled FROM inbox_control.rollout);")
     if identity != f"postgres|{DATABASE_MARKER}|true":
         fail(f"owned HTTP database identity mismatch: {identity!r}")
+
+
+def _exists(name: str) -> bool:
+    result = subprocess.run(
+        ["docker", "--host", SOCKET, "inspect", name],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    if result.returncode == 0:
+        return True
+    if "No such object" in result.stderr:
+        return False
+    fail(f"docker inspect failed for {name}: {result.stderr.strip()[-1000:]}")
 
 
 def wait_http(url: str, timeout: float = 30.0) -> None:
