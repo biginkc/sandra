@@ -1,8 +1,8 @@
 {
-  "status": "RELEASE_CANDIDATE_WITH_BLOCKED_RUNTIME_AND_STRESS_GATES",
-  "candidate_sha": "a656f3847f6775b960446155f6cd8708736dad60",
+  "status": "RELEASE_CANDIDATE_WITH_BLOCKED_INSTALL_AND_STRESS_GATES",
+  "candidate_sha": "a97bcbded9b06ff3d591fae197a0dfd96eef2308",
   "source_snapshot_sha": "68555650bb5b09b9d2f01a4c0429da1f12c91840",
-  "evidence_scope": "Owned browser, SQL, and cleanup proofs ran at candidate_sha. The generated operation/reply packet is intentionally pinned to source_snapshot_sha; every SQL/runtime path listed by the backend and execution manifests is byte-identical between those commits. This evidence file is metadata only and does not claim production deployment.",
+  "evidence_scope": "Owned browser, SQL, and cleanup proofs ran at the reviewed product candidate before the release-only supervision delta. The generated operation/reply packet is intentionally pinned to source_snapshot_sha; every SQL/runtime path listed by the backend and execution manifests is byte-identical between those commits. Recovery, relay parity, and rollback evidence below were independently reproduced at candidate_sha. This evidence file is metadata only and does not claim production deployment.",
   "flags": {
     "production_inbox_actions_server_enabled": "off",
     "production_inbox_replies_server_enabled": "off",
@@ -24,12 +24,14 @@
     "backend_packet_provenance": "PASS: packet source_snapshot_sha is the reviewed backend snapshot and current manifest hashes match it at candidate_sha",
     "http_stack_probe": "PASS: authenticated RPCs, WebSocket 101, projection health",
     "saved_action_fixture_reconciliation": "PASS: owned T2 SQL proof reconciled the validator and completed immutable/scoping/reference/guard checks",
-    "worker_recovery": "BLOCKED: release-gate recovery evidence was not produced for this source snapshot",
+    "worker_recovery": "PASS: full-runtime relay, operation worker, reply worker, Restate, and Electric restart recovery reproduced at candidate_sha",
+    "relay_parity": "PASS: live owned relay auth/shape/method checks plus 9 relay and 23 upstream tests",
+    "rollback_receipt_read": "PASS: serving and command admission disabled transaction preserved authenticated receipt/read and recovery wrappers",
     "stress_harness_unit": "PASS: 6 tests",
     "stress_measurements": "BLOCKED_UNJUDGED"
   },
   "validation": {
-    "release_unit_tests": "PASS: 43 tests",
+    "release_unit_tests": "PASS: 44 tests",
     "production_install_unit_tests": "PASS: 15 tests",
     "inbox_vitest": "PASS: 571 tests across 36 files (src/lib/inbox subset: 567 tests)",
     "typecheck": "PASS",
@@ -41,9 +43,6 @@
     "installed_schema_exact: the release gate requires an exact installed-catalog proof artifact; the T2 proof is not that gate",
     "current_volume_stress: measured arrival rate, concurrency, tenant count, and history skew are not supplied",
     "three_x_volume_stress: measured arrival rate, concurrency, tenant count, and history skew are not supplied",
-    "worker_recovery: exact release-stack termination/lease/duplicate recovery evidence is absent",
-    "relay_parity: exact release relay parity evidence is absent",
-    "rollback_receipt_read: exact disable-admission receipt/read evidence is absent",
     "pilot_enablement: production deployment and pilot enablement remain intentionally disabled"
   ],
   "scope": "Owned rehearsal evidence only; no production deployment or pilot enablement claim."
