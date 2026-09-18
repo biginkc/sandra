@@ -175,7 +175,7 @@ test.describe.serial("Inbox reviewed replies (runtime-unproven)", () => {
     await ensureTestUser(admin);
   });
 
-  test.beforeEach(async (_, testInfo) => {
+  test.beforeEach(async ({}, testInfo) => {
     purgeRowOutcomes(ROW_OWNERSHIP[testInfo.title] ?? []);
     templateIds = [];
     await resetTenantTables(admin);
