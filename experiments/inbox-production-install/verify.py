@@ -22,6 +22,28 @@ subprocess.run([sys.executable,str(P/'read-companion.py')],check=True)
 foundation=P/'generated/install-candidate.sql';cand=foundation.read_text();digest=hashlib.sha256(foundation.read_bytes()).hexdigest()
 companion_path=P/'generated/read-companion.sql'
 companion=companion_path.read_text() if companion_path.exists() else ''
+
+def installer_owner_contract():
+ # Ownership is an installer contract, not a value that a previous catalog
+ # snapshot is allowed to redefine. build.py rejects every role other than the
+ # migration role and creates each candidate schema with AUTHORIZATION.
+ build_contract=(P/'build.py').read_text()
+ migration_roles=sorted(set(re.findall(r"current_user<>?'([^']+)'",build_contract)))
+ authorized_roles=sorted(set(re.findall(r'CREATE SCHEMA \w+ AUTHORIZATION (\w+)',build_contract)))
+ if migration_roles!=['postgres'] or authorized_roles!=['postgres']:
+  raise RuntimeError('Installer owner contract drift: build.py must require and authorize postgres')
+ return 'postgres'
+
+INSTALLER_OWNER=installer_owner_contract()
+column_acl_contract=json.loads((P/'column-acl.json').read_text()) if (P/'column-acl.json').exists() else {}
+if column_acl_contract.get('contract')!='no-column-specific-grants':
+ raise RuntimeError('column-acl.json must declare the reviewed no-column-specific-grants contract')
+if any(value!=INSTALLER_OWNER for value in json.loads((P/'function-owners.json').read_text()).values()):
+ raise RuntimeError('function-owners.json contains a value outside the installer owner contract')
+if any(value!=INSTALLER_OWNER for value in json.loads((P/'relation-owners.json').read_text()).values()):
+ raise RuntimeError('relation-owners.json contains a value outside the installer owner contract')
+if re.search(r'\bGRANT\s+[A-Z ,]+\([^)]*\)\s+ON\s+',cand+'\n'+companion,re.I):
+ raise RuntimeError('Source candidate contains column-specific GRANT syntax but column-acl.json declares no-column-specific-grants')
 if a.source_only:
  print('Source-manifest hashes match, bundle Python parses, and candidate/read companion compile deterministically (no DB).')
  sys.exit(0)
@@ -302,18 +324,6 @@ def scratch_name(t):return t.replace('.','__')
 
 private_schemas=json.loads((P/'private-schemas.json').read_text())
 owner_pins=json.loads((P/'function-owners.json').read_text()) if (P/'function-owners.json').exists() else {}
-# Ownership is an installer contract, not a value that a previous catalog
-# snapshot is allowed to redefine.  build.py rejects every role other than the
-# migration role and creates each candidate schema with an explicit
-# AUTHORIZATION clause.  Keep the pin files as a completeness check, but derive
-# the expected role from that reviewed contract so a forged or stale pin file
-# cannot bless a different owner.
-_build_contract=(P/'build.py').read_text()
-_migration_roles=sorted(set(re.findall(r"current_user<>?'([^']+)'",_build_contract)))
-_authorized_roles=sorted(set(re.findall(r'CREATE SCHEMA \w+ AUTHORIZATION (\w+)',_build_contract)))
-if _migration_roles != ['postgres'] or _authorized_roles != ['postgres']:
- raise RuntimeError('Installer owner contract drift: build.py must require and authorize postgres')
-INSTALLER_OWNER='postgres'
 
 def pinned_owner(pins,pin_key,filename):
  expected=pins.get(pin_key)
@@ -354,9 +364,6 @@ grant_pins=json.loads((P/'function-grants.json').read_text()) if (P/'function-gr
 # every composite type it declares.
 relation_owner_pins=json.loads((P/'relation-owners.json').read_text()) if (P/'relation-owners.json').exists() else {}
 relation_acl_pins=json.loads((P/'relation-acl.json').read_text()) if (P/'relation-acl.json').exists() else {}
-column_acl_contract=json.loads((P/'column-acl.json').read_text()) if (P/'column-acl.json').exists() else {}
-if column_acl_contract.get('contract')!='no-column-specific-grants':
- raise RuntimeError('column-acl.json must declare the reviewed no-column-specific-grants contract')
 
 # Functions: capture the WHOLE verbatim matched "CREATE (OR REPLACE) FUNCTION
 # ... AS $$ ... $$;" statement, nothing else. Round-4 no longer parses any

@@ -24,7 +24,7 @@
   "unknown-retention-test.py": "15c027cc365b46d2fdc21e7ff4e0ca6ea74afef21949f8a9c70424a9eb1d99c7",
   "unknown-retention.sql": "974eab36185aa70d78099eb1867e35c741a51bf5b5b0d68155be74e5604e6504",
   "verify-mutation-harness.py": "1a7fcf4aae481a7ee7c0782eee22ae14c3b7764a146b7d901e746075f05f95e0",
-  "verify.py": "8f886006a355dbacb0c62dff56731b273b2de163f03847ee589c831c5b6715ce",
+  "verify.py": "ca6e6fba1a6b21fd8fa96bc2a51b2b58bde8d87967b3ce205e954f0406655221",
   "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15",
   "selection-review.sql": "8c7d3492ec6766963e2d518d24b221316545f07bc1ba7923f25402dc23802dbd",
   "reviewed-read/06-inbox-workset-updates-setup.sql": "7916e78557da25af1044c6a2c4697be06c48606776a3533ea876b039a2a28106",
