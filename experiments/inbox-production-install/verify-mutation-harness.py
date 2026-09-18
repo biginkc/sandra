@@ -177,7 +177,10 @@ run_case('composite_attribute_type_changed',
 run_case('composite_attribute_renamed',
  lambda: sql("ALTER TYPE inbox_bridge.cursor_context RENAME ATTRIBUTE cursor_kind TO cursor_kind_renamed"),
  lambda: sql("ALTER TYPE inbox_bridge.cursor_context RENAME ATTRIBUTE cursor_kind_renamed TO cursor_kind"),
- 'column set drift on inbox_bridge.cursor_context')
+ # Renaming also removes the reviewed original pin before the later live
+ # column-set branch runs, so it must assert the same complete-pin rejection
+ # as the dropped-attribute case.
+ 'column-acl.json contains pins for columns absent from the candidate')
 
 # 8h. Give a text attribute an explicit non-default collation.
 run_case('composite_attribute_collation_changed',
