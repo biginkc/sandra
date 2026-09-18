@@ -61,7 +61,7 @@ CREATE FUNCTION inbox_action_api.prepare(canonical_input text,k uuid) RETURNS js
 LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE intent jsonb; a jsonb;o uuid;u uuid;definition jsonb;step jsonb;target jsonb;resolved jsonb;
  p public.properties;assignee uuid;item jsonb;items jsonb:='[]';effects jsonb:='[]';plans jsonb:='{}';plan jsonb;requirements jsonb;sms_scope jsonb;
- property_ids uuid[];enrollment_ids uuid[];row record;prep_id uuid:=gen_random_uuid();hash text;expires timestamptz:=clock_timestamp()+interval '5 minutes';exclusion text;has_sms boolean:=false;has_outcome boolean:=false;has_assignment boolean:=false;
+ property_ids uuid[];enrollment_ids uuid[];message_ids uuid[];unknown_group uuid;unknown_raw text;unknown_revision bigint;unknown_action text;row record;prep_id uuid:=gen_random_uuid();hash text;expires timestamptz:=clock_timestamp()+interval '5 minutes';exclusion text;has_sms boolean:=false;has_outcome boolean:=false;has_assignment boolean:=false;has_promotion boolean:=false;metadata_effect_count integer:=0;metadata_ordinal integer:=0;follow_up_template text;
 BEGIN
  IF k IS NULL OR canonical_input IS NULL OR octet_length(canonical_input)>131072 THEN RAISE EXCEPTION 'Invalid action input';END IF;
  PERFORM inbox_action_api.assert_json_shape(canonical_input::json);
@@ -71,8 +71,8 @@ BEGIN
  IF o IS NULL OR u IS NULL THEN RAISE EXCEPTION 'Invalid action actor';END IF;
  a:=inbox_action_api.authorize(o,u);
  definition:=intent->'definition';
- IF jsonb_typeof(definition) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(definition))<>2 OR definition->'version' IS DISTINCT FROM '1'::jsonb OR jsonb_typeof(definition->'steps') IS DISTINCT FROM 'array' OR jsonb_array_length(definition->'steps') NOT BETWEEN 1 AND 2 THEN RAISE EXCEPTION 'Unsupported action definition';END IF;
- FOR step IN SELECT value FROM jsonb_array_elements(definition->'steps') LOOP
+ IF jsonb_typeof(definition) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(definition))<>2 OR definition->'version' IS DISTINCT FROM '1'::jsonb OR jsonb_typeof(definition->'steps') IS DISTINCT FROM 'array' OR jsonb_array_length(definition->'steps') NOT BETWEEN 1 AND 5 THEN RAISE EXCEPTION 'Unsupported action definition';END IF;
+ FOR step IN SELECT value FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY q(value,position) ORDER BY position LOOP
   IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 THEN RAISE EXCEPTION 'Unsupported action step';END IF;
   IF step->>'type'='outcome' THEN
    IF has_outcome OR has_assignment OR NOT(step ? 'value') THEN RAISE EXCEPTION 'Invalid action order';END IF;has_outcome:=true;
@@ -86,14 +86,41 @@ BEGIN
     IF NOT FOUND THEN RAISE EXCEPTION 'assignee_unavailable';END IF;
    END IF;
    IF assignee IS NOT NULL AND NOT EXISTS(SELECT 1 FROM public.memberships WHERE org_id=o AND user_id=assignee AND access_status='active' AND deletion_prepared_at IS NULL AND (access_expires_at IS NULL OR access_expires_at>clock_timestamp())) THEN RAISE EXCEPTION 'assignee_unavailable';END IF;
+  ELSIF step->>'type'='promote' THEN
+   IF has_promotion OR has_assignment THEN RAISE EXCEPTION 'Invalid action order';END IF;has_promotion:=true;
+  ELSIF step->>'type' IN ('dismiss_unknown','restore_unknown') THEN
+   IF has_assignment OR has_outcome AND has_assignment THEN RAISE EXCEPTION 'Invalid action order';END IF;
+   IF unknown_action IS NOT NULL AND unknown_action IS DISTINCT FROM step->>'type' THEN RAISE EXCEPTION 'Invalid unknown action order';END IF;
+   unknown_action:=step->>'type';
+  ELSIF step->>'type'='review_reply' THEN
+   IF step->>'text' IS NULL OR btrim(step->>'text')='' OR length(step->>'text')>1600 THEN RAISE EXCEPTION 'Unsupported review reply step';END IF;
+   follow_up_template:=btrim(step->>'text');
   ELSE RAISE EXCEPTION 'Unsupported action step';END IF;
  END LOOP;
+ IF (SELECT count(*) FROM jsonb_array_elements(definition->'steps') s WHERE s->>'type'='review_reply')>1 OR ((SELECT count(*) FROM jsonb_array_elements(definition->'steps') s WHERE s->>'type'='review_reply')=1 AND (definition->'steps'->-1)->>'type'<>'review_reply') THEN RAISE EXCEPTION 'Invalid review reply order';END IF;
  IF jsonb_typeof(intent->'targets') IS DISTINCT FROM 'array' OR jsonb_array_length(intent->'targets') NOT BETWEEN 1 AND 500 THEN RAISE EXCEPTION 'Invalid bounded targets';END IF;
  IF (SELECT count(DISTINCT (value->>'kind')||':'||(value->>'id')) FROM jsonb_array_elements(intent->'targets'))<>jsonb_array_length(intent->'targets') THEN RAISE EXCEPTION 'Duplicate targets';END IF;
  FOR target IN SELECT value FROM jsonb_array_elements(intent->'targets') ORDER BY value->>'kind',value->>'id' LOOP
   IF jsonb_typeof(target) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(target))<>2 OR NOT(target ?& ARRAY['kind','id']) OR target->>'kind' IS NULL OR target->>'kind' NOT IN ('conversation','unknown_sender_group') OR target->>'id' IS NULL THEN RAISE EXCEPTION 'Invalid typed target';END IF;
   PERFORM (target->>'id')::uuid;exclusion:=NULL;resolved:='{}';
-  IF target->>'kind'<>'conversation' THEN exclusion:='unsupported_target';
+  IF target->>'kind'='unknown_sender_group' AND unknown_action IS NULL THEN exclusion:='unsupported_target';
+  ELSIF target->>'kind'='unknown_sender_group' THEN
+   -- Unknown actions bind a persistent sender-group identity and an exact
+   -- message-id workset at prepare time. Raw sender is used only to resolve
+   -- this authoritative group; it is never re-expanded by the worker.
+   unknown_group:=(target->>'id')::uuid;
+   SELECT g.raw_sender INTO unknown_raw FROM inbox_t2_message_capture.sender_groups g WHERE g.org_id=o AND g.sender_group_id=unknown_group FOR SHARE;
+   IF unknown_raw IS NULL THEN exclusion:='conversation_unavailable';
+   ELSE
+    SELECT v.revision INTO unknown_revision FROM inbox_t2_message_capture.versions v WHERE v.org_id=o AND v.namespace='unknown_action' AND v.target_id=unknown_group FOR UPDATE;
+    IF unknown_revision IS NULL THEN exclusion:='source_baseline_unavailable';
+    ELSE
+     SELECT array_agg(q.id ORDER BY q.id) INTO message_ids FROM (SELECT m.id FROM public.messages m WHERE m.org_id=o AND m.channel='sms' AND m.direction='inbound' AND m.contact_id IS NULL AND m.from_address=unknown_raw AND CASE unknown_action WHEN 'dismiss_unknown' THEN m.dismissed_at IS NULL WHEN 'restore_unknown' THEN m.dismissed_at IS NOT NULL ELSE false END ORDER BY m.id LIMIT 501) q;
+     IF cardinality(message_ids) IS NULL OR cardinality(message_ids)=0 THEN exclusion:='conversation_unavailable';
+     ELSIF cardinality(message_ids)>500 THEN exclusion:='scope_too_large';
+     ELSE resolved:=jsonb_build_object('unknown_action',jsonb_build_object('sender_group_id',unknown_group,'raw_sender',unknown_raw,'revision',unknown_revision::text,'message_ids',to_jsonb(message_ids))); END IF;
+    END IF;
+   END IF;
   ELSE
    -- Avoid persistent counters for arbitrary nonexistent client UUIDs. This
    -- first read is only a negative fast path, never the prepared mapping.
@@ -137,22 +164,33 @@ BEGIN
     END IF;
    END IF;
   END IF;
-  item:=jsonb_build_object('id',gen_random_uuid(),'kind',target->>'kind','target_id',(target->>'id')::uuid,'resolution',jsonb_build_object('property_id',CASE WHEN exclusion IS NULL THEN resolved->>'property_id' END,'valid_until',resolved->'next_window_expiry'),'exclusion_code',exclusion);
+  item:=jsonb_build_object('id',gen_random_uuid(),'kind',target->>'kind','target_id',(target->>'id')::uuid,'resolution',CASE WHEN target->>'kind'='unknown_sender_group' THEN coalesce(resolved->'unknown_action','{}'::jsonb) ELSE jsonb_build_object('property_id',CASE WHEN exclusion IS NULL THEN resolved->>'property_id' END,'valid_until',resolved->'next_window_expiry') END,'exclusion_code',exclusion);
   items:=items||jsonb_build_array(item);
  END LOOP;
  FOR row IN SELECT key,value FROM jsonb_each(plans) ORDER BY key LOOP
-  FOR step IN SELECT value||jsonb_build_object('ordinal',ordinality-1) FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY LOOP
+  metadata_ordinal:=0;
+ FOR step IN SELECT value||jsonb_build_object('ordinal',ordinality-1) FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY LOOP
+   IF step->>'type'='review_reply' THEN CONTINUE; END IF;
+   step:=step||jsonb_build_object('ordinal',metadata_ordinal);
    SELECT row.value||jsonb_build_object('targets',jsonb_agg(jsonb_build_object('conversation_id',i->>'target_id','revision',v.revision::text,'valid_until',i->'resolution'->'valid_until') ORDER BY i->>'target_id')) INTO plan
     FROM jsonb_array_elements(items) i JOIN inbox_operation_domain.target_versions v ON v.org_id=o AND v.conversation_id=(i->>'target_id')::uuid WHERE i->>'exclusion_code' IS NULL AND i->'resolution'->>'property_id'=row.key;
-   effects:=effects||jsonb_build_array(jsonb_build_object('effect_key','property:'||row.key,'ordinal',(step->>'ordinal')::integer,'action',step->>'type','payload',CASE WHEN step->>'type'='outcome' THEN jsonb_build_object('property_id',row.key,'value',step->>'value') ELSE jsonb_build_object('property_id',row.key,'user_id',step->'userId') END,'dependencies',plan,'item_ids',(SELECT jsonb_agg(i->>'id' ORDER BY i->>'id') FROM jsonb_array_elements(items) i WHERE i->>'exclusion_code' IS NULL AND i->'resolution'->>'property_id'=row.key)));
+   effects:=effects||jsonb_build_array(jsonb_build_object('effect_key','property:'||row.key,'ordinal',(step->>'ordinal')::integer,'action',step->>'type','payload',CASE WHEN step->>'type'='outcome' THEN jsonb_build_object('property_id',row.key,'value',step->>'value') WHEN step->>'type'='promote' THEN jsonb_build_object('property_id',row.key) ELSE jsonb_build_object('property_id',row.key,'user_id',step->'userId') END,'dependencies',plan,'item_ids',(SELECT jsonb_agg(i->>'id' ORDER BY i->>'id') FROM jsonb_array_elements(items) i WHERE i->>'exclusion_code' IS NULL AND i->'resolution'->>'property_id'=row.key)));
+   metadata_effect_count:=metadata_effect_count+1;metadata_ordinal:=metadata_ordinal+1;
   END LOOP;
  END LOOP;
+ IF unknown_action IS NOT NULL THEN
+  FOR row IN SELECT i FROM jsonb_array_elements(items) i WHERE i->>'kind'='unknown_sender_group' AND i->>'exclusion_code' IS NULL ORDER BY i->>'target_id' LOOP
+   metadata_ordinal:=0;
+   effects:=effects||jsonb_build_array(jsonb_build_object('effect_key','unknown:'||(row.i->>'target_id'),'ordinal',metadata_ordinal,'action',unknown_action,'payload',row.i->'resolution'->'unknown_action','dependencies',jsonb_build_object('unknown_action',row.i->'resolution'->'unknown_action'),'item_ids',jsonb_build_array(row.i->>'id')));
+   metadata_effect_count:=metadata_effect_count+1;metadata_ordinal:=metadata_ordinal+1;
+  END LOOP;
+ END IF;
  IF assignee IS NOT NULL AND NOT EXISTS(SELECT 1 FROM public.memberships WHERE org_id=o AND user_id=assignee AND access_status='active' AND deletion_prepared_at IS NULL AND (access_expires_at IS NULL OR access_expires_at>clock_timestamp())) THEN RAISE EXCEPTION 'assignee_unavailable';END IF;
  PERFORM inbox_action_api.authorize(o,u);
  hash:=encode(sha256(convert_to('sandra:inbox:action:v1','utf8')||decode('00','hex')||convert_to(canonical_input,'utf8')),'hex');
  INSERT INTO inbox_operations.preparations VALUES(prep_id,o,u,canonical_input,hash,definition,jsonb_build_object('items',items,'effects',effects),expires);
  INSERT INTO inbox_action_api.preparation_requests VALUES(prep_id,o,u,k,hash);
- RETURN jsonb_build_object('preparation_id',prep_id,'idempotency_key',k,'input_hash',hash,'expires_at',expires,'definition',definition,'items',items,'effect_count',jsonb_array_length(effects),'affected_property_count',(SELECT count(*) FROM jsonb_object_keys(plans)));
+ RETURN jsonb_build_object('preparation_id',prep_id,'idempotency_key',k,'input_hash',hash,'expires_at',expires,'definition',definition,'items',items,'effect_count',jsonb_array_length(effects),'metadata_effect_count',metadata_effect_count,'affected_property_count',(SELECT count(*) FROM jsonb_object_keys(plans)));
 END $$;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_action_api FROM PUBLIC,anon,authenticated,service_role;
 COMMIT;

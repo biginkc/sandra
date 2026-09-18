@@ -112,6 +112,18 @@ describe("PR-C: parseInboxReplyPrepareRequest (bulk-reply prepare intent, obliga
     expect(result.targets).toHaveLength(2);
     expect(result.template).toBe("Hi {{first_name}}");
   });
+  it("accepts only the bounded source-operation follow-up form without client targets or template", () => {
+    const sourceOperationId = id(77);
+    const result = parseInboxReplyPrepareRequest(JSON.stringify({ idempotencyKey: id(4), sourceOperationId }));
+    expect(result).toMatchObject({ idempotencyKey: id(4), sourceOperationId });
+    expect(result.targets).toEqual([]);
+    expect(result.template).toBe("");
+    for (const body of [
+      { idempotencyKey: id(4), sourceOperationId, targets: [replyTarget(5)] },
+      { idempotencyKey: id(4), sourceOperationId, template: "client text" },
+      { idempotencyKey: id(4), sourceOperationId: id(77), extra: true },
+    ]) expect(() => parseInboxReplyPrepareRequest(JSON.stringify(body))).toThrow(InvalidInboxActionError);
+  });
   it.each([
     // duplicate top-level JSON member
     `{"idempotencyKey":"${id(4)}","idempotencyKey":"${id(4)}","targets":[{"kind":"conversation","id":"${id(5)}"}],"template":"hi"}`,

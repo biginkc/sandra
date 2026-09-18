@@ -44,11 +44,19 @@ export const INBOX_REPLY_EXCLUSIONS: ReadonlySet<InboxReplyExclusion> = new Set(
  * experiments/inbox-reply-preparation/recipient.sql — checked by
  * reply-api-contract.test.ts, which reads that SQL source directly. */
 export const INBOX_REPLY_RECIPIENT_LIMIT = 50;
-export interface InboxReplyPrepareRequest {
-  targets: readonly InboxReplyTarget[];
-  template: string;
-  idempotencyKey: string;
-}
+export type InboxReplyPrepareRequest =
+  | {
+      targets: readonly InboxReplyTarget[];
+      template: string;
+      idempotencyKey: string;
+    }
+  /** Follow-up preparation after an accepted metadata operation. The server
+   * owns the original targets and immutable final template; clients cannot
+   * replace either value in this branch. */
+  | {
+      sourceOperationId: string;
+      idempotencyKey: string;
+    };
 export interface PreparedInboxReplyItem {
   id: string;
   target: InboxReplyTarget;

@@ -3,10 +3,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/types";
 import { parseInboxActionIntent, parseInboxActionDefinition, InvalidInboxActionError, type InboxActionAuthContext, type SavedInboxActionSnapshot } from "./action-definition";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
-import { resolveSavedInboxActionSnapshot, savedActionReferenceFromRaw, isReviewReplySavedDefinition, buildReplyHandoffPayload, InboxSavedActionApiError, type InboxSavedActionClient } from "./saved-action-api";
+import { resolveSavedInboxActionSnapshot, savedActionReferenceFromRaw, reviewReplyFollowUp, buildReplyHandoffPayload, InboxSavedActionApiError, type InboxSavedActionClient } from "./saved-action-api";
 import { createInboxReplyRepository, InboxReplyApiError, type InboxReplyClient } from "./reply-api";
 import type { PreparedInboxReply } from "./reply-api-contract";
-import type { InboxActionRecovery, InboxAssigneeChoice, AcceptedInboxAction, InboxActionExclusion, InboxMetadataStep, InboxOperationStatus, InboxStepState, PreparedInboxAction, PreparedInboxActionItem } from "./action-api-contract";
+import type { InboxActionRecovery, InboxAssigneeChoice, AcceptedInboxAction, InboxActionExclusion, InboxOperationStatus, InboxStepState, PreparedInboxAction, PreparedInboxActionItem, InboxMetadataStep } from "./action-api-contract";
 type ActionDatabase = Omit<Database, "public"> & {
     public: Omit<Database["public"], "Functions"> & {
         Functions: Database["public"]["Functions"] & {
@@ -72,7 +72,7 @@ function failure(error: {
             throw new InboxActionApiError(404, "action_unavailable");
     }
     if (error.code === "P0001") {
-        const conflicts: Record<string, string> = { INBOX_ACTION_PREPARATION_CHANGED: "preparation_changed", INBOX_ACTION_PREPARATION_EXPIRED_OR_EMPTY: "preparation_expired_or_empty", INBOX_ACTION_IDEMPOTENCY_MISMATCH: "idempotency_mismatch", "Preparation expired": "preparation_expired", "Idempotency conflict": "idempotency_conflict", INBOX_ACTION_ASSIGNEE_UNAVAILABLE: "assignee_unavailable", assignee_unavailable: "assignee_unavailable", permanent_dnc_not_enabled: "permanent_dnc_not_enabled" };
+        const conflicts: Record<string, string> = { INBOX_ACTION_PREPARATION_CHANGED: "preparation_changed", INBOX_ACTION_PREPARATION_EXPIRED_OR_EMPTY: "preparation_expired_or_empty", INBOX_ACTION_IDEMPOTENCY_MISMATCH: "idempotency_mismatch", "Preparation expired": "preparation_expired", "Idempotency conflict": "idempotency_conflict", INBOX_ACTION_ASSIGNEE_UNAVAILABLE: "assignee_unavailable", assignee_unavailable: "assignee_unavailable", permanent_dnc_not_enabled: "permanent_dnc_not_enabled", INBOX_SAVED_ACTION_DEFINITION_MISMATCH: "saved_action_definition_mismatch" };
         if (error.message && conflicts[error.message])
             throw new InboxActionApiError(409, conflicts[error.message]);
     }
@@ -88,8 +88,11 @@ function item(value: unknown): PreparedInboxActionItem {
     const row = record(value), resolution = row.resolution === undefined ? row : record(row.resolution);
     need(row.kind === "conversation" || row.kind === "unknown_sender_group");
     need(row.exclusion_code === null || EXCLUSIONS.has(row.exclusion_code as InboxActionExclusion));
-    const propertyId = resolution.property_id === null ? null : id(resolution.property_id);
-    need(row.exclusion_code !== null || propertyId !== null);
+    const propertyId = resolution.property_id === undefined || resolution.property_id === null ? null : id(resolution.property_id);
+    // Unknown-sender command effects intentionally have no property mapping;
+    // their immutable resolution carries the exact message-id workset and
+    // sender-group revision instead.
+    need(row.exclusion_code !== null || propertyId !== null || row.kind === "unknown_sender_group");
     return { id: id(row.id), target: { kind: row.kind, id: id(row.target_id) }, propertyId, exclusion: row.exclusion_code as InboxActionExclusion | null };
 }
 export function createInboxActionRepository(client: InboxActionClient) {
@@ -137,17 +140,22 @@ export function createInboxActionRepository(client: InboxActionClient) {
             // already-validated targets/idempotencyKey (never a re-parse of
             // the raw body), and independently re-validated again by
             // reply-api.ts's own parseInboxReplyPrepareRequest.
-            if (saved && isReviewReplySavedDefinition(saved.definition)) {
+            const isStandaloneReviewReply = parsed.input.definition.steps.length === 1 && parsed.input.definition.steps[0].type === "review_reply";
+            if (isStandaloneReviewReply) {
                 try {
-                    return await createInboxReplyRepository(client as unknown as InboxReplyClient).prepare(buildReplyHandoffPayload(parsed.idempotencyKey, parsed.input.targets, saved.definition), signal);
+                    return await createInboxReplyRepository(client as unknown as InboxReplyClient).prepare(buildReplyHandoffPayload(parsed.idempotencyKey, parsed.input.targets, parsed.input.definition), signal);
                 } catch (error) {
                     if (error instanceof InboxReplyApiError) throw new InboxActionApiError(error.status, error.code);
                     if (error instanceof InvalidInboxActionError) throw new InboxActionApiError(400, "invalid_action");
                     throw error;
                 }
             }
-            need(parsed.input.definition.steps.length <= 2, 400);
-            need(parsed.input.definition.steps.every((step, index) => step.type === "assign" || (step.type === "outcome" && step.value !== "dnc" && index === 0)), 400);
+            const metadataSteps = parsed.input.definition.steps.filter((step): step is Exclude<typeof step, { type: "review_reply" }> => step.type !== "review_reply");
+            need(metadataSteps.length > 0 && metadataSteps.length <= 4, 400);
+            need(metadataSteps.every((step, index) => {
+                if (step.type === "outcome") return step.value !== "dnc" && index === 0;
+                return step.type === "assign" || step.type === "promote" || step.type === "dismiss_unknown" || step.type === "restore_unknown";
+            }), 400);
             const result = await retryReceiptTransaction(() => { signal.throwIfAborted(); return client.rpc("inbox_prepare_action", { canonical_input: parsed.canonicalInput, idempotency_key: parsed.idempotencyKey }).abortSignal(signal); });
             signal.throwIfAborted();
             failure(result.error);
@@ -160,16 +168,27 @@ export function createInboxActionRepository(client: InboxActionClient) {
                 need(targets.delete(key) && !seen.has(value.id));
                 seen.add(value.id);
             }
-            const eligibleCount = items.filter(i => i.exclusion === null).length, affectedPropertyCount = count(row.affected_property_count, 500), effectCount = count(row.effect_count, 1000);
-            need(affectedPropertyCount === new Set(items.filter(i => i.exclusion === null).map(i => i.propertyId)).size && effectCount === affectedPropertyCount * parsed.input.definition.steps.length);
+            const eligibleCount = items.filter(i => i.exclusion === null).length, affectedPropertyCount = count(row.affected_property_count, 500), effectCount = count(row.effect_count, 5000);
+            need(affectedPropertyCount === new Set(items.filter(i => i.exclusion === null && i.propertyId !== null).map(i => i.propertyId)).size);
+            // New preparations report the number of metadata effects compiled
+            // from the authoritative prefix. Keep the old exact check for the
+            // existing property-only SQL response while requiring the explicit
+            // field for combos/unknown-target adapters, where total effects are
+            // not property-count × step-count.
+            if (row.metadata_effect_count !== undefined) {
+                const metadataEffectCount = count(row.metadata_effect_count, 5000);
+                need(metadataEffectCount === affectedPropertyCount * metadataSteps.length || metadataSteps.some(step => step.type === "promote" || step.type === "dismiss_unknown" || step.type === "restore_unknown"));
+                need(effectCount >= metadataEffectCount);
+            } else {
+                need(metadataSteps.every(step => step.type === "outcome" || step.type === "assign") && effectCount === affectedPropertyCount * metadataSteps.length);
+            }
             const hasSms = parsed.input.definition.steps.some(s => s.type === "outcome" && s.value === "opted_out");
             need(hasSms ? row.sms_safety_summary !== null : row.sms_safety_summary === null);
             const safety = hasSms ? record(row.sms_safety_summary) : null;
             const smsSafetySummary = safety ? { contacts: count(safety.contacts, 500), linkedProperties: count(safety.linked_properties, 250000), activeEnrollments: count(safety.active_enrollments, 250000) } : null;
-            return { smsSafetySummary, preparationId: id(row.preparation_id), idempotencyKey: parsed.idempotencyKey, inputHash: parsed.inputHash, expiresAt: timestamp(row.expires_at), definition: parsed.input.definition as {
-                    version: 1;
-                    steps: InboxMetadataStep[];
-                }, items, eligibleCount, excludedCount: items.length - eligibleCount, affectedPropertyCount, effectCount };
+            const followUp = reviewReplyFollowUp(parsed.input.definition);
+            return { smsSafetySummary, preparationId: id(row.preparation_id), idempotencyKey: parsed.idempotencyKey, inputHash: parsed.inputHash, expiresAt: timestamp(row.expires_at), definition: { version: 1, steps: metadataSteps as InboxMetadataStep[] },
+                items, eligibleCount, excludedCount: items.length - eligibleCount, affectedPropertyCount, effectCount, ...(followUp ? { followUp } : {}) };
         },
         async accept(preparationId: string, idempotencyKey: string, signal: AbortSignal): Promise<AcceptedInboxAction> {
             need(UUID.test(preparationId) && UUID.test(idempotencyKey), 400);
@@ -208,17 +227,17 @@ export function createInboxActionRepository(client: InboxActionClient) {
                 const step = record(value), stepId = id(step.id);
                 need(!seen.has(stepId));
                 seen.add(stepId);
-                need((step.action === "outcome" || step.action === "assign") && STATES.has(step.state as InboxStepState));
+                need((step.action === "outcome" || step.action === "assign" || step.action === "promote" || step.action === "dismiss_unknown" || step.action === "restore_unknown") && STATES.has(step.state as InboxStepState));
                 need(step.code === null || (typeof step.code === "string" && /^[a-z][a-z0-9_]{0,95}$/.test(step.code)));
                 need(typeof step.receipt_version === "string" && /^(0|[1-9][0-9]{0,18})$/.test(step.receipt_version) && BigInt(step.receipt_version) <= BigInt("9223372036854775807"));
                 need(step.changed === null || typeof step.changed === "boolean");
                 const state = step.state as InboxStepState;
                 need(TERMINAL.has(state) === (BigInt(step.receipt_version) > BigInt(0)));
                 need(state === "succeeded" ? step.code === null : !TERMINAL.has(state) || step.code !== null);
-                return { id: stepId, action: step.action as "outcome" | "assign", state, code: step.code as string | null, receiptVersion: step.receipt_version, changed: step.changed as boolean | null };
+                return { id: stepId, action: step.action as "outcome" | "assign" | "promote" | "dismiss_unknown" | "restore_unknown", state, code: step.code as string | null, receiptVersion: step.receipt_version, changed: step.changed as boolean | null };
             });
             const itemIds = new Set<string>();
-            const items = row.items.map(value => { const source = record(value), decoded = item(value); need(!itemIds.has(decoded.id)); itemIds.add(decoded.id); need(Array.isArray(source.step_ids) && source.step_ids.length <= 2 && source.step_ids.every(s => typeof s === "string" && seen.has(s)) && new Set(source.step_ids).size === source.step_ids.length); need(source.state === "excluded" || STATES.has(source.state as InboxStepState)); need(source.code === null || typeof source.code === "string"); need(decoded.exclusion === null ? source.step_ids.length > 0 : source.state === "excluded" && source.step_ids.length === 0); return { ...decoded, stepIds: source.step_ids as string[], state: source.state as InboxStepState | "excluded", code: source.code as string | null }; });
+            const items = row.items.map(value => { const source = record(value), decoded = item(value); need(!itemIds.has(decoded.id)); itemIds.add(decoded.id); need(Array.isArray(source.step_ids) && source.step_ids.length <= 5 && source.step_ids.every(s => typeof s === "string" && seen.has(s)) && new Set(source.step_ids).size === source.step_ids.length); need(source.state === "excluded" || STATES.has(source.state as InboxStepState)); need(source.code === null || typeof source.code === "string"); need(decoded.exclusion === null ? source.step_ids.length > 0 : source.state === "excluded" && source.step_ids.length === 0); return { ...decoded, stepIds: source.step_ids as string[], state: source.state as InboxStepState | "excluded", code: source.code as string | null }; });
             need(row.completed === steps.every(s => TERMINAL.has(s.state)));
             const expected = !row.completed ? null : steps.every(s => s.state === "succeeded") ? "succeeded" : steps.some(s => s.state === "succeeded") ? "partial" : steps.every(s => s.state === "cancelled") ? "cancelled" : "failed";
             need(row.result === expected);

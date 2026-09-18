@@ -50,6 +50,7 @@ function failure(error: { code?: string; message?: string } | null): void {
             INBOX_SAVED_ACTION_STEP_TYPE_DISABLED: "step_type_disabled",
             INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED: "step_combination_unsupported",
             INBOX_SAVED_ACTION_ASSIGNEE_UNAVAILABLE: "assignee_unavailable",
+            INBOX_SAVED_ACTION_DEFINITION_MISMATCH: "saved_action_definition_mismatch",
             permanent_dnc_not_enabled: "permanent_dnc_not_enabled",
         };
         if (error.message && notFound.has(error.message)) throw new InboxSavedActionApiError(404, "saved_action_not_found");
@@ -155,6 +156,15 @@ export function isReviewReplySavedDefinition(definition: InboxActionDefinition):
     return definition.steps.length === 1 && definition.steps[0].type === "review_reply";
 }
 
+/** Returns the optional final reply handoff for a mixed metadata definition.
+ * The returned template is a display hint from the already-resolved stored
+ * definition; it never authorizes a send and is never used as a reply target
+ * or rendered body. */
+export function reviewReplyFollowUp(definition: InboxActionDefinition): { kind: "review_reply"; template: string } | undefined {
+    const finalStep = definition.steps[definition.steps.length - 1];
+    return finalStep?.type === "review_reply" ? { kind: "review_reply", template: finalStep.text } : undefined;
+}
+
 /** Builds the reply-prepare wire payload from ALREADY-VALIDATED values only:
  * `idempotencyKey`/`targets` must come from parseInboxActionIntent's parsed
  * result (the SAME hardened envelope validator — exact required-key set,
@@ -172,6 +182,6 @@ export function isReviewReplySavedDefinition(definition: InboxActionDefinition):
  * it. Only ever reaches reply PREPARE, never accept/send — review_reply
  * saved actions still require the normal reviewed-reply accept step. */
 export function buildReplyHandoffPayload(idempotencyKey: string, targets: readonly { kind: "conversation" | "unknown_sender_group"; id: string }[], definition: InboxActionDefinition): string {
-    if (!isReviewReplySavedDefinition(definition)) throw new InvalidInboxActionError();
+    if (definition.steps.length !== 1 || definition.steps[0].type !== "review_reply") throw new InvalidInboxActionError();
     return JSON.stringify({ idempotencyKey, targets, template: definition.steps[0].text });
 }

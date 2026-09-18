@@ -19,6 +19,13 @@ type ReplyDatabase = Omit<Database, "public"> & {
                 Args: { canonical_input: string; idempotency_key: string };
                 Returns: Json;
             };
+            /** Loads an accepted metadata operation's immutable target/template
+             * snapshot. The coordinator then uses the same current capture,
+             * renderer, and freeze path as an ordinary reply preparation. */
+            inbox_reply_source_context: {
+                Args: { source_operation_id: string };
+                Returns: Json;
+            };
             inbox_accept_reply: {
                 Args: { preparation_id: string; idempotency_key: string };
                 Returns: Json;
@@ -61,6 +68,14 @@ function e164(value: unknown): string { need(typeof value === "string" && E164.t
 function timestamp(value: unknown): string { need(typeof value === "string" && Number.isFinite(Date.parse(value))); return value; }
 function count(value: unknown, max: number): number { need(Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= max); return Number(value); }
 function bool(value: unknown): boolean { need(typeof value === "boolean"); return value; }
+function requireReplyEnabled(): void {
+    // The route gate is intentionally duplicated at the repository boundary:
+    // action-api can hand off a single or mixed saved definition internally,
+    // so a DB admission row alone must not make reply capture reachable while
+    // the HTTP release flag is off.
+    if (process.env.INBOX_REPLIES_SERVER_ENABLED !== "1")
+        throw new InboxReplyApiError(404, "Not found");
+}
 
 function failure(error: { code?: string; message?: string } | null): void {
     if (!error) return;
@@ -188,9 +203,69 @@ function item(value: unknown, expectedBody: Map<string, string>, replayed: boole
     };
 }
 
+/** Decode a freeze result completely before exposing it to the caller. Both
+ * ordinary and metadata-follow-up preparations use the same coordinator
+ * renderer and fresh-capture body equality. */
+function decodePreparedReply(
+    value: unknown,
+    expectedIdempotencyKey: string,
+    expectedTargets: readonly InboxReplyTarget[] | null,
+    expectedBodies: Map<string, string>,
+): PreparedInboxReply {
+    const row = record(value);
+    need(typeof row.idempotencyKey === "string" && row.idempotencyKey === expectedIdempotencyKey);
+    const replayed = bool(row.replayed);
+    need(Array.isArray(row.items));
+    need(row.items.length === (expectedTargets?.length ?? row.items.length));
+    need(row.items.length > 0 && row.items.length <= 500);
+    const seenTargets = new Set<string>();
+    const seenIds = new Set<string>();
+    const items = row.items.map((raw: unknown) => {
+        const decoded = item(raw, expectedBodies, replayed);
+        const key = `${decoded.target.kind}:${decoded.target.id}`;
+        need(!seenTargets.has(key));
+        seenTargets.add(key);
+        need(!seenIds.has(decoded.id));
+        seenIds.add(decoded.id);
+        return decoded;
+    });
+    if (expectedTargets) for (const target of expectedTargets)
+        need(seenTargets.has(`${target.kind}:${target.id}`));
+    const eligible = items.filter(i => i.exclusion === null);
+    const distinctDestinations = new Set(eligible.map(i => i.recipient?.to));
+    const recipientCount = count(row.recipientCount, 500);
+    need(recipientCount === distinctDestinations.size);
+    const destinationCounts = new Map<string, number>();
+    for (const i of eligible) destinationCounts.set(i.recipient!.to, (destinationCounts.get(i.recipient!.to) ?? 0) + 1);
+    let anyDuplicate = false;
+    for (const i of eligible) {
+        const isDuplicate = (destinationCounts.get(i.recipient!.to) ?? 0) >= 2;
+        need(i.duplicateDestination === isDuplicate);
+        if (isDuplicate) anyDuplicate = true;
+    }
+    need(eligible.length >= recipientCount);
+    need(anyDuplicate ? eligible.length > recipientCount : eligible.length === recipientCount);
+    need(Array.isArray(row.blockers) && row.blockers.every((b: unknown) => b === "empty" || b === "recipient_limit" || b === "duplicate_destination"));
+    const blockers = row.blockers as readonly ("empty" | "recipient_limit" | "duplicate_destination")[];
+    need(new Set(blockers).size === blockers.length);
+    need(blockers.includes("empty") === (recipientCount === 0));
+    need(blockers.includes("recipient_limit") === (recipientCount > INBOX_REPLY_RECIPIENT_LIMIT));
+    need(blockers.includes("duplicate_destination") === anyDuplicate);
+    return {
+        preparationId: id(row.preparationId),
+        idempotencyKey: expectedIdempotencyKey,
+        inputHash: (() => { need(typeof row.inputHash === "string" && /^[a-f0-9]{64}$/.test(row.inputHash)); return row.inputHash; })(),
+        expiresAt: timestamp(row.expiresAt),
+        items,
+        recipientCount,
+        blockers,
+    };
+}
+
 export function createInboxReplyRepository(client: InboxReplyClient) {
     return {
         async prepare(raw: string, signal: AbortSignal): Promise<PreparedInboxReply> {
+            requireReplyEnabled();
             signal.throwIfAborted();
             let parsed: ReturnType<typeof parseInboxReplyPrepareRequest>;
             try {
@@ -199,6 +274,34 @@ export function createInboxReplyRepository(client: InboxReplyClient) {
                 if (error instanceof InvalidInboxActionError)
                     throw new InboxReplyApiError(400, "invalid_reply");
                 throw error;
+            }
+            if ("sourceOperationId" in parsed) {
+                // The source operation is the only authority for the original
+                // targets and final template. The context RPC performs the
+                // accepted-operation/terminal/auth checks. Rendering then
+                // deliberately continues through the exact same server
+                // renderer + canonical capture + freeze path as an ordinary
+                // reviewed reply; the client supplies none of those values.
+                need(typeof parsed.sourceOperationId === "string");
+                const sourceOperationId = parsed.sourceOperationId;
+                const sourceResult = await retryReceiptTransaction(() => {
+                    signal.throwIfAborted();
+                    return client.rpc("inbox_reply_source_context", {
+                        source_operation_id: sourceOperationId,
+                    }).abortSignal(signal);
+                });
+                signal.throwIfAborted();
+                failure(sourceResult.error);
+                const source = record(sourceResult.data);
+                need(source.sourceOperationId === sourceOperationId && Array.isArray(source.targets) && typeof source.template === "string");
+                try {
+                    // Re-apply the hardened legacy shape parser to server
+                    // context before using it. This is a structural decoder,
+                    // not a trust transfer from client input.
+                    parsed = parseInboxReplyPrepareRequest(JSON.stringify({ idempotencyKey: parsed.idempotencyKey, targets: source.targets, template: source.template }));
+                } catch {
+                    throw new InboxReplyApiError(503);
+                }
             }
             // C3: template-wide errors are rejected before any RPC, via a probe
             // render against every supported variable set non-empty. Any error
@@ -261,64 +364,10 @@ export function createInboxReplyRepository(client: InboxReplyClient) {
             });
             signal.throwIfAborted();
             failure(freezeResult.error);
-            const row = record(freezeResult.data);
-            // B1-1: the idempotencyKey the server echoes back must match what
-            // this request actually sent — never trusted implicitly.
-            need(typeof row.idempotencyKey === "string" && row.idempotencyKey === parsed.idempotencyKey);
-            // B2: freeze() tells us whether this is a fresh freeze or a replay
-            // of an already-immutable row. Fresh-render body equality (below,
-            // via item()) applies ONLY to a fresh freeze.
-            const replayed = bool(row.replayed);
-            need(Array.isArray(row.items));
-            need(row.items.length === parsed.targets.length);
-            const seenTargets = new Set<string>();
-            const seenIds = new Set<string>();
-            const items = row.items.map((raw: unknown) => {
-                const decoded = item(raw, renderedBodyByConversation, replayed);
-                const key = `${decoded.target.kind}:${decoded.target.id}`;
-                need(!seenTargets.has(key));
-                seenTargets.add(key);
-                need(!seenIds.has(decoded.id));
-                seenIds.add(decoded.id);
-                return decoded;
-            });
-            for (const target of parsed.targets)
-                need(seenTargets.has(`${target.kind}:${target.id}`));
-            const eligible = items.filter(i => i.exclusion === null);
-            const distinctDestinations = new Set(eligible.map(i => i.recipient?.to));
-            const recipientCount = count(row.recipientCount, 500);
-            need(recipientCount === distinctDestinations.size);
-            // Cross-item duplicateDestination invariants: an eligible item's
-            // duplicateDestination is true iff >=2 eligible items share its
-            // `to`, and the eligible/distinct-count relationship holds exactly
-            // (equal count iff nothing is flagged duplicate).
-            const destinationCounts = new Map<string, number>();
-            for (const i of eligible) destinationCounts.set(i.recipient!.to, (destinationCounts.get(i.recipient!.to) ?? 0) + 1);
-            let anyDuplicate = false;
-            for (const i of eligible) {
-                const isDuplicate = (destinationCounts.get(i.recipient!.to) ?? 0) >= 2;
-                need(i.duplicateDestination === isDuplicate);
-                if (isDuplicate) anyDuplicate = true;
-            }
-            need(eligible.length >= recipientCount);
-            need(anyDuplicate ? eligible.length > recipientCount : eligible.length === recipientCount);
-            need(Array.isArray(row.blockers) && row.blockers.every((b: unknown) => b === "empty" || b === "recipient_limit" || b === "duplicate_destination"));
-            const blockers = row.blockers as readonly ("empty" | "recipient_limit" | "duplicate_destination")[];
-            need(new Set(blockers).size === blockers.length);
-            need(blockers.includes("empty") === (recipientCount === 0));
-            need(blockers.includes("recipient_limit") === (recipientCount > INBOX_REPLY_RECIPIENT_LIMIT));
-            need(blockers.includes("duplicate_destination") === anyDuplicate);
-            return {
-                preparationId: id(row.preparationId),
-                idempotencyKey: parsed.idempotencyKey,
-                inputHash: (() => { need(typeof row.inputHash === "string" && /^[a-f0-9]{64}$/.test(row.inputHash)); return row.inputHash; })(),
-                expiresAt: timestamp(row.expiresAt),
-                items,
-                recipientCount,
-                blockers,
-            };
+            return decodePreparedReply(freezeResult.data, parsed.idempotencyKey, parsed.targets, renderedBodyByConversation);
         },
         async accept(raw: string, signal: AbortSignal): Promise<AcceptedInboxReply> {
+            requireReplyEnabled();
             signal.throwIfAborted();
             let parsed: ReturnType<typeof parseInboxActionAcceptance>;
             try {

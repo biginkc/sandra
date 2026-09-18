@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInboxReplyRepository, type InboxReplyClient } from "./reply-api";
 
 const id = (n: number) => `abcdef00-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -40,6 +40,7 @@ function client(results: unknown[]) {
   }));
   return { rpc, seenSignals, repository: createInboxReplyRepository({ rpc } as unknown as InboxReplyClient) };
 }
+beforeEach(() => vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "1"));
 afterEach(() => vi.unstubAllEnvs());
 
 describe("malformed prepare intent is rejected before any RPC (obligation 3)", () => {
@@ -57,6 +58,47 @@ describe("malformed prepare intent is rejected before any RPC (obligation 3)", (
   // MUTATION: bypassing wire()'s duplicate-member scan (e.g. parsing with a
   // plain JSON.parse that silently last-value-wins) makes the first case pass
   // through to a 200/RPC call instead of 400.
+});
+
+describe("metadata operation reply follow-up", () => {
+  it("loads server-owned targets/template through the source operation RPC and never captures client data", async () => {
+    const sourceOperationId = id(70);
+    const context = {
+      sourceOperationId,
+      targets: [target(5)],
+      template,
+    };
+    const capture = { items: [captureItem(5)] };
+    const authoritative = freezeResult([freezeItemFor(5, "Hi Ada, I'm Mel.")], { replayed: false });
+    const c = client([ok(context), ok(capture), ok(authoritative)]);
+    const result = await c.repository.prepare(JSON.stringify({ idempotencyKey: id(4), sourceOperationId }), signal());
+    expect(result.items[0].recipient?.renderedBody).toBe("Hi Ada, I'm Mel.");
+    expect(c.rpc.mock.calls.map(([name]) => name)).toEqual([
+      "inbox_reply_source_context",
+      "inbox_capture_reply_recipients",
+      "inbox_freeze_reply_review",
+    ]);
+    expect(c.rpc.mock.calls[0][1]).toEqual({ source_operation_id: sourceOperationId });
+    expect(c.rpc.mock.calls[1][1]).toEqual({ conversation_ids: [id(5)] });
+    const canonical = JSON.parse((c.rpc.mock.calls[2][1] as { canonical_input: string }).canonical_input);
+    expect(canonical.template).toBe(template);
+    expect(canonical.targets).toEqual([target(5)]);
+    expect(canonical.drafts[0].body).toBe("Hi Ada, I'm Mel.");
+  });
+  it("rejects a malformed source follow-up before the RPC", async () => {
+    const c = client([]);
+    await expect(c.repository.prepare(JSON.stringify({ idempotencyKey: id(4), sourceOperationId: id(70), template: "client supplied" }), signal())).rejects.toMatchObject({ status: 400 });
+    expect(c.rpc).not.toHaveBeenCalled();
+  });
+  it("keeps accepted-receipt recovery and status readable when new reply preparation is disabled", async () => {
+    vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
+    const recovery = client([ok({ state: "prepared", operation: null, preparationId: id(8), idempotencyKey: id(4) })]);
+    await expect(recovery.repository.recover(id(8), id(4), signal())).resolves.toMatchObject({ state: "prepared" });
+    expect(recovery.rpc).toHaveBeenCalledWith("inbox_recover_reply", { preparation_id: id(8), idempotency_key: id(4) });
+    const status = client([ok({})]);
+    await expect(status.repository.status(id(9), signal())).rejects.toMatchObject({ status: 503 });
+    expect(status.rpc).toHaveBeenCalledWith("inbox_reply_operation_status", { operation_id: id(9) });
+  });
 });
 
 describe("template-wide probe render rejects before capture RPC (obligation 4, C3)", () => {

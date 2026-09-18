@@ -7,6 +7,10 @@ export type InboxMetadataStep = {
     type: "assign";
     userId: string | null;
 };
+/** Internal operation receipts may expose the newer durable adapters even
+ * while the existing metadata editor continues to render its original
+ * outcome/assignment definition shape. */
+export type InboxOperationAction = "outcome" | "assign" | "promote" | "dismiss_unknown" | "restore_unknown";
 export type InboxMetadataTarget = {
     kind: "conversation" | "unknown_sender_group";
     id: string;
@@ -38,6 +42,10 @@ export interface PreparedInboxAction {
     affectedPropertyCount: number;
     effectCount: number;
     smsSafetySummary: { contacts: number; linkedProperties: number; activeEnrollments: number } | null;
+    /** A final review_reply step is only a display handoff. It is excluded
+     * from metadata effects and requires a later sourceOperationId reply
+     * preparation after the metadata operation reaches a terminal result. */
+    followUp?: { kind: "review_reply"; template: string };
 }
 export interface AcceptInboxActionRequest {
     preparationId: string;
@@ -60,7 +68,7 @@ export interface InboxOperationStatus {
     })[];
     steps: readonly {
         id: string;
-        action: "outcome" | "assign";
+        action: InboxOperationAction;
         state: InboxStepState;
         code: string | null;
         receiptVersion: string;

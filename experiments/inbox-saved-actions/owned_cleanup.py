@@ -220,10 +220,12 @@ def _primary_key(sql, table):
     return _PK_CACHE[table]
 
 
-def _counter_column(sql, table):
-    """The one explicitly allowlisted mutable counter on `table`, if any.
+def _counter_columns(sql, table):
+    """All explicitly allowlisted mutable counters on `table`, if any.
     Immutable primary-key columns are never eligible, even if their name
-    looks like a version or revision."""
+    looks like a version or revision. A table can own more than one
+    independent lease/receipt counter; every allowlisted column must be
+    excluded from the content hash and checked row-by-row."""
     schema, name = table.split('.', 1)
     allowed_columns = sorted(item.rsplit('.', 1)[1] for item in COUNTER_COLUMN_ALLOWLIST if item.rsplit('.', 1)[0] == table)
     if not allowed_columns:
@@ -241,9 +243,16 @@ def _counter_column(sql, table):
             WHERE pk.indrelid=c.oid AND pk.indisprimary AND a.attnum=ANY(pk.indkey)
           )
           AND format_type(a.atttypid,a.atttypmod) IN ('integer','bigint','smallint')
-        ORDER BY a.attnum LIMIT 1
+        ORDER BY a.attnum
     """)
-    return rows[0] if rows else None
+    return rows
+
+
+def _counter_column(sql, table):
+    """Compatibility alias for callers that only need to ask whether a table
+    has an allowlisted counter. Use `_counter_columns` for signatures."""
+    columns = _counter_columns(sql, table)
+    return columns[0] if columns else None
 
 
 def _all_tables(sql):
@@ -267,7 +276,7 @@ def _all_tables(sql):
     out = []
     for r in rows:
         table, has_org, has_user = r.split('|')
-        out.append((table, has_org == 'true', has_user == 'true', _counter_column(sql, table)))
+        out.append((table, has_org == 'true', has_user == 'true', _counter_columns(sql, table)))
     return out
 
 
@@ -328,7 +337,7 @@ def _row_key_expr(sql, table):
     return f"md5(array_to_string(ARRAY[{parts}], ''))"
 
 
-def _row_hash_expr(sql, table, exclude_col):
+def _row_hash_expr(sql, table, exclude_cols):
     """[Astra round-8/9] Per-row content hash built from each column's OWN
     native `::text` output, collision-free-encoded (round 9 — see
     _encode_col_sql) and concatenated in a stable (attnum) order — never
@@ -343,21 +352,22 @@ def _row_hash_expr(sql, table, exclude_col):
     possible, regardless of what any column's text happens to contain). If a
     column's type has no meaningful ::text cast, Postgres raises at query
     time rather than this module silently falling back to a lossy encoding."""
-    cols = [c for c in _columns(sql, table) if c != exclude_col]
+    excluded = {exclude_cols} if isinstance(exclude_cols, str) else set(exclude_cols or ())
+    cols = [c for c in _columns(sql, table) if c not in excluded]
     if not cols:
         return "md5('')"
     parts = ','.join(_encode_col_sql(f't."{c}"') for c in cols)
     return f"md5(array_to_string(ARRAY[{parts}], ''))"
 
 
-def _content_hash_sql(sql, table, col, where=None):
+def _content_hash_sql(sql, table, cols, where=None):
     """One table-level digest over EVERY column except the whitelisted
     counter column (or every column, if col is None), optionally restricted
     to a WHERE clause: each row's _row_hash_expr, md5'd, sorted (so row
     order/physical layout never matters), joined, md5'd again. Applied to
     EVERY table with zero exceptions, using each column's raw, collision-free
     ::text encoding (rounds 8/9)."""
-    row_hash = _row_hash_expr(sql, table, col)
+    row_hash = _row_hash_expr(sql, table, cols)
     filt = f" WHERE {where}" if where else ""
     return f"SELECT md5(coalesce(string_agg(h,',' ORDER BY h),'')) FROM (SELECT {row_hash} AS h FROM {table} t{filt}) x"
 
@@ -404,10 +414,10 @@ def snapshot_baseline(sql, all_tables):
     raw per-column ::text output (round 8), and counter_pairs is PER ROW
     (round 8), never a table-wide SUM."""
     snapshot = {}
-    for table, _, _, col in all_tables:
+    for table, _, _, cols in all_tables:
         count = sql(f"SELECT count(*) FROM {table}")
-        content_hash = sql(_content_hash_sql(sql, table, col))
-        pairs = _parse_counter_pairs(sql(_counter_row_pairs_sql(sql, table, col))) if col else None
+        content_hash = sql(_content_hash_sql(sql, table, cols))
+        pairs = {col: _parse_counter_pairs(sql(_counter_row_pairs_sql(sql, table, col))) for col in cols} if cols else None
         snapshot[table] = (count, content_hash, pairs)
     return snapshot
 
@@ -515,7 +525,7 @@ def assert_clean(sql, all_tables, baseline, owned_orgs, owned_users):
     if appeared:
         residual['__table_universe__'] = residual.get('__table_universe__', '') + f'; NEW table(s) created during this run, absent from the baseline (would have escaped every check below entirely): {sorted(appeared)}'
 
-    for table, has_org, has_user, col in all_tables:
+    for table, has_org, has_user, cols in all_tables:
         if table in vanished:
             continue  # already reported above; querying it would just error
         owned_pred = _owned_predicate(table, has_org, has_user, orgs, users)
@@ -533,29 +543,31 @@ def assert_clean(sql, all_tables, baseline, owned_orgs, owned_users):
         if before_count != '?' and now_count != before_count:
             residual[table] = residual.get(table, '') + f'; non-owned row count changed {before_count} -> {now_count} (a row was added to or removed from the pre-existing baseline, outside this run\'s own synthetic ids)'
         else:
-            now_hash = sql(_content_hash_sql(sql, table, col, not_owned))
+            now_hash = sql(_content_hash_sql(sql, table, cols, not_owned))
             if before_hash != '?' and now_hash != before_hash:
                 residual[table] = residual.get(table, '') + f'; non-owned content hash changed {before_hash} -> {now_hash} (a mutation in a pre-existing row\'s non-counter column, hashed from raw ::text output — includes jsonb content/array length, organizations.name/auth.users, and every other table/type uniformly)'
 
-        if col and before_pairs is not None:
-            now_pairs = _parse_counter_pairs(sql(_counter_row_pairs_sql(sql, table, col, not_owned)))
-            for row_id in set(before_pairs) | set(now_pairs):
-                bvals, avals = before_pairs.get(row_id, []), now_pairs.get(row_id, [])
-                if len(bvals) != len(avals):
-                    continue  # a row's identity appearing/disappearing is already caught by the count/hash checks above
-                # Both lists sorted with the NULL-aware key (round 9) — with
-                # a real PRIMARY KEY each list has exactly one element; the
-                # PK-less fallback keeps the sound multiset comparison.
-                for bv, av in zip(sorted(bvals, key=_pk_sort_key), sorted(avals, key=_pk_sort_key)):
-                    if bv == 'NULL' or av == 'NULL':
-                        if bv != av:
-                            residual[table] = residual.get(table, '') + f'; {col} changed to/from NULL ({bv} -> {av}) on row(key={row_id[:12]}...) (round 9 — never a benign advance, never silently dropped from the check)'
-                        continue  # both NULL: genuinely unchanged
-                    bv_i, av_i = int(bv), int(av)
-                    if av_i < bv_i:
-                        residual[table] = residual.get(table, '') + f'; {col} DECREASED {bv_i} -> {av_i} on row(key={row_id[:12]}...) (per-row, PRIMARY-KEY-grouped check — never masked by another row\'s increase via a table-wide SUM, never conflated with another row via a content-hash collision)'
-                    elif av_i > bv_i:
-                        advanced.append(f'{table}.{col} row {row_id[:12]}... +{av_i - bv_i} ({bv_i} -> {av_i})')
+        if cols and before_pairs is not None:
+            for col in cols:
+                before_col_pairs = before_pairs.get(col, {}) if isinstance(before_pairs, dict) else {}
+                now_pairs = _parse_counter_pairs(sql(_counter_row_pairs_sql(sql, table, col, not_owned)))
+                for row_id in set(before_col_pairs) | set(now_pairs):
+                    bvals, avals = before_col_pairs.get(row_id, []), now_pairs.get(row_id, [])
+                    if len(bvals) != len(avals):
+                        continue  # a row's identity appearing/disappearing is already caught by the count/hash checks above
+                    # Both lists sorted with the NULL-aware key (round 9) — with
+                    # a real PRIMARY KEY each list has exactly one element; the
+                    # PK-less fallback keeps the sound multiset comparison.
+                    for bv, av in zip(sorted(bvals, key=_pk_sort_key), sorted(avals, key=_pk_sort_key)):
+                        if bv == 'NULL' or av == 'NULL':
+                            if bv != av:
+                                residual[table] = residual.get(table, '') + f'; {col} changed to/from NULL ({bv} -> {av}) on row(key={row_id[:12]}...) (round 9 — never a benign advance, never silently dropped from the check)'
+                            continue  # both NULL: genuinely unchanged
+                        bv_i, av_i = int(bv), int(av)
+                        if av_i < bv_i:
+                            residual[table] = residual.get(table, '') + f'; {col} DECREASED {bv_i} -> {av_i} on row(key={row_id[:12]}...) (per-row, PRIMARY-KEY-grouped check — never masked by another row\'s increase via a table-wide SUM, never conflated with another row via a content-hash collision)'
+                        elif av_i > bv_i:
+                            advanced.append(f'{table}.{col} row {row_id[:12]}... +{av_i - bv_i} ({bv_i} -> {av_i})')
 
     if residual:
         raise RuntimeError(f'Owned-fixture cleanup left residual/unexplained changes across {len(residual)} dynamically-discovered table(s) (single uniform, lossless, per-row check over the whole database): {residual}')

@@ -38,7 +38,20 @@ BEGIN
  -- rolls back every canonical write, then commits a durable failure receipt.
  PERFORM inbox_operations.lock_step_for_effect(o,op,s,g);
  BEGIN
-  result:=inbox_operation_domain.apply_property_step(o,op,s,g);
+  -- Dispatch by the immutable prepared action. Each adapter owns its own
+  -- canonical locks and receipt semantics; unknown actions receive the exact
+  -- message-id workset captured during preparation and never raw-sender
+  -- expansion.
+  SELECT CASE
+   WHEN st.action='promote' THEN 'promote'
+   WHEN st.action IN ('dismiss_unknown','restore_unknown') THEN 'unknown'
+   ELSE 'property'
+  END INTO message
+  FROM inbox_operations.steps st WHERE st.org_id=o AND st.operation_id=op AND st.id=s;
+  IF message='promote' THEN result:=inbox_operation_domain.apply_promotion_step(o,op,s,g);
+  ELSIF message='unknown' THEN result:=inbox_operation_domain.apply_unknown_step(o,op,s,g);
+  ELSE result:=inbox_operation_domain.apply_property_step(o,op,s,g);
+  END IF;
   RETURN result;
  EXCEPTION WHEN SQLSTATE 'P0001' THEN
   GET STACKED DIAGNOSTICS message=MESSAGE_TEXT;
@@ -60,6 +73,10 @@ BEGIN
    WHEN 'SMS property scope exceeds bound or changed' THEN terminal_state:='conflicted';code:='sms_scope_changed';
    WHEN 'SMS enrollment scope exceeds bound' THEN terminal_state:='blocked';code:='sms_scope_too_large';
    WHEN 'permanent_dnc_not_enabled' THEN terminal_state:='blocked';code:='permanent_dnc_not_enabled';
+   WHEN 'Unknown action snapshot changed' THEN terminal_state:='conflicted';code:='unknown_action_changed';
+   WHEN 'Unknown sender identity changed' THEN terminal_state:='conflicted';code:='unknown_identity_changed';
+   WHEN 'message_unavailable' THEN terminal_state:='conflicted';code:='message_unavailable';
+   WHEN 'Access baseline missing' THEN terminal_state:='blocked';code:='requester_access_unavailable';
    ELSE RAISE; -- Invariant/software faults are not disguised as business denials.
   END CASE;
  END;

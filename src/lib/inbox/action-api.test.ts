@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { createInboxActionRepository, type InboxActionClient } from "./action-api";
 import type { PreparedInboxAction } from "./action-api-contract";
 import { parseInboxActionAcceptance, parseInboxActionIntent, InvalidInboxActionError } from "./action-definition";
@@ -11,6 +11,8 @@ const prepared = () => ({ preparation_id: id(5), idempotency_key: id(3), input_h
 function client(results: unknown[]) { const rpc = vi.fn(() => ({ abortSignal: vi.fn(() => { const r = results.shift(); if (r instanceof Error)
         return Promise.reject(r); return Promise.resolve(r); }) })); return { rpc, repository: createInboxActionRepository({ rpc } as unknown as InboxActionClient) }; }
 const ok = (data: unknown) => ({ data, error: null });
+beforeEach(() => vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "1"));
+afterEach(() => vi.unstubAllEnvs());
 const status = () => ({ operation_id: id(8), accepted_at: "2026-09-13T00:00:00Z", completed: true, result: "failed", items: [{ id: id(6), kind: "conversation", target_id: id(4), property_id: id(7), exclusion_code: null, step_ids: [id(9), id(10)], state: "conflicted", code: "record_changed" }], steps: [{ id: id(9), action: "outcome", state: "conflicted", code: "record_changed", receipt_version: "1", changed: false }, { id: id(10), action: "assign", state: "blocked", code: "predecessor_failed", receipt_version: "1", changed: false }] });
 describe("authoritative Inbox action transport", () => {
     it("derives requester/org from live authorization and accepts jsonb member ordering", async () => { const c = client([ok(actor), ok(prepared())]); const p = await c.repository.prepare(JSON.stringify(request), signal()) as PreparedInboxAction; expect(p.eligibleCount).toBe(1); expect(c.rpc.mock.calls[1]).toEqual(["inbox_prepare_action", { canonical_input: intent.canonicalInput, idempotency_key: id(3) }]); });
@@ -54,6 +56,20 @@ describe("action review and recovery decoding", () => {
         const row = { ...prepared(), input_hash: parsed.inputHash, definition: parsed.input.definition, sms_safety_summary: { contacts: 1, linked_properties: 2, active_enrollments: 3 } };
         expect((await client([ok(actor), ok(row)]).repository.prepare(raw, signal()) as PreparedInboxAction).smsSafetySummary).toEqual({ contacts: 1, linkedProperties: 2, activeEnrollments: 3 });
         await expect(client([ok(actor), ok({ ...row, sms_safety_summary: null })]).repository.prepare(raw, signal())).rejects.toMatchObject({ status: 503 });
+    });
+    it("decodes an eligible unknown-sender command without inventing a property mapping", async () => {
+        const raw = JSON.stringify({ idempotencyKey: id(3), targets: [{ kind: "unknown_sender_group", id: id(50) }], definition: { version: 1, steps: [{ type: "dismiss_unknown" }] } });
+        const parsed = parseInboxActionIntent(raw, { organizationId: id(1), requesterId: id(2) });
+        const row = {
+            preparation_id: id(5), idempotency_key: id(3), input_hash: parsed.inputHash,
+            expires_at: "2026-09-14T00:00:00Z", definition: parsed.input.definition,
+            items: [{ id: id(6), kind: "unknown_sender_group", target_id: id(50), resolution: { unknown_action: { sender_group_id: id(50), raw_sender: "+18165550001", revision: "1", message_ids: [id(51)] } }, exclusion_code: null }],
+            effect_count: 1, metadata_effect_count: 1, affected_property_count: 0, sms_safety_summary: null,
+        };
+        const result = await client([ok(actor), ok(row)]).repository.prepare(raw, signal()) as PreparedInboxAction;
+        expect(result.items[0].propertyId).toBeNull();
+        expect(result.effectCount).toBe(1);
+        expect(result.eligibleCount).toBe(1);
     });
 });
 describe("saved-action prepare glue", () => {
@@ -130,6 +146,14 @@ describe("saved-action prepare glue", () => {
         expect(calledRpcNames).not.toContain("inbox_accept_action");
         expect(calledRpcNames).not.toContain("inbox_accept_reply");
         expect(calledRpcNames).not.toContain("inbox_prepare_action");
+    });
+    it("does not reach reply capture/freeze when the independent reply release flag is off", async () => {
+        vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "unknown_sender_group", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const reviewReplyDefinition = { version: 1, steps: [{ type: "review_reply", text: "Hi {{first_name}}" }] };
+        const c = client([ok(actor), ok(savedRow(reviewReplyDefinition))]);
+        await expect(c.repository.prepare(JSON.stringify(savedRequest), signal())).rejects.toMatchObject({ status: 404 });
+        expect((c.rpc.mock.calls as unknown as [string, unknown][]).map((call) => call[0])).toEqual(["inbox_authorize_sync", "inbox_saved_action_get"]);
     });
     it("MUTATION: Astra round-1 blocker #2 — a review_reply saved action with a malformed/oversized envelope (an unexpected extra field) is rejected by the SAME envelope validation an inline request goes through, and NEVER reaches reply prepare (no bypass)", async () => {
         const malformedSavedRequest = { idempotencyKey: id(3), targets: [{ kind: "unknown_sender_group", id: id(4) }], savedAction: { id: id(20), version: 1 }, extraUnexpectedField: "should be rejected" };

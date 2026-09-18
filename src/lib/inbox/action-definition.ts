@@ -197,8 +197,25 @@ export function parseInboxActionAcceptance(raw: string) {
  * coordinator (reply-api.ts) renders and freezes those separately, inside one
  * request. Deliberately independent of parseReviewedInboxReply, which parses
  * an acceptance reference to an already-frozen server-owned preview. */
-export function parseInboxReplyPrepareRequest(raw: string): { idempotencyKey: string; targets: readonly InboxActionTarget[]; template: string } {
-  const request = object(wire(raw), ["idempotencyKey", "targets", "template"]);
+export type InboxReplyPrepareRequestIntent =
+  | { idempotencyKey: string; targets: readonly InboxActionTarget[]; template: string; sourceOperationId?: never }
+  /** A metadata operation is the authority for the original target selection
+   * and final saved template. The client supplies only the accepted source
+   * operation and a fresh idempotency key; reply-api loads and re-renders the
+   * current server snapshot before producing a reviewable reply preparation. */
+  | { idempotencyKey: string; sourceOperationId: string; targets: readonly []; template: "" };
+export function parseInboxReplyPrepareRequest(raw: string): InboxReplyPrepareRequestIntent {
+  const value = wire(raw);
+  if (value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.hasOwn(value, "sourceOperationId")) {
+    const request = object(value, ["idempotencyKey", "sourceOperationId"]);
+    // The empty placeholders keep the parser's historical return shape
+    // available to callers that only handle the legacy branch. They are
+    // intentionally never read: reply-api narrows on sourceOperationId and
+    // obtains both values from the authoritative RPC.
+    return freeze({ idempotencyKey: uuid(request.idempotencyKey), sourceOperationId: uuid(request.sourceOperationId), targets: [] as const, template: "" as const });
+  }
+  const request = object(value, ["idempotencyKey", "targets", "template"]);
   valid(typeof request.template === "string");
   return freeze({ idempotencyKey: uuid(request.idempotencyKey), targets: targets(request.targets), template: persistentText(request.template) });
 }
