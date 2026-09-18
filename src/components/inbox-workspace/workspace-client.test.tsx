@@ -23,8 +23,12 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 600 });
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 900 });
   calls = []; state.replacements = []; state.deny = false; state.itemUnavailable = false; state.detailUnavailable = false;
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     calls.push(url);
+    if (url.includes("/selection-review")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { generation: string; targets: { kind: string; id: string }[]; filter: { view: string } };
+      return Response.json({ orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: body.generation, items: body.targets.map(target => ({ ...target, status: target.id === conversationId && body.filter.view === "unread" ? "outside_filter" : "matching", name: target.id === conversationId ? "Ada (authoritative)" : "Bea (authoritative)" })) });
+    }
     if (url.includes("/detail")) return state.detailUnavailable ? Response.json({}, { status: 404 }) : Response.json({ orgId, requesterId: userId, conversationId, ...detailFields, history: [{ id: "message", direction: "inbound", body: "Hello from history", createdAtRaw: new Date().toISOString(), readAtRaw: null, inboundRevision: "1" }], readBoundary: "boundary", boundaryExpiresAt: new Date(Date.now() + 60000).toISOString(), captureGeneration: "capture", headRevision: "1" });
     if (url.includes("/counts")) return Response.json({ accessEpoch: "1", asOf: new Date().toISOString(), counts: { all: 1000, unread: 10 } });
     if (url.includes("read-acknowledgments")) return state.itemUnavailable ? Response.json({}, { status: 404 }) : Response.json({ boundaryId: "boundary", batch: 0, changed: 1, completed: true });
@@ -58,9 +62,23 @@ it("keeps selected identities across a view change and permits removing hidden s
   act(() => state.callbacks!.onChange({ state: "live", rows: [] }));
   expect(screen.getByText(/1 selected · 1 not loaded here/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
-  expect(screen.getByRole("dialog")).toHaveTextContent("Ada");
+  await screen.findByText(/outside this view/);
+  expect(screen.getByRole("dialog")).toHaveTextContent("Ada (authoritative)");
   fireEvent.click(screen.getByRole("button", { name: "Remove" }));
   expect(screen.getByRole("dialog")).toHaveTextContent("0 selected conversations");
+});
+it("renders matching and outside-filter classifications from the authoritative review", async () => {
+  await loaded();
+  act(() => state.callbacks!.onChange({ state: "live", rows: [row, row2] }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select Ada" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select Bea" }));
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "unread" } });
+  await waitFor(() => expect(state.replacements).toHaveLength(2));
+  act(() => state.callbacks!.onChange({ state: "live", rows: [row2] }));
+  fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+  await screen.findByText(/1 outside this view/);
+  expect(screen.getByRole("dialog")).toHaveTextContent("Ada (authoritative) (outside filter)");
+  expect(screen.getByRole("dialog")).toHaveTextContent("Bea (authoritative) (matching loaded)");
 });
 it("clears selection and visible history on a canonical access denial", async () => {
   await loaded();
@@ -116,8 +134,8 @@ it("prunes selection (not just visibility) on item-scoped invalidation, so it ne
   // The Review dialog reads the raw selection array directly (not the invalidatedIds-
   // filtered list InboxWorkspace renders checkboxes from) — it must not still list Ada.
   fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+  await screen.findByText("Bea (authoritative)");
   expect(screen.getByRole("dialog")).toHaveTextContent("1 selected conversations");
-  expect(screen.getByRole("dialog")).toHaveTextContent("Bea");
   expect(screen.getByRole("dialog")).not.toHaveTextContent("Ada");
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   // A later load() clears invalidatedIds; Ada's pruned selection must not resurrect.

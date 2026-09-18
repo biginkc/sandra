@@ -19,6 +19,41 @@ import { InboxUnknownSenderActions } from "./unknown-sender-actions";
 const labels: Record<InboxFilter["view"], string> = { active: "All", all: "All", mine: "Assigned to me", unassigned: "Unassigned", unread: "Unread", escalated: "Needs review", dispo: "Has outcome", needs_outcome: "Needs outcome", unknown: "Unknown senders", dismissed: "Dismissed" };
 type Scope = WorkspaceScope & { nextCursor: string | null; refreshed: boolean };
 type Open = { id: WorkspaceId; generation: number; row?: WorkspaceRow; data?: InboxDetailSnapshot; unknownData?: UnknownSenderHistorySnapshot; error?: string };
+type SelectionReviewBackendItem = { kind: "conversation" | "unknown_sender_group"; id: string; status: "matching" | "outside_filter" | "unavailable"; name: string | null };
+type SelectionReviewItem = { id: WorkspaceId; status: "matching_loaded" | "matching_unloaded" | "outside_filter" | "unavailable"; name: string };
+type SelectionReviewState = { status: "loading" | "ready" | "error"; generation: string; ids: readonly WorkspaceId[]; filter: InboxFilter; items: SelectionReviewItem[]; error?: string };
+
+function newSelectionReviewGeneration(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const random = () => Math.floor(Math.random() * 0x1_0000_0000).toString(16).padStart(8, "0");
+  return `${random()}-${random().slice(0, 4)}-4${random().slice(0, 3)}-8${random().slice(0, 3)}-${random()}${random().slice(0, 4)}`;
+}
+
+function selectionTarget(id: WorkspaceId, orgId: string): { kind: SelectionReviewBackendItem["kind"]; id: string } {
+  let parts: unknown;
+  try { parts = JSON.parse(id); } catch { throw Error("The selection identity could not be verified."); }
+  if (!Array.isArray(parts) || parts.length !== 3 || parts[0] !== orgId || !["conversation", "unknown_sender_group"].includes(parts[1] as string) || typeof parts[2] !== "string") throw Error("The selection identity could not be verified.");
+  return { kind: parts[1] as SelectionReviewBackendItem["kind"], id: parts[2] };
+}
+
+function decodeSelectionReview(value: unknown, expected: readonly { kind: SelectionReviewBackendItem["kind"]; id: string }[], identity: InboxQueryIdentity, generation: string): SelectionReviewBackendItem[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("The selection review response was invalid.");
+  const response = value as Record<string, unknown>;
+  if (response.orgId !== identity.orgId || response.requesterId !== identity.userId || response.sessionId !== identity.sessionId || response.accessEpoch !== identity.accessEpoch || response.generation !== generation || !Array.isArray(response.items) || response.items.length !== expected.length) throw Error("The selection review response did not match this session.");
+  return response.items.map((candidate, index) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw Error("The selection review item was invalid.");
+    const item = candidate as Record<string, unknown>;
+    const target = expected[index];
+    if (item.kind !== target.kind || item.id !== target.id || !["matching", "outside_filter", "unavailable"].includes(item.status as string) || (item.name !== null && typeof item.name !== "string")) throw Error("The selection review item did not match this request.");
+    return { kind: target.kind, id: target.id, status: item.status as SelectionReviewBackendItem["status"], name: item.name as string | null };
+  });
+}
+function abortSelectionReview(sequence: { current: number }, request: { current: AbortController | null }) {
+  sequence.current++;
+  request.current?.abort();
+  request.current = null;
+}
+
 export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled = false, replyEnabled = false }: { identity: InboxQueryIdentity & { expiresAt: number }; initialFilter: InboxFilter; actionsEnabled?: boolean; replyEnabled?: boolean }) {
   const [cache] = useState(() => createInboxQueryCache(identity));
   const [snapshot, setSnapshot] = useState<SyncSnapshot>({ state: "loading", rows: [] });
@@ -28,6 +63,9 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const [invalidatedIds, setInvalidatedIds] = useState<readonly WorkspaceId[]>([]);
   const activeOpen = useRef<WorkspaceId | null>(null);
   const [review, setReview] = useState(false);
+  const [selectionReview, setSelectionReview] = useState<SelectionReviewState | null>(null);
+  const selectionReviewRequest = useRef<AbortController | null>(null);
+  const selectionReviewSequence = useRef(0);
   const [opened, setOpened] = useState<Open | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string>();
@@ -47,7 +85,9 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     if (denied.current) return;
     denied.current = true; sequence.current++;
     request.current?.abort(); clearActions.current(); cache.close();
+    selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null;
     setSelectionNames(new Map()); setSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setReview(false);
+    setSelectionReview(null);
     sync.current?.revoke(); setSnapshot({ state: "permission_lost", rows: [] }); setBusy(false);
   }, [cache]);
   /** A single item-scoped denial (404): only this target is affected. Invalidate its
@@ -59,6 +99,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
    * see conversation-history.tsx). */
   const invalidateTarget = useCallback((target: WorkspaceTarget) => {
     const id = workspaceId(target);
+    selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null; setReview(false); setSelectionReview(null);
     cache.invalidate("detail", id);
     setInvalidatedIds(previous => (previous.includes(id) ? previous : [...previous, id]));
     setSelected(previous => previous.filter(value => value !== id));
@@ -99,6 +140,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   }
   async function load(next: InboxFilter, cursor: string | null = null) {
     if (denied.current) return;
+    selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null; setReview(false); setSelectionReview(null);
     request.current?.abort();
     const controller = new AbortController(); request.current = controller;
     setBusy(true); setError(undefined); sync.current?.reset();
@@ -118,6 +160,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     // cannot publish after unmount even when the server completed its scope.
     const adapter = createWorkspaceSync({ origin: window.location.origin, onChange: setSnapshot, onAccessBoundary: accessLost,
       onInvalidated: ids => {
+        selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null; setReview(false); setSelectionReview(null);
         setInvalidatedIds(previous => [...new Set([...previous, ...ids])]);
         setSelected(previous => previous.filter(id => !ids.includes(id)));
         setSelectionNames(previous => new Map([...previous].filter(([id]) => !ids.includes(id))));
@@ -130,7 +173,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     void load(initialFilter);
     const expiry = setTimeout(accessLost, Math.max(0, identity.expiresAt - Date.now()));
     return () => {
-      invalidateViews(); request.current?.abort(); clearTimeout(expiry); adapter.reset(); sync.current = null;
+      invalidateViews(); request.current?.abort(); abortSelectionReview(selectionReviewSequence, selectionReviewRequest); clearTimeout(expiry); adapter.reset(); sync.current = null;
       // React Strict Mode immediately installs another owned adapter; a real
       // unmount closes the cache once that synchronous replay is complete.
       queueMicrotask(() => { if (sync.current === null) cache.close(); });
@@ -140,9 +183,49 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   }, []);
   function select(ids: readonly WorkspaceId[]) {
     if (ids.length > 500) { setError("Select up to 500 conversations at a time."); return; }
+    if (review) { selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null; setReview(false); setSelectionReview(null); }
     const names = new Map<WorkspaceId, string>();
     for (const id of ids) names.set(id, snapshot.rows.find(row => workspaceId(row.target) === id)?.name ?? selectionNames.get(id) ?? "Conversation outside this view");
     setSelectionNames(names); setSelected(ids);
+  }
+  async function beginSelectionReview(ids: readonly WorkspaceId[], nextFilter: InboxFilter) {
+    if (!ids.length || denied.current) return;
+    selectionReviewRequest.current?.abort();
+    const controller = new AbortController(); selectionReviewRequest.current = controller;
+    const token = ++selectionReviewSequence.current;
+    const generation = newSelectionReviewGeneration();
+    const capturedIds = [...ids];
+    setReview(true); setSelectionReview({ status: "loading", generation, ids: capturedIds, filter: nextFilter, items: [] });
+    try {
+      const targets = capturedIds.map(id => selectionTarget(id, identity.orgId));
+      const batches = Array.from({ length: Math.ceil(targets.length / 100) }, (_, index) => targets.slice(index * 100, (index + 1) * 100));
+      const responses = await Promise.all(batches.map(async batch => {
+        const value = await json<unknown>("/api/inbox/selection-review", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orgId: identity.orgId, filter: nextFilter, targets: batch, generation }) }, controller.signal);
+        return decodeSelectionReview(value, batch, identity, generation);
+      }));
+      if (token !== selectionReviewSequence.current || controller.signal.aborted || denied.current) return;
+      const resident = new Set(snapshot.rows.map(row => workspaceId(row.target)));
+      const items = responses.flat().map(item => ({
+        id: workspaceId(item.kind === "conversation" ? { kind: "conversation", orgId: identity.orgId, conversationId: item.id } : { kind: "unknown_sender_group", orgId: identity.orgId, senderGroupId: item.id }),
+        status: item.status === "matching" ? (resident.has(workspaceId(item.kind === "conversation" ? { kind: "conversation", orgId: identity.orgId, conversationId: item.id } : { kind: "unknown_sender_group", orgId: identity.orgId, senderGroupId: item.id })) ? "matching_loaded" : "matching_unloaded") : item.status,
+        name: item.status === "unavailable" ? "Unavailable" : item.name ?? "Selected conversation",
+      } satisfies SelectionReviewItem));
+      setSelectionReview({ status: "ready", generation, ids: capturedIds, filter: nextFilter, items });
+    } catch (failure) {
+      if (controller.signal.aborted || token !== selectionReviewSequence.current || denied.current) return;
+      setSelectionReview({ status: "error", generation, ids: capturedIds, filter: nextFilter, items: [], error: failure instanceof Error ? failure.message : "The selection could not be reviewed." });
+    } finally {
+      if (selectionReviewRequest.current === controller) selectionReviewRequest.current = null;
+    }
+  }
+  function closeSelectionReview(open: boolean) {
+    if (open) { setReview(true); return; }
+    selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null; setReview(false); setSelectionReview(null);
+  }
+  function removeFromSelectionReview(id: WorkspaceId) {
+    setSelected(previous => previous.filter(value => value !== id));
+    setSelectionNames(previous => { if (!previous.has(id)) return previous; const next = new Map(previous); next.delete(id); return next; });
+    setSelectionReview(previous => previous ? { ...previous, ids: previous.ids.filter(value => value !== id), items: previous.items.filter(item => item.id !== id) } : previous);
   }
   async function open(id: WorkspaceId, fresh = false) {
     const generation = ++sequence.current; activeOpen.current = id;
@@ -176,7 +259,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   return <QueryClientProvider client={cache.client}>
     <InboxWorkspace scopeLabel={labels[filter.view]} rows={snapshot.rows} invalidatedIds={invalidatedIds} selectedIds={selected} openId={opened?.id ?? null}
       onSelectionChange={select} onOpen={id => void open(id)} onCloseDetail={() => { sequence.current++; activeOpen.current = null; setOpened(null); }}
-      onBack={() => { window.location.href = "/inbox/overview"; }} onReviewSelection={() => setReview(true)}
+      onBack={() => { window.location.href = "/inbox/overview"; }} onReviewSelection={() => void beginSelectionReview(selected, filter)}
       actions={actionItems} onAction={prepareAction} connection={{ state: snapshot.state === "permission_lost" ? "permission_lost" : snapshot.state === "live" ? "live" : snapshot.state === "resync_required" ? "offline" : "updating", label: snapshot.state === "permission_lost" ? "Your access has changed. Reload to continue." : snapshot.state === "live" ? "Current workspace is synchronized" : snapshot.state === "resync_required" ? "Refresh this view to reconnect" : "Loading workspace…" }}
       listState={busy || snapshot.state === "loading" ? "loading" : "ready"} listError={error} onRetryList={() => void load(filter)}
       toolbar={<><form onSubmit={event => { event.preventDefault(); void load({ ...filter, search }); }}><label>Search <input aria-label="Search conversations" maxLength={100} value={search} onChange={event => setSearch(event.target.value)} disabled={busy} /></label><button disabled={busy}>Search</button></form>
@@ -189,6 +272,6 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     {metadata.review}
     {saved.review}
     {actionsEnabled ? saved.builder : null}
-    <Dialog open={review} onOpenChange={setReview}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>{selected.length} selected conversations</DialogTitle><DialogDescription>Remove any conversations that do not belong in this group, including those outside the current view.</DialogDescription><ul>{selected.map(id => <li className="flex items-center justify-between gap-4 py-2" key={id}>{selectionNames.get(id)}<button onClick={() => select(selected.filter(value => value !== id))}>Remove</button></li>)}</ul></DialogContent></Dialog>
+    <Dialog open={review} onOpenChange={closeSelectionReview}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>{selected.length} selected conversations</DialogTitle><DialogDescription>Review each selected conversation against the current filter before continuing.</DialogDescription>{selectionReview?.status === "loading" && <p role="status">Checking selected conversations…</p>}{selectionReview?.status === "error" && <><p role="alert">{selectionReview.error}</p><button type="button" onClick={() => void beginSelectionReview(selectionReview.ids, selectionReview.filter)}>Retry review</button></>}{selectionReview?.status === "ready" && <p role="status">{selectionReview.items.filter(item => item.status === "outside_filter").length} outside this view · {selectionReview.items.filter(item => item.status === "unavailable").length} unavailable</p>}<ul>{selectionReview?.items.map(item => <li className="flex items-center justify-between gap-4 py-2" key={item.id}><span>{item.name} <small>({item.status.replace("_", " ")})</small></span><button type="button" disabled={selectionReview.status === "loading"} onClick={() => removeFromSelectionReview(item.id)}>Remove</button></li>)}</ul></DialogContent></Dialog>
   </QueryClientProvider>;
 }
