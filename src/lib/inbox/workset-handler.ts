@@ -7,7 +7,10 @@ import type { DurableInboxScope, InboxWorksetRepository } from "./sync-gateway";
 
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-const error = (status: number) => Response.json({ error: "Inbox workset unavailable" }, { status, headers });
+const error = (status: number, retryAfterSeconds: number | null = null) => Response.json(
+  { error: "Inbox workset unavailable" },
+  { status, headers: retryAfterSeconds === null ? headers : { ...headers, "retry-after": String(retryAfterSeconds) } },
+);
 
 /** HTTP core, mounted only behind the disabled Inbox workspace server flag.
  * The repository creates and authorizes a scope atomically. This boundary never resolves
@@ -76,7 +79,7 @@ export function createInboxWorksetHandler(repository: InboxWorksetRepository, no
         reportInboxFailure("inbox_workset", controller.signal.aborted ? "timeout" : "unexpected_failure");
       controller.abort();
       void reader?.cancel().catch(() => {});
-      return error(failure instanceof InboxHttpError ? failure.status : 503);
+      return error(failure instanceof InboxHttpError ? failure.status : 503, failure instanceof InboxHttpError ? failure.retryAfterSeconds : null);
     } finally {
       clearTimeout(timer);
       signal.removeEventListener("abort", cancel);

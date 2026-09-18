@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createInboxWorksetHandler } from "./workset-handler";
+import { InboxHttpError } from "./http-error";
 const report = vi.hoisted(() => vi.fn());
 vi.mock("./report-failure", () => ({ reportInboxFailure: report }));
 import type { DurableInboxScope, InboxWorksetRepository } from "./sync-gateway";
@@ -45,6 +46,14 @@ describe("bounded workset HTTP boundary", () => {
     const f = fixture(); f.repo.createScope = async () => { throw Error("private SQL"); };
     const response = await f.make()(f.request()); expect(response.status).toBe(503); expect(await response.text()).not.toContain("private SQL");
     expect(report).toHaveBeenCalledWith("inbox_workset", "unexpected_failure");
+  });
+  it("exposes a retry hint only for the transient generation-rate domain error", async () => {
+    const f = fixture(); f.repo.createScope = async () => { throw new InboxHttpError(429, 1); };
+    const retry = await f.make()(f.request());
+    expect(retry.status).toBe(429); expect(retry.headers.get("retry-after")).toBe("1");
+    f.repo.createScope = async () => { throw new InboxHttpError(429); };
+    const hardLimit = await f.make()(f.request());
+    expect(hardLimit.status).toBe(429); expect(hardLimit.headers.get("retry-after")).toBeNull();
   });
   it("rejects a mutated scope reference after creation", async () => {
     const f = fixture(); f.repo.getAccess = async () => { f.scope.targets = []; return { sessionActive: true, activeMembershipCount: 1, status: "active" as const, epoch: "1", expiresAt: null, deletionPrepared: false }; };

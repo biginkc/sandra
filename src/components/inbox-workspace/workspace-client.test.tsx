@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InboxWorkspaceClient } from "./workspace-client";
 import { workspaceId } from "./selection";
 import type { WorkspaceRow } from "./inbox-workspace";
-const state = vi.hoisted(() => ({ callbacks: null as null | { onChange: (value: unknown) => void; onAccessBoundary: () => void; onInvalidated: (ids: readonly string[]) => void }, replacements: [] as unknown[], worksetBodies: [] as Array<Record<string, unknown>>, deny: false, itemUnavailable: false, detailUnavailable: false, selectionUnavailable: false, deferNextSelectionReview: false, resolveDeferredSelectionReview: null as null | (() => void), worksetUpdates: "none" as "none" | "has" | "required" | "error" }));
+const state = vi.hoisted(() => ({ callbacks: null as null | { onChange: (value: unknown) => void; onAccessBoundary: () => void; onInvalidated: (ids: readonly string[]) => void }, replacements: [] as unknown[], worksetBodies: [] as Array<Record<string, unknown>>, rateLimitedWorksets: 0, hardLimitWorksets: 0, deferNextWorkset: false, resolveDeferredWorkset: null as null | (() => void), deny: false, itemUnavailable: false, detailUnavailable: false, selectionUnavailable: false, deferNextSelectionReview: false, resolveDeferredSelectionReview: null as null | (() => void), worksetUpdates: "none" as "none" | "has" | "required" | "error" }));
 vi.mock("@/lib/inbox/workspace-sync", () => ({ createWorkspaceSync: (callbacks: typeof state.callbacks) => {
   state.callbacks = callbacks;
   return { replace: (value: unknown) => { state.replacements.push(value); }, reset: () => callbacks?.onChange({ state: "resync_required", rows: [] }), revoke: () => callbacks?.onChange({ state: "permission_lost", rows: [] }) };
@@ -22,7 +22,7 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ x: 0, y: 0, left: 0, top: 0, width: 900, height: 600, right: 900, bottom: 600, toJSON: () => ({}) }));
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 600 });
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 900 });
-  calls = []; state.replacements = []; state.worksetBodies = []; state.deny = false; state.itemUnavailable = false; state.detailUnavailable = false; state.selectionUnavailable = false; state.deferNextSelectionReview = false; state.resolveDeferredSelectionReview = null; state.worksetUpdates = "none";
+  calls = []; state.replacements = []; state.worksetBodies = []; state.rateLimitedWorksets = 0; state.hardLimitWorksets = 0; state.deferNextWorkset = false; state.resolveDeferredWorkset = null; state.deny = false; state.itemUnavailable = false; state.detailUnavailable = false; state.selectionUnavailable = false; state.deferNextSelectionReview = false; state.resolveDeferredSelectionReview = null; state.worksetUpdates = "none";
   window.sessionStorage.clear();
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     calls.push(url);
@@ -45,12 +45,16 @@ beforeEach(() => {
     if (state.deny) return Response.json({}, { status: 403 });
     if (url.endsWith("/worksets")) {
       state.worksetBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-      return Response.json({ scopeId, orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: "generation-1", expiresAt: Date.now() + 60000, orderedIds: [workspaceId(row.target)], nextCursor: null, refreshed: false });
+      if (state.rateLimitedWorksets > 0) { state.rateLimitedWorksets--; return Response.json({ error: "Inbox workset unavailable" }, { status: 429, headers: { "retry-after": "1" } }); }
+      if (state.hardLimitWorksets > 0) { state.hardLimitWorksets--; return Response.json({ error: "Inbox workset unavailable" }, { status: 429 }); }
+      const success = () => Response.json({ scopeId, orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: "generation-1", expiresAt: Date.now() + 60000, orderedIds: [workspaceId(row.target)], nextCursor: null, refreshed: false });
+      if (state.deferNextWorkset) { state.deferNextWorkset = false; return new Promise<Response>(resolve => { state.resolveDeferredWorkset = () => resolve(success()); }); }
+      return success();
     }
     return Response.json({ scopeId, orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: "generation-1", expiresAt: Date.now() + 60000, orderedIds: [workspaceId(row.target)], nextCursor: null, refreshed: false });
   }));
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 async function loaded() {
   render(<InboxWorkspaceClient identity={identity} initialFilter={{ view: "all", hide_noise: true }} />);
   await waitFor(() => expect(state.replacements).toHaveLength(1));
@@ -72,6 +76,60 @@ it("does not reuse a scope across an access-epoch change", async () => {
   render(<InboxWorkspaceClient identity={{ ...identity, accessEpoch: "2" }} initialFilter={{ view: "all", hide_noise: true }} />);
   await waitFor(() => expect(state.worksetBodies).toHaveLength(2));
   expect(state.worksetBodies[1]?.replacesScopeId).toBeUndefined();
+});
+
+it("keeps the current rows visible when a hard generation limit refuses a filter change", async () => {
+  await loaded();
+  state.hardLimitWorksets = 1;
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "unread" } });
+  await screen.findByRole("alert");
+  expect(screen.getByRole("list")).toHaveTextContent("Ada");
+  expect(screen.getByRole("alert")).toHaveTextContent("Please wait before refreshing this view.");
+  expect(screen.getByRole("button", { name: "Retry list" })).toBeInTheDocument();
+});
+
+it("automatically retries a distinguished generation-rate response once", async () => {
+  await loaded();
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  state.rateLimitedWorksets = 1;
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "unread" } });
+  await screen.findByRole("alert");
+  const attemptsAfterRateLimit = state.worksetBodies.length;
+  await act(async () => { vi.advanceTimersByTime(1000); });
+  await waitFor(() => expect(state.replacements).toHaveLength(2));
+  expect(state.worksetBodies).toHaveLength(attemptsAfterRateLimit + 1);
+  expect(screen.getByRole("combobox")).toHaveValue("unread");
+});
+
+it("does not automatically retry the hard generation limit", async () => {
+  await loaded();
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  state.hardLimitWorksets = 1;
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "unread" } });
+  await screen.findByRole("alert");
+  const attemptsAfterLimit = state.worksetBodies.length;
+  await act(async () => { vi.advanceTimersByTime(5000); });
+  expect(state.worksetBodies).toHaveLength(attemptsAfterLimit);
+  expect(screen.getByRole("combobox")).toHaveValue("all");
+  expect(screen.getByRole("button", { name: "Retry list" })).toBeInTheDocument();
+});
+
+it("does not let an abandoned automatic retry publish after the workspace remounts", async () => {
+  await loaded();
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  state.rateLimitedWorksets = 1;
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: "unread" } });
+  await screen.findByRole("alert");
+  state.deferNextWorkset = true;
+  await act(async () => { vi.advanceTimersByTime(1000); });
+  await waitFor(() => expect(state.resolveDeferredWorkset).toBeTruthy());
+  const stale = state.resolveDeferredWorkset!;
+  cleanup();
+  state.replacements = [];
+  await loaded();
+  const replacementsAfterRemount = state.replacements.length;
+  await act(async () => stale());
+  expect(state.replacements).toHaveLength(replacementsAfterRemount);
 });
 
 it("selection never fetches history; opening and revisiting use the bounded detail cache", async () => {

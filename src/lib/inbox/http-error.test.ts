@@ -10,5 +10,6 @@ describe("canonical SQL domain HTTP mapping", () => {
     ["PGRST301", "JWT signature rejected", 401], ["PGRST303", "JWT expired", 401], ["PGRST202", "missing schema", 503], ["unknown", "INBOX_ORG_DENIED", 503],
   ])("maps exact domain %s/%s to %s without exposing database text", (code, message, status) => {
     const error = inboxDatabaseError({ code, message }); expect(error.status).toBe(status); expect(error.message).toBe("Inbox unavailable");
+    expect(error.retryAfterSeconds).toBe(message === "INBOX_GENERATION_RATE" ? 1 : null);
   });
 });
