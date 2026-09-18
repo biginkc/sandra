@@ -60,5 +60,5 @@ it("recovers the same acceptance key and displays the terminal reply receipt", a
   fireEvent.click(screen.getByRole("button", { name: "Accept reviewed reply" }));
   await screen.findByText("Reply succeeded");
   expect(calls.some(url => url.startsWith("/api/inbox/replies/recover?preparationId="))).toBe(true);
-  expect(screen.getByRole("link", { name: "Open reply receipt" })).toHaveAttribute("href", `/api/inbox/replies/${operationId}`);
+  expect(screen.getByRole("link", { name: "Open reply receipt" })).toHaveAttribute("href", `/inbox/replies/${operationId}`);
 });

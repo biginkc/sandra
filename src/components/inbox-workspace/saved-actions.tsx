@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import type { InboxQueryIdentity } from "@/lib/inbox/workspace-query";
 import type { WorkspaceId } from "./selection";
 import type { WorkspaceAction } from "./inbox-workspace";
+import { forgetRecoveryEntry, readRecoveryEntries, recoveryStorageKey, rememberRecoveryEntry, type RecoveryEntry } from "./recovery-registry";
 
 /** Client-safe mirror of the server action definition. The server remains the
  * authority: this shape only drives bounded editing and display. */
@@ -87,7 +88,7 @@ const outcomes = [
 ] as const;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const recoveryKey = (identity: InboxQueryIdentity) => `inbox-saved-action-recovery:${JSON.stringify([identity.orgId, identity.userId, identity.sessionId, identity.accessEpoch])}`;
+const recoveryKey = (identity: InboxQueryIdentity) => recoveryStorageKey("inbox-saved-action-recovery", identity);
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -206,7 +207,7 @@ export function useInboxSavedActions(options: Options) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [followUp, setFollowUp] = useState<FollowUpDraft | null>(null);
   const [followUpReceipt, setFollowUpReceipt] = useState<Receipt | null>(null);
-  const [recoveredOperation, setRecoveredOperation] = useState<{ operationId: string; kind: Prepared["kind"] } | null>(null);
+  const [recoveredOperation, setRecoveredOperation] = useState<{ operationId: string; kind: Prepared["kind"]; entry: RecoveryEntry } | null>(null);
   const [recoveryError, setRecoveryError] = useState<string>();
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [retry, setRetry] = useState(0);
@@ -235,10 +236,13 @@ export function useInboxSavedActions(options: Options) {
   }, []);
 
   const rememberRecovery = useCallback((kind: Prepared["kind"], preparationId: string, idempotencyKey: string) => {
-    try { sessionStorage.setItem(recoveryStorage, JSON.stringify({ kind, preparationId, idempotencyKey })); }
-    catch { setRecoveryError("Keep this tab open until the action is confirmed; reload recovery is unavailable in this browser."); }
+    try { rememberRecoveryEntry(recoveryStorage, { kind, preparationId, idempotencyKey }); return true; }
+    catch { setRecoveryError("This tab already has 50 unresolved actions. Check their receipts before starting another."); return false; }
   }, [recoveryStorage]);
-  const forgetRecovery = useCallback(() => { try { sessionStorage.removeItem(recoveryStorage); } catch { /* optional browser storage */ } }, [recoveryStorage]);
+  const forgetRecovery = useCallback((entry?: Pick<RecoveryEntry, "preparationId" | "idempotencyKey">) => {
+    try { if (entry) forgetRecoveryEntry(recoveryStorage, entry); else sessionStorage.removeItem(recoveryStorage); }
+    catch { /* optional browser storage */ }
+  }, [recoveryStorage]);
 
   const load = useCallback(async () => {
     if (!latest.current.enabled) return;
@@ -265,9 +269,9 @@ export function useInboxSavedActions(options: Options) {
     async function recover() {
       try {
         const raw = sessionStorage.getItem(recoveryStorage);
-        if (!raw || raw.length > 512) return;
-        const record = object(JSON.parse(raw));
-        if (!record || !["metadata", "reply"].includes(record.kind as string) || typeof record.preparationId !== "string" || !UUID.test(record.preparationId) || typeof record.idempotencyKey !== "string" || !UUID.test(record.idempotencyKey)) { forgetRecovery(); return; }
+        if (!raw || raw.length > 16_384) return;
+        const record = readRecoveryEntries(recoveryStorage).find(entry => (entry.kind === "metadata" || entry.kind === "reply") && UUID.test(entry.preparationId) && UUID.test(entry.idempotencyKey));
+        if (!record || !record.kind) { forgetRecovery(); return; }
         const path = record.kind === "reply" ? "/api/inbox/replies/recover" : "/api/inbox/operations/recover";
         const response = await fetch(`${path}?preparationId=${encodeURIComponent(record.preparationId)}&idempotencyKey=${encodeURIComponent(record.idempotencyKey)}`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.any([abort.signal, AbortSignal.timeout(15_000)]) });
         if (abort.signal.aborted) return;
@@ -277,9 +281,9 @@ export function useInboxSavedActions(options: Options) {
         if (value?.state === "accepted") {
           const operation = object(value.operation);
           if (!operation || typeof operation.operationId !== "string" || !UUID.test(operation.operationId)) throw new Error("The earlier action response could not be verified.");
-          setRecoveredOperation({ operationId: operation.operationId, kind: record.kind as Prepared["kind"] });
+          setRecoveredOperation({ operationId: operation.operationId, kind: record.kind, entry: record });
           setRecoveryError(undefined);
-        } else if (value?.state === "expired_not_accepted") { forgetRecovery(); }
+        } else if (value?.state === "expired_not_accepted") { forgetRecovery(record); }
         else setRecoveryError("The earlier action has not been confirmed yet. Its original identifiers are retained.");
       } catch (error) { if (!abort.signal.aborted) setRecoveryError(error instanceof Error ? error.message : "Earlier action recovery is unavailable."); }
     }
@@ -289,7 +293,7 @@ export function useInboxSavedActions(options: Options) {
 
   useEffect(() => {
     if (!recoveredOperation) return;
-    const { operationId, kind } = recoveredOperation;
+    const { operationId, kind, entry } = recoveredOperation;
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function poll() {
@@ -301,7 +305,7 @@ export function useInboxSavedActions(options: Options) {
         if (complete) {
           const result = kind === "reply" ? replyReceiptResult(raw.receipts) : typeof raw.result === "string" ? raw.result : "completed";
           setReceipt({ operationId, kind, result });
-          forgetRecovery();
+          forgetRecovery(entry);
           setRecoveredOperation(null);
           setRecoveryError(undefined);
           latest.current.onCompleted();
@@ -391,10 +395,10 @@ export function useInboxSavedActions(options: Options) {
   async function accept() {
     if (!draft?.prepared || draft.stage !== "prepared" || (draft.error && !draft.acceptAttempted)) return;
     const next = { ...draft, stage: "accepting" as const, acceptAttempted: true, error: undefined };
-    rememberRecovery(draft.prepared.kind, draft.prepared.value.preparationId, draft.request.idempotencyKey);
+    if (!rememberRecovery(draft.prepared.kind, draft.prepared.value.preparationId, draft.request.idempotencyKey)) return;
     setDraft(next);
     try {
-      const recoveryPath = draft.prepared.kind === "reply" ? "/api/inbox/replies/recover" : "/api/inbox/actions/recover";
+      const recoveryPath = draft.prepared.kind === "reply" ? "/api/inbox/replies/recover" : "/api/inbox/operations/recover";
       const recovery = await fetch(`${recoveryPath}?preparationId=${encodeURIComponent(draft.prepared.value.preparationId)}&idempotencyKey=${encodeURIComponent(draft.request.idempotencyKey)}`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.timeout(15_000) });
       if (recovery.ok) {
         const recovered = object(await recovery.json());
@@ -436,7 +440,7 @@ export function useInboxSavedActions(options: Options) {
   async function acceptFollowUp() {
     if (!followUp?.prepared || followUp.stage !== "prepared" || followUp.prepared.recipientCount < 1 || followUp.prepared.recipientCount > 50 || followUp.prepared.blockers.length) return;
     const next = { ...followUp, stage: "accepting" as const, error: undefined };
-    rememberRecovery("reply", followUp.prepared.preparationId, followUp.request.idempotencyKey);
+    if (!rememberRecovery("reply", followUp.prepared.preparationId, followUp.request.idempotencyKey)) return;
     setFollowUp(next);
     try {
       const recovery = await fetch(`/api/inbox/replies/recover?preparationId=${encodeURIComponent(followUp.prepared.preparationId)}&idempotencyKey=${encodeURIComponent(followUp.request.idempotencyKey)}`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.timeout(15_000) });
@@ -457,6 +461,7 @@ export function useInboxSavedActions(options: Options) {
     if (!draft?.operationId) return;
     const operationId = draft.operationId;
     const kind = draft.prepared?.kind;
+    const recoveryEntry = draft.prepared ? { kind: draft.prepared.kind, preparationId: draft.prepared.value.preparationId, idempotencyKey: draft.request.idempotencyKey } : undefined;
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function poll() {
@@ -468,7 +473,7 @@ export function useInboxSavedActions(options: Options) {
         if (complete) {
           const result = kind === "reply" ? replyReceiptResult(raw.receipts) : typeof raw.result === "string" ? raw.result : "completed";
           setReceipt({ operationId, kind: kind ?? "metadata", result });
-          forgetRecovery();
+          if (recoveryEntry) forgetRecovery(recoveryEntry);
           setDraft(current => current ? { ...current, result, error: undefined } : current);
           latest.current.onCompleted();
           return;
@@ -480,11 +485,12 @@ export function useInboxSavedActions(options: Options) {
     }
     void poll();
     return () => { abort.abort(); if (timer) clearTimeout(timer); };
-  }, [draft?.operationId, draft?.prepared?.kind, requestJson]);
+  }, [draft?.operationId, draft?.prepared?.kind, draft?.prepared?.value.preparationId, draft?.request.idempotencyKey, requestJson, forgetRecovery]);
 
   useEffect(() => {
     if (!followUp?.operationId) return;
     const operationId = followUp.operationId;
+    const recoveryEntry = followUp.prepared ? { kind: "reply" as const, preparationId: followUp.prepared.preparationId, idempotencyKey: followUp.request.idempotencyKey } : undefined;
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function poll() {
@@ -493,7 +499,7 @@ export function useInboxSavedActions(options: Options) {
         if (!raw || raw.operationId !== operationId || !Array.isArray(raw.receipts)) throw new Error("Reply progress could not be verified.");
         if (raw.dispatchComplete === true) {
           const result = replyReceiptResult(raw.receipts);
-          forgetRecovery();
+          if (recoveryEntry) forgetRecovery(recoveryEntry);
           setFollowUpReceipt({ operationId, kind: "reply", result });
           setFollowUp(current => current ? { ...current, result, error: undefined } : current);
           return;
@@ -503,7 +509,7 @@ export function useInboxSavedActions(options: Options) {
     }
     void poll();
     return () => { abort.abort(); if (timer) clearTimeout(timer); };
-  }, [followUp?.operationId, requestJson]);
+  }, [followUp?.operationId, followUp?.prepared?.preparationId, followUp?.request.idempotencyKey, requestJson, forgetRecovery]);
 
   useEffect(() => () => { followUpGeneration.current++; followUpController.current?.abort(); }, []);
 
@@ -532,6 +538,6 @@ export function useInboxSavedActions(options: Options) {
 
   const review = <Dialog open={!!draft} onOpenChange={open => { if (!open && draft?.stage !== "accepting" && followUp?.stage !== "accepting") clear(); }}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>Review saved action · {draft?.saved.name}</DialogTitle><DialogDescription>Check the authoritative eligibility result before applying this saved combination.</DialogDescription>{draft?.stage === "preparing" ? <p role="status">Checking current records…</p> : draft && !draft.prepared ? <p role="alert">{draft.error ?? "Saved action review unavailable."}</p> : draft?.prepared && <>{draft.prepared.kind === "reply" ? <><p>{draft.prepared.value.recipientCount} recipients · {draft.prepared.value.blockers.length ? `Blocked: ${draft.prepared.value.blockers.join(", ")}` : "Ready for reviewed send"}</p><ul>{draft.prepared.value.items.map(item => <li key={item.id}>{draft.names.get(`${item.target.kind}:${item.target.id}`) ?? "Selected conversation"}: {item.exclusion ?? (item.recipient ? `Ready for send to ${item.recipient.contactName}` : "Needs attention")}{item.recipient && <small className="block whitespace-pre-wrap">{item.recipient.renderedBody}</small>}</li>)}</ul></> : <><p>{draft.prepared.value.eligibleCount} eligible · {draft.prepared.value.excludedCount} excluded · {draft.prepared.value.effectCount ?? 0} changes</p><ul>{draft.prepared.value.items.map(item => <li key={item.id}>{draft.names.get(`${item.target.kind}:${item.target.id}`) ?? "Selected conversation"}: {item.exclusion ?? "Eligible"}</li>)}</ul>{draft.result && draft.prepared.value.followUp && !followUp && <button type="button" onClick={() => void prepareFollowUp()}>Review reply</button>}</>}{draft.error && <p role="alert">{draft.error}</p>}<button type="button" disabled={draft.stage === "accepting" || !!draft.operationId || (!!draft.prepared && (draft.prepared.kind === "reply" ? draft.prepared.value.recipientCount === 0 || draft.prepared.value.blockers.length > 0 : draft.prepared.value.eligibleCount === 0))} onClick={() => void accept()}>{draft.stage === "accepting" ? "Applying…" : draft.operationId ? "Accepted · checking progress…" : draft.acceptAttempted ? "Retry action safely" : "Accept reviewed action"}</button>{draft.operationId && <p role="status">Accepted. Checking durable progress…</p>}</>}{followUp?.stage === "preparing" && <p role="status">Checking reply recipients…</p>}{followUp && !followUp.prepared && followUp.stage !== "preparing" && <p role="alert">{followUp.error ?? "Reply review unavailable."}</p>}{followUp?.prepared && <section aria-label="Review saved reply"><h3>Review reply</h3><p>{followUp.prepared.recipientCount} recipients · {followUp.prepared.blockers.length ? `Blocked: ${followUp.prepared.blockers.join(", ")}` : "Ready for reviewed send"}</p><ul>{followUp.prepared.items.map(item => <li key={item.id}>{item.exclusion ?? (item.recipient ? `Ready to send to ${item.recipient.contactName}` : "Needs attention")}{item.recipient && <small className="block whitespace-pre-wrap">{item.recipient.renderedBody}</small>}</li>)}</ul>{followUp.error && <p role="alert">{followUp.error}</p>}<button type="button" disabled={followUp.stage === "accepting" || !!followUp.operationId || followUp.prepared.recipientCount < 1 || followUp.prepared.recipientCount > 50 || followUp.prepared.blockers.length > 0} onClick={() => void acceptFollowUp()}>{followUp.stage === "accepting" ? "Accepting…" : followUp.operationId ? "Accepted · checking progress…" : "Accept reviewed reply"}</button></section>}</DialogContent></Dialog>;
   const activeReceipts = [draft?.operationId ? { operationId: draft.operationId, kind: draft.prepared?.kind ?? "metadata", result: draft.result, error: draft.error } : receipt, followUp?.operationId ? { operationId: followUp.operationId, kind: "reply" as const, result: followUp.result, error: followUp.error } : followUpReceipt, recoveredOperation ? { operationId: recoveredOperation.operationId, kind: recoveredOperation.kind, result: undefined, error: recoveryError } : null].filter((value): value is Receipt => !!value);
-  const activity: ReactNode = activeReceipts.length ? <>{activeReceipts.map((activeReceipt, index) => <section aria-label="Saved action progress" key={`${activeReceipt.operationId}:${index}`}><p role="status">{activeReceipt.error ?? (activeReceipt.result ? `Saved action ${activeReceipt.result}.` : "Saved action accepted. Checking durable progress…")}</p><a href={`${activeReceipt.kind === "reply" ? "/api/inbox/replies/" : "/api/inbox/operations/"}${encodeURIComponent(activeReceipt.operationId)}`}>Open action receipt</a></section>)}</> : null;
+  const activity: ReactNode = activeReceipts.length ? <>{activeReceipts.map((activeReceipt, index) => <section aria-label="Saved action progress" key={`${activeReceipt.operationId}:${index}`}><p role="status">{activeReceipt.error ?? (activeReceipt.result ? `Saved action ${activeReceipt.result}.` : "Saved action accepted. Checking durable progress…")}</p><a href={`/inbox/${activeReceipt.kind === "reply" ? "replies" : "operations"}/${encodeURIComponent(activeReceipt.operationId)}`}>Open action receipt</a></section>)}</> : null;
   return { items, actions, prepare, review, activity, picker, builder, clear, refresh: load, replyStep, isReplyAction: (actionId: string) => !!replyStep(actionFromId(actionId)?.definition ?? { version: 1, steps: [] }) };
 }

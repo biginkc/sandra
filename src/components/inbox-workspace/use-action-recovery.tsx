@@ -2,8 +2,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { InboxQueryIdentity } from "@/lib/inbox/workspace-query";
 import type { AcceptedInboxAction, AcceptInboxActionRequest, InboxActionRecovery } from "@/lib/inbox/action-api-contract";
+import { forgetRecoveryEntry, readRecoveryEntries, recoveryStorageKey, rememberRecoveryEntry } from "./recovery-registry";
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-const storageKey = (identity: InboxQueryIdentity) => `inbox-action-recovery:${JSON.stringify([identity.orgId, identity.userId, identity.sessionId, identity.accessEpoch])}`;
+const storageKey = (identity: InboxQueryIdentity) => recoveryStorageKey("inbox-action-recovery", identity);
 type State = { kind: "checking" | "pending" | "accepting"; pair?: AcceptInboxActionRequest; error?: string } | { kind: "idle" } | { kind: "suspended" };
 interface Options { identity: InboxQueryIdentity; enabled: boolean; onRecovered: (operation: AcceptedInboxAction) => void; onAccessLost: () => void; onExpired: () => void }
 /** Deliberate narrow sessionStorage exception: only opaque preparation/key,
@@ -18,19 +19,15 @@ export function useInboxActionRecovery(options: Options) {
   const latest = useRef(options);
   useEffect(() => { latest.current = options; }, [options]);
   const remove = useCallback((pair?: AcceptInboxActionRequest) => {
-    try {
-      const raw = sessionStorage.getItem(key);
-      if (!raw) return;
-      const value = JSON.parse(raw);
-      if (!pair || (value.preparationId === pair.preparationId && value.idempotencyKey === pair.idempotencyKey)) sessionStorage.removeItem(key);
-    } catch { /* Storage is optional; in-memory idempotency remains intact. */ }
+    try { if (pair) forgetRecoveryEntry(key, pair); else sessionStorage.removeItem(key); }
+    catch { /* Storage is optional; in-memory idempotency remains intact. */ }
   }, [key]);
   // Access loss clears visible private state but preserves the opaque identity-scoped
   // pair. The same session must recover it; a different identity never reads it.
   const clear = useCallback(() => { current.current?.abort(); lastPair.current = null; setState({ kind: "suspended" }); setNotice(undefined); }, []);
   function remember(pair: AcceptInboxActionRequest) {
     lastPair.current = pair;
-    try { sessionStorage.setItem(key, JSON.stringify(pair)); return true; }
+    try { rememberRecoveryEntry(key, pair); return true; }
     catch { setNotice("Keep this tab open until the action is confirmed; reload recovery is unavailable in this browser."); return false; }
   }
   function accepted(operation: AcceptedInboxAction) { current.current?.abort(); setState({ kind: "idle" }); latest.current.onRecovered(operation); }
@@ -62,9 +59,10 @@ export function useInboxActionRecovery(options: Options) {
       // Hydrate the external sessionStorage record after mount; SSR cannot read it.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       if (!raw) { setState({ kind: "idle" }); return; }
-      if (raw.length > 512) throw Error("Invalid recovery record");
-      const pair = JSON.parse(raw);
-      if (!pair || Object.keys(pair).length !== 2 || !uuid.test(pair.preparationId) || !uuid.test(pair.idempotencyKey)) throw Error("Invalid recovery record");
+      if (raw.length > 16_384) throw Error("Invalid recovery record");
+      const entry = readRecoveryEntries(key).find(value => uuid.test(value.preparationId) && uuid.test(value.idempotencyKey));
+      if (!entry) throw Error("Invalid recovery record");
+      const pair = { preparationId: entry.preparationId, idempotencyKey: entry.idempotencyKey };
       lastPair.current = pair; void resolve(pair);
     } catch { remove(); setState({ kind: "idle" }); }
     return () => { current.current?.abort(); };
@@ -72,6 +70,6 @@ export function useInboxActionRecovery(options: Options) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, options.enabled]);
   const completed = useCallback(() => { remove(lastPair.current ?? undefined); lastPair.current = null; }, [remove]);
-  const panel = !options.enabled || state.kind === "suspended" ? undefined : state.kind !== "idle" ? <section aria-label="Recover earlier bulk action"><p role="status">{state.kind === "checking" ? "Checking an earlier action…" : state.kind === "accepting" ? "Retrying the same earlier action…" : "The earlier action has not been confirmed yet. Starting another bulk action is paused."}</p>{state.error && <p role="alert">{state.error}</p>}{state.kind === "pending" && state.pair && <><button type="button" onClick={() => void resolve(state.pair!)}>Check earlier action</button><button type="button" onClick={() => void resolve(state.pair!, true)}>Retry earlier action safely</button></>}</section> : notice ? <p role="status">{notice}</p> : undefined;
+  const panel = !options.enabled || state.kind === "suspended" ? undefined : state.kind !== "idle" ? <section aria-label="Recover earlier bulk action"><p role="status">{state.kind === "checking" ? "Checking an earlier action…" : state.kind === "accepting" ? "Retrying the same earlier action…" : "The earlier action has not been confirmed yet. Starting another bulk action is paused."}</p>{state.error && <p role="alert">{state.error}</p>}{state.kind === "pending" && state.pair && <><button type="button" onClick={() => void resolve(state.pair!)}>Check earlier action</button><button type="button" onClick={() => void resolve(state.pair!, true)}>Retry earlier action safely</button></>}<a href="/inbox/receipts">Open standalone recovery</a></section> : notice ? <p role="status">{notice}</p> : undefined;
   return { blocked: options.enabled && state.kind !== "idle", panel, remember, clear, accepted, check: (pair: AcceptInboxActionRequest) => { lastPair.current = pair; void resolve(pair); }, completed };
 }
