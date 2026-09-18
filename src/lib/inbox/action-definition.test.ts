@@ -15,7 +15,7 @@ describe("Inbox action input boundaries", () => {
     const second = parse({ definition: { steps: definition.steps, version: 1 }, targets: [target(6), { kind: "conversation", id: id(5).toUpperCase() }], idempotencyKey: id(99) });
     expect(first.inputHash).toBe(second.inputHash);
     expect(first.idempotencyKey).not.toBe(second.idempotencyKey);
-    const steps = [{ type: "promote" }, { type: "assign", userId: null }];
+    const steps = [{ type: "promote" }, { type: "outcome", value: "nurture" }];
     expect(parse({ ...request(), definition: { version: 1, steps } }).inputHash).not.toBe(parse({ ...request(), definition: { version: 1, steps: [...steps].reverse() } }).inputHash);
     const textHash = (text: string) => parse({ ...request(), definition: { version: 1, steps: [{ type: "review_reply", text }] } }).inputHash;
     expect(textHash("hello")).toBe(textHash(" hello "));
@@ -48,7 +48,7 @@ describe("Inbox action input boundaries", () => {
     }
   });
   it("rejects duplicate/conflicting steps, backwards dependency, or a reply before metadata", () => {
-    for (const steps of [[...definition.steps].reverse(), [definition.steps[0], definition.steps[0]], [{ type: "dismiss_unknown" }, { type: "restore_unknown" }], [{ type: "assign", userId: null }, { type: "assign", userId: id(3) }], [{ type: "review_reply", text: "hello" }, { type: "promote" }]]) {
+    for (const steps of [[...definition.steps].reverse(), [definition.steps[0], definition.steps[0]], [{ type: "dismiss_unknown" }, { type: "restore_unknown" }], [{ type: "assign", userId: null }, { type: "assign", userId: id(3) }], [{ type: "review_reply", text: "hello" }, { type: "promote" }], [{ type: "outcome", value: "nurture" }, { type: "assign", userId: null }, { type: "promote" }], [{ type: "outcome", value: "nurture" }, { type: "assign", userId: null }, { type: "dismiss_unknown" }], [{ type: "outcome", value: "nurture" }, { type: "assign", userId: null }, { type: "restore_unknown" }]]) {
       expect(() => parse({ ...request(), definition: { version: 1, steps } })).toThrow(InvalidInboxActionError);
     }
   });

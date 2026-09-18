@@ -33,7 +33,7 @@ BEGIN
  RETURN jsonb_build_object('members',members);
 END $$;
 CREATE FUNCTION public.inbox_action_assignees() RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_action_api.assignees() $$;
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_action_api.assignees() $$;
 CREATE FUNCTION inbox_action_api.recover(k uuid) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE a jsonb;result jsonb;
@@ -45,7 +45,7 @@ BEGIN
  RETURN jsonb_build_object('operation',result);
 END $$;
 CREATE FUNCTION public.inbox_recover_operation(idempotency_key uuid) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_action_api.recover(idempotency_key) $$;
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_action_api.recover(idempotency_key) $$;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_action_api FROM PUBLIC,anon,authenticated,service_role;
 REVOKE ALL ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_action_assignees(),public.inbox_recover_operation(uuid) FROM PUBLIC,anon,service_role;
 GRANT EXECUTE ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_action_assignees(),public.inbox_recover_operation(uuid) TO authenticated;

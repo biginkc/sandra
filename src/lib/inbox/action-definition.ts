@@ -127,6 +127,13 @@ function definition(input: unknown): InboxActionDefinition {
   const outcome = steps.findIndex((s) => s.type === "outcome");
   const assign = steps.findIndex((s) => s.type === "assign");
   valid(outcome < 0 || assign < 0 || outcome < assign);
+  // The durable prepare grammar consumes promotion and unknown-sender
+  // commands before assignment. Keep the client/saved-definition parser
+  // aligned with that authoritative gate so a saved definition cannot be
+  // accepted here and rejected only after the SQL prepare RPC.
+  if (assign >= 0) {
+    valid(!steps.some((step, index) => index > assign && (step.type === "promote" || step.type === "dismiss_unknown" || step.type === "restore_unknown")));
+  }
   return freeze({ version: 1, steps });
 }
 export function parseInboxActionDefinition(raw: string): InboxActionDefinition { return definition(wire(raw)); }

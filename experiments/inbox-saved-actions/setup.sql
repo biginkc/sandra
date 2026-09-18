@@ -75,7 +75,10 @@ BEGIN
   RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
  END IF;
  IF array_position(types,'assign') IS NOT NULL
-  AND (array_position(types,'outcome') IS NULL OR array_position(types,'outcome')>array_position(types,'assign')) THEN
+  AND (array_position(types,'outcome') IS NULL OR array_position(types,'outcome')>array_position(types,'assign')
+   OR (array_position(types,'promote') IS NOT NULL AND array_position(types,'promote')>array_position(types,'assign'))
+   OR (array_position(types,'dismiss_unknown') IS NOT NULL AND array_position(types,'dismiss_unknown')>array_position(types,'assign'))
+   OR (array_position(types,'restore_unknown') IS NOT NULL AND array_position(types,'restore_unknown')>array_position(types,'assign'))) THEN
   RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
  END IF;
  IF array_position(types,'dismiss_unknown') IS NOT NULL AND array_position(types,'restore_unknown') IS NOT NULL THEN

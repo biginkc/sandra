@@ -114,17 +114,36 @@ BEGIN
  IF a->>'version'<>'2' THEN RAISE EXCEPTION 'get() did not recover after restoring eligibility: %',a; END IF;
  RAISE NOTICE 'PASS get() recovers once assignee restored (control)';
 
- -- 8) disabled gated step type (promote) rejected at SAVE
+ -- 8) promotion is a supported metadata step, but the prepare grammar
+ -- consumes it before assignment. Save the standalone control, then reject
+ -- the two demonstrated assign-then-command mismatches at SAVE.
+ EXECUTE 'SET LOCAL ROLE authenticated';
+ a:=public.inbox_saved_action_create('Promote',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','promote'))));
+ EXECUTE 'RESET ROLE';
+ IF a->'definition' IS DISTINCT FROM jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','promote'))) THEN RAISE EXCEPTION 'supported promote definition was not saved: %',a; END IF;
+ RAISE NOTICE 'PASS supported promote step accepted at save';
+
  failed:=false;
  BEGIN
   EXECUTE 'SET LOCAL ROLE authenticated';
-  PERFORM public.inbox_saved_action_create('Promote',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','promote'))));
+  PERFORM public.inbox_saved_action_create('Assign then promote',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','assign','userId',NULL),jsonb_build_object('type','promote'))));
   EXECUTE 'RESET ROLE';
  EXCEPTION WHEN raise_exception THEN
-  IF SQLERRM='INBOX_SAVED_ACTION_STEP_TYPE_DISABLED' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
+  IF SQLERRM='INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
  END;
- IF NOT failed THEN RAISE EXCEPTION 'DISABLED STEP TYPE (promote) ADMITTED AT SAVE'; END IF;
- RAISE NOTICE 'PASS disabled gated step type (promote) rejected at save';
+ IF NOT failed THEN RAISE EXCEPTION 'ASSIGN-THEN-PROMOTE SAVED DEFINITION ADMITTED'; END IF;
+ RAISE NOTICE 'PASS assign-then-promote rejected at save';
+
+ failed:=false;
+ BEGIN
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  PERFORM public.inbox_saved_action_create('Assign then dismiss',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','assign','userId',NULL),jsonb_build_object('type','dismiss_unknown'))));
+  EXECUTE 'RESET ROLE';
+ EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM='INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
+ END;
+ IF NOT failed THEN RAISE EXCEPTION 'ASSIGN-THEN-DISMISS SAVED DEFINITION ADMITTED'; END IF;
+ RAISE NOTICE 'PASS assign-then-dismiss rejected at save';
 
  -- 9) dnc gated outcome rejected at SAVE
  failed:=false;
