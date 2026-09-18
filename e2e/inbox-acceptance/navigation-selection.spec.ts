@@ -142,6 +142,38 @@ test.describe("Inbox navigation and selection", () => {
     await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
   });
 
+  test("Shift-drag selects the resident range and drag-drop opens the same review flow", async ({ page }) => {
+    const first = await seedSelectionThread("SEL-GESTURE-FIRST", "Gesture", "First");
+    const second = await seedSelectionThread("SEL-GESTURE-SECOND", "Gesture", "Second");
+    const third = await seedSelectionThread("SEL-GESTURE-THIRD", "Gesture", "Third");
+    await openWorkspace(page);
+
+    const firstBox = await rowFor(page, first).boundingBox();
+    const thirdBox = await rowFor(page, third).boundingBox();
+    expect(firstBox).not.toBeNull();
+    expect(thirdBox).not.toBeNull();
+    await page.keyboard.down("Shift");
+    await page.mouse.move(firstBox!.x + firstBox!.width / 2, firstBox!.y + firstBox!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(thirdBox!.x + thirdBox!.width / 2, thirdBox!.y + thirdBox!.height / 2, { steps: 5 });
+    await page.mouse.up();
+    await page.keyboard.up("Shift");
+    await expect(page.getByText("3 selected", { exact: true })).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Open conversation" })).toHaveCount(0);
+
+    const assign = page.getByRole("button", { name: "Assign", exact: true });
+    await expect(assign).toBeVisible();
+    const secondBox = await rowFor(page, second).boundingBox();
+    const assignBox = await assign.boundingBox();
+    expect(secondBox).not.toBeNull();
+    expect(assignBox).not.toBeNull();
+    await page.mouse.move(secondBox!.x + secondBox!.width / 2, secondBox!.y + secondBox!.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(assignBox!.x + assignBox!.width / 2, assignBox!.y + assignBox!.height / 2, { steps: 5 });
+    await page.mouse.up();
+    await expect(page.getByRole("dialog")).toContainText("Assign conversations");
+  });
+
   test("filter changes retain hidden selected IDs for Review selection", async ({ page }) => {
     const unread = await seedSelectionThread("SEL-HIDDEN-UNREAD", "Visible", "Selection", { read: false });
     const read = await seedSelectionThread("SEL-HIDDEN-READ", "Hidden", "Selection", { read: true });
