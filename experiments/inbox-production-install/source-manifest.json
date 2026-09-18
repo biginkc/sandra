@@ -7,8 +7,8 @@
   "install-unknown-companion.py": "449dd4face96e841476b239b9d79f6bb934de81648590bc1192ccbe11241c33b",
   "maintenance-test.py": "6ef8b437401d7b7ad053af4a59dad0e28f53991cb54db6530aff5ce80bcfc0a2",
   "private-schemas.json": "bafdef15eef48ac54a506c49b35f6577b00f70500d7ef337574a41457a0277f6",
-  "read-companion-manifest.json": "f1fe951203b957a73b1f067bf08f876c89ecf6b46201214f9dabb148d754866a",
-  "read-companion.py": "49f700a0f4a968a829ac9a228bed556a27f75451291782062170812c9b9d6dfe",
+  "read-companion-manifest.json": "d32ec3fc6ee4c88607efb7e4e276b2669e40ece0074fe8023baca185b3c07e02",
+  "read-companion.py": "5c0a5137214d8f371123bc32d1e5dcb01f8cc60ef806d9545692cf230dbdd415",
   "read-retention-test.py": "b818783db592d6ef8e35ba18c9ef5b7688d1a1545c6eff6649d7f9f98998c0bf",
   "read-retention.sql": "679ab6aa94635a3fa518221ffe49629868108d851e35cab4000277b7ec5d133d",
   "rehearse-bootstrap.py": "4b0504b57ac15235bbdc84b19416e151e2fd727fbc9fe657b7438e19ea79a6cb",
@@ -26,5 +26,6 @@
   "verify-mutation-harness.py": "3c1c0209359ef8028cb92ea0a64dcf0c6dab288a035bc3bc8ae6604ad9116c17",
   "verify.py": "f85d5740db82e9de171145dfab6268340efe0f854e42ecbedd3f5b13198a2aaa",
   "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15",
-  "selection-review.sql": "8c7d3492ec6766963e2d518d24b221316545f07bc1ba7923f25402dc23802dbd"
+  "selection-review.sql": "8c7d3492ec6766963e2d518d24b221316545f07bc1ba7923f25402dc23802dbd",
+  "reviewed-read/06-inbox-workset-updates-setup.sql": "7916e78557da25af1044c6a2c4697be06c48606776a3533ea876b039a2a28106"
 }

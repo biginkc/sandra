@@ -173,7 +173,8 @@ operation, reply and projection images are built from the exact `fcffde3` source
 snapshot and have no accepted digest until that build runs. Electric is pinned
 to the previously reviewed 1.8.1 digest, but its publication, replication role
 and compatibility with the current candidate still require the separate
-database packet. The fixture relay imports the reviewed relay factory through
+database packet. The compose environment names a constrained replication role;
+it never falls back to the `postgres` administrator. The fixture relay imports the reviewed relay factory through
 `relay-fixture.mjs`; the production entry point remains
 `services/inbox-sync-relay/server.mjs`, which accepts only a private Railway
 Electric hostname.

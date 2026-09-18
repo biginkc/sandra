@@ -12,6 +12,7 @@ This is an executable candidate under review, outside `supabase/migrations`. It 
 - [x] Fresh real GoTrue Auth bootstrap and canonical app replay; actual candidate install, late-failure rollback probe, seven concurrent indexes and disabled serving gate.
 - [x] Canonical message capture through durable worker, assignment/outcome fanout, facets and timestamp-age removal smoke.
 - [x] Hash-pinned PR579 read/history companion installed; six bodies and authenticated-only public grants verified.
+- [x] Current-workset update probe from `f246955922001dc93548219d6678843af90122ad` is bundled after the read schema. It binds each workset to its immutable source cursor/page limit and exposes an authenticated, bounded stale-scope probe; the source remains a separate reviewed installer packet.
 - [x] Validate known/unknown read/history companion catalog, bounded retention and actual held-lock behavior.
 - [ ] Validate final external operations APIs and continuously supervised worker hosting against the same candidate.
 - [ ] Measure installation locks, write amplification, worker catch-up and schema equivalence before migration promotion.

@@ -163,6 +163,7 @@
         "container_name": "sandra-inbox-release-electric-20260917",
         "upstream": "http://electric:3000/",
         "database_relation": "inbox_bridge.summaries",
+        "database_role": "inbox_electric_replication (separate reviewed provisioning required)",
         "publication": "external reviewed database/publication operation required",
         "stream_id": "inbox_release_20260917",
         "memory_bytes": 536870912,

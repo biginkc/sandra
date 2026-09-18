@@ -62,8 +62,8 @@ services:
   operation-worker:
     profiles: [full-runtime]
     build:
-      context: ../..
-      dockerfile: experiments/inbox-operation-worker/Dockerfile
+      context: ../inbox-operation-worker
+      dockerfile: Dockerfile
     image: sandra-inbox-action-worker:release-fcffde3
     pull_policy: never
     container_name: sandra-inbox-release-operation-worker-20260917
@@ -100,8 +100,8 @@ services:
   reply-send-worker:
     profiles: [full-runtime]
     build:
-      context: ../..
-      dockerfile: experiments/inbox-reply-send-worker/Dockerfile
+      context: ../inbox-reply-send-worker
+      dockerfile: Dockerfile
     image: sandra-inbox-reply-send-worker:release-fcffde3
     pull_policy: never
     container_name: sandra-inbox-release-reply-worker-20260917
@@ -143,8 +143,8 @@ services:
   projection-worker:
     profiles: [full-runtime]
     build:
-      context: ../..
-      dockerfile: services/inbox-projection-worker/Dockerfile
+      context: ../../services/inbox-projection-worker
+      dockerfile: Dockerfile
     image: sandra-inbox-projection-worker:release-fcffde3
     pull_policy: never
     container_name: sandra-inbox-release-projection-worker-20260917

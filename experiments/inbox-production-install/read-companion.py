@@ -21,7 +21,10 @@ for entry in manifest:
  raw=(ROOT/entry['source_file']).read_bytes()
  if hashlib.sha256(raw).hexdigest()!=entry['source_sha256']:raise RuntimeError('Pinned companion source changed')
  s=raw.decode();guard_marker=entry.get('fixture_guard','inbox_t2_fixture.identity')
- guards=[g for g in re.finditer(r'DO \$\$.*?END \$\$;',s,re.S) if guard_marker in g.group()]
+ # Reviewed installers use both `END $$;` and the equivalent multiline
+ # `END; $$;` PL/pgSQL terminator.  Match only a complete DO block containing
+ # the explicit fixture marker; never remove an unmarked block.
+ guards=[g for g in re.finditer(r'DO \$\$.*?(?:END\s*\$\$;|END\s*;\s*\$\$;)',s,re.S) if guard_marker in g.group()]
  if len(guards)!=1:raise RuntimeError('Companion fixture guard drift')
  g=guards[0];s=s[:g.start()]+s[g.end():];s,n=normalize(s)
  if n!=2:raise RuntimeError('Companion transaction envelope drift')

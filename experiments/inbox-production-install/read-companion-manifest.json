@@ -40,6 +40,16 @@
     "upgrade_name": "sync-authority"
   },
   {
+    "path": "experiments/inbox-workset-updates/setup.sql",
+    "commit": "f246955922001dc93548219d6678843af90122ad",
+    "source_file": "experiments/inbox-production-install/reviewed-read/06-inbox-workset-updates-setup.sql",
+    "source_sha256": "7916e78557da25af1044c6a2c4697be06c48606776a3533ea876b039a2a28106",
+    "source_original_sha256": "7916e78557da25af1044c6a2c4697be06c48606776a3533ea876b039a2a28106",
+    "fixture_guard": "install_fixture.identity",
+    "rename_prefix": null,
+    "compiled_sha256": "7a26c3203e3e4bbfe52da1d8ac200c2bfdab4bb55a8da23ef08570d5875e056f"
+  },
+  {
     "path": "experiments/inbox-production-install/selection-review.sql",
     "commit": "0eb0985fcee90c4b45853eae9937f5bb19a8942b",
     "source_file": "experiments/inbox-production-install/selection-review.sql",
