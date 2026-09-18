@@ -207,6 +207,113 @@ describe("saved-action prepare glue", () => {
         expect((c.rpc.mock.calls as unknown as [string, unknown][]).map((call) => call[0])).toEqual(["inbox_authorize_sync", "inbox_prepare_action"]);
     });
 });
+describe("saved-action prepare glue", () => {
+    const savedRow = (definition: unknown, overrides: Record<string, unknown> = {}) => ({ id: id(20), version: 1, name: "Saved", definition, org_id: id(1), requester_id: id(2), is_active: true, created_at: "2026-09-14T00:00:00Z", ...overrides });
+    it("resolves the exact stored version via an authorized lookup and threads it into the metadata seam (never the raw client definition)", async () => {
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const savedDefinition = { version: 1, steps: [{ type: "outcome", value: "nurture" }] };
+        const preparedRow = { preparation_id: id(5), idempotency_key: id(3), input_hash: "will not be checked here", expires_at: "2026-09-14T00:00:00Z", definition: savedDefinition, items: [{ id: id(6), kind: "conversation", target_id: id(4), resolution: { property_id: id(7) }, exclusion_code: null }], effect_count: 1, affected_property_count: 1, sms_safety_summary: null };
+        // input_hash/definition echo must match the real parseInboxActionIntent
+        // output for this exact saved snapshot, so compute it the same way the
+        // route does rather than hand-typing a hash.
+        const intentForHash = parseInboxActionIntent(JSON.stringify(savedRequest), { organizationId: id(1), requesterId: id(2) }, { organizationId: id(1), requesterId: id(2), id: id(20), version: 1, definition: savedDefinition as never });
+        preparedRow.input_hash = intentForHash.inputHash;
+        const c = client([ok(actor), ok(savedRow(savedDefinition)), ok(preparedRow)]);
+        const p = await c.repository.prepare(JSON.stringify(savedRequest), signal()) as PreparedInboxAction;
+        expect(p.eligibleCount).toBe(1);
+        const calls = c.rpc.mock.calls as unknown as [string, Record<string, unknown>][];
+        expect(calls[1][0]).toBe("inbox_saved_action_get");
+        expect(calls[1][1]).toEqual({ id: id(20), version: 1 });
+        // The canonical input sent to inbox_prepare_action must carry the
+        // savedAction reference (not "savedAction":null / a client definition).
+        expect((calls[2][1] as { canonical_input: string }).canonical_input).toContain(`"savedAction":{"id":"${id(20)}","version":1}`);
+        // Astra round-1 blocker #1 (regression guard): a saved action must
+        // produce the SAME intent (targets/definition) as passing that exact
+        // definition inline — only the savedAction envelope field differs.
+        const inlineRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], definition: savedDefinition };
+        const inlineIntent = parseInboxActionIntent(JSON.stringify(inlineRequest), { organizationId: id(1), requesterId: id(2) });
+        expect(intentForHash.input.targets).toEqual(inlineIntent.input.targets);
+        expect(intentForHash.input.definition).toEqual(inlineIntent.input.definition);
+        expect(intentForHash.input.savedAction).toEqual({ id: id(20), version: 1 });
+        expect(inlineIntent.input.savedAction).toBeNull();
+    });
+    it("MUTATION: end to end against a real widened inbox_prepare_action mock — prepare() with a valid saved action succeeds and returns the same eligible/effect counts a real inline prepare of the identical definition would", async () => {
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const inlineRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], definition: { version: 1, steps: [{ type: "outcome", value: "nurture" }] } };
+        const savedDefinition = { version: 1, steps: [{ type: "outcome", value: "nurture" }] };
+        const preparedRowFor = (intent: ReturnType<typeof parseInboxActionIntent>) => ({ preparation_id: id(5), idempotency_key: intent.idempotencyKey, input_hash: intent.inputHash, expires_at: "2026-09-14T00:00:00Z", definition: savedDefinition, items: [{ id: id(6), kind: "conversation", target_id: id(4), resolution: { property_id: id(7) }, exclusion_code: null }], effect_count: 1, affected_property_count: 1, sms_safety_summary: null });
+        const savedIntent = parseInboxActionIntent(JSON.stringify(savedRequest), { organizationId: id(1), requesterId: id(2) }, { organizationId: id(1), requesterId: id(2), id: id(20), version: 1, definition: savedDefinition as never });
+        const inlineIntent = parseInboxActionIntent(JSON.stringify(inlineRequest), { organizationId: id(1), requesterId: id(2) });
+        const viaSaved = await client([ok(actor), ok(savedRow(savedDefinition)), ok(preparedRowFor(savedIntent))]).repository.prepare(JSON.stringify(savedRequest), signal()) as PreparedInboxAction;
+        const viaInline = await client([ok(actor), ok(preparedRowFor(inlineIntent))]).repository.prepare(JSON.stringify(inlineRequest), signal()) as PreparedInboxAction;
+        expect(viaSaved.eligibleCount).toBe(viaInline.eligibleCount);
+        expect(viaSaved.affectedPropertyCount).toBe(viaInline.affectedPropertyCount);
+        expect(viaSaved.effectCount).toBe(viaInline.effectCount);
+        expect(viaSaved.definition).toEqual(viaInline.definition);
+    });
+    it("MUTATION: a tampered {id,version} — the resolved row echoes a DIFFERENT id/version than requested — is rejected fail-closed, never reaches prepare RPC", async () => {
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const c = client([ok(actor), ok(savedRow({ version: 1, steps: [{ type: "outcome", value: "nurture" }] }, { version: 2 }))]);
+        await expect(c.repository.prepare(JSON.stringify(savedRequest), signal())).rejects.toMatchObject({ status: 503 });
+        expect(c.rpc).toHaveBeenCalledTimes(2);
+    });
+    it("MUTATION: a tampered {id,version} referencing a saved action that does not exist is rejected (404), never reaches prepare RPC", async () => {
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const c = client([ok(actor), { data: null, error: { code: "P0001", message: "INBOX_SAVED_ACTION_NOT_FOUND" } }]);
+        await expect(c.repository.prepare(JSON.stringify(savedRequest), signal())).rejects.toMatchObject({ status: 404 });
+        expect(c.rpc).toHaveBeenCalledTimes(2);
+    });
+    it("MUTATION: a savedAction reference whose resolved snapshot belongs to a different org/requester than the live session is rejected before any prepare RPC (owner mismatch)", async () => {
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "conversation", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const c = client([ok(actor), ok(savedRow({ version: 1, steps: [{ type: "outcome", value: "nurture" }] }, { org_id: id(99) }))]);
+        await expect(c.repository.prepare(JSON.stringify(savedRequest), signal())).rejects.toMatchObject({ status: 403 });
+        expect(c.rpc).toHaveBeenCalledTimes(2);
+    });
+    it("review_reply saved actions hand off to reply PREPARE only — never inbox_accept_action/inbox_accept_reply, i.e. never auto-send", async () => {
+        const savedRequest = { idempotencyKey: id(3), targets: [{ kind: "unknown_sender_group", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const reviewReplyDefinition = { version: 1, steps: [{ type: "review_reply", value: undefined, text: "Hi {{first_name}}" }] };
+        const freezeRow = { idempotencyKey: id(3), replayed: false, items: [{ id: id(6), target: { kind: "unknown_sender_group", id: id(4) }, exclusion: "unsupported_target", recipient: null, duplicateDestination: false }], recipientCount: 0, blockers: ["empty"], preparationId: id(7), inputHash: "a".repeat(64), expiresAt: "2026-09-14T00:00:00Z" };
+        const c = client([ok(actor), ok(savedRow(reviewReplyDefinition)), ok(freezeRow)]);
+        const result = await c.repository.prepare(JSON.stringify(savedRequest), signal());
+        expect(result).toMatchObject({ recipientCount: 0, blockers: ["empty"] });
+        const calledRpcNames = (c.rpc.mock.calls as unknown as [string, unknown][]).map((call) => call[0]);
+        expect(calledRpcNames).toEqual(["inbox_authorize_sync", "inbox_saved_action_get", "inbox_freeze_reply_review"]);
+        expect(calledRpcNames).not.toContain("inbox_accept_action");
+        expect(calledRpcNames).not.toContain("inbox_accept_reply");
+        expect(calledRpcNames).not.toContain("inbox_prepare_action");
+    });
+    it("MUTATION: Astra round-1 blocker #2 — a review_reply saved action with a malformed/oversized envelope (an unexpected extra field) is rejected by the SAME envelope validation an inline request goes through, and NEVER reaches reply prepare (no bypass)", async () => {
+        const malformedSavedRequest = { idempotencyKey: id(3), targets: [{ kind: "unknown_sender_group", id: id(4) }], savedAction: { id: id(20), version: 1 }, extraUnexpectedField: "should be rejected" };
+        const reviewReplyDefinition = { version: 1, steps: [{ type: "review_reply", value: undefined, text: "Hi {{first_name}}" }] };
+        const c = client([ok(actor), ok(savedRow(reviewReplyDefinition))]);
+        await expect(c.repository.prepare(JSON.stringify(malformedSavedRequest), signal())).rejects.toMatchObject({ status: 400, code: "invalid_action" });
+        const calledRpcNames = (c.rpc.mock.calls as unknown as [string, unknown][]).map((call) => call[0]);
+        // Envelope rejection happens after resolving the reference (needed to
+        // even know this WOULD be a review_reply hand-off) but strictly
+        // before any reply RPC — proving the hand-off never bypasses
+        // parseInboxActionIntent's envelope check.
+        expect(calledRpcNames).toEqual(["inbox_authorize_sync", "inbox_saved_action_get"]);
+        expect(calledRpcNames).not.toContain("inbox_freeze_reply_review");
+        expect(calledRpcNames).not.toContain("inbox_capture_reply_recipients");
+        // An equivalent malformed INLINE (non-saved) request is rejected the
+        // same way, by the same validator, proving parity rather than a
+        // separately-invented check for the hand-off path.
+        expect(() => parseInboxActionIntent(JSON.stringify({ ...request, extraUnexpectedField: "x" }), { organizationId: id(1), requesterId: id(2) })).toThrow(InvalidInboxActionError);
+    });
+    it("MUTATION: a review_reply saved action whose targets fail the shared targets() envelope validation (duplicate target) is rejected before reply prepare, exactly as an inline definition-based request would be", async () => {
+        const dupTargetRequest = { idempotencyKey: id(3), targets: [{ kind: "unknown_sender_group", id: id(4) }, { kind: "unknown_sender_group", id: id(4) }], savedAction: { id: id(20), version: 1 } };
+        const reviewReplyDefinition = { version: 1, steps: [{ type: "review_reply", value: undefined, text: "Hi" }] };
+        const c = client([ok(actor), ok(savedRow(reviewReplyDefinition))]);
+        await expect(c.repository.prepare(JSON.stringify(dupTargetRequest), signal())).rejects.toMatchObject({ status: 400, code: "invalid_action" });
+        const calledRpcNames = (c.rpc.mock.calls as unknown as [string, unknown][]).map((call) => call[0]);
+        expect(calledRpcNames).toEqual(["inbox_authorize_sync", "inbox_saved_action_get"]);
+    });
+    it("a non-savedAction request is unaffected (no saved-action RPC issued)", async () => {
+        const c = client([ok(actor), ok(prepared())]);
+        await c.repository.prepare(JSON.stringify(request), signal());
+        expect((c.rpc.mock.calls as unknown as [string, unknown][]).map((call) => call[0])).toEqual(["inbox_authorize_sync", "inbox_prepare_action"]);
+    });
+});
 it("distinguishes definitive expired-not-accepted from still pending and rejects contradictory recovery data", async () => {
     expect(await client([ok({ state: "expired_not_accepted", operation: null })]).repository.recover(id(5), id(3), signal())).toEqual({ state: "expired_not_accepted", operation: null });
     await expect(client([ok({ state: "expired_not_accepted", operation: { operation_id: id(8) } })]).repository.recover(id(5), id(3), signal())).rejects.toMatchObject({ status: 503 });
