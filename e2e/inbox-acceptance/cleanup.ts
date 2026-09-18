@@ -14,7 +14,7 @@ import {
   isAcceptanceProjectionDrained,
   type AcceptanceProjectionState,
   type AcceptanceProjectionStateRow,
-} from "./cleanup-state";
+} from "./cleanup-state.mjs";
 
 /**
  * The acceptance suite is allowed to mutate only this disposable database.
@@ -51,8 +51,13 @@ export const ACCEPTANCE_PROJECTION_STATE_SQL = `
       SELECT 1 FROM inbox_safety.routes
       WHERE org_id = $1::uuid AND generation > ack
     ) AS safety_pending,
-    (SELECT count(*)::integer FROM inbox_maintained.rows WHERE org_id = $1::uuid)
-      AS maintained_rows,
+    (SELECT count(*)::integer
+       FROM inbox_maintained.rows
+      WHERE org_id = $1::uuid
+        -- Deletion publishes an acknowledged exists=false tombstone and
+        -- intentionally retains that row for generation fencing. Count only
+        -- live or malformed rows as residual projection state.
+        AND (summary->>'exists') IS DISTINCT FROM 'false') AS maintained_rows,
     (SELECT count(*)::integer FROM inbox_bridge.summaries WHERE org_id = $1::uuid)
       AS summary_rows,
     (SELECT count(*)::integer FROM inbox_bridge.filter_rows WHERE org_id = $1::uuid)

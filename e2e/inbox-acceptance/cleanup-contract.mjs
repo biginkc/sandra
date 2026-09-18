@@ -38,6 +38,7 @@ test("cleanup requires source deletion plus a meaningful private projection drai
   assert.match(source, /inbox_safety\.routes/);
   assert.match(source, /inbox_bridge\.summaries/);
   assert.match(source, /inbox_bridge\.filter_rows/);
+  assert.match(source, /summary->>'exists'\) IS DISTINCT FROM 'false'/);
   assert.match(source, /decodeAcceptanceProjectionState/);
   assert.match(source, /isAcceptanceProjectionDrained/);
   assert.match(source, /const probe = await openProjectionProbe\(\);[\s\S]*?deleteOrgScopedFixtureRows/);

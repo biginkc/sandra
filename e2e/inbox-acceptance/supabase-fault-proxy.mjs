@@ -102,7 +102,9 @@ export async function startSupabaseFaultProxy({ targetUrl, port, token }) {
     const destination = new URL(request.url ?? "/", target);
     if (armed && !failed && request.method === "GET" && isQueueRead(destination)) {
       failed = true;
-      response.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+      // PostgREST automatically retries 503 GETs. Use a non-retried server
+      // failure so the page receives an error and the operator can use Retry.
+      response.writeHead(500, { "content-type": "application/json", "cache-control": "no-store" });
       response.end(JSON.stringify({ code: "O10_INJECTED_QUEUE_READ_FAILURE" }));
       return;
     }

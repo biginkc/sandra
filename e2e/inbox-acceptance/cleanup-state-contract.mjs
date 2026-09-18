@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   decodeAcceptanceProjectionState,
   isAcceptanceProjectionDrained,
-} from "./cleanup-state.ts";
+} from "./cleanup-state.mjs";
 
 const cleared = {
   queue_pending: false,
@@ -40,9 +40,29 @@ test("nonzero derived rows fail the drain predicate", () => {
   );
 });
 
+test("an acknowledged exists=false tombstone is compatible with a drained fixture", () => {
+  // The SQL probe excludes this retained tombstone from maintained_rows;
+  // summaries and filter_rows are independently required to be empty.
+  const tombstoneOnly = { ...cleared, maintained_rows: 0 };
+  assert.equal(
+    isAcceptanceProjectionDrained(
+      decodeAcceptanceProjectionState(tombstoneOnly),
+    ),
+    true,
+  );
+});
+
+test("a live maintained row remains a cleanup failure", () => {
+  assert.equal(
+    isAcceptanceProjectionDrained(
+      decodeAcceptanceProjectionState({ ...cleared, maintained_rows: 1 }),
+    ),
+    false,
+  );
+});
+
 test("malformed database state fails closed", () => {
   assert.throws(() =>
     decodeAcceptanceProjectionState({ ...cleared, filter_rows: -1 }),
   );
 });
-
