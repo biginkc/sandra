@@ -493,7 +493,7 @@ export function useInboxSavedActions(options: Options) {
           if (kind === "metadata" && !results) throw new Error("Action results could not be verified.");
           setReceipt({ operationId, kind: kind ?? "metadata", result });
           if (recoveryEntry) forgetRecovery(recoveryEntry);
-          setDraft(current => current ? { ...current, result, metadataResults: results, error: undefined } : current);
+          setDraft(current => current ? { ...current, result, metadataResults: results ?? undefined, error: undefined } : current);
           latest.current.onCompleted();
           return;
         }
