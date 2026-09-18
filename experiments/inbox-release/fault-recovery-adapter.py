@@ -79,6 +79,8 @@ def verify_target() -> None:
         fail("target probe markers do not match the owned fixture")
     if os.environ.get("INBOX_RELEASE_PROVIDER_TRAFFIC", "false") != "false" or os.environ.get("INBOX_NO_PROVIDER") != "1":
         fail("provider traffic is not explicitly disabled")
+    if os.environ.get("INBOX_RELEASE_CUSTOMER_SENDS", "false") != "false":
+        fail("customer sends are forbidden")
     for name in CONTAINERS.values():
         inspect(name)
     db = CONTAINERS["db"]
