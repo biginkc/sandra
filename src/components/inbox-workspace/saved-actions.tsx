@@ -59,7 +59,7 @@ type Draft = {
   ids: readonly WorkspaceId[];
   names: ReadonlyMap<string, string>;
   request: { idempotencyKey: string; targets: readonly Target[]; savedAction: { id: string; version: number } };
-  stage: "preparing" | "prepared" | "accepting";
+  stage: "preparing" | "prepared" | "accepting" | "accepted";
   prepared?: Prepared;
   operationId?: string;
   result?: string;
@@ -87,6 +87,7 @@ const outcomes = [
 ] as const;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const recoveryKey = (identity: InboxQueryIdentity) => `inbox-saved-action-recovery:${JSON.stringify([identity.orgId, identity.userId, identity.sessionId, identity.accessEpoch])}`;
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -205,6 +206,8 @@ export function useInboxSavedActions(options: Options) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [followUp, setFollowUp] = useState<FollowUpDraft | null>(null);
   const [followUpReceipt, setFollowUpReceipt] = useState<Receipt | null>(null);
+  const [recoveredOperation, setRecoveredOperation] = useState<{ operationId: string; kind: Prepared["kind"] } | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string>();
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [retry, setRetry] = useState(0);
   const [builderOpen, setBuilderOpen] = useState(false);
@@ -220,6 +223,7 @@ export function useInboxSavedActions(options: Options) {
   const controller = useRef<AbortController | null>(null);
   const followUpController = useRef<AbortController | null>(null);
   const followUpGeneration = useRef(0);
+  const recoveryStorage = recoveryKey(options.identity);
   const latest = useRef(options);
   latest.current = options;
 
@@ -229,6 +233,12 @@ export function useInboxSavedActions(options: Options) {
     if (!response.ok) throw new Error(response.status === 409 ? "This saved action changed. Refresh and try again." : "Saved actions are unavailable. Try again.");
     return response.status === 204 ? null : await response.json() as unknown;
   }, []);
+
+  const rememberRecovery = useCallback((kind: Prepared["kind"], preparationId: string, idempotencyKey: string) => {
+    try { sessionStorage.setItem(recoveryStorage, JSON.stringify({ kind, preparationId, idempotencyKey })); }
+    catch { setRecoveryError("Keep this tab open until the action is confirmed; reload recovery is unavailable in this browser."); }
+  }, [recoveryStorage]);
+  const forgetRecovery = useCallback(() => { try { sessionStorage.removeItem(recoveryStorage); } catch { /* optional browser storage */ } }, [recoveryStorage]);
 
   const load = useCallback(async () => {
     if (!latest.current.enabled) return;
@@ -248,6 +258,66 @@ export function useInboxSavedActions(options: Options) {
   }, [requestJson]);
 
   useEffect(() => { void load(); return () => { controller.current?.abort(); }; }, [load, options.enabled]);
+
+  useEffect(() => {
+    if (!options.enabled) return;
+    const abort = new AbortController();
+    async function recover() {
+      try {
+        const raw = sessionStorage.getItem(recoveryStorage);
+        if (!raw || raw.length > 512) return;
+        const record = object(JSON.parse(raw));
+        if (!record || !["metadata", "reply"].includes(record.kind as string) || typeof record.preparationId !== "string" || !UUID.test(record.preparationId) || typeof record.idempotencyKey !== "string" || !UUID.test(record.idempotencyKey)) { forgetRecovery(); return; }
+        const path = record.kind === "reply" ? "/api/inbox/replies/recover" : "/api/inbox/operations/recover";
+        const response = await fetch(`${path}?preparationId=${encodeURIComponent(record.preparationId)}&idempotencyKey=${encodeURIComponent(record.idempotencyKey)}`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.any([abort.signal, AbortSignal.timeout(15_000)]) });
+        if (abort.signal.aborted) return;
+        if (response.status === 401 || response.status === 403) { latest.current.onAccessLost(); return; }
+        if (!response.ok) throw new Error("The earlier action could not be checked. Its original identifiers are retained.");
+        const value = object(await response.json());
+        if (value?.state === "accepted") {
+          const operation = object(value.operation);
+          if (!operation || typeof operation.operationId !== "string" || !UUID.test(operation.operationId)) throw new Error("The earlier action response could not be verified.");
+          setRecoveredOperation({ operationId: operation.operationId, kind: record.kind as Prepared["kind"] });
+          setRecoveryError(undefined);
+        } else if (value?.state === "expired_not_accepted") { forgetRecovery(); }
+        else setRecoveryError("The earlier action has not been confirmed yet. Its original identifiers are retained.");
+      } catch (error) { if (!abort.signal.aborted) setRecoveryError(error instanceof Error ? error.message : "Earlier action recovery is unavailable."); }
+    }
+    void recover();
+    return () => abort.abort();
+  }, [options.enabled, recoveryStorage, forgetRecovery]);
+
+  useEffect(() => {
+    if (!recoveredOperation) return;
+    const { operationId, kind } = recoveredOperation;
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function poll() {
+      try {
+        const path = kind === "reply" ? `/api/inbox/replies/${encodeURIComponent(operationId)}` : `/api/inbox/operations/${encodeURIComponent(operationId)}`;
+        const raw = object(await requestJson(path, { signal: abort.signal }));
+        if (!raw || raw.operationId !== operationId) throw new Error("Recovered action progress could not be verified.");
+        const complete = kind === "reply" ? raw.dispatchComplete === true : raw.completed === true;
+        if (complete) {
+          const result = kind === "reply" ? replyReceiptResult(raw.receipts) : typeof raw.result === "string" ? raw.result : "completed";
+          setReceipt({ operationId, kind, result });
+          forgetRecovery();
+          setRecoveredOperation(null);
+          setRecoveryError(undefined);
+          latest.current.onCompleted();
+          return;
+        }
+        timer = setTimeout(() => void poll(), 1000);
+      } catch (error) {
+        if (!abort.signal.aborted) {
+          setRecoveryError(error instanceof Error ? error.message : "Recovered action progress is unavailable.");
+          timer = setTimeout(() => void poll(), 2000);
+        }
+      }
+    }
+    void poll();
+    return () => { abort.abort(); if (timer) clearTimeout(timer); };
+  }, [recoveredOperation, requestJson, forgetRecovery]);
 
   async function loadAssignees() {
     setAssigneesError(undefined);
@@ -321,6 +391,7 @@ export function useInboxSavedActions(options: Options) {
   async function accept() {
     if (!draft?.prepared || draft.stage !== "prepared" || (draft.error && !draft.acceptAttempted)) return;
     const next = { ...draft, stage: "accepting" as const, acceptAttempted: true, error: undefined };
+    rememberRecovery(draft.prepared.kind, draft.prepared.value.preparationId, draft.request.idempotencyKey);
     setDraft(next);
     try {
       const recoveryPath = draft.prepared.kind === "reply" ? "/api/inbox/replies/recover" : "/api/inbox/actions/recover";
@@ -329,7 +400,7 @@ export function useInboxSavedActions(options: Options) {
         const recovered = object(await recovery.json());
         const operation = recovered && object(recovered.operation);
         if (recovered?.state === "accepted" && operation && typeof operation.operationId === "string") {
-          setDraft({ ...next, operationId: operation.operationId });
+          setDraft({ ...next, stage: "accepted", operationId: operation.operationId });
           return;
         }
         if (recovered?.state === "expired_not_accepted") throw new Error("This review expired. Prepare it again.");
@@ -338,7 +409,7 @@ export function useInboxSavedActions(options: Options) {
       const endpoint = draft.prepared.kind === "reply" ? "/api/inbox/replies/accept" : "/api/inbox/actions/accept";
       const value = object(await requestJson(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ preparationId: draft.prepared.value.preparationId, idempotencyKey: draft.request.idempotencyKey }) }));
       if (!value || typeof value.operationId !== "string") throw new Error("The action response could not be verified. Retry with this same review.");
-      setDraft({ ...next, operationId: value.operationId });
+      setDraft({ ...next, stage: "accepted", operationId: value.operationId });
     } catch (error) { setDraft({ ...draft, stage: "prepared", acceptAttempted: true, error: error instanceof Error ? error.message : "We could not confirm whether this action started. Retry safely with this same review." }); }
   }
 
@@ -365,6 +436,7 @@ export function useInboxSavedActions(options: Options) {
   async function acceptFollowUp() {
     if (!followUp?.prepared || followUp.stage !== "prepared" || followUp.prepared.recipientCount < 1 || followUp.prepared.recipientCount > 50 || followUp.prepared.blockers.length) return;
     const next = { ...followUp, stage: "accepting" as const, error: undefined };
+    rememberRecovery("reply", followUp.prepared.preparationId, followUp.request.idempotencyKey);
     setFollowUp(next);
     try {
       const recovery = await fetch(`/api/inbox/replies/recover?preparationId=${encodeURIComponent(followUp.prepared.preparationId)}&idempotencyKey=${encodeURIComponent(followUp.request.idempotencyKey)}`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.timeout(15_000) });
@@ -396,6 +468,7 @@ export function useInboxSavedActions(options: Options) {
         if (complete) {
           const result = kind === "reply" ? replyReceiptResult(raw.receipts) : typeof raw.result === "string" ? raw.result : "completed";
           setReceipt({ operationId, kind: kind ?? "metadata", result });
+          forgetRecovery();
           setDraft(current => current ? { ...current, result, error: undefined } : current);
           latest.current.onCompleted();
           return;
@@ -420,6 +493,7 @@ export function useInboxSavedActions(options: Options) {
         if (!raw || raw.operationId !== operationId || !Array.isArray(raw.receipts)) throw new Error("Reply progress could not be verified.");
         if (raw.dispatchComplete === true) {
           const result = replyReceiptResult(raw.receipts);
+          forgetRecovery();
           setFollowUpReceipt({ operationId, kind: "reply", result });
           setFollowUp(current => current ? { ...current, result, error: undefined } : current);
           return;
@@ -442,11 +516,12 @@ export function useInboxSavedActions(options: Options) {
     setDraft(null);
     setFollowUp(null);
   }, [draft, followUp]);
-  const actions: readonly WorkspaceAction[] = useMemo(() => items.map(item => ({ id: `saved:${item.id}:${item.version}`, label: item.name, description: `Saved action · ${item.definition.steps.length} step${item.definition.steps.length === 1 ? "" : "s"}`, disabledReason: !options.selectedIds.length ? "Select conversations first." : undefined, pending: draft?.stage === "accepting" })), [items, options.selectedIds.length, draft?.stage]);
+  const recoveryBlocked = !!recoveredOperation || !!recoveryError;
+  const actions: readonly WorkspaceAction[] = useMemo(() => items.map(item => ({ id: `saved:${item.id}:${item.version}`, label: item.name, description: `Saved action · ${item.definition.steps.length} step${item.definition.steps.length === 1 ? "" : "s"}`, disabledReason: recoveryBlocked ? "Resolve the earlier action before starting another." : !options.selectedIds.length ? "Select conversations first." : undefined, pending: draft?.stage === "accepting" })), [items, options.selectedIds.length, draft?.stage, recoveryBlocked]);
 
   const picker = <div className="flex flex-wrap items-center gap-2" aria-label="Saved actions">
     <label>Saved action <select aria-label="Saved action" value={selectedActionId} onChange={event => setSelectedActionId(event.target.value)} disabled={listState === "loading" || !items.length}><option value="">Choose…</option>{items.map(item => <option key={`${item.id}:${item.version}`} value={`saved:${item.id}:${item.version}`}>{item.name}</option>)}</select></label>
-    <button type="button" disabled={!selectedActionId || !options.selectedIds.length} onClick={() => void prepare(selectedActionId, options.selectedIds)}>Review saved action</button>
+    <button type="button" disabled={recoveryBlocked || !selectedActionId || !options.selectedIds.length} onClick={() => void prepare(selectedActionId, options.selectedIds)}>Review saved action</button>
     <button type="button" onClick={() => openBuilder()}>Create saved action</button>
     <button type="button" onClick={() => void load()} disabled={listState === "loading"}>Refresh saved actions</button>
     {listState === "loading" && <span role="status">Loading saved actions…</span>}
@@ -456,7 +531,7 @@ export function useInboxSavedActions(options: Options) {
   const builder = <Dialog open={builderOpen} onOpenChange={setBuilderOpen}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>{editing ? "Edit saved action" : "Create saved action"}</DialogTitle><DialogDescription>Choose a bounded set of reviewed steps. The server validates and rechecks each referenced entity when you use it.</DialogDescription><label>Name<input aria-label="Saved action name" maxLength={120} value={builderName} onChange={event => setBuilderName(event.target.value)} /></label>{assigneesError && <p role="alert">{assigneesError}</p>}<div className="mt-3 space-y-3"><strong>Steps</strong>{builderSteps.map((step, index) => <div className="flex flex-wrap items-end gap-2" key={index}><label>Step {index + 1}<select aria-label={`Step ${index + 1} type`} value={step.type} onChange={event => { const type = event.target.value as SavedActionStep["type"]; setBuilderSteps(previous => previous.map((current, position) => position === index ? type === "outcome" ? { type, value: "nurture" } : type === "assign" ? { type, userId: null } : type === "review_reply" ? { type, text: "" } : { type } : current)); }}><option value="outcome">Outcome</option><option value="assign">Assignment</option><option value="promote">Move to lead</option><option value="dismiss_unknown">Dismiss unknown</option><option value="restore_unknown">Restore unknown</option><option value="review_reply">Reviewed reply</option></select></label>{step.type === "outcome" && <label>Outcome<select aria-label={`Step ${index + 1} outcome`} value={step.value} onChange={event => setBuilderSteps(previous => previous.map((current, position) => position === index ? { ...current, value: event.target.value } : current))}>{outcomes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}{step.type === "assign" && <label>Assign to<select aria-label={`Step ${index + 1} assignee`} value={step.userId ?? ""} onChange={event => setBuilderSteps(previous => previous.map((current, position) => position === index ? { ...current, userId: event.target.value || null } : current))}><option value="">Unassigned</option>{assignees.map(member => <option key={member.userId} value={member.userId}>{member.label}</option>)}{step.userId && !assignees.some(member => member.userId === step.userId) && <option value={step.userId}>Current assignee</option>}</select></label>}{step.type === "review_reply" && <label className="min-w-[18rem]">Reply text<textarea aria-label={`Step ${index + 1} reply text`} maxLength={1600} value={step.text} onChange={event => setBuilderSteps(previous => previous.map((current, position) => position === index ? { ...current, text: event.target.value } : current))} /></label>}<button type="button" onClick={() => setBuilderSteps(previous => previous.filter((_, position) => position !== index))} disabled={builderSteps.length <= 1}>Remove</button></div>)}<button type="button" onClick={() => setBuilderSteps(previous => previous.length < 5 ? [...previous, { type: "outcome", value: "nurture" }] : previous)} disabled={builderSteps.length >= 5}>Add step</button></div>{builderError && <p role="alert">{builderError}</p>}<div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={() => setBuilderOpen(false)}>Cancel</button><button type="button" onClick={() => void saveBuilder()} disabled={saving}>{saving ? "Saving…" : editing ? "Save changes" : "Save action"}</button></div><div className="mt-5 border-t pt-3"><h3>Existing saved actions</h3>{items.length ? <ul>{items.map(item => <li key={item.id} className="flex items-center justify-between gap-3 py-1"><span>{item.name}</span><span className="flex gap-2"><button type="button" onClick={() => openBuilder(item)}>Edit</button><button type="button" onClick={() => void remove(item)}>Delete</button></span></li>)}</ul> : <p>No saved actions yet.</p>}{deleteError && <p role="alert">{deleteError}</p>}</div></DialogContent></Dialog>;
 
   const review = <Dialog open={!!draft} onOpenChange={open => { if (!open && draft?.stage !== "accepting" && followUp?.stage !== "accepting") clear(); }}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>Review saved action · {draft?.saved.name}</DialogTitle><DialogDescription>Check the authoritative eligibility result before applying this saved combination.</DialogDescription>{draft?.stage === "preparing" ? <p role="status">Checking current records…</p> : draft && !draft.prepared ? <p role="alert">{draft.error ?? "Saved action review unavailable."}</p> : draft?.prepared && <>{draft.prepared.kind === "reply" ? <><p>{draft.prepared.value.recipientCount} recipients · {draft.prepared.value.blockers.length ? `Blocked: ${draft.prepared.value.blockers.join(", ")}` : "Ready for reviewed send"}</p><ul>{draft.prepared.value.items.map(item => <li key={item.id}>{draft.names.get(`${item.target.kind}:${item.target.id}`) ?? "Selected conversation"}: {item.exclusion ?? (item.recipient ? `Ready for send to ${item.recipient.contactName}` : "Needs attention")}{item.recipient && <small className="block whitespace-pre-wrap">{item.recipient.renderedBody}</small>}</li>)}</ul></> : <><p>{draft.prepared.value.eligibleCount} eligible · {draft.prepared.value.excludedCount} excluded · {draft.prepared.value.effectCount ?? 0} changes</p><ul>{draft.prepared.value.items.map(item => <li key={item.id}>{draft.names.get(`${item.target.kind}:${item.target.id}`) ?? "Selected conversation"}: {item.exclusion ?? "Eligible"}</li>)}</ul>{draft.result && draft.prepared.value.followUp && !followUp && <button type="button" onClick={() => void prepareFollowUp()}>Review reply</button>}</>}{draft.error && <p role="alert">{draft.error}</p>}<button type="button" disabled={draft.stage === "accepting" || !!draft.operationId || (!!draft.prepared && (draft.prepared.kind === "reply" ? draft.prepared.value.recipientCount === 0 || draft.prepared.value.blockers.length > 0 : draft.prepared.value.eligibleCount === 0))} onClick={() => void accept()}>{draft.stage === "accepting" ? "Applying…" : draft.operationId ? "Accepted · checking progress…" : draft.acceptAttempted ? "Retry action safely" : "Accept reviewed action"}</button>{draft.operationId && <p role="status">Accepted. Checking durable progress…</p>}</>}{followUp?.stage === "preparing" && <p role="status">Checking reply recipients…</p>}{followUp && !followUp.prepared && followUp.stage !== "preparing" && <p role="alert">{followUp.error ?? "Reply review unavailable."}</p>}{followUp?.prepared && <section aria-label="Review saved reply"><h3>Review reply</h3><p>{followUp.prepared.recipientCount} recipients · {followUp.prepared.blockers.length ? `Blocked: ${followUp.prepared.blockers.join(", ")}` : "Ready for reviewed send"}</p><ul>{followUp.prepared.items.map(item => <li key={item.id}>{item.exclusion ?? (item.recipient ? `Ready to send to ${item.recipient.contactName}` : "Needs attention")}{item.recipient && <small className="block whitespace-pre-wrap">{item.recipient.renderedBody}</small>}</li>)}</ul>{followUp.error && <p role="alert">{followUp.error}</p>}<button type="button" disabled={followUp.stage === "accepting" || !!followUp.operationId || followUp.prepared.recipientCount < 1 || followUp.prepared.recipientCount > 50 || followUp.prepared.blockers.length > 0} onClick={() => void acceptFollowUp()}>{followUp.stage === "accepting" ? "Accepting…" : followUp.operationId ? "Accepted · checking progress…" : "Accept reviewed reply"}</button></section>}</DialogContent></Dialog>;
-  const activeReceipts = [draft?.operationId ? { operationId: draft.operationId, kind: draft.prepared?.kind ?? "metadata", result: draft.result, error: draft.error } : receipt, followUp?.operationId ? { operationId: followUp.operationId, kind: "reply" as const, result: followUp.result, error: followUp.error } : followUpReceipt].filter((value): value is Receipt => !!value);
+  const activeReceipts = [draft?.operationId ? { operationId: draft.operationId, kind: draft.prepared?.kind ?? "metadata", result: draft.result, error: draft.error } : receipt, followUp?.operationId ? { operationId: followUp.operationId, kind: "reply" as const, result: followUp.result, error: followUp.error } : followUpReceipt, recoveredOperation ? { operationId: recoveredOperation.operationId, kind: recoveredOperation.kind, result: undefined, error: recoveryError } : null].filter((value): value is Receipt => !!value);
   const activity: ReactNode = activeReceipts.length ? <>{activeReceipts.map((activeReceipt, index) => <section aria-label="Saved action progress" key={`${activeReceipt.operationId}:${index}`}><p role="status">{activeReceipt.error ?? (activeReceipt.result ? `Saved action ${activeReceipt.result}.` : "Saved action accepted. Checking durable progress…")}</p><a href={`${activeReceipt.kind === "reply" ? "/api/inbox/replies/" : "/api/inbox/operations/"}${encodeURIComponent(activeReceipt.operationId)}`}>Open action receipt</a></section>)}</> : null;
   return { items, actions, prepare, review, activity, picker, builder, clear, refresh: load, replyStep, isReplyAction: (actionId: string) => !!replyStep(actionFromId(actionId)?.definition ?? { version: 1, steps: [] }) };
 }

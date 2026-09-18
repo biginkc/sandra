@@ -18,7 +18,7 @@ function Harness({ values = [saved], selected = [target] as readonly WorkspaceId
   return <><div>{actions.actions.map(action => <button key={action.id} disabled={!!action.disabledReason || action.pending} onClick={() => actions.prepare(action.id, selected)}>{action.label}</button>)}</div>{actions.picker}{actions.review}{actions.builder}{actions.activity}</>;
 }
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 
 it("loads named actions, preserves the selected target, and routes metadata review/accept", async () => {
   const calls: { url: string; body?: unknown }[] = [];
@@ -157,4 +157,52 @@ it("aborts a delayed prepare when its review is closed", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   resolve?.(Response.json({ preparationId: "00000000-0000-4000-8000-000000000006", idempotencyKey: "00000000-0000-4000-8000-000000000007", expiresAt: new Date(Date.now() + 60_000).toISOString(), definition: saved.definition, items: [], eligibleCount: 0, excludedCount: 0 }));
   await waitFor(() => expect(screen.queryByRole("dialog", { name: /Review saved action/ })).toBeNull());
+});
+
+it("closes a terminal review and preserves its receipt while allowing another review", async () => {
+  let prepareCount = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    if (url === "/api/inbox/saved-actions") return Response.json({ items: [saved] });
+    if (url.endsWith("/actions/prepare")) {
+      prepareCount++;
+      const body = JSON.parse(String(init?.body)) as { idempotencyKey: string };
+      return Response.json({ preparationId: "00000000-0000-4000-8000-00000000000f", idempotencyKey: body.idempotencyKey, expiresAt: new Date(Date.now() + 60_000).toISOString(), definition: saved.definition, items: [{ id: "item", target: { kind: "conversation", id: conversationId }, exclusion: null }], eligibleCount: 1, excludedCount: 0, effectCount: 1 });
+    }
+    if (url.endsWith("/actions/accept")) return Response.json({ operationId: "00000000-0000-4000-8000-000000000010" });
+    if (url.endsWith("/operations/00000000-0000-4000-8000-000000000010")) return Response.json({ operationId: "00000000-0000-4000-8000-000000000010", completed: true, result: "succeeded", items: [], steps: [] });
+    return Response.json({});
+  }));
+  render(<Harness />);
+  await screen.findByRole("button", { name: "Nurture + owner" });
+  fireEvent.click(screen.getByRole("button", { name: "Nurture + owner" }));
+  await screen.findByText("1 eligible · 0 excluded · 1 changes");
+  fireEvent.click(screen.getByRole("button", { name: "Accept reviewed action" }));
+  await screen.findByText("Saved action succeeded.");
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: /Review saved action/ })).toBeNull());
+  expect(screen.getByRole("link", { name: "Open action receipt" })).toHaveAttribute("href", "/api/inbox/operations/00000000-0000-4000-8000-000000000010");
+  fireEvent.click(screen.getByRole("button", { name: "Nurture + owner" }));
+  await screen.findByText("1 eligible · 0 excluded · 1 changes");
+  expect(prepareCount).toBe(2);
+});
+
+it("recovers an accepted action after reload and polls its standalone receipt", async () => {
+  const preparationId = "00000000-0000-4000-8000-000000000011";
+  const idempotencyKey = "00000000-0000-4000-8000-000000000012";
+  const operationId = "00000000-0000-4000-8000-000000000013";
+  const key = `inbox-saved-action-recovery:${JSON.stringify([orgId, userId, userId, "1"])}`;
+  sessionStorage.setItem(key, JSON.stringify({ kind: "metadata", preparationId, idempotencyKey }));
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    calls.push(url);
+    if (url === "/api/inbox/saved-actions") return Response.json({ items: [saved] });
+    if (url.startsWith("/api/inbox/operations/recover")) return Response.json({ state: "accepted", operation: { operationId } });
+    if (url === `/api/inbox/operations/${operationId}`) return Response.json({ operationId, completed: true, result: "succeeded", items: [], steps: [] });
+    return Response.json({});
+  }));
+  render(<Harness />);
+  await screen.findByText("Saved action succeeded.");
+  expect(calls.some(url => url.startsWith("/api/inbox/operations/recover?preparationId="))).toBe(true);
+  expect(screen.getByRole("link", { name: "Open action receipt" })).toHaveAttribute("href", `/api/inbox/operations/${operationId}`);
+  expect(sessionStorage.getItem(key)).toBeNull();
 });
