@@ -98,7 +98,15 @@
     "node": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
     "cached_historical_action": "sandra-inbox-action-worker:20260913",
     "cached_historical_projection": "sandra-inbox-projection-worker:20260913",
-    "cached_historical_relay": "sandra-inbox-sync-relay:20260913"
+    "cached_historical_relay": "sandra-inbox-sync-relay:20260913",
+    "supabase_fixture": {
+      "postgres": "public.ecr.aws/supabase/postgres@sha256:917ced7b01be819d54f6d1888c79a7380aaa3efb9186d3a182d3b77bb672f39f",
+      "gotrue": "public.ecr.aws/supabase/gotrue@sha256:93bfec0a41cfe3ed81d03c9c1c8807fd230b8ecea260cf999b8a7204ccc7d5cf",
+      "postgrest": "public.ecr.aws/supabase/postgrest@sha256:2fa40bb679b2a731f6ffe7dc9db6c15d57fd4e329e59e6362f9307630323535f",
+      "kong": "public.ecr.aws/supabase/kong@sha256:8a5a7357d6cbda1840574130d109fc37b8088750d32c87b50f3b7909b7975425",
+      "realtime": "public.ecr.aws/supabase/realtime@sha256:3211f8ebd59edcd0aa772186f1c8249c82c6b1ae5565f40dedb7aa93e951fe37",
+      "provenance": "orchestration/staging/SUPABASE-ARM64-IMAGE-METADATA-20260912.json; metadata-only refs, not daemon cache evidence"
+    }
   },
   "requirements": {
     "operation_command_adapters": "required for action prepare/accept and saved CRUD; absent from installed release DB",
@@ -120,5 +128,116 @@
     "shared_stack_excluded": true,
     "production_deploy": false,
     "new_spending": false
+  },
+  "runtime_definition": {
+    "compose": "experiments/inbox-release/execution-stack-compose.yml",
+    "env_example": "experiments/inbox-release/full-stack.env.example",
+    "profile": "full-runtime",
+    "mode": "SOURCE_ONLY_LOCAL_DISPOSABLE",
+    "status": "SOURCE_PACKAGED_UNBUILT_UNRUNNABLE",
+    "target": {
+      "http_fixture_compose": "experiments/inbox-release/http-stack-compose.yml",
+      "http_base_url": "http://127.0.0.1:54321",
+      "database_url_shape": "postgresql://<constrained-role>:<secret>@127.0.0.1:54322/postgres",
+      "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
+      "container_label_marker": "sandra-inbox-release-http-owned-20260917",
+      "network_mode": "host for workers/Restate; external marked release_http network for Electric/relay",
+      "provider_traffic": false,
+      "customer_sends": false
+    },
+    "services": {
+      "restate": {
+        "image": "docker.restate.dev/restatedev/restate@sha256:675b85e7bf674f9dfda04a391fa33e850650d57e464b694ca8df5866acad95cc",
+        "source": "experiments/inbox-stack/bulk/start-runtime.sh",
+        "container_name": "sandra-inbox-release-restate-20260917",
+        "private_ingress": "sandra-inbox-restate-owned:8080",
+        "private_admin_port": 9070,
+        "memory_bytes": 536870912,
+        "cpus": 1.0,
+        "persistent_volume": "sandra_inbox_release_restate_data_20260917",
+        "status": "PINNED_REFERENCE_UNRAN"
+      },
+      "electric": {
+        "image": "electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139",
+        "source": "experiments/inbox-stack/sync/start-electric.sh",
+        "container_name": "sandra-inbox-release-electric-20260917",
+        "upstream": "http://electric:3000/",
+        "database_relation": "inbox_bridge.summaries",
+        "publication": "external reviewed database/publication operation required",
+        "stream_id": "inbox_release_20260917",
+        "memory_bytes": 536870912,
+        "cpus": 1.0,
+        "persistent_volume": "sandra_inbox_release_electric_data_20260917",
+        "status": "PINNED_REFERENCE_UNRAN_COMPATIBILITY_UNPROVEN"
+      },
+      "operation-worker": {
+        "image": "sandra-inbox-action-worker:release-fcffde3",
+        "source_commit": "fcffde3827da164df85c6ef2e2b4a094f79b512c",
+        "build_context": "experiments/inbox-operation-worker",
+        "current_image_digest": null,
+        "role_packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
+        "database_role": "inbox_action_worker",
+        "memory_bytes": 268435456,
+        "cpus": 0.25,
+        "status": "SOURCE_ONLY_UNBUILT"
+      },
+      "reply-send-worker": {
+        "image": "sandra-inbox-reply-send-worker:release-fcffde3",
+        "source_commit": "fcffde3827da164df85c6ef2e2b4a094f79b512c",
+        "build_context": "experiments/inbox-reply-send-worker",
+        "current_image_digest": null,
+        "role_packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
+        "database_role": "inbox_reply_send_worker",
+        "memory_bytes": 268435456,
+        "cpus": 0.25,
+        "provider_transport": "fixture-only test transport in local profile; production vendored adapter requires secret",
+        "status": "SOURCE_ONLY_UNBUILT"
+      },
+      "projection-worker": {
+        "image": "sandra-inbox-projection-worker:release-fcffde3",
+        "source_commit": "fcffde3827da164df85c6ef2e2b4a094f79b512c",
+        "build_context": "services/inbox-projection-worker",
+        "current_image_digest": null,
+        "role_packet": "experiments/inbox-release/generated/projection-worker-role.sql",
+        "database_role": "inbox_projection_worker",
+        "memory_bytes": 268435456,
+        "cpus": 0.25,
+        "status": "SOURCE_ONLY_UNBUILT"
+      },
+      "relay": {
+        "production_source": "services/inbox-sync-relay",
+        "production_entrypoint": "services/inbox-sync-relay/server.mjs",
+        "production_upstream": "private Railway Electric hostname only",
+        "fixture_wrapper": "experiments/inbox-release/relay-fixture.mjs",
+        "fixture_image_dockerfile": "experiments/inbox-release/Dockerfile.relay-fixture",
+        "fixture_upstream": "http://electric:3000/",
+        "projection_table": "inbox_bridge.summaries",
+        "memory_bytes": 536870912,
+        "cpus": 0.5,
+        "status": "SOURCE_PACKAGED_UNRUN"
+      }
+    },
+    "preflight_order": [
+      "start and identity-check the separately owned HTTP fixture",
+      "apply generated backend-operation-reply.sql and generated/projection-worker-role.sql to the marked fixture using separate reviewed login provisioning",
+      "create and verify Electric publication/replication role for inbox_bridge.summaries",
+      "build current operation/reply/projection/relay sources and record immutable image digests",
+      "register both Restate services, then run authenticated command/recovery and read/subscription acceptance",
+      "measure current and three-times workload with the owned fault/resource adapter"
+    ],
+    "missing_evidence": [
+      "Docker image inspection currently returns containerd blob I/O errors; no cached-image availability is claimed.",
+      "No current operation, reply, or projection image digest exists until the exact source builds complete.",
+      "Electric publication/replication role and compatibility with the current candidate are not installed or measured.",
+      "Restate service registration and crash/recovery against this release HTTP database are not run.",
+      "The local relay wrapper is fixture-only; production relay still needs a private Railway Electric endpoint and hosting review.",
+      "Current and three-times workload profiles/arrival rates remain coordinator-supplied and unmeasured."
+    ],
+    "production_mapping": {
+      "electric": "deployment/inbox/candidate.json service inbox-electric; private, pinned image, publication only inbox_bridge.summaries",
+      "restate": "deployment/inbox/candidate.json service inbox-restate; private ingress 8080/admin 9070 with persistent volume",
+      "workers": "operation/reply/projection source builds from this manifest; deployment/inbox/candidate.json worker image stays null until digest evidence",
+      "relay": "services/inbox-sync-relay with private Railway upstream and server-only bearer token"
+    }
   }
 }

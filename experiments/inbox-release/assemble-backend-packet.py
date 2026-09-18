@@ -26,7 +26,7 @@ from transaction_envelope import normalize
 
 RELEASE_DATABASE = "sandra_inbox_release_20260917"
 RELEASE_MARKER = "sandra-inbox-release-owned-synthetic"
-SOURCE_COMMIT = "28765326"  # coordinator integration exact snapshot
+SOURCE_COMMIT = "fcffde3827da164df85c6ef2e2b4a094f79b512c"  # coordinator integration exact snapshot
 
 SQL_SOURCES = [
     ("operation_foundation", "experiments/inbox-operation-acceptance/setup.sql"),

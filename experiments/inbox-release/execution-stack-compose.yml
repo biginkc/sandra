@@ -1,0 +1,214 @@
+name: sandra-inbox-release-runtime-20260917
+
+# Full synthetic runtime definition.  It is deliberately opt-in: every
+# service has the `full-runtime` profile, and pull_policy=never means a
+# missing image fails instead of pulling or spending.  The HTTP Supabase
+# fixture is the separately owned http-stack-compose.yml on 127.0.0.1:54321 /
+# 54322.  Restate and workers use host mode because their reviewed fixture
+# profiles require the exact loopback database target and Restate hostname;
+# Electric and the fixture relay use the marked HTTP network instead.
+services:
+  restate:
+    profiles: [full-runtime]
+    image: docker.restate.dev/restatedev/restate@sha256:675b85e7bf674f9dfda04a391fa33e850650d57e464b694ca8df5866acad95cc
+    pull_policy: never
+    container_name: sandra-inbox-release-restate-20260917
+    restart: "no"
+    network_mode: host
+    environment:
+      RESTATE_CLUSTER_NAME: sandra-inbox-release-restate-20260917
+      RESTATE_AUTO_PROVISION: "true"
+      RESTATE_REQUEST_IDENTITY_PRIVATE_KEY_PEM_FILE: /restate-key.pem
+    volumes:
+      - sandra_inbox_release_restate_data_20260917:/restate-data
+      - ${INBOX_RESTATE_PRIVATE_KEY_FILE:?set INBOX_RESTATE_PRIVATE_KEY_FILE to an ignored key path}:/restate-key.pem:ro
+    labels:
+      purpose: sandra-inbox-release-runtime
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+      component: restate
+    mem_limit: 512m
+    cpus: 1.0
+
+  electric:
+    profiles: [full-runtime]
+    image: electricsql/electric:1.8.1@sha256:efb6fa43859d67cb8c73439e0c8bc0f7a3daa467500fb06f2a924bcb2070c139
+    pull_policy: never
+    container_name: sandra-inbox-release-electric-20260917
+    restart: "no"
+    networks:
+      release_http:
+        aliases: [electric]
+    environment:
+      DATABASE_URL: ${INBOX_ELECTRIC_DATABASE_URL:?set INBOX_ELECTRIC_DATABASE_URL in the ignored runtime env}
+      ELECTRIC_INSECURE: "true"
+      ELECTRIC_DB_POOL_SIZE: "2"
+      ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
+      ELECTRIC_REPLICATION_STREAM_ID: inbox_release_20260917
+      ELECTRIC_LONG_POLL_TIMEOUT: "8000"
+      ELECTRIC_MAX_SHAPES: "16"
+      ELECTRIC_TELEMETRY: "false"
+      ELECTRIC_LOG_LEVEL: warning
+    volumes:
+      - sandra_inbox_release_electric_data_20260917:/var/lib/electric
+    labels:
+      purpose: sandra-inbox-release-runtime
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+      component: electric
+    mem_limit: 512m
+    cpus: 1.0
+
+  operation-worker:
+    profiles: [full-runtime]
+    build:
+      context: ../..
+      dockerfile: experiments/inbox-operation-worker/Dockerfile
+    image: sandra-inbox-action-worker:release-fcffde3
+    pull_policy: never
+    container_name: sandra-inbox-release-operation-worker-20260917
+    restart: "no"
+    network_mode: host
+    extra_hosts:
+      - sandra-inbox-restate-owned:127.0.0.1
+    env_file:
+      - ${INBOX_RELEASE_RUNTIME_ENV_FILE:?set INBOX_RELEASE_RUNTIME_ENV_FILE to an ignored populated file}
+    environment:
+      NODE_ENV: test
+      INBOX_ACTION_WORKER_ENABLED: "1"
+      INBOX_ACTION_LOCAL_FIXTURE: "1"
+      INBOX_ACTION_FIXTURE_PROFILE: release-http
+      INBOX_ACTION_OWNED_FIXTURE_PLAINTEXT: "true"
+      INBOX_ACTION_FIXTURE_MARKER: sandra-inbox-http-owned-synthetic-20260917
+      INBOX_ACTION_FIXTURE_OWNER: release-infra
+      INBOX_ACTION_FIXTURE_PURPOSE: sandra-inbox-release-http
+      INBOX_ACTION_FIXTURE_LABELS_VERIFIED: "true"
+      INBOX_RESTATE_INGRESS_URL: http://sandra-inbox-restate-owned:8080/
+      INBOX_ACTION_CONNECTIONS: "2"
+      PORT: "9080"
+      INBOX_WORKER_BIND: 127.0.0.1
+    depends_on: [restate]
+    read_only: true
+    labels:
+      purpose: sandra-inbox-release-runtime
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+      component: operation-worker
+    mem_limit: 256m
+    cpus: 0.25
+
+  reply-send-worker:
+    profiles: [full-runtime]
+    build:
+      context: ../..
+      dockerfile: experiments/inbox-reply-send-worker/Dockerfile
+    image: sandra-inbox-reply-send-worker:release-fcffde3
+    pull_policy: never
+    container_name: sandra-inbox-release-reply-worker-20260917
+    restart: "no"
+    network_mode: host
+    extra_hosts:
+      - sandra-inbox-restate-owned:127.0.0.1
+    env_file:
+      - ${INBOX_RELEASE_RUNTIME_ENV_FILE:?set INBOX_RELEASE_RUNTIME_ENV_FILE to an ignored populated file}
+    environment:
+      NODE_ENV: test
+      INBOX_REPLY_SEND_WORKER_ENABLED: "1"
+      INBOX_ACTION_LOCAL_FIXTURE: "1"
+      INBOX_ACTION_FIXTURE_PROFILE: release-http
+      INBOX_REPLY_SEND_OWNED_FIXTURE_PLAINTEXT: "true"
+      INBOX_REPLY_SEND_FIXTURE_MARKER: sandra-inbox-http-owned-synthetic-20260917
+      INBOX_REPLY_SEND_FIXTURE_OWNER: release-infra
+      INBOX_REPLY_SEND_FIXTURE_PURPOSE: sandra-inbox-release-http
+      INBOX_REPLY_SEND_FIXTURE_LABELS_VERIFIED: "true"
+      INBOX_RESTATE_INGRESS_URL: http://sandra-inbox-restate-owned:8080/
+      INBOX_REPLY_SEND_CONNECTIONS: "2"
+      INBOX_REPLY_SEND_TEST_TRANSPORT_MODULE: /app/vendor/test-transport.mjs
+      PORT: "9081"
+      INBOX_WORKER_BIND: 127.0.0.1
+    volumes:
+      # This module is a fixture-only provider double.  The production image
+      # uses the vendored provider adapter and a secret, never this mount.
+      - ../inbox-reply-send-worker/vendor/test-transport.mjs:/app/vendor/test-transport.mjs:ro
+    depends_on: [restate]
+    read_only: true
+    labels:
+      purpose: sandra-inbox-release-runtime
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+      component: reply-send-worker
+    mem_limit: 256m
+    cpus: 0.25
+
+  projection-worker:
+    profiles: [full-runtime]
+    build:
+      context: ../..
+      dockerfile: services/inbox-projection-worker/Dockerfile
+    image: sandra-inbox-projection-worker:release-fcffde3
+    pull_policy: never
+    container_name: sandra-inbox-release-projection-worker-20260917
+    restart: "no"
+    network_mode: host
+    env_file:
+      - ${INBOX_RELEASE_PROJECTION_ENV_FILE:?set INBOX_RELEASE_PROJECTION_ENV_FILE to an ignored populated file}
+    environment:
+      INBOX_PROJECTION_EXPECT_DATABASE: postgres
+      INBOX_PROJECTION_OWNED_FIXTURE_PLAINTEXT: "true"
+      INBOX_PROJECTION_FIXTURE_MARKER: sandra-inbox-http-owned-synthetic-20260917
+      INBOX_PROJECTION_FIXTURE_OWNER: release-infra
+      INBOX_PROJECTION_FIXTURE_PURPOSE: sandra-inbox-release-http
+      INBOX_PROJECTION_FIXTURE_LABELS_VERIFIED: "true"
+      INBOX_PROJECTION_BIND: 127.0.0.1
+      PORT: "59081"
+    read_only: true
+    labels:
+      purpose: sandra-inbox-release-runtime
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+      component: projection-worker
+    mem_limit: 256m
+    cpus: 0.25
+
+  relay:
+    profiles: [full-runtime]
+    build:
+      context: ../..
+      dockerfile: experiments/inbox-release/Dockerfile.relay-fixture
+    image: sandra-inbox-sync-relay:release-fcffde3
+    pull_policy: never
+    container_name: sandra-inbox-release-relay-20260917
+    restart: "no"
+    networks:
+      release_http:
+        aliases: [relay]
+    environment:
+      INBOX_RELEASE_HTTP_FIXTURE: "1"
+      INBOX_RELEASE_FIXTURE_MARKER: sandra-inbox-release-http-owned-20260917
+      INBOX_RELAY_UPSTREAM: http://electric:3000/
+      INBOX_RELAY_PROJECTION_TABLE: inbox_bridge.summaries
+      INBOX_RELAY_TOKEN: ${INBOX_RELAY_TOKEN:?set INBOX_RELAY_TOKEN in the ignored runtime env}
+      INBOX_RELAY_BIND: 0.0.0.0
+      PORT: "58787"
+    ports:
+      - "127.0.0.1:58787:58787"
+    depends_on: [electric]
+    read_only: true
+    labels:
+      purpose: sandra-inbox-release-runtime
+      owner: release-infra
+      marker: sandra-inbox-release-http-owned-20260917
+      component: relay
+    mem_limit: 512m
+    cpus: 0.5
+
+volumes:
+  sandra_inbox_release_restate_data_20260917:
+    name: sandra_inbox_release_restate_data_20260917
+  sandra_inbox_release_electric_data_20260917:
+    name: sandra_inbox_release_electric_data_20260917
+
+networks:
+  release_http:
+    external: true
+    name: sandra-inbox-release-http-20260917

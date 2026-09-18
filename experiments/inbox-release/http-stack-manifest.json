@@ -49,6 +49,8 @@
   "database_endpoint": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
   "templates": {
     "compose": "experiments/inbox-release/http-stack-compose.yml",
+    "full_runtime_compose": "experiments/inbox-release/execution-stack-compose.yml",
+    "full_runtime_env_example": "experiments/inbox-release/full-stack.env.example",
     "kong": "experiments/inbox-release/http-stack-kong.yml",
     "env_example": "experiments/inbox-release/http-stack.env.example",
     "projection_env_example": "experiments/inbox-release/http-stack-projection.env.example"

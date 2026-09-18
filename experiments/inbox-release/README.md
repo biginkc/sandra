@@ -156,6 +156,36 @@ historical aliases and production certificate path remain separate. The
 profile is recorded as an unbuilt overlay in `execution-stack-manifest.json`;
 no worker launch is implied.
 
+## Complete execution stack definition
+
+`execution-stack-compose.yml` is the checked-in synthetic full-stack definition
+for the separately owned HTTP fixture. Its opt-in `full-runtime` profile wires
+the pinned Restate runtime, Electric, current-source operation worker,
+reply-send worker, projection worker and the release-only relay wrapper. It
+uses host mode only for Restate and the workers because the reviewed local
+profiles deliberately accept only the exact `127.0.0.1:54322/postgres` target
+and the `sandra-inbox-restate-owned:8080` ingress alias. Electric and the
+fixture relay join the existing marked release HTTP network. `full-stack.env.example`
+contains names only; credentials and the Restate key stay in ignored files.
+
+The compose definition is deployable configuration, not runtime evidence. The
+operation, reply and projection images are built from the exact `fcffde3` source
+snapshot and have no accepted digest until that build runs. Electric is pinned
+to the previously reviewed 1.8.1 digest, but its publication, replication role
+and compatibility with the current candidate still require the separate
+database packet. The fixture relay imports the reviewed relay factory through
+`relay-fixture.mjs`; the production entry point remains
+`services/inbox-sync-relay/server.mjs`, which accepts only a private Railway
+Electric hostname.
+
+The current read-only daemon probe returned containerd blob I/O errors while
+inspecting the historical and infrastructure images. No cache availability or
+runtime readiness is claimed from those references. The remaining concrete
+runtime evidence is recorded under `runtime_definition.missing_evidence` in
+`execution-stack-manifest.json`: exact current image digests, role/publication
+installation, Restate registration and recovery, and measured current/three
+times workload observations.
+
 `stress-harness-config.json` and `run-stress-recovery.py` provide the actual
 current/three-times workload and fault-recovery execution contract. A workload
 adapter and a fault adapter must emit JSONL timing, CPU/memory/lock/connection,

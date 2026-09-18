@@ -7,7 +7,7 @@
   "install-unknown-companion.py": "449dd4face96e841476b239b9d79f6bb934de81648590bc1192ccbe11241c33b",
   "maintenance-test.py": "6ef8b437401d7b7ad053af4a59dad0e28f53991cb54db6530aff5ce80bcfc0a2",
   "private-schemas.json": "bafdef15eef48ac54a506c49b35f6577b00f70500d7ef337574a41457a0277f6",
-  "read-companion-manifest.json": "5c502bbb3ebc925cf6bdd55da6ab8c656284eecbdb65cbd7d428e89aa5faed3c",
+  "read-companion-manifest.json": "f1fe951203b957a73b1f067bf08f876c89ecf6b46201214f9dabb148d754866a",
   "read-companion.py": "49f700a0f4a968a829ac9a228bed556a27f75451291782062170812c9b9d6dfe",
   "read-retention-test.py": "b818783db592d6ef8e35ba18c9ef5b7688d1a1545c6eff6649d7f9f98998c0bf",
   "read-retention.sql": "679ab6aa94635a3fa518221ffe49629868108d851e35cab4000277b7ec5d133d",
@@ -26,5 +26,5 @@
   "verify-mutation-harness.py": "3c1c0209359ef8028cb92ea0a64dcf0c6dab288a035bc3bc8ae6604ad9116c17",
   "verify.py": "f85d5740db82e9de171145dfab6268340efe0f854e42ecbedd3f5b13198a2aaa",
   "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15",
-  "selection-review.sql": "acbdb0ff600ab4beb4c86bb02a8a2b9d7f4d4241fb060facf6b91cf9bac6d7d5"
+  "selection-review.sql": "8c7d3492ec6766963e2d518d24b221316545f07bc1ba7923f25402dc23802dbd"
 }
