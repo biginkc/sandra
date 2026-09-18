@@ -7,6 +7,9 @@ import { createSupabaseInboxRepository, type InboxRpcClient } from "./supabase-s
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 export type SelectionReviewTarget = { kind: "conversation" | "unknown_sender_group"; id: string };
+/** Client-owned filter/selection request generation, shared across its batches.
+ * This is echoed for stale-response rejection; it is not a workset generation
+ * or an authorization claim. SQL independently derives all access authority. */
 export type SelectionReviewInput = { orgId: string; filter: InboxFilter; targets: SelectionReviewTarget[]; generation: string };
 export type SelectionReviewItem = SelectionReviewTarget & { status: "matching" | "outside_filter" | "unavailable"; name: string | null };
 export type SelectionReviewResult = { orgId: string; requesterId: string; sessionId: string; accessEpoch: string; generation: string; items: SelectionReviewItem[] };

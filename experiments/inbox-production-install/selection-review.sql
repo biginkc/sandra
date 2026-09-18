@@ -47,7 +47,9 @@ BEGIN
   AND CASE WHEN t.kind='conversation' THEN EXISTS(SELECT 1 FROM public.messages m
     WHERE m.org_id=o AND m.conversation_id=t.id AND m.channel='sms')
    ELSE EXISTS(SELECT 1 FROM public.messages m WHERE m.org_id=o AND m.channel='sms'
-    AND m.direction='inbound' AND m.contact_id IS NULL AND m.from_address=r.summary->>'raw_sender_key') END
+    AND m.direction='inbound' AND m.contact_id IS NULL AND m.from_address<>''
+    AND md5(m.from_address)=md5(r.summary->>'raw_sender_key')
+    AND m.from_address=r.summary->>'raw_sender_key') END
  ), matching AS (
   SELECT c.target_kind,c.target_id FROM candidates c CROSS JOIN p
 -- BEGIN canonical workset matching predicate

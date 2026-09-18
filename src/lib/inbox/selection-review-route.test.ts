@@ -1,0 +1,17 @@
+import {beforeEach,afterEach,it,expect,vi} from "vitest";
+vi.mock("server-only",()=>({}));
+const mocks=vi.hoisted(()=>({createClient:vi.fn(),memberships:vi.fn(),review:vi.fn()}));
+vi.mock("@/lib/supabase/server",()=>({createClient:mocks.createClient}));
+vi.mock("@/lib/auth/memberships",()=>({getCallerMembershipsOrThrow:mocks.memberships}));
+vi.mock("./selection-review",async original=>({...await original<typeof import("./selection-review")>(),createSelectionReviewRepository:()=>mocks.review}));
+import {POST} from "@/app/api/inbox/selection-review/route";
+const id="11111111-1111-4111-8111-111111111111";
+const input={orgId:id,generation:id,filter:{view:"all"},targets:[{kind:"conversation",id}]};
+const request=(body:unknown=input,headers:Record<string,string>={})=>new Request("http://localhost/api/inbox/selection-review",{method:"POST",headers:{"content-type":"application/json",...headers},body:JSON.stringify(body)});
+beforeEach(()=>{vi.clearAllMocks();vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED","1");vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS",id);vi.stubEnv("INBOX_WORKSPACE_ROLLOUT_MODE","pilot");mocks.createClient.mockResolvedValue({auth:{getUser:async()=>({data:{user:{id}}})}});mocks.memberships.mockResolvedValue([{role:"owner",access_status:"active"}]);mocks.review.mockResolvedValue({items:[]});});
+afterEach(()=>vi.unstubAllEnvs());
+it("disabled admission never constructs a database client",async()=>{vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED","0");expect((await POST(request())).status).toBe(404);expect(mocks.createClient).not.toHaveBeenCalled();expect(mocks.review).not.toHaveBeenCalled();});
+it("cross-site requests never construct a database client",async()=>{expect((await POST(request(input,{"sec-fetch-site":"cross-site"}))).status).toBe(403);expect(mocks.createClient).not.toHaveBeenCalled();});
+it("nonpilot and acquisition-only callers cannot reach selection RPC",async()=>{vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS","");expect((await POST(request())).status).toBe(404);vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS",id);mocks.memberships.mockResolvedValue([{role:"member",access_status:"active",acquisitions_enabled:true}]);expect((await POST(request())).status).toBe(404);expect(mocks.review).not.toHaveBeenCalled();});
+it("malformed envelopes and duplicate targets cannot reach selection RPC",async()=>{for(const body of [{...input,requesterId:id},{...input,targets:[...input.targets,...input.targets]},{...input,targets:Array(101).fill(input.targets[0])}])expect((await POST(request(body))).status).toBe(400);expect(mocks.review).not.toHaveBeenCalled();});
+it("valid authorized review preserves exact input and stays private",async()=>{const result=await POST(request());expect(result.status).toBe(200);expect(result.headers.get("cache-control")).toBe("private, no-store");expect(mocks.review.mock.calls[0][0]).toEqual(input);});
