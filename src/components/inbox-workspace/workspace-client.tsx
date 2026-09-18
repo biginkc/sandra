@@ -17,8 +17,9 @@ import { InboxKnownConversationActions, knownConversationActionContext } from ".
 import { InboxUnknownSenderActions } from "./unknown-sender-actions";
 
 const labels: Record<InboxFilter["view"], string> = { active: "All", all: "All", mine: "Assigned to me", unassigned: "Unassigned", unread: "Unread", escalated: "Needs review", dispo: "Has outcome", needs_outcome: "Needs outcome", unknown: "Unknown senders", dismissed: "Dismissed" };
-type Scope = WorkspaceScope & { nextCursor: string | null; refreshed: boolean };
+type Scope = WorkspaceScope & { generation: string; nextCursor: string | null; refreshed: boolean };
 type Open = { id: WorkspaceId; generation: number; row?: WorkspaceRow; data?: InboxDetailSnapshot; unknownData?: UnknownSenderHistorySnapshot; error?: string };
+type WorksetUpdates = { scopeId: string; orgId: string; requesterId: string; sessionId: string; accessEpoch: string; generation: string; hasUpdates: boolean; refreshRequired: boolean };
 type SelectionReviewBackendItem = { kind: "conversation" | "unknown_sender_group"; id: string; status: "matching" | "outside_filter" | "unavailable"; name: string | null };
 type SelectionReviewItem = { id: WorkspaceId; status: "matching_loaded" | "matching_unloaded" | "outside_filter" | "unavailable"; name: string };
 type SelectionReviewState = { status: "loading" | "ready" | "error"; generation: string; ids: readonly WorkspaceId[]; filter: InboxFilter; items: SelectionReviewItem[]; error?: string };
@@ -53,6 +54,17 @@ function abortSelectionReview(sequence: { current: number }, request: { current:
   request.current?.abort();
   request.current = null;
 }
+function abortWorksetUpdates(sequence: { current: number }, request: { current: AbortController | null }) {
+  sequence.current++;
+  request.current?.abort();
+  request.current = null;
+}
+function decodeWorksetUpdates(value: unknown, scope: Scope, identity: InboxQueryIdentity): WorksetUpdates {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("The workspace update response was invalid.");
+  const response = value as Record<string, unknown>;
+  if (response.scopeId !== scope.scopeId || response.orgId !== identity.orgId || response.requesterId !== identity.userId || response.sessionId !== identity.sessionId || response.accessEpoch !== identity.accessEpoch || response.generation !== scope.generation || typeof response.hasUpdates !== "boolean" || typeof response.refreshRequired !== "boolean") throw Error("The workspace update response did not match this scope.");
+  return { scopeId: scope.scopeId, orgId: identity.orgId, requesterId: identity.userId, sessionId: identity.sessionId, accessEpoch: identity.accessEpoch, generation: scope.generation, hasUpdates: response.hasUpdates, refreshRequired: response.refreshRequired };
+}
 
 export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled = false, replyEnabled = false }: { identity: InboxQueryIdentity & { expiresAt: number }; initialFilter: InboxFilter; actionsEnabled?: boolean; replyEnabled?: boolean }) {
   const [cache] = useState(() => createInboxQueryCache(identity));
@@ -66,6 +78,11 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const [selectionReview, setSelectionReview] = useState<SelectionReviewState | null>(null);
   const selectionReviewRequest = useRef<AbortController | null>(null);
   const selectionReviewSequence = useRef(0);
+  const [pageScope, setPageScope] = useState<Scope | null>(null);
+  const [worksetUpdateLabel, setWorksetUpdateLabel] = useState<string>();
+  const [worksetUpdateError, setWorksetUpdateError] = useState(false);
+  const worksetUpdateRequest = useRef<AbortController | null>(null);
+  const worksetUpdateSequence = useRef(0);
   const [opened, setOpened] = useState<Open | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string>();
@@ -86,8 +103,9 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     denied.current = true; sequence.current++;
     request.current?.abort(); clearActions.current(); cache.close();
     selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null;
+    worksetUpdateSequence.current++; worksetUpdateRequest.current?.abort(); worksetUpdateRequest.current = null;
     setSelectionNames(new Map()); setSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setReview(false);
-    setSelectionReview(null);
+    setSelectionReview(null); setPageScope(null); setWorksetUpdateLabel(undefined); setWorksetUpdateError(false);
     sync.current?.revoke(); setSnapshot({ state: "permission_lost", rows: [] }); setBusy(false);
   }, [cache]);
   /** A single item-scoped denial (404): only this target is affected. Invalidate its
@@ -141,6 +159,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   async function load(next: InboxFilter, cursor: string | null = null) {
     if (denied.current) return;
     selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null; setReview(false); setSelectionReview(null);
+    worksetUpdateSequence.current++; worksetUpdateRequest.current?.abort(); worksetUpdateRequest.current = null; setPageScope(null); setWorksetUpdateLabel(undefined); setWorksetUpdateError(false);
     request.current?.abort();
     const controller = new AbortController(); request.current = controller;
     setBusy(true); setError(undefined); sync.current?.reset();
@@ -149,12 +168,39 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
       const value = await json<Scope>("/api/inbox/worksets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orgId: identity.orgId, filter: next, cursor, limit: 500, ...(scope.current ? { replacesScopeId: scope.current.scopeId } : {}) }) }, controller.signal);
       if (controller.signal.aborted) return;
       if (value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch) { accessLost(); return; }
-      if (!(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean") throw Error("Invalid workspace response");
-      setInvalidatedIds([]); sync.current!.replace(value); scope.current = value; setNextCursor(value.nextCursor); setFilter(next);
+      if (!(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean" || typeof value.generation !== "string" || value.generation.length === 0) throw Error("Invalid workspace response");
+      setInvalidatedIds([]); sync.current!.replace(value); scope.current = value; setPageScope(value); setNextCursor(value.nextCursor); setFilter(next);
     } catch (failure) {
       if (!controller.signal.aborted && !denied.current) setError(failure instanceof Error ? failure.message : "Could not load conversations.");
     } finally { if (!controller.signal.aborted) setBusy(false); }
   }
+  useEffect(() => {
+    if (!pageScope || denied.current) return undefined;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    worksetUpdateRequest.current = controller;
+    const token = ++worksetUpdateSequence.current;
+    const poll = async () => {
+      try {
+        const value = await json<unknown>(`/api/inbox/workset-updates?scopeId=${encodeURIComponent(pageScope.scopeId)}`, {}, controller.signal);
+        if (!active || controller.signal.aborted || token !== worksetUpdateSequence.current || denied.current) return;
+        const update = decodeWorksetUpdates(value, pageScope, identity);
+        setWorksetUpdateError(false);
+        setWorksetUpdateLabel(update.refreshRequired ? "Refresh required to check for new conversations" : update.hasUpdates ? "New conversations available · Refresh view" : undefined);
+      } catch {
+        if (active && !controller.signal.aborted && token === worksetUpdateSequence.current && !denied.current) setWorksetUpdateError(true);
+      } finally {
+        if (active && !controller.signal.aborted && token === worksetUpdateSequence.current && !denied.current) timer = setTimeout(() => void poll(), 15_000);
+      }
+    };
+    void poll();
+    return () => {
+      active = false; abortWorksetUpdates(worksetUpdateSequence, worksetUpdateRequest); if (timer) clearTimeout(timer);
+    };
+    // The scope object is the complete identity fence for this polling loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageScope]);
   useEffect(() => {
     // Each mount owns its transport and no browser persistence. A stale request
     // cannot publish after unmount even when the server completed its scope.
@@ -173,7 +219,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     void load(initialFilter);
     const expiry = setTimeout(accessLost, Math.max(0, identity.expiresAt - Date.now()));
     return () => {
-      invalidateViews(); request.current?.abort(); abortSelectionReview(selectionReviewSequence, selectionReviewRequest); clearTimeout(expiry); adapter.reset(); sync.current = null;
+      invalidateViews(); request.current?.abort(); abortSelectionReview(selectionReviewSequence, selectionReviewRequest); abortWorksetUpdates(worksetUpdateSequence, worksetUpdateRequest); clearTimeout(expiry); adapter.reset(); sync.current = null;
       // React Strict Mode immediately installs another owned adapter; a real
       // unmount closes the cache once that synchronous replay is complete.
       queueMicrotask(() => { if (sync.current === null) cache.close(); });
@@ -259,7 +305,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   return <QueryClientProvider client={cache.client}>
     <InboxWorkspace scopeLabel={labels[filter.view]} rows={snapshot.rows} invalidatedIds={invalidatedIds} selectedIds={selected} openId={opened?.id ?? null}
       onSelectionChange={select} onOpen={id => void open(id)} onCloseDetail={() => { sequence.current++; activeOpen.current = null; setOpened(null); }}
-      onBack={() => { window.location.href = "/inbox/overview"; }} onReviewSelection={() => void beginSelectionReview(selected, filter)}
+      onBack={() => { window.location.href = "/inbox/overview"; }} onReviewSelection={() => void beginSelectionReview(selected, filter)} newMessagesLabel={worksetUpdateLabel} onRefreshRows={() => void load(filter)}
       actions={actionItems} onAction={prepareAction} connection={{ state: snapshot.state === "permission_lost" ? "permission_lost" : snapshot.state === "live" ? "live" : snapshot.state === "resync_required" ? "offline" : "updating", label: snapshot.state === "permission_lost" ? "Your access has changed. Reload to continue." : snapshot.state === "live" ? "Current workspace is synchronized" : snapshot.state === "resync_required" ? "Refresh this view to reconnect" : "Loading workspace…" }}
       listState={busy || snapshot.state === "loading" ? "loading" : "ready"} listError={error} onRetryList={() => void load(filter)}
       toolbar={<><form onSubmit={event => { event.preventDefault(); void load({ ...filter, search }); }}><label>Search <input aria-label="Search conversations" maxLength={100} value={search} onChange={event => setSearch(event.target.value)} disabled={busy} /></label><button disabled={busy}>Search</button></form>
@@ -268,7 +314,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
         <span role="status">{counts ? `${counts.counts[filter.view === "active" ? "all" : filter.view]} matching · counted ${new Date(counts.asOf).toLocaleTimeString()}` : countsError ? "Counts unavailable" : "Loading counts…"}</span>{countsError && <button type="button" onClick={() => void loadCounts(filter, true)}>Retry counts</button>}{actionsEnabled ? saved.picker : null}</>}
       pageControl={<><span>{snapshot.rows.length} loaded</span><button disabled={busy} onClick={() => void load(filter)}>Refresh view</button><button disabled={busy || !nextCursor} onClick={() => void load(filter, nextCursor)}>Next 500</button></>}
       detail={opened ? { targetId: opened.id, title: opened.row?.name ?? "Conversation", context: opened.row?.context, state: opened.error ? "error" : opened.data || opened.unknownData ? "ready" : "loading", error: opened.error, onRetry: () => void open(opened.id, true), headerActions: opened.data ? <ConversationLinks conversationId={opened.data.conversationId} /> : undefined, content: opened.data ? <><InboxKnownConversationActions key={opened.data.conversationId} context={knownConversationActionContext(opened.data, opened.row?.name ?? null)} currentUserId={identity.userId} onChanged={() => void open(opened.id, true)} /><ConversationHistory orgId={identity.orgId} conversationId={opened.data.conversationId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.data }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={unavailable} /><InboxReplyComposer key={`${identity.orgId}:${opened.data.conversationId}`} conversationId={opened.data.conversationId} identity={identity} enabled={replyEnabled} /></> : opened.unknownData ? <><UnknownSenderHistory key={opened.unknownData.senderGroupId} orgId={identity.orgId} senderGroupId={opened.unknownData.senderGroupId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.unknownData }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={unavailableSenderGroup} /><InboxUnknownSenderActions key={opened.unknownData.senderGroupId} fromAddress={opened.unknownData.rawSender} latestBody={opened.unknownData.history[0]?.body ?? ""} dismissed={filter.view === "dismissed"} onChanged={() => void load(filter)} /></> : undefined } : undefined}
-      activity={<>{metadata.activity ?? <p>{actionsEnabled ? "Select an action to review eligible records." : "Bulk actions and remaining individual tools are being connected."}</p>}{saved.activity}</>} />
+      activity={<>{worksetUpdateError && <p role="status">New conversation check unavailable; retrying.</p>}{metadata.activity ?? <p>{actionsEnabled ? "Select an action to review eligible records." : "Bulk actions and remaining individual tools are being connected."}</p>}{saved.activity}</>} />
     {metadata.review}
     {saved.review}
     {actionsEnabled ? saved.builder : null}
