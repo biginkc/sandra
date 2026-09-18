@@ -62,6 +62,11 @@ class BackendPackagingTests(unittest.TestCase):
         self.assertEqual(backend_result["status"], "PASS", backend_result)
         self.assertEqual(execution_result["status"], "PASS", execution_result)
 
+    def test_acceptance_gate_counts_rows_whose_text_contains_id(self) -> None:
+        result = self.gate.check_acceptance_matrix("HEAD")
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(result["rows"], 50)
+
 
 if __name__ == "__main__":
     unittest.main()

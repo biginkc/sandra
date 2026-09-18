@@ -706,7 +706,7 @@ def check_acceptance_matrix(candidate_sha: str) -> dict[str, Any]:
         return result("FAIL", "acceptance matrix is missing")
     rows: list[dict[str, str]] = []
     for line in matrix.read_text().splitlines():
-        if not line.startswith("|") or line.startswith("|---") or "ID" in line:
+        if not line.startswith("|") or line.startswith("|---") or line.startswith("| ID |"):
             continue
         parts = [part.strip() for part in line.strip().strip("|").split("|")]
         if len(parts) != 6 or not re.fullmatch(r"[A-Z][0-9]{2}", parts[0]):
