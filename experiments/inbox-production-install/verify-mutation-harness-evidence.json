@@ -52,7 +52,7 @@
     {
       "case": "not_valid_readd",
       "drift_caught": true,
-      "drift_error": "  live remaining=[{'def': \"CHECK ((channel = ANY (ARRAY['sms'::text, 'email'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': \"CHECK ((direction = ANY (ARRAY['outbound'::text, 'inbound'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': \"CHECK ((provider = ANY (ARRAY['dialpad'::text, 'twilio'::text, 'resend'::text, 'sendgrid'::text, 'internal'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': \"CHECK ((status = ANY (ARRAY['pending'::text, 'queued'::text, 'sent'::text, 'delivered'::text, 'failed'::text, 'received'::text, 'bounced'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': 'PRIMARY KEY (id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'FOREIGN KEY (org_id) REFERENCES organizations(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'FOREIGN KEY (property_id) REFERENCES properties(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'FOREIGN KEY (contact_id) REFERENCES contacts(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'CHECK ((inbox_inbound_revision >= 0)) NOT VALID', 'table': 'public.messages', 'valid': False, 'noinherit': False, 'triggers_ok': True}]",
+      "drift_error": "  live remaining=[{'def': \"CHECK ((channel = ANY (ARRAY['sms'::text, 'email'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': \"CHECK ((direction = ANY (ARRAY['outbound'::text, 'inbound'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': 'PRIMARY KEY (id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'FOREIGN KEY (org_id) REFERENCES organizations(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'FOREIGN KEY (property_id) REFERENCES properties(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'FOREIGN KEY (contact_id) REFERENCES contacts(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE RESTRICT', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'FOREIGN KEY (attributed_outbound_message_id) REFERENCES messages(id) ON DELETE SET NULL', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': \"CHECK ((provider = ANY (ARRAY['dialpad'::text, 'twilio'::text, 'resend'::text, 'sendgrid'::text, 'internal'::text, 'mock'::text, 'sendillo'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': 'FOREIGN KEY (inbound_intent_id) REFERENCES sms_inbound_intents(id) ON DELETE SET NULL', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': \"CHECK ((status = ANY (ARRAY['pending'::text, 'queued'::text, 'paused'::text, 'sent'::text, 'delivered'::text, 'failed'::text, 'received'::text, 'bounced'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': 'CHECK ((inbox_inbound_revision >= 0)) NOT VALID', 'table': 'public.messages', 'valid': False, 'noinherit': False, 'triggers_ok': True}]",
       "restored_pass": true
     },
     {
@@ -88,7 +88,7 @@
     {
       "case": "composite_attribute_dropped",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Column set drift on inbox_bridge.cursor_context: expected=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id'] live=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id']",
+      "drift_error": "RuntimeError: column-acl.json contains pins for columns absent from the candidate: ['inbox_bridge.cursor_context.cursor_target']",
       "restored_pass": true
     },
     {
@@ -106,7 +106,7 @@
     {
       "case": "composite_attribute_renamed",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Column set drift on inbox_bridge.cursor_context: expected=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id'] live=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind_renamed', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id']",
+      "drift_error": "RuntimeError: column-acl.json contains pins for columns absent from the candidate: ['inbox_bridge.cursor_context.cursor_kind']",
       "restored_pass": true
     },
     {
@@ -215,6 +215,12 @@
       "case": "table_acl_grant_added",
       "drift_caught": true,
       "drift_error": "RuntimeError: Table ACL drift public.inbox_inbound_heads: expected=['postgres=arwdDxtm/postgres'] live=['anon=r/postgres', 'postgres=arwdDxtm/postgres'] (raw aclitem text, so a WITH GRANT OPTION change -- a '*' suffix on a privilege letter -- is included)",
+      "restored_pass": true
+    },
+    {
+      "case": "column_acl_grant_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column ACL drift public.inbox_inbound_heads.org_id: expected=[] live=['anon=r/postgres']",
       "restored_pass": true
     },
     {
