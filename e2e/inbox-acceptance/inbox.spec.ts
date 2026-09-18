@@ -65,7 +65,7 @@ test("F02 — search messages filters the workset", async ({ page }) => {
   await expect(list.getByText(noMatch.contactName)).toBeVisible();
 
   await page.getByLabel("Search conversations").fill(match.contactName);
-  await page.getByRole("button", { name: "Search" }).click();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
   await expect(list.getByText(match.contactName)).toBeVisible();
   await expect(list.getByText(noMatch.contactName)).toHaveCount(0);
 
