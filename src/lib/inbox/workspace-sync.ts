@@ -159,7 +159,10 @@ export function createWorkspaceSync(options: WorkspaceSyncOptions) {
           // Electric parses PostgreSQL wire strings (including boolean) using its schema.
           // Validate identity here; validate complete typed rows only after parsing/merge.
           if (message?.headers?.operation === "insert") key(message.value);
-          if (message?.headers?.operation === "delete" && !initialCatchup) removed.push(key(message.value));
+          if (message?.headers?.operation === "delete") {
+            const id = key(message.value);
+            if (!initialCatchup) removed.push(id);
+          }
         }
         if (removed.length && authorizedNow()) options.onInvalidated?.([...new Set(removed)]);
       }
