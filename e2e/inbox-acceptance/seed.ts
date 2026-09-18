@@ -41,6 +41,12 @@ export async function seedAcceptanceThread(
   admin: SupabaseClient<Database>,
   opts: {
     phone: string;
+    /**
+     * Business number used by the inbound messages. The general Inbox
+     * fixtures retain their historical number; reviewed-reply fixtures pass
+     * the canonical sender seeded for the provider policy.
+     */
+    businessNumber?: string;
     addressTag: string;
     contactName: { first: string; last: string };
     propertyStatus?: string;
@@ -81,6 +87,7 @@ export async function seedAcceptanceThread(
 
   for (const m of opts.messages) {
     const createdAt = new Date(Date.now() + m.createdAtOffsetMin * 60_000).toISOString();
+    const businessNumber = opts.businessNumber ?? "+18162804181";
     const { error: msgError } = await admin.from("messages").insert({
       channel: "sms",
       direction: m.direction,
@@ -88,8 +95,8 @@ export async function seedAcceptanceThread(
       conversation_id: conversationId,
       contact_id: contact.id,
       property_id: prop.id,
-      from_address: m.direction === "inbound" ? opts.phone : "+18162804181",
-      to_address: m.direction === "inbound" ? "+18162804181" : opts.phone,
+      from_address: m.direction === "inbound" ? opts.phone : businessNumber,
+      to_address: m.direction === "inbound" ? businessNumber : opts.phone,
       body: m.body,
       created_at: createdAt,
       read_at: m.direction === "inbound" && m.read === true ? new Date().toISOString() : null,

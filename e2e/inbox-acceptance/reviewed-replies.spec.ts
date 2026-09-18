@@ -4,8 +4,10 @@ import { resetAcceptanceFixture } from "./cleanup";
 import {
   adminClient,
   DEFAULT_ORG_ID,
+  E2E_MOCK_BUSINESS_NUMBER,
   ensureTestUser,
 } from "../fixtures";
+import { seedSenderCatalog } from "../../tests/integration/delivery";
 import {
   captureRowEvidence,
   purgeRowOutcomes,
@@ -93,8 +95,16 @@ async function seedReplyThread(
   consent: "in" | "out",
 ): Promise<SeededThread> {
   phoneCounter += 1;
+  // Reply preparation deliberately requires an active `sendillo` sender
+  // snapshot. The acceptance web server still uses the mock provider for
+  // dispatch, so keep the normal mock catalog intact and add this explicit
+  // policy fixture for the canonical business number.
+  await seedSenderCatalog(admin, DEFAULT_ORG_ID, [E2E_MOCK_BUSINESS_NUMBER], {
+    provider: "sendillo",
+  });
   const thread = await seedAcceptanceThread(admin, {
     phone: `+1816555${String(7000 + phoneCounter).padStart(4, "0")}`,
+    businessNumber: E2E_MOCK_BUSINESS_NUMBER,
     addressTag,
     contactName: { first: "Inbox", last: addressTag.replace(/[^A-Za-z0-9]/g, "") },
     messages: [
