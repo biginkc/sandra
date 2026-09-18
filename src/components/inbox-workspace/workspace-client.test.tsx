@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { InboxWorkspaceClient } from "./workspace-client";
 import { workspaceId } from "./selection";
 import type { WorkspaceRow } from "./inbox-workspace";
-const state = vi.hoisted(() => ({ callbacks: null as null | { onChange: (value: unknown) => void; onAccessBoundary: () => void; onInvalidated: (ids: readonly string[]) => void }, replacements: [] as unknown[], deny: false, itemUnavailable: false, detailUnavailable: false }));
+const state = vi.hoisted(() => ({ callbacks: null as null | { onChange: (value: unknown) => void; onAccessBoundary: () => void; onInvalidated: (ids: readonly string[]) => void }, replacements: [] as unknown[], deny: false, itemUnavailable: false, detailUnavailable: false, selectionUnavailable: false }));
 vi.mock("@/lib/inbox/workspace-sync", () => ({ createWorkspaceSync: (callbacks: typeof state.callbacks) => {
   state.callbacks = callbacks;
   return { replace: (value: unknown) => { state.replacements.push(value); }, reset: () => callbacks?.onChange({ state: "resync_required", rows: [] }), revoke: () => callbacks?.onChange({ state: "permission_lost", rows: [] }) };
@@ -22,12 +22,12 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ x: 0, y: 0, left: 0, top: 0, width: 900, height: 600, right: 900, bottom: 600, toJSON: () => ({}) }));
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get: () => 600 });
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 900 });
-  calls = []; state.replacements = []; state.deny = false; state.itemUnavailable = false; state.detailUnavailable = false;
+  calls = []; state.replacements = []; state.deny = false; state.itemUnavailable = false; state.detailUnavailable = false; state.selectionUnavailable = false;
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     calls.push(url);
     if (url.includes("/selection-review")) {
       const body = JSON.parse(String(init?.body ?? "{}")) as { generation: string; targets: { kind: string; id: string }[]; filter: { view: string } };
-      return Response.json({ orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: body.generation, items: body.targets.map(target => ({ ...target, status: target.id === conversationId && body.filter.view === "unread" ? "outside_filter" : "matching", name: target.id === conversationId ? "Ada (authoritative)" : "Bea (authoritative)" })) });
+      return Response.json({ orgId, requesterId: userId, sessionId, accessEpoch: "1", generation: body.generation, items: body.targets.map(target => ({ ...target, status: state.selectionUnavailable && target.id === conversationId2 ? "unavailable" : target.id === conversationId && body.filter.view === "unread" ? "outside_filter" : "matching", name: state.selectionUnavailable && target.id === conversationId2 ? null : target.id === conversationId ? "Ada (authoritative)" : "Bea (authoritative)" })) });
     }
     if (url.includes("/detail")) return state.detailUnavailable ? Response.json({}, { status: 404 }) : Response.json({ orgId, requesterId: userId, conversationId, ...detailFields, history: [{ id: "message", direction: "inbound", body: "Hello from history", createdAtRaw: new Date().toISOString(), readAtRaw: null, inboundRevision: "1" }], readBoundary: "boundary", boundaryExpiresAt: new Date(Date.now() + 60000).toISOString(), captureGeneration: "capture", headRevision: "1" });
     if (url.includes("/counts")) return Response.json({ accessEpoch: "1", asOf: new Date().toISOString(), counts: { all: 1000, unread: 10 } });
@@ -79,6 +79,15 @@ it("renders matching and outside-filter classifications from the authoritative r
   await screen.findByText(/1 outside this view/);
   expect(screen.getByRole("dialog")).toHaveTextContent("Ada (authoritative) (outside filter)");
   expect(screen.getByRole("dialog")).toHaveTextContent("Bea (authoritative) (matching loaded)");
+});
+it("does not reuse a cached name for an unavailable authoritative target", async () => {
+  await loaded();
+  act(() => state.callbacks!.onChange({ state: "live", rows: [row, row2] }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select Bea" }));
+  state.selectionUnavailable = true;
+  fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+  await screen.findByText("Unavailable");
+  expect(screen.getByRole("dialog")).not.toHaveTextContent("Bea (authoritative)");
 });
 it("clears selection and visible history on a canonical access denial", async () => {
   await loaded();
