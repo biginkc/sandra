@@ -519,7 +519,7 @@ def apply_broadcast_publication() -> None:
 
 
 def read_broadcast_publication_state() -> bool:
-    """Return whether the broadcast publication has only its expected tables."""
+    """Return whether the broadcast publication has only messages partitions."""
 
     value = sql_query(
         "SELECT ("
@@ -529,10 +529,11 @@ def read_broadcast_publication_state() -> bool:
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
         f"WHERE p.pubname = '{BROADCAST_PUBLICATION}' "
         "AND n.nspname = 'realtime' AND c.relname = 'messages') "
-        "AND NOT EXISTS (SELECT 1 FROM pg_publication_tables "
-        f"WHERE pubname = '{BROADCAST_PUBLICATION}' "
-        "AND (schemaname <> 'realtime' OR tablename <> 'messages' "
-        "AND left(tablename, 9) <> 'messages_'))"
+        "AND NOT EXISTS (SELECT 1 FROM pg_publication p "
+        "JOIN pg_publication_rel pr ON pr.prpubid = p.oid "
+        f"WHERE p.pubname = '{BROADCAST_PUBLICATION}' "
+        "AND NOT EXISTS (SELECT 1 FROM pg_partition_tree('realtime.messages'::regclass) tree "
+        "WHERE tree.relid = pr.prrelid))"
         ")::text;"
     )
     return value.strip().lower() in {"t", "true"}
@@ -718,6 +719,28 @@ def cleanup_migration_container(temp_name: str) -> None:
         ) from cleanup_error
 
 
+def cleanup_and_repair_runtime(
+    temp_name: str,
+) -> tuple[Exception | None, Exception | None]:
+    """Restore the service and both runtime prerequisites, even after failure."""
+
+    cleanup_error: Exception | None = None
+    repair_errors: list[Exception] = []
+    try:
+        cleanup_migration_container(temp_name)
+    except Exception as exc:
+        cleanup_error = exc
+    for repair in (apply_runtime_role, apply_broadcast_publication):
+        try:
+            repair()
+        except Exception as exc:
+            repair_errors.append(exc)
+    repair_error: Exception | None = None
+    if repair_errors:
+        repair_error = BootstrapError("; ".join(str(error) for error in repair_errors))
+    return cleanup_error, repair_error
+
+
 def validate_fixture(*, require_running: bool = True) -> Mapping[str, Any]:
     network = inspect_network()
     require_owned_network(network)
@@ -769,6 +792,9 @@ def apply_bootstrap(env_file: Path) -> dict[str, Any]:
     if migration_needed:
         docker("stop", REALTIME_CONTAINER)
         migration_succeeded = False
+        migration_error: Exception | None = None
+        cleanup_error: Exception | None = None
+        repair_error: Exception | None = None
         try:
             subprocess.run(
                 migration_args,
@@ -802,17 +828,29 @@ def apply_bootstrap(env_file: Path) -> dict[str, Any]:
 
             wait_for(ready)
             migration_succeeded = True
+        except Exception as exc:
+            migration_error = exc
         finally:
-            # Restore the owned service even when a migration fails.  Cleanup
-            # errors cannot skip this restoration attempt. The pinned schema
-            # hardening migration may revoke the CDC ledger grant, so restore
-            # it before reconnecting the long-running constrained process.
-            try:
-                if migration_succeeded:
-                    apply_runtime_role()
-                    apply_broadcast_publication()
-            finally:
-                cleanup_migration_container(temp_name)
+            # The pinned schema hardening migration may revoke the CDC
+            # grants even on a failed run, so repair them unconditionally.
+            cleanup_error, repair_error = cleanup_and_repair_runtime(temp_name)
+        if migration_error is not None:
+            if cleanup_error is not None or repair_error is not None:
+                restoration = "; ".join(
+                    str(error)
+                    for error in (cleanup_error, repair_error)
+                    if error is not None
+                )
+                raise BootstrapError(
+                    f"Realtime migration failed: {migration_error}; "
+                    f"runtime restoration failed: {restoration}"
+                ) from migration_error
+            raise migration_error
+        if cleanup_error is not None or repair_error is not None:
+            restoration = "; ".join(
+                str(error) for error in (cleanup_error, repair_error) if error is not None
+            )
+            raise BootstrapError(f"Realtime runtime restoration failed: {restoration}")
         if not migration_succeeded:
             raise BootstrapError("Realtime migration process did not reach the pinned schema")
         wait_for(

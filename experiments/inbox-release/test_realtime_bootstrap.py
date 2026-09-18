@@ -80,7 +80,7 @@ class RealtimeBootstrapTest(unittest.TestCase):
             self.assertTrue(realtime_bootstrap.read_broadcast_publication_state())
         query = sql_call.call_args.args[0]
         self.assertIn("pg_publication_rel", query)
-        self.assertIn("pg_publication_tables", query)
+        self.assertIn("pg_partition_tree", query)
         self.assertIn("supabase_realtime_messages_publication", query)
         self.assertIn("c.relname = 'messages'", query)
 
@@ -263,6 +263,30 @@ class RealtimeBootstrapTest(unittest.TestCase):
         self.assertEqual(calls[1][0], ("start", realtime_bootstrap.REALTIME_CONTAINER))
         self.assertTrue(calls[1][1])
         wait_for_rpc_ready.assert_called_once_with(realtime_bootstrap.REALTIME_CONTAINER)
+
+    def test_failed_migration_cleanup_still_repairs_both_runtime_prerequisites(self) -> None:
+        events: list[str] = []
+
+        with patch.object(
+            realtime_bootstrap,
+            "cleanup_migration_container",
+            side_effect=RuntimeError("simulated migration cleanup failure"),
+        ), patch.object(
+            realtime_bootstrap,
+            "apply_runtime_role",
+            side_effect=lambda: events.append("role"),
+        ), patch.object(
+            realtime_bootstrap,
+            "apply_broadcast_publication",
+            side_effect=lambda: events.append("publication"),
+        ):
+            cleanup_error, repair_error = realtime_bootstrap.cleanup_and_repair_runtime(
+                "temporary-realtime"
+            )
+
+        self.assertIsNotNone(cleanup_error)
+        self.assertIsNone(repair_error)
+        self.assertEqual(events, ["role", "publication"])
 
 
     def test_runtime_role_rejects_unsafe_or_incomplete_catalog(self) -> None:
