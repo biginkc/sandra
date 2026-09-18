@@ -220,7 +220,7 @@ test("metadata combo offers a separately reviewed reply and never auto-accepts i
   const selection = page.getByRole("checkbox", { name: `Select ${thread.contactName}` });
   await selection.check();
   await expect(selection).toBeChecked();
-  await expect(page.getByText("1 selected", { exact: false })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Conversation selection" }).getByText("1 selected", { exact: true })).toBeVisible();
 
   const picker = page.getByLabel("Saved actions");
   await expect(picker.getByRole("option", { name: comboName, exact: true })).toHaveCount(1);
@@ -266,7 +266,7 @@ test("metadata combo offers a separately reviewed reply and never auto-accepts i
   // then exposes the explicit reply hand-off. No reply acceptance has happened.
   await expect(review.getByRole("button", { name: "Review reply", exact: true })).toBeVisible({ timeout: 20_000 });
   await expect(selection).toBeChecked();
-  await expect(page.getByText("1 selected", { exact: false })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Conversation selection" }).getByText("1 selected", { exact: true })).toBeVisible();
 
   const replyPrepare = responseFor(page, "/api/inbox/replies/prepare", "POST");
   await review.getByRole("button", { name: "Review reply", exact: true }).click();

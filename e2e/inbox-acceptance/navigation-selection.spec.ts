@@ -97,7 +97,7 @@ test.describe("Inbox navigation and selection", () => {
 
     await page.getByTestId("tab-outbox").click();
     await expect(page).toHaveURL(/\/messages\?tab=outbox$/);
-    await expect(page.getByTestId("messages-outbox-panel")).toBeVisible();
+    await expect(page.getByRole("tabpanel", { name: /^Outbox(?: |$)/ })).toBeVisible();
   });
 
   test("selection supports single, modifier-checkbox, and Shift-toggle interactions without opening", async ({ page }) => {
