@@ -1,7 +1,7 @@
 {
   "status": "RELEASE_CANDIDATE_WITH_BLOCKED_RUNTIME_AND_STRESS_GATES",
-  "candidate_sha": "8f4c586a5f669ff1336fe3445b5145573294f745",
-  "evidence_scope": "This packet records the exact source candidate tested before the next evidence-metadata commit. The generated release-gate packet is authoritative for the final commit SHA.",
+  "candidate_sha": "68555650bb5b09b9d2f01a4c0429da1f12c91840",
+  "evidence_scope": "This packet records the exact source snapshot exercised by the owned browser and SQL proofs. Packet and evidence metadata commits follow that source snapshot; no production claim is made.",
   "flags": {
     "production_inbox_actions_server_enabled": "off",
     "production_inbox_replies_server_enabled": "off",
@@ -19,26 +19,29 @@
   },
   "gates": {
     "source_manifest": "PASS",
-    "acceptance_matrix": "BLOCKED: 50 rows are specified, but the exact-head owned browser rerun stops at /api/inbox/sync with HTTP 503 unexpected_failure before F02/F11 can complete",
+    "acceptance_matrix": "PASS: 50 artifact-backed rows from the complete 52-test owned browser matrix; teardown completed cleanly",
     "http_stack_probe": "PASS: authenticated RPCs, WebSocket 101, projection health",
-    "saved_action_fixture_reconciliation": "PASS: targeted live owned fixture function now matches the pinned saved-actions grammar; full installed catalog proof still required",
-    "worker_recovery": "PASS: realtime_restart 3020.6ms; projection_restart 1320.9ms",
+    "saved_action_fixture_reconciliation": "PASS: owned T2 SQL proof reconciled the validator and completed immutable/scoping/reference/guard checks",
+    "worker_recovery": "BLOCKED: release-gate recovery evidence was not produced for this source snapshot",
     "stress_harness_unit": "PASS: 6 tests",
     "stress_measurements": "BLOCKED_UNJUDGED"
   },
   "validation": {
     "release_unit_tests": "PASS: 43 tests",
     "production_install_unit_tests": "PASS: 15 tests",
-    "inbox_vitest": "PASS: 570 tests",
+    "inbox_vitest": "PASS: 571 tests",
     "typecheck": "PASS",
     "realtime_bootstrap_tests": "PASS: 23 tests",
-    "realtime_cdc_tests": "PASS: 8 tests"
+    "realtime_cdc_tests": "PASS: 8 tests",
+    "cleanup_negative_controls": "PASS: whole-database dynamic discovery caught content mutation and immutable primary-key replacement, then baseline restoration was clean"
   },
   "blocked_gates": [
-    "browser_acceptance_runtime: the owned release stack returns HTTP 503 unexpected_failure from /api/inbox/sync despite a direct relay HTTP 200 probe; session/workset authority alignment remains unresolved",
-    "installed_schema_exact: the targeted saved-action function was reconciled in the owned fixture, but the full installed catalog proof was not rerun at this candidate",
+    "installed_schema_exact: the release gate requires an exact installed-catalog proof artifact; the T2 proof is not that gate",
     "current_volume_stress: measured arrival rate, concurrency, tenant count, and history skew are not supplied",
     "three_x_volume_stress: measured arrival rate, concurrency, tenant count, and history skew are not supplied",
+    "worker_recovery: exact release-stack termination/lease/duplicate recovery evidence is absent",
+    "relay_parity: exact release relay parity evidence is absent",
+    "rollback_receipt_read: exact disable-admission receipt/read evidence is absent",
     "pilot_enablement: production deployment and pilot enablement remain intentionally disabled"
   ],
   "scope": "Owned rehearsal evidence only; no production deployment or pilot enablement claim."
