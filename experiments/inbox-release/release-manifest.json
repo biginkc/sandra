@@ -63,6 +63,7 @@
     "worker_recovery",
     "relay_parity",
     "rollback_receipt_read",
+    "whole_db_cleanup",
     "pilot_enablement"
   ],
   "source_manifest": {

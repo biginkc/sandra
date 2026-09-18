@@ -684,6 +684,7 @@ def check_evidence(
         "worker_recovery": "worker-recovery.json",
         "relay_parity": "relay-parity.json",
         "rollback_receipt_read": "rollback-receipts.json",
+        "whole_db_cleanup": "whole-db-cleanup.json",
     }
     if evidence_dir is None:
         return result("BLOCKED", "no evidence directory supplied; measurements and recovery are required")
@@ -960,6 +961,7 @@ def main() -> int:
         "worker_recovery",
         "relay_parity",
         "rollback_receipt_read",
+        "whole_db_cleanup",
     )
     evidence_checks = evidence_result.get("checks", {})
     for gate in evidence_gates:

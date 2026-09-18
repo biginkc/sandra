@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -30,6 +31,37 @@ class ReleaseGateStatusTests(unittest.TestCase):
     def test_fixture_evidence_cannot_replace_unrun_release_probe(self) -> None:
         live = {"status": "BLOCKED", "detail": "release database probe not requested"}
         self.assertIs(gate.authoritative_rollback_gate(live), live)
+
+    def test_whole_database_cleanup_is_a_decisive_evidence_gate(self) -> None:
+        sha = "c" * 40
+        fixture = {"database": "postgres", "marker": "http-marker"}
+        manifest = {
+            "fixture_policy": {
+                "release_database": "release-db",
+                "must_have_marker": "release-marker",
+                "http_fixture": {
+                    "database": "postgresql://localhost/postgres",
+                    "database_marker": "http-marker",
+                },
+            },
+            "budgets": {"sample_minimum": 1},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_dir = Path(directory)
+            for filename in (
+                "current-volume-stress.json",
+                "three-x-volume-stress.json",
+                "worker-recovery.json",
+                "relay-parity.json",
+                "rollback-receipts.json",
+                "whole-db-cleanup.json",
+            ):
+                (evidence_dir / filename).write_text(
+                    json.dumps({"status": "BLOCKED", "candidate_sha": sha, "fixture": fixture})
+                )
+            result = gate.check_evidence(evidence_dir, sha, manifest)
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["checks"]["whole_db_cleanup"]["status"], "BLOCKED")
 
     def test_acceptance_gate_requires_candidate_binding(self) -> None:
         result = gate.check_acceptance_matrix("0" * 40)
