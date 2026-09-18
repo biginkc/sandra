@@ -523,17 +523,19 @@ def read_broadcast_publication_state() -> bool:
 
     value = sql_query(
         "SELECT ("
-        f"EXISTS (SELECT 1 FROM pg_publication WHERE pubname = '{BROADCAST_PUBLICATION}') "
-        "AND EXISTS (SELECT 1 FROM pg_publication_tables "
-        f"WHERE pubname = '{BROADCAST_PUBLICATION}' "
-        "AND schemaname = 'realtime' AND tablename = 'messages') "
+        "EXISTS (SELECT 1 FROM pg_publication p "
+        "JOIN pg_publication_rel pr ON pr.prpubid = p.oid "
+        "JOIN pg_class c ON c.oid = pr.prrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        f"WHERE p.pubname = '{BROADCAST_PUBLICATION}' "
+        "AND n.nspname = 'realtime' AND c.relname = 'messages') "
         "AND NOT EXISTS (SELECT 1 FROM pg_publication_tables "
         f"WHERE pubname = '{BROADCAST_PUBLICATION}' "
-        "AND (schemaname <> 'realtime' OR (tablename <> 'messages' "
-        "AND tablename NOT LIKE 'messages\\_%' ESCAPE '\\')))"
+        "AND (schemaname <> 'realtime' OR tablename <> 'messages' "
+        "AND left(tablename, 9) <> 'messages_'))"
         ")::text;"
     )
-    return value.strip() == "t"
+    return value.strip().lower() in {"t", "true"}
 
 
 def require_runtime_role_minimum(state: MigrationState) -> None:

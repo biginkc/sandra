@@ -76,12 +76,13 @@ class RealtimeBootstrapTest(unittest.TestCase):
         self.assertNotIn("GRANT CREATE ON DATABASE", sql.upper())
 
     def test_broadcast_publication_catalog_guard_requires_expected_table(self) -> None:
-        with patch.object(realtime_bootstrap, "sql_query", return_value="t") as sql_call:
+        with patch.object(realtime_bootstrap, "sql_query", return_value="true") as sql_call:
             self.assertTrue(realtime_bootstrap.read_broadcast_publication_state())
         query = sql_call.call_args.args[0]
+        self.assertIn("pg_publication_rel", query)
         self.assertIn("pg_publication_tables", query)
         self.assertIn("supabase_realtime_messages_publication", query)
-        self.assertIn("tablename = 'messages'", query)
+        self.assertIn("c.relname = 'messages'", query)
 
     def test_running_image_id_and_cached_manifest_are_authoritative_over_tag(self) -> None:
         container = {
