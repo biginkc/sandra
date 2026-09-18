@@ -106,6 +106,9 @@ test.describe("Inbox navigation and selection", () => {
     const firstRow = rowFor(page, first);
     await firstRow.getByText(first.contactName, { exact: true }).click();
     await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
+    await expect(page.getByLabel(`Select ${first.contactName}`)).toBeChecked();
+    await expect(page.getByLabel(`Select ${second.contactName}`)).not.toBeChecked();
+    await expect(page.getByLabel(`Select ${third.contactName}`)).not.toBeChecked();
     await expect(page.getByRole("complementary", { name: "Open conversation" })).toHaveCount(0);
 
     // Checkbox toggles are the keyboard and Cmd/Ctrl-safe equivalent of the
@@ -113,13 +116,25 @@ test.describe("Inbox navigation and selection", () => {
     // existing selected group through the row click handler.
     await page.getByLabel(`Select ${second.contactName}`).click({ modifiers: ["Control"] });
     await expect(page.getByText("2 selected", { exact: true })).toBeVisible();
+    await expect(page.getByLabel(`Select ${first.contactName}`)).toBeChecked();
+    await expect(page.getByLabel(`Select ${second.contactName}`)).toBeChecked();
+    await expect(page.getByLabel(`Select ${third.contactName}`)).not.toBeChecked();
     await page.getByLabel(`Select ${third.contactName}`).click({ modifiers: ["Meta"] });
     await expect(page.getByText("3 selected", { exact: true })).toBeVisible();
+    await expect(page.getByLabel(`Select ${first.contactName}`)).toBeChecked();
+    await expect(page.getByLabel(`Select ${second.contactName}`)).toBeChecked();
+    await expect(page.getByLabel(`Select ${third.contactName}`)).toBeChecked();
 
     await rowFor(page, third).getByText(third.contactName, { exact: true }).click({ modifiers: ["Shift"] });
     await expect(page.getByText("2 selected", { exact: true })).toBeVisible();
+    await expect(page.getByLabel(`Select ${first.contactName}`)).toBeChecked();
+    await expect(page.getByLabel(`Select ${second.contactName}`)).toBeChecked();
+    await expect(page.getByLabel(`Select ${third.contactName}`)).not.toBeChecked();
     await rowFor(page, second).getByText(second.contactName, { exact: true }).click({ modifiers: ["Shift"] });
     await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
+    await expect(page.getByLabel(`Select ${first.contactName}`)).toBeChecked();
+    await expect(page.getByLabel(`Select ${second.contactName}`)).not.toBeChecked();
+    await expect(page.getByLabel(`Select ${third.contactName}`)).not.toBeChecked();
     await expect(page.getByRole("complementary", { name: "Open conversation" })).toHaveCount(0);
   });
 
@@ -193,8 +208,8 @@ test.describe("Inbox navigation and selection", () => {
     await page.getByRole("button", { name: "Review selection" }).click();
     const review = page.getByRole("dialog");
     await expect(review).toBeVisible();
-    await expect(review.getByText(unread.contactName, { exact: true })).toBeVisible();
-    await expect(review.getByText(read.contactName, { exact: true })).toBeVisible();
+    await expect(review.getByText(`${unread.contactName} (matching loaded)`, { exact: true })).toBeVisible();
+    await expect(review.getByText(`${read.contactName} (outside filter)`, { exact: true })).toBeVisible();
   });
 
   test("incoming arrivals wait behind the indicator until explicit refresh", async ({ page }) => {

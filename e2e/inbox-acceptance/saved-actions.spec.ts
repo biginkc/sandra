@@ -258,6 +258,10 @@ test("metadata combo offers a separately reviewed reply and never auto-accepts i
     })
     .toMatchObject({ status: "new_lead", outreach_dispo: "nurture", assigned_user_id: assigneeId });
 
+  const metadataResults = review.getByRole("region", { name: "Saved action results" });
+  await expect(metadataResults).toBeVisible({ timeout: 20_000 });
+  await expect(metadataResults).toContainText(`${thread.contactName}: succeeded`);
+
   // The accepted metadata operation retains the original selection and only
   // then exposes the explicit reply hand-off. No reply acceptance has happened.
   await expect(review.getByRole("button", { name: "Review reply", exact: true })).toBeVisible({ timeout: 20_000 });
