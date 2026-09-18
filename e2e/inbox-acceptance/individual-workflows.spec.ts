@@ -209,7 +209,10 @@ test.describe.serial("Inbox individual workflows (runtime-unproven)", () => {
     });
 
     await openKnown(page, thread);
-    await page.getByRole("button", { name: "Move to Lead" }).click();
+    await page
+      .getByRole("complementary", { name: "Open conversation" })
+      .getByRole("button", { name: "Move to Lead", exact: true })
+      .click();
     await expect.poll(async () => {
       const { data } = await admin.from("properties").select("status").eq("id", thread.propertyId).single();
       return data?.status ?? null;
