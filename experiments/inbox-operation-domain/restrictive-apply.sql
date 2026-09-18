@@ -237,7 +237,13 @@ BEGIN
  IF NOT FOUND OR member.access_status<>'active' OR member.deletion_prepared_at IS NOT NULL OR (member.access_expires_at IS NOT NULL AND member.access_expires_at<=clock_timestamp()) THEN RAISE EXCEPTION 'Requester access revoked';END IF;
  IF NOT EXISTS(SELECT 1 FROM inbox_t2_message_capture.sender_groups sg WHERE sg.org_id=o AND sg.sender_group_id=group_id AND sg.raw_sender COLLATE "C"=snapshot_raw COLLATE "C") THEN RAISE EXCEPTION 'Unknown sender identity changed';END IF;
  SELECT revision INTO current_revision FROM inbox_t2_message_capture.versions WHERE org_id=o AND namespace='unknown_action' AND target_id=group_id FOR UPDATE;
- IF current_revision IS DISTINCT FROM expected_revision THEN RAISE EXCEPTION 'Unknown action snapshot changed';END IF;
+ IF current_revision IS NULL OR current_revision<expected_revision THEN RAISE EXCEPTION 'Unknown action snapshot changed';END IF;
+ -- The sender-group counter also advances for unrelated arrivals and for
+ -- state changes to other messages. The accepted scope is the immutable
+ -- message_ids array, so a newer counter must not expand or cancel that
+ -- scope. Each frozen ID is re-read under its row lock and reports its own
+ -- disappearance, reclassification, permission exclusion, or already-state
+ -- reason below; newly arrived messages are never selected here.
  FOR message_id IN SELECT value::text::uuid FROM jsonb_array_elements_text(payload->'message_ids') ORDER BY value::text::uuid LOOP
   SELECT to_jsonb(m) INTO message FROM public.messages m WHERE m.org_id=o AND m.id=message_id FOR UPDATE;
   reason:=NULL;
