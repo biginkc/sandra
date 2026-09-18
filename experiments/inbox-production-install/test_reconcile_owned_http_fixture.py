@@ -104,6 +104,8 @@ class ReconcileOwnedHttpFixtureTests(unittest.TestCase):
         self.assertIn("serving_enabled=false,backfill_complete=false,reconciliation_complete=false", source)
         self.assertIn("UPDATE inbox_message_capture.dirty", source)
         self.assertIn("command admission to remain disabled", source)
+        self.assertIn("owned HTTP recovery requires the reviewed eight capture triggers", source)
+        self.assertIn("capture_fingerprint=inbox_backfill.fingerprint()", source)
 
     def test_dry_run_does_not_execute_apply_path(self) -> None:
         source = inspect.getsource(MODULE.run)

@@ -365,6 +365,23 @@ def apply_break(db: OwnedHttpDb) -> None:
           IF EXISTS (SELECT 1 FROM inbox_control.command_admission WHERE enabled) THEN
             RAISE EXCEPTION 'owned HTTP recovery requires command admission to remain disabled';
           END IF;
+          IF (
+            SELECT count(*)
+            FROM pg_trigger
+            WHERE NOT tgisinternal
+              AND tgenabled IN ('O','A')
+              AND tgname IN (
+                'zzzzz_inbox_message_direct',
+                'zzzzz_inbox_parent',
+                'zzzzz_inbox_parent_review',
+                'zzzzz_inbox_safety_consent',
+                'zzzzz_inbox_safety_thread',
+                'zzzzz_inbox_safety_suppression',
+                'zzzzz_inbox_backfill_collision'
+              )
+          ) <> 8 THEN
+            RAISE EXCEPTION 'owned HTTP recovery requires the reviewed eight capture triggers';
+          END IF;
         END $$;
         UPDATE inbox_control.rollout
           SET serving_enabled=false,backfill_complete=false,reconciliation_complete=false
@@ -397,7 +414,8 @@ def apply_break(db: OwnedHttpDb) -> None:
           SET generation=generation+1,claim_token=NULL,lease_until=NULL,
               scan_generation=NULL,cursor=NULL,available_at=clock_timestamp();
         UPDATE inbox_backfill.jobs
-          SET revision=revision+1,stream='messages',cursor=NULL,claim_token=NULL,
+          SET revision=revision+1,capture_fingerprint=inbox_backfill.fingerprint(),
+              stream='messages',cursor=NULL,claim_token=NULL,
               lease_until=NULL,available_at=clock_timestamp(),completed_at=NULL;
 
         INSERT INTO inbox_message_capture.dirty(org_id,target_kind,target_id,generation)
