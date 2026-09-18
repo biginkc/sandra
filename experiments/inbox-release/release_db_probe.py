@@ -22,6 +22,66 @@ MARKER = os.environ.get("INBOX_RELEASE_FIXTURE_MARKER", "")
 EXPECTED_DATABASE = "sandra_inbox_release_20260917"
 EXPECTED_MARKER = "sandra-inbox-release-owned-synthetic"
 
+RECEIPT_EXPECTED_ERRORS: dict[str, tuple[str, ...]] = {
+    "public.inbox_operation_status(uuid)": ("INBOX_ACTION_OPERATION_UNAVAILABLE",),
+    "public.inbox_recover_operation(uuid,uuid)": ("INBOX_ACTION_PREPARATION_UNAVAILABLE",),
+    "public.inbox_reply_operation_status(uuid)": ("INBOX_REPLY_OPERATION_UNAVAILABLE",),
+    "public.inbox_recover_reply(uuid,uuid)": ("INBOX_REPLY_PREPARATION_UNAVAILABLE",),
+}
+
+
+class ReceiptProbeError(RuntimeError):
+    """The wrapper probe did not produce the expected authenticated outcome."""
+
+
+def receipt_probe_sql(actor: str, session: str, org: str, invocation: str) -> str:
+    """Build one rollback-scoped wrapper probe.
+
+    Fixture setup runs as the privileged probe role.  Only after serving state
+    is disabled do we switch to ``authenticated`` and invoke the public
+    wrapper, so a private-table permission error cannot masquerade as proof.
+    """
+    claims = json.dumps(
+        {"sub": actor, "session_id": session, "role": "authenticated", "exp": 4102444800},
+        separators=(",", ":"),
+    )
+    escaped_claims = claims.replace("'", "''")
+    return (
+        "BEGIN;"
+        f"INSERT INTO auth.users(id,email,role) VALUES('{actor}','{actor}@example.invalid','authenticated');"
+        f"INSERT INTO organizations(id,name) VALUES('{org}','release receipt probe {org}');"
+        f"INSERT INTO memberships(user_id,org_id,role,access_status) VALUES('{actor}','{org}','owner','active');"
+        f"INSERT INTO auth.sessions(id,user_id,not_after) VALUES('{session}','{actor}',clock_timestamp()+interval '1 hour');"
+        "UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton;"
+        "SET LOCAL ROLE authenticated;"
+        f"SET LOCAL request.jwt.claims='{escaped_claims}';"
+        + invocation
+        + "ROLLBACK;"
+    )
+
+
+def classify_receipt_probe(signature: str, code: int, output: str, stderr: str) -> str:
+    """Accept only the wrapper's known missing-reference outcome.
+
+    A nonzero status alone proves nothing: the SQL may have aborted before the
+    wrapper (for example, while updating the private rollout table).  The
+    wrapper-specific error marker is the reachability evidence.
+    """
+    combined = "\n".join(part for part in (stderr, output) if part)
+    if code == 0:
+        raise ReceiptProbeError(f"receipt/status wrapper unexpectedly succeeded: {signature}")
+    if "INBOX_NOT_READY" in combined:
+        raise ReceiptProbeError(f"receipt/status wrapper remains coupled to serving gate: {signature}")
+    if "permission denied" in combined.lower():
+        raise ReceiptProbeError(f"receipt/status probe failed before wrapper invocation: {signature}: {stderr}")
+    expected = RECEIPT_EXPECTED_ERRORS.get(signature, ())
+    marker = next((candidate for candidate in expected if candidate in combined), None)
+    if marker is None:
+        raise ReceiptProbeError(
+            f"receipt/status wrapper did not produce an expected authenticated outcome: {signature}: {stderr or output}"
+        )
+    return f"PASS (authenticated wrapper reached expected outcome: {marker})"
+
 
 def fail(message: str) -> int:
     print(json.dumps({"status": "FAIL", "detail": message}, indent=2))
@@ -131,26 +191,12 @@ def main() -> int:
         actor = str(uuid.uuid4())
         session = str(uuid.uuid4())
         org = str(uuid.uuid4())
-        claims = json.dumps({"sub": actor, "session_id": session, "role": "authenticated", "exp": 4102444800}, separators=(",", ":"))
-        setup = (
-            "BEGIN;"
-            f"INSERT INTO auth.users(id,email,role) VALUES('{actor}','{actor}@example.invalid','authenticated');"
-            f"INSERT INTO organizations(id,name) VALUES('{org}','release receipt probe {org}');"
-            f"INSERT INTO memberships(user_id,org_id,role,access_status) VALUES('{actor}','{org}','owner','active');"
-            f"INSERT INTO auth.sessions(id,user_id,not_after) VALUES('{session}','{actor}',clock_timestamp()+interval '1 hour');"
-            "SET LOCAL ROLE authenticated;"
-            f"SET LOCAL request.jwt.claims='{claims.replace(chr(39), chr(39)+chr(39))}';"
-            "UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton;"
-            + invocation
-            + "ROLLBACK;"
-        )
+        setup = receipt_probe_sql(actor, session, org, invocation)
         call_code, call_output, call_stderr = sql(setup)
-        if call_code == 0:
-            receipt_checks[signature] = "PASS"
-        elif "INBOX_NOT_READY" in call_stderr:
-            return fail(f"receipt/status wrapper remains coupled to serving gate: {signature}")
-        else:
-            receipt_checks[signature] = "PASS (authenticated wrapper reached operation outcome)"
+        try:
+            receipt_checks[signature] = classify_receipt_probe(signature, call_code, call_output, call_stderr)
+        except ReceiptProbeError as error:
+            return fail(str(error))
     # If the reviewed operation adapter is present, exercise the actual public
     # prepare RPC inside a rolled-back transaction.  The rollback packet must
     # disable admission even when an operator had previously enabled a family
