@@ -29,8 +29,7 @@ export async function isInboxPilotRequest(client: InboxPilotAuthClient): Promise
   const { data } = await client.auth.getUser();
   const userId = data.user?.id;
   if (!userId) return false;
-  // Explicit full rollout follows successful pilot; unknown modes fail closed.
-  const mode = process.env.INBOX_WORKSPACE_ROLLOUT_MODE ?? "pilot";
-  if (mode === "all") return true;
-  return mode === "pilot" && isInboxPilotUser(userId);
+  // Every request remains cohort-scoped until a separately reviewed rollout
+  // change replaces this gate. No environment value may bypass the allowlist.
+  return isInboxPilotUser(userId);
 }

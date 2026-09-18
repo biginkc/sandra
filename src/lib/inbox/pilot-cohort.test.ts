@@ -53,16 +53,11 @@ describe("isInboxPilotRequest", () => {
   });
 });
 
-describe("explicit rollout modes", () => {
-  const client = { auth: { getUser: async () => ({data: {user: {id: "non-pilot"}}}) } };
-  it("admits authenticated users only in explicit all mode", async () => {
+describe("rollout bypass resistance", () => {
+  it("does not let an environment mode bypass the allowlist", async () => {
     vi.stubEnv("INBOX_WORKSPACE_ROLLOUT_MODE", "all");
-    expect(await isInboxPilotRequest(client)).toBe(true);
-    expect(await isInboxPilotRequest({auth: {getUser: async () => ({data: {user:null}})}})).toBe(false);
-  });
-  it("fails closed for an unrecognized rollout mode", async () => {
-    vi.stubEnv("INBOX_WORKSPACE_ROLLOUT_MODE", "ALL");
-    vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", "non-pilot");
+    vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", "pilot-user");
+    const client = { auth: { getUser: async () => ({ data: { user: { id: "non-pilot" } } }) } };
     expect(await isInboxPilotRequest(client)).toBe(false);
   });
 });

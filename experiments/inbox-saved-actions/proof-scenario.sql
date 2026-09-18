@@ -114,49 +114,34 @@ BEGIN
  IF a->>'version'<>'2' THEN RAISE EXCEPTION 'get() did not recover after restoring eligibility: %',a; END IF;
  RAISE NOTICE 'PASS get() recovers once assignee restored (control)';
 
- -- 8) promotion is a supported metadata step, but the prepare grammar
- -- consumes it before assignment. Standalone assignment and promote-then-
- -- assign are valid; the two demonstrated assign-then-command mismatches
- -- remain rejected at SAVE.
+ -- 8) the saved-action backend only persists the reviewed #642 grammar:
+ -- outcome/assign metadata pairs or one standalone review_reply hand-off.
+ -- Promotion and unknown-sender commands stay disabled here until their
+ -- executor contract is reviewed and wired through this lane.
  EXECUTE 'SET LOCAL ROLE authenticated';
  a:=public.inbox_saved_action_create('Assign only',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','assign','userId',NULL))));
  EXECUTE 'RESET ROLE';
  IF a->'definition' IS DISTINCT FROM jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','assign','userId',NULL))) THEN RAISE EXCEPTION 'standalone assign definition was not saved: %',a; END IF;
  RAISE NOTICE 'PASS standalone assign step accepted at save';
 
- EXECUTE 'SET LOCAL ROLE authenticated';
- a:=public.inbox_saved_action_create('Promote then assign',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','promote'),jsonb_build_object('type','assign','userId',assignee))));
- EXECUTE 'RESET ROLE';
- IF jsonb_array_length(a->'definition'->'steps')<>2 THEN RAISE EXCEPTION 'promote-then-assign definition was not saved: %',a; END IF;
- RAISE NOTICE 'PASS promote-then-assign steps accepted at save';
+ FOR msg IN SELECT unnest(ARRAY['promote','dismiss_unknown','restore_unknown']) LOOP
+  failed:=false;
+  BEGIN
+   EXECUTE 'SET LOCAL ROLE authenticated';
+   PERFORM public.inbox_saved_action_create('Disabled '||msg,jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type',msg))));
+   EXECUTE 'RESET ROLE';
+  EXCEPTION WHEN raise_exception THEN
+   IF SQLERRM='INBOX_SAVED_ACTION_STEP_TYPE_DISABLED' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
+  END;
+  IF NOT failed THEN RAISE EXCEPTION 'DISABLED SAVED STEP ADMITTED: %',msg; END IF;
+  RAISE NOTICE 'PASS disabled saved step rejected at save: %',msg;
+ END LOOP;
 
  EXECUTE 'SET LOCAL ROLE authenticated';
- a:=public.inbox_saved_action_create('Promote',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','promote'))));
+ a:=public.inbox_saved_action_create('Reviewed reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','review_reply','text','Hi {{first_name}}'))));
  EXECUTE 'RESET ROLE';
- IF a->'definition' IS DISTINCT FROM jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','promote'))) THEN RAISE EXCEPTION 'supported promote definition was not saved: %',a; END IF;
- RAISE NOTICE 'PASS supported promote step accepted at save';
-
- failed:=false;
- BEGIN
-  EXECUTE 'SET LOCAL ROLE authenticated';
-  PERFORM public.inbox_saved_action_create('Assign then promote',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','assign','userId',NULL),jsonb_build_object('type','promote'))));
-  EXECUTE 'RESET ROLE';
- EXCEPTION WHEN raise_exception THEN
-  IF SQLERRM='INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
- END;
- IF NOT failed THEN RAISE EXCEPTION 'ASSIGN-THEN-PROMOTE SAVED DEFINITION ADMITTED'; END IF;
- RAISE NOTICE 'PASS assign-then-promote rejected at save';
-
- failed:=false;
- BEGIN
-  EXECUTE 'SET LOCAL ROLE authenticated';
-  PERFORM public.inbox_saved_action_create('Assign then dismiss',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','assign','userId',NULL),jsonb_build_object('type','dismiss_unknown'))));
-  EXECUTE 'RESET ROLE';
- EXCEPTION WHEN raise_exception THEN
-  IF SQLERRM='INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
- END;
- IF NOT failed THEN RAISE EXCEPTION 'ASSIGN-THEN-DISMISS SAVED DEFINITION ADMITTED'; END IF;
- RAISE NOTICE 'PASS assign-then-dismiss rejected at save';
+ IF jsonb_array_length(a->'definition'->'steps')<>1 OR a->'definition'->'steps'->0->>'type'<>'review_reply' THEN RAISE EXCEPTION 'review_reply definition was not saved: %',a; END IF;
+ RAISE NOTICE 'PASS standalone review_reply hand-off accepted at save';
 
  -- 9) dnc gated outcome rejected at SAVE
  failed:=false;
