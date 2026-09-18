@@ -12,9 +12,11 @@ empty or omitted list is a blocked run rather than a pass.
 from __future__ import annotations
 
 import json
+import http.client
 import os
 from pathlib import Path
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -99,6 +101,29 @@ def wait_http(url: str, timeout: float = 30.0) -> None:
     fail(f"health endpoint did not recover: {url}")
 
 
+def wait_realtime_websocket(timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        connection = http.client.HTTPConnection("127.0.0.1", 54321, timeout=2)
+        try:
+            connection.request("GET", "/realtime/v1/websocket?vsn=1.0.0", headers={
+                "Connection": "Upgrade",
+                "Upgrade": "websocket",
+                "Sec-WebSocket-Version": "13",
+                "Sec-WebSocket-Key": secrets.token_urlsafe(16),
+            })
+            response = connection.getresponse()
+            response.read(256)
+            if response.status == 101:
+                return
+        except OSError:
+            pass
+        finally:
+            connection.close()
+        time.sleep(0.25)
+    fail("Realtime WebSocket did not recover")
+
+
 def wait_db(timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -152,6 +177,8 @@ def recover(kind: str) -> None:
     check, url = HEALTH[service]
     if check == "db":
         wait_db()
+    elif service == "realtime":
+        wait_realtime_websocket()
     else:
         assert url is not None
         wait_http(url)
