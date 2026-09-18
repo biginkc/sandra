@@ -217,9 +217,10 @@ END $$;
 
 -- Unknown sender actions consume only the frozen message IDs in the
 -- preparation resolution. The worker never looks up a raw sender group to
--- discover additional rows. A current group revision mismatch conflicts the
--- whole step; rows that became ineligible after preparation are reported as
--- per-message no-op reasons, leaving later arrivals untouched.
+-- discover additional rows. A newer group revision is tolerated because it
+-- can represent an unrelated arrival; rows that became ineligible after
+-- preparation are reported as per-message no-op reasons, leaving later
+-- arrivals untouched.
 CREATE OR REPLACE FUNCTION inbox_operation_domain.apply_unknown_step(o uuid,op uuid,s uuid,g bigint) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE step jsonb;payload jsonb;group_id uuid;snapshot_raw text;expected_revision bigint;current_revision bigint;requester uuid;member public.memberships;message_id uuid;message jsonb;outcomes jsonb:='[]';changed_count integer:=0;reason text;result jsonb;v bigint;actor_count integer;
