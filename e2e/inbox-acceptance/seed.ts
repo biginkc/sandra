@@ -50,6 +50,7 @@ export async function seedAcceptanceThread(
     addressTag: string;
     contactName: { first: string; last: string };
     propertyStatus?: string;
+    propertyState?: string;
     messages: SeededMessage[];
     assigneeId?: string | null;
     /** Set false only when the caller intentionally seeds after opening a workset. */
@@ -76,6 +77,7 @@ export async function seedAcceptanceThread(
     .update({
       homeowner_contact_id: contact.id,
       status: opts.propertyStatus ?? "new_lead",
+      ...(opts.propertyState ? { state: opts.propertyState } : {}),
       assigned_user_id: opts.assigneeId ?? null,
     })
     .eq("id", prop.id);

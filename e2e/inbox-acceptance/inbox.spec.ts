@@ -144,7 +144,8 @@ test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => 
   // toggle would allow a backend that ignores the default hide policy.
   await expect(list.getByText(dnc.contactName)).toHaveCount(0);
 
-  await page.getByLabel(/Hide DNC and test conversations/).uncheck();
+  await page.getByLabel(/Hide DNC and test conversations/).click();
+  await expect(page.getByLabel(/Hide DNC and test conversations/)).not.toBeChecked();
   await expect(list.getByText(dnc.contactName)).toBeVisible();
 
   recordRowOutcome({ id: "F05", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F05" });

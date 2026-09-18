@@ -105,6 +105,7 @@ async function seedReplyThread(
   const thread = await seedAcceptanceThread(admin, {
     phone: `+1816555${String(7000 + phoneCounter).padStart(4, "0")}`,
     businessNumber: E2E_MOCK_BUSINESS_NUMBER,
+    propertyState: process.env.INBOX_ACCEPTANCE_REPLY_STATE ?? "MO",
     addressTag,
     contactName: { first: "Inbox", last: addressTag.replace(/[^A-Za-z0-9]/g, "") },
     messages: [
@@ -125,8 +126,16 @@ async function seedReplyThread(
   return thread;
 }
 
-async function openKnown(page: Page, thread: SeededThread) {
+async function openKnown(page: Page, thread: SeededThread, includeRestricted = false) {
   await page.goto("/inbox?view=all");
+  if (includeRestricted) {
+    const noiseToggle = page.getByRole("checkbox", { name: "Hide DNC and test conversations" });
+    await expect(noiseToggle).toBeEnabled();
+    await expect(noiseToggle).toBeChecked();
+    // The controlled filter commits only after its workset request succeeds.
+    await noiseToggle.click();
+    await expect(noiseToggle).not.toBeChecked();
+  }
   const list = page.getByRole("list", { name: "Inbox conversations" });
   await expect(list.getByText(thread.contactName)).toBeVisible();
   await page.getByRole("button", { name: `Open ${thread.contactName}` }).click();
@@ -326,7 +335,7 @@ test.describe.serial("Inbox reviewed replies (runtime-unproven)", () => {
     const eligibleB = await seedReplyThread(`ACC-R05-B-${Date.now()}`, "in");
 
     const requests = auditRequests(page);
-    const restrictedComposer = await openKnown(page, restricted);
+    const restrictedComposer = await openKnown(page, restricted, true);
     await restrictedComposer.getByRole("textbox", { name: "Reply message" }).fill("This must be blocked");
     const restrictedPrepare = responseFor(page, "/api/inbox/replies/prepare", "POST");
     await restrictedComposer.getByRole("button", { name: "Review reply", exact: true }).click();
