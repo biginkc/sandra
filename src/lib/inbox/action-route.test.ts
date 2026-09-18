@@ -7,7 +7,7 @@ import { POST as accept } from "@/app/api/inbox/actions/accept/route";
 import { GET as status } from "@/app/api/inbox/operations/[operationId]/route";
 const id = "abcdef00-0000-4000-8000-000000000001";
 const request = (body: string, headers: Record<string, string> = {}) => new Request("http://localhost/api/inbox/actions/prepare", { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
-beforeEach(() => { vi.stubEnv("INBOX_ACTIONS_SERVER_ENABLED", "1"); vi.clearAllMocks(); mocks.createClient.mockResolvedValue({}); mocks.prepare.mockResolvedValue({ prepared: true }); mocks.accept.mockResolvedValue({ operationId: id }); mocks.status.mockResolvedValue({ operationId: id }); });
+beforeEach(() => { vi.stubEnv("INBOX_ACTIONS_SERVER_ENABLED", "1"); vi.clearAllMocks(); mocks.createClient.mockResolvedValue({ auth: { getUser: async () => ({ data: { user: { id } } }) } }); vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", id); mocks.prepare.mockResolvedValue({ prepared: true }); mocks.accept.mockResolvedValue({ operationId: id }); mocks.status.mockResolvedValue({ operationId: id }); });
 afterEach(() => vi.unstubAllEnvs());
 describe("disabled-by-default action routes", () => {
     it("does not construct a client or read a body when disabled", async () => { vi.stubEnv("INBOX_ACTIONS_SERVER_ENABLED", "0"); expect((await prepare(request("{}"))).status).toBe(404); expect(mocks.createClient).not.toHaveBeenCalled(); });
@@ -45,4 +45,24 @@ it("accepts browser Host authority through Next internal hostname while retainin
  expect((await prepare(makeFallback("", { host: "foreign.invalid" }))).status).toBe(403);
  expect((await prepare(makeFallback("", { host: "localhost:52582", "x-forwarded-host": "127.0.0.1:52582" }))).status).toBe(403);
  expect(mocks.prepare).toHaveBeenCalledTimes(1);
+});
+
+it("rejects new preparation and acceptance outside the cohort before repository calls", async () => {
+  vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", "someone-else");
+  expect((await prepare(request("{}"))).status).toBe(404);
+  expect((await accept(request("{}"))).status).toBe(404);
+  expect(mocks.prepare).not.toHaveBeenCalled();
+  expect(mocks.accept).not.toHaveBeenCalled();
+});
+
+it("keeps receipt status and recovery available after admission rollback", async () => {
+  vi.stubEnv("INBOX_ACTIONS_SERVER_ENABLED", "0");
+  vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", "");
+  mocks.recover.mockResolvedValue({state: "accepted"});
+  expect((await status(new Request(`http://localhost/api/inbox/operations/${id}`), {params: Promise.resolve({operationId:id})})).status).toBe(200);
+  expect((await recover(new Request(`http://localhost/api/inbox/operations/recover?preparationId=${id}&idempotencyKey=${id}`))).status).toBe(200);
+  expect(mocks.status).toHaveBeenCalledWith(id, expect.anything());
+  expect(mocks.recover).toHaveBeenCalledWith(id, id, expect.anything());
+  expect((await accept(request("{}"))).status).toBe(404);
+  expect(mocks.accept).not.toHaveBeenCalled();
 });

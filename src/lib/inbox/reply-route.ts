@@ -3,12 +3,15 @@ import { createClient } from "@/lib/supabase/server";
 import { createInboxReplyRepository, InboxReplyApiError, type InboxReplyClient } from "./reply-api";
 import { InvalidInboxActionError } from "./action-definition";
 import { isInboxSameOrigin } from "./same-origin";
+import { isInboxPilotRequest, type InboxPilotAuthClient } from "./pilot-cohort";
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 // Mirrors action-route.ts's shape (flag-first, same-origin, json-only, body
 // cap, deadline, error mapping) for the bulk-reply lane. action-route.ts
 // itself is untouched; nothing here imports from or is imported by it.
 export async function inboxReplyRoute(request: Request, action: "prepare" | "accept" | "status" | "recover", operationId?: string) {
-    if (process.env.INBOX_REPLIES_SERVER_ENABLED !== "1")
+    // Admission stops on rollback; authenticated receipt reads remain available.
+    const admission = action !== "status" && action !== "recover";
+    if (admission && process.env.INBOX_REPLIES_SERVER_ENABLED !== "1")
         return Response.json({ error: "Not found" }, { status: 404, headers });
     const signal = AbortSignal.any([request.signal, AbortSignal.timeout(20000)]);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -60,7 +63,10 @@ export async function inboxReplyRoute(request: Request, action: "prepare" | "acc
                 throw new InboxReplyApiError(400);
             }
         }
-        const client = await createClient(), repository = createInboxReplyRepository(client as unknown as InboxReplyClient);
+        const client = await createClient();
+        if (admission && !(await isInboxPilotRequest(client as unknown as InboxPilotAuthClient)))
+            return Response.json({ error: "Not found" }, { status: 404, headers });
+        const repository = createInboxReplyRepository(client as unknown as InboxReplyClient);
         if (action === "prepare")
             return Response.json(await repository.prepare(raw, signal), { headers });
         if (action === "accept")

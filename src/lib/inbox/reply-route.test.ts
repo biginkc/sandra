@@ -10,7 +10,7 @@ import { InboxReplyApiError } from "./reply-api";
 const id = "abcdef00-0000-4000-8000-000000000001";
 const request = (body: string, headers: Record<string, string> = {}) => new Request("http://localhost/api/inbox/replies/prepare", { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
 beforeEach(() => {
-  vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "1"); vi.clearAllMocks(); mocks.createClient.mockResolvedValue({});
+  vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "1"); vi.clearAllMocks(); mocks.createClient.mockResolvedValue({ auth: { getUser: async () => ({ data: { user: { id } } }) } }); vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", id);
   mocks.prepare.mockResolvedValue({ preparationId: id, idempotencyKey: id, inputHash: "a".repeat(64), expiresAt: "2026-09-14T00:00:00Z", items: [], recipientCount: 0, blockers: ["empty"] });
   mocks.accept.mockResolvedValue({ preparationId: id, idempotencyKey: id, operationId: id });
   mocks.recover.mockResolvedValue({ state: "prepared", preparationId: id, idempotencyKey: id });
@@ -144,11 +144,11 @@ describe("accept route (Lane 1 PR-E)", () => {
 
 describe("recover route (Lane 1 PR-E)", () => {
   const recoverRequest = (query: string) => new Request(`http://localhost/api/inbox/replies/recover${query}`);
-  it("is disabled-by-default", async () => {
+  it("preserves authenticated receipt reads when admission is disabled", async () => {
     vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
     const response = await recover(recoverRequest(`?idempotencyKey=${id}&preparationId=${id}`));
-    expect(response.status).toBe(404);
-    expect(mocks.recover).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(mocks.recover).toHaveBeenCalledWith(id, id, expect.anything());
   });
   it("requires exactly idempotencyKey+preparationId query params, rejecting extras and shortfalls", async () => {
     for (const query of ["", `?idempotencyKey=${id}`, `?idempotencyKey=${id}&preparationId=${id}&extra=1`, `?foo=${id}&preparationId=${id}`]) {
@@ -167,11 +167,11 @@ describe("recover route (Lane 1 PR-E)", () => {
 });
 
 describe("status route (Lane 1 PR-E)", () => {
-  it("is disabled-by-default", async () => {
+  it("preserves authenticated receipt reads when admission is disabled", async () => {
     vi.stubEnv("INBOX_REPLIES_SERVER_ENABLED", "0");
     const response = await statusRoute(new Request("http://localhost/api/inbox/replies/" + id), { params: Promise.resolve({ operationId: id }) });
-    expect(response.status).toBe(404);
-    expect(mocks.status).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(mocks.status).toHaveBeenCalledWith(id, expect.anything());
   });
   it("passes the operationId path segment through to status()", async () => {
     const response = await statusRoute(new Request("http://localhost/api/inbox/replies/" + id), { params: Promise.resolve({ operationId: id }) });
@@ -183,4 +183,12 @@ describe("status route (Lane 1 PR-E)", () => {
     expect(response.status).toBe(403);
     expect(mocks.status).not.toHaveBeenCalled();
   });
+});
+
+it("rejects new preparation and acceptance outside the cohort before repository calls", async () => {
+  vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", "someone-else");
+  expect((await prepare(request("{}"))).status).toBe(404);
+  expect((await accept(request("{}"))).status).toBe(404);
+  expect(mocks.prepare).not.toHaveBeenCalled();
+  expect(mocks.accept).not.toHaveBeenCalled();
 });

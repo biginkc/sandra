@@ -3,9 +3,12 @@ import { createClient } from "@/lib/supabase/server";
 import { createInboxActionRepository, InboxActionApiError, type InboxActionClient } from "./action-api";
 import { InvalidInboxActionError, parseInboxActionAcceptance } from "./action-definition";
 import { isInboxSameOrigin } from "./same-origin";
+import { isInboxPilotRequest, type InboxPilotAuthClient } from "./pilot-cohort";
 const headers = { "cache-control": "private, no-store", vary: "Cookie, Authorization" };
 export async function inboxActionRoute(request: Request, action: "prepare" | "accept" | "status" | "assignees" | "recover", operationId?: string) {
-    if (process.env.INBOX_ACTIONS_SERVER_ENABLED !== "1")
+    // Admission stops on rollback; authenticated receipt reads remain available.
+    const admission = action !== "status" && action !== "recover";
+    if (admission && process.env.INBOX_ACTIONS_SERVER_ENABLED !== "1")
         return Response.json({ error: "Not found" }, { status: 404, headers });
     const signal = AbortSignal.any([request.signal, AbortSignal.timeout(20000)]);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -51,7 +54,10 @@ export async function inboxActionRoute(request: Request, action: "prepare" | "ac
                 throw new InboxActionApiError(400);
             }
         }
-        const client = await createClient(), repository = createInboxActionRepository(client as unknown as InboxActionClient);
+        const client = await createClient();
+        if (admission && !(await isInboxPilotRequest(client as unknown as InboxPilotAuthClient)))
+            return Response.json({ error: "Not found" }, { status: 404, headers });
+        const repository = createInboxActionRepository(client as unknown as InboxActionClient);
         if (action === "prepare")
             return Response.json(await repository.prepare(raw, signal), { headers });
         if (action === "accept") {

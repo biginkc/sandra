@@ -27,5 +27,10 @@ export interface InboxPilotAuthClient {
 // /api/inbox route (see route.test.ts:29's "before RPC" style assertions).
 export async function isInboxPilotRequest(client: InboxPilotAuthClient): Promise<boolean> {
   const { data } = await client.auth.getUser();
-  return isInboxPilotUser(data.user?.id ?? null);
+  const userId = data.user?.id;
+  if (!userId) return false;
+  // Explicit full rollout follows successful pilot; unknown modes fail closed.
+  const mode = process.env.INBOX_WORKSPACE_ROLLOUT_MODE ?? "pilot";
+  if (mode === "all") return true;
+  return mode === "pilot" && isInboxPilotUser(userId);
 }
