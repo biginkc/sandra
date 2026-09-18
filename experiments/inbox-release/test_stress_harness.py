@@ -199,6 +199,7 @@ class StressHarnessTests(unittest.TestCase):
             "arrival_rate": {"samples": 10, "p95_rps": 1.0, "status": "MEASURED"},
             "operator_arrival_rate": {"samples": 10, "p95_rps": 1.0, "status": "MEASURED", "basis": "operator_cycle_start_interval"},
             "system_metrics": {},
+            "raw_samples": {"timing": [{"event": "first_open", "duration_ms": 1.0}], "metric": [], "recovery": []},
             "recovery": {"status": "MEASURED", "faults": [{"fault": "projection_restart", "recovered": True, "duration_ms": 12.0}]},
         }
         manifest = {
@@ -214,6 +215,7 @@ class StressHarnessTests(unittest.TestCase):
         }
         evidence = module.release_evidence(target, release, validated, manifest)
         self.assertEqual(evidence["source_manifest"], manifest)
+        self.assertEqual(evidence["raw_samples"]["timing"][0]["event"], "first_open")
 
     def test_measured_failure_is_not_erased_by_later_unjudged_event(self):
         config, _target, release = module.load_config(HERE / "stress-harness-config.json")

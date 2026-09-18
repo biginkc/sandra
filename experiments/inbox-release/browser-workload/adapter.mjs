@@ -23,6 +23,7 @@ const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const REQUIRED_PROFILE_KEYS = ["arrival_rate_rps", "concurrency", "tenant_count", "history_skew"];
 const MEASURED_TIMING_EVENTS = new Set(["first_open", "revisit", "selection", "ingestion", "queue"]);
 const MEASURED_METRICS = new Set(["arrival_rate_rps", "operator_arrival_rate_rps"]);
+const WORKLOAD_SCENARIOS = new Set(["steady", "burst", "cold_start", "reconnect"]);
 
 export class WorkloadBlocked extends Error {
   constructor(message) {
@@ -75,6 +76,12 @@ function readProfile(env) {
   dimensions.concurrency = positiveInteger(dimensions.concurrency, "INBOX_STRESS_CONCURRENCY");
   dimensions.tenant_count = positiveInteger(dimensions.tenant_count, "INBOX_STRESS_TENANT_COUNT");
   return { name: profile, dimensions };
+}
+
+function readScenario(env) {
+  const scenario = requiredString(env.INBOX_STRESS_SCENARIO ?? "steady", "INBOX_STRESS_SCENARIO");
+  if (!WORKLOAD_SCENARIOS.has(scenario)) throw new WorkloadBlocked(`unsupported stress scenario: ${scenario}`);
+  return scenario;
 }
 
 function assertRunnerContext(env) {
@@ -153,6 +160,7 @@ export function nextVirtualScrollTop({ scrollTop, scrollHeight, clientHeight, ro
 export async function loadRuntimeInput(env = process.env) {
   assertRunnerContext(env);
   const profile = readProfile(env);
+  const scenario = readScenario(env);
   const appUrl = loopbackUrl(env.INBOX_RELEASE_APP_URL ?? env.INBOX_STRESS_APP_URL, "INBOX_RELEASE_APP_URL");
   const databaseUrl = requiredString(env.INBOX_RELEASE_DATABASE_URL ?? env.INBOX_STRESS_DATABASE_URL, "INBOX_RELEASE_DATABASE_URL");
   let database;
@@ -182,7 +190,7 @@ export async function loadRuntimeInput(env = process.env) {
     if (scenario.appUrl && scenario.appUrl !== appUrl) throw new WorkloadBlocked(`scenario ${scenario.tenantId} appUrl does not match INBOX_RELEASE_APP_URL`);
   }
   const jobs = planWork({ scenarios, cycles, concurrency: profile.dimensions.concurrency, tenantCount: profile.dimensions.tenant_count });
-  return Object.freeze({ profile, appUrl, databaseUrl, scenarios, cycles, jobs, arrivalIntervalMs: 1000 / profile.dimensions.arrival_rate_rps });
+  return Object.freeze({ profile, scenario, appUrl, databaseUrl, scenarios, cycles, jobs, arrivalIntervalMs: 1000 / profile.dimensions.arrival_rate_rps });
 }
 
 export function measuredRecord(type, profile, fields) {
@@ -190,12 +198,12 @@ export function measuredRecord(type, profile, fields) {
   if (type === "timing") {
     if (!MEASURED_TIMING_EVENTS.has(fields?.event)) throw new WorkloadBlocked(`unsupported timing event: ${String(fields?.event)}`);
     if (!Number.isFinite(fields?.duration_ms) || fields.duration_ms < 0) throw new WorkloadBlocked(`invalid observed duration for ${fields?.event}`);
-    return { type, profile, event: fields.event, duration_ms: fields.duration_ms, sample: fields.sample };
+    return { type, profile, event: fields.event, duration_ms: fields.duration_ms, sample: fields.sample, ...(fields.scenario ? { scenario: fields.scenario } : {}) };
   }
   if (type === "metric") {
     if (!MEASURED_METRICS.has(fields?.name)) throw new WorkloadBlocked(`unsupported measured metric: ${String(fields?.name)}`);
     if (!Number.isFinite(fields?.value) || fields.value < 0) throw new WorkloadBlocked(`invalid observed metric for ${fields?.name}`);
-    return { type, profile, name: fields.name, value: fields.value, sample: fields.sample };
+    return { type, profile, name: fields.name, value: fields.value, sample: fields.sample, ...(fields.scenario ? { scenario: fields.scenario } : {}) };
   }
   throw new WorkloadBlocked(`unsupported measurement type: ${type}`);
 }
@@ -240,8 +248,8 @@ export function sourceArrivalTiming(profile, observation) {
   });
 }
 
-function emitTiming(profile, event, durationMs, sample) {
-  process.stdout.write(`${JSON.stringify(measuredRecord("timing", profile, { event, duration_ms: durationMs, sample }))}\n`);
+function emitTiming(profile, event, durationMs, sample, scenario) {
+  process.stdout.write(`${JSON.stringify(measuredRecord("timing", profile, { event, duration_ms: durationMs, sample, scenario }))}\n`);
 }
 
 function emitMetric(profile, name, value, sample) {
@@ -384,6 +392,13 @@ async function runCycle(browser, input, job, sample, onCycleStart) {
     await page.goto("/inbox?view=all", { waitUntil: "domcontentloaded", timeout: 30_000 });
     const list = page.getByRole("list", { name: "Inbox conversations", exact: true });
     await list.waitFor({ state: "visible", timeout: 30_000 });
+    if (input.scenario === "reconnect") {
+      await context.setOffline(true);
+      await sleep(100);
+      await context.setOffline(false);
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+      await list.waitFor({ state: "visible", timeout: 30_000 });
+    }
     const row = await findRow(page, scenario.orgId, job.conversationId);
     const firstOpenStart = performance.now();
     await row.getByRole("button", { name: /^Open / }).click();
@@ -393,7 +408,7 @@ async function runCycle(browser, input, job, sample, onCycleStart) {
       if (detail.querySelector('[role="alert"]')) return "error";
       return detail.querySelector('[aria-label="Conversation history"] ol > li') ? "ready" : "loading";
     }));
-    emitTiming(input.profile.name, "first_open", performance.now() - firstOpenStart, sample);
+    emitTiming(input.profile.name, "first_open", performance.now() - firstOpenStart, sample, input.scenario);
 
     const close = page.getByRole("button", { name: "Close conversation details", exact: true });
     await close.click();
@@ -406,7 +421,7 @@ async function runCycle(browser, input, job, sample, onCycleStart) {
       if (detail.querySelector('[role="alert"]')) return "error";
       return detail.querySelector('[aria-label="Conversation history"] ol > li') ? "ready" : "loading";
     }));
-    emitTiming(input.profile.name, "revisit", performance.now() - revisitStart, sample);
+    emitTiming(input.profile.name, "revisit", performance.now() - revisitStart, sample, input.scenario);
 
     await page.getByRole("button", { name: "Close conversation details", exact: true }).click();
     const selectionStart = performance.now();
@@ -415,7 +430,7 @@ async function runCycle(browser, input, job, sample, onCycleStart) {
     await checkbox.check();
     await checkbox.waitFor({ state: "visible" });
     await waitForSelectionFeedback(page);
-    emitTiming(input.profile.name, "selection", performance.now() - selectionStart, sample);
+    emitTiming(input.profile.name, "selection", performance.now() - selectionStart, sample, input.scenario);
 
     const actionKey = randomUUID();
     const metadataQueueStart = performance.now();
@@ -438,7 +453,7 @@ async function runCycle(browser, input, job, sample, onCycleStart) {
       phase: "metadata_accept_to_terminal_receipt",
       operationId: metadataOperationId,
       sample,
-    });
+    }, input.scenario);
     const metadataRecovery = await browserJson(page, `/api/inbox/operations/recover?preparationId=${encodeURIComponent(metadataPreparationId)}&idempotencyKey=${encodeURIComponent(actionKey)}`);
     if (metadataRecovery.state !== "accepted") throw new WorkloadBlocked("metadata recovery did not return the accepted receipt");
 
@@ -453,7 +468,7 @@ async function runCycle(browser, input, job, sample, onCycleStart) {
       phase: "reply_accept_to_terminal_receipt",
       operationId: replyOperationId,
       sample,
-    });
+    }, input.scenario);
     const replyRecovery = await browserJson(page, `/api/inbox/replies/recover?preparationId=${encodeURIComponent(replyPreparationId)}&idempotencyKey=${encodeURIComponent(replyKey)}`);
     if (replyRecovery.state !== "accepted") throw new WorkloadBlocked("reply recovery did not return the accepted receipt");
 

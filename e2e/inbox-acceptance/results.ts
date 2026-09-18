@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import type { RowOutcome } from "./matrix";
 
@@ -143,10 +143,10 @@ export function hasRecordedOutcome(id: string): boolean {
  * file). Written under test-results/, returned as a repo-relative path
  * suitable for the matrix's Evidence column.
  */
-export async function captureRowEvidence(page: Page, id: string): Promise<string> {
+export async function captureRowEvidence(page: Page, id: string, subject?: Locator): Promise<string> {
   fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
   const absolutePath = path.join(EVIDENCE_DIR, `${id}.png`);
-  await page.screenshot({ path: absolutePath });
+  await (subject ?? page).screenshot({ path: absolutePath });
   return path.relative(path.resolve(__dirname, "../.."), absolutePath);
 }
 

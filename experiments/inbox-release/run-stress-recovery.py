@@ -433,7 +433,16 @@ def validate_records(
             f"missing source IDs are retained in {source_manifest['path']}: {','.join(missing)}"
         )
     overall = {0: "PASS", 1: "UNJUDGED", 2: "BLOCKED", 3: "FAIL"}[STATUS_RANK[aggregate_status]]
-    return {"profile": profile, "profile_dimensions": profile_dimensions(config, profile), "overall": overall, "timing": timing, "system_metrics": metrics, "arrival_rate": arrival_rate, "operator_arrival_rate": operator_arrival_rate, "recovery": {"status": recovery_status, "faults": recovery}}
+    # Keep the observations that produced every aggregate.  Percentiles alone
+    # are not independently reproducible evidence: a reviewer must be able to
+    # recompute p95/p99 and inspect the source-arrival/recovery samples without
+    # trusting a transient child-process stdout buffer.
+    raw_samples = {
+        "timing": records["timing"],
+        "metric": records["metric"],
+        "recovery": records["recovery"],
+    }
+    return {"profile": profile, "profile_dimensions": profile_dimensions(config, profile), "overall": overall, "timing": timing, "system_metrics": metrics, "arrival_rate": arrival_rate, "operator_arrival_rate": operator_arrival_rate, "recovery": {"status": recovery_status, "faults": recovery}, "raw_samples": raw_samples}
 
 
 def release_evidence(
@@ -465,6 +474,7 @@ def release_evidence(
         "arrival_rate": validated["arrival_rate"],
         "operator_arrival_rate": validated["operator_arrival_rate"],
         "system_metrics": validated["system_metrics"],
+        "raw_samples": validated.get("raw_samples", {"timing": [], "metric": [], "recovery": []}),
         "recovery": validated["recovery"],
         "source_manifest": source_manifest,
         "target_marker": target["marker"],

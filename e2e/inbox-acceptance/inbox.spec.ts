@@ -317,6 +317,8 @@ test("F07/F08/F09/F10 — open a conversation, read history, mark-read, identity
   const row = page.getByRole("listitem", { name: new RegExp(thread.contactName) });
   await expect(row).toBeVisible();
   await expect(page.getByRole("checkbox", { name: `Select ${thread.contactName}` })).toBeVisible();
+  // F10 evidence is the list-row identity/context state, before opening.
+  const f10Evidence = await captureRowEvidence(page, "F10", row);
 
   // F07 — open.
   await page.getByRole("button", { name: `Open ${thread.contactName}` }).click();
@@ -329,12 +331,9 @@ test("F07/F08/F09/F10 — open a conversation, read history, mark-read, identity
   await expect(history).toContainText("opened conversation inbound body");
   await expect(history).toContainText("opened conversation outbound reply");
 
-  // Capture each row while the UI state it asserts is visible. afterEach
-  // preserves these durable screenshots instead of replacing them with one
-  // final closed-list image.
-  const f10Evidence = await captureRowEvidence(page, "F10");
-  const f07Evidence = await captureRowEvidence(page, "F07");
-  const f08Evidence = await captureRowEvidence(page, "F08");
+  // Capture each row from the specific state it asserts. Element-scoped
+  // captures prevent four rows from silently sharing one whole-page image.
+  const f08Evidence = await captureRowEvidence(page, "F08", history);
 
   // F09 — automatic mark-read: opening the conversation triggers the
   // read-acknowledgment round trip; assert the DB-side effect directly
@@ -358,6 +357,7 @@ test("F07/F08/F09/F10 — open a conversation, read history, mark-read, identity
   // F07 (close) — close returns to the list.
   await page.getByRole("button", { name: "Close conversation details" }).click();
   await expect(detail).toHaveCount(0);
+  const f07Evidence = await captureRowEvidence(page, "F07");
 
   recordRowOutcome({ id: "F07", status: "pass", evidence: f07Evidence });
   recordRowOutcome({ id: "F08", status: "pass", evidence: f08Evidence });

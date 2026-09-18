@@ -339,6 +339,9 @@ export async function main(env = process.env) {
     throw new WorkloadBlocked(`source scenario is unreadable: ${scenarioPath}`);
   }
   const scenario = readSourceScenario(await readJsonFile(scenarioPath, "source scenario"));
+  const scenarioName = typeof env.INBOX_RELEASE_SOURCE_SCENARIO_NAME === "string" && env.INBOX_RELEASE_SOURCE_SCENARIO_NAME.trim()
+    ? env.INBOX_RELEASE_SOURCE_SCENARIO_NAME.trim()
+    : "steady";
   const maxMessages = safeInteger(env.INBOX_RELEASE_SOURCE_MAX_MESSAGES, "INBOX_RELEASE_SOURCE_MAX_MESSAGES", { minimum: 1 });
   const count = safeInteger(env.INBOX_RELEASE_SOURCE_MESSAGE_COUNT, "INBOX_RELEASE_SOURCE_MESSAGE_COUNT", { minimum: 1, maximum: maxMessages });
   const arrivalRateRps = finitePositive(env.INBOX_RELEASE_SOURCE_ARRIVAL_RATE_RPS ?? env.INBOX_STRESS_ARRIVAL_RATE_RPS, "INBOX_RELEASE_SOURCE_ARRIVAL_RATE_RPS");
@@ -360,6 +363,7 @@ export async function main(env = process.env) {
     source_scenario: scenario,
     run_id: runId,
     schedule: {
+      scenario: scenarioName,
       message_count: count,
       message_bound: maxMessages,
       arrival_rate_rps: arrivalRateRps,
@@ -475,6 +479,7 @@ export async function main(env = process.env) {
           name: "arrival_rate_rps",
           value: 1000 / interval,
           sample: { basis: "source_fixture_arrival_intervals", sourceMessageId: arrivals[index].id },
+          scenario: scenarioName,
         }))}\n`);
       }
     }
