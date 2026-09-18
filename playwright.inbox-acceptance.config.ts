@@ -118,9 +118,14 @@ const webServerEnv: Record<string, string> = {
   // Acceptance-harness-only: turns on the new /inbox workspace routes for
   // THIS webServer process only. Never set in prod deploy config.
   INBOX_WORKSPACE_SERVER_ENABLED: "1",
-  INBOX_WORKSPACE_ROLLOUT_MODE: "all",
+  INBOX_WORKSPACE_ROLLOUT_MODE: "pilot",
+  INBOX_WORKSPACE_PILOT_USER_IDS: process.env.INBOX_WORKSPACE_PILOT_USER_IDS ?? "",
   INBOX_ACTIONS_SERVER_ENABLED: "1",
   INBOX_REPLIES_SERVER_ENABLED: "1",
+  INBOX_ELECTRIC_UPSTREAM_MODE: process.env.INBOX_ELECTRIC_UPSTREAM_MODE ?? "relay",
+  INBOX_ELECTRIC_SHAPE_URL: process.env.INBOX_ELECTRIC_SHAPE_URL ?? "",
+  INBOX_ELECTRIC_PROJECTION_TABLE: process.env.INBOX_ELECTRIC_PROJECTION_TABLE ?? "",
+  INBOX_ELECTRIC_RELAY_TOKEN: process.env.INBOX_ELECTRIC_RELAY_TOKEN ?? "",
   // The web-server wrapper replaces NEXT_PUBLIC_SUPABASE_URL with its
   // loopback relay. Fixtures and auth.setup continue using TEST_SUPABASE_URL
   // directly in the Playwright process.
