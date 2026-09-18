@@ -39,12 +39,17 @@ BEGIN
    FROM inbox_t2_message_capture.versions v
    WHERE v.org_id=prep.org_id AND v.namespace='unknown_action' AND v.target_id=unknown_group
    FOR UPDATE;
-   IF revision IS NULL OR revision::text IS DISTINCT FROM unknown_snapshot->>'revision' THEN
+   -- A sender-group revision also advances when a later unknown message
+   -- arrives.  That is allowed: the immutable message-id workset below is
+   -- the authority for this accepted operation, so later arrivals remain
+   -- untouched by the worker.
+   IF revision IS NULL OR revision < (unknown_snapshot->>'revision')::bigint THEN
     RAISE EXCEPTION 'Unknown action snapshot changed' USING ERRCODE='P0001';
    END IF;
    SELECT coalesce(jsonb_agg(to_jsonb(m.id) ORDER BY m.id),'[]'::jsonb) INTO current_message_ids
-   FROM public.messages m
-   WHERE m.org_id=prep.org_id AND m.channel='sms' AND m.direction='inbound'
+   FROM jsonb_array_elements_text(unknown_snapshot->'message_ids') frozen
+   JOIN public.messages m ON m.id=frozen.value::uuid AND m.org_id=prep.org_id
+   WHERE m.channel='sms' AND m.direction='inbound'
      AND m.contact_id IS NULL AND m.from_address=unknown_raw
      AND CASE effect->>'action'
        WHEN 'dismiss_unknown' THEN m.dismissed_at IS NULL
