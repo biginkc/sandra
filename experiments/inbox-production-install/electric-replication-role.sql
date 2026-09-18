@@ -35,6 +35,7 @@ BEGIN
   END IF;
 END $$;
 
+BEGIN;
 -- Create the named principal in a harmless NOLOGIN state first.  The next
 -- ALTER ROLE is the only statement that consumes the caller-provided secret.
 DO $$
@@ -112,3 +113,4 @@ BEGIN
     RAISE EXCEPTION 'Electric publication final table set is not exact';
   END IF;
 END $$;
+COMMIT;

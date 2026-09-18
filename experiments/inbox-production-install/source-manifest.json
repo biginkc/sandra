@@ -28,5 +28,5 @@
   "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15",
   "selection-review.sql": "8c7d3492ec6766963e2d518d24b221316545f07bc1ba7923f25402dc23802dbd",
   "reviewed-read/06-inbox-workset-updates-setup.sql": "7916e78557da25af1044c6a2c4697be06c48606776a3533ea876b039a2a28106",
-  "electric-replication-role.sql": "8e61c78e848f51416117d71d131ebbe8ce12071d1cf33a2ac28c10ab666de524"
+  "electric-replication-role.sql": "72b52d829f176940fb2d935d00193fa670fd0ac5562b69419de513782dffd7ad"
 }

@@ -28,11 +28,15 @@ WORKERS = {
         "name": "sandra-inbox-release-operation-worker-20260917",
         "endpoint": "http://127.0.0.1:9080",
         "enabled": "INBOX_ACTION_WORKER_ENABLED=1",
+        "image_id_env": "INBOX_RELEASE_OPERATION_IMAGE_ID",
+        "service": "InboxMetadataOperation",
     },
     "reply": {
         "name": "sandra-inbox-release-reply-worker-20260917",
         "endpoint": "http://127.0.0.1:9081",
         "enabled": "INBOX_REPLY_SEND_WORKER_ENABLED=1",
+        "image_id_env": "INBOX_RELEASE_REPLY_IMAGE_ID",
+        "service": "InboxReplySend",
     },
 }
 RESTATE_IMAGE = (
@@ -99,25 +103,49 @@ def environment_values(state: dict) -> set[str]:
 def check_worker(name: str, expected: dict) -> dict:
     state = require_release_container(name)
     env = environment_values(state)
+    image_id = os.environ.get(expected["image_id_env"], "")
+    if not image_id.startswith("sha256:") or len(image_id) != len("sha256:") + 64:
+        raise GuardError(f"{expected['image_id_env']} must contain the immutable built image ID")
+    try:
+        image_info = json.loads(docker("image", "inspect", state.get("Config", {}).get("Image", "")))[0]
+    except (json.JSONDecodeError, IndexError, GuardError) as exc:
+        raise GuardError(f"cannot inspect worker image for {name}: {exc}") from exc
+    if image_info.get("Id") != image_id:
+        raise GuardError(f"worker {name} does not match its immutable image receipt")
     if expected["enabled"] not in env:
         raise GuardError(f"worker {name} is not explicitly enabled")
     # The local profile must use the provider double.  A real provider key is
     # deliberately not accepted by this release-only registration helper.
     if "INBOX_ACTION_LOCAL_FIXTURE=1" not in env:
         raise GuardError(f"worker {name} is not in the fixture profile")
-    return {"name": name, "endpoint": expected["endpoint"], "image": state["Config"].get("Image")}
+    if expected["service"] == "InboxReplySend":
+        if "INBOX_REPLY_SEND_TEST_TRANSPORT_MODULE=/app/vendor/test-transport.mjs" not in env:
+            raise GuardError("reply worker is missing the exact fixture provider double")
+        if any(value.startswith("SENDILLO_API_KEY=") for value in env):
+            raise GuardError("reply worker must not carry a provider credential in the fixture profile")
+    return {
+        "name": name,
+        "endpoint": expected["endpoint"],
+        "image": state["Config"].get("Image"),
+        "image_id": image_id,
+        "service": expected["service"],
+    }
 
 
-def http_json(url: str, *, method: str = "GET", payload: dict | None = None) -> tuple[int, dict]:
+def http_request(url: str, *, method: str = "GET", payload: dict | None = None, json_body: bool = True) -> tuple[int, object]:
     body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
     headers = {"content-type": "application/json"} if body is not None else {}
     request = Request(url, data=body, headers=headers, method=method)
     try:
         with urlopen(request, timeout=10) as response:
             raw = response.read(2_000_000)
+            if not json_body:
+                return response.status, None
             return response.status, json.loads(raw or b"{}")
     except HTTPError as exc:
         raw = exc.read(2_000_000)
+        if not json_body:
+            return exc.code, None
         try:
             detail = json.loads(raw or b"{}")
         except json.JSONDecodeError:
@@ -125,6 +153,34 @@ def http_json(url: str, *, method: str = "GET", payload: dict | None = None) -> 
         return exc.code, detail
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise GuardError(f"owned Restate admin request failed: {exc}") from exc
+
+
+def http_json(url: str, *, method: str = "GET", payload: dict | None = None) -> tuple[int, dict]:
+    status, body = http_request(url, method=method, payload=payload)
+    if not isinstance(body, dict):
+        raise GuardError(f"owned Restate admin returned a non-object JSON response: {url}")
+    return status, body
+
+
+def deployment_matches(registry: dict, endpoint: str, service: str) -> dict | None:
+    deployments = registry.get("deployments")
+    if not isinstance(deployments, list):
+        raise GuardError("Restate deployment registry has no deployments list")
+    for deployment in deployments:
+        if not isinstance(deployment, dict) or deployment.get("uri") != endpoint:
+            continue
+        if not deployment.get("id") or not isinstance(deployment.get("sdk_version"), str) or not deployment["sdk_version"]:
+            raise GuardError(f"Restate deployment for {endpoint} has no immutable ID/SDK version")
+        if deployment.get("http_version") not in {"1.1", "HTTP/1.1"}:
+            raise GuardError(f"Restate deployment for {endpoint} is not HTTP/1.1")
+        services = deployment.get("services")
+        if not isinstance(services, list):
+            raise GuardError(f"Restate deployment for {endpoint} has no service inventory")
+        match = next((item for item in services if isinstance(item, dict) and item.get("name") == service), None)
+        if not isinstance(match, dict) or not isinstance(match.get("revision"), int) or match["revision"] < 1:
+            raise GuardError(f"Restate deployment for {endpoint} does not expose service {service} with a revision")
+        return {"id": deployment["id"], "sdk_version": deployment["sdk_version"], "revision": match["revision"], "http_version": deployment["http_version"]}
+    return None
 
 
 def main() -> int:
@@ -136,11 +192,18 @@ def main() -> int:
         raise GuardError("registration requires INBOX_RELEASE_ALLOW_RUNTIME_MUTATION=1")
     restate = require_release_container(RESTATE_NAME, image=RESTATE_IMAGE)
     workers = [check_worker(item["name"], item) for item in WORKERS.values()]
-    status, health = http_json("http://127.0.0.1:9070/health")
+    status, _ = http_request("http://127.0.0.1:9070/health", json_body=False)
     if status != 200:
         raise GuardError(f"owned Restate admin is not healthy: HTTP {status}")
+    registry_status, registry = http_json("http://127.0.0.1:9070/deployments")
+    if registry_status != 200:
+        raise GuardError(f"owned Restate deployment registry is unavailable: HTTP {registry_status}")
     registrations = []
     for worker in workers:
+        current = deployment_matches(registry, worker["endpoint"], worker["service"])
+        if current is not None:
+            registrations.append({"endpoint": worker["endpoint"], "service": worker["service"], "state": "already_registered", **current})
+            continue
         if args.register_owned_runtime:
             code, body = http_json(
                 "http://127.0.0.1:9070/deployments",
@@ -149,9 +212,15 @@ def main() -> int:
             )
             if code not in {200, 201, 409}:
                 raise GuardError(f"Restate registration failed for {worker['name']}: HTTP {code}")
-            registrations.append({"endpoint": worker["endpoint"], "http_status": code})
+            registry_status, registry = http_json("http://127.0.0.1:9070/deployments")
+            if registry_status != 200:
+                raise GuardError("Restate deployment registry could not be read after registration")
+            verified = deployment_matches(registry, worker["endpoint"], worker["service"])
+            if verified is None:
+                raise GuardError(f"Restate registration did not expose {worker['service']} at {worker['endpoint']}")
+            registrations.append({"endpoint": worker["endpoint"], "service": worker["service"], "state": "registered", "http_status": code, **verified})
         else:
-            registrations.append({"endpoint": worker["endpoint"], "http_status": None})
+            registrations.append({"endpoint": worker["endpoint"], "service": worker["service"], "state": "not_registered", "http_status": None})
     receipt = {
         "status": "REGISTERED" if args.register_owned_runtime else "READY_TO_REGISTER",
         "restate_container": restate["Name"].lstrip("/"),
