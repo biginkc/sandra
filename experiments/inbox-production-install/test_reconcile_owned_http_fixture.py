@@ -77,7 +77,9 @@ class ReconcileOwnedHttpFixtureTests(unittest.TestCase):
         verify_source = inspect.getsource(MODULE.verify_reconciled)
         self.assertIn("maintained_tombstones", verify_source)
         self.assertIn("maintained_missing_dirty", verify_source)
-        self.assertIn("live_targets_missing_maintained", verify_source)
+        self.assertIn("captured_targets_missing_maintained", verify_source)
+        self.assertIn("inbox_message_capture.dirty d", verify_source)
+        self.assertNotIn("live_targets_missing_maintained", verify_source)
 
     def test_protected_snapshot_hashes_content_and_keys(self) -> None:
         source = inspect.getsource(MODULE.protected_snapshot)
@@ -94,7 +96,10 @@ class ReconcileOwnedHttpFixtureTests(unittest.TestCase):
         self.assertIn("cardinality(duplicate_thread_ids)=2", collision_source)
         self.assertIn("idle_rounds >= 20", collision_source)
         self.assertIn("idle_rounds >= 20", inspect.getsource(MODULE.drain_backfill))
-        self.assertIn("sender-group reconciliation exceeded bounded batch budget", inspect.getsource(MODULE.ensure_sender_groups))
+        sender_source = inspect.getsource(MODULE.ensure_sender_groups)
+        self.assertIn('m.from_address COLLATE \\"C\\" AS raw_sender', sender_source)
+        self.assertIn("ORDER BY m.org_id,raw_sender", sender_source)
+        self.assertIn("sender-group reconciliation exceeded bounded batch budget", sender_source)
 
     def test_generation_break_invalidates_read_state_and_keeps_serving_off(self) -> None:
         source = inspect.getsource(MODULE.apply_break)

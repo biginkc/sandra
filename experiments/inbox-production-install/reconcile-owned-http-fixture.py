@@ -489,7 +489,7 @@ def ensure_sender_groups(db: OwnedHttpDb, batch_size: int, max_batches: int) -> 
             f"""
             SELECT inbox_message_capture.sender_id(q.org_id,q.raw_sender)
             FROM (
-              SELECT DISTINCT m.org_id,m.from_address AS raw_sender
+              SELECT DISTINCT m.org_id,m.from_address COLLATE \"C\" AS raw_sender
               FROM public.messages m
               WHERE m.channel='sms' AND m.direction='inbound' AND m.contact_id IS NULL
                 AND m.from_address IS NOT NULL AND m.from_address<>''
@@ -497,7 +497,7 @@ def ensure_sender_groups(db: OwnedHttpDb, batch_size: int, max_batches: int) -> 
                   SELECT 1 FROM inbox_message_capture.sender_groups g
                   WHERE g.org_id=m.org_id AND g.raw_sender COLLATE \"C\"=m.from_address COLLATE \"C\"
                 )
-              ORDER BY m.org_id,m.from_address COLLATE \"C\"
+              ORDER BY m.org_id,raw_sender
               LIMIT {batch_size}
             ) q
             """,
@@ -805,20 +805,17 @@ def verify_reconciled(db: OwnedHttpDb, before_protected: dict[str, dict[str, Any
               'maintained_missing_dirty',(SELECT count(*) FROM inbox_maintained.rows r WHERE NOT EXISTS (SELECT 1 FROM inbox_message_capture.dirty d WHERE d.org_id=r.org_id AND d.target_kind=r.target_kind AND d.target_id=r.target_id)),
               'tombstone_summaries',(SELECT count(*) FROM inbox_bridge.summaries s JOIN inbox_maintained.rows r USING(org_id,target_kind,target_id) WHERE coalesce((r.summary->>'exists')::boolean,false) IS NOT TRUE),
               'tombstone_filters',(SELECT count(*) FROM inbox_bridge.filter_rows f JOIN inbox_maintained.rows r USING(org_id,target_kind,target_id) WHERE coalesce((r.summary->>'exists')::boolean,false) IS NOT TRUE),
-              'live_targets_missing_maintained',(SELECT count(*) FROM (
-                SELECT DISTINCT m.org_id,'known_conversation'::text AS target_kind,m.conversation_id AS target_id
-                FROM public.messages m WHERE m.channel='sms' AND m.conversation_id IS NOT NULL
-                UNION
-                SELECT DISTINCT m.org_id,'unknown_sender'::text,g.sender_group_id
-                FROM public.messages m JOIN inbox_message_capture.sender_groups g
-                  ON g.org_id=m.org_id AND g.raw_sender COLLATE "C"=m.from_address COLLATE "C"
-                WHERE m.channel='sms' AND m.direction='inbound' AND m.contact_id IS NULL
-                  AND m.from_address IS NOT NULL AND m.from_address<>''
-              ) t WHERE NOT EXISTS (
-                SELECT 1 FROM inbox_maintained.rows r
-                WHERE r.org_id=t.org_id AND r.target_kind=t.target_kind AND r.target_id=t.target_id
-                  AND coalesce((r.summary->>'exists')::boolean,false)
-              )),
+              'captured_targets_missing_maintained',(SELECT count(*) FROM inbox_message_capture.dirty d
+                WHERE d.target_kind IN ('known_conversation','unknown_sender')
+                  AND (NOT EXISTS (
+                    SELECT 1 FROM inbox_maintained.rows r
+                    WHERE r.org_id=d.org_id AND r.target_kind=d.target_kind AND r.target_id=d.target_id
+                  ) OR NOT EXISTS (
+                    SELECT 1 FROM inbox_maintained.rows r
+                    WHERE r.org_id=d.org_id AND r.target_kind=d.target_kind AND r.target_id=d.target_id
+                      AND r.source_generation=d.generation
+                      AND jsonb_typeof(r.summary->'exists')='boolean'
+                  ))),
               'missing_summaries',(SELECT count(*) FROM inbox_maintained.rows r WHERE coalesce((r.summary->>'exists')::boolean,false) AND NOT EXISTS (SELECT 1 FROM inbox_bridge.summaries s WHERE s.org_id=r.org_id AND s.target_kind=r.target_kind AND s.target_id=r.target_id)),
               'missing_filters',(SELECT count(*) FROM inbox_maintained.rows r WHERE coalesce((r.summary->>'exists')::boolean,false) AND NOT EXISTS (SELECT 1 FROM inbox_bridge.filter_rows f WHERE f.org_id=r.org_id AND f.target_kind=r.target_kind AND f.target_id=r.target_id)),
               'orphan_summaries',(SELECT count(*) FROM inbox_bridge.summaries s WHERE NOT EXISTS (SELECT 1 FROM inbox_maintained.rows r WHERE r.org_id=s.org_id AND r.target_kind=s.target_kind AND r.target_id=s.target_id AND coalesce((r.summary->>'exists')::boolean,false))),
@@ -829,7 +826,7 @@ def verify_reconciled(db: OwnedHttpDb, before_protected: dict[str, dict[str, Any
     )
     if result["serving_enabled"] is not False or int(result["admission_enabled"]) != 0:
         raise RuntimeError("recovery unexpectedly enabled serving or command admission")
-    for key in ("backfill_pending", "parent_pending", "safety_pending", "queue_pending", "collisions_pending", "duplicate_threads", "read_boundaries", "history_cursors", "unknown_cursors", "maintained_missing_dirty", "tombstone_summaries", "tombstone_filters", "live_targets_missing_maintained", "missing_summaries", "missing_filters", "orphan_summaries", "orphan_filters"):
+    for key in ("backfill_pending", "parent_pending", "safety_pending", "queue_pending", "collisions_pending", "duplicate_threads", "read_boundaries", "history_cursors", "unknown_cursors", "maintained_missing_dirty", "tombstone_summaries", "tombstone_filters", "captured_targets_missing_maintained", "missing_summaries", "missing_filters", "orphan_summaries", "orphan_filters"):
         if int(result[key]) != 0:
             raise RuntimeError(f"reconciliation incomplete: {key}={result[key]}")
     return result
