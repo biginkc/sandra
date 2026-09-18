@@ -90,6 +90,46 @@ class RealtimeBootstrapTest(unittest.TestCase):
         self.assertIn("supabase_realtime_messages_publication", query)
         self.assertIn("c.relname = 'messages'", query)
 
+    def test_cdc_state_requires_publication_slot_and_stream(self) -> None:
+        with patch.object(
+            realtime_bootstrap,
+            "sql_query",
+            return_value=json.dumps(
+                {
+                    "publication_exists": True,
+                    "publication_messages": True,
+                    "slot_active": True,
+                    "streaming": True,
+                }
+            ),
+        ) as sql_call:
+            state = realtime_bootstrap.read_cdc_state()
+        self.assertEqual(
+            state,
+            {
+                "publication_exists": True,
+                "publication_messages": True,
+                "slot_active": True,
+                "streaming": True,
+            },
+        )
+        query = sql_call.call_args.args[0]
+        self.assertIn("pg_replication_slots", query)
+        self.assertIn("wal2json", query)
+        self.assertIn("realtime_replication_connection", query)
+        self.assertIn("public' AND c.relname = 'messages'", query)
+
+    def test_cdc_state_rejects_missing_live_prerequisite(self) -> None:
+        with self.assertRaises(realtime_bootstrap.BootstrapError):
+            realtime_bootstrap.require_cdc_ready(
+                {
+                    "publication_exists": True,
+                    "publication_messages": True,
+                    "slot_active": False,
+                    "streaming": True,
+                }
+            )
+
     def test_running_image_id_and_cached_manifest_are_authoritative_over_tag(self) -> None:
         container = {
             "Image": realtime_bootstrap.REALTIME_IMAGE_ID,
@@ -194,6 +234,15 @@ class RealtimeBootstrapTest(unittest.TestCase):
             realtime_bootstrap,
             "read_broadcast_publication_state",
             return_value=True,
+        ), patch.object(
+            realtime_bootstrap,
+            "wait_for_cdc_ready",
+            return_value={
+                "publication_exists": True,
+                "publication_messages": True,
+                "slot_active": True,
+                "streaming": True,
+            },
         ):
             realtime_bootstrap.apply_bootstrap(Path("/private/realtime.env"))
 
@@ -273,6 +322,97 @@ class RealtimeBootstrapTest(unittest.TestCase):
         self.assertTrue(calls[1][1])
         wait_for_rpc_ready.assert_called_once_with(realtime_bootstrap.REALTIME_CONTAINER)
 
+    def test_apply_migration_branch_runs_ledger_then_repairs_and_restarts(self) -> None:
+        incomplete = {
+            "latest_migration": "20260527120000",
+            "migration_count": 81,
+            "columns": ("action_filter",),
+        }
+        complete = {
+            "latest_migration": realtime_bootstrap.EXPECTED_MIGRATION,
+            "migration_count": 82,
+            "columns": realtime_bootstrap.EXPECTED_COLUMNS,
+        }
+        tenant = {"settings_fingerprint": "same", "migrations_ran": 1}
+        events: list[str] = []
+        temp_name = "sandra-inbox-release-realtime-migration-20260917"
+
+        def fake_docker(*args: str, check: bool = True) -> SimpleNamespace:
+            if args[:2] == ("inspect", temp_name):
+                return SimpleNamespace(returncode=1, stdout="", stderr="")
+            events.append("docker:" + " ".join(args[:2]))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(realtime_bootstrap, "require_mutation_confirmation"), patch.object(
+            realtime_bootstrap,
+            "validate_fixture",
+            return_value={"Image": realtime_bootstrap.REALTIME_IMAGE_ID},
+        ), patch.object(
+            realtime_bootstrap, "build_migration_run_args", return_value=["migration"]
+        ), patch.object(
+            realtime_bootstrap,
+            "read_migration_state",
+            side_effect=[incomplete, complete, complete],
+        ), patch.object(
+            realtime_bootstrap, "read_tenant_state", side_effect=[tenant, tenant]
+        ), patch.object(
+            realtime_bootstrap,
+            "wait_for_rpc_ready",
+            side_effect=lambda container: events.append("rpc:" + container),
+        ), patch.object(
+            realtime_bootstrap,
+            "read_tenant_runtime_user",
+            return_value=realtime_bootstrap.RUNTIME_ROLE,
+        ), patch.object(
+            realtime_bootstrap, "docker", side_effect=fake_docker
+        ), patch.object(
+            realtime_bootstrap,
+            "subprocess",
+            SimpleNamespace(run=lambda *args, **kwargs: SimpleNamespace(returncode=0)),
+        ), patch.object(
+            realtime_bootstrap,
+            "apply_runtime_role",
+            side_effect=lambda: events.append("role"),
+        ), patch.object(
+            realtime_bootstrap,
+            "invoke_tenant_migrations",
+            side_effect=lambda container: events.append("migrate:" + container) or "started",
+        ), patch.object(
+            realtime_bootstrap,
+            "wait_for",
+            side_effect=lambda predicate, **kwargs: predicate(),
+        ), patch.object(
+            realtime_bootstrap,
+            "inspect_container",
+            return_value={"State": {"Status": "running"}},
+        ), patch.object(
+            realtime_bootstrap,
+            "cleanup_and_repair_runtime",
+            side_effect=lambda container: events.append("repair:" + container) or (None, None),
+        ), patch.object(
+            realtime_bootstrap, "migration_state_advanced", return_value=True
+        ), patch.object(
+            realtime_bootstrap, "require_runtime_role_minimum"
+        ), patch.object(
+            realtime_bootstrap, "read_broadcast_publication_state", return_value=True
+        ), patch.object(
+            realtime_bootstrap,
+            "wait_for_cdc_ready",
+            return_value={
+                "publication_exists": True,
+                "publication_messages": True,
+                "slot_active": True,
+                "streaming": True,
+            },
+        ):
+            result = realtime_bootstrap.apply_bootstrap(Path("/private/realtime.env"))
+
+        self.assertEqual(result["status"], "BOOTSTRAPPED")
+        self.assertEqual(result["migration_rpc_status"], "started")
+        self.assertIn("migrate:" + temp_name, events)
+        self.assertIn("repair:" + temp_name, events)
+        self.assertLess(events.index("migrate:" + temp_name), events.index("repair:" + temp_name))
+
     def test_failed_migration_cleanup_still_repairs_both_runtime_prerequisites(self) -> None:
         events: list[str] = []
 
@@ -288,7 +428,11 @@ class RealtimeBootstrapTest(unittest.TestCase):
             realtime_bootstrap,
             "apply_broadcast_publication",
             side_effect=lambda: events.append("publication"),
-        ):
+        ), patch.object(
+            realtime_bootstrap,
+            "docker",
+            return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ), patch.object(realtime_bootstrap, "wait_for_rpc_ready"):
             cleanup_error, repair_error = realtime_bootstrap.cleanup_and_repair_runtime(
                 "temporary-realtime"
             )

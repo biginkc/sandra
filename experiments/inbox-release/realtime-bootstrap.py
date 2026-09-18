@@ -68,9 +68,12 @@ EXPECTED_MIGRATION = "20260709120000"
 EXPECTED_COLUMNS = ("action_filter", "selected_columns")
 TENANT_EXTERNAL_ID = "realtime-dev"
 BROADCAST_PUBLICATION = "supabase_realtime_messages_publication"
+TENANT_PUBLICATION = "supabase_realtime"
 RPC_READY_MARKER = "realtime_bootstrap_rpc_ready"
 RPC_READY_TIMEOUT = 120.0
 RPC_READY_INTERVAL = 2.0
+CDC_READY_TIMEOUT = 120.0
+CDC_READY_INTERVAL = 2.0
 
 MigrationState = Mapping[str, Any]
 
@@ -552,6 +555,74 @@ def read_broadcast_publication_state() -> bool:
     return value.strip().lower() in {"t", "true"}
 
 
+def read_cdc_state() -> dict[str, bool]:
+    """Read the live tenant CDC prerequisites from PostgreSQL.
+
+    Realtime can be RPC-ready while its tenant logical-replication path is
+    absent or disconnected.  The bootstrap result must therefore include the
+    tenant publication, its ``public.messages`` member, an active wal2json
+    slot, and a streaming Realtime replication connection.
+    """
+
+    raw = sql_query(
+        "SELECT json_build_object("
+        "'publication_exists', EXISTS (SELECT 1 FROM pg_publication "
+        f"WHERE pubname = '{TENANT_PUBLICATION}'), "
+        "'publication_messages', EXISTS (SELECT 1 FROM pg_publication p "
+        "JOIN pg_publication_rel pr ON pr.prpubid = p.oid "
+        "JOIN pg_class c ON c.oid = pr.prrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        f"WHERE p.pubname = '{TENANT_PUBLICATION}' "
+        "AND n.nspname = 'public' AND c.relname = 'messages'), "
+        "'slot_active', EXISTS (SELECT 1 FROM pg_replication_slots "
+        "WHERE slot_name LIKE 'supabase_realtime_replication_slot%' "
+        "AND slot_type = 'logical' AND plugin = 'wal2json' AND active), "
+        "'streaming', EXISTS (SELECT 1 FROM pg_stat_replication "
+        "WHERE application_name = 'realtime_replication_connection' "
+        "AND state = 'streaming'))::text;"
+    )
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BootstrapError("Realtime CDC catalog query returned invalid JSON") from exc
+    if not isinstance(state, dict) or not all(isinstance(value, bool) for value in state.values()):
+        raise BootstrapError("Realtime CDC catalog query returned an invalid object")
+    return state
+
+
+def require_cdc_ready(state: Mapping[str, Any]) -> None:
+    required = ("publication_exists", "publication_messages", "slot_active", "streaming")
+    missing = [name for name in required if state.get(name) is not True]
+    if missing:
+        raise BootstrapError(
+            "Realtime tenant CDC is not live; missing " + ", ".join(missing)
+        )
+
+
+def wait_for_cdc_ready(
+    *, timeout: float = CDC_READY_TIMEOUT, interval: float = CDC_READY_INTERVAL
+) -> dict[str, bool]:
+    """Wait for the tenant publication, logical slot, and replication stream."""
+
+    latest: dict[str, bool] = {}
+
+    def ready() -> bool:
+        nonlocal latest
+        latest = read_cdc_state()
+        return all(
+            latest.get(name) is True
+            for name in ("publication_exists", "publication_messages", "slot_active", "streaming")
+        )
+
+    try:
+        wait_for(ready, timeout=timeout, interval=interval)
+    except BootstrapError as exc:
+        detail = ", ".join(f"{key}={value!r}" for key, value in sorted(latest.items()))
+        suffix = f"; last CDC state: {detail}" if detail else ""
+        raise BootstrapError(f"{exc}{suffix}") from exc
+    return latest
+
+
 def require_runtime_role_minimum(state: MigrationState) -> None:
     role = state.get("role")
     if not isinstance(role, dict):
@@ -916,6 +987,8 @@ def apply_bootstrap(env_file: Path) -> dict[str, Any]:
         raise BootstrapError(
             f"Realtime broadcast publication {BROADCAST_PUBLICATION} is missing or has unexpected tables"
         )
+    cdc = wait_for_cdc_ready()
+    require_cdc_ready(cdc)
     if not migration_complete(state):
         raise BootstrapError(f"Realtime schema is not at the pinned migration level: {state!r}")
     return {
@@ -928,6 +1001,7 @@ def apply_bootstrap(env_file: Path) -> dict[str, Any]:
         "migration_count": state["migration_count"],
         "migration_rpc_status": migration_rpc_status,
         "columns": list(state["columns"]),
+        "cdc": cdc,
         "realtime_container": REALTIME_CONTAINER,
         "image_id": realtime.get("Image"),
     }
