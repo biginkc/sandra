@@ -65,10 +65,11 @@ if sql("SELECT to_regnamespace('inbox_saved_actions') IS NULL") == 't':
 else:
     print('inbox_saved_actions already installed; reusing')
 
-# Astra round-1 blocker #1: (re-)apply the widened inbox_action_api.prepare
-# envelope guard every run. Idempotent (CREATE OR REPLACE of the exact
-# unmodified upstream body, only the savedAction guard widened), and cheap
-# to reapply even when inbox_saved_actions itself was already installed.
+# Re-apply the authoritative inbox_action_api.prepare saved-reference guard
+# and stored-snapshot binding every run. This is idempotent and cheap even
+# when inbox_saved_actions itself was already installed; the SQL proof below
+# independently exercises the public boundary rather than trusting the TS
+# lookup path.
 prepare_patch = (P / 'action-prepare-saved-reference.sql').read_text()
 if not prepare_patch.endswith('COMMIT;\n') or '\nBEGIN;\n' not in prepare_patch:
     raise RuntimeError('Expected source transaction boundary')
@@ -76,7 +77,7 @@ r = subprocess.run(D + ['exec', '-i', N, 'psql', '-XqAt', '-U', 'postgres', '-d'
                     input=prepare_patch, text=True, capture_output=True, timeout=30)
 if r.returncode:
     raise RuntimeError(f'action-prepare-saved-reference.sql install failed: {r.stderr}')
-print('APPLIED inbox_action_api.prepare savedAction-reference widening')
+print('APPLIED inbox_action_api.prepare savedAction shape guard + snapshot binding')
 
 ORG_TABLES, USER_TABLES, ALL_TABLES = owned_cleanup.discover(sql)
 BASELINE = owned_cleanup.snapshot_baseline(sql, ALL_TABLES)

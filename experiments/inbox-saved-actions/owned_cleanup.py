@@ -85,9 +85,9 @@ closes:
      any per-table content check even runs.
 1. EXHAUSTIVE COVERAGE: every base table ANYWHERE in the database (any
    schema, never hardcoded, PRIMARY_TABLES included) is discovered via
-   pg_catalog, excluding only the ephemeral reply-lane schemas that get
-   DROP SCHEMA CASCADEd entirely each run (EPHEMERAL_SCHEMAS — querying them
-   after the drop would error, not a coverage choice).
+   pg_catalog. Existing reply-lane schemas are included in the same whole-DB
+   signature; callers that create disposable schemas remove them before the
+   final check.
 2. Cleanup SWEEPS every dynamically-discovered org_id/user_id-scoped table
    (not a hand-maintained list, PRIMARY_TABLES excluded here ONLY because
    the caller deletes those nine tables itself, in the correct FK/trigger
@@ -97,15 +97,12 @@ closes:
    the last pass.
 """
 
-# Schemas created fresh and DROP SCHEMA CASCADEd entirely by the caller each
-# run — querying them after the drop would error (table does not exist), and
-# their rows can never leak because CASCADE removes them unconditionally.
-# This is the ONLY exclusion from the uniform table universe, and it is
-# mechanical (the tables cease to exist), not a coverage choice.
-EPHEMERAL_SCHEMAS = {
-    'inbox_reply_context', 'inbox_reply_preparation', 'inbox_reply_review',
-    'inbox_reply_send', 'inbox_reply_send_scratch',
-}
+# Every existing base table is part of the signature universe, including the
+# reply-lane schemas. The old five-schema exclusion made a mutation in an
+# already-present reply table invisible whenever a proof happened to leave
+# that schema installed. Callers that create a disposable schema must remove
+# it before the final check; the checker must never silently omit an existing
+# table from whole-DB verification.
 # Tables the caller deletes explicitly, in the correct FK/trigger order
 # (owner-guard trigger dance on memberships, etc.) — excluded ONLY from
 # sweep_delete's generic DELETE (a blind per-table sweep would fight the
@@ -125,14 +122,52 @@ PRIMARY_TABLES = {
 # used only to build the OWNED predicate, never to exclude either table from
 # the content signature (see round-7 history above).
 ANCHOR_ID_TABLES = {'public.organizations': 'org', 'auth.users': 'user'}
-# Column-name shape treated as a monotonic serialization/version counter when
-# its SQL type is integer/bigint (never uuid/text — e.g.
-# inbox_t2_capture_boundary.generation.generation is a uuid "generation id"
-# that gets swapped, not an incrementing counter). This IS the whitelist:
-# only a column matching this shape is ever excluded from the content hash
-# or permitted to increase — every other column, on every table, is fully
-# covered by the hash with zero exemptions.
-COUNTER_COLUMN_PATTERN_SQL = r"a.attname ~* '(version|revision|generation|counter)$'"
+# Only these known mutable serialization/lease counters may advance while a
+# proof runs. This is deliberately table+column exact: suffix heuristics used
+# to exempt business fields such as dataset_version/schema_version and even
+# immutable primary-key versions from the content signature. Every column not
+# listed here remains hashed. The saved-action definitions.version column is
+# intentionally absent because it is part of the immutable composite primary
+# key; a version insert changes row count/content and must be visible.
+COUNTER_COLUMN_ALLOWLIST = frozenset({
+    'inbox_operation_domain.sms_scopes.revision',
+    'inbox_operation_domain.target_versions.revision',
+    'inbox_operations.dispatch_outbox.generation',
+    'inbox_operations.steps.generation',
+    'inbox_t2_backfill.collisions.generation',
+    'inbox_t2_backfill.jobs.revision',
+    'inbox_t2_bridge.access_epochs.revision',
+    'inbox_t2_bridge.filter_rows.revision',
+    'inbox_t2_bridge.summaries.projection_revision',
+    'inbox_t2_bridge.summaries.source_generation',
+    'inbox_t2_bridge.worksets.generation',
+    'inbox_t2_maintained.rows.revision',
+    'inbox_t2_maintained.rows.source_generation',
+    'inbox_t2_message_capture.dirty.generation',
+    'inbox_t2_message_capture.versions.revision',
+    'inbox_t2_parent.work.generation',
+    'inbox_t2_parent.work.scan_generation',
+    'inbox_t2_policy.versions.revision',
+    'inbox_t2_projection_proof.dirty.acknowledged_generation',
+    'inbox_t2_projection_proof.dirty.generation',
+    'inbox_t2_projection_proof.projections.latest_inbound_revision',
+    'inbox_t2_projection_proof.projections.revision',
+    'inbox_t2_projection_proof.projections.source_generation',
+    'inbox_t2_read.boundaries.revision',
+    'inbox_t2_safety.routes.generation',
+    'inbox_t2_safety.routes.scan_generation',
+    'inbox_t2_summary_worker.summaries.revision',
+    'inbox_t2_summary_worker.summaries.source_generation',
+    'public.hugo_owner_guard_serialization.version',
+    'public.inbox_inbound_heads.revision',
+    'public.memberships.my_leads_revision',
+    'public.messages.inbox_inbound_revision',
+    'inbox_reply_context.versions.revision',
+    'inbox_reply_send.attempts.generation',
+    'inbox_reply_send.attempts.receipt_version',
+    'inbox_reply_send.callback_receipts.lease_generation',
+    'inbox_reply_send.dispatch_outbox.generation',
+})
 
 
 def _rows(sql, query):
@@ -186,19 +221,25 @@ def _primary_key(sql, table):
 
 
 def _counter_column(sql, table):
-    """The one whitelisted counter-shaped integer/bigint column on `table`,
-    if any — applied uniformly regardless of whether `table` has org_id/
-    user_id, so a legitimate monotonic counter advance (e.g.
-    inbox_t2_policy.versions.revision, or hugo_owner_guard_serialization.
-    version) is never mistaken for the content mutation this module exists
-    to catch, on ANY table."""
+    """The one explicitly allowlisted mutable counter on `table`, if any.
+    Immutable primary-key columns are never eligible, even if their name
+    looks like a version or revision."""
     schema, name = table.split('.', 1)
+    allowed_columns = sorted(item.rsplit('.', 1)[1] for item in COUNTER_COLUMN_ALLOWLIST if item.rsplit('.', 1)[0] == table)
+    if not allowed_columns:
+        return None
+    allowed = ','.join("'" + column.replace("'", "''") + "'" for column in allowed_columns)
     rows = _rows(sql, f"""
         SELECT a.attname FROM pg_attribute a
         JOIN pg_class c ON c.oid=a.attrelid
         JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE c.relkind='r' AND n.nspname='{schema}' AND c.relname='{name}'
-          AND a.attnum>0 AND NOT a.attisdropped AND {COUNTER_COLUMN_PATTERN_SQL}
+          AND a.attname IN ({allowed})
+          AND a.attnum>0 AND NOT a.attisdropped
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_index pk
+            WHERE pk.indrelid=c.oid AND pk.indisprimary AND a.attnum=ANY(pk.indkey)
+          )
           AND format_type(a.atttypid,a.atttypmod) IN ('integer','bigint','smallint')
         ORDER BY a.attnum LIMIT 1
     """)
@@ -210,11 +251,9 @@ def _all_tables(sql):
     anywhere in the database (any schema, PRIMARY_TABLES included, no
     org_id/user_id requirement — a table with neither, like
     hugo_owner_guard_serialization, is just as much a member as one with
-    both), minus only EPHEMERAL_SCHEMAS (mechanical necessity, not a
-    coverage exclusion). Returns [(table, has_org, has_user,
+    both), with no schema exclusions. Returns [(table, has_org, has_user,
     counter_column_or_None)] — the one list every function below iterates,
     with no branching by category."""
-    exclude_schemas = ','.join(f"'{s}'" for s in EPHEMERAL_SCHEMAS)
     rows = _rows(sql, f"""
         SELECT n.nspname||'.'||c.relname||'|'||
           coalesce(bool_or(a.attname='org_id'),false)||'|'||coalesce(bool_or(a.attname='user_id'),false)
@@ -223,7 +262,6 @@ def _all_tables(sql):
         LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attname IN ('org_id','user_id')
         WHERE c.relkind='r'
           AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname<>'information_schema'
-          AND n.nspname NOT IN ({exclude_schemas})
         GROUP BY n.nspname,c.relname ORDER BY 1
     """)
     out = []

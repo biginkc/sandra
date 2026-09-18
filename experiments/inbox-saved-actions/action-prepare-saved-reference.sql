@@ -6,19 +6,17 @@
 -- `saved` branch (action-definition.ts, unmodified) ALWAYS emits a non-null
 -- `{id,version}` savedAction once a snapshot is resolved — so a saved action
 -- could never reach prepare()/accept() end-to-end: the RPC unconditionally
--- rejected it as "Invalid action envelope". This widens ONLY that one guard
--- to also accept a well-formed `{id,version}` reference (uuid id, positive
--- integer version, exactly those 2 keys) — every other check in prepare()
--- (definition shape/step semantics, target resolution, membership,
--- assignee eligibility, policy snapshots) is untouched, because the
--- `definition` field it validates is ALREADY the concrete, resolved,
--- authorized snapshot copy the TS glue passed (parseInboxActionIntent's
--- `saved` branch: `copiedDefinition = definition(saved.definition)`); the
--- SQL layer never needs to re-derive the saved lookup, only accept that a
--- reference to it may legitimately travel alongside the resolved
--- definition. CREATE OR REPLACE of the exact, unmodified function body
--- from experiments/inbox-operation-preparation/setup.sql:60-156, with only
--- the envelope-guard line changed.
+-- rejected it as "Invalid action envelope". This widens the shape guard to
+-- accept a well-formed `{id,version}` reference (uuid id, positive integer
+-- version, exactly those 2 keys), then binds that reference again inside the
+-- authoritative SQL transaction. The requester/org-scoped saved-action
+-- lookup rejects missing, foreign, stale, and deactivated versions, and the
+-- submitted definition must equal the stored immutable definition byte-for-
+-- byte as JSONB. The TypeScript glue still resolves the snapshot for normal
+-- requests, but the public RPC is independently callable by an authenticated
+-- role, so SQL must not trust a shape-valid reference or client definition.
+-- All existing definition-shape, target, membership, assignee, and policy
+-- checks remain in place after this server-side snapshot binding.
 BEGIN;
 
 CREATE OR REPLACE FUNCTION inbox_action_api.invalid_saved_action_reference(value jsonb) RETURNS boolean
@@ -37,7 +35,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION inbox_action_api.prepare(canonical_input text,k uuid) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE intent jsonb; a jsonb;o uuid;u uuid;definition jsonb;step jsonb;target jsonb;resolved jsonb;
+DECLARE intent jsonb; a jsonb;o uuid;u uuid;definition jsonb;saved_action jsonb;stored_saved_action jsonb;step jsonb;target jsonb;resolved jsonb;
  p public.properties;assignee uuid;item jsonb;items jsonb:='[]';effects jsonb:='[]';plans jsonb:='{}';plan jsonb;requirements jsonb;sms_scope jsonb;
  property_ids uuid[];enrollment_ids uuid[];row record;prep_id uuid:=gen_random_uuid();hash text;expires timestamptz:=clock_timestamp()+interval '5 minutes';exclusion text;has_sms boolean:=false;has_outcome boolean:=false;has_assignment boolean:=false;
 BEGIN
@@ -50,6 +48,27 @@ BEGIN
  a:=inbox_action_api.authorize(o,u);
  definition:=intent->'definition';
  IF jsonb_typeof(definition) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(definition))<>2 OR definition->'version' IS DISTINCT FROM '1'::jsonb OR jsonb_typeof(definition->'steps') IS DISTINCT FROM 'array' OR jsonb_array_length(definition->'steps') NOT BETWEEN 1 AND 2 THEN RAISE EXCEPTION 'Unsupported action definition';END IF;
+ -- The savedAction reference is an immutable snapshot binding, not a type
+ -- marker. Resolve the exact requester/org-scoped row again inside the
+ -- authoritative prepare transaction and require the submitted definition to
+ -- be that row's stored definition. The TypeScript transport performs the
+ -- same lookup for normal requests, but this public RPC is independently
+ -- callable by an authenticated role; without this check a caller could
+ -- submit any valid definition alongside an existing, stale, foreign, or
+ -- fabricated-looking reference and the shape-only guard would accept it.
+ -- get() also revalidates the saved definition and rejects stale,
+ -- deactivated, missing, or out-of-scope versions before any target work.
+ saved_action:=intent->'savedAction';
+ IF saved_action IS DISTINCT FROM 'null'::jsonb THEN
+  stored_saved_action:=inbox_saved_actions.get(o,u,(saved_action->>'id')::uuid,(saved_action->>'version')::integer);
+  IF stored_saved_action->>'id' IS DISTINCT FROM saved_action->>'id'
+   OR stored_saved_action->>'version' IS DISTINCT FROM saved_action->>'version'
+   OR stored_saved_action->>'org_id' IS DISTINCT FROM o::text
+   OR stored_saved_action->>'requester_id' IS DISTINCT FROM u::text
+   OR stored_saved_action->'definition' IS DISTINCT FROM definition THEN
+   RAISE EXCEPTION 'INBOX_SAVED_ACTION_DEFINITION_MISMATCH';
+  END IF;
+ END IF;
  FOR step IN SELECT value FROM jsonb_array_elements(definition->'steps') LOOP
   IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 THEN RAISE EXCEPTION 'Unsupported action step';END IF;
   IF step->>'type'='outcome' THEN

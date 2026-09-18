@@ -28,15 +28,15 @@ DECLARE a jsonb;
 BEGIN a:=inbox_action_api.authorize(NULL); RETURN inbox_saved_actions.get((a->>'org_id')::uuid,(a->>'user_id')::uuid,target_id,target_version); END $$;
 
 CREATE FUNCTION public.inbox_saved_action_create(name text,definition jsonb) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_saved_actions.create_for_session(name,definition) $$;
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_saved_actions.create_for_session(name,definition) $$;
 CREATE FUNCTION public.inbox_saved_action_update(id uuid,name text,definition jsonb) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_saved_actions.update_for_session(id,name,definition) $$;
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_saved_actions.update_for_session(id,name,definition) $$;
 CREATE FUNCTION public.inbox_saved_action_deactivate(id uuid) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_saved_actions.deactivate_for_session(id) $$;
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_saved_actions.deactivate_for_session(id) $$;
 CREATE FUNCTION public.inbox_saved_action_list() RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_saved_actions.list_for_session() $$;
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_saved_actions.list_for_session() $$;
 CREATE FUNCTION public.inbox_saved_action_get(id uuid,version integer) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_saved_actions.get_for_session(id,version) $$;
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_saved_actions.get_for_session(id,version) $$;
 
 REVOKE ALL ON FUNCTION public.inbox_saved_action_create(text,jsonb),public.inbox_saved_action_update(uuid,text,jsonb),
  public.inbox_saved_action_deactivate(uuid),public.inbox_saved_action_list(),public.inbox_saved_action_get(uuid,integer)
