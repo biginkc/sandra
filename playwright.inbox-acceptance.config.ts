@@ -7,7 +7,7 @@ import {
   ensureE2ERunEnvironment,
   identityForPrincipal,
 } from "./src/lib/supabase/e2e-identity-guard";
-import { assertSafeE2ESupabaseTargetFromEnvironment } from "./src/lib/supabase/e2e-target-safety";
+import { assertDisposableE2EDatabaseEnvironment, assertSafeE2ESupabaseTargetFromEnvironment } from "./src/lib/supabase/e2e-target-safety";
 
 /**
  * Playwright config for the Inbox acceptance harness (DoD#2, acceptance
@@ -70,6 +70,9 @@ const softphoneTransport =
   env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT ??
   "";
 
+assertDisposableE2EDatabaseEnvironment(supabaseUrl);
+process.env.INBOX_ACCEPTANCE_RUN = "1";
+
 if (supabaseUrl) {
   assertSafeE2ESupabaseTargetFromEnvironment(supabaseUrl);
 }
@@ -106,6 +109,7 @@ const webServerEnv: Record<string, string> = {
   // Acceptance-harness-only: turns on the new /inbox workspace routes for
   // THIS webServer process only. Never set in prod deploy config.
   INBOX_WORKSPACE_SERVER_ENABLED: "1",
+  INBOX_WORKSPACE_ROLLOUT_MODE: "all",
   INBOX_ACTIONS_SERVER_ENABLED: "1",
   INBOX_REPLIES_SERVER_ENABLED: "1",
 };

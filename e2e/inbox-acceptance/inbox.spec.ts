@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
 
-import { adminClient, ensureTestUser, resetTenantTables, TEST_ASSIGNEE_EMAIL } from "../fixtures";
+import { adminClient, ensureTestUser, resetTenantTables } from "../fixtures";
 import { seedAcceptanceThread } from "./seed";
-import { recordRowOutcome } from "./results";
+import { captureRowEvidence, purgeRowOutcomes, recordRowOutcome } from "./results";
 
 /**
  * Inbox acceptance matrix runner — F02-F10 (existing read/search/filter/
@@ -19,29 +19,23 @@ test.describe.configure({ mode: "serial" });
 
 let admin: ReturnType<typeof adminClient>;
 
-/**
- * DISCOVERED DURING THE HARNESS RUN (2026-09-17): the `/inbox` backend RPC
- * schema (inbox_authorize_sync, inbox_counts_v2, inbox_create_workset_v2,
- * etc. — see src/lib/inbox/supabase-sync-repository.ts) is NOT installed on
- * the shared e2e Supabase test project. A direct RPC probe returns
- * PGRST202 "Could not find the function public.inbox_authorize_sync(...)
- * in the schema cache." Every `/inbox` page load therefore renders the
- * generic "Inbox workspace unavailable" fallback (InboxPage's catch-all),
- * regardless of feature flags, fixture data, or auth state.
- *
- * This is a pre-existing environment gap, not something this harness
- * caused, and not something in scope to fix here (applying an unreviewed
- * schema install — see experiments/inbox-production-install/ — to the
- * SHARED fixture DB other lanes are actively using is exactly the kind of
- * broad, irreversible-on-a-shared-resource action this harness must not
- * take unilaterally). Every row below that requires `/inbox` to respond
- * is therefore blocked for a DIFFERENT reason than "UI not wired": the
- * backend isn't reachable at all in this environment. These tests are
- * skipped (not deleted) so the authored assertions stand ready for the
- * moment the schema is installed — see the matrix's Status text for each
- * row's honest classification.
- */
-test.skip(true, "Blocked: /inbox backend RPC schema (inbox_authorize_sync) is not installed on the shared e2e Supabase test project — every /inbox request returns 'workspace unavailable'. See comment above.");
+// The ordinary golden suite does not enable the new workspace. Required
+// Inbox acceptance runs in the dedicated owned-fixture config below.
+test.skip(process.env.INBOX_ACCEPTANCE_RUN !== "1", "Use playwright.inbox-acceptance.config.ts for required Inbox acceptance");
+
+function ownedRows(title: string): string[] {
+  return title.split(" — ")[0].split("/").filter(id => /^[FARUO]\d{2}$/.test(id));
+}
+test.beforeEach(async ({}, info) => { purgeRowOutcomes(ownedRows(info.title)); });
+test.afterEach(async ({ page }, info) => {
+  const ids = ownedRows(info.title);
+  purgeRowOutcomes(ids);
+  for (const id of ids) {
+    const passed = info.status === "passed";
+    recordRowOutcome({ id, status: passed ? "pass" : info.status === "skipped" ? "skip" : "fail",
+      evidence: passed ? await captureRowEvidence(page, id) : info.error?.message ?? `Test ${info.status}` });
+  }
+});
 
 test.beforeAll(async () => {
   admin = adminClient();
@@ -111,9 +105,19 @@ test("F04 — needs_outcome view excludes threads with an outcome", async ({ pag
     messages: [{ direction: "inbound", body: "no outcome yet", createdAtOffsetMin: -6 }],
   });
 
-  await page.goto("/inbox?view=needs_outcome");
+  const completed = await seedAcceptanceThread(admin, {
+    phone: "+18165551904", addressTag: "ACC-F04-COMPLETED",
+    contactName: { first: "Completed", last: "Outcome" },
+    messages: [{ direction: "inbound", body: "outcome already recorded", createdAtOffsetMin: -6 }],
+  });
+  const { error } = await admin.from("properties").update({ outreach_dispo: "not_interested" }).eq("id", completed.propertyId);
+  expect(error).toBeNull();
+  await page.goto("/inbox?view=all");
   const list = page.getByRole("list", { name: "Inbox conversations" });
+  await expect(list.getByText(completed.contactName)).toBeVisible();
+  await page.getByLabel("View").selectOption("needs_outcome");
   await expect(list.getByText(noOutcome.contactName)).toBeVisible();
+  await expect(list.getByText(completed.contactName)).toHaveCount(0);
 
   recordRowOutcome({ id: "F04", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F04" });
 });
@@ -226,6 +230,8 @@ async function runBulkOutcome(
   contactName: string,
   outcomeButtonName: string,
   matrixId: string,
+  propertyId: string,
+  expected: { outreach_dispo?: string; assigned_user_id?: string | null },
 ) {
   await page.goto("/inbox?view=all");
   const list = page.getByRole("list", { name: "Inbox conversations" });
@@ -238,6 +244,11 @@ async function runBulkOutcome(
   await expect(applyButton).toBeEnabled({ timeout: 10_000 });
   await applyButton.click();
   await expect(page.getByText(/Action (accepted|succeeded|finished)/i)).toBeVisible({ timeout: 15_000 });
+  await expect(async () => {
+    const { data, error } = await admin.from("properties").select("outreach_dispo, assigned_user_id").eq("id", propertyId).single();
+    expect(error).toBeNull();
+    expect(data).toMatchObject(expected);
+  }).toPass({ timeout: 15_000 });
   recordRowOutcome({ id: matrixId, status: "pass", evidence: `e2e/inbox-acceptance/inbox.spec.ts::${matrixId}` });
 }
 
@@ -248,7 +259,7 @@ test("A01 — Wrong number bulk outcome applies", async ({ page }) => {
     contactName: { first: "Wrong", last: "NumberA01" },
     messages: [{ direction: "inbound", body: "a01 probe", createdAtOffsetMin: -2 }],
   });
-  await runBulkOutcome(page, thread.contactName, "Wrong number", "A01");
+  await runBulkOutcome(page, thread.contactName, "Wrong number", "A01", thread.propertyId, { outreach_dispo: "wrong_number" });
 });
 
 test("A02 — Bad number bulk outcome applies", async ({ page }) => {
@@ -258,7 +269,7 @@ test("A02 — Bad number bulk outcome applies", async ({ page }) => {
     contactName: { first: "Bad", last: "NumberA02" },
     messages: [{ direction: "inbound", body: "a02 probe", createdAtOffsetMin: -2 }],
   });
-  await runBulkOutcome(page, thread.contactName, "Bad number", "A02");
+  await runBulkOutcome(page, thread.contactName, "Bad number", "A02", thread.propertyId, { outreach_dispo: "bad_number" });
 });
 
 test("A03 — Not interested bulk outcome applies", async ({ page }) => {
@@ -268,7 +279,7 @@ test("A03 — Not interested bulk outcome applies", async ({ page }) => {
     contactName: { first: "Not", last: "InterestedA03" },
     messages: [{ direction: "inbound", body: "a03 probe", createdAtOffsetMin: -2 }],
   });
-  await runBulkOutcome(page, thread.contactName, "Not interested", "A03");
+  await runBulkOutcome(page, thread.contactName, "Not interested", "A03", thread.propertyId, { outreach_dispo: "not_interested" });
 });
 
 test("A05 — Needs sequence bulk outcome applies", async ({ page }) => {
@@ -278,7 +289,7 @@ test("A05 — Needs sequence bulk outcome applies", async ({ page }) => {
     contactName: { first: "Needs", last: "SequenceA05" },
     messages: [{ direction: "inbound", body: "a05 probe", createdAtOffsetMin: -2 }],
   });
-  await runBulkOutcome(page, thread.contactName, "Needs sequence", "A05");
+  await runBulkOutcome(page, thread.contactName, "Needs sequence", "A05", thread.propertyId, { outreach_dispo: "needs_sequence" });
 });
 
 test("A06 — SMS opt-out bulk outcome applies", async ({ page }) => {
@@ -288,7 +299,11 @@ test("A06 — SMS opt-out bulk outcome applies", async ({ page }) => {
     contactName: { first: "Opt", last: "OutA06" },
     messages: [{ direction: "inbound", body: "a06 probe", createdAtOffsetMin: -2 }],
   });
-  await runBulkOutcome(page, thread.contactName, "SMS opt-out", "A06");
+  await runBulkOutcome(page, thread.contactName, "SMS opt-out", "A06", thread.propertyId, { outreach_dispo: "opted_out" });
+  await expect(async () => {
+    const { data, error } = await admin.from("contacts").select("sms_opted_out").eq("id", thread.contactId).single();
+    expect(error).toBeNull(); expect(data?.sms_opted_out).toBe(true);
+  }).toPass({ timeout: 15_000 });
 });
 
 test("A07 — Permanent DNC action is absent (gated)", async ({ page }) => {
@@ -328,9 +343,8 @@ test("A10 — Assign to a teammate bulk action applies", async ({ page }) => {
   await expect(configDialog).toBeVisible();
   const assigneeSelect = configDialog.getByLabel("Assign to");
   await expect(assigneeSelect.locator("option")).not.toHaveCount(0);
-  const options = await assigneeSelect.locator("option").allTextContents();
-  const teammateOption = options.find((label) => label.toLowerCase().includes(TEST_ASSIGNEE_EMAIL.split("@")[0].toLowerCase()));
-  await assigneeSelect.selectOption(teammateOption ? { label: teammateOption } : { label: "Unassigned" });
+  const teammateId = await ensureTestUser(admin, { principal: "assignee" });
+  await assigneeSelect.selectOption(teammateId);
   await configDialog.getByRole("button", { name: "Review assignment" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Review bulk action" });
@@ -339,6 +353,10 @@ test("A10 — Assign to a teammate bulk action applies", async ({ page }) => {
   await applyButton.click();
   await expect(page.getByText(/Action (accepted|succeeded|finished)/i)).toBeVisible({ timeout: 15_000 });
 
+  await expect(async () => {
+    const { data, error } = await admin.from("properties").select("assigned_user_id").eq("id", thread.propertyId).single();
+    expect(error).toBeNull(); expect(data?.assigned_user_id).toBe(teammateId);
+  }).toPass({ timeout: 15_000 });
   recordRowOutcome({ id: "A10", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::A10" });
 });
 
@@ -352,5 +370,5 @@ test("A11 — Clear assignment (unassign) bulk action applies", async ({ page })
     assigneeId: testUserId,
   });
 
-  await runBulkOutcome(page, thread.contactName, "Clear assignment", "A11");
+  await runBulkOutcome(page, thread.contactName, "Clear assignment", "A11", thread.propertyId, { assigned_user_id: null });
 });
