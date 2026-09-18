@@ -42,6 +42,11 @@ test("cleanup requires source deletion plus a meaningful private projection drai
   assert.match(source, /decodeAcceptanceProjectionState/);
   assert.match(source, /isAcceptanceProjectionDrained/);
   assert.match(source, /const probe = await openProjectionProbe\(\);[\s\S]*?deleteOrgScopedFixtureRows/);
+  assert.match(source, /readCleanupProtection/);
+  assert.match(source, /is_dnc_locked/, "cleanup must inspect permanent DNC locks before mutation");
+  assert.match(source, /retainedContactIds/);
+  assert.match(source, /deleteDncAwareFixtureRows/);
+  assert.match(source, /\.eq\("is_dnc_locked", false\)/);
   assert.doesNotMatch(source, /seed(?:Sender|ProviderCampaign)Catalog/);
   assert.doesNotMatch(source, /\.rpc\(["']reset_tenant_tables/);
 });

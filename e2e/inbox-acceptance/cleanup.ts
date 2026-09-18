@@ -30,6 +30,12 @@ const ACCEPTANCE_DATABASE_MARKER =
 const DRAIN_ATTEMPTS = 40;
 const DRAIN_INTERVAL_MS = 250;
 
+type CleanupProtection = {
+  lockedPropertyIds: Set<string>;
+  retainedContactIds: Set<string>;
+  retainedPropertyIds: Set<string>;
+};
+
 export type AcceptanceProjectionTarget =
   | { kind: "known_conversation"; id: string; unread: boolean }
   | { kind: "unknown_sender"; rawSender: string; dismissed: boolean };
@@ -129,6 +135,174 @@ async function openProjectionProbe(): Promise<Client> {
     throw error;
   }
   return client;
+}
+
+/**
+ * Read the permanent-DNC rows before any source delete. A DNC update is an
+ * intentional compliance lock: the properties trigger rejects both mutation
+ * and deletion, and deleting a linked contact would make PostgreSQL attempt
+ * the same forbidden property update through ON DELETE SET NULL. Acceptance
+ * cleanup therefore retains those exact rows and removes only the ordinary
+ * fixture rows around them.
+ */
+async function readCleanupProtection(
+  admin: SupabaseClient<Database>,
+  orgId: string,
+): Promise<CleanupProtection> {
+  const { data: lockedProperties, error: lockedPropertiesError } = await admin
+    .from("properties")
+    .select("id,homeowner_contact_id")
+    .eq("org_id", orgId)
+    .eq("is_dnc_locked", true);
+  if (lockedPropertiesError) {
+    throw new Error(
+      `Inbox acceptance cleanup could not inspect locked properties: ${lockedPropertiesError.message}`,
+    );
+  }
+
+  const lockedPropertyIds = new Set(
+    (lockedProperties ?? []).map((row) => row.id),
+  );
+  const retainedContactIds = new Set(
+    (lockedProperties ?? [])
+      .map((row) => row.homeowner_contact_id)
+      .filter((id): id is string => typeof id === "string"),
+  );
+
+  const { data: contacts, error: contactsError } = await admin
+    .from("contacts")
+    .select("id,do_not_contact")
+    .eq("org_id", orgId);
+  if (contactsError) {
+    throw new Error(
+      `Inbox acceptance cleanup could not inspect DNC contacts: ${contactsError.message}`,
+    );
+  }
+  for (const contact of contacts ?? []) {
+    if (contact.do_not_contact) retainedContactIds.add(contact.id);
+  }
+
+  const { data: retainedProperties, error: leadEventsError } = await admin
+    .from("lead_events")
+    .select("property_id")
+    .eq("org_id", orgId);
+  if (leadEventsError) {
+    throw new Error(
+      `Inbox acceptance cleanup could not inspect lead-event property references: ${leadEventsError.message}`,
+    );
+  }
+  const retainedPropertyIds = new Set(
+    (retainedProperties ?? [])
+      .map((row) => row.property_id)
+      .filter((id): id is string => typeof id === "string"),
+  );
+
+  return { lockedPropertyIds, retainedContactIds, retainedPropertyIds };
+}
+
+function addIdExclusion<T extends { not: (column: string, operator: string, value: string) => T }>(
+  query: T,
+  ids: Set<string>,
+): T {
+  return ids.size === 0 ? query : query.not("id", "in", `(${[...ids].join(",")})`);
+}
+
+/**
+ * DNC-aware equivalent of deleteOrgScopedFixtureRows. It deliberately uses
+ * the same ordinary source deletes and leaves all locked properties and
+ * their compliance contacts untouched. No trigger/session_replication_role
+ * bypass is available here.
+ */
+async function deleteDncAwareFixtureRows(
+  admin: SupabaseClient<Database>,
+  orgId: string,
+  protection: CleanupProtection,
+): Promise<Set<string>> {
+  for (const table of ["messages", "notifications"] as const) {
+    const { error } = await admin.from(table).delete().eq("org_id", orgId);
+    if (error) {
+      throw new Error(
+        `Inbox acceptance DNC-aware cleanup failed to clear ${table}: ${error.message}`,
+      );
+    }
+  }
+
+  const retainedPropertyIds = new Set(
+    protection.retainedPropertyIds,
+  );
+  for (const id of protection.lockedPropertyIds) retainedPropertyIds.add(id);
+
+  // Only unlocked properties are eligible for the ordinary unlink. Locked
+  // DNC properties must retain their relationship and audit state.
+  const { error: unlinkError } = await admin
+    .from("properties")
+    .update({ homeowner_contact_id: null, agent_contact_id: null })
+    .eq("org_id", orgId)
+    .eq("is_dnc_locked", false);
+  if (unlinkError) {
+    throw new Error(
+      `Inbox acceptance DNC-aware cleanup failed to unlink unlocked properties: ${unlinkError.message}`,
+    );
+  }
+
+  let contactsQuery = admin.from("contacts").delete().eq("org_id", orgId);
+  contactsQuery = addIdExclusion(contactsQuery, protection.retainedContactIds);
+  const { error: contactsError } = await contactsQuery;
+  if (contactsError) {
+    throw new Error(
+      `Inbox acceptance DNC-aware cleanup failed to clear ordinary contacts: ${contactsError.message}`,
+    );
+  }
+
+  let propertiesQuery = admin
+    .from("properties")
+    .delete()
+    .eq("org_id", orgId)
+    .eq("is_dnc_locked", false);
+  propertiesQuery = addIdExclusion(propertiesQuery, retainedPropertyIds);
+  const { error: propertiesError } = await propertiesQuery;
+  if (propertiesError) {
+    throw new Error(
+      `Inbox acceptance DNC-aware cleanup failed to clear ordinary properties: ${propertiesError.message}`,
+    );
+  }
+  return retainedPropertyIds;
+}
+
+async function countCleanableRows(
+  admin: SupabaseClient<Database>,
+  orgId: string,
+  retainedPropertyIds: Set<string>,
+  retainedContactIds: Set<string>,
+): Promise<number> {
+  let total = 0;
+  for (const table of ["messages", "notifications"] as const) {
+    const { count, error } = await admin
+      .from(table)
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", orgId);
+    if (error) throw new Error(`Inbox acceptance cleanup could not count ${table}: ${error.message}`);
+    total += count ?? 0;
+  }
+
+  let contactsQuery = admin
+    .from("contacts")
+    .select("id", { count: "exact", head: true })
+    .eq("org_id", orgId);
+  contactsQuery = addIdExclusion(contactsQuery, retainedContactIds);
+  const { count: contactsCount, error: contactsError } = await contactsQuery;
+  if (contactsError) throw new Error(`Inbox acceptance cleanup could not count ordinary contacts: ${contactsError.message}`);
+  total += contactsCount ?? 0;
+
+  let propertiesQuery = admin
+    .from("properties")
+    .select("id", { count: "exact", head: true })
+    .eq("org_id", orgId)
+    .eq("is_dnc_locked", false);
+  propertiesQuery = addIdExclusion(propertiesQuery, retainedPropertyIds);
+  const { count: propertiesCount, error: propertiesError } = await propertiesQuery;
+  if (propertiesError) throw new Error(`Inbox acceptance cleanup could not count ordinary properties: ${propertiesError.message}`);
+  return total + (propertiesCount ?? 0);
 }
 
 /**
@@ -237,14 +411,34 @@ export async function resetAcceptanceFixture(
   admin: SupabaseClient<Database>,
   orgId: string = DEFAULT_ORG_ID,
 ): Promise<void> {
+  if (orgId !== DEFAULT_ORG_ID) {
+    throw new Error(
+      "Inbox acceptance cleanup only permits the checked-in disposable acceptance organization.",
+    );
+  }
   // Verify target identity before the first mutating Supabase request. A
   // misbound read probe must never follow a destructive cleanup call.
   const probe = await openProjectionProbe();
   let lastState: AcceptanceProjectionState | undefined;
   try {
-    await deleteOrgScopedFixtureRows(admin, orgId);
+    const protection = await readCleanupProtection(admin, orgId);
+    let retainedPropertyIds = new Set(protection.retainedPropertyIds);
+    if (protection.lockedPropertyIds.size === 0 && protection.retainedContactIds.size === 0) {
+      await deleteOrgScopedFixtureRows(admin, orgId);
+    } else {
+      retainedPropertyIds = await deleteDncAwareFixtureRows(admin, orgId, protection);
+    }
 
-    const remaining = await countOrgScopedFixtureRows(admin, orgId);
+    // Keep the existing org-scoped count as a diagnostic contract. A
+    // permanent-DNC row is expected residue; only ordinary rows are required
+    // to be gone before the projection drain begins.
+    await countOrgScopedFixtureRows(admin, orgId);
+    const remaining = await countCleanableRows(
+      admin,
+      orgId,
+      retainedPropertyIds,
+      protection.retainedContactIds,
+    );
     if (remaining !== 0) {
       throw new Error(
         `Inbox acceptance cleanup left ${remaining} canonical fixture rows for org ${orgId}.`,
