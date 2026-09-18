@@ -41,12 +41,11 @@ CREATE TRIGGER immutable_saved_action_version BEFORE UPDATE OR DELETE ON inbox_s
 -- feeding the snapshot into parseInboxActionIntent). Mirrors the allowed
 -- step-type/ordering/gating rules inbox_action_api.prepare() enforces for
 -- the metadata lane (experiments/inbox-operation-preparation/setup.sql):
--- only 'outcome'+'assign' are wired to any executor today; 'promote',
--- 'dismiss_unknown' and 'restore_unknown' are typed in action-definition.ts
--- but have no executor, so they are disabled gated step types here too.
--- 'review_reply' hands off to the separate reply prepare/accept lane and so
--- may only ever appear alone. dnc stays permanently gated off (matches
--- inbox_action_api.prepare's 'permanent_dnc_not_enabled').
+-- outcome, assignment, promotion, and unknown-sender commands are wired to
+-- the durable metadata executor. A final 'review_reply' is a hand-off to the
+-- separate reply prepare/accept lane; it may follow a metadata prefix but is
+-- never accepted or sent as part of that metadata operation. dnc stays
+-- permanently gated off (matches inbox_action_api.prepare).
 CREATE FUNCTION inbox_saved_actions.validate_definition(o uuid,definition jsonb) RETURNS void
 LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE step jsonb;types text[];assignee uuid;
@@ -57,22 +56,31 @@ BEGIN
   RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';
  END IF;
  SELECT array_agg(value->>'type') INTO types FROM jsonb_array_elements(definition->'steps');
- IF 'review_reply'=ANY(types) THEN
-  IF array_length(types,1)<>1 THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';END IF;
-  step:=definition->'steps'->0;
-  IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR NOT(step ? 'text')
-   OR jsonb_typeof(step->'text') IS DISTINCT FROM 'string' OR length(step->>'text') NOT BETWEEN 1 AND 1600 THEN
-   RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';
-  END IF;
-  RETURN;
- END IF;
- IF EXISTS(SELECT 1 FROM unnest(types) t WHERE t NOT IN ('outcome','assign')) THEN
+ IF EXISTS(SELECT 1 FROM unnest(types) t WHERE t NOT IN ('outcome','assign','promote','dismiss_unknown','restore_unknown','review_reply')) THEN
   RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_TYPE_DISABLED';
  END IF;
- IF array_length(types,1)>2 OR (SELECT count(*) FROM unnest(types) t WHERE t='outcome')>1 OR (SELECT count(*) FROM unnest(types) t WHERE t='assign')>1 THEN
+ -- This mirrors action-definition.ts: metadata may contain one of each
+ -- supported command, with outcome before assignment, and review_reply is an
+ -- optional final hand-off. It is deliberately not limited to the old
+ -- outcome/assign pair; saved definitions must use the same grammar as the
+ -- inline prepare envelope.
+ IF (SELECT count(*) FROM unnest(types) t WHERE t='outcome')>1
+  OR (SELECT count(*) FROM unnest(types) t WHERE t='assign')>1
+  OR (SELECT count(*) FROM unnest(types) t WHERE t='promote')>1
+  OR (SELECT count(*) FROM unnest(types) t WHERE t IN ('dismiss_unknown','restore_unknown'))>1
+  OR (SELECT count(*) FROM unnest(types) t WHERE t='review_reply')>1 THEN
   RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
  END IF;
- IF array_length(types,1)=2 AND types[1]<>'outcome' THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';END IF;
+ IF 'review_reply'=ANY(types) AND types[array_length(types,1)]<>'review_reply' THEN
+  RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
+ END IF;
+ IF array_position(types,'assign') IS NOT NULL
+  AND (array_position(types,'outcome') IS NULL OR array_position(types,'outcome')>array_position(types,'assign')) THEN
+  RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
+ END IF;
+ IF array_position(types,'dismiss_unknown') IS NOT NULL AND array_position(types,'restore_unknown') IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
+ END IF;
  FOR step IN SELECT value FROM jsonb_array_elements(definition->'steps') LOOP
   IF step->>'type'='outcome' THEN
    IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR NOT(step ? 'value') THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';END IF;
@@ -86,6 +94,13 @@ BEGIN
      RAISE EXCEPTION 'INBOX_SAVED_ACTION_ASSIGNEE_UNAVAILABLE';
     END IF;
    ELSIF step->'userId' IS DISTINCT FROM 'null'::jsonb THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';
+   END IF;
+  ELSIF step->>'type' IN ('promote','dismiss_unknown','restore_unknown') THEN
+   IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>1 OR NOT(step ? 'type') THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';END IF;
+  ELSIF step->>'type'='review_reply' THEN
+   IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR NOT(step ? 'text')
+    OR jsonb_typeof(step->'text') IS DISTINCT FROM 'string' OR length(btrim(step->>'text')) NOT BETWEEN 1 AND 1600 THEN
+    RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';
    END IF;
   ELSE RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_TYPE_DISABLED';
   END IF;

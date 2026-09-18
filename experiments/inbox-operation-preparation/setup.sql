@@ -73,27 +73,29 @@ BEGIN
  definition:=intent->'definition';
  IF jsonb_typeof(definition) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(definition))<>2 OR definition->'version' IS DISTINCT FROM '1'::jsonb OR jsonb_typeof(definition->'steps') IS DISTINCT FROM 'array' OR jsonb_array_length(definition->'steps') NOT BETWEEN 1 AND 5 THEN RAISE EXCEPTION 'Unsupported action definition';END IF;
  FOR step IN SELECT value FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY q(value,position) ORDER BY position LOOP
-  IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 THEN RAISE EXCEPTION 'Unsupported action step';END IF;
+  IF jsonb_typeof(step) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION 'Unsupported action step';END IF;
   IF step->>'type'='outcome' THEN
-   IF has_outcome OR has_assignment OR NOT(step ? 'value') THEN RAISE EXCEPTION 'Invalid action order';END IF;has_outcome:=true;
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR has_outcome OR has_assignment OR NOT(step ? 'value') THEN RAISE EXCEPTION 'Invalid action order';END IF;has_outcome:=true;
    IF step->>'value'='dnc' THEN RAISE EXCEPTION 'permanent_dnc_not_enabled';END IF;
    IF step->>'value' IS NULL OR step->>'value' NOT IN ('wrong_number','bad_number','not_interested','needs_sequence','nurture','opted_out') THEN RAISE EXCEPTION 'Unsupported outcome';END IF;
    has_sms:=step->>'value'='opted_out';
   ELSIF step->>'type'='assign' THEN
-   IF has_assignment OR NOT(step ? 'userId') THEN RAISE EXCEPTION 'Invalid assignment';END IF;has_assignment:=true;assignee:=(step->>'userId')::uuid;
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR has_assignment OR NOT(step ? 'userId') THEN RAISE EXCEPTION 'Invalid assignment';END IF;has_assignment:=true;assignee:=(step->>'userId')::uuid;
    IF assignee IS NOT NULL THEN
     PERFORM 1 FROM inbox_t2_bridge.access_epochs WHERE user_id=assignee FOR SHARE;
     IF NOT FOUND THEN RAISE EXCEPTION 'assignee_unavailable';END IF;
    END IF;
    IF assignee IS NOT NULL AND NOT EXISTS(SELECT 1 FROM public.memberships WHERE org_id=o AND user_id=assignee AND access_status='active' AND deletion_prepared_at IS NULL AND (access_expires_at IS NULL OR access_expires_at>clock_timestamp())) THEN RAISE EXCEPTION 'assignee_unavailable';END IF;
   ELSIF step->>'type'='promote' THEN
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>1 THEN RAISE EXCEPTION 'Unsupported action step';END IF;
    IF has_promotion OR has_assignment THEN RAISE EXCEPTION 'Invalid action order';END IF;has_promotion:=true;
   ELSIF step->>'type' IN ('dismiss_unknown','restore_unknown') THEN
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>1 THEN RAISE EXCEPTION 'Unsupported action step';END IF;
    IF has_assignment OR has_outcome AND has_assignment THEN RAISE EXCEPTION 'Invalid action order';END IF;
    IF unknown_action IS NOT NULL AND unknown_action IS DISTINCT FROM step->>'type' THEN RAISE EXCEPTION 'Invalid unknown action order';END IF;
    unknown_action:=step->>'type';
   ELSIF step->>'type'='review_reply' THEN
-   IF step->>'text' IS NULL OR btrim(step->>'text')='' OR length(step->>'text')>1600 THEN RAISE EXCEPTION 'Unsupported review reply step';END IF;
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR step->>'text' IS NULL OR btrim(step->>'text')='' OR length(btrim(step->>'text'))>1600 THEN RAISE EXCEPTION 'Unsupported review reply step';END IF;
    follow_up_template:=btrim(step->>'text');
   ELSE RAISE EXCEPTION 'Unsupported action step';END IF;
  END LOOP;
@@ -169,8 +171,11 @@ BEGIN
  END LOOP;
  FOR row IN SELECT key,value FROM jsonb_each(plans) ORDER BY key LOOP
   metadata_ordinal:=0;
- FOR step IN SELECT value||jsonb_build_object('ordinal',ordinality-1) FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY LOOP
-   IF step->>'type'='review_reply' THEN CONTINUE; END IF;
+  FOR step IN SELECT value||jsonb_build_object('ordinal',ordinality-1) FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY LOOP
+   -- Unknown-sender commands have no property effect or property payload.
+   -- Mixed selections still prepare their frozen sender-group effect in the
+   -- separate loop below; never route one through apply_property_step.
+   IF step->>'type' NOT IN ('outcome','assign','promote') THEN CONTINUE; END IF;
    step:=step||jsonb_build_object('ordinal',metadata_ordinal);
    SELECT row.value||jsonb_build_object('targets',jsonb_agg(jsonb_build_object('conversation_id',i->>'target_id','revision',v.revision::text,'valid_until',i->'resolution'->'valid_until') ORDER BY i->>'target_id')) INTO plan
     FROM jsonb_array_elements(items) i JOIN inbox_operation_domain.target_versions v ON v.org_id=o AND v.conversation_id=(i->>'target_id')::uuid WHERE i->>'exclusion_code' IS NULL AND i->'resolution'->>'property_id'=row.key;
@@ -181,7 +186,10 @@ BEGIN
  IF unknown_action IS NOT NULL THEN
   FOR row IN SELECT i FROM jsonb_array_elements(items) i WHERE i->>'kind'='unknown_sender_group' AND i->>'exclusion_code' IS NULL ORDER BY i->>'target_id' LOOP
    metadata_ordinal:=0;
-   effects:=effects||jsonb_build_array(jsonb_build_object('effect_key','unknown:'||(row.i->>'target_id'),'ordinal',metadata_ordinal,'action',unknown_action,'payload',row.i->'resolution'->'unknown_action','dependencies',jsonb_build_object('unknown_action',row.i->'resolution'->'unknown_action'),'item_ids',jsonb_build_array(row.i->>'id')));
+   -- The item resolution is already the frozen unknown-action snapshot.
+   -- Pass that object directly to apply_unknown_step; an extra
+   -- resolution.unknown_action lookup would produce a NULL payload.
+   effects:=effects||jsonb_build_array(jsonb_build_object('effect_key','unknown:'||(row.i->>'target_id'),'ordinal',metadata_ordinal,'action',unknown_action,'payload',row.i->'resolution','dependencies',jsonb_build_object('unknown_action',row.i->'resolution'),'item_ids',jsonb_build_array(row.i->>'id')));
    metadata_effect_count:=metadata_effect_count+1;metadata_ordinal:=metadata_ordinal+1;
   END LOOP;
  END IF;
