@@ -19,7 +19,11 @@ services:
         paths:
           - /rest/v1/
   - name: release-realtime
-    url: http://realtime:4000/socket
+    # The upstream Host must resolve to the seeded tenant external_id. Kong
+    # therefore sends Host: realtime-dev while retaining Realtime's /socket
+    # mount for the WebSocket endpoint.
+    url: http://realtime-dev:4000/socket
+    protocol: ws
     routes:
       - name: release-realtime-v1
         strip_path: true

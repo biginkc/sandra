@@ -185,9 +185,6 @@ def main() -> int:
     openapi, _ = request("/rest/v1/")
     if openapi != 200:
         raise RuntimeError(f"PostgREST probe failed: {openapi}")
-    realtime_route = raw_status("/realtime/v1/")
-    if realtime_route != 200:
-        raise RuntimeError(f"Realtime gateway route failed: {realtime_route}")
     realtime_websocket = realtime_websocket_status()
     if realtime_websocket != 101:
         raise RuntimeError(
@@ -197,7 +194,7 @@ def main() -> int:
     projection_health_status = raw_url_status("http://127.0.0.1:59081/health")
     if projection_health_status != 200:
         raise RuntimeError(f"Projection worker health failed: {projection_health_status}")
-    result: dict = {"status": "PASS", "identity": identity, "base_url": BASE, "binding": "api:54321<->db:54322", "auth": "healthy", "rest": "openapi", "realtime": "running", "realtime_route": 200, "realtime_websocket": 101, "projection": "healthy", "bounded_services": ["db", "auth", "rest", "realtime", "projection", "gateway"]}
+    result: dict = {"status": "PASS", "identity": identity, "base_url": BASE, "binding": "api:54321<->db:54322", "auth": "healthy", "rest": "openapi", "realtime": "running", "realtime_websocket": 101, "projection": "healthy", "bounded_services": ["db", "auth", "rest", "realtime", "projection", "gateway"]}
     email = os.environ.get("INBOX_HTTP_USER_EMAIL")
     password = os.environ.get("INBOX_HTTP_USER_PASSWORD")
     if email and password:

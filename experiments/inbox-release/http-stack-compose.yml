@@ -129,7 +129,10 @@ services:
         condition: service_started
     networks:
       release_http:
-        aliases: [realtime]
+        # Realtime derives the tenant external_id from the upstream host. The
+        # disposable database seeds realtime-dev; keep the short alias for
+        # existing service references while making the tenant alias explicit.
+        aliases: [realtime, realtime-dev]
     labels:
       purpose: sandra-inbox-release-http
       owner: release-infra
