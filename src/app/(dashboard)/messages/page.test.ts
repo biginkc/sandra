@@ -1,5 +1,5 @@
 import type { ReactElement } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Thread } from "@/lib/messages/list-threads";
 
@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   fetchInboxDetail: vi.fn(),
   markMessagesReadForThread: vi.fn(),
   canonicalizeThreadId: vi.fn(),
+  isInboxPilotRequest: vi.fn(),
   createClient: vi.fn(),
   createAdminClient: vi.fn(),
   getCallerMemberships: vi.fn(),
@@ -113,6 +114,10 @@ vi.mock("@/lib/messages/threading", () => ({
   canonicalizeThreadId: mocks.canonicalizeThreadId,
 }));
 
+vi.mock("@/lib/inbox/pilot-cohort", () => ({
+  isInboxPilotRequest: mocks.isInboxPilotRequest,
+}));
+
 vi.mock("next/navigation", () => ({
   notFound: mocks.notFound,
   redirect: mocks.redirect,
@@ -172,8 +177,9 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
 describe("MessagesPage filter-count boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     mocks.effectivePage = null;
-  mocks.createClient.mockResolvedValue({
+    mocks.createClient.mockResolvedValue({
       auth: {
         getUser: vi.fn(async () => ({
           data: { user: { id: "user-1" } },
@@ -216,7 +222,10 @@ describe("MessagesPage filter-count boundary", () => {
     mocks.listUnknownSenders.mockResolvedValue([]);
     mocks.fetchInboxDetail.mockResolvedValue(null);
     mocks.canonicalizeThreadId.mockResolvedValue(null);
+    mocks.isInboxPilotRequest.mockResolvedValue(false);
   });
+
+  afterEach(() => vi.unstubAllEnvs());
 
   it("passes counts and threads from the same visible non-noise inbox set", async () => {
     mocks.listThreads.mockResolvedValue([
@@ -315,6 +324,23 @@ describe("MessagesPage filter-count boundary", () => {
       ).resolves.toBeTruthy();
       expect(mocks.notFound).not.toHaveBeenCalled();
     }
+  });
+
+  it("passes the Inbox overview entry only to an admitted pilot when the server flag is on", async () => {
+    vi.stubEnv("INBOX_WORKSPACE_SERVER_ENABLED", "1");
+    mocks.isInboxPilotRequest.mockResolvedValue(true);
+    mocks.listThreads.mockResolvedValue([]);
+
+    const admitted = (await MessagesPage({
+      searchParams: Promise.resolve({}),
+    })) as ReactElement<{ inboxWorkspaceEntryEnabled: boolean }>;
+    expect(admitted.props.inboxWorkspaceEntryEnabled).toBe(true);
+
+    mocks.isInboxPilotRequest.mockResolvedValue(false);
+    const denied = (await MessagesPage({
+      searchParams: Promise.resolve({}),
+    })) as ReactElement<{ inboxWorkspaceEntryEnabled: boolean }>;
+    expect(denied.props.inboxWorkspaceEntryEnabled).toBe(false);
   });
 
   it("treats Sandra Dispo as pending AI review work, including DNC reviews", async () => {

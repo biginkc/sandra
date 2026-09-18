@@ -60,6 +60,8 @@ type Props = {
   queueStatsFailed?: boolean;
   /** Request-scoped clock so SSR and hydration render identical relative times. */
   nowMs: number;
+  /** Server-gated entry into the new Inbox overview. */
+  inboxWorkspaceEntryEnabled?: boolean;
 };
 
 const THREAD_FILTERS = new Set<InboxFilter>([
@@ -95,6 +97,7 @@ export function CockpitView({
   inboxTotal: initialTotal = initialThreads.length,
   queueLoadFailed = false,
   queueStatsFailed = false,
+  inboxWorkspaceEntryEnabled = false,
   nowMs,
 }: Props) {
   const router = useRouter();
@@ -440,15 +443,26 @@ export function CockpitView({
         title="Messages"
         description="Live conversations on the Inbox tab; queued bulk sends on the Outbox tab."
         actions={
-          <button
-            type="button"
-            data-testid="messages-new-message"
-            onClick={() => router.push(`/leads?compose=1`)}
-            className="inline-flex min-h-11 items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90"
-          >
-            <PlusIcon className="h-4 w-4" />
-            New Message
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {inboxWorkspaceEntryEnabled && (
+              <a
+                href="/inbox/overview"
+                data-testid="messages-inbox-overview-link"
+                className="inline-flex min-h-11 items-center rounded-full border border-primary px-5 py-2.5 text-[12px] font-bold text-primary transition-colors hover:bg-primary/10"
+              >
+                Open Inbox overview
+              </a>
+            )}
+            <button
+              type="button"
+              data-testid="messages-new-message"
+              onClick={() => router.push(`/leads?compose=1`)}
+              className="inline-flex min-h-11 items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-[12px] font-bold text-primary-foreground transition-opacity hover:opacity-90"
+            >
+              <PlusIcon className="h-4 w-4" />
+              New Message
+            </button>
+          </div>
         }
       />
 

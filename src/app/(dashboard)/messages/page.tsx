@@ -7,6 +7,7 @@ import {
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
 import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
 import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
+import { isInboxPilotRequest, type InboxPilotAuthClient } from "@/lib/inbox/pilot-cohort";
 import {
   listThreadPage,
   type ThreadPageFilter,
@@ -107,6 +108,17 @@ async function renderMessagesPage(
     redirect(`/messages?${canonical.toString()}`);
   }
   const currentUserId = currentUser?.id ?? null;
+  let inboxWorkspaceEntryEnabled = false;
+  if (process.env.INBOX_WORKSPACE_SERVER_ENABLED === "1" && currentUser !== null) {
+    try {
+      inboxWorkspaceEntryEnabled = await isInboxPilotRequest(
+        supabase as unknown as InboxPilotAuthClient,
+      );
+    } catch {
+      // The legacy Messages/Outbox surface stays available if the optional
+      // Inbox admission probe is temporarily unavailable.
+    }
+  }
   const effectiveFilter = normalizeInboxFilterForUser(filter, currentUserId);
 
   // Translate whatever the URL carries (canonical conversation UUID, or a
@@ -239,6 +251,7 @@ async function renderMessagesPage(
       inboxTotal={threadPage.total}
       queueLoadFailed={!queuedResult.ok}
       queueStatsFailed={!queueStatsResult.ok}
+      inboxWorkspaceEntryEnabled={inboxWorkspaceEntryEnabled}
       nowMs={requestNowMs}
     />
   );

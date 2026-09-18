@@ -122,6 +122,17 @@ const baseProps = {
 };
 
 describe("<CockpitView /> shell — tabs + cadence", () => {
+  it("shows the pilot-gated Inbox overview entry without changing the legacy tabs", () => {
+    render(<CockpitView {...baseProps} activeTab="inbox" inboxWorkspaceEntryEnabled />);
+
+    expect(screen.getByRole("link", { name: "Open Inbox overview" })).toHaveAttribute(
+      "href",
+      "/inbox/overview",
+    );
+    expect(screen.getByTestId("tab-inbox")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("tab-outbox")).toHaveAttribute("aria-selected", "false");
+  });
+
   it("defaults to the Inbox tab when activeTab='inbox' (test 7)", () => {
     render(<CockpitView {...baseProps} activeTab="inbox" />);
 
