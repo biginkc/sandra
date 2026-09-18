@@ -273,6 +273,15 @@ export async function findRow(page, orgId, conversationId, { timeoutMs = 15_000 
   throw new WorkloadBlocked(`conversation ${conversationId} is absent after scanning the mounted authenticated workset`);
 }
 
+export async function waitForSelectionFeedback(page, selectedCount = 1) {
+  if (!Number.isSafeInteger(selectedCount) || selectedCount < 1) throw new TypeError("selectedCount must be a positive safe integer");
+  const feedback = page
+    .locator('section[aria-label="Conversation selection"] strong[aria-live="polite"]')
+    .filter({ hasText: new RegExp(`^${selectedCount} selected(?:\\s|·|$)`) });
+  await feedback.waitFor({ state: "visible", timeout: 5_000 });
+  return feedback;
+}
+
 async function terminalAction(page, operationId, deadline) {
   let latest;
   while (Date.now() < deadline) {
@@ -341,7 +350,7 @@ async function runCycle(browser, input, job, sample) {
     const checkbox = selectionRow.getByRole("checkbox", { name: /^Select / });
     await checkbox.check();
     await checkbox.waitFor({ state: "visible" });
-    await page.getByText("1 selected", { exact: false }).waitFor({ state: "visible", timeout: 5_000 });
+    await waitForSelectionFeedback(page);
     emitTiming(input.profile.name, "selection", performance.now() - selectionStart, sample);
 
     const actionKey = randomUUID();

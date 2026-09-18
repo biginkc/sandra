@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { findRow, nextVirtualScrollTop, planWork, WorkloadBlocked, waitForDetailState } from "./adapter.mjs";
+import { findRow, nextVirtualScrollTop, planWork, waitForDetailState, waitForSelectionFeedback, WorkloadBlocked } from "./adapter.mjs";
 
 const id = (number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
 
@@ -135,6 +135,28 @@ test("bounded row lookup stops when the list never reports a ready workset", asy
       () => findRow(page, id(901), id(902), { timeoutMs: 20 }),
       (error) => error instanceof WorkloadBlocked && /absent after scanning/.test(error.message),
     );
+  } finally {
+    await browser.close();
+  }
+});
+
+test("selection timing scopes the exact feedback node when the action rail repeats its text", async () => {
+  const { chromium } = await import("@playwright/test");
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  await page.setContent(`
+    <section aria-label="Conversation selection">
+      <strong aria-live="polite">1 selected</strong>
+    </section>
+    <aside aria-label="Actions for selection">
+      <p role="status">1 selected · click or drag</p>
+    </aside>
+  `);
+  try {
+    const feedback = await waitForSelectionFeedback(page);
+    assert.equal(await feedback.textContent(), "1 selected");
+    assert.equal(await page.locator('section[aria-label="Conversation selection"] strong[aria-live="polite"]').count(), 1);
+    assert.equal(await page.locator('aside[aria-label="Actions for selection"] p[role="status"]').count(), 1);
   } finally {
     await browser.close();
   }
