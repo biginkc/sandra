@@ -71,6 +71,11 @@ function failure(error: {
         if (["INBOX_ACTION_PREPARATION_UNAVAILABLE", "INBOX_ACTION_OPERATION_UNAVAILABLE"].includes(error.message ?? ""))
             throw new InboxActionApiError(404, "action_unavailable");
     }
+    // Half-enabled (admission closed) must be indistinguishable from the
+    // action flag being off entirely: the route returns the same 404 body and
+    // never leaks that the command family exists.
+    if (error.code === "55000")
+        throw new InboxActionApiError(404, "Not found");
     if (error.code === "P0001") {
         const conflicts: Record<string, string> = { INBOX_ACTION_PREPARATION_CHANGED: "preparation_changed", INBOX_ACTION_PREPARATION_EXPIRED_OR_EMPTY: "preparation_expired_or_empty", INBOX_ACTION_IDEMPOTENCY_MISMATCH: "idempotency_mismatch", "Preparation expired": "preparation_expired", "Idempotency conflict": "idempotency_conflict", INBOX_ACTION_ASSIGNEE_UNAVAILABLE: "assignee_unavailable", assignee_unavailable: "assignee_unavailable", permanent_dnc_not_enabled: "permanent_dnc_not_enabled", INBOX_SAVED_ACTION_DEFINITION_MISMATCH: "saved_action_definition_mismatch" };
         if (error.message && conflicts[error.message])

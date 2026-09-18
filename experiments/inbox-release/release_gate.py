@@ -700,6 +700,38 @@ def check_evidence(
     return result(overall, "required stress/recovery evidence evaluated", checks=checks)
 
 
+def reduce_gate_statuses(results: dict[str, Any], required: list[str]) -> dict[str, str]:
+    """Return every decisive status, including checks outside required_gates.
+
+    ``required_gates`` is a contract inventory, not a permission to hide a
+    failed prerequisite.  Candidate identity, source-manifest integrity and
+    the live rollback probe must remain decisive even if an older manifest
+    omitted one of those names.
+    """
+    decisive = set(required) | {
+        "candidate_identity",
+        "source_manifest",
+        "candidate_package",
+        "service_unit_checks",
+        "backend_packet",
+        "execution_stack",
+        "installed_schema_exact",
+        "acceptance_matrix",
+        "rollback_admission",
+        "rollback_receipt_read",
+    }
+    return {
+        key: value["status"]
+        for key, value in results.items()
+        if key in decisive and isinstance(value, dict) and isinstance(value.get("status"), str)
+    }
+
+
+def authoritative_rollback_gate(live_probe: dict[str, Any]) -> dict[str, Any]:
+    """Keep the release-database probe authoritative over fixture evidence."""
+    return live_probe
+
+
 def check_acceptance_matrix(candidate_sha: str) -> dict[str, Any]:
     matrix = ROOT / "docs" / "performance" / "inbox-redesign" / "acceptance-matrix.md"
     if not matrix.is_file():
@@ -839,10 +871,10 @@ def main() -> int:
             results["rollback_admission"] = result("FAIL", "release database identity or rollback admission proof failed", command=probe)
     else:
         results["rollback_admission"] = result("BLOCKED", "release database probe not requested")
-    # Keep the manifest key stable even though the implementation probe also
-    # reports command-admission status; otherwise a required gate could be
-    # accidentally omitted from the final status reduction.
-    results["rollback_receipt_read"] = results["rollback_admission"]
+    # Keep the live probe as the authoritative rollback gate.  Evidence files
+    # can document a separately reproduced HTTP fixture check, but they must
+    # never turn an unrun or failed release-database probe into a pass.
+    results["rollback_receipt_read"] = authoritative_rollback_gate(results["rollback_admission"])
     results["acceptance_matrix"] = check_acceptance_matrix(candidate_sha)
     evidence_result = check_evidence(args.evidence_dir, candidate_sha, manifest)
     results["evidence"] = evidence_result
@@ -860,17 +892,14 @@ def main() -> int:
     for gate in evidence_gates:
         check = evidence_checks.get(gate)
         if isinstance(check, dict):
-            results[gate] = result(check.get("status", "FAIL"), check.get("detail", "evidence gate evaluated"), path=check.get("path"))
+            evidence_result_key = "rollback_receipt_evidence" if gate == "rollback_receipt_read" else gate
+            results[evidence_result_key] = result(check.get("status", "FAIL"), check.get("detail", "evidence gate evaluated"), path=check.get("path"))
         else:
-            results[gate] = result("BLOCKED", "evidence gate was not evaluated by the aggregate checker")
+            evidence_result_key = "rollback_receipt_evidence" if gate == "rollback_receipt_read" else gate
+            results[evidence_result_key] = result("BLOCKED", "evidence gate was not evaluated by the aggregate checker")
     results["pilot_enablement"] = result("BLOCKED", "production deployment and pilot enablement are outside this harness")
 
-    required = set(manifest["required_gates"])
-    statuses = {
-        key: value["status"]
-        for key, value in results.items()
-        if key in required or key in {"candidate_package", "service_unit_checks", "backend_packet", "execution_stack", "installed_schema_exact", "acceptance_matrix"}
-    }
+    statuses = reduce_gate_statuses(results, manifest["required_gates"])
     failures = sorted(key for key, status in statuses.items() if status == "FAIL")
     blockers = sorted(key for key, status in statuses.items() if status == "BLOCKED")
     overall = "READY" if not failures and not blockers else ("FAIL" if failures else "BLOCKED")
