@@ -47,7 +47,8 @@
     "source_original_sha256": "7916e78557da25af1044c6a2c4697be06c48606776a3533ea876b039a2a28106",
     "fixture_guard": "install_fixture.identity",
     "rename_prefix": null,
-    "compiled_sha256": "7a26c3203e3e4bbfe52da1d8ac200c2bfdab4bb55a8da23ef08570d5875e056f"
+    "compiled_sha256": "7a26c3203e3e4bbfe52da1d8ac200c2bfdab4bb55a8da23ef08570d5875e056f",
+    "upgrade_name": "workset-updates"
   },
   {
     "path": "experiments/inbox-production-install/selection-review.sql",
@@ -55,6 +56,7 @@
     "source_file": "experiments/inbox-production-install/selection-review.sql",
     "source_sha256": "8c7d3492ec6766963e2d518d24b221316545f07bc1ba7923f25402dc23802dbd",
     "fixture_guard": "install_fixture.identity",
-    "compiled_sha256": "870ba50a93f81b469dae9dbf0a9c11f9f62541b0dab35d188b17ca34b6bf73a9"
+    "compiled_sha256": "870ba50a93f81b469dae9dbf0a9c11f9f62541b0dab35d188b17ca34b6bf73a9",
+    "upgrade_name": "selection-review"
   }
 ]

@@ -24,8 +24,11 @@ MANIFEST = HERE / "backend-operation-reply-manifest.json"
 sys.path.insert(0, str(ROOT / "experiments" / "inbox-projection" / "fixture"))
 from transaction_envelope import normalize
 
-RELEASE_DATABASE = "sandra_inbox_release_20260917"
-RELEASE_MARKER = "sandra-inbox-release-owned-synthetic"
+# Operation/reply SQL is consumed by the executable workers against the
+# separately owned HTTP fixture.  The read/install rehearsal database has a
+# different identity and must not be accepted by this packet.
+RELEASE_DATABASE = "postgres"
+RELEASE_MARKER = "sandra-inbox-http-owned-synthetic-20260917"
 SOURCE_COMMIT = "4850f8ceb6e993a9573639580dfe53cbfb86e5dd"  # coordinator integration exact snapshot
 
 SQL_SOURCES = [
@@ -76,7 +79,7 @@ RUNTIME_SOURCES = [
 ]
 
 GUARD = f"""DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'{RELEASE_DATABASE}' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='{RELEASE_MARKER}') THEN RAISE EXCEPTION 'Owned release fixture required';END IF;
+ IF current_user<>'postgres' OR current_database()<>'{RELEASE_DATABASE}' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='{RELEASE_MARKER}') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
 END $$;"""
 
 
@@ -229,7 +232,7 @@ def main() -> int:
         entry = {"name": name, "kind": "runtime", "path": path, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
         runtime_entries.append(entry)
 
-    packet = """-- GENERATED RELEASE OPERATION/REPLY PACKET. No production execution authorization.\n-- Target is the explicitly marked release database only.\nBEGIN;\nSET LOCAL lock_timeout='2s';\nSET LOCAL statement_timeout='30s';\n""" + "\n".join(sql_parts) + ADMISSION_OVERLAY + "\nCOMMIT;\n"
+    packet = """-- GENERATED RELEASE OPERATION/REPLY PACKET. No production execution authorization.\n-- Target is the explicitly marked HTTP fixture database only.\nBEGIN;\nSET LOCAL lock_timeout='2s';\nSET LOCAL statement_timeout='30s';\n""" + "\n".join(sql_parts) + ADMISSION_OVERLAY + "\nCOMMIT;\n"
     packet_hash = hashlib.sha256(packet.encode()).hexdigest()
     out = HERE / "generated"
     out.mkdir(exist_ok=True)
@@ -270,7 +273,13 @@ def main() -> int:
             "provider_traffic": False,
             "customer_sends": False,
         },
-        "safety": {"release_db": RELEASE_DATABASE, "release_marker": RELEASE_MARKER, "production_install": False, "provider_traffic": False, "customer_sends": False},
+        "safety": {
+            "target_database": RELEASE_DATABASE,
+            "target_marker": RELEASE_MARKER,
+            "production_install": False,
+            "provider_traffic": False,
+            "customer_sends": False,
+        },
     }
     MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps({"status": manifest["status"], "source_commit": actual, "sql_sources": len(source_entries), "runtime_sources": len(runtime_entries), "packet_sha256": packet_hash}, indent=2))

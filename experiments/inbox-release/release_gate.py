@@ -247,7 +247,7 @@ def verify_backend_packet() -> dict[str, Any]:
         "admit_command('action_saved_write')",
         "admit_command('reply_prepare')",
         "admit_command('reply_accept')",
-        "current_database()<>'sandra_inbox_release_20260917'",
+        "current_database()<>'postgres'",
         "install_fixture.identity",
     )
     missing = [needle for needle in required if needle not in sql]
@@ -400,7 +400,7 @@ def verify_execution_stack_manifest() -> dict[str, Any]:
     if not role_packet_path.is_file() or sha256(role_packet_path) != projection_order.get("packet_sha256"):
         return result("FAIL", "projection worker executable role packet is missing or hash-drifted")
     role_packet = role_packet_path.read_text()
-    if "current_database()<>'sandra_inbox_release_20260917'" not in role_packet or "marker='sandra-inbox-release-owned-synthetic'" not in role_packet or "CREATE ROLE inbox_projection_worker" not in role_packet or "inbox_t2_" in role_packet:
+    if "current_database()<>'postgres'" not in role_packet or "marker='sandra-inbox-http-owned-synthetic-20260917'" not in role_packet or "CREATE ROLE inbox_projection_worker" not in role_packet or "inbox_t2_" in role_packet:
         return result("FAIL", "projection worker role packet is not release-guarded")
     backend = load_json(HERE / "backend-operation-reply-manifest.json")
     backend_roles = {entry.get("path"): entry.get("sha256") for entry in backend.get("sql_sources", []) if isinstance(entry, dict)}
@@ -469,6 +469,29 @@ def verify_compiled_package() -> tuple[dict[str, Any], list[dict[str, Any]]]:
         return result("FAIL", "compiled package enables serving", commands=commands), commands
     if receipt.get("canonical_concurrent_indexes") != 7:
         return result("FAIL", "compiled package index count differs from reviewed candidate", commands=commands), commands
+    auth_upgrade_path = INSTALL / "generated" / "auth-upgrade.sql"
+    if not auth_upgrade_path.is_file():
+        return result("FAIL", "canonical authorization forward upgrade is missing", commands=commands), commands
+    auth_upgrade = auth_upgrade_path.read_text()
+    if re.search(r"\bCREATE\s+(?:SCHEMA|TABLE)\b", auth_upgrade, re.IGNORECASE) or "CREATE OR REPLACE FUNCTION inbox_bridge.authorize" not in auth_upgrade:
+        return result("FAIL", "canonical authorization forward upgrade is not OR REPLACE-only", commands=commands), commands
+    if "sandra_inbox_release_20260917" not in auth_upgrade or "sandra-inbox-release-owned-synthetic" not in auth_upgrade or "current_database()='postgres'" not in auth_upgrade or "sandra-inbox-http-owned-synthetic-20260917" not in auth_upgrade:
+        return result("FAIL", "canonical authorization forward upgrade lacks exact target identities", commands=commands), commands
+    upgrade_paths = [
+        INSTALL / "generated" / "read-upgrade-current.sql",
+        INSTALL / "generated" / "read-upgrade-workset-updates.sql",
+        INSTALL / "generated" / "read-upgrade-selection-review.sql",
+    ]
+    for upgrade_path in upgrade_paths:
+        if not upgrade_path.is_file():
+            return result("FAIL", "existing-schema read upgrade packet is missing", path=str(upgrade_path), commands=commands), commands
+        upgrade = upgrade_path.read_text()
+        if re.search(r"\bCREATE\s+(?:SCHEMA|TABLE)\b", upgrade, re.IGNORECASE):
+            return result("FAIL", "existing-schema read upgrade replays fresh-install DDL", path=str(upgrade_path), commands=commands), commands
+        if not re.search(r"\bCREATE\s+OR\s+REPLACE\s+FUNCTION\b", upgrade, re.IGNORECASE):
+            return result("FAIL", "existing-schema read upgrade has no replaceable function body", path=str(upgrade_path), commands=commands), commands
+        if "current_database()<>'sandra_inbox_release_20260917'" not in upgrade or "marker='sandra-inbox-release-owned-synthetic'" not in upgrade:
+            return result("FAIL", "default read upgrade is not guarded to the release rehearsal identity", path=str(upgrade_path), commands=commands), commands
     return (
         result(
             "PASS",

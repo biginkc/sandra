@@ -1,10 +1,9 @@
 {
-  "applied": true,
-  "correction": "exact private grants revocation and bounded cursor retention",
+  "status": "HISTORICAL_UNVERIFIED",
   "foundation_sha256": "27f4da86593eefd8b328bd760310d457ab03eff3470abb238f1278903037269d",
-  "companion_sha256": "ee05e2c30c3ee35a761cca7e1245076428276edc3f8954f1c5b6641234cff5fe",
-  "hardening_sha256": "4a1d6a89d263ff2b40949e313b14d90529eba69c38a9839b6fb3d0820f99944a",
+  "historical_companion_sha256": "ee05e2c30c3ee35a761cca7e1245076428276edc3f8954f1c5b6641234cff5fe",
+  "current_companion_sha256": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
   "preserved_serving_gate": true,
   "disabled_public_gate_verified": true,
-  "scope": "Private grants and retention forward correction after recorded initial installation; not a fresh reinstallation"
+  "scope": "Historical forward-correction receipt tied to the superseded read companion; it does not certify the current generated functions or an installed current-schema upgrade."
 }

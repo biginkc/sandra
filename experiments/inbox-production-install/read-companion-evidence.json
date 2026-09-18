@@ -1,43 +1,23 @@
 {
-  "installed_bodies_verified": 15,
-  "permissions": [
-    {
-      "anon": false,
-      "name": "inbox_acknowledge_read(uuid,integer)",
-      "service": false,
-      "authenticated": true
-    },
-    {
-      "anon": false,
-      "name": "inbox_history_page(uuid,uuid,uuid)",
-      "service": false,
-      "authenticated": true
-    },
-    {
-      "anon": false,
-      "name": "inbox_read_detail(uuid,uuid)",
-      "service": false,
-      "authenticated": true
-    },
-    {
-      "anon": false,
-      "name": "inbox_sync_finalize_v1(uuid,jsonb,integer,text,text)",
-      "service": false,
-      "authenticated": true
-    },
-    {
-      "anon": false,
-      "name": "inbox_sync_snapshot_v1(uuid)",
-      "service": false,
-      "authenticated": true
-    },
-    {
-      "anon": false,
-      "name": "inbox_unknown_history_page(uuid,uuid,uuid)",
-      "service": false,
-      "authenticated": true
-    }
-  ],
-  "compiled_sha256": "ee05e2c30c3ee35a761cca7e1245076428276edc3f8954f1c5b6641234cff5fe",
-  "scope": "Actual fresh DB catalog proof; browser transport is independent evidence"
+  "status": "HISTORICAL_UNVERIFIED",
+  "historical_receipt": {
+    "installed_bodies_claimed": 15,
+    "permissions_claimed": [
+      "inbox_acknowledge_read(uuid,integer)",
+      "inbox_history_page(uuid,uuid,uuid)",
+      "inbox_read_detail(uuid,uuid)",
+      "inbox_sync_finalize_v1(uuid,jsonb,integer,text,text)",
+      "inbox_sync_snapshot_v1(uuid)",
+      "inbox_unknown_history_page(uuid,uuid,uuid)"
+    ],
+    "compiled_sha256": "ee05e2c30c3ee35a761cca7e1245076428276edc3f8954f1c5b6641234cff5fe",
+    "recorded_from_commit": "7ca5d671",
+    "scope": "Historical catalog receipt for a superseded read companion artifact; it is not evidence that the current generated companion is installed."
+  },
+  "current_generated": {
+    "compiled_sha256": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
+    "function_count": 21,
+    "public_function_count": 9,
+    "scope": "Compiler output only; no current installed-catalog claim."
+  }
 }

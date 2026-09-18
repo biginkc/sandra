@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Compile pinned read/history companion; installation is restricted to the owned fixture."""
-import argparse,hashlib,json,re,sys
+import argparse,hashlib,json,os,re,sys
 from pathlib import Path
 P=Path(__file__).resolve().parent;ROOT=P.parent.parent
 sys.path.insert(0,str(P.parent/'inbox-projection/fixture'))
 from transaction_envelope import normalize
-parser=argparse.ArgumentParser();parser.add_argument('--owned-fixture',action='store_true');parser.add_argument('--verify-only',action='store_true');args=parser.parse_args()
+parser=argparse.ArgumentParser();parser.add_argument('--owned-fixture',action='store_true');parser.add_argument('--verify-only',action='store_true');parser.add_argument('--target',choices=('release-db','http'),default=os.environ.get('INBOX_RELEASE_TARGET_PROFILE','release-db'));args=parser.parse_args()
 DETAIL_CONTEXT_FIELDS=(
  'property_id','contact_id','contact_name','property_address','property_status',
  'outreach_dispo','assignee_id','thread_customer_phone','thread_business_phone',
@@ -17,6 +17,15 @@ DETAIL_CONTEXT_FIELDS=(
  'ai_responder_status','ai_responder_reason','ai_responder_status_at',
  'ai_last_delivery_status','ai_last_delivery_error')
 manifest=json.loads((P/'read-companion-manifest.json').read_text());chunks=[];concurrent_indexes=[]
+FUNCTION_STATEMENT_RE=re.compile(r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+[\w.]+\(.*?\)\s+RETURNS\b.*?AS\s+\$\$.*?\$\$;',re.S|re.I)
+PERMISSION_STATEMENT_RE=re.compile(r'(?:REVOKE\s+ALL\s+ON\s+FUNCTION|GRANT\s+EXECUTE\s+ON\s+FUNCTION).*?;',re.S|re.I)
+TARGETS={'release-db':('sandra_inbox_release_20260917','sandra-inbox-release-owned-synthetic'),'http':('postgres','sandra-inbox-http-owned-synthetic-20260917')}
+target_database,target_marker=TARGETS[args.target]
+UPGRADE_GUARD=f"""DO $$ BEGIN
+ IF current_user<>'postgres' OR current_database()<>'{target_database}' OR NOT EXISTS(
+  SELECT 1 FROM install_fixture.identity WHERE marker='{target_marker}'
+ ) THEN RAISE EXCEPTION 'Owned {args.target} fixture required'; END IF;
+END $$;"""
 for entry in manifest:
  raw=(ROOT/entry['source_file']).read_bytes()
  if hashlib.sha256(raw).hexdigest()!=entry['source_sha256']:raise RuntimeError('Pinned companion source changed')
@@ -56,6 +65,28 @@ if 'detail_v2(o,c,position.before_at,position.before_id)' not in compiled or '||
 (P/'generated/read-companion.sql').write_text(compiled)
 (P/'generated/read-indexes.json').write_text(json.dumps(concurrent_indexes,indent=2)+'\n')
 for i,q in enumerate(concurrent_indexes,1):(P/f'generated/read-index-{i:02d}.sql').write_text(q+'\n')
+
+def replace_create_function(sql):
+ return re.sub(r'\bCREATE\s+FUNCTION\b','CREATE OR REPLACE FUNCTION',sql,flags=re.I)
+
+base=[]
+for chunk in chunks[:5]:
+ base.extend(replace_create_function(m.group(0)) for m in FUNCTION_STATEMENT_RE.finditer(chunk))
+ base.extend(m.group(0) for m in PERMISSION_STATEMENT_RE.finditer(chunk))
+
+def existing_schema_function_upgrade():
+ # The recorded installed schema predates the authoritative-context and
+ # cursor changes. A forward packet replaces every current function body from
+ # the original five entries, then applies both additive entries. It never
+ # replays CREATE SCHEMA/TABLE from the fresh-install bundle.
+ additive=[]
+ for entry,chunk in zip(manifest,chunks):
+  if entry.get('upgrade_name') in {'workset-updates','selection-review'}:
+   additive.append(replace_create_function(chunk))
+ body='\n'.join(base+additive)
+ return 'BEGIN;SET LOCAL lock_timeout=\'2s\';SET LOCAL statement_timeout=\'30s\';\n'+UPGRADE_GUARD+'\n'+body+'\nNOTIFY pgrst,\'reload schema\';\n'+(P/'harden-private.sql').read_text()+'COMMIT;\n'
+
+(P/'generated/read-upgrade-current.sql').write_text(existing_schema_function_upgrade())
 # Each entry that names an upgrade_name gets its own standalone forward-upgrade
 # packet (that entry's chunk plus the minimum companion-wide retention/hardening
 # additions it introduced), for applying to a fixture that already has every
@@ -68,11 +99,17 @@ for entry,chunk in zip(manifest,chunks):
  name=entry.get('upgrade_name')
  if not name:continue
  extra=''.join((P/f).read_text() for f in UPGRADE_EXTRAS.get(name,['harden-private.sql']))
- (P/f'generated/read-upgrade-{name}.sql').write_text('BEGIN;'+chunk+extra+'COMMIT;')
+ upgrade_body=replace_create_function(chunk)
+ if name in {'workset-updates','selection-review'}:
+  upgrade_body='\n'.join(base+[upgrade_body])
+ (P/f'generated/read-upgrade-{name}.sql').write_text('BEGIN;SET LOCAL lock_timeout=\'2s\';SET LOCAL statement_timeout=\'30s\';\n'+UPGRADE_GUARD+'\n'+upgrade_body+extra+'COMMIT;')
 if not args.owned_fixture:
  if args.verify_only:raise RuntimeError('--verify-only requires --owned-fixture')
  print('Compiled pinned read/history companion; no database connection');sys.exit(0)
-from fixture_db import guard,sql,ensure_concurrent_index
+if args.target=='http':
+ from http_fixture_db import guard,sql,ensure_concurrent_index
+else:
+ from fixture_db import guard,sql,ensure_concurrent_index
 guard()
 if not args.verify_only:
  if sql("SELECT to_regnamespace('inbox_read') IS NOT NULL")=='t':raise RuntimeError('Existing read schema; use verification or reviewed forward upgrade')

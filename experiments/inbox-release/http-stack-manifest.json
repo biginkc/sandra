@@ -39,7 +39,7 @@
     "image": "sandra-inbox-projection-worker:release-20260917@sha256:23776b77652be03e4619b5379f6070b1688fa2a2f9159a3dae9fc4f9fc41a283",
     "database_role": "inbox_projection_worker via inbox_projection_runtime_20260917",
     "role_packet": "experiments/inbox-release/generated/projection-worker-role.sql",
-    "role_packet_sha256": "02062e227b29c0d575255013dd9c5b93cf5a0624b6cbe105264b059d2d52114f",
+    "role_packet_sha256": "0ab937fbd46ae083e20dfefdd945b96a3a690f21b41782d09bd572f5d407dc71",
     "network_mode": "host",
     "health_url": "http://127.0.0.1:59081/health",
     "memory_bytes": 268435456,

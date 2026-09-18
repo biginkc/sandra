@@ -1,4 +1,10 @@
-BEGIN;-- Additive candidate RPCs. Public RPC callers supply no actor authority.
+BEGIN;SET LOCAL lock_timeout='2s';SET LOCAL statement_timeout='30s';
+DO $$ BEGIN
+ IF current_user<>'postgres' OR current_database()<>'sandra_inbox_release_20260917' OR NOT EXISTS(
+  SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-release-owned-synthetic'
+ ) THEN RAISE EXCEPTION 'Owned release-db fixture required'; END IF;
+END $$;
+-- Additive candidate RPCs. Public RPC callers supply no actor authority.
 
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
 

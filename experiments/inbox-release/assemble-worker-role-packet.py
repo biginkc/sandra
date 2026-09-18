@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Assemble and optionally apply the reviewed projection worker role packet.
 
-The source commit and release database are explicit.  Assembly never opens a
-database connection.  Applying is a separate opt-in operation that accepts
-only the dedicated release database and its marker; it never targets the
-backend-owned install fixture.
+The source commit and HTTP fixture identity are explicit.  Assembly never
+opens a database connection.  Applying is a separate opt-in operation that
+accepts only the dedicated HTTP fixture database and marker; it never targets
+the backend-owned install fixture or the read/install rehearsal database.
 """
 
 from __future__ import annotations
@@ -25,8 +25,11 @@ OUTPUT = HERE / "generated" / "projection-worker-role.sql"
 RECEIPT = HERE / "generated" / "projection-worker-role-manifest.json"
 SOURCE_PATH = "services/inbox-projection-worker/worker-role.sql"
 SOURCE_COMMIT = "4850f8ceb6e993a9573639580dfe53cbfb86e5dd"
-RELEASE_DATABASE = "sandra_inbox_release_20260917"
-RELEASE_MARKER = "sandra-inbox-release-owned-synthetic"
+# The role packet is applied to the owned HTTP fixture used by the executable
+# worker profile.  The separate release database remains reserved for the
+# read/install rehearsal and must never be accepted by this runtime packet.
+RELEASE_DATABASE = "postgres"
+RELEASE_MARKER = "sandra-inbox-http-owned-synthetic-20260917"
 
 
 def git_show(repo: Path, commit: str, path: str) -> bytes:
@@ -50,10 +53,10 @@ def compile_packet(raw: bytes) -> str:
     guard = f"""DO $$ BEGIN
  IF current_user<>'postgres' OR current_database()<>'{RELEASE_DATABASE}' OR NOT EXISTS(
   SELECT 1 FROM install_fixture.identity WHERE marker='{RELEASE_MARKER}'
- ) THEN RAISE EXCEPTION 'Owned release fixture required'; END IF;
+ ) THEN RAISE EXCEPTION 'Owned HTTP fixture required'; END IF;
 END $$;"""
     return """-- GENERATED PROJECTION WORKER ROLE PACKET. No production execution authorization.
--- Apply only after the release database marker and role review are confirmed.
+-- Apply only after the owned HTTP fixture marker and role review are confirmed.
 BEGIN;
 SET LOCAL lock_timeout='2s';
 SET LOCAL statement_timeout='30s';
@@ -64,7 +67,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-repo", type=Path, required=True)
     parser.add_argument("--commit", default=SOURCE_COMMIT)
-    parser.add_argument("--apply", action="store_true", help="apply to the explicitly marked release database")
+    parser.add_argument("--apply", action="store_true", help="apply to the explicitly marked HTTP fixture")
     args = parser.parse_args()
     repo = args.source_repo.resolve()
     actual = subprocess.check_output(["git", "-C", str(repo), "rev-parse", f"{args.commit}^{{commit}}"], text=True).strip()
@@ -92,11 +95,11 @@ def main() -> int:
     if os.environ.get("INBOX_RELEASE_DATABASE") != RELEASE_DATABASE or os.environ.get("INBOX_RELEASE_FIXTURE_MARKER") != RELEASE_MARKER or os.environ.get("INBOX_RELEASE_SERVING_ENABLED", "false").lower() != "false":
         raise RuntimeError("--apply requires the dedicated release database marker and serving_enabled=false")
     sys.path.insert(0, str(ROOT / "experiments" / "inbox-production-install"))
-    from fixture_db import guard, sql
+    from http_fixture_db import guard, sql
     guard()
     sql(packet)
-    RECEIPT.write_text(RECEIPT.read_text().replace('"status": "SOURCE_ONLY_UNINSTALLED"', '"status": "INSTALLED_RELEASE_DATABASE"'))
-    print(json.dumps({"status": "INSTALLED_RELEASE_DATABASE", "packet_sha256": packet_hash}, indent=2))
+    RECEIPT.write_text(RECEIPT.read_text().replace('"status": "SOURCE_ONLY_UNINSTALLED"', '"status": "INSTALLED_HTTP_FIXTURE"'))
+    print(json.dumps({"status": "INSTALLED_HTTP_FIXTURE", "packet_sha256": packet_hash}, indent=2))
     return 0
 
 

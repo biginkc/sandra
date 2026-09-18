@@ -81,8 +81,19 @@ COMMIT;
 """
 admission=(P/'command-admission.sql').read_text()
 (out/'install-candidate.sql').write_text(pre+'\n'.join(chunks)+(P/'runtime.sql').read_text()+admission+(P/'harden-private.sql').read_text()+post)
+(candidate:= (out/'install-candidate.sql').read_text())
+auth_match=re.search(r'CREATE FUNCTION inbox_bridge\.authorize\(.*?AS \$\$.*?\$\$;',candidate,re.S)
+if not auth_match:raise RuntimeError('Canonical authorization function missing from compiled candidate')
+auth_body=re.sub(r'^CREATE FUNCTION\b','CREATE OR REPLACE FUNCTION',auth_match.group(0),count=1)
+auth_guard="""DO $$ BEGIN
+ IF current_user<>'postgres' OR NOT (
+   (current_database()='sandra_inbox_release_20260917' AND EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-release-owned-synthetic'))
+   OR (current_database()='postgres' AND EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917'))
+ ) THEN RAISE EXCEPTION 'Owned release or HTTP fixture required'; END IF;
+END $$;"""
+(out/'auth-upgrade.sql').write_text("BEGIN;SET LOCAL lock_timeout='2s';SET LOCAL statement_timeout='30s';\n"+auth_guard+'\n'+auth_body+"\nNOTIFY pgrst,'reload schema';\nCOMMIT;\n")
 (out/'indexes.json').write_text(json.dumps(indexes,indent=2)+'\n')
 for i,q in enumerate(indexes,1):(out/f'index-{i:02d}.sql').write_text(q+'\n')
 (out/'rollback-serving.sql').write_text("BEGIN;UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton;UPDATE inbox_control.command_admission SET enabled=false,updated_at=clock_timestamp();COMMIT;\n-- Preserve retained heads, epochs, worksets, receipts and capture. Never drop/reset them as routine rollback.\n-- Admission is disabled atomically with serving; authenticated receipt/status/recovery authority remains available.\n")
-(out/'build-receipt.json').write_text(json.dumps({'components':receipts,'canonical_concurrent_indexes':len(indexes),'serving_enabled':False,'compiler_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'runtime_sha256':hashlib.sha256((P/'runtime.sql').read_bytes()).hexdigest(),'admission_sha256':hashlib.sha256(admission.encode()).hexdigest(),'hardening_sha256':hashlib.sha256((P/'harden-private.sql').read_bytes()).hexdigest(),'foundation_sha256':hashlib.sha256((out/'install-candidate.sql').read_bytes()).hexdigest(),'external_dependencies':m['external_dependencies']},indent=2)+'\n')
+(out/'build-receipt.json').write_text(json.dumps({'components':receipts,'canonical_concurrent_indexes':len(indexes),'serving_enabled':False,'compiler_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'runtime_sha256':hashlib.sha256((P/'runtime.sql').read_bytes()).hexdigest(),'admission_sha256':hashlib.sha256(admission.encode()).hexdigest(),'hardening_sha256':hashlib.sha256((P/'harden-private.sql').read_bytes()).hexdigest(),'foundation_sha256':hashlib.sha256((out/'install-candidate.sql').read_bytes()).hexdigest(),'auth_upgrade_sha256':hashlib.sha256((out/'auth-upgrade.sql').read_bytes()).hexdigest(),'external_dependencies':m['external_dependencies']},indent=2)+'\n')
 print(f'Compiled {len(chunks)} pinned components, {len(indexes)} separate concurrent indexes; no DB connection')

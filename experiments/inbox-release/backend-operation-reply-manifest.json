@@ -6,7 +6,7 @@
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
-    "sha256": "712c93bc6996a138452bdc310add3dd960167c34611d730cf209e29eec50ab94"
+    "sha256": "eb0f4073fbfe2814329ff38a4f0ab5da377859b39b0ad57ee215072c5f9947d4"
   },
   "sql_sources": [
     {
@@ -127,7 +127,7 @@
       "path": "experiments/inbox-reply-boundary/context.sql",
       "sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
       "bytes": 5946,
-      "transformed_sha256": "b0728afb5d179b0904d5e04b3e5d41cf2eeee409ee9b6525c98e885f2b10bd0d"
+      "transformed_sha256": "d37e2d745aac9cd34c38b6199beb8bb6cd803dabe75cd249faaacf97e50479f4"
     },
     {
       "name": "reply_recipient",
@@ -135,7 +135,7 @@
       "path": "experiments/inbox-reply-preparation/recipient.sql",
       "sha256": "90d1e6d24f954a7ae809962c8f7181a4f9a21b973303163c9655940e4c18cdf1",
       "bytes": 17992,
-      "transformed_sha256": "f67bd80a69910cda04fad6833bdeec6927d26e83613a4a384b22d17fcf67bf44"
+      "transformed_sha256": "fb6982d179edf847c23ce6a8611fab843cbb5a2628860451be7e7026ddc91543"
     },
     {
       "name": "reply_batch",
@@ -143,7 +143,7 @@
       "path": "experiments/inbox-reply-preparation/batch.sql",
       "sha256": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
       "bytes": 4980,
-      "transformed_sha256": "d0a7925c491965044be40656acb0840fc469cdf9689aeb1047792b7ceb726e8b"
+      "transformed_sha256": "77946239834b08941f28803ab4153b606f47036e62971a60b5cdb53b3186ebca"
     },
     {
       "name": "reply_review_setup",
@@ -151,7 +151,7 @@
       "path": "experiments/inbox-reply-review/setup.sql",
       "sha256": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
       "bytes": 14194,
-      "transformed_sha256": "fa38ee46ab5f19f83acd32c8d783051b224c0ae6a53800d64685f550b0cef1eb"
+      "transformed_sha256": "553bf5a3e4b0a76b83a4fb36bce57eb34997eec164b1c26a0a7274873f4d8684"
     },
     {
       "name": "reply_source_operation",
@@ -167,7 +167,7 @@
       "path": "experiments/inbox-reply-review/public-api.sql",
       "sha256": "0711295976fce7ff258f4948a08ed71e49374ccd1a5759034c230c505e3cb263",
       "bytes": 2913,
-      "transformed_sha256": "5e231ede73fa13cb48dabc63424fdeb657a8e9240b240df2ed19ae51744cc013"
+      "transformed_sha256": "bef029825b645e034b5a922a04c7d22f66f474b7184de4c92dc8cbc5275c4dc7"
     },
     {
       "name": "reply_attempts",
@@ -175,7 +175,7 @@
       "path": "experiments/inbox-reply-send/attempts.sql",
       "sha256": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9",
       "bytes": 36291,
-      "transformed_sha256": "b47ac1c77e511aba6b1fa5d8f9cc99be91f9a8147e24262ed703ace63a16cbf2"
+      "transformed_sha256": "c6348607c788276209b35e7379c6decca5a99616b65172d0467e3135a21cb280"
     },
     {
       "name": "reply_accept_recovery",
@@ -183,7 +183,7 @@
       "path": "experiments/inbox-reply-send/accept.sql",
       "sha256": "375fcb63bdd59e14168f49b05e46ab33f2f4f55c04e72ea5242b4165f6a54621",
       "bytes": 18742,
-      "transformed_sha256": "414ae6dc9365f364c0516f6f9a5d0d80aec4adefb61480b8fc8d232d7afd3ffd"
+      "transformed_sha256": "8a91056d2d8ac00000213f02f2c045e3be233c09a47e0d2b57f81569e02d7280"
     },
     {
       "name": "reply_callback",
@@ -191,7 +191,7 @@
       "path": "experiments/inbox-reply-send/callback.sql",
       "sha256": "71ec54276bbd13e70408586c2efd151f5811b06ac8b31d238a542ae30a39f66c",
       "bytes": 21025,
-      "transformed_sha256": "9b25696940a91259d650e751f3d96776f33ef08909de5ba0e4d38b0306a96016"
+      "transformed_sha256": "9f10280479e65bc823c5bfd73a5b1a0d313aa49296afc0384a96c42704aee5d4"
     },
     {
       "name": "reply_public_api",
@@ -199,7 +199,7 @@
       "path": "experiments/inbox-reply-send/public-api.sql",
       "sha256": "4d5e1c7d76bd3464ca12c68d0a173bc6a58c3bc1e743d2e6f69b0b57da79fe0e",
       "bytes": 2899,
-      "transformed_sha256": "680fa89d616ca4d9c92d55e07eaae79ddf5b964d0f2cf82df52a95e1a48cf071"
+      "transformed_sha256": "0e2e04b57f57496251cf1568c85b0635e49e336ef521401036dfaaf404cca1f5"
     },
     {
       "name": "reply_worker",
@@ -207,7 +207,7 @@
       "path": "experiments/inbox-reply-send-worker/worker.sql",
       "sha256": "a4c4a5229a74a538addeec29e153e4633c1c3dbf2bd5e91cc5fa1f28a475486c",
       "bytes": 12627,
-      "transformed_sha256": "38c6d59b66b58f1c2353db2a8380bc35740fafcce95fb3665781d03e4b37224a"
+      "transformed_sha256": "dfc89631f9018713e7f23e25a6d3c2a0ef328ea6886f6ddee92d2c4252fa49b7"
     },
     {
       "name": "reply_worker_role",
@@ -380,8 +380,8 @@
     "customer_sends": false
   },
   "safety": {
-    "release_db": "sandra_inbox_release_20260917",
-    "release_marker": "sandra-inbox-release-owned-synthetic",
+    "target_database": "postgres",
+    "target_marker": "sandra-inbox-http-owned-synthetic-20260917",
     "production_install": false,
     "provider_traffic": false,
     "customer_sends": false

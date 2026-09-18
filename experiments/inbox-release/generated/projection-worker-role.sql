@@ -1,12 +1,12 @@
 -- GENERATED PROJECTION WORKER ROLE PACKET. No production execution authorization.
--- Apply only after the release database marker and role review are confirmed.
+-- Apply only after the owned HTTP fixture marker and role review are confirmed.
 BEGIN;
 SET LOCAL lock_timeout='2s';
 SET LOCAL statement_timeout='30s';
 DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'sandra_inbox_release_20260917' OR NOT EXISTS(
-  SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-release-owned-synthetic'
- ) THEN RAISE EXCEPTION 'Owned release fixture required'; END IF;
+ IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(
+  SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917'
+ ) THEN RAISE EXCEPTION 'Owned HTTP fixture required'; END IF;
 END $$;
 -- Reviewed role candidate; no production execution or LOGIN credential provisioning.
 DO $$ BEGIN

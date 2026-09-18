@@ -1,4 +1,10 @@
-BEGIN;-- Owned fixture candidate; production requires the reviewed migration path.
+BEGIN;SET LOCAL lock_timeout='2s';SET LOCAL statement_timeout='30s';
+DO $$ BEGIN
+ IF current_user<>'postgres' OR current_database()<>'sandra_inbox_release_20260917' OR NOT EXISTS(
+  SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-release-owned-synthetic'
+ ) THEN RAISE EXCEPTION 'Owned release-db fixture required'; END IF;
+END $$;
+-- Owned fixture candidate; production requires the reviewed migration path.
 
 SET LOCAL lock_timeout='2s';
 SET LOCAL statement_timeout='15s';
@@ -14,7 +20,7 @@ REVOKE ALL ON TABLE inbox_read.unknown_history_cursors FROM PUBLIC,anon,authenti
 -- Hash narrows the index only. Exact raw text equality below is authoritative.
 -- The release companion must create this index CONCURRENTLY outside its transaction.
 -- Canonical index moved to separate concurrent packet.
-CREATE FUNCTION inbox_read.unknown_history_values(o uuid,g uuid,at_time timestamptz,before_id uuid) RETURNS jsonb
+CREATE OR REPLACE FUNCTION inbox_read.unknown_history_values(o uuid,g uuid,at_time timestamptz,before_id uuid) RETURNS jsonb
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
  WITH sender AS MATERIALIZED (
   SELECT raw_sender FROM inbox_message_capture.sender_groups WHERE org_id=o AND sender_group_id=g
@@ -31,7 +37,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path='' AS $$
   'history',coalesce((SELECT jsonb_agg(jsonb_build_object('id',id,'created_at_raw',created_at::text,'body',body,
    'direction',direction,'dismissed_at_raw',dismissed_at::text) ORDER BY created_at DESC,id DESC) FROM page),'[]'::jsonb))
 $$;
-CREATE FUNCTION inbox_read.unknown_history_page(o uuid,g uuid,before_cursor uuid DEFAULT NULL) RETURNS jsonb
+CREATE OR REPLACE FUNCTION inbox_read.unknown_history_page(o uuid,g uuid,before_cursor uuid DEFAULT NULL) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 DECLARE a jsonb; result jsonb; position inbox_read.unknown_history_cursors;
  expires timestamptz:=clock_timestamp()+interval '5 minutes';last_message jsonb;next_cursor uuid;
@@ -61,7 +67,7 @@ BEGIN
  RETURN (result-'exists')||jsonb_build_object('requester_id',a->>'user_id','org_id',o,'sender_group_id',g,'next_cursor',next_cursor,'expires_at',expires);
 END $$;
 REVOKE ALL ON FUNCTION inbox_read.unknown_history_values(uuid,uuid,timestamptz,uuid),inbox_read.unknown_history_page(uuid,uuid,uuid) FROM PUBLIC,anon,authenticated,service_role;
-CREATE FUNCTION public.inbox_unknown_history_page(org_id uuid,sender_group_id uuid,before_cursor uuid DEFAULT NULL) RETURNS jsonb
+CREATE OR REPLACE FUNCTION public.inbox_unknown_history_page(org_id uuid,sender_group_id uuid,before_cursor uuid DEFAULT NULL) RETURNS jsonb
 LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_read.unknown_history_page(org_id,sender_group_id,before_cursor) $$;
 REVOKE ALL ON FUNCTION public.inbox_unknown_history_page(uuid,uuid,uuid) FROM PUBLIC,anon,service_role;
 GRANT EXECUTE ON FUNCTION public.inbox_unknown_history_page(uuid,uuid,uuid) TO authenticated;

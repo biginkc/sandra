@@ -80,7 +80,7 @@
     {
       "id": "auth",
       "path": "experiments/inbox-workset-bridge/auth.sql",
-      "sha256": "cf675f9e1e034022f4dbadb591395b71814b856ed476a7a6a8cba4e1359dca1e"
+      "sha256": "d21ce28d4a826f5fde3ce901ee4696ec08823564d4d4d898e75c257147f2aee3"
     },
     {
       "id": "worksets",
