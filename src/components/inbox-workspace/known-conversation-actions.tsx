@@ -31,6 +31,9 @@ export type KnownConversationActionContext = {
   currentPhone: string | null;
   isDncLocked: boolean;
   contactDoNotContact: boolean;
+  contactSmsOptedOut: boolean;
+  phoneSuppressed: boolean | null;
+  smsSafetyReadFailed: boolean;
   aiDispositionReview: InboxAiDispositionReview | null;
   aiResponderStatus: string | null;
   aiResponderReason: string | null;
@@ -38,42 +41,35 @@ export type KnownConversationActionContext = {
   aiLastDeliveryError: string | null;
 };
 
-function stringOrNull(row: Record<string, unknown>, key: string): string | null {
-  return typeof row[key] === "string" && row[key] ? row[key] as string : null;
-}
-
-/** Decode optional action fields without making the read history endpoint a
- * second authority. Older snapshots simply produce the link-only surface. */
+/** Map the authenticated read DTO into the action rail without making a
+ * second client-side authority for identity or safety state. */
 export function knownConversationActionContext(
   data: InboxDetailSnapshot,
   fallbackName: string | null,
 ): KnownConversationActionContext {
-  const row = data as unknown as Record<string, unknown>;
-  const rawReview = row.aiDispositionReview;
-  const review = rawReview && typeof rawReview === "object" && !Array.isArray(rawReview)
-    ? rawReview as Record<string, unknown>
-    : null;
-  const aiDispositionReview = review && typeof review.id === "string" && typeof review.disposition === "string" && typeof review.reason === "string"
-    ? { id: review.id, disposition: review.disposition, reason: review.reason, sourceMessageBody: typeof review.sourceMessageBody === "string" ? review.sourceMessageBody : null }
-    : null;
   return {
     conversationId: data.conversationId,
-    propertyId: stringOrNull(row, "propertyId"),
-    contactId: stringOrNull(row, "contactId"),
-    contactName: stringOrNull(row, "contactName") ?? fallbackName,
-    propertyAddress: stringOrNull(row, "propertyAddress"),
-    propertyStatus: stringOrNull(row, "propertyStatus"),
-    outreachDispo: stringOrNull(row, "outreachDispo"),
-    assigneeId: stringOrNull(row, "assigneeId"),
-    assigneeLabel: stringOrNull(row, "assigneeLabel") ?? stringOrNull(row, "assigneeEmail"),
-    currentPhone: stringOrNull(row, "threadCustomerPhone") ?? stringOrNull(row, "currentPhone"),
-    isDncLocked: row.isDncLocked === true,
-    contactDoNotContact: row.contactDoNotContact === true,
-    aiDispositionReview,
-    aiResponderStatus: stringOrNull(row, "aiResponderStatus"),
-    aiResponderReason: stringOrNull(row, "aiResponderReason"),
-    aiLastDeliveryStatus: stringOrNull(row, "aiLastDeliveryStatus"),
-    aiLastDeliveryError: stringOrNull(row, "aiLastDeliveryError"),
+    propertyId: data.propertyId,
+    contactId: data.contactId,
+    contactName: data.contactName ?? fallbackName,
+    propertyAddress: data.propertyAddress,
+    propertyStatus: data.propertyStatus,
+    outreachDispo: data.outreachDispo,
+    assigneeId: data.assigneeId,
+    assigneeLabel: null,
+    currentPhone: data.threadCustomerPhone,
+    isDncLocked: data.isDncLocked,
+    contactDoNotContact: data.contactDoNotContact,
+    contactSmsOptedOut: data.contactSmsOptedOut,
+    phoneSuppressed: data.phoneSuppressed,
+    smsSafetyReadFailed: data.smsSafetyReadFailed,
+    aiDispositionReview: data.aiDispositionReview
+      ? { id: data.aiDispositionReview.id, disposition: data.aiDispositionReview.disposition, reason: data.aiDispositionReview.reason, sourceMessageBody: data.aiDispositionReview.sourceMessageBody }
+      : null,
+    aiResponderStatus: data.aiResponderStatus,
+    aiResponderReason: data.aiResponderReason,
+    aiLastDeliveryStatus: data.aiLastDeliveryStatus,
+    aiLastDeliveryError: data.aiLastDeliveryError,
   };
 }
 
@@ -108,7 +104,8 @@ export function InboxKnownConversationActions({ context, currentUserId, onChange
   const [reviewVisible, setReviewVisible] = useState(context.aiDispositionReview !== null);
 
   const canMutateProperty = Boolean(context.propertyId) && !context.isDncLocked && !pending;
-  const canCall = Boolean(context.currentPhone) && !context.isDncLocked && !context.contactDoNotContact;
+  const hasBadThreadNumber = context.outreachDispo === "wrong_number" || context.outreachDispo === "bad_number";
+  const canCall = Boolean(context.currentPhone) && !context.isDncLocked && !context.smsSafetyReadFailed && !context.contactDoNotContact && context.phoneSuppressed !== true && !hasBadThreadNumber;
   const isLead = context.propertyStatus !== null && context.propertyStatus !== "prospect";
 
   function applyDisposition(disposition: OutreachDispo) {

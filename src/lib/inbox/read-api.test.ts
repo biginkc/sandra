@@ -5,6 +5,9 @@ import wrapperEvidence from "../../../experiments/inbox-post-render-read/wrapper
 const org = "11111111-1111-1111-1111-111111111111";
 const conversation = "22222222-2222-2222-2222-222222222222";
 const boundary = "33333333-3333-3333-3333-333333333333";
+const property = "44444444-4444-4444-8444-444444444444";
+const contact = "55555555-5555-4555-8555-555555555555";
+const review = "66666666-6666-4666-8666-666666666666";
 const signal = () => new AbortController().signal;
 function client(responses: unknown[]) {
   const rpc = vi.fn(() => ({ abortSignal: vi.fn(async () => {
@@ -15,17 +18,47 @@ function client(responses: unknown[]) {
   return { rpc, repository: createInboxReadRepository({ rpc } as unknown as InboxReadClient) };
 }
 const receipt = { boundary_id: boundary, batch: 0, changed: 200, completed: false };
+const detailFields = {
+  property_id: property,
+  contact_id: contact,
+  contact_name: "Ada Homeowner",
+  property_address: "123 Oak St, St Louis, MO",
+  property_status: "prospect",
+  outreach_dispo: null,
+  assignee_id: null,
+  thread_customer_phone: "+15555550100",
+  thread_business_phone: "+15555550199",
+  contact_do_not_contact: false,
+  contact_sms_opted_out: false,
+  phone_suppressed: false,
+  sms_safety_read_failed: false,
+  is_dnc_locked: false,
+  ai_disposition_review_id: review,
+  ai_disposition_review_status: "pending",
+  ai_disposition_review_disposition: "nurture",
+  ai_disposition_review_reason: "Positive buying signal",
+  ai_disposition_review_source_inbound_message_id: boundary,
+  ai_disposition_review_source_message_body: "Interested in a showing",
+  ai_disposition_review_created_at: "2026-09-13T12:00:00Z",
+  ai_responder_status: "escalated",
+  ai_responder_reason: "Needs human review",
+  ai_responder_status_at: "2026-09-13T12:01:00Z",
+  ai_last_delivery_status: "delivered",
+  ai_last_delivery_error: null,
+};
 const snapshot = {
   requester_id: boundary, org_id: org, conversation_id: conversation, head_revision: "9007199254740993",
   read_boundary: boundary, boundary_expires_at: "2030-01-01T00:00:00Z", capture_generation: boundary, next_cursor: null,
+  ...detailFields,
   history: [{ id: boundary, created_at_raw: "2026-09-13 12:00:00.123456+00", body: "Owned test", direction: "inbound", read_at_raw: null, inbound_revision: "9007199254740993" }],
 };
 describe("canonical Inbox read RPC repository", () => {
   it("decodes retained real canonical mixed-history and receipt scalars (mock HTTP transport)", async () => {
-    const raw = wrapperEvidence.scalar_detail;
+    const raw = { ...wrapperEvidence.scalar_detail, ...detailFields };
     const { repository } = client([{ data: { ...raw, next_cursor: null }, error: null }, { data: wrapperEvidence.scalar_acknowledgment, error: null }]);
     const detail = await repository.detail(raw.org_id, raw.conversation_id, signal());
     expect(detail.history.map(row => [row.direction, row.inboundRevision])).toEqual([["inbound", "1"], ["outbound", "0"]]);
+    expect(detail).toMatchObject({ propertyId: property, contactId: contact, contactName: "Ada Homeowner", threadCustomerPhone: "+15555550100", aiResponderStatus: "escalated", aiDispositionReview: { id: review, disposition: "nurture", sourceMessageBody: "Interested in a showing" } });
     expect((await repository.acknowledge(raw.read_boundary, 0, signal())).changed).toBe(1);
   });
   it("preserves microsecond timestamps and revisions above JS integer precision", async () => {
@@ -47,6 +80,10 @@ describe("canonical Inbox read RPC repository", () => {
     for (const value of [{ ...snapshot, conversation_id: org }, { ...snapshot, history: Array(51).fill(snapshot.history[0]) }]) {
       await expect(client([{ data: value, error: null }]).repository.detail(org, conversation, signal())).rejects.toMatchObject({ status: 503 });
     }
+  });
+  it("fails closed when the detail SQL row omits an action-safety field", async () => {
+    const { contact_do_not_contact: _, ...missing } = snapshot;
+    await expect(client([{ data: missing, error: null }]).repository.detail(org, conversation, signal())).rejects.toMatchObject({ status: 503 });
   });
   it("accepts outbound zero revisions and refuses missing canonical revision coverage", async () => {
     const outbound = { ...snapshot.history[0], id: org, direction: "outbound", inbound_revision: "0" };

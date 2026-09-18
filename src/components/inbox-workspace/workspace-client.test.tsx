@@ -8,12 +8,15 @@ vi.mock("@/lib/inbox/workspace-sync", () => ({ createWorkspaceSync: (callbacks: 
   state.callbacks = callbacks;
   return { replace: (value: unknown) => { state.replacements.push(value); }, reset: () => callbacks?.onChange({ state: "resync_required", rows: [] }), revoke: () => callbacks?.onChange({ state: "permission_lost", rows: [] }) };
 } }));
+vi.mock("@/app/(dashboard)/messages/assign-dropdown", () => ({ AssignDropdown: () => <button type="button">Change assignee</button> }));
+vi.mock("@/components/appointments/book-appointment-popover", () => ({ BookAppointmentPopover: () => <button type="button">Book appointment</button> }));
 const orgId = "00000000-0000-4000-8000-000000000001", userId = "00000000-0000-4000-8000-000000000002", sessionId = "00000000-0000-4000-8000-000000000003";
 const conversationId = "00000000-0000-4000-8000-000000000004";
 const identity = { orgId, userId, sessionId, accessEpoch: "1", expiresAt: Date.now() + 60000 };
 const row: WorkspaceRow = { target: { kind: "conversation", orgId, conversationId }, name: "Ada", context: "123 Oak", preview: "A real conversation", timeLabel: "Now", outcomeLabel: "Needs outcome", assignedLabel: "Unassigned" };
 const conversationId2 = "00000000-0000-4000-8000-000000000005";
 const row2: WorkspaceRow = { target: { kind: "conversation", orgId, conversationId: conversationId2 }, name: "Bea", context: "456 Pine", preview: "A second conversation", timeLabel: "Now", outcomeLabel: "Needs outcome", assignedLabel: "Unassigned" };
+const detailFields = { propertyId: "00000000-0000-0000-0000-000000000006", contactId: "00000000-0000-0000-0000-000000000007", contactName: "Ada", propertyAddress: "123 Oak", propertyStatus: "prospect", outreachDispo: null, assigneeId: null, threadCustomerPhone: "+15555550100", threadBusinessPhone: "+15555550199", contactDoNotContact: false, contactSmsOptedOut: false, phoneSuppressed: false, smsSafetyReadFailed: false, isDncLocked: false, aiDispositionReview: null, aiResponderStatus: null, aiResponderReason: null, aiResponderStatusAt: null, aiLastDeliveryStatus: null, aiLastDeliveryError: null };
 let calls: string[];
 beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ x: 0, y: 0, left: 0, top: 0, width: 900, height: 600, right: 900, bottom: 600, toJSON: () => ({}) }));
@@ -22,7 +25,7 @@ beforeEach(() => {
   calls = []; state.replacements = []; state.deny = false; state.itemUnavailable = false; state.detailUnavailable = false;
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     calls.push(url);
-    if (url.includes("/detail")) return state.detailUnavailable ? Response.json({}, { status: 404 }) : Response.json({ orgId, requesterId: userId, conversationId, history: [{ id: "message", direction: "inbound", body: "Hello from history", createdAtRaw: new Date().toISOString(), readAtRaw: null, inboundRevision: "1" }], readBoundary: "boundary", boundaryExpiresAt: new Date(Date.now() + 60000).toISOString(), captureGeneration: "capture", headRevision: "1" });
+    if (url.includes("/detail")) return state.detailUnavailable ? Response.json({}, { status: 404 }) : Response.json({ orgId, requesterId: userId, conversationId, ...detailFields, history: [{ id: "message", direction: "inbound", body: "Hello from history", createdAtRaw: new Date().toISOString(), readAtRaw: null, inboundRevision: "1" }], readBoundary: "boundary", boundaryExpiresAt: new Date(Date.now() + 60000).toISOString(), captureGeneration: "capture", headRevision: "1" });
     if (url.includes("/counts")) return Response.json({ accessEpoch: "1", asOf: new Date().toISOString(), counts: { all: 1000, unread: 10 } });
     if (url.includes("read-acknowledgments")) return state.itemUnavailable ? Response.json({}, { status: 404 }) : Response.json({ boundaryId: "boundary", batch: 0, changed: 1, completed: true });
     if (state.deny) return Response.json({}, { status: 403 });

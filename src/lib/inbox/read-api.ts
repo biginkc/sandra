@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/lib/supabase/types";
 import { retryReceiptTransaction } from "@/lib/messaging/receipt-persistence";
+import type { InboxDetailActionFields, InboxDispositionReview } from "./api-contract";
 
 type ReadDatabase = Omit<Database, "public"> & { public: Omit<Database["public"], "Functions"> & { Functions: Database["public"]["Functions"] & {
   inbox_unknown_history_page: { Args: { org_id: string; sender_group_id: string; before_cursor?: string }; Returns: Json };
@@ -27,6 +28,57 @@ function revision(value: unknown): string {
 }
 function timestamp(value: unknown): string { requireValue(typeof value === "string" && Number.isFinite(Date.parse(value))); return value; }
 function nullableTimestamp(value: unknown): string | null { return value === null ? null : timestamp(value); }
+function nullableIdentifier(value: unknown): string | null { return value === null ? null : id(value); }
+function nullableText(value: unknown, maxLength = 2000): string | null {
+  requireValue(value === null || (typeof value === "string" && value.length <= maxLength));
+  return value as string | null;
+}
+function booleanValue(value: unknown): boolean { requireValue(typeof value === "boolean"); return value; }
+function nullableBoolean(value: unknown): boolean | null { requireValue(value === null || typeof value === "boolean"); return value as boolean | null; }
+function detailActionFields(row: Record<string, unknown>): InboxDetailActionFields {
+  const reviewId = nullableIdentifier(row.ai_disposition_review_id);
+  const review = reviewId === null ? null : (() => {
+    requireValue(row.ai_disposition_review_status === "pending");
+    const value: InboxDispositionReview = {
+      id: reviewId,
+      status: "pending",
+      disposition: nullableText(row.ai_disposition_review_disposition, 64) ?? "",
+      reason: nullableText(row.ai_disposition_review_reason, 4000) ?? "",
+      sourceInboundMessageId: id(row.ai_disposition_review_source_inbound_message_id),
+      sourceMessageBody: nullableText(row.ai_disposition_review_source_message_body, 16_384),
+      createdAt: timestamp(row.ai_disposition_review_created_at),
+    };
+    requireValue(value.disposition.length > 0 && value.reason.length > 0);
+    return value;
+  })();
+  if (reviewId === null) {
+    requireValue(row.ai_disposition_review_status === null && row.ai_disposition_review_disposition === null &&
+      row.ai_disposition_review_reason === null && row.ai_disposition_review_source_inbound_message_id === null &&
+      row.ai_disposition_review_source_message_body === null && row.ai_disposition_review_created_at === null);
+  }
+  return {
+    propertyId: nullableIdentifier(row.property_id),
+    contactId: nullableIdentifier(row.contact_id),
+    contactName: nullableText(row.contact_name),
+    propertyAddress: nullableText(row.property_address),
+    propertyStatus: nullableText(row.property_status, 64),
+    outreachDispo: nullableText(row.outreach_dispo, 64),
+    assigneeId: nullableIdentifier(row.assignee_id),
+    threadCustomerPhone: nullableText(row.thread_customer_phone, 64),
+    threadBusinessPhone: nullableText(row.thread_business_phone, 64),
+    contactDoNotContact: booleanValue(row.contact_do_not_contact),
+    contactSmsOptedOut: booleanValue(row.contact_sms_opted_out),
+    phoneSuppressed: nullableBoolean(row.phone_suppressed),
+    smsSafetyReadFailed: booleanValue(row.sms_safety_read_failed),
+    isDncLocked: booleanValue(row.is_dnc_locked),
+    aiDispositionReview: review,
+    aiResponderStatus: nullableText(row.ai_responder_status, 128),
+    aiResponderReason: nullableText(row.ai_responder_reason, 4000),
+    aiResponderStatusAt: nullableTimestamp(row.ai_responder_status_at),
+    aiLastDeliveryStatus: nullableText(row.ai_last_delivery_status, 128),
+    aiLastDeliveryError: nullableText(row.ai_last_delivery_error, 4000),
+  };
+}
 function fail(error: { code?: string; message?: string } | null): void {
   if (!error) return;
   if (error.code === "PGRST301" || error.code === "PGRST303") throw new InboxReadError(401);
@@ -83,7 +135,8 @@ export function createInboxReadRepository(client: InboxReadClient) {
           direction: message.direction, readAtRaw: nullableTimestamp(message.read_at_raw), inboundRevision: revision(message.inbound_revision) };
       });
       return { requesterId: id(row.requester_id), orgId, conversationId, headRevision: revision(row.head_revision),
-        readBoundary: id(row.read_boundary), boundaryExpiresAt: timestamp(row.boundary_expires_at), captureGeneration: id(row.capture_generation), history, nextCursor: row.next_cursor === null ? null : id(row.next_cursor) };
+        readBoundary: id(row.read_boundary), boundaryExpiresAt: timestamp(row.boundary_expires_at), captureGeneration: id(row.capture_generation),
+        ...detailActionFields(row), history, nextCursor: row.next_cursor === null ? null : id(row.next_cursor) };
     },
     async acknowledge(boundaryId: string, batch: number, signal: AbortSignal) {
       requireValue(UUID.test(boundaryId) && Number.isSafeInteger(batch) && batch >= 0 && batch <= 2147483647, 400);
