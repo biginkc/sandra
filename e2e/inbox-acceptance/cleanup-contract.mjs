@@ -43,6 +43,20 @@ test("cleanup requires source deletion plus a meaningful private projection drai
   assert.match(source, /isAcceptanceProjectionDrained/);
   assert.match(source, /const probe = await openProjectionProbe\(\);[\s\S]*?deleteOrgScopedFixtureRows/);
   assert.match(source, /readCleanupProtection/);
+  assert.match(source, /deleteAcceptanceDispositionReviews/);
+  assert.match(source, /DELETE FROM public\.ai_disposition_reviews/);
+  assert.match(source, /WHERE org_id = \$1::uuid/);
+  assert.match(source, /org_id <> \$1::uuid/);
+  assert.doesNotMatch(
+    source,
+    /from\("ai_disposition_reviews"\)\.delete/,
+    "service_role has SELECT-only grants; review cleanup must use the guarded postgres probe",
+  );
+  assert.match(
+    source,
+    /deleteAcceptanceDispositionReviews\(probe, orgId\)[\s\S]*?deleteOrgScopedFixtureRows/,
+    "owned disposition reviews must be deleted before source messages",
+  );
   assert.match(source, /is_dnc_locked/, "cleanup must inspect permanent DNC locks before mutation");
   assert.match(source, /agent_contact_id/, "cleanup must retain every contact linked to a locked property");
   assert.match(source, /retainedContactIds/);

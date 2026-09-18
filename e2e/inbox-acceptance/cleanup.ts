@@ -269,6 +269,83 @@ async function deleteDncAwareFixtureRows(
   return retainedPropertyIds;
 }
 
+/**
+ * Remove only review records owned by the acceptance organization before
+ * deleting their source messages. The review migration intentionally keeps
+ * source_inbound_message_id as a non-cascading FK, so an ordinary message
+ * delete must be preceded by this exact org-scoped cleanup. The migration
+ * grants service_role SELECT only, so this uses the already identity-checked
+ * postgres probe rather than widening production table grants. Read the IDs
+ * first and compare another-org counts inside the same transaction; a
+ * permission or identity failure must stop cleanup before source rows move.
+ */
+async function deleteAcceptanceDispositionReviews(
+  probe: Client,
+  orgId: string,
+): Promise<void> {
+  await probe.query("BEGIN");
+  try {
+    const reviews = await probe.query<{ id: string; source_inbound_message_id: string }>(
+      `
+        SELECT id, source_inbound_message_id
+          FROM public.ai_disposition_reviews
+         WHERE org_id = $1::uuid
+      `,
+      [orgId],
+    );
+    if (reviews.rowCount === 0) {
+      await probe.query("COMMIT");
+      return;
+    }
+
+    const otherBefore = await probe.query<{ count: string }>(
+      `
+        SELECT count(*)::text AS count
+          FROM public.ai_disposition_reviews
+         WHERE org_id <> $1::uuid
+      `,
+      [orgId],
+    );
+    await probe.query(
+      `
+        DELETE FROM public.ai_disposition_reviews
+         WHERE org_id = $1::uuid
+      `,
+      [orgId],
+    );
+    const remainingOwned = await probe.query<{ count: string }>(
+      `
+        SELECT count(*)::text AS count
+          FROM public.ai_disposition_reviews
+         WHERE org_id = $1::uuid
+      `,
+      [orgId],
+    );
+    const otherAfter = await probe.query<{ count: string }>(
+      `
+        SELECT count(*)::text AS count
+          FROM public.ai_disposition_reviews
+         WHERE org_id <> $1::uuid
+      `,
+      [orgId],
+    );
+    if (
+      Number(remainingOwned.rows[0]?.count ?? "0") !== 0 ||
+      otherAfter.rows[0]?.count !== otherBefore.rows[0]?.count
+    ) {
+      throw new Error(
+        `Inbox acceptance cleanup could not verify org-scoped disposition review cleanup for ${orgId}.`,
+      );
+    }
+    await probe.query("COMMIT");
+  } catch (error) {
+    await probe.query("ROLLBACK").catch(() => undefined);
+    throw new Error(
+      `Inbox acceptance cleanup could not clear owned disposition reviews: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 async function countCleanableRows(
   admin: SupabaseClient<Database>,
   orgId: string,
@@ -431,6 +508,10 @@ export async function resetAcceptanceFixture(
       })}\n`);
     }
     let retainedPropertyIds = new Set(protection.retainedPropertyIds);
+    // ai_disposition_reviews.source_inbound_message_id intentionally does
+    // not cascade. Clear this owned child relation before any source-message
+    // delete, while the exact fixture identity guard is still in force.
+    await deleteAcceptanceDispositionReviews(probe, orgId);
     if (protection.lockedPropertyIds.size === 0 && protection.retainedContactIds.size === 0) {
       await deleteOrgScopedFixtureRows(admin, orgId);
     } else {

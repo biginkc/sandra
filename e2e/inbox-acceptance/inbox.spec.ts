@@ -127,8 +127,11 @@ test("F04 — needs_outcome view excludes threads with an outcome", async ({ pag
 test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => {
   await resetAcceptanceFixture(admin);
   await ensureTestUser(admin);
+  const dncPhone = `+1816${[...randomUUID().replaceAll("-", "").slice(0, 7)]
+    .map((digit) => (Number.parseInt(digit, 16) % 10).toString())
+    .join("")}`;
   const dnc = await seedAcceptanceThread(admin, {
-    phone: "+18165551006",
+    phone: dncPhone,
     addressTag: "ACC-F05-DNC",
     contactName: { first: "Dnc", last: "Probe" },
     messages: [{ direction: "inbound", body: "dnc probe message", createdAtOffsetMin: -5 }],
@@ -142,11 +145,11 @@ test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => 
   // The default projection must exclude the DNC conversation before the
   // operator changes the noise filter. Merely proving re-inclusion after the
   // toggle would allow a backend that ignores the default hide policy.
-  await expect(list.getByText(dnc.contactName)).toHaveCount(0);
+  await expect(list.getByText(dnc.contactName, { exact: true })).toHaveCount(0);
 
   await page.getByLabel(/Hide DNC and test conversations/).click();
   await expect(page.getByLabel(/Hide DNC and test conversations/)).not.toBeChecked();
-  await expect(list.getByText(dnc.contactName)).toBeVisible();
+  await expect(list.getByText(dnc.contactName, { exact: true })).toBeVisible();
 
   recordRowOutcome({ id: "F05", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F05" });
 });

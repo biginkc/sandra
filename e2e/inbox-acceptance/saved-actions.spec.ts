@@ -1,7 +1,9 @@
 import { expect, test, type Page } from "./fixture";
 
-import { adminClient, ensureTestUser } from "../fixtures";
+import { adminClient, DEFAULT_ORG_ID, E2E_MOCK_BUSINESS_NUMBER, ensureTestUser } from "../fixtures";
+import { seedSenderCatalog } from "../../tests/integration/delivery";
 import { seedAcceptanceThread } from "./seed";
+import { resetAcceptanceFixture } from "./cleanup";
 
 /**
  * Saved actions are exercised through the authenticated browser boundary. The
@@ -106,6 +108,11 @@ test.beforeAll(async () => {
   assigneeId = await ensureTestUser(admin, { principal: "assignee" });
 });
 
+test.beforeEach(async () => {
+  await resetAcceptanceFixture(admin);
+  await ensureTestUser(admin);
+});
+
 test("saved action CRUD persists immutable edits and deactivation", async ({ page }) => {
   await page.goto("/inbox?view=all");
   await expect(page.getByRole("list", { name: "Inbox conversations" })).toBeVisible();
@@ -168,8 +175,11 @@ test("saved action CRUD persists immutable edits and deactivation", async ({ pag
 });
 
 test("metadata combo offers a separately reviewed reply and never auto-accepts it", async ({ page }) => {
+  await seedSenderCatalog(admin, DEFAULT_ORG_ID, [E2E_MOCK_BUSINESS_NUMBER], { provider: "sendillo" });
   const thread = await seedAcceptanceThread(admin, {
     phone: "+18165552001",
+    businessNumber: E2E_MOCK_BUSINESS_NUMBER,
+    propertyState: process.env.INBOX_ACCEPTANCE_REPLY_STATE ?? "MO",
     addressTag: `ACC-SAVED-COMBO-${Date.now()}`,
     contactName: { first: "Saved", last: "Combo" },
     propertyStatus: "prospect",
@@ -217,10 +227,12 @@ test("metadata combo offers a separately reviewed reply and never auto-accepts i
   expect((await comboSaveResponse).status()).toBe(200);
   await expect(builder).toHaveCount(0);
 
-  const selection = page.getByRole("checkbox", { name: `Select ${thread.contactName}` });
+  // The open review dialog makes background roles inaccessible; the labeled
+  // checkbox still proves the original selection is retained.
+  const selection = page.getByLabel(`Select ${thread.contactName}`, { exact: true });
   await selection.check();
   await expect(selection).toBeChecked();
-  await expect(page.getByRole("region", { name: "Conversation selection" }).getByText("1 selected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Conversation selection", includeHidden: true }).getByText("1 selected", { exact: true })).toBeVisible();
 
   const picker = page.getByLabel("Saved actions");
   await expect(picker.getByRole("option", { name: comboName, exact: true })).toHaveCount(1);
@@ -266,7 +278,7 @@ test("metadata combo offers a separately reviewed reply and never auto-accepts i
   // then exposes the explicit reply hand-off. No reply acceptance has happened.
   await expect(review.getByRole("button", { name: "Review reply", exact: true })).toBeVisible({ timeout: 20_000 });
   await expect(selection).toBeChecked();
-  await expect(page.getByRole("region", { name: "Conversation selection" }).getByText("1 selected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Conversation selection", includeHidden: true }).getByText("1 selected", { exact: true })).toBeVisible();
 
   const replyPrepare = responseFor(page, "/api/inbox/replies/prepare", "POST");
   await review.getByRole("button", { name: "Review reply", exact: true }).click();
