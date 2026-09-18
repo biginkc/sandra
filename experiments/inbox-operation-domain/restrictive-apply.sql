@@ -1,7 +1,7 @@
 -- Source-only candidate. Replace the private adapter only after reviewed scope/helper installation.
 CREATE OR REPLACE FUNCTION inbox_operation_domain.apply_property_step(o uuid,op uuid,s uuid,g bigint) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE shared_sms inbox_operation_domain.shared_sms_receipts; sms_original_policy jsonb; sms jsonb; sms_expected jsonb; sms_contact uuid; step jsonb; payload jsonb; expected jsonb; actual jsonb; requirements jsonb; prior jsonb;
+DECLARE shared_sms inbox_operation_domain.shared_sms_receipts; sms_original_policy jsonb; sms jsonb; sms_expected jsonb; sms_contact uuid; step jsonb; payload jsonb; expected jsonb; actual jsonb; requirements jsonb; prior jsonb; history jsonb; historical jsonb;
  requester uuid; assignee uuid; property_id uuid; p public.properties; member public.memberships;
  requirement jsonb; revised jsonb; result jsonb; changed boolean; disposition text; entry record; targets jsonb; target jsonb; target_revision bigint; resolved jsonb; target_results jsonb:='[]'; actor_count integer;
 BEGIN
@@ -67,14 +67,20 @@ BEGIN
  END LOOP;
  targets:=target_results;
 
- -- Only revisions expressly returned by this adapter may replace earlier values.
- IF prior IS NOT NULL AND prior<>'null'::jsonb THEN
-  IF prior->>'property_id' IS DISTINCT FROM property_id::text OR jsonb_typeof(prior->'revised_dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Invalid predecessor receipt';END IF;
-  FOR revised IN SELECT value FROM jsonb_array_elements(prior->'revised_dependencies') LOOP
+ -- Rebase every accepted predecessor in order. Each adapter receipt returns
+ -- only the dependency namespaces it changed, so the final step must merge
+ -- the whole chain rather than just the immediately preceding receipt.
+ history:=step->'predecessor_results';
+ IF jsonb_typeof(history) IS DISTINCT FROM 'array' THEN
+  history:=CASE WHEN prior IS NULL OR prior='null'::jsonb THEN '[]'::jsonb ELSE jsonb_build_array(prior) END;
+ END IF;
+ FOR historical IN SELECT value FROM jsonb_array_elements(history) LOOP
+  IF historical->>'property_id' IS DISTINCT FROM property_id::text OR jsonb_typeof(historical->'revised_dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Invalid predecessor receipt';END IF;
+  FOR revised IN SELECT value FROM jsonb_array_elements(historical->'revised_dependencies') LOOP
    IF NOT ((revised->>'namespace' IN ('property_identity','property_policy','property_outcome','property_assignment','property_reviews') AND revised->'key'=jsonb_build_array(property_id)) OR (sms_contact IS NOT NULL AND ((revised->>'namespace' IN ('contact_policy','contact_identity') AND revised->'key'=jsonb_build_array(sms_contact)) OR (revised->>'namespace'='contact_channel_consent' AND revised->'key'=jsonb_build_array(sms_contact,'sms'))))) OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(expected->'dependencies') d WHERE d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key') THEN RAISE EXCEPTION 'Invalid revised dependency';END IF;
    SELECT jsonb_set(expected,'{dependencies}',jsonb_agg(CASE WHEN d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key' THEN revised ELSE d END ORDER BY d->>'namespace',(d->'key')::text)) INTO expected FROM jsonb_array_elements(expected->'dependencies') d;
   END LOOP;
- END IF;
+ END LOOP;
  -- Reuse only this accepted operation's committed contact safety transition.
  -- Exact original preparation equality is required before rebasing shared keys.
  SELECT jsonb_build_object('org_id',o,'dependencies',coalesce(jsonb_agg(d ORDER BY d->>'namespace',(d->'key')::text),'[]')) INTO sms_original_policy FROM jsonb_array_elements(step->'original_dependencies'->'policy'->'dependencies') d WHERE d->>'namespace' IN ('contact_identity','contact_policy','contact_channel_consent');
@@ -143,7 +149,7 @@ END $$;
 -- result without pretending an ineligible row was changed.
 CREATE OR REPLACE FUNCTION inbox_operation_domain.apply_promotion_step(o uuid,op uuid,s uuid,g bigint) RETURNS jsonb
 LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE step jsonb;payload jsonb;expected jsonb;actual jsonb;requirements jsonb;requester uuid;property_id uuid;p public.properties;member public.memberships;changed boolean;outcome text;result jsonb;v bigint;actor_count integer;prior jsonb;targets jsonb;target jsonb;target_revision bigint;target_results jsonb:='[]';resolved jsonb;revised jsonb;requirement jsonb;
+DECLARE step jsonb;payload jsonb;expected jsonb;actual jsonb;requirements jsonb;requester uuid;property_id uuid;p public.properties;member public.memberships;changed boolean;outcome text;result jsonb;v bigint;actor_count integer;prior jsonb;history jsonb;historical jsonb;targets jsonb;target jsonb;target_revision bigint;target_results jsonb:='[]';resolved jsonb;revised jsonb;requirement jsonb;
 BEGIN
  step:=inbox_operations.lock_step_for_effect(o,op,s,g);
  IF step->>'action' IS DISTINCT FROM 'promote' THEN RAISE EXCEPTION 'Unsupported promotion effect';END IF;
@@ -159,13 +165,17 @@ BEGIN
  prior:=step->'predecessor_result';
  expected:=step->'original_dependencies'->'policy';
  IF expected->>'org_id' IS DISTINCT FROM o::text OR jsonb_typeof(expected->'dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Missing policy vector';END IF;
- IF prior IS NOT NULL AND prior<>'null'::jsonb THEN
-  IF prior->>'property_id' IS DISTINCT FROM property_id::text OR jsonb_typeof(prior->'revised_dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Invalid predecessor receipt';END IF;
-  FOR revised IN SELECT value FROM jsonb_array_elements(prior->'revised_dependencies') LOOP
+ history:=step->'predecessor_results';
+ IF jsonb_typeof(history) IS DISTINCT FROM 'array' THEN
+  history:=CASE WHEN prior IS NULL OR prior='null'::jsonb THEN '[]'::jsonb ELSE jsonb_build_array(prior) END;
+ END IF;
+ FOR historical IN SELECT value FROM jsonb_array_elements(history) LOOP
+  IF historical->>'property_id' IS DISTINCT FROM property_id::text OR jsonb_typeof(historical->'revised_dependencies') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'Invalid predecessor receipt';END IF;
+  FOR revised IN SELECT value FROM jsonb_array_elements(historical->'revised_dependencies') LOOP
    IF revised->>'namespace' NOT IN ('property_identity','property_policy','property_outcome','property_assignment','property_reviews') OR revised->'key' IS DISTINCT FROM jsonb_build_array(property_id) OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements(expected->'dependencies') d WHERE d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key') THEN RAISE EXCEPTION 'Invalid revised dependency';END IF;
    SELECT jsonb_set(expected,'{dependencies}',jsonb_agg(CASE WHEN d->>'namespace'=revised->>'namespace' AND d->'key'=revised->'key' THEN revised ELSE d END ORDER BY d->>'namespace',(d->'key')::text)) INTO expected FROM jsonb_array_elements(expected->'dependencies') d;
   END LOOP;
- END IF;
+ END LOOP;
  targets:=CASE WHEN prior IS NOT NULL AND prior<>'null'::jsonb THEN prior->'target_revisions' ELSE step->'original_dependencies'->'targets' END;
  IF jsonb_typeof(targets) IS DISTINCT FROM 'array' OR jsonb_array_length(targets) NOT BETWEEN 1 AND 500 THEN RAISE EXCEPTION 'Missing bounded target vector';END IF;
  IF jsonb_array_length(targets)<>(SELECT count(*) FROM inbox_operations.item_steps WHERE org_id=o AND operation_id=op AND step_id=s) THEN RAISE EXCEPTION 'Incomplete target vector';END IF;

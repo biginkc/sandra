@@ -135,15 +135,22 @@ END $$;
 -- Call in the SAME transaction, before any canonical mutation. Keep this row lock
 -- through eligibility checks, the effect and finish_step. Never use across HTTP calls.
 CREATE FUNCTION inbox_operations.lock_step_for_effect(o uuid,op uuid,s uuid,g bigint) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE row inbox_operations.steps; prior jsonb;
+DECLARE row inbox_operations.steps; prior jsonb; predecessor_results jsonb:='[]'::jsonb; cursor uuid;
 BEGIN
  SELECT * INTO row FROM inbox_operations.steps WHERE org_id=o AND operation_id=op AND id=s FOR UPDATE;
  IF NOT FOUND OR row.state<>'running' OR g IS NULL OR row.generation<>g OR row.lease_until<=clock_timestamp() THEN RAISE EXCEPTION 'Stale step claim';END IF;
- IF row.predecessor_id IS NOT NULL THEN
-  SELECT result INTO prior FROM inbox_operations.receipts WHERE org_id=o AND operation_id=op AND step_id=row.predecessor_id;
+ cursor:=row.predecessor_id;
+ WHILE cursor IS NOT NULL LOOP
+  SELECT r.result,st.predecessor_id INTO prior,cursor
+  FROM inbox_operations.steps st JOIN inbox_operations.receipts r ON r.org_id=st.org_id AND r.operation_id=st.operation_id AND r.step_id=st.id
+  WHERE st.org_id=o AND st.operation_id=op AND st.id=cursor;
   IF NOT FOUND THEN RAISE EXCEPTION 'Predecessor incomplete';END IF;
- END IF;
- RETURN jsonb_build_object('action',row.action,'payload',row.payload,'original_dependencies',row.dependencies,'predecessor_result',prior);
+  -- Prepend each older receipt so adapters receive the complete immutable
+  -- dependency history in execution order, while predecessor_result remains
+  -- the immediate receipt for target/SMS rebasing.
+  predecessor_results:=jsonb_build_array(prior)||predecessor_results;
+ END LOOP;
+ RETURN jsonb_build_object('action',row.action,'payload',row.payload,'original_dependencies',row.dependencies,'predecessor_result',CASE WHEN jsonb_array_length(predecessor_results)>0 THEN predecessor_results->-1 ELSE NULL END,'predecessor_results',predecessor_results);
 END $$;
 CREATE FUNCTION inbox_operations.finish_step(o uuid,op uuid,s uuid,g bigint,result jsonb) RETURNS bigint LANGUAGE plpgsql SET search_path='' AS $$
 DECLARE v bigint;
