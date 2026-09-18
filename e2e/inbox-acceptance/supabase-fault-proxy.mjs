@@ -85,6 +85,7 @@ export async function startSupabaseFaultProxy({ targetUrl, port, token }) {
 
   let armed = false;
   let failed = false;
+  const upgradedSockets = new Set();
   const server = http.createServer((request, response) => {
     const localUrl = new URL(request.url ?? "/", "http://127.0.0.1");
     if (localUrl.pathname === FAULT_PATH) {
@@ -120,7 +121,11 @@ export async function startSupabaseFaultProxy({ targetUrl, port, token }) {
     });
     request.pipe(proxyRequest);
   });
-  server.on("upgrade", (request, socket, head) => relayUpgrade(request, socket, head, target));
+  server.on("upgrade", (request, socket, head) => {
+    upgradedSockets.add(socket);
+    socket.once("close", () => upgradedSockets.delete(socket));
+    relayUpgrade(request, socket, head, target);
+  });
 
   await new Promise((resolve, reject) => {
     const onError = (error) => { server.off("listening", onListening); reject(error); };
@@ -131,6 +136,9 @@ export async function startSupabaseFaultProxy({ targetUrl, port, token }) {
   });
   return {
     origin: `http://127.0.0.1:${port}`,
-    close: () => new Promise((resolve) => server.close(() => resolve())),
+    close: () => new Promise((resolve) => {
+      for (const socket of upgradedSockets) socket.destroy();
+      server.close(() => resolve());
+    }),
   };
 }
