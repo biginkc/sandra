@@ -256,6 +256,36 @@ def verify_execution_stack_manifest() -> dict[str, Any]:
             continue
         if entry.get("sha256") != backend_roles.get(entry.get("source")):
             return result("FAIL", f"{entry.get('service')} role hash is not tied to the backend packet")
+    electric_order = next((entry for entry in order if isinstance(entry, dict) and entry.get("service") == "electric"), None)
+    if not isinstance(electric_order, dict):
+        return result("FAIL", "Electric role/publication packet is missing from install order")
+    electric_source = ROOT / str(electric_order.get("source", ""))
+    if not electric_source.is_file() or sha256(electric_source) != electric_order.get("sha256"):
+        return result("FAIL", "Electric role/publication packet is missing or hash-drifted")
+    electric_sql = electric_source.read_text()
+    for needle in (
+        "current_database()",
+        "sandra-inbox-http-owned-synthetic-20260917",
+        "CREATE ROLE inbox_electric_replication",
+        "REPLICATION",
+        "GRANT SELECT ON TABLE inbox_bridge.summaries",
+        "REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION electric_publication_inbox_release_20260917",
+    ):
+        if needle not in electric_sql:
+            return result("FAIL", f"Electric packet is missing required guarded operation: {needle}")
+    if "sandra_inbox_install_20260913" in electric_sql or "inbox_t2_" in electric_sql:
+        return result("FAIL", "Electric packet retains historical fixture references")
+    registration = manifest.get("runtime_definition", {}).get("restate_registration")
+    if not isinstance(registration, dict):
+        return result("FAIL", "Restate registration procedure is missing")
+    registration_path = ROOT / str(registration.get("helper", ""))
+    if not registration_path.is_file() or sha256(registration_path) != registration.get("sha256"):
+        return result("FAIL", "Restate registration helper is missing or hash-drifted")
+    registration_source = registration_path.read_text()
+    for needle in ("--register-owned-runtime", "INBOX_RELEASE_ALLOW_RUNTIME_MUTATION", "http://127.0.0.1:9070/deployments", "http://127.0.0.1:9080", "http://127.0.0.1:9081"):
+        if needle not in registration_source:
+            return result("FAIL", f"Restate registration helper is missing required guard/procedure: {needle}")
     bounds = manifest.get("resource_bounds")
     if not isinstance(bounds, dict) or bounds.get("projection_worker_memory_bytes") != 268435456 or bounds.get("projection_worker_cpus") != 0.25:
         return result("FAIL", "projection worker resource bounds are missing")

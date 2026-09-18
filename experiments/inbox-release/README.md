@@ -173,11 +173,30 @@ operation, reply and projection images are built from the exact `fcffde3` source
 snapshot and have no accepted digest until that build runs. Electric is pinned
 to the previously reviewed 1.8.1 digest, but its publication, replication role
 and compatibility with the current candidate still require the separate
-database packet. The compose environment names a constrained replication role;
-it never falls back to the `postgres` administrator. The fixture relay imports the reviewed relay factory through
+database packet. `experiments/inbox-production-install/electric-replication-role.sql`
+is that packet: it is guarded by the release database and marker, creates only
+`inbox_electric_replication`, grants `CONNECT`, schema `USAGE`, and summary-table
+`SELECT`, enforces `REPLICA IDENTITY FULL`, and creates the one-table
+`electric_publication_inbox_release_20260917`. The password is supplied at
+execution time with `psql -v`; it is never stored in this tree. The compose
+environment names this constrained replication role and never falls back to the
+`postgres` administrator. The fixture relay imports the reviewed relay factory through
 `relay-fixture.mjs`; the production entry point remains
 `services/inbox-sync-relay/server.mjs`, which accepts only a private Railway
 Electric hostname.
+
+Restate deployment registration is a separate guarded operation. After the
+owned Restate and worker containers pass their exact label, image, host-network,
+and fixture-profile checks, run
+`register-restate-services.py` without mutation to inspect the admin health.
+Only after worker readiness and database checks pass may the operator set
+`INBOX_RELEASE_ALLOW_RUNTIME_MUTATION=1` and add
+`--register-owned-runtime`; the helper then posts only
+`http://127.0.0.1:9080` (`InboxMetadataOperation`) and
+`http://127.0.0.1:9081` (`InboxReplySend`) to the owned Restate admin at
+`http://127.0.0.1:9070`. It does not start, stop, pull, or remove containers,
+and writes a redacted registration receipt. No registration or replication
+receipt exists in this candidate yet.
 
 The current read-only daemon probe returned containerd blob I/O errors while
 inspecting the historical and infrastructure images. No cache availability or

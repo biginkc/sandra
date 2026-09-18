@@ -70,6 +70,17 @@
   },
   "database_role_install_order": [
     {
+      "service": "electric",
+      "source": "experiments/inbox-production-install/electric-replication-role.sql",
+      "sha256": "8e61c78e848f51416117d71d131ebbe8ce12071d1cf33a2ac28c10ab666de524",
+      "role": "inbox_electric_replication",
+      "publication": "electric_publication_inbox_release_20260917",
+      "table": "inbox_bridge.summaries",
+      "must_apply_before": "electric runtime",
+      "secret_input": "psql -v electric_password from the reviewed hosting secret store; never commit or log it",
+      "status": "SOURCE_ONLY_UNRUN"
+    },
+    {
       "service": "projection-worker",
       "source": "services/inbox-projection-worker/worker-role.sql",
       "sha256": "e44f574ff5fc11eb3f5a47ef95778798a01260d756022228967dcc439922df30",
@@ -114,7 +125,9 @@
     "projection_worker": "requires worker-role.sql and worker grants on target DB; verified separately on the owned HTTP fixture",
     "current_source_build": "required before execution image is accepted; no current image claim is made",
     "provider_traffic": "forbidden",
-    "customer_sends": "forbidden"
+    "customer_sends": "forbidden",
+    "electric_replication": "requires the guarded role/publication packet; only inbox_bridge.summaries is permitted",
+    "restate_registration": "requires the guarded helper and explicit registration mutation after worker readiness"
   },
   "resource_bounds": {
     "operation_worker_memory_bytes": 268435456,
@@ -221,9 +234,11 @@
     "preflight_order": [
       "start and identity-check the separately owned HTTP fixture",
       "apply generated backend-operation-reply.sql and generated/projection-worker-role.sql to the marked fixture using separate reviewed login provisioning",
-      "create and verify Electric publication/replication role for inbox_bridge.summaries",
+      "apply experiments/inbox-production-install/electric-replication-role.sql with the reviewed Electric password and verify its exact catalog result",
       "build current operation/reply/projection/relay sources and record immutable image digests",
-      "register both Restate services, then run authenticated command/recovery and read/subscription acceptance",
+      "start the pinned Electric and Restate services only after their catalog/image guards pass",
+      "run register-restate-services.py in inspect-only mode, then explicitly register both worker endpoints",
+      "run authenticated command/recovery and read/subscription acceptance",
       "measure current and three-times workload with the owned fault/resource adapter"
     ],
     "missing_evidence": [
@@ -239,6 +254,41 @@
       "restate": "deployment/inbox/candidate.json service inbox-restate; private ingress 8080/admin 9070 with persistent volume",
       "workers": "operation/reply/projection source builds from this manifest; deployment/inbox/candidate.json worker image stays null until digest evidence",
       "relay": "services/inbox-sync-relay with private Railway upstream and server-only bearer token"
+    },
+    "electric_provisioning": {
+      "source": "experiments/inbox-production-install/electric-replication-role.sql",
+      "sha256": "8e61c78e848f51416117d71d131ebbe8ce12071d1cf33a2ac28c10ab666de524",
+      "database": "postgres",
+      "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
+      "role": "inbox_electric_replication",
+      "publication": "electric_publication_inbox_release_20260917",
+      "table": "inbox_bridge.summaries",
+      "runtime_dsn": "postgres://inbox_electric_replication:<secret>@127.0.0.1:54322/postgres?sslmode=disable",
+      "procedure": [
+        "verify the HTTP container label and install_fixture.identity marker before opening credentials",
+        "apply the SQL with psql -v electric_password from the reviewed secret store",
+        "verify role authority, exact grants, REPLICA IDENTITY FULL, and one-table publication",
+        "start the pinned Electric image only after those catalog checks pass"
+      ],
+      "status": "SOURCE_ONLY_UNRUN"
+    },
+    "restate_registration": {
+      "helper": "experiments/inbox-release/register-restate-services.py",
+      "sha256": "757d0a4762c3b2347b2a6251aab722de28d39fc8b9a5bf4dd3429b83e7e836e0",
+      "admin_url": "http://127.0.0.1:9070",
+      "worker_endpoints": {
+        "InboxMetadataOperation": "http://127.0.0.1:9080",
+        "InboxReplySend": "http://127.0.0.1:9081"
+      },
+      "procedure": [
+        "set INBOX_RELEASE_DOCKER_HOST to the explicitly owned Docker daemon",
+        "run the helper without --register-owned-runtime for identity and health inspection",
+        "after worker readiness and database checks pass, set INBOX_RELEASE_ALLOW_RUNTIME_MUTATION=1",
+        "rerun with --register-owned-runtime; POST only the two exact worker endpoints",
+        "preserve the redacted receipt and verify both deployments before acceptance"
+      ],
+      "mutation_guard": "explicit --register-owned-runtime plus INBOX_RELEASE_ALLOW_RUNTIME_MUTATION=1",
+      "status": "SOURCE_ONLY_UNRUN"
     }
   }
 }
