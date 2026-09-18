@@ -13,7 +13,9 @@ import { seedAcceptanceThread, type SeededThread } from "./seed";
  * tests cover behavior that has no separate matrix row: selection is local to
  * the authenticated session, Open is distinct from selection, and filtering
  * does not discard selected IDs that are temporarily outside the resident
- * view.
+ * view. The arrival test is the incoming-activity adjunct to F06's ordering
+ * row and the development plan's selection acceptance clause; it intentionally
+ * does not claim F06's separate pagination verification.
  *
  * Runtime is enabled only by the dedicated acceptance configuration. These
  * tests use the real browser, APIs, and persisted fixture rows; they do not
@@ -194,6 +196,32 @@ test.describe("Inbox navigation and selection", () => {
     await expect(review.getByText(unread.contactName, { exact: true })).toBeVisible();
     await expect(review.getByText(read.contactName, { exact: true })).toBeVisible();
   });
+
+  test("incoming arrivals wait behind the indicator until explicit refresh", async ({ page }) => {
+    const resident = await seedSelectionThread("ARRIVAL-RESIDENT", "Resident", "Arrival", { read: false, createdAtOffsetMin: -10 });
+    await openWorkspace(page);
+
+    const list = page.getByRole("list", { name: "Inbox conversations" });
+    await expect(list.getByText(resident.contactName, { exact: true })).toBeVisible();
+    await page.getByLabel(`Select ${resident.contactName}`).click();
+    await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
+
+    // Insert through the authenticated fixture client while the original
+    // server workset remains mounted. The new thread is newer and should be
+    // reported by workset-updates, but it must not enter the resident page or
+    // replace the selected ID before the operator refreshes explicitly.
+    const arriving = await seedSelectionThread("ARRIVAL-NEW", "New", "Arrival", { read: false, createdAtOffsetMin: -1 });
+    const indicator = page.getByRole("button", { name: /New conversations available/ });
+    await expect(indicator).toBeVisible({ timeout: 20_000 });
+    await expect(list.getByText(arriving.contactName, { exact: true })).toHaveCount(0);
+    await expect(list.getByRole("listitem").first()).toContainText(resident.contactName);
+    await expect(page.getByLabel(`Select ${resident.contactName}`)).toBeChecked();
+
+    await indicator.click();
+    await expect(list.getByText(arriving.contactName, { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(list.getByRole("listitem").first()).toContainText(arriving.contactName);
+    await expect(page.getByLabel(`Select ${resident.contactName}`)).toBeChecked();
+  });
 });
 
 async function openWorkspace(page: Page): Promise<void> {
@@ -210,14 +238,14 @@ async function seedSelectionThread(
   addressTag: string,
   first: string,
   last: string,
-  options: { read?: boolean } = {},
+  options: { read?: boolean; createdAtOffsetMin?: number } = {},
 ): Promise<SeededThread> {
   selectionPhoneCounter += 1;
   return seedAcceptanceThread(admin, {
     phone: `+1816${selectionPhoneCounter}`,
     addressTag,
     contactName: { first, last },
-    messages: [{ direction: "inbound", body: `${addressTag} selection body`, createdAtOffsetMin: -2, read: options.read ?? false }],
+    messages: [{ direction: "inbound", body: `${addressTag} selection body`, createdAtOffsetMin: options.createdAtOffsetMin ?? -2, read: options.read ?? false }],
   });
 }
 
