@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { adminClient, ensureTestUser, resetTenantTables } from "../fixtures";
 import { seedQueuedMessage } from "./seed";
+import { armOutboxInitialReadFailure } from "./fault-proxy";
 import { captureRowEvidence, purgeRowOutcomes, readMatrixResults, recordRowOutcome } from "./results";
 
 /**
@@ -287,36 +288,16 @@ test("O08/O09 — load more queue rows advances the page, loaded total updates",
 test("O10 — a failed initial queue read recovers via Retry", async ({ page }) => {
   await seedQueuedMessage(admin, { addressTag: "ACC-O10-RETRY", body: "o10 recovers after retry", scheduledForOffsetMin: 5 });
 
-  let failedOnce = false;
-  await page.route("**/messages*", async (route) => {
-    const request = route.request();
-    const isServerActionInvocation =
-      request.method() === "POST" && !!(await request.headerValue("next-action"));
-    if (isServerActionInvocation && !failedOnce) {
-      failedOnce = true;
-      await route.fulfill({ status: 500, body: "simulated queue read failure" });
-      return;
-    }
-    await route.continue();
-  });
+  // The first queue page is rendered by the server component and its
+  // Supabase request never traverses the browser page, so a page.route()
+  // interception cannot exercise this failure path. Arm the acceptance-only
+  // loopback Supabase proxy instead; it faults exactly this queued REST read
+  // once and forwards the retry to the real seeded database.
+  await armOutboxInitialReadFailure();
 
   await page.goto("/messages?tab=outbox");
   const failure = page.getByTestId("queue-load-failure");
-  // locator.waitFor genuinely polls (unlike isVisible(), which returns
-  // immediately with no auto-wait) — this really does wait up to 10s for
-  // the intercepted server action's failure to render before deciding
-  // this render path doesn't hit it.
-  const sawFailure = await failure
-    .waitFor({ state: "visible", timeout: 10_000 })
-    .then(() => true)
-    .catch(() => false);
-  if (!sawFailure) {
-    const reason =
-      "Waited up to 10s (locator.waitFor) for queue-load-failure after intercepting the first POST request carrying a next-action header on /messages?tab=outbox and forcing it to fail. It never appeared, so the initial queue read on this render path did not route through the intercepted request in this run — not fabricating a pass.";
-    recordRowOutcome({ id: "O10", status: "skip", evidence: reason });
-    test.skip(true, reason);
-  }
-
+  await expect(failure).toBeVisible({ timeout: 15_000 });
   await failure.getByRole("button", { name: "Retry" }).click();
   await expect(failure).toHaveCount(0, { timeout: 15_000 });
   await expect(page.getByText("o10 recovers after retry")).toBeVisible();

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 
 import { defineConfig, devices } from "@playwright/test";
 
@@ -89,6 +90,14 @@ process.env.E2E_QUIET_HOURS_NOW =
 const browserChannel =
   process.env.PLAYWRIGHT_BROWSER_CHANNEL === "chrome" ? "chrome" : undefined;
 const useWebpackDevServer = process.env.PLAYWRIGHT_WEBPACK_DEV_SERVER === "1";
+const faultProxyPort = Number(process.env.INBOX_ACCEPTANCE_FAULT_PROXY_PORT ?? "4567");
+if (!Number.isInteger(faultProxyPort) || faultProxyPort < 1 || faultProxyPort > 65_535) {
+  throw new Error("INBOX_ACCEPTANCE_FAULT_PROXY_PORT must be a valid TCP port.");
+}
+const faultProxyToken = process.env.INBOX_ACCEPTANCE_FAULT_PROXY_TOKEN ?? randomBytes(32).toString("hex");
+process.env.INBOX_ACCEPTANCE_FAULT_PROXY_PORT = String(faultProxyPort);
+process.env.INBOX_ACCEPTANCE_FAULT_PROXY_TOKEN = faultProxyToken;
+process.env.INBOX_ACCEPTANCE_FAULT_PROXY_CONTROL_URL = `http://127.0.0.1:${faultProxyPort}/__inbox-fault/arm-o10`;
 
 const webServerEnv: Record<string, string> = {
   NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
@@ -112,6 +121,13 @@ const webServerEnv: Record<string, string> = {
   INBOX_WORKSPACE_ROLLOUT_MODE: "all",
   INBOX_ACTIONS_SERVER_ENABLED: "1",
   INBOX_REPLIES_SERVER_ENABLED: "1",
+  // The web-server wrapper replaces NEXT_PUBLIC_SUPABASE_URL with its
+  // loopback relay. Fixtures and auth.setup continue using TEST_SUPABASE_URL
+  // directly in the Playwright process.
+  INBOX_ACCEPTANCE_SUPABASE_TARGET_URL: supabaseUrl,
+  INBOX_ACCEPTANCE_FAULT_PROXY_PORT: String(faultProxyPort),
+  INBOX_ACCEPTANCE_FAULT_PROXY_TOKEN: faultProxyToken,
+  INBOX_ACCEPTANCE_NEXT_USE_WEBPACK: useWebpackDevServer ? "1" : "0",
 };
 
 export default defineConfig({
@@ -173,9 +189,7 @@ export default defineConfig({
     // origin when seeding cookies into storageState, and the fixture
     // serialization rule in this harness already means it never runs
     // concurrently with the main suite against the same shared fixture.
-    command: useWebpackDevServer
-      ? "npx next dev --webpack -p 3456"
-      : "npx next dev -p 3456",
+    command: "node e2e/inbox-acceptance/web-server-with-supabase-fault-proxy.mjs",
     url: "http://localhost:3456/login",
     reuseExistingServer: false,
     stdout: "pipe",
