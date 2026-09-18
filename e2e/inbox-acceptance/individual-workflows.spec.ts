@@ -9,6 +9,12 @@ import {
   resetTenantTables,
   seedProspects,
 } from "../fixtures";
+import {
+  captureRowEvidence,
+  purgeRowOutcomes,
+  readMatrixResults,
+  recordRowOutcome,
+} from "./results";
 import { seedAcceptanceThread, type SeededThread } from "./seed";
 
 /**
@@ -20,17 +26,33 @@ import { seedAcceptanceThread, type SeededThread } from "./seed";
  * RUNTIME-UNPROVEN: the suite is opt-in until the coordinator hands off the
  * installed Inbox RPC schema and an exclusive acceptance runtime:
  *
- *   INBOX_INDIVIDUAL_WORKFLOWS_RUN=1 npx playwright test \
+ *   INBOX_ACCEPTANCE_RUN=1 npx playwright test \
  *     --config=playwright.inbox-acceptance.config.ts individual-workflows.spec.ts
  *
- * U07/U08 intentionally assert the existing Messages resolution affordances
- * by their stable test IDs. They are authored as required coverage even
- * though the current Inbox detail integration has not mounted that dialog.
- * A runtime failure there is an honest missing-affordance result, not a
- * substitute pass through U03/U04.
+ * U07/U08 exercise the existing Messages resolution dialog after it is mounted
+ * in the Inbox detail action rail. A runtime failure remains an honest missing
+ * affordance or persistence result, not a substitute pass through U03/U04.
  */
 
-const shouldRun = process.env.INBOX_INDIVIDUAL_WORKFLOWS_RUN === "1";
+const shouldRun = process.env.INBOX_ACCEPTANCE_RUN === "1";
+
+const ROW_OWNERSHIP: Record<string, string[]> = {
+  "F11 — detail renders authoritative Sandra AI status": ["F11"],
+  "F12 — detail exposes record and copy-link controls": ["F12"],
+  "F13 — detail exposes an eligible tel link without placing a call": ["F13"],
+  "F14 — detail preserves the existing New Message destination": ["F14"],
+  "A04 — Follow up applies nurture through the reviewed bulk lane": ["A04"],
+  "A08 — Move to Lead persists the property transition": ["A08"],
+  "A09 — Book appointment persists an open appointment task": ["A09"],
+  "A12 — operator can confirm Sandra's pending disposition": ["A12"],
+  "A13 — correcting Sandra's disposition supersedes the review": ["A13"],
+  "U01 — unknown detail shows bounded sender history": ["U01"],
+  "U02 — unknown sender merges into an existing contact": ["U02"],
+  "U03 — unknown sender merges into an existing property": ["U03"],
+  "U04 — unknown sender creates a new lead": ["U04"],
+  "U07 — known contact resolves to an existing property": ["U07"],
+  "U08 — known contact creates a property and resolves": ["U08"],
+};
 
 type UnknownSeed = { fromAddress: string; messageIds: string[] };
 
@@ -39,8 +61,38 @@ let admin: ReturnType<typeof adminClient>;
 test.describe.serial("Inbox individual workflows (runtime-unproven)", () => {
   test.skip(
     !shouldRun,
-    "Runtime-unproven: set INBOX_INDIVIDUAL_WORKFLOWS_RUN=1 after coordinator runtime handoff.",
+    "Runtime-unproven: set INBOX_ACCEPTANCE_RUN=1 through the dedicated acceptance config after coordinator runtime handoff.",
   );
+
+  test.beforeEach(async ({}, testInfo) => {
+    purgeRowOutcomes(ROW_OWNERSHIP[testInfo.title] ?? []);
+  });
+
+  test.afterEach(async ({ page }, testInfo) => {
+    if (!shouldRun) return;
+    const ids = ROW_OWNERSHIP[testInfo.title] ?? [];
+    const alreadyRecorded = new Set(readMatrixResults().map((result) => result.id));
+    for (const id of ids) {
+      if (alreadyRecorded.has(id)) continue;
+      if (testInfo.status === "skipped") {
+        recordRowOutcome({ id, status: "skip", evidence: `test skipped (no explicit reason recorded for ${id})` });
+        continue;
+      }
+      if (testInfo.status === "passed") {
+        try {
+          const evidence = await captureRowEvidence(page, id);
+          recordRowOutcome({ id, status: "pass", evidence });
+          continue;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message.slice(0, 300) : "evidence capture failed";
+          recordRowOutcome({ id, status: "fail", evidence: `evidence capture failed: ${detail}` });
+          continue;
+        }
+      }
+      const detail = testInfo.error?.message?.slice(0, 300) ?? "no assertion for this row completed";
+      recordRowOutcome({ id, status: "fail", evidence: `test ${testInfo.status ?? "failed"}: ${detail}` });
+    }
+  });
 
   test.beforeAll(async () => {
     admin = adminClient();
