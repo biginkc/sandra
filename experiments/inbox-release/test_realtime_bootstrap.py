@@ -98,6 +98,7 @@ class RealtimeBootstrapTest(unittest.TestCase):
                 {
                     "publication_exists": True,
                     "publication_messages": True,
+                    "subscription_exists": False,
                     "slot_active": True,
                     "streaming": True,
                 }
@@ -109,6 +110,7 @@ class RealtimeBootstrapTest(unittest.TestCase):
             {
                 "publication_exists": True,
                 "publication_messages": True,
+                "subscription_exists": False,
                 "slot_active": True,
                 "streaming": True,
             },
@@ -125,6 +127,7 @@ class RealtimeBootstrapTest(unittest.TestCase):
                 {
                     "publication_exists": True,
                     "publication_messages": True,
+                    "subscription_exists": True,
                     "slot_active": False,
                     "streaming": True,
                 }
@@ -240,8 +243,10 @@ class RealtimeBootstrapTest(unittest.TestCase):
             return_value={
                 "publication_exists": True,
                 "publication_messages": True,
+                "subscription_exists": False,
                 "slot_active": True,
                 "streaming": True,
+                "tenant_connection": True,
             },
         ):
             realtime_bootstrap.apply_bootstrap(Path("/private/realtime.env"))
@@ -401,8 +406,10 @@ class RealtimeBootstrapTest(unittest.TestCase):
             return_value={
                 "publication_exists": True,
                 "publication_messages": True,
+                "subscription_exists": False,
                 "slot_active": True,
                 "streaming": True,
+                "tenant_connection": True,
             },
         ):
             result = realtime_bootstrap.apply_bootstrap(Path("/private/realtime.env"))

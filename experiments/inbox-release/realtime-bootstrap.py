@@ -242,6 +242,35 @@ def read_tenant_runtime_user() -> str:
     return lines[-1]
 
 
+def probe_tenant_cdc_connection() -> bool:
+    """Open and close a real tenant connection through the Realtime release."""
+
+    expression = (
+        f"tenant=Realtime.Api.get_tenant_by_external_id(\"{TENANT_EXTERNAL_ID}\", "
+        "use_replica?: false); "
+        "case Realtime.Database.check_tenant_connection(tenant) do "
+        "{:ok, pid, _migrations} -> Process.exit(pid, :normal); "
+        "IO.puts(\"realtime_bootstrap_tenant_connection_ready\"); "
+        "_ -> IO.puts(\"realtime_bootstrap_tenant_connection_unavailable\") end"
+    )
+    try:
+        result = docker(
+            "exec",
+            REALTIME_CONTAINER,
+            "/app/bin/realtime",
+            "rpc",
+            expression,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return (
+        result.returncode == 0
+        and "realtime_bootstrap_tenant_connection_ready"
+        in (result.stdout or "")
+    )
+
+
 def rpc_probe(container_name: str) -> tuple[bool, str]:
     """Probe the running release node without reading tenant data or secrets."""
 
@@ -294,7 +323,12 @@ def wait_for_rpc_ready(
         return is_ready
 
     try:
-        wait_for(ready, timeout=timeout, interval=interval)
+        wait_for(
+            ready,
+            timeout=timeout,
+            interval=interval,
+            description="Realtime RPC readiness",
+        )
     except BootstrapError as exc:
         suffix = f"; last RPC probe: {last_detail}" if last_detail else ""
         raise BootstrapError(f"{exc}{suffix}") from exc
@@ -558,10 +592,10 @@ def read_broadcast_publication_state() -> bool:
 def read_cdc_state() -> dict[str, bool]:
     """Read the live tenant CDC prerequisites from PostgreSQL.
 
-    Realtime can be RPC-ready while its tenant logical-replication path is
-    absent or disconnected.  The bootstrap result must therefore include the
-    tenant publication, its ``public.messages`` member, an active wal2json
-    slot, and a streaming Realtime replication connection.
+    Realtime can be RPC-ready while its tenant CDC prerequisites are absent.
+    The tenant logical-replication slot is created lazily when a subscription
+    exists, so an idle tenant proves readiness through a real tenant connection;
+    an active subscription additionally requires its wal2json slot and stream.
     """
 
     raw = sql_query(
@@ -574,6 +608,9 @@ def read_cdc_state() -> dict[str, bool]:
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
         f"WHERE p.pubname = '{TENANT_PUBLICATION}' "
         "AND n.nspname = 'public' AND c.relname = 'messages'), "
+        "'subscription_exists', EXISTS (SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = 'realtime' AND table_name = 'subscription' "
+        "AND EXISTS (SELECT 1 FROM realtime.subscription)), "
         "'slot_active', EXISTS (SELECT 1 FROM pg_replication_slots "
         "WHERE slot_name LIKE 'supabase_realtime_replication_slot%' "
         "AND slot_type = 'logical' AND plugin = 'wal2json' AND active), "
@@ -591,8 +628,14 @@ def read_cdc_state() -> dict[str, bool]:
 
 
 def require_cdc_ready(state: Mapping[str, Any]) -> None:
-    required = ("publication_exists", "publication_messages", "slot_active", "streaming")
+    required = ("publication_exists", "publication_messages")
     missing = [name for name in required if state.get(name) is not True]
+    if state.get("subscription_exists") is True:
+        for name in ("slot_active", "streaming"):
+            if state.get(name) is not True:
+                missing.append(name)
+    elif state.get("tenant_connection") is not True:
+        missing.append("tenant_connection")
     if missing:
         raise BootstrapError(
             "Realtime tenant CDC is not live; missing " + ", ".join(missing)
@@ -609,13 +652,30 @@ def wait_for_cdc_ready(
     def ready() -> bool:
         nonlocal latest
         latest = read_cdc_state()
-        return all(
-            latest.get(name) is True
-            for name in ("publication_exists", "publication_messages", "slot_active", "streaming")
+        if latest.get("subscription_exists") is True:
+            return all(
+                latest.get(name) is True
+                for name in (
+                    "publication_exists",
+                    "publication_messages",
+                    "slot_active",
+                    "streaming",
+                )
+            )
+        latest["tenant_connection"] = probe_tenant_cdc_connection()
+        return (
+            latest["publication_exists"] is True
+            and latest["publication_messages"] is True
+            and latest["tenant_connection"] is True
         )
 
     try:
-        wait_for(ready, timeout=timeout, interval=interval)
+        wait_for(
+            ready,
+            timeout=timeout,
+            interval=interval,
+            description="Realtime CDC readiness",
+        )
     except BootstrapError as exc:
         detail = ", ".join(f"{key}={value!r}" for key, value in sorted(latest.items()))
         suffix = f"; last CDC state: {detail}" if detail else ""
@@ -767,14 +827,18 @@ def require_mutation_confirmation() -> None:
 
 
 def wait_for(
-    predicate: Callable[[], bool], *, timeout: float = 120.0, interval: float = 2.0
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 120.0,
+    interval: float = 2.0,
+    description: str = "Realtime migration state",
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(interval)
-    raise BootstrapError(f"Timed out after {timeout:.0f}s waiting for Realtime migration state")
+    raise BootstrapError(f"Timed out after {timeout:.0f}s waiting for {description}")
 
 
 def cleanup_migration_container(temp_name: str, *, restart: bool = True) -> None:
