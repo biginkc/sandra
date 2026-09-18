@@ -84,6 +84,7 @@ class ReconcileOwnedHttpFixtureTests(unittest.TestCase):
         self.assertIn("array_to_string(ARRAY", source)
         self.assertIn("string_agg(h,',' ORDER BY h)", source)
         self.assertIn("::text", source)
+        self.assertIn("bus.bus_messages", MODULE.PROTECTED_RELATIONS)
         self.assertGreaterEqual(len(MODULE.PROTECTED_RELATIONS), 20)
 
     def test_collision_probe_and_idle_budget_are_required(self) -> None:

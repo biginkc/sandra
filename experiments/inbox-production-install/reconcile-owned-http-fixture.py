@@ -45,6 +45,7 @@ DATABASE_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 # per-column content fingerprint (including keys and counters) is captured
 # before and after recovery while writers are stopped.
 PROTECTED_RELATIONS = (
+    "bus.bus_messages",
     "public.messages",
     "public.inbox_inbound_heads",
     "inbox_message_capture.versions",
