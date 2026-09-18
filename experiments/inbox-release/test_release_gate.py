@@ -17,6 +17,50 @@ SPEC.loader.exec_module(gate)
 
 
 class ReleaseGateStatusTests(unittest.TestCase):
+    def test_stress_measurements_require_recomputable_raw_samples(self) -> None:
+        evidence = {
+            "measurements": {
+                event: {"samples": 1, "p95_ms": 1.0, "p99_ms": 1.0}
+                for event in ("first_open", "revisit", "selection")
+            },
+            "bulk_reply_recipient_cap": 50,
+            "arrival_rate": {"samples": 1},
+        }
+        status, detail = gate.validate_measurements(
+            evidence,
+            {"sample_minimum": 1, "first_open_p95_ms": 1000, "revisit_p95_ms": 200, "selection_p95_ms": 100, "bulk_reply_recipient_cap": 50},
+            tier="current",
+        )
+        self.assertEqual(status, "FAIL")
+        self.assertIn("raw_samples", detail)
+
+    def test_stress_measurements_require_raw_counts_to_match(self) -> None:
+        evidence = {
+            "measurements": {
+                event: {"samples": 1, "p95_ms": 1.0, "p99_ms": 1.0}
+                for event in ("first_open", "revisit", "selection")
+            },
+            "bulk_reply_recipient_cap": 50,
+            "arrival_rate": {"samples": 1},
+            "raw_samples": {
+                "timing": [
+                    {"event": "first_open", "duration_ms": 1.0},
+                    {"event": "revisit", "duration_ms": 1.0},
+                    {"event": "selection", "duration_ms": 1.0},
+                    {"event": "selection", "duration_ms": 1.0},
+                ],
+                "metric": [],
+                "recovery": [],
+            },
+        }
+        status, detail = gate.validate_measurements(
+            evidence,
+            {"sample_minimum": 1, "first_open_p95_ms": 1000, "revisit_p95_ms": 200, "selection_p95_ms": 100, "bulk_reply_recipient_cap": 50},
+            tier="current",
+        )
+        self.assertEqual(status, "FAIL")
+        self.assertIn("raw sample count", detail)
+
     def test_unlisted_integrity_failure_is_decisive(self) -> None:
         statuses = gate.reduce_gate_statuses(
             {

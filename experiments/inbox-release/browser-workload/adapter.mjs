@@ -382,13 +382,22 @@ async function terminalReply(page, operationId, deadline) {
 async function runCycle(browser, input, job, sample, onCycleStart) {
   const scenario = job.scenario;
   const context = await browser.newContext({ baseURL: scenario.appUrl ?? input.appUrl, storageState: scenario.storageState });
-  const page = await context.newPage();
+  let page = await context.newPage();
   const deadline = Date.now() + positiveNumber(process.env.INBOX_RELEASE_CYCLE_TIMEOUT_MS ?? 120_000, "INBOX_RELEASE_CYCLE_TIMEOUT_MS");
   try {
     // The readiness signal is deliberately after browser context/page
     // creation.  A launched browser with no active cycle must not unblock
     // the fault/resource adapter.
     await onCycleStart?.();
+    if (input.scenario === "cold_start") {
+      // Discard the initial page and force a fresh page/request before the
+      // first-open timer. This exercises cold browser initialization rather
+      // than merely attaching a scenario label to a normal warm cycle.
+      await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 });
+      await page.close();
+      page = await context.newPage();
+      await page.setExtraHTTPHeaders({ "Cache-Control": "no-cache" });
+    }
     await page.goto("/inbox?view=all", { waitUntil: "domcontentloaded", timeout: 30_000 });
     const list = page.getByRole("list", { name: "Inbox conversations", exact: true });
     await list.waitFor({ state: "visible", timeout: 30_000 });

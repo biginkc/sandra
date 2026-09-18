@@ -638,6 +638,20 @@ def validate_evidence_file(path: Path, candidate_sha: str, policy: dict[str, Any
 def validate_measurements(
     evidence: dict[str, Any], budgets: dict[str, Any], *, tier: str
 ) -> tuple[str, str]:
+    raw_samples = evidence.get("raw_samples")
+    if not isinstance(raw_samples, dict):
+        return "FAIL", f"{tier} evidence does not retain raw_samples"
+    timing_samples = raw_samples.get("timing")
+    if not isinstance(timing_samples, list):
+        return "FAIL", f"{tier} evidence raw_samples.timing is missing"
+    observed_events = {
+        record.get("event")
+        for record in timing_samples
+        if isinstance(record, dict) and isinstance(record.get("event"), str)
+    }
+    for event in ("first_open", "revisit", "selection"):
+        if event not in observed_events:
+            return "FAIL", f"{tier} raw_samples.timing lacks {event} observations"
     measurements = evidence.get("measurements")
     if not isinstance(measurements, dict):
         return "FAIL", f"{tier} evidence has no measurements"
@@ -662,6 +676,13 @@ def validate_measurements(
         target = budgets[budget_key]
         if float(p95) > float(target):
             return "FAIL", f"{tier} {metric} p95={p95}ms exceeds approved target {target}ms"
+        event_samples = [
+            record
+            for record in timing_samples
+            if isinstance(record, dict) and record.get("event") == metric
+        ]
+        if len(event_samples) != samples:
+            return "FAIL", f"{tier} {metric} raw sample count {len(event_samples)} does not match measured count {samples}"
     cap = evidence.get("bulk_reply_recipient_cap")
     if cap != budgets.get("bulk_reply_recipient_cap"):
         return "FAIL", f"{tier} bulk reply cap is not the approved server cap"
