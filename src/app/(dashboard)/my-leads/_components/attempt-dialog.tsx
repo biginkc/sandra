@@ -518,7 +518,7 @@ export function AcquisitionAttemptDialog({
             />
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="acquisition-attempt-recording">Recording link (optional)</Label>
+              <Label htmlFor="acquisition-attempt-recording">Recording link {source === "dialpad" ? "(required)" : "(optional)"}</Label>
               <Input
                 id="acquisition-attempt-recording"
                 type="url"
@@ -526,9 +526,14 @@ export function AcquisitionAttemptDialog({
                 disabled={attemptRecorded || reconciliationLocked}
                 onChange={(event) => setRecordingUrl(event.target.value)}
                 placeholder="https://…"
+                aria-invalid={Boolean(clientFieldErrors.recordingUrl)}
                 className={TEXT_FIELD_CLASS}
               />
-              <p className="text-xs text-muted-foreground">Recording links are optional for Sandra and DialPad.</p>
+              {clientFieldErrors.recordingUrl ? (
+                <p className="text-xs text-destructive">{clientFieldErrors.recordingUrl}</p>
+              ) : (
+                <p className="text-xs text-muted-foreground">Paste the shared DialPad recording link. Sandra recordings attach automatically.</p>
+              )}
             </div>
 
             <div className="flex flex-col gap-1.5">

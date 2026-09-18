@@ -201,6 +201,7 @@ describe("My Leads workflow dialogs", () => {
     const user = userEvent.setup()
     render(<AcquisitionAttemptDialog {...baseProps} onSubmit={vi.fn()} />)
     expect(screen.getByRole("option", { name: "Sandra" })).toBeDisabled()
+    expect(screen.getByLabelText("Recording link (required)")).toBeInTheDocument()
     expect(screen.getByText(/No Sandra calls need an outcome/)).toBeInTheDocument()
     await user.selectOptions(screen.getByLabelText("Source"), "sandra")
     expect(screen.getByLabelText("Source")).toHaveValue("dialpad")
