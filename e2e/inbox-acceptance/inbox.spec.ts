@@ -89,12 +89,12 @@ test("F03 — view filter changes the row list", async ({ page }) => {
 
   await page.goto("/inbox?view=all");
   const list = page.getByRole("list", { name: "Inbox conversations" });
-  await expect(list.getByText(unread.contactName)).toBeVisible();
-  await expect(list.getByText(readThread.contactName)).toBeVisible();
+  await expect(list.getByText(unread.contactName, { exact: true })).toBeVisible();
+  await expect(list.getByText(readThread.contactName, { exact: true })).toBeVisible();
 
   await page.getByLabel("View").selectOption("unread");
-  await expect(list.getByText(unread.contactName)).toBeVisible();
-  await expect(list.getByText(readThread.contactName)).toHaveCount(0);
+  await expect(list.getByText(unread.contactName, { exact: true })).toBeVisible();
+  await expect(list.getByText(readThread.contactName, { exact: true })).toHaveCount(0);
 
   recordRowOutcome({ id: "F03", status: "pass", evidence: "e2e/inbox-acceptance/inbox.spec.ts::F03" });
 });
