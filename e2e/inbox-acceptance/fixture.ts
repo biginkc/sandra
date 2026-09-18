@@ -95,12 +95,12 @@ export const test = base.extend<AcceptanceFixtures>({
     try {
       await runFixture(session.storageState);
     } finally {
-      // This run identity is namespaced by E2E_RUN_SLUG and is not shared by
-      // another acceptance run. Global scope is therefore the only Supabase
-      // sign-out mode that revokes the server-side session/workset promptly;
-      // local scope would merely clear cookies and leave the session active.
+      // Revoke only the session that supplied this fixture's access token.
+      // Supabase's local logout scope sends the token to GoTrue's logout
+      // endpoint and clears this client's cookies; global would also revoke
+      // the setup session or any other session for the run user.
       session.auth.auth.stopAutoRefresh();
-      const { error } = await session.auth.auth.signOut({ scope: "global" });
+      const { error } = await session.auth.auth.signOut({ scope: "local" });
       if (error) {
         throw new Error(
           `Inbox acceptance auth fixture could not revoke its test session: ${error.message}`,
