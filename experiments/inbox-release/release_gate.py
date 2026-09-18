@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 
 HERE = Path(__file__).resolve().parent
@@ -90,6 +91,73 @@ def run_command(label: str, command: list[str], *, timeout: int = 180) -> dict[s
         "stdout_tail": result.stdout[-4000:],
         "stderr_tail": result.stderr[-4000:],
     }
+
+
+def git_source_bytes(repository: Path, commit: str, relative_path: str) -> bytes:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(repository), "show", f"{commit}:{relative_path}"],
+            stderr=subprocess.STDOUT,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise GateError(f"pinned source is unavailable: {repository}@{commit}:{relative_path}: {exc.output[-400:].decode(errors='replace')}") from exc
+
+
+def verify_backend_source_content(manifest: dict[str, Any], packet: str) -> dict[str, Any]:
+    """Verify every packet source against both the pinned commit and its worktree.
+
+    The packet assembler uses ``git show`` intentionally.  This check makes a
+    dirty source checkout fail closed as well, so a later build cannot consume
+    content different from the reviewed hash while the manifest still looks
+    internally consistent.
+    """
+    repository = Path(str(manifest.get("source_repository", "")))
+    commit = str(manifest.get("source_commit", ""))
+    if not repository.is_dir() or not commit:
+        return result("FAIL", "backend packet source repository/commit is missing")
+    try:
+        resolved = subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", f"{commit}^{{commit}}"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        ).strip()
+    except subprocess.CalledProcessError as exc:
+        return result("FAIL", f"backend packet source commit cannot be resolved: {exc.output.strip()}")
+    if resolved != commit:
+        return result("FAIL", "backend packet source commit is not exact", expected=commit, actual=resolved)
+    mismatches: list[str] = []
+    checked = 0
+    packet_markers = set(re.findall(r"-- source_sha256=([0-9a-f]{64})", packet))
+    for group in ("sql_sources", "runtime_sources"):
+        entries = manifest.get(group)
+        if not isinstance(entries, list):
+            return result("FAIL", f"backend packet {group} inventory is missing")
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256", ""))):
+                mismatches.append(f"invalid {group} entry")
+                continue
+            path = entry["path"]
+            expected = entry["sha256"]
+            try:
+                pinned = git_source_bytes(repository, commit, path)
+            except GateError as exc:
+                mismatches.append(str(exc))
+                continue
+            checked += 1
+            pinned_hash = hashlib.sha256(pinned).hexdigest()
+            if pinned_hash != expected:
+                mismatches.append(f"{group}:{path}: pinned hash {pinned_hash} != manifest {expected}")
+                continue
+            worktree_path = repository / path
+            if not worktree_path.is_file():
+                mismatches.append(f"{group}:{path}: source worktree file is missing")
+            elif sha256(worktree_path) != expected:
+                mismatches.append(f"{group}:{path}: source worktree content drifted from reviewed hash")
+            if group == "sql_sources" and expected not in packet_markers:
+                mismatches.append(f"{group}:{path}: generated packet omits its source hash marker")
+    if mismatches:
+        return result("FAIL", "backend packet source content drift", checked=checked, mismatches=mismatches)
+    return result("PASS", "all backend SQL/runtime sources match pinned commit and clean source worktree", checked=checked, source_commit=commit)
 
 
 def result(status: str, detail: str, **extra: Any) -> dict[str, Any]:
@@ -169,6 +237,9 @@ def verify_backend_packet() -> dict[str, Any]:
     if actual_hash != packet_info.get("sha256"):
         return result("FAIL", "generated backend packet hash drift", expected=packet_info.get("sha256"), actual=actual_hash)
     sql = packet.read_text()
+    source_content = verify_backend_source_content(manifest, sql)
+    if source_content["status"] != "PASS":
+        return source_content
     required = (
         "admit_command('action_prepare')",
         "admit_command('action_accept')",
@@ -198,7 +269,16 @@ def verify_backend_packet() -> dict[str, Any]:
     runtime_names = {item.get("name") for item in runtime if isinstance(item, dict)}
     if "reply_worker_lock" not in runtime_names:
         return result("FAIL", "reply worker package lock is not pinned in the runtime packet")
-    return result("PASS", "exact backend operation/reply packet assembled and hash-verified", packet_sha256=actual_hash, sql_sources=len(sources), runtime_sources=len(runtime))
+    if any(isinstance(item, dict) and item.get("local_overlay") for item in runtime):
+        return result("FAIL", "runtime packet contains an unreviewed working-tree overlay")
+    return result(
+        "PASS",
+        "exact backend operation/reply packet and source content hashes verified",
+        packet_sha256=actual_hash,
+        sql_sources=len(sources),
+        runtime_sources=len(runtime),
+        source_content=source_content,
+    )
 
 
 def verify_execution_stack_manifest() -> dict[str, Any]:
@@ -214,6 +294,79 @@ def verify_execution_stack_manifest() -> dict[str, Any]:
     except GateError as exc:
         return result("FAIL", str(exc))
     services = manifest.get("services")
+    source_repository = Path(str(manifest.get("source_repository", "")))
+    source_commit = str(manifest.get("source_commit", ""))
+    if not source_repository.is_dir() or not source_commit:
+        return result("FAIL", "execution stack source repository/commit is missing")
+    try:
+        resolved_source_commit = subprocess.check_output(
+            ["git", "-C", str(source_repository), "rev-parse", f"{source_commit}^{{commit}}"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        ).strip()
+    except subprocess.CalledProcessError as exc:
+        return result("FAIL", f"execution stack source commit cannot be resolved: {exc.output.strip()}")
+    if resolved_source_commit != source_commit:
+        return result("FAIL", "execution stack source commit is not exact", expected=source_commit, actual=resolved_source_commit)
+    source_paths = {
+        "operation-worker": {
+            "Dockerfile": "experiments/inbox-operation-worker/Dockerfile",
+            "package.json": "experiments/inbox-operation-worker/package.json",
+            "package-lock.json": "experiments/inbox-operation-worker/package-lock.json",
+            "core.mjs": "experiments/inbox-operation-worker/core.mjs",
+            "server.mjs": "experiments/inbox-operation-worker/server.mjs",
+        },
+        "reply-send-worker": {
+            "Dockerfile": "experiments/inbox-reply-send-worker/Dockerfile",
+            "package.json": "experiments/inbox-reply-send-worker/package.json",
+            "package-lock.json": "experiments/inbox-reply-send-worker/package-lock.json",
+            "core.mjs": "experiments/inbox-reply-send-worker/core.mjs",
+            "runner.mjs": "experiments/inbox-reply-send-worker/runner.mjs",
+            "server.mjs": "experiments/inbox-reply-send-worker/server.mjs",
+            "vendor/reply-provider.mjs": "experiments/inbox-reply-send-worker/vendor/reply-provider.mjs",
+        },
+        "sync-relay": {
+            "Dockerfile": "services/inbox-sync-relay/Dockerfile",
+            "server.mjs": "services/inbox-sync-relay/server.mjs",
+            "railway.json": "services/inbox-sync-relay/railway.json",
+        },
+        "projection-worker": {
+            "Dockerfile": "services/inbox-projection-worker/Dockerfile",
+            "package.json": "services/inbox-projection-worker/package.json",
+            "package-lock.json": "services/inbox-projection-worker/package-lock.json",
+            "core.mjs": "services/inbox-projection-worker/core.mjs",
+            "config.mjs": "services/inbox-projection-worker/config.mjs",
+            "server.mjs": "services/inbox-projection-worker/server.mjs",
+            "worker-role.sql": "services/inbox-projection-worker/worker-role.sql",
+            "config.test.mjs": "services/inbox-projection-worker/config.test.mjs",
+        },
+    }
+    source_drift: list[str] = []
+    source_checked = 0
+    for service_name, paths in source_paths.items():
+        service = services.get(service_name) if isinstance(services, dict) else None
+        if not isinstance(service, dict):
+            return result("FAIL", f"execution stack service is missing: {service_name}")
+        if service.get("source_commit") != source_commit:
+            source_drift.append(f"{service_name}: source_commit does not match execution stack source")
+        for field, relative in paths.items():
+            expected = service.get(field)
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                source_drift.append(f"{service_name}:{field}: missing content hash")
+                continue
+            try:
+                pinned = git_source_bytes(source_repository, source_commit, relative)
+            except GateError as exc:
+                source_drift.append(str(exc))
+                continue
+            source_checked += 1
+            if hashlib.sha256(pinned).hexdigest() != expected:
+                source_drift.append(f"{service_name}:{relative}: pinned content drift")
+            worktree = source_repository / relative
+            if not worktree.is_file() or sha256(worktree) != expected:
+                source_drift.append(f"{service_name}:{relative}: source worktree content drift")
+    if source_drift:
+        return result("FAIL", "execution stack source content drift", checked=source_checked, mismatches=source_drift)
     projection = services.get("projection-worker") if isinstance(services, dict) else None
     if not isinstance(projection, dict):
         return result("FAIL", "execution stack has no pinned projection worker")
@@ -369,10 +522,15 @@ def validate_evidence_file(path: Path, candidate_sha: str, policy: dict[str, Any
     identity = evidence.get("fixture")
     if not isinstance(identity, dict):
         return "FAIL", f"missing fixture identity in evidence: {path}", evidence
-    if identity.get("database") != policy.get("release_database"):
-        return "FAIL", f"evidence names the wrong release database: {path}", evidence
-    if identity.get("marker") != policy.get("must_have_marker"):
-        return "FAIL", f"evidence names the wrong fixture marker: {path}", evidence
+    allowed_identities = {(policy.get("release_database"), policy.get("must_have_marker"))}
+    http_fixture = policy.get("http_fixture")
+    if isinstance(http_fixture, dict):
+        database_url = http_fixture.get("database")
+        database_name = urlparse(database_url).path.lstrip("/") if isinstance(database_url, str) else ""
+        if database_name and http_fixture.get("database_marker"):
+            allowed_identities.add((database_name, http_fixture["database_marker"]))
+    if (identity.get("database"), identity.get("marker")) not in allowed_identities:
+        return "FAIL", f"evidence names an unapproved fixture identity: {path}", evidence
     return "PASS", "verified evidence", evidence
 
 

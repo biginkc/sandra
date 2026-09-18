@@ -24,7 +24,7 @@ HERE = ROOT / "experiments" / "inbox-release"
 OUTPUT = HERE / "generated" / "projection-worker-role.sql"
 RECEIPT = HERE / "generated" / "projection-worker-role-manifest.json"
 SOURCE_PATH = "services/inbox-projection-worker/worker-role.sql"
-SOURCE_COMMIT = "fcffde3827da164df85c6ef2e2b4a094f79b512c"
+SOURCE_COMMIT = "4850f8ceb6e993a9573639580dfe53cbfb86e5dd"
 RELEASE_DATABASE = "sandra_inbox_release_20260917"
 RELEASE_MARKER = "sandra-inbox-release-owned-synthetic"
 

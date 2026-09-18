@@ -144,6 +144,13 @@ def run_adapter(command: str, env: dict[str, str], label: str) -> str:
     return completed.stdout
 
 
+def current_candidate_sha() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, stderr=subprocess.STDOUT).strip()
+    except subprocess.CalledProcessError as exc:
+        raise HarnessBlocked(f"cannot resolve candidate SHA: {exc.output.strip()}") from exc
+
+
 def validate_records(config: dict[str, Any], release: dict[str, Any], profile: str, records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     required_timing = config["required_timing_events"]
     required_metrics = config["required_system_metrics"]
@@ -179,19 +186,30 @@ def validate_records(config: dict[str, Any], release: dict[str, Any], profile: s
             timing_status = merge_status(timing_status, "UNJUDGED")
         timing[event] = stats
 
+    metric_values: dict[str, list[float]] = {}
+    for record in records["metric"]:
+        name = record.get("name")
+        if name not in set(required_metrics) | {"arrival_rate_rps"}:
+            raise HarnessBlocked(f"unknown system metric: {name}")
+        value = record.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise HarnessBlocked(f"invalid system metric: {name}")
+        metric_values.setdefault(name, []).append(float(value))
+
     metrics: dict[str, Any] = {}
     metric_status = "MEASURED"
     for name in required_metrics:
-        values = []
-        for record in records["metric"]:
-            if record.get("name") != name:
-                continue
-            value = record.get("value")
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-                raise HarnessBlocked(f"invalid system metric: {name}")
-            values.append(float(value))
+        values = metric_values.get(name, [])
         metrics[name] = {"sample_count": len(values), "p95": percentile(values, .95) if values else None, "status": "UNJUDGED_NO_THRESHOLD" if values else "MISSING"}
         metric_status = merge_status(metric_status, "UNJUDGED" if values else "BLOCKED")
+
+    arrival_values = metric_values.get("arrival_rate_rps", [])
+    arrival_status = "MEASURED" if arrival_values else "BLOCKED"
+    arrival_rate = {
+        "samples": len(arrival_values),
+        "p95_rps": percentile(arrival_values, .95) if arrival_values else None,
+        "status": arrival_status,
+    }
 
     recovery = []
     for record in records["recovery"]:
@@ -203,10 +221,42 @@ def validate_records(config: dict[str, Any], release: dict[str, Any], profile: s
         recovery.append({"fault": record["fault"], "recovered": True, "duration_ms": duration})
     recovery_status = "MEASURED" if recovery else "BLOCKED"
     aggregate_status = "MEASURED"
-    for status in (timing_status, metric_status, recovery_status):
+    for status in (timing_status, metric_status, arrival_status, recovery_status):
         aggregate_status = merge_status(aggregate_status, status)
     overall = {0: "PASS", 1: "UNJUDGED", 2: "BLOCKED", 3: "FAIL"}[STATUS_RANK[aggregate_status]]
-    return {"profile": profile, "profile_dimensions": profile_dimensions(config, profile), "overall": overall, "timing": timing, "system_metrics": metrics, "recovery": {"status": recovery_status, "faults": recovery}}
+    return {"profile": profile, "profile_dimensions": profile_dimensions(config, profile), "overall": overall, "timing": timing, "system_metrics": metrics, "arrival_rate": arrival_rate, "recovery": {"status": recovery_status, "faults": recovery}}
+
+
+def release_evidence(target: dict[str, Any], release: dict[str, Any], validated: dict[str, Any]) -> dict[str, Any]:
+    """Adapt measured runner output to the release gate's evidence contract."""
+    measurements: dict[str, Any] = {}
+    for event in ("first_open", "revisit", "selection"):
+        stats = validated["timing"].get(event, {})
+        measurements[event] = {
+            "samples": stats.get("sample_count", 0),
+            "p95_ms": stats.get("p95_ms"),
+            "p99_ms": stats.get("p99_ms"),
+            "status": stats.get("status", "MISSING"),
+        }
+    policy = release["fixture_policy"]
+    return {
+        "schema_version": 1,
+        "status": validated["overall"],
+        "candidate_sha": current_candidate_sha(),
+        "fixture": {"database": target["database"], "marker": target["database_marker"]},
+        "profile": validated["profile"],
+        "profile_dimensions": validated["profile_dimensions"],
+        "measurements": measurements,
+        "bulk_reply_recipient_cap": release["budgets"]["bulk_reply_recipient_cap"],
+        "arrival_rate": validated["arrival_rate"],
+        "system_metrics": validated["system_metrics"],
+        "recovery": validated["recovery"],
+        "target_marker": target["marker"],
+        "database_marker": target["database_marker"],
+        "captured_at_unix": time.time(),
+        "provider_traffic": policy["http_fixture"].get("provider_traffic", "forbidden"),
+        "customer_sends": False,
+    }
 
 
 def main() -> int:
@@ -244,12 +294,13 @@ def main() -> int:
         for kind in ("timing", "metric"):
             workload[kind].extend(fault[kind])
         workload["recovery"].extend(fault["recovery"])
-        result = {"schema_version": 1, "target_marker": target["marker"], "database_marker": target["database_marker"], "captured_at_unix": time.time(), **validate_records(config, release, args.profile, workload)}
+        validated = validate_records(config, release, args.profile, workload)
+        result = release_evidence(target, release, validated)
         if args.evidence_out:
             args.evidence_out.parent.mkdir(parents=True, exist_ok=True)
             args.evidence_out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
         print(json.dumps(result, indent=2, sort_keys=True))
-        return 0 if result["overall"] == "PASS" else 2
+        return 0 if result["status"] == "PASS" else 2
     except HarnessBlocked as exc:
         print(json.dumps({"status": "BLOCKED", "reason": str(exc)}), file=sys.stderr)
         return 2

@@ -64,7 +64,7 @@ services:
     build:
       context: ../inbox-operation-worker
       dockerfile: Dockerfile
-    image: sandra-inbox-action-worker:release-fcffde3
+    image: sandra-inbox-action-worker:release-4850f8c
     pull_policy: never
     container_name: sandra-inbox-release-operation-worker-20260917
     restart: "no"
@@ -102,7 +102,7 @@ services:
     build:
       context: ../inbox-reply-send-worker
       dockerfile: Dockerfile
-    image: sandra-inbox-reply-send-worker:release-fcffde3
+    image: sandra-inbox-reply-send-worker:release-4850f8c
     pull_policy: never
     container_name: sandra-inbox-release-reply-worker-20260917
     restart: "no"
@@ -145,7 +145,7 @@ services:
     build:
       context: ../../services/inbox-projection-worker
       dockerfile: Dockerfile
-    image: sandra-inbox-projection-worker:release-fcffde3
+    image: sandra-inbox-projection-worker:release-4850f8c
     pull_policy: never
     container_name: sandra-inbox-release-projection-worker-20260917
     restart: "no"
@@ -175,7 +175,7 @@ services:
     build:
       context: ../..
       dockerfile: experiments/inbox-release/Dockerfile.relay-fixture
-    image: sandra-inbox-sync-relay:release-fcffde3
+    image: sandra-inbox-sync-relay:release-4850f8c
     pull_policy: never
     container_name: sandra-inbox-release-relay-20260917
     restart: "no"

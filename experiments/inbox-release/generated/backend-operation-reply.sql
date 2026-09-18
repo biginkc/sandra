@@ -188,7 +188,7 @@ END $$;
 
 
 -- Pinned saved_actions_setup: experiments/inbox-saved-actions/setup.sql
--- source_sha256=0d4816d10daa156db37826ad9bc3df1ea3fb0a949dcf2012f35481cc1ce7316b
+-- source_sha256=7ff25fd7f463aa4e110ca881df94e92ea8259d0e1a7daec80eebd2d4f3f9e214
 -- Personal saved-action definitions (DoD#3 backend). Immutable per-version
 -- rows feeding the EXISTING `saved` seam in action-definition.ts
 -- (parseInboxActionIntent's 3rd argument). No picker/builder UI, no
@@ -266,7 +266,7 @@ BEGIN
   RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
  END IF;
  IF array_position(types,'assign') IS NOT NULL
-  AND (array_position(types,'outcome') IS NULL OR array_position(types,'outcome')>array_position(types,'assign')
+  AND ((array_position(types,'outcome') IS NOT NULL AND array_position(types,'outcome')>array_position(types,'assign'))
    OR (array_position(types,'promote') IS NOT NULL AND array_position(types,'promote')>array_position(types,'assign'))
    OR (array_position(types,'dismiss_unknown') IS NOT NULL AND array_position(types,'dismiss_unknown')>array_position(types,'assign'))
    OR (array_position(types,'restore_unknown') IS NOT NULL AND array_position(types,'restore_unknown')>array_position(types,'assign'))) THEN

@@ -30,6 +30,7 @@ class StressHarnessTests(unittest.TestCase):
             records["timing"].extend({"type": "timing", "event": event, "duration_ms": 1.0} for _ in range(10))
         for name in config["required_system_metrics"]:
             records["metric"].append({"type": "metric", "name": name, "value": 1.0})
+        records["metric"].append({"type": "metric", "name": "arrival_rate_rps", "value": 1.0})
         result = module.validate_records(config, release, "current", records)
         self.assertEqual(result["overall"], "UNJUDGED")
         self.assertEqual(result["timing"]["ingestion"]["status"], "UNJUDGED_NO_THRESHOLD")
@@ -53,6 +54,18 @@ class StressHarnessTests(unittest.TestCase):
         result = module.validate_records(config, release, "current", records)
         self.assertEqual(result["timing"]["first_open"]["status"], "FAIL")
         self.assertEqual(result["overall"], "FAIL")
+
+    def test_missing_arrival_measurement_is_blocked(self):
+        config, _target, release = module.load_config(HERE / "stress-harness-config.json")
+        config["profiles"]["current"] = {"arrival_rate_rps": 1, "concurrency": 1, "tenant_count": 1, "history_skew": 1}
+        records = {"timing": [], "metric": [], "recovery": [{"fault": "projection_restart", "recovered": True, "duration_ms": 12.0}]}
+        for event in config["required_timing_events"]:
+            records["timing"].extend({"type": "timing", "event": event, "duration_ms": 1.0} for _ in range(10))
+        for name in config["required_system_metrics"]:
+            records["metric"].append({"type": "metric", "name": name, "value": 1.0})
+        result = module.validate_records(config, release, "current", records)
+        self.assertEqual(result["arrival_rate"]["status"], "BLOCKED")
+        self.assertEqual(result["overall"], "BLOCKED")
 
 
 if __name__ == "__main__":

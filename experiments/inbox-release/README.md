@@ -169,7 +169,7 @@ fixture relay join the existing marked release HTTP network. `full-stack.env.exa
 contains names only; credentials and the Restate key stay in ignored files.
 
 The compose definition is deployable configuration, not runtime evidence. The
-operation, reply and projection images are built from the exact `fcffde3` source
+operation, reply and projection images are built from the exact `4850f8c` source
 snapshot and have no accepted digest until that build runs. Electric is pinned
 to the previously reviewed 1.8.1 digest, but its publication, replication role
 and compatibility with the current candidate still require the separate

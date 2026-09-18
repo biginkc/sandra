@@ -26,7 +26,7 @@ from transaction_envelope import normalize
 
 RELEASE_DATABASE = "sandra_inbox_release_20260917"
 RELEASE_MARKER = "sandra-inbox-release-owned-synthetic"
-SOURCE_COMMIT = "fcffde3827da164df85c6ef2e2b4a094f79b512c"  # coordinator integration exact snapshot
+SOURCE_COMMIT = "4850f8ceb6e993a9573639580dfe53cbfb86e5dd"  # coordinator integration exact snapshot
 
 SQL_SOURCES = [
     ("operation_foundation", "experiments/inbox-operation-acceptance/setup.sql"),
@@ -74,13 +74,6 @@ RUNTIME_SOURCES = [
     ("sync_relay_server", "services/inbox-sync-relay/server.mjs"),
     ("sync_relay_railway", "services/inbox-sync-relay/railway.json"),
 ]
-
-# The coordinator snapshot predates the reply worker lockfile.  Keep that
-# source as an explicit local overlay instead of pretending it came from the
-# pinned backend commit; all other runtime sources must resolve from git show.
-LOCAL_RUNTIME_OVERRIDES = {
-    "reply_worker_lock": "experiments/inbox-reply-send-worker/package-lock.json",
-}
 
 GUARD = f"""DO $$ BEGIN
  IF current_user<>'postgres' OR current_database()<>'{RELEASE_DATABASE}' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='{RELEASE_MARKER}') THEN RAISE EXCEPTION 'Owned release fixture required';END IF;
@@ -232,14 +225,8 @@ def main() -> int:
 
     runtime_entries = []
     for name, path in RUNTIME_SOURCES:
-        local_overlay = name in LOCAL_RUNTIME_OVERRIDES
-        if local_overlay:
-            raw = (ROOT / path).read_bytes()
-        else:
-            raw = git_show(repo, actual, path)
+        raw = git_show(repo, actual, path)
         entry = {"name": name, "kind": "runtime", "path": path, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
-        if local_overlay:
-            entry.update({"source": "release-infra-working-tree", "source_commit": None, "local_overlay": True})
         runtime_entries.append(entry)
 
     packet = """-- GENERATED RELEASE OPERATION/REPLY PACKET. No production execution authorization.\n-- Target is the explicitly marked release database only.\nBEGIN;\nSET LOCAL lock_timeout='2s';\nSET LOCAL statement_timeout='30s';\n""" + "\n".join(sql_parts) + ADMISSION_OVERLAY + "\nCOMMIT;\n"

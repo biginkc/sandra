@@ -2,11 +2,11 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration",
-  "source_commit": "fcffde3827da164df85c6ef2e2b4a094f79b512c",
+  "source_commit": "4850f8ceb6e993a9573639580dfe53cbfb86e5dd",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
-    "sha256": "e60764ae880e49f69ebaf8b6ba2681e3d060fc6a4281f4b7625527c3c5d0c25a"
+    "sha256": "712c93bc6996a138452bdc310add3dd960167c34611d730cf209e29eec50ab94"
   },
   "sql_sources": [
     {
@@ -21,9 +21,9 @@
       "name": "saved_actions_setup",
       "kind": "sql",
       "path": "experiments/inbox-saved-actions/setup.sql",
-      "sha256": "0d4816d10daa156db37826ad9bc3df1ea3fb0a949dcf2012f35481cc1ce7316b",
-      "bytes": 13542,
-      "transformed_sha256": "ea966bae5013cdf22cea4fbacb674fc508acff16e863bc9459847e81bcd06bb4"
+      "sha256": "7ff25fd7f463aa4e110ca881df94e92ea8259d0e1a7daec80eebd2d4f3f9e214",
+      "bytes": 13549,
+      "transformed_sha256": "ea85ae58758d266f08658a74a76d6939b2b7898cae40f72ea677eb68f0f7a048"
     },
     {
       "name": "saved_actions_public_api",
@@ -258,8 +258,8 @@
       "name": "reply_worker_Dockerfile",
       "kind": "runtime",
       "path": "experiments/inbox-reply-send-worker/Dockerfile",
-      "sha256": "910306b915a0d7cf213ae22f8bbb73eee324665204757283b8eeeeed9af9a7fa",
-      "bytes": 464
+      "sha256": "98ec0bc8335b2db7b5ef40eb1237a37fc3350896a385c7762d06ee0c6fd04c66",
+      "bytes": 477
     },
     {
       "name": "reply_worker_package",
@@ -273,10 +273,7 @@
       "kind": "runtime",
       "path": "experiments/inbox-reply-send-worker/package-lock.json",
       "sha256": "c40f2cf81253d61988e9d90438fbde767c4b4bf30eec9796a63c702bea494a2b",
-      "bytes": 6400,
-      "source": "release-infra-working-tree",
-      "source_commit": null,
-      "local_overlay": true
+      "bytes": 6400
     },
     {
       "name": "reply_worker_core",
