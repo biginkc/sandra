@@ -295,7 +295,7 @@ test("F07/F08/F09/F10 — open a conversation, read history, mark-read, identity
 
   await page.goto("/inbox?view=all");
   const list = page.getByRole("list", { name: "Inbox conversations" });
-  await expect(list.getByText(thread.contactName)).toBeVisible();
+  await expect(list.getByText(thread.contactName, { exact: true })).toBeVisible();
 
   // F10 — identity/context visible in the row before opening.
   const row = page.getByRole("listitem", { name: new RegExp(thread.contactName) });
@@ -306,7 +306,7 @@ test("F07/F08/F09/F10 — open a conversation, read history, mark-read, identity
   await page.getByRole("button", { name: `Open ${thread.contactName}` }).click();
   const detail = page.getByRole("complementary", { name: "Open conversation" });
   await expect(detail).toBeVisible();
-  await expect(detail.getByText(thread.contactName)).toBeVisible();
+  await expect(detail.getByText(thread.contactName, { exact: true })).toBeVisible();
 
   // F08 — history renders both seeded messages.
   const history = page.getByRole("region", { name: "Conversation history" });
