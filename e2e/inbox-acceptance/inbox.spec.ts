@@ -30,7 +30,14 @@ test.skip(process.env.INBOX_ACCEPTANCE_RUN !== "1", "Use playwright.inbox-accept
 function ownedRows(title: string): string[] {
   return title.split(" — ")[0].split("/").filter(id => /^[FARUO]\d{2}$/.test(id));
 }
-test.beforeEach(async ({}, info) => { purgeRowOutcomes(ownedRows(info.title)); });
+test.beforeEach(async ({}, info) => {
+  // Every row owns its fixture. In particular, F06 intentionally creates 501
+  // conversations to exercise pagination; carrying that projection into later
+  // action rows makes their transport/recovery behavior depend on test order.
+  await resetAcceptanceFixture(admin);
+  await ensureTestUser(admin);
+  purgeRowOutcomes(ownedRows(info.title));
+});
 test.afterEach(async ({ page }, info) => {
   const ids = ownedRows(info.title);
   purgeRowOutcomes(ids);
@@ -127,8 +134,6 @@ test("F04 — needs_outcome view excludes threads with an outcome", async ({ pag
 });
 
 test("F05 — hide DNC & tests checkbox toggles inclusion", async ({ page }) => {
-  await resetAcceptanceFixture(admin);
-  await ensureTestUser(admin);
   const dncPhone = `+1816${[...randomUUID().replaceAll("-", "").slice(0, 7)]
     .map((digit) => (Number.parseInt(digit, 16) % 10).toString())
     .join("")}`;
@@ -259,8 +264,6 @@ test("F06 — rows order by most recent activity", async ({ page }) => {
   // Isolate the page-boundary proof from earlier serial rows. The fixture is
   // inserted in two bounded service-role batches plus one message batch;
   // there are no 500 browser actions and no provider calls.
-  await resetAcceptanceFixture(admin);
-  await ensureTestUser(admin);
   const { newestName, oldestName } = await seedOrderedInboxPage(501);
   await waitForOrderedProjection(501);
 

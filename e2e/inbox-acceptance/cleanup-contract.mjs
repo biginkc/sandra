@@ -17,6 +17,7 @@ test("acceptance specs cannot reintroduce truncate cleanup", async () => {
     "outbox.spec.ts",
     "reviewed-replies.spec.ts",
     "unknown-bulk.spec.ts",
+    "saved-actions.spec.ts",
   ];
   for (const spec of specs) {
     const source = await text(spec);
@@ -44,6 +45,10 @@ test("cleanup requires source deletion plus a meaningful private projection drai
   assert.match(source, /const probe = await openProjectionProbe\(\);[\s\S]*?deleteOrgScopedFixtureRows/);
   assert.match(source, /readCleanupProtection/);
   assert.match(source, /deleteAcceptanceDispositionReviews/);
+  assert.match(source, /deleteAcceptanceSavedActions/);
+  assert.match(source, /inbox_saved_actions\.definitions/);
+  assert.match(source, /DISABLE TRIGGER immutable_saved_action_version/);
+  assert.match(source, /ENABLE TRIGGER immutable_saved_action_version/);
   assert.match(source, /DELETE FROM public\.ai_disposition_reviews/);
   assert.match(source, /WHERE org_id = \$1::uuid/);
   assert.match(source, /org_id <> \$1::uuid/);

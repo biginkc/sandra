@@ -365,6 +365,82 @@ async function deleteAcceptanceDispositionReviews(
   }
 }
 
+/**
+ * Saved-action versions are intentionally immutable in normal operation, so a
+ * disposable acceptance reset cannot use an ordinary DELETE against their
+ * trigger-protected table. The probe is already bound to the marked local
+ * fixture; disable that trigger only inside this rollback-scoped cleanup
+ * transaction, delete this run's org rows, restore the trigger, and prove
+ * another org was unchanged. This path is test-fixture cleanup only and is
+ * never reachable from an application request or production installer.
+ */
+async function deleteAcceptanceSavedActions(
+  probe: Client,
+  orgId: string,
+): Promise<void> {
+  await probe.query("BEGIN");
+  let triggerDisabled = false;
+  try {
+    const otherBefore = await probe.query<{ count: string }>(
+      `
+        SELECT count(*)::text AS count
+          FROM inbox_saved_actions.definitions
+         WHERE org_id <> $1::uuid
+      `,
+      [orgId],
+    );
+    await probe.query(
+      "ALTER TABLE inbox_saved_actions.definitions DISABLE TRIGGER immutable_saved_action_version",
+    );
+    triggerDisabled = true;
+    await probe.query(
+      `DELETE FROM inbox_saved_actions.definitions WHERE org_id = $1::uuid`,
+      [orgId],
+    );
+    const remainingOwned = await probe.query<{ count: string }>(
+      `
+        SELECT count(*)::text AS count
+          FROM inbox_saved_actions.definitions
+         WHERE org_id = $1::uuid
+      `,
+      [orgId],
+    );
+    const otherAfter = await probe.query<{ count: string }>(
+      `
+        SELECT count(*)::text AS count
+          FROM inbox_saved_actions.definitions
+         WHERE org_id <> $1::uuid
+      `,
+      [orgId],
+    );
+    if (
+      Number(remainingOwned.rows[0]?.count ?? "0") !== 0 ||
+      otherAfter.rows[0]?.count !== otherBefore.rows[0]?.count
+    ) {
+      throw new Error(
+        `saved-action cleanup changed owned/foreign rows unexpectedly for ${orgId}.`,
+      );
+    }
+    await probe.query(
+      "ALTER TABLE inbox_saved_actions.definitions ENABLE TRIGGER immutable_saved_action_version",
+    );
+    triggerDisabled = false;
+    await probe.query("COMMIT");
+  } catch (error) {
+    if (triggerDisabled) {
+      await probe
+        .query(
+          "ALTER TABLE inbox_saved_actions.definitions ENABLE TRIGGER immutable_saved_action_version",
+        )
+        .catch(() => undefined);
+    }
+    await probe.query("ROLLBACK").catch(() => undefined);
+    throw new Error(
+      `Inbox acceptance cleanup could not clear saved actions: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 async function countCleanableRows(
   admin: SupabaseClient<Database>,
   orgId: string,
@@ -529,6 +605,7 @@ export async function resetAcceptanceFixture(
     // ai_disposition_reviews.source_inbound_message_id intentionally does
     // not cascade. Clear this owned child relation before any source-message
     // delete, while the exact fixture identity guard is still in force.
+    await deleteAcceptanceSavedActions(probe, orgId);
     await deleteAcceptanceDispositionReviews(probe, orgId);
     if (protection.lockedPropertyIds.size === 0 && protection.retainedContactIds.size === 0) {
       await deleteOrgScopedFixtureRows(admin, orgId);
