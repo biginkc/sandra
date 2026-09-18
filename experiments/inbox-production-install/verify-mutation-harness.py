@@ -413,6 +413,14 @@ run_case('table_acl_grant_added',
  lambda: sql("REVOKE SELECT ON public.inbox_inbound_heads FROM anon"),
  'table acl drift')
 
+# 21b. column_acl_grant_added: column privileges live in pg_attribute.attacl,
+# not pg_class.relacl. A direct GRANT on one column therefore leaves the table
+# ACL unchanged; the verifier must read and reject the column-level exposure.
+run_case('column_acl_grant_added',
+ lambda: sql("GRANT SELECT (org_id) ON public.inbox_inbound_heads TO anon"),
+ lambda: sql("REVOKE SELECT (org_id) ON public.inbox_inbound_heads FROM anon"),
+ 'column acl drift')
+
 # 22. table_set_unlogged (Astra round 6, gap #3): relpersistence was never
 # compared -- ALTER TABLE ... SET UNLOGGED passed silently, turning a
 # persistent table crash-truncatable (Postgres discards all UNLOGGED table

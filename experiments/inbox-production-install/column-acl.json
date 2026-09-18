@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "contract": "no-column-specific-grants",
+  "columns": {}
+}

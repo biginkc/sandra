@@ -21,39 +21,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      # DB-less determinism gate: source-manifest hash check, ast-parse every
-      # .py in the bundle (catches a syntax error in the new composite-type
-      # parsing code before it ever reaches a real catalog), then recompile
-      # build.py + read-companion.py from the hash-pinned source.
-      #
-      # This deliberately does NOT invoke `verify.py` itself (with or
-      # without --installed): this repo currently carries a recorded
-      # forward-correction (hardening-evidence.json) that makes even a
-      # no-DB `verify.py` invocation require --installed to pass (see the
-      # RuntimeError at verify.py's foundation-hash-drift check) -- so
-      # `verify.py` cannot run to completion here at all today, independent
-      # of this gate's own change. Replicating just its DB-less prefix here
-      # keeps this job green while still exercising the compiler layer.
+      # DB-less determinism gate. This calls the same verifier entry point as
+      # the native installed proof; --source-only stops after its hash-pinned
+      # source/AST/compiler checks and never opens a database. Keeping one
+      # implementation prevents the CI prefix from drifting away from the
+      # verifier's actual source manifest and compiler inputs.
       - name: Source-manifest + compiler determinism (DB-less)
         working-directory: experiments/inbox-production-install
         run: |
-          python3 - <<'PY'
-          import ast,hashlib,json,subprocess,sys
-          from pathlib import Path
-          P=Path('.')
-          manifest=json.loads((P/'source-manifest.json').read_text())
-          for name,digest in manifest.items():
-           actual=hashlib.sha256((P/name).read_bytes()).hexdigest()
-           if actual!=digest:
-            print(f'Bundle source manifest drift: {name}',file=sys.stderr);sys.exit(1)
-          for f in P.glob('*.py'):
-           ast.parse(f.read_text(),filename=str(f))
-          subprocess.run([sys.executable,'build.py'],check=True)
-          subprocess.run([sys.executable,'read-companion.py'],check=True)
-          print('Source-manifest hashes match, all bundle .py files parse, compiler is deterministic with no DB.')
-          PY
+          python3 verify.py --source-only
       # --- verify.py --installed, verify.py --selftest, and
-      # verify-mutation-harness.py --owned-fixture (40 cases) are all NOT
+      # verify-mutation-harness.py --owned-fixture (41 cases) are all NOT
       # run in this job. Rounds 2-3 ran --selftest here DB-lessly (it
       # exercised pure text-normalization functions -- bool_ast, proconfig
       # parsing -- with no live catalog needed). Round 4 (Astra NO/4)
@@ -99,7 +77,7 @@ jobs:
       # Both proofs are produced locally instead: `verify.py --selftest`
       # (run manually against the owned fixture before every push) and
       # verify-mutation-harness.py --owned-fixture, whose result is
-      # committed in verify-mutation-harness-evidence.json (currently 40
+      # committed in verify-mutation-harness-evidence.json (currently 41
       # cases, including table_owner_changed, table_acl_grant_added,
       # table_set_unlogged, table_rewrite_rule_added and
       # table_policy_and_extra_trigger_added from this round -- round 6
@@ -112,4 +90,4 @@ jobs:
       # object scan being scoped to private schemas only).
       - name: Record known CI scope gap
         run: |
-          echo "verify.py --installed, verify.py --selftest, and verify-mutation-harness.py --owned-fixture (live-catalog proof, 40 cases) all require the locally-pinned T2 fixture (see guards.py) and are not run in this job -- Postgres-canonical-deparse comparison has no DB-less form. Both are run locally before every push; see workflow comments." >> "$GITHUB_STEP_SUMMARY"
+          echo "verify.py --installed, verify.py --selftest, and verify-mutation-harness.py --owned-fixture (live-catalog proof, 41 cases) all require the locally-pinned T2 fixture (see guards.py) and are not run in this job -- Postgres-canonical-deparse comparison has no DB-less form. Both are run locally before every push; see workflow comments." >> "$GITHUB_STEP_SUMMARY"

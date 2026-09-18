@@ -3,7 +3,7 @@
 import argparse,ast,hashlib,json,re,shutil,subprocess,sys
 from pathlib import Path
 P=Path(__file__).resolve().parent
-ap=argparse.ArgumentParser();ap.add_argument('--installed',action='store_true');ap.add_argument('--selftest',action='store_true');a=ap.parse_args()
+ap=argparse.ArgumentParser();ap.add_argument('--installed',action='store_true');ap.add_argument('--selftest',action='store_true');ap.add_argument('--source-only',action='store_true');a=ap.parse_args()
 manifest=P/'source-manifest.json'
 if manifest.exists():
  for name,digest in json.loads(manifest.read_text()).items():
@@ -22,6 +22,9 @@ subprocess.run([sys.executable,str(P/'read-companion.py')],check=True)
 foundation=P/'generated/install-candidate.sql';cand=foundation.read_text();digest=hashlib.sha256(foundation.read_bytes()).hexdigest()
 companion_path=P/'generated/read-companion.sql'
 companion=companion_path.read_text() if companion_path.exists() else ''
+if a.source_only:
+ print('Source-manifest hashes match, bundle Python parses, and candidate/read companion compile deterministically (no DB).')
+ sys.exit(0)
 # The companion (read/history) namespace and the main candidate share the same
 # installed catalog (inbox_* schemas, pinned canonical helpers). All structural
 # checks below are derived from BOTH sources combined, so drift in the companion
@@ -299,6 +302,24 @@ def scratch_name(t):return t.replace('.','__')
 
 private_schemas=json.loads((P/'private-schemas.json').read_text())
 owner_pins=json.loads((P/'function-owners.json').read_text()) if (P/'function-owners.json').exists() else {}
+# Ownership is an installer contract, not a value that a previous catalog
+# snapshot is allowed to redefine.  build.py rejects every role other than the
+# migration role and creates each candidate schema with an explicit
+# AUTHORIZATION clause.  Keep the pin files as a completeness check, but derive
+# the expected role from that reviewed contract so a forged or stale pin file
+# cannot bless a different owner.
+_build_contract=(P/'build.py').read_text()
+_migration_roles=sorted(set(re.findall(r"current_user<>?'([^']+)'",_build_contract)))
+_authorized_roles=sorted(set(re.findall(r'CREATE SCHEMA \w+ AUTHORIZATION (\w+)',_build_contract)))
+if _migration_roles != ['postgres'] or _authorized_roles != ['postgres']:
+ raise RuntimeError('Installer owner contract drift: build.py must require and authorize postgres')
+INSTALLER_OWNER='postgres'
+
+def pinned_owner(pins,pin_key,filename):
+ expected=pins.get(pin_key)
+ if expected is None:raise RuntimeError(f'No pinned owner expectation for {pin_key} in {filename} -- add one before this can be certified')
+ if expected!=INSTALLER_OWNER:raise RuntimeError(f'Owner pin contract drift for {pin_key}: {filename} says {expected!r}, but build.py authorizes only {INSTALLER_OWNER!r}')
+ return INSTALLER_OWNER
 # Astra round 5, gap #1: verify.py's privilege_exposure check only scanned
 # the PRIVATE inbox_* schemas -- public-facing RPC wrapper functions
 # (public.inbox_*) were never checked at all, so `GRANT EXECUTE ON
@@ -333,6 +354,9 @@ grant_pins=json.loads((P/'function-grants.json').read_text()) if (P/'function-gr
 # every composite type it declares.
 relation_owner_pins=json.loads((P/'relation-owners.json').read_text()) if (P/'relation-owners.json').exists() else {}
 relation_acl_pins=json.loads((P/'relation-acl.json').read_text()) if (P/'relation-acl.json').exists() else {}
+column_acl_contract=json.loads((P/'column-acl.json').read_text()) if (P/'column-acl.json').exists() else {}
+if column_acl_contract.get('contract')!='no-column-specific-grants':
+ raise RuntimeError('column-acl.json must declare the reviewed no-column-specific-grants contract')
 
 # Functions: capture the WHOLE verbatim matched "CREATE (OR REPLACE) FUNCTION
 # ... AS $$ ... $$;" statement, nothing else. Round-4 no longer parses any
@@ -483,14 +507,14 @@ if a.selftest:
   sql(f'ALTER FUNCTION {SCRATCH}.owner_b() OWNER TO supabase_admin',role='supabase_admin')
   owner_a=sql(f"SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid='{SCRATCH}.owner_a()'::regprocedure")
   owner_b=sql(f"SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid='{SCRATCH}.owner_b()'::regprocedure")
-  if owner_a!='postgres':
-   print(f'SELFTEST FAIL: expected the selftest role (postgres) to own its own freshly-created function, got {owner_a!r}',file=sys.stderr);sys.exit(1)
+  if owner_a!=INSTALLER_OWNER:
+   print(f'SELFTEST FAIL: expected the installer role ({INSTALLER_OWNER}) to own its own freshly-created function, got {owner_a!r}',file=sys.stderr);sys.exit(1)
   if owner_b!='supabase_admin':
    print(f'SELFTEST FAIL: expected ALTER FUNCTION ... OWNER TO supabase_admin to take effect, got {owner_b!r}',file=sys.stderr);sys.exit(1)
   if not owner_mismatch(owner_a,owner_b):
-   print('SELFTEST FAIL: owner_mismatch(postgres, supabase_admin) returned False -- the SAME function --installed calls for the owner check is back to a no-op',file=sys.stderr);sys.exit(1)
+   print(f'SELFTEST FAIL: owner_mismatch({INSTALLER_OWNER}, supabase_admin) returned False -- the SAME function --installed calls for the owner check is back to a no-op',file=sys.stderr);sys.exit(1)
   if owner_mismatch(owner_a,owner_a):
-   print('SELFTEST FAIL: owner_mismatch(postgres, postgres) returned True -- false positive on a matching owner',file=sys.stderr);sys.exit(1)
+   print(f'SELFTEST FAIL: owner_mismatch({INSTALLER_OWNER}, {INSTALLER_OWNER}) returned True -- false positive on a matching owner',file=sys.stderr);sys.exit(1)
 
   # CHECK constraint: string-literal case (Astra demonstrated bool_ast
   # lowercased every leaf, so 'DONE' vs 'done' compared equal) AND the
@@ -558,6 +582,8 @@ if a.selftest:
   function_acl_grantable=[{'grantee':'authenticated','privilege_type':'EXECUTE','grantable':True}]
   if not acl_mismatch(function_acl,function_acl_grantable):
    print('SELFTEST FAIL: acl_mismatch did not detect a function EXECUTE WITH GRANT OPTION change -- the function grant-option gap is back',file=sys.stderr);sys.exit(1)
+  if not acl_mismatch([],['anon=r/postgres']):
+   print('SELFTEST FAIL: acl_mismatch did not detect a column ACL grant -- the attacl coverage gap is back',file=sys.stderr);sys.exit(1)
   if relation_set_mismatch([],[]):
    print('SELFTEST FAIL: relation_set_mismatch on two empty sets returned True (false positive)',file=sys.stderr);sys.exit(1)
   if not relation_set_mismatch([],['zz_extra_trigger']):
@@ -567,7 +593,7 @@ if a.selftest:
  finally:
   sql(f'DROP SCHEMA IF EXISTS {SCRATCH} CASCADE')
   sql(f'DROP SCHEMA IF EXISTS {SCRATCH}_src CASCADE')
- print('SELFTEST OK: the SAME functions --installed uses (scratch_function_stmt, scratch_trigger_stmt, assert_deparse_match, find_constraint_match, owner_mismatch, acl_mismatch, relation_set_mismatch) correctly distinguish real drift from cosmetic sameness for functions, owners, CHECK constraints, index predicates, triggers, function/relation ACLs (incl. WITH GRANT OPTION), and rewrite-rule/policy/trigger extra-object sets')
+ print('SELFTEST OK: the SAME functions --installed uses (scratch_function_stmt, scratch_trigger_stmt, assert_deparse_match, find_constraint_match, owner_mismatch, acl_mismatch, relation_set_mismatch) correctly distinguish real drift from cosmetic sameness for functions, owners, CHECK constraints, index predicates, triggers, function/relation/column ACLs (incl. WITH GRANT OPTION), and rewrite-rule/policy/trigger extra-object sets')
  sys.exit(0)
 
 if a.installed:
@@ -741,7 +767,7 @@ SELECT jsonb_build_object(
  snapshot_sql=f"""
 BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;
 SELECT jsonb_build_object(
- 'columns',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'table',c.relname,'column',a.attname,'type',format_type(a.atttypid,a.atttypmod),'notnull',a.attnotnull,'default',pg_get_expr(d.adbin,d.adrelid),'identity',a.attidentity,'generated',a.attgenerated,'noncollation',a.attcollation<>0 AND a.attcollation<>t.typcollation,'attnum',a.attnum)),'[]')
+ 'columns',(SELECT coalesce(jsonb_agg(jsonb_build_object('schema',n.nspname,'table',c.relname,'column',a.attname,'type',format_type(a.atttypid,a.atttypmod),'notnull',a.attnotnull,'default',pg_get_expr(d.adbin,d.adrelid),'identity',a.attidentity,'generated',a.attgenerated,'noncollation',a.attcollation<>0 AND a.attcollation<>t.typcollation,'attnum',a.attnum,'acl',coalesce(to_jsonb(a.attacl::text[]),'[]'::jsonb))),'[]')
    FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
    JOIN pg_type t ON t.oid=a.atttypid
    LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
@@ -838,8 +864,7 @@ COMMIT;
   expected_def=scratch_def.replace(f'{SCRATCH}.{scratch_key}',f'{schema}.{fname}')
   assert_deparse_match('Function',f'{schema}.{fname}',expected_def,row['def'])
   pin_key=f'{schema}.{fname}'
-  expected_owner=owner_pins.get(pin_key)
-  if expected_owner is None:raise RuntimeError(f'No pinned owner expectation for {pin_key} in function-owners.json -- add one (see that file\'s own note) before this can be certified')
+  expected_owner=pinned_owner(owner_pins,pin_key,'function-owners.json')
   if owner_mismatch(expected_owner,row['owner']):raise RuntimeError(f"Function OWNER drift {schema}.{fname}: expected owner={expected_owner!r} live={row['owner']!r} (for a SECURITY DEFINER function the owner is the execution principal)")
   # Grants (Astra round 5, gap #1): compare every non-owner direct function
   # ACL entry from aclexplode, including is_grantable, rather than using
@@ -864,6 +889,18 @@ COMMIT;
  live_cols={}
  for row in snap['columns']:
   live_cols.setdefault(f"{row['schema']}.{row['table']}",{})[row['column']]=row
+ # A column-level GRANT has a different catalog home (pg_attribute.attacl)
+ # from a table GRANT (pg_class.relacl).  The reviewed candidate has no
+ # column-specific GRANT syntax; reject a source change that would make the
+ # empty ACL expectation stale instead of silently treating the new exposure
+ # as a live-only drift.
+ if re.search(r'\bGRANT\s+[A-Z ,]+\([^)]*\)\s+ON\s+',s,re.I):
+  raise RuntimeError('Source candidate contains column-specific GRANT syntax but column-acl.json declares no-column-specific-grants')
+ pinned_column_keys=set(column_acl_contract.get('columns',{}))
+ live_column_keys={f"{t}.{name}" for t,cols in live_cols.items() for name in cols}
+ unexpected_column_pins=pinned_column_keys-live_column_keys
+ if unexpected_column_pins:
+  raise RuntimeError('column-acl.json contains pins for columns absent from the candidate: '+str(sorted(unexpected_column_pins)))
  for t in sorted(set(all_tables)|set(composite_types)):
   cols=dict(table_columns(t)) if t not in composite_types else dict(composite_cols[t])
   lc=live_cols.get(t)
@@ -898,6 +935,12 @@ COMMIT;
    if row['identity']!='':raise RuntimeError(f"Column identity drift {t}.{name}: expected no GENERATED ... AS IDENTITY, live attidentity={row['identity']!r}")
    if row['generated']!='':raise RuntimeError(f"Column generated-expression drift {t}.{name}: expected no GENERATED ... STORED, live attgenerated={row['generated']!r}")
    if row['noncollation'] is not False:raise RuntimeError(f"Column collation drift {t}.{name}: expected the type's default collation, live has an explicit non-default COLLATE")
+   # Column-level GRANTs are independent of the table ACL and are therefore
+   # invisible to relacl. Compare the generated pin when a native proof has
+   # materialized one; the reviewed empty contract otherwise defaults to [].
+   column_key=f'{t}.{name}'
+   expected_column_acl=column_acl_contract.get('columns',{}).get(column_key,[])
+   if acl_mismatch(expected_column_acl, row.get('acl', [])):raise RuntimeError(f"Column ACL drift {t}.{name}: expected={expected_column_acl} live={row.get('acl', [])}")
 
  # RLS: every ENABLE ROW LEVEL SECURITY table must still have it enabled live,
  # and FORCE ROW LEVEL SECURITY must match source (none of this candidate's
@@ -922,8 +965,7 @@ COMMIT;
   rel=snap['relations'].get(t)
   if rel is None:raise RuntimeError(f'Installed relation missing from relation snapshot: {t}')
   pin_key=f'table:{t}'
-  expected_owner=relation_owner_pins.get(pin_key)
-  if expected_owner is None:raise RuntimeError(f'No pinned owner expectation for {pin_key} in relation-owners.json -- add one before this can be certified')
+  expected_owner=pinned_owner(relation_owner_pins,pin_key,'relation-owners.json')
   if owner_mismatch(expected_owner,rel['owner']):raise RuntimeError(f"Table OWNER drift {t}: expected owner={expected_owner!r} live={rel['owner']!r} (a table's OWNER bypasses RLS entirely, regardless of any policy)")
   expected_acl=relation_acl_pins.get(pin_key)
   if expected_acl is None:raise RuntimeError(f'No pinned ACL expectation for {pin_key} in relation-acl.json -- add one before this can be certified')
@@ -940,8 +982,7 @@ COMMIT;
   schrow=snap['owned_schemas'].get(sch)
   if schrow is None:raise RuntimeError(f'Installed schema missing from schema snapshot: {sch}')
   pin_key=f'schema:{sch}'
-  expected_owner=relation_owner_pins.get(pin_key)
-  if expected_owner is None:raise RuntimeError(f'No pinned owner expectation for {pin_key} in relation-owners.json -- add one before this can be certified')
+  expected_owner=pinned_owner(relation_owner_pins,pin_key,'relation-owners.json')
   if owner_mismatch(expected_owner,schrow['owner']):raise RuntimeError(f"Schema OWNER drift {sch}: expected owner={expected_owner!r} live={schrow['owner']!r}")
   expected_acl=relation_acl_pins.get(pin_key)
   if expected_acl is None:raise RuntimeError(f'No pinned ACL expectation for {pin_key} in relation-acl.json -- add one before this can be certified')
@@ -952,8 +993,7 @@ COMMIT;
   typerow=snap['owned_types'].get(ct)
   if typerow is None:raise RuntimeError(f'Installed type missing from type snapshot: {ct}')
   pin_key=f'type:{ct}'
-  expected_owner=relation_owner_pins.get(pin_key)
-  if expected_owner is None:raise RuntimeError(f'No pinned owner expectation for {pin_key} in relation-owners.json -- add one before this can be certified')
+  expected_owner=pinned_owner(relation_owner_pins,pin_key,'relation-owners.json')
   if owner_mismatch(expected_owner,typerow['owner']):raise RuntimeError(f"Type OWNER drift {ct}: expected owner={expected_owner!r} live={typerow['owner']!r}")
   expected_acl=relation_acl_pins.get(pin_key)
   if expected_acl is None:raise RuntimeError(f'No pinned ACL expectation for {pin_key} in relation-acl.json -- add one before this can be certified')

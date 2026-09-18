@@ -23,8 +23,8 @@
   "smoke.py": "48fb552e52de31bdce662f44c149ed87fef84e2efd2cbb8748069fd5edec6e96",
   "unknown-retention-test.py": "15c027cc365b46d2fdc21e7ff4e0ca6ea74afef21949f8a9c70424a9eb1d99c7",
   "unknown-retention.sql": "974eab36185aa70d78099eb1867e35c741a51bf5b5b0d68155be74e5604e6504",
-  "verify-mutation-harness.py": "987e2ec8ed3d84f7a51d0a73dbd42cd8c94da9c787d72d8b45714b372c89433d",
-  "verify.py": "a39ac2dfd94baac294332f91e239d1d5680b2e277de00a18ba295168a4db5980",
+  "verify-mutation-harness.py": "1a7fcf4aae481a7ee7c0782eee22ae14c3b7764a146b7d901e746075f05f95e0",
+  "verify.py": "8f886006a355dbacb0c62dff56731b273b2de163f03847ee589c831c5b6715ce",
   "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15",
   "selection-review.sql": "8c7d3492ec6766963e2d518d24b221316545f07bc1ba7923f25402dc23802dbd",
   "reviewed-read/06-inbox-workset-updates-setup.sql": "7916e78557da25af1044c6a2c4697be06c48606776a3533ea876b039a2a28106",
@@ -35,5 +35,7 @@
   "function-owners.json": "a07acd64007dcd8b056fb94e6a9b20844c58e9cc4fa5fb29ad55f65edd500a09",
   "function-grants.json": "00e891fa0b42a4efb0d741738fb9b1caaa839c588309ba8ec77cda3aef7fe3b7",
   "relation-owners.json": "aedfbd764a4f31e32f899f8dd94c807265af331db06cb66d2c61ea8a0e78810e",
-  "relation-acl.json": "840d2b885da6052c624b91ef8e686c86dd6eded5e758ad006e68487629493bc8"
+  "relation-acl.json": "840d2b885da6052c624b91ef8e686c86dd6eded5e758ad006e68487629493bc8",
+  "generate-catalog-pins.py": "f47a231a2e57753cf9ac7803074fef64bc256c1699b128b75952510d0bd13663",
+  "column-acl.json": "5b8231e6ce255137a3d5e1a0d0abb7bf4d6693563eb836eefafc21b4f1050ade"
 }
