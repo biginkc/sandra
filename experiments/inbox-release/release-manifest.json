@@ -95,6 +95,7 @@
       "network": "sandra-inbox-release-http-20260917",
       "api": "http://127.0.0.1:54321",
       "database": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+      "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
       "baseline_owner_org": "00000000-0000-0000-0000-000000000bbb"
     },
     "shared_http_stack_excluded": true,

@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import tempfile
 import unittest
 
 
@@ -10,6 +11,11 @@ spec = importlib.util.spec_from_file_location("release_stress", HERE / "run-stre
 assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+gate_spec = importlib.util.spec_from_file_location("release_gate", HERE / "release_gate.py")
+assert gate_spec and gate_spec.loader
+gate = importlib.util.module_from_spec(gate_spec)
+gate_spec.loader.exec_module(gate)
 
 
 class StressHarnessTests(unittest.TestCase):
@@ -66,6 +72,28 @@ class StressHarnessTests(unittest.TestCase):
         result = module.validate_records(config, release, "current", records)
         self.assertEqual(result["arrival_rate"]["status"], "BLOCKED")
         self.assertEqual(result["overall"], "BLOCKED")
+
+    def test_release_evidence_serializes_to_gate_contract(self):
+        _config, target, release = module.load_config(HERE / "stress-harness-config.json")
+        validated = {
+            "overall": "PASS",
+            "profile": "current",
+            "profile_dimensions": {"arrival_rate_rps": 1, "concurrency": 1, "tenant_count": 1, "history_skew": 1},
+            "timing": {
+                event: {"sample_count": 10, "p95_ms": 1.0, "p99_ms": 1.0, "status": "MEASURED"}
+                for event in ("first_open", "revisit", "selection")
+            },
+            "arrival_rate": {"samples": 10, "p95_rps": 1.0, "status": "MEASURED"},
+            "system_metrics": {},
+            "recovery": {"status": "MEASURED", "faults": [{"fault": "projection_restart", "recovered": True, "duration_ms": 12.0}]},
+        }
+        evidence = module.release_evidence(target, release, validated)
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = Path(directory) / "synthetic-evidence.json"
+            evidence_path.write_text(json.dumps(evidence))
+            status, detail, loaded = gate.validate_evidence_file(evidence_path, module.current_candidate_sha(), release["fixture_policy"])
+        self.assertEqual(status, "PASS", detail)
+        self.assertEqual(loaded, evidence)
 
 
 if __name__ == "__main__":
