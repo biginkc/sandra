@@ -43,6 +43,14 @@ describe("saved-action repository", () => {
         await expect(client([{ data: null, error: { code: "42501", message: "INBOX_ACTION_FORBIDDEN" } }]).repository.get(id(1), 1, signal())).rejects.toMatchObject({ status: 403 });
         await expect(client([{ data: null, error: { code: "42501", message: "INBOX_SESSION_REVOKED" } }]).repository.get(id(1), 1, signal())).rejects.toMatchObject({ status: 401 });
     });
+    it.each([
+        ["INBOX_COMMAND_NOT_IN_COHORT", 404, "Not found"],
+        ["INBOX_SHARED_SURFACE_DENIED", 403, "access_unavailable"],
+        ["INBOX_COMMAND_DISABLED", 404, "Not found"],
+    ])("maps admission denial %s fail-closed", async (message, status, code) => {
+        const c = client([{ data: null, error: { code: message === "INBOX_COMMAND_DISABLED" ? "55000" : "42501", message } }]);
+        await expect(c.repository.get(id(1), 1, signal())).rejects.toMatchObject({ status, code });
+    });
     it("get() asserts the returned row echoes the exact requested id+version", async () => {
         const c = client([ok(row({ id: id(9), version: 1 }))]);
         await expect(c.repository.get(id(1), 1, signal())).rejects.toMatchObject({ status: 503 });

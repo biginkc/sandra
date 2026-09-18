@@ -66,8 +66,10 @@ function failure(error: {
     if (error.code === "42501") {
         if (["INBOX_AUTH_REQUIRED", "INBOX_SESSION_EXPIRED", "INBOX_SESSION_REVOKED"].includes(error.message ?? ""))
             throw new InboxActionApiError(401, "authentication_required");
-        if (["INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", "INBOX_ORG_DENIED", "INBOX_ACTION_FORBIDDEN"].includes(error.message ?? ""))
+        if (["INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", "INBOX_ORG_DENIED", "INBOX_ACTION_FORBIDDEN", "INBOX_SHARED_SURFACE_DENIED"].includes(error.message ?? ""))
             throw new InboxActionApiError(403, "access_unavailable");
+        if (error.message === "INBOX_COMMAND_NOT_IN_COHORT")
+            throw new InboxActionApiError(404, "Not found");
         if (["INBOX_ACTION_PREPARATION_UNAVAILABLE", "INBOX_ACTION_OPERATION_UNAVAILABLE"].includes(error.message ?? ""))
             throw new InboxActionApiError(404, "action_unavailable");
     }

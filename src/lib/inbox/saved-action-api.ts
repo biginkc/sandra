@@ -38,9 +38,13 @@ function failure(error: { code?: string; message?: string } | null): void {
     if (error.code === "42501") {
         if (["INBOX_AUTH_REQUIRED", "INBOX_SESSION_EXPIRED", "INBOX_SESSION_REVOKED"].includes(error.message ?? ""))
             throw new InboxSavedActionApiError(401, "authentication_required");
-        if (["INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", "INBOX_ORG_DENIED", "INBOX_ACTION_FORBIDDEN"].includes(error.message ?? ""))
+        if (["INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", "INBOX_ORG_DENIED", "INBOX_ACTION_FORBIDDEN", "INBOX_SHARED_SURFACE_DENIED"].includes(error.message ?? ""))
             throw new InboxSavedActionApiError(403, "access_unavailable");
+        if (error.message === "INBOX_COMMAND_NOT_IN_COHORT")
+            throw new InboxSavedActionApiError(404, "Not found");
     }
+    if (error.code === "55000")
+        throw new InboxSavedActionApiError(404, "Not found");
     if (error.code === "P0001") {
         const notFound = new Set(["INBOX_SAVED_ACTION_NOT_FOUND"]);
         const conflicts: Record<string, string> = {

@@ -47,6 +47,13 @@ describe("authoritative Inbox action transport", () => {
         const c = client([ok(actor), { data: null, error: { code: "55000", message: "INBOX_COMMAND_DISABLED" } }]);
         await expect(c.repository.prepare(JSON.stringify(request), signal())).rejects.toMatchObject({ status: 404, code: "Not found" });
     });
+    it.each([
+        ["INBOX_COMMAND_NOT_IN_COHORT", 404, "Not found"],
+        ["INBOX_SHARED_SURFACE_DENIED", 403, "access_unavailable"],
+    ])("maps admission denial %s without revealing command availability", async (message, status, code) => {
+        const c = client([ok(actor), { data: null, error: { code: "42501", message } }]);
+        await expect(c.repository.prepare(JSON.stringify(request), signal())).rejects.toMatchObject({ status, code });
+    });
     it("keeps missing grants as infrastructure errors while distinguishing revoked session", async () => { await expect(client([{ data: null, error: { code: "42501", message: "permission denied for function inbox_accept_action" } }]).repository.accept(id(5), id(3), signal())).rejects.toMatchObject({ status: 503 }); await expect(client([{ data: null, error: { code: "42501", message: "INBOX_SESSION_REVOKED" } }]).repository.accept(id(5), id(3), signal())).rejects.toMatchObject({ status: 401 }); });
     it("does not issue RPC after cancellation", async () => { const c = client([]), controller = new AbortController(); controller.abort(); await expect(c.repository.accept(id(5), id(3), controller.signal)).rejects.toThrow(); expect(c.rpc).not.toHaveBeenCalled(); });
     it("acceptance reference parser rejects duplicate decoded keys and extra payload", () => { expect(() => parseInboxActionAcceptance(`{"preparationId":"${id(5)}","preparationId":"${id(5)}","idempotencyKey":"${id(3)}"}`)).toThrow(); expect(() => parseInboxActionAcceptance(JSON.stringify({ preparationId: id(5), idempotencyKey: id(3), definition: {} }))).toThrow(); expect(parseInboxActionAcceptance(JSON.stringify({ idempotencyKey: id(3), preparationId: id(5) }))).toEqual({ preparationId: id(5), idempotencyKey: id(3) }); });

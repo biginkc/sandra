@@ -88,8 +88,10 @@ function failure(error: { code?: string; message?: string } | null): void {
         // "unavailable" (preparation/operation not found or not this
         // requester's) both fail closed to the same 403 — never distinguish
         // "exists but not yours" from "doesn't exist".
-        if (["INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", "INBOX_ORG_DENIED", "INBOX_ACTION_FORBIDDEN", "INBOX_REPLY_PREPARATION_UNAVAILABLE", "INBOX_REPLY_OPERATION_UNAVAILABLE"].includes(error.message ?? ""))
+        if (["INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", "INBOX_ORG_DENIED", "INBOX_ACTION_FORBIDDEN", "INBOX_SHARED_SURFACE_DENIED", "INBOX_REPLY_PREPARATION_UNAVAILABLE", "INBOX_REPLY_OPERATION_UNAVAILABLE"].includes(error.message ?? ""))
             throw new InboxReplyApiError(403, "access_unavailable");
+        if (error.message === "INBOX_COMMAND_NOT_IN_COHORT")
+            throw new InboxReplyApiError(404, "Not found");
     }
     // Half-enabled (admission closed) must be indistinguishable from the flag
     // being off entirely (C1): identical status AND identical body.

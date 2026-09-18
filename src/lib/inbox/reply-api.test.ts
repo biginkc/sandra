@@ -358,6 +358,8 @@ describe("C7 error mapping table (obligation 8)", () => {
     ["42501", "INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING", 403, "access_unavailable"],
     ["42501", "INBOX_ORG_DENIED", 403, "access_unavailable"],
     ["42501", "INBOX_ACTION_FORBIDDEN", 403, "access_unavailable"],
+    ["42501", "INBOX_SHARED_SURFACE_DENIED", 403, "access_unavailable"],
+    ["42501", "INBOX_COMMAND_NOT_IN_COHORT", 404, "Not found"],
     ["55000", undefined, 404, "Not found"],
     ["P0001", "INBOX_REPLY_PREPARATION_CHANGED", 409, "preparation_changed"],
     ["P0001", "INBOX_REPLY_IDEMPOTENCY_MISMATCH", 409, "idempotency_mismatch"],
