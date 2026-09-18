@@ -5,7 +5,7 @@ LANGUAGE plpgsql SET search_path='' AS $$
 BEGIN PERFORM inbox_action_api.authorize(o,u);END $$;
 CREATE OR REPLACE FUNCTION inbox_operations.assert_current_preparation(p uuid) RETURNS void
 LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE prep inbox_operations.preparations;binding inbox_action_api.preparation_requests;item jsonb;effect jsonb;target jsonb;expected jsonb;requirements jsonb;revision bigint;assignee uuid;
+DECLARE prep inbox_operations.preparations;binding inbox_action_api.preparation_requests;item jsonb;effect jsonb;target jsonb;expected jsonb;requirements jsonb;revision bigint;assignee uuid;unknown_snapshot jsonb;current_message_ids jsonb;unknown_group uuid;unknown_raw text;
 BEGIN
  SELECT * INTO prep FROM inbox_operations.preparations WHERE id=p;
  SELECT * INTO binding FROM inbox_action_api.preparation_requests WHERE preparation_id=p;
@@ -13,6 +13,49 @@ BEGIN
  PERFORM inbox_action_api.authorize(prep.org_id,prep.requester_id);
  IF prep.expires_at<=clock_timestamp() OR jsonb_array_length(prep.snapshot->'effects')=0 THEN RAISE EXCEPTION 'INBOX_ACTION_PREPARATION_EXPIRED_OR_EMPTY';END IF;
  FOR effect IN SELECT value FROM jsonb_array_elements(prep.snapshot->'effects') ORDER BY value->>'effect_key',(value->>'ordinal')::integer LOOP
+  -- Unknown-sender effects carry a frozen sender-group/message-id snapshot,
+  -- not property policy/target dependencies.  Validate that exact snapshot
+  -- against current canonical rows before accepting; routing it through the
+  -- property policy branch passes NULL requirements to inbox_policy.snapshot
+  -- and rejects every otherwise valid unknown dismissal/restoration.
+  IF effect->'dependencies' ? 'unknown_action' THEN
+   unknown_snapshot:=effect->'dependencies'->'unknown_action';
+   IF jsonb_typeof(unknown_snapshot) IS DISTINCT FROM 'object'
+      OR (SELECT count(*) FROM jsonb_object_keys(unknown_snapshot))<>4
+      OR NOT(unknown_snapshot ?& ARRAY['sender_group_id','raw_sender','revision','message_ids'])
+      OR jsonb_typeof(unknown_snapshot->'message_ids') IS DISTINCT FROM 'array'
+      OR effect->>'action' NOT IN ('dismiss_unknown','restore_unknown') THEN
+    RAISE EXCEPTION 'Unknown action snapshot changed' USING ERRCODE='P0001';
+   END IF;
+   unknown_group:=(unknown_snapshot->>'sender_group_id')::uuid;
+   SELECT g.raw_sender INTO unknown_raw
+   FROM inbox_t2_message_capture.sender_groups g
+   WHERE g.org_id=prep.org_id AND g.sender_group_id=unknown_group
+   FOR SHARE;
+   IF unknown_raw IS NULL OR unknown_raw IS DISTINCT FROM unknown_snapshot->>'raw_sender' THEN
+    RAISE EXCEPTION 'Unknown sender identity changed' USING ERRCODE='P0001';
+   END IF;
+   SELECT v.revision INTO revision
+   FROM inbox_t2_message_capture.versions v
+   WHERE v.org_id=prep.org_id AND v.namespace='unknown_action' AND v.target_id=unknown_group
+   FOR UPDATE;
+   IF revision IS NULL OR revision::text IS DISTINCT FROM unknown_snapshot->>'revision' THEN
+    RAISE EXCEPTION 'Unknown action snapshot changed' USING ERRCODE='P0001';
+   END IF;
+   SELECT coalesce(jsonb_agg(to_jsonb(m.id) ORDER BY m.id),'[]'::jsonb) INTO current_message_ids
+   FROM public.messages m
+   WHERE m.org_id=prep.org_id AND m.channel='sms' AND m.direction='inbound'
+     AND m.contact_id IS NULL AND m.from_address=unknown_raw
+     AND CASE effect->>'action'
+       WHEN 'dismiss_unknown' THEN m.dismissed_at IS NULL
+       WHEN 'restore_unknown' THEN m.dismissed_at IS NOT NULL
+       ELSE false
+     END;
+   IF current_message_ids IS DISTINCT FROM unknown_snapshot->'message_ids' THEN
+    RAISE EXCEPTION 'Unknown action snapshot changed' USING ERRCODE='P0001';
+   END IF;
+   CONTINUE;
+  END IF;
   IF effect->'dependencies'->'sms_scope'->>'contact_id' IS NOT NULL THEN
    SELECT s.revision INTO revision FROM inbox_operation_domain.sms_scopes s WHERE s.org_id=prep.org_id AND s.contact_id=(effect->'dependencies'->'sms_scope'->>'contact_id')::uuid FOR UPDATE;
    IF NOT FOUND OR revision::text IS DISTINCT FROM effect->'dependencies'->'sms_scope'->>'revision' THEN RAISE EXCEPTION 'INBOX_ACTION_PREPARATION_CHANGED';END IF;
