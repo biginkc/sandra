@@ -2,11 +2,11 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration",
-  "source_commit": "94bf37f8af10593be058ffd5526cc9495115cf31",
+  "source_commit": "be2eb8c1719120e0bf9ef3f363233c7a012c64f3",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
-    "sha256": "10af296ef4642b9b769b12f779d8b34924c74411ad3d7683c969db2ec0e7231d"
+    "sha256": "9127b423b0212dd38a24eeb9f7ea64f96474eb90919e650a4d62348eff22040a"
   },
   "sql_sources": [
     {
@@ -21,9 +21,9 @@
       "name": "saved_actions_setup",
       "kind": "sql",
       "path": "experiments/inbox-saved-actions/setup.sql",
-      "sha256": "7ff25fd7f463aa4e110ca881df94e92ea8259d0e1a7daec80eebd2d4f3f9e214",
-      "bytes": 13549,
-      "transformed_sha256": "ea85ae58758d266f08658a74a76d6939b2b7898cae40f72ea677eb68f0f7a048"
+      "sha256": "3f06c8764459f06867f0803e74499ee7c982aecf5fc087d05b0f18aedb864b16",
+      "bytes": 11954,
+      "transformed_sha256": "3192b69e9455a89274a4c6f4799a98fe99ca96e1ea5f60596975435fcc6c97ec"
     },
     {
       "name": "saved_actions_public_api",
