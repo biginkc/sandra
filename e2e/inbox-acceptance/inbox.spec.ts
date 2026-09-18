@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixture";
 import { randomUUID } from "node:crypto";
 
 import { adminClient, ensureTestUser, resetTenantTables } from "../fixtures";
