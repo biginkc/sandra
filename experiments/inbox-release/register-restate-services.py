@@ -100,18 +100,21 @@ def environment_values(state: dict) -> set[str]:
     return set(state.get("Config", {}).get("Env") or [])
 
 
+def assert_running_image(state: dict, image_id: str, name: str) -> None:
+    # Config.Image is only the tag used to create the container and can move
+    # after launch.  The top-level Image field is the immutable image ID
+    # actually mounted into this running container.
+    if state.get("Image") != image_id:
+        raise GuardError(f"worker {name} does not match its immutable running image receipt")
+
+
 def check_worker(name: str, expected: dict) -> dict:
     state = require_release_container(name)
     env = environment_values(state)
     image_id = os.environ.get(expected["image_id_env"], "")
     if not image_id.startswith("sha256:") or len(image_id) != len("sha256:") + 64:
         raise GuardError(f"{expected['image_id_env']} must contain the immutable built image ID")
-    try:
-        image_info = json.loads(docker("image", "inspect", state.get("Config", {}).get("Image", "")))[0]
-    except (json.JSONDecodeError, IndexError, GuardError) as exc:
-        raise GuardError(f"cannot inspect worker image for {name}: {exc}") from exc
-    if image_info.get("Id") != image_id:
-        raise GuardError(f"worker {name} does not match its immutable image receipt")
+    assert_running_image(state, image_id, name)
     if expected["enabled"] not in env:
         raise GuardError(f"worker {name} is not explicitly enabled")
     # The local profile must use the provider double.  A real provider key is

@@ -274,7 +274,7 @@
     },
     "restate_registration": {
       "helper": "experiments/inbox-release/register-restate-services.py",
-      "sha256": "23cef637ceded9e94eb994c07c109b37c0211ef364a6294637e815860f471620",
+      "sha256": "69a8e22420c0d7471d24314866f4ce57cbdcb2de561c18656bc9628b70b80bcd",
       "admin_url": "http://127.0.0.1:9070",
       "worker_endpoints": {
         "InboxMetadataOperation": "http://127.0.0.1:9080",
