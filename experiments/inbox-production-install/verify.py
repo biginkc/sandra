@@ -140,8 +140,10 @@ def parse_column(seg):
 
 tables=sorted(set(re.findall(r'CREATE TABLE (?:IF NOT EXISTS )?([\w.]+)',s)))
 added_cols={}
-for m in re.finditer(r'ALTER TABLE ([\w.]+) ADD COLUMN (\w+ [^;]+);',s):
- added_cols.setdefault(m.group(1),[]).append(m.group(2))
+for m in re.finditer(r'ALTER TABLE ([\w.]+)\s+ADD COLUMN (?:IF NOT EXISTS )?(.+?);',s,re.S):
+ for coldef in split_top_level(m.group(2)):
+  coldef=re.sub(r'^\s*ADD COLUMN (?:IF NOT EXISTS )?', '', coldef, flags=re.I)
+  if coldef.strip(): added_cols.setdefault(m.group(1),[]).append(coldef.strip())
 all_tables=sorted(set(tables)|set(added_cols.keys()))
 rls_tables=sorted(set(re.findall(r'ALTER TABLE ([\w.]+) ENABLE ROW LEVEL SECURITY',s)))
 composite_types=sorted(set(re.findall(r'CREATE TYPE ([\w.]+) AS \(',s)))
@@ -256,7 +258,7 @@ def extract_constraints_for_table(t):
    if fm:
     tail=(fm.group(3) or '')+(fm.group(4) or '')
     frags.append((f'FOREIGN KEY ({name}) REFERENCES {fm.group(1)}({fm.group(2)}){tail}',True))
- for m in re.finditer(r'ALTER TABLE '+re.escape(t)+r' ADD CONSTRAINT \w+\s+([^;]+);',s):
+ for m in re.finditer(r'ALTER TABLE\s+'+re.escape(t)+r'\s+ADD CONSTRAINT\s+\w+\s+([^;]+);',s,re.S):
   clause=m.group(1)
   valid='NOT VALID' not in clause.upper()
   clause=re.sub(r'\s+NOT\s+VALID\s*$','',clause,flags=re.I)
