@@ -22,6 +22,11 @@ import { captureRowEvidence, purgeRowOutcomes, readMatrixResults, recordRowOutco
  * baseline honest through THIS run's real outcome).
  */
 
+test.skip(
+  process.env.INBOX_ACCEPTANCE_RUN !== "1",
+  "Use playwright.inbox-acceptance.config.ts for the owned Outbox fixture.",
+);
+
 test.describe.configure({ mode: "serial" });
 
 let admin: ReturnType<typeof adminClient>;
