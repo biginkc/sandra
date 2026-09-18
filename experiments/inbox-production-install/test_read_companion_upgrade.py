@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -19,7 +20,7 @@ if str(P) not in sys.path:
 class ReadCompanionUpgradeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        subprocess.run([sys.executable, str(P / "read-companion.py")], check=True)
+        subprocess.run([sys.executable, str(P / "read-companion.py"), "--target", "release-db"], check=True)
 
     def test_historical_receipt_is_not_current_install_proof(self) -> None:
         receipt = json.loads((P / "read-companion-evidence.json").read_text())
@@ -75,7 +76,7 @@ class ReadCompanionUpgradeTest(unittest.TestCase):
         self.assertNotIn("sandra-inbox-release-owned-synthetic", packet)
         # Restore the checked-in/default release rehearsal packet after this
         # profile-only compile so subsequent tests cannot consume HTTP output.
-        subprocess.run([sys.executable, str(P / "read-companion.py")], check=True)
+        subprocess.run([sys.executable, str(P / "read-companion.py"), "--target", "release-db"], check=True)
 
     def test_installer_requires_explicit_owned_mode(self) -> None:
         result = subprocess.run(
@@ -96,6 +97,11 @@ class ReadCompanionUpgradeTest(unittest.TestCase):
         http_db = __import__("http_fixture_db")
         calls = []
         real_run = subprocess.run
+        old_profile = os.environ.get("INBOX_RELEASE_TARGET_PROFILE")
+        generated = {
+            path: path.read_bytes()
+            for path in (P / "generated").glob("read-upgrade-*.sql")
+        }
 
         def fake_run(command, *args, **kwargs):
             if str(P / "read-companion.py") in command:
@@ -115,6 +121,7 @@ class ReadCompanionUpgradeTest(unittest.TestCase):
             return ""
 
         evidence = P / "read-upgrade-evidence.json"
+        old_evidence = evidence.read_bytes() if evidence.exists() else None
         try:
             with mock.patch.object(http_db, "guard"), mock.patch.object(http_db, "sql", side_effect=fake_sql), mock.patch.object(http_db, "ensure_concurrent_index", return_value="idx"), mock.patch.object(installer.subprocess, "run", side_effect=fake_run), mock.patch.object(sys, "argv", [str(P / "install-read-upgrade.py"), "--owned-fixture", "--target", "http"]):
                 self.assertEqual(installer.main(), 0)
@@ -128,8 +135,16 @@ class ReadCompanionUpgradeTest(unittest.TestCase):
             self.assertIn("current_database()<>'postgres'", packet)
             self.assertIn("marker='sandra-inbox-http-owned-synthetic-20260917'", packet)
         finally:
-            evidence.unlink(missing_ok=True)
-            real_run([sys.executable, str(P / "read-companion.py")], check=True)
+            if old_profile is None:
+                os.environ.pop("INBOX_RELEASE_TARGET_PROFILE", None)
+            else:
+                os.environ["INBOX_RELEASE_TARGET_PROFILE"] = old_profile
+            for path, content in generated.items():
+                path.write_bytes(content)
+            if old_evidence is None:
+                evidence.unlink(missing_ok=True)
+            else:
+                evidence.write_bytes(old_evidence)
 
 
 if __name__ == "__main__":

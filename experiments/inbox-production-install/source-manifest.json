@@ -30,6 +30,6 @@
   "reviewed-read/06-inbox-workset-updates-setup.sql": "7916e78557da25af1044c6a2c4697be06c48606776a3533ea876b039a2a28106",
   "electric-replication-role.sql": "72b52d829f176940fb2d935d00193fa670fd0ac5562b69419de513782dffd7ad",
   "install-read-upgrade.py": "77f276ce1192eabe4fae1d2798226b50664bfd7abb95115934afa64e1ab4fbfd",
-  "test_read_companion_upgrade.py": "c665f7f8aa5e872bd2fe5b23ba356e2f9c4a3133fbd8695443b5cf4c65ff10dd",
+  "test_read_companion_upgrade.py": "155f99acb69d7424e62a875a6a9fcd01f2964d1d7d1e4aea136df873f1cb9a82",
   "http_fixture_db.py": "9e6b164009cdbe2f3cc3779fa4f9372f309239eb90d660bcb4fef9335c5eed15"
 }
