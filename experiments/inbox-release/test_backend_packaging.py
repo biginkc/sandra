@@ -62,10 +62,10 @@ class BackendPackagingTests(unittest.TestCase):
         self.assertEqual(backend_result["status"], "PASS", backend_result)
         self.assertEqual(execution_result["status"], "PASS", execution_result)
 
-    def test_acceptance_gate_counts_rows_whose_text_contains_id(self) -> None:
+    def test_acceptance_gate_blocks_unbound_historical_rows(self) -> None:
         result = self.gate.check_acceptance_matrix("HEAD")
-        self.assertEqual(result["status"], "PASS", result)
-        self.assertEqual(result["rows"], 50)
+        self.assertEqual(result["status"], "BLOCKED", result)
+        self.assertIn("candidate SHA", result["detail"])
 
 
 if __name__ == "__main__":

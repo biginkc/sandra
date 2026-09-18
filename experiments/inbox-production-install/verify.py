@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Verify compiler determinism and, with --installed, the exact guarded installed schema."""
-import argparse,ast,hashlib,json,os,re,shutil,subprocess,sys
+import argparse,ast,atexit,hashlib,json,os,re,shutil,subprocess,sys,tempfile
 from pathlib import Path
 P=Path(__file__).resolve().parent
 ap=argparse.ArgumentParser();ap.add_argument('--installed',action='store_true');ap.add_argument('--selftest',action='store_true');ap.add_argument('--source-only',action='store_true');ap.add_argument('--target',choices=('release-db','http'),default=os.environ.get('INBOX_RELEASE_TARGET_PROFILE','release-db'));a=ap.parse_args()
@@ -10,6 +10,23 @@ if manifest.exists():
  for name,digest in json.loads(manifest.read_text()).items():
   if hashlib.sha256((P/name).read_bytes()).hexdigest()!=digest:raise RuntimeError('Bundle source manifest drift: '+name)
 for f in P.glob('*.py'):ast.parse(f.read_text(),filename=str(f))
+# Profile-specific compilation rewrites generated/ (for example, the HTTP
+# fixture replaces release-database guards).  Keep that scratch output out of
+# the checked-in bundle even when a later compiler or installed check fails.
+# The restore runs for normal exits and exceptions; a hard process kill cannot
+# run Python cleanup and therefore remains an operationally distinct failure.
+_generated_dir=P/'generated'
+_generated_backup_root=Path(tempfile.mkdtemp(prefix='inbox-verify-generated-'))
+_generated_backup=_generated_backup_root/'generated'
+_generated_existed=_generated_dir.exists()
+if _generated_existed:
+ shutil.copytree(_generated_dir,_generated_backup)
+def _restore_generated() -> None:
+ shutil.rmtree(_generated_dir,ignore_errors=True)
+ if _generated_existed:
+  shutil.copytree(_generated_backup,_generated_dir)
+ shutil.rmtree(_generated_backup_root,ignore_errors=True)
+atexit.register(_restore_generated)
 # Wipe generated/ before regenerating: build.py and read-companion.py always fully
 # rewrite every file they own from hash-verified pinned source, so a clean wipe means
 # nothing here can ever read a stale or injected file left over from a prior run (an

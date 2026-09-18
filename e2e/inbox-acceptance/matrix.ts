@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 const MATRIX_PATH = path.resolve(
   __dirname,
@@ -15,6 +16,22 @@ export const ALL_ROW_IDS = [
   ...Array.from({ length: 8 }, (_, n) => `U${String(n + 1).padStart(2, "0")}`),
   ...Array.from({ length: 10 }, (_, n) => `O${String(n + 1).padStart(2, "0")}`),
 ];
+
+const RUN_MARKER = /<!-- acceptance-run candidate_sha: ([0-9a-f]{40}) -->/;
+
+function candidateSha(): string {
+  return execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: path.resolve(__dirname, "../.."),
+    encoding: "utf8",
+  }).trim();
+}
+
+function setRunMarker(content: string): string {
+  const marker = `<!-- acceptance-run candidate_sha: ${candidateSha()} -->`;
+  return RUN_MARKER.test(content)
+    ? content.replace(RUN_MARKER, marker)
+    : content.replace("# Inbox acceptance matrix\n", `# Inbox acceptance matrix\n\n${marker}\n`);
+}
 
 /**
  * Make arbitrary text (error messages, skip reasons) safe to drop into a
@@ -57,7 +74,7 @@ function replaceRow(content: string, id: string, status: string, evidence: strin
 
 /** Clear stale outcomes before every run, including rows without a test. */
 export function resetMatrixForRun(): void {
-  let content = fs.readFileSync(MATRIX_PATH, "utf8");
+  let content = setRunMarker(fs.readFileSync(MATRIX_PATH, "utf8"));
   for (const id of ALL_ROW_IDS) content = replaceRow(content, id, "Not run", "No evidence from this run");
   fs.writeFileSync(MATRIX_PATH, content, "utf8");
 }

@@ -736,8 +736,14 @@ def check_acceptance_matrix(candidate_sha: str) -> dict[str, Any]:
     matrix = ROOT / "docs" / "performance" / "inbox-redesign" / "acceptance-matrix.md"
     if not matrix.is_file():
         return result("FAIL", "acceptance matrix is missing")
+    matrix_text = matrix.read_text()
+    marker = re.search(r"<!-- acceptance-run candidate_sha: ([0-9a-f]{40}) -->", matrix_text)
+    if marker is None:
+        return result("BLOCKED", "acceptance matrix is not bound to a candidate SHA")
+    if marker.group(1) != candidate_sha:
+        return result("BLOCKED", "acceptance matrix candidate SHA does not match HEAD", matrix_candidate_sha=marker.group(1), candidate_sha=candidate_sha)
     rows: list[dict[str, str]] = []
-    for line in matrix.read_text().splitlines():
+    for line in matrix_text.splitlines():
         if not line.startswith("|") or line.startswith("|---") or line.startswith("| ID |"):
             continue
         parts = [part.strip() for part in line.strip().strip("|").split("|")]
@@ -746,6 +752,17 @@ def check_acceptance_matrix(candidate_sha: str) -> dict[str, Any]:
         rows.append({"id": parts[0], "status": parts[4], "evidence": parts[5]})
     if not rows:
         return result("FAIL", "acceptance matrix contains no rows")
+    results_file = ROOT / "test-results" / "inbox-acceptance-results.json"
+    if not results_file.is_file():
+        return result("BLOCKED", "acceptance run result artifact is missing")
+    try:
+        run_results = load_json(results_file)
+    except GateError as exc:
+        return result("FAIL", f"acceptance run result artifact is invalid: {exc}")
+    if not isinstance(run_results, dict) or run_results.get("candidate_sha") != candidate_sha:
+        return result("BLOCKED", "acceptance run result artifact is not bound to HEAD", candidate_sha=candidate_sha)
+    if not isinstance(run_results.get("rows"), list):
+        return result("FAIL", "acceptance run result artifact has no rows")
     blocked = [row for row in rows if row["status"].lower().startswith(("blocked", "not run", "fail"))]
     invalid_evidence = [
         row

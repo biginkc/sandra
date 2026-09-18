@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import type { Page } from "@playwright/test";
 
 import type { RowOutcome } from "./matrix";
@@ -26,18 +27,70 @@ const EVIDENCE_DIR = path.resolve(
 
 export function resetResultsFile(): void {
   fs.mkdirSync(path.dirname(RESULTS_FILE), { recursive: true });
-  fs.writeFileSync(RESULTS_FILE, "[]\n", "utf8");
+  fs.writeFileSync(
+    RESULTS_FILE,
+    JSON.stringify(
+      {
+        candidate_sha: candidateSha(),
+        run_started_at: new Date().toISOString(),
+        rows: [],
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
   fs.rmSync(EVIDENCE_DIR, { recursive: true, force: true });
   fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
 }
 
-export function recordRowOutcome(result: RowOutcome): void {
+type ResultsFile = {
+  candidate_sha: string;
+  run_started_at: string;
+  rows: RowOutcome[];
+};
+
+function candidateSha(): string {
+  return execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: path.resolve(__dirname, "../.."),
+    encoding: "utf8",
+  }).trim();
+}
+
+function readResultsFile(): ResultsFile {
+  if (!fs.existsSync(RESULTS_FILE)) {
+    return { candidate_sha: "", run_started_at: "", rows: [] };
+  }
+  const parsed: unknown = JSON.parse(fs.readFileSync(RESULTS_FILE, "utf8"));
+  // Older checked-in artifacts were a bare row array. Read them so a failed
+  // teardown can still report its rows, but their missing identity is a
+  // deliberate release-gate failure rather than proof for a candidate.
+  if (Array.isArray(parsed)) {
+    return { candidate_sha: "", run_started_at: "", rows: parsed as RowOutcome[] };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("acceptance results file must be an object");
+  }
+  const file = parsed as Partial<ResultsFile>;
+  if (!Array.isArray(file.rows)) {
+    throw new Error("acceptance results file is missing rows");
+  }
+  return {
+    candidate_sha: typeof file.candidate_sha === "string" ? file.candidate_sha : "",
+    run_started_at: typeof file.run_started_at === "string" ? file.run_started_at : "",
+    rows: file.rows,
+  };
+}
+
+function writeResultsFile(file: ResultsFile): void {
   fs.mkdirSync(path.dirname(RESULTS_FILE), { recursive: true });
-  const existing: RowOutcome[] = fs.existsSync(RESULTS_FILE)
-    ? JSON.parse(fs.readFileSync(RESULTS_FILE, "utf8"))
-    : [];
-  existing.push(result);
-  fs.writeFileSync(RESULTS_FILE, JSON.stringify(existing, null, 2), "utf8");
+  fs.writeFileSync(RESULTS_FILE, JSON.stringify(file, null, 2) + "\n", "utf8");
+}
+
+export function recordRowOutcome(result: RowOutcome): void {
+  const file = readResultsFile();
+  file.rows.push(result);
+  writeResultsFile(file);
 }
 
 /**
@@ -58,16 +111,14 @@ export function recordRowOutcome(result: RowOutcome): void {
  */
 export function purgeRowOutcomes(ids: readonly string[]): void {
   if (ids.length === 0) return;
-  const existing = readMatrixResults();
+  const file = readResultsFile();
   const idSet = new Set(ids);
-  const filtered = existing.filter((r) => !idSet.has(r.id));
-  fs.mkdirSync(path.dirname(RESULTS_FILE), { recursive: true });
-  fs.writeFileSync(RESULTS_FILE, JSON.stringify(filtered, null, 2), "utf8");
+  file.rows = file.rows.filter((r) => !idSet.has(r.id));
+  writeResultsFile(file);
 }
 
 export function readMatrixResults(): RowOutcome[] {
-  if (!fs.existsSync(RESULTS_FILE)) return [];
-  return JSON.parse(fs.readFileSync(RESULTS_FILE, "utf8"));
+  return readResultsFile().rows;
 }
 
 export function hasRecordedOutcome(id: string): boolean {

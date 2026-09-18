@@ -78,6 +78,27 @@ class ReadCompanionUpgradeTest(unittest.TestCase):
         # profile-only compile so subsequent tests cannot consume HTTP output.
         subprocess.run([sys.executable, str(P / "read-companion.py"), "--target", "release-db"], check=True)
 
+    def test_verify_http_profile_restores_generated_bundle(self) -> None:
+        generated = {
+            path: path.read_bytes()
+            for path in (P / "generated").rglob("*")
+            if path.is_file()
+        }
+        result = subprocess.run(
+            [sys.executable, str(P / "verify.py"), "--source-only", "--target", "http"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        restored = {
+            path: path.read_bytes()
+            for path in (P / "generated").rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(set(restored), set(generated))
+        self.assertEqual(restored, generated)
+
     def test_installer_requires_explicit_owned_mode(self) -> None:
         result = subprocess.run(
             [sys.executable, str(P / "install-read-upgrade.py")],

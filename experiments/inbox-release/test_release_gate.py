@@ -30,6 +30,11 @@ class ReleaseGateStatusTests(unittest.TestCase):
         live = {"status": "BLOCKED", "detail": "release database probe not requested"}
         self.assertIs(gate.authoritative_rollback_gate(live), live)
 
+    def test_acceptance_gate_requires_candidate_binding(self) -> None:
+        result = gate.check_acceptance_matrix("0" * 40)
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("candidate SHA", result["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()
