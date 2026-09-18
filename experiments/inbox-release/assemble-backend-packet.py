@@ -26,15 +26,18 @@ from transaction_envelope import normalize
 
 RELEASE_DATABASE = "sandra_inbox_release_20260917"
 RELEASE_MARKER = "sandra-inbox-release-owned-synthetic"
-SOURCE_COMMIT = "0c23afca"  # coordinator integration exact snapshot
+SOURCE_COMMIT = "28765326"  # coordinator integration exact snapshot
 
 SQL_SOURCES = [
     ("operation_foundation", "experiments/inbox-operation-acceptance/setup.sql"),
+    ("saved_actions_setup", "experiments/inbox-saved-actions/setup.sql"),
+    ("saved_actions_public_api", "experiments/inbox-saved-actions/public-api.sql"),
     ("operation_domain_setup", "experiments/inbox-operation-domain/setup.sql"),
     ("operation_domain_scope", "experiments/inbox-operation-domain/restrictive-scope.sql"),
     ("operation_domain_effect", "experiments/inbox-operation-domain/restrictive-effect.sql"),
     ("operation_domain_apply", "experiments/inbox-operation-domain/restrictive-apply.sql"),
     ("operation_setup", "experiments/inbox-operation-preparation/setup.sql"),
+    ("saved_actions_prepare_reference", "experiments/inbox-saved-actions/action-prepare-saved-reference.sql"),
     ("operation_worker", "experiments/inbox-operation-preparation/worker.sql"),
     ("operation_accept", "experiments/inbox-operation-preparation/accept.sql"),
     ("operation_public_api", "experiments/inbox-operation-preparation/public-api.sql"),
@@ -159,8 +162,40 @@ BEGIN
  a:=inbox_action_api.authorize(NULL);
  RETURN inbox_reply_send.accept((a->>'org_id')::uuid,(a->>'user_id')::uuid,idempotency_key,preparation_id);
 END $$;
+CREATE OR REPLACE FUNCTION public.inbox_saved_action_create(name text,definition jsonb) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_control.admit_command('action_saved_write');
+ RETURN inbox_saved_actions.create_for_session(name,definition);
+END $$;
+CREATE OR REPLACE FUNCTION public.inbox_saved_action_update(id uuid,name text,definition jsonb) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_control.admit_command('action_saved_write');
+ RETURN inbox_saved_actions.update_for_session(id,name,definition);
+END $$;
+CREATE OR REPLACE FUNCTION public.inbox_saved_action_deactivate(id uuid) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_control.admit_command('action_saved_write');
+ RETURN inbox_saved_actions.deactivate_for_session(id);
+END $$;
+CREATE OR REPLACE FUNCTION public.inbox_saved_action_list() RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_control.admit_command('action_saved_read');
+ RETURN inbox_saved_actions.list_for_session();
+END $$;
+CREATE OR REPLACE FUNCTION public.inbox_saved_action_get(id uuid,version integer) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_control.admit_command('action_saved_read');
+ RETURN inbox_saved_actions.get_for_session(id,version);
+END $$;
 REVOKE ALL ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_accept_action(uuid,uuid),public.inbox_capture_reply_recipients(uuid[]),public.inbox_freeze_reply_review(text,uuid),public.inbox_reply_source_context(uuid),public.inbox_accept_reply(uuid,uuid) FROM PUBLIC,anon,service_role;
 GRANT EXECUTE ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_accept_action(uuid,uuid),public.inbox_capture_reply_recipients(uuid[]),public.inbox_freeze_reply_review(text,uuid),public.inbox_reply_source_context(uuid),public.inbox_accept_reply(uuid,uuid) TO authenticated;
+REVOKE ALL ON FUNCTION public.inbox_saved_action_create(text,jsonb),public.inbox_saved_action_update(uuid,text,jsonb),public.inbox_saved_action_deactivate(uuid),public.inbox_saved_action_list(),public.inbox_saved_action_get(uuid,integer) FROM PUBLIC,anon,service_role;
+GRANT EXECUTE ON FUNCTION public.inbox_saved_action_create(text,jsonb),public.inbox_saved_action_update(uuid,text,jsonb),public.inbox_saved_action_deactivate(uuid),public.inbox_saved_action_list(),public.inbox_saved_action_get(uuid,integer) TO authenticated;
 """
 
 
@@ -211,7 +246,7 @@ def main() -> int:
         "compiler_transforms_required": [
             "replace historical inbox_t2_fixture guards with the marked release database identity",
             "replace inbox_t2_ namespaces with inbox_",
-            "gate authenticated action prepare/accept and reply prepare/accept wrappers with inbox_control.admit_command",
+            "gate authenticated action prepare/accept, saved CRUD and reply prepare/accept wrappers with inbox_control.admit_command",
             "retain inbox_reply_review.require_admission as an additional reply gate",
             "remove the existing reply-review admission check from private reply recovery only so authenticated receipt recovery survives rollback",
             "leave action/reply status and recovery wrappers session-authorized and available with serving disabled",

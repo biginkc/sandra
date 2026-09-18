@@ -2,11 +2,11 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration",
-  "source_commit": "0c23afcac1216e658f642d41d89ff2d7ce1e9477",
+  "source_commit": "28765326a7dd1ce9080c4c6beca1bf564417908d",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
-    "sha256": "bfe0b486ae1f605e969e16de758912106249ee74fe1b6fc688f61568d3e6e683"
+    "sha256": "80a860decc888c1df5d19eb12076625623d0bddba79903a36713ce9a0cf2d455"
   },
   "sql_sources": [
     {
@@ -16,6 +16,22 @@
       "sha256": "04d34d74ef76dd11585ee45728e2a0a1f6e635cb2fd0376a4ef9b014ea12dae3",
       "bytes": 14508,
       "transformed_sha256": "53e8c8256092c68a743ecb21a10c5ae1d22b0b1ceab4cf46ca60bea9d1effd99"
+    },
+    {
+      "name": "saved_actions_setup",
+      "kind": "sql",
+      "path": "experiments/inbox-saved-actions/setup.sql",
+      "sha256": "3acbfe66b1e7fa924217f9361d8ef1189d5485f0393d3e2a7c2a879d6dc4986d",
+      "bytes": 13153,
+      "transformed_sha256": "a6256e2f58457f494aac73d138cf1f923a2f4c89f2ff1db5494f6c4e67f619ea"
+    },
+    {
+      "name": "saved_actions_public_api",
+      "kind": "sql",
+      "path": "experiments/inbox-saved-actions/public-api.sql",
+      "sha256": "f0229a3e1062c06ba13a7209532579b6eba67d7961b8362b2fc6469999ab369c",
+      "bytes": 3583,
+      "transformed_sha256": "52ced83124bed432436d1a3d8ccf02134b16e447e08f43fafbb3fa531ef2db47"
     },
     {
       "name": "operation_domain_setup",
@@ -53,9 +69,17 @@
       "name": "operation_setup",
       "kind": "sql",
       "path": "experiments/inbox-operation-preparation/setup.sql",
-      "sha256": "46c24f338f7a0c38612ea535e71327117dbfae25814ba51448367aa30be8ca74",
-      "bytes": 18755,
-      "transformed_sha256": "e289f17d37856d20b6b5b9b430d181ca7c5710c3311f6d563d7e588b66df9b80"
+      "sha256": "c4e131938309b88f6d1b6a7ed8216846b551a2287fd0caaad8676c37a0b62917",
+      "bytes": 19508,
+      "transformed_sha256": "802e8fbeeab342379f6df9bce25920233b7b1544b5ae570ad60e135dd4cbe2ea"
+    },
+    {
+      "name": "saved_actions_prepare_reference",
+      "kind": "sql",
+      "path": "experiments/inbox-saved-actions/action-prepare-saved-reference.sql",
+      "sha256": "8ad5f6977e166ecb2ed91c2f8609728349faaf20c11935d3ef7d1c5fcd72fdf7",
+      "bytes": 19048,
+      "transformed_sha256": "da6d3ccead5cc5c7767f15a0914f7430dc4783b148d52e84b75450410e6da7a8"
     },
     {
       "name": "operation_worker",
@@ -296,11 +320,14 @@
   ],
   "install_order": [
     "operation_foundation",
+    "saved_actions_setup",
+    "saved_actions_public_api",
     "operation_domain_setup",
     "operation_domain_scope",
     "operation_domain_effect",
     "operation_domain_apply",
     "operation_setup",
+    "saved_actions_prepare_reference",
     "operation_worker",
     "operation_accept",
     "operation_public_api",
@@ -323,7 +350,7 @@
   "compiler_transforms_required": [
     "replace historical inbox_t2_fixture guards with the marked release database identity",
     "replace inbox_t2_ namespaces with inbox_",
-    "gate authenticated action prepare/accept and reply prepare/accept wrappers with inbox_control.admit_command",
+    "gate authenticated action prepare/accept, saved CRUD and reply prepare/accept wrappers with inbox_control.admit_command",
     "retain inbox_reply_review.require_admission as an additional reply gate",
     "remove the existing reply-review admission check from private reply recovery only so authenticated receipt recovery survives rollback",
     "leave action/reply status and recovery wrappers session-authorized and available with serving disabled"

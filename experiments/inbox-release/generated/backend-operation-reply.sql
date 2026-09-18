@@ -187,6 +187,254 @@ END $$;
 
 
 
+-- Pinned saved_actions_setup: experiments/inbox-saved-actions/setup.sql
+-- source_sha256=3acbfe66b1e7fa924217f9361d8ef1189d5485f0393d3e2a7c2a879d6dc4986d
+-- Personal saved-action definitions (DoD#3 backend). Immutable per-version
+-- rows feeding the EXISTING `saved` seam in action-definition.ts
+-- (parseInboxActionIntent's 3rd argument). No picker/builder UI, no
+-- promotion, no unknown dismiss/restore here — those are separate pieces.
+-- Mirrors inbox_action_api/inbox_operations idioms: private schema,
+-- REVOKE ALL, org_id+requester_id in keys, immutable_row() trigger,
+-- inbox_action_api.authorize(o,u) for membership, SECURITY DEFINER public
+-- wrappers added in public-api.sql.
+
+CREATE SCHEMA inbox_saved_actions;
+REVOKE ALL ON SCHEMA inbox_saved_actions FROM PUBLIC,anon,authenticated,service_role;
+
+-- Personal visibility only: requester_id scopes every read/write. Shared/team
+-- visibility is a separate product decision (dev-plan P3), not built here.
+-- Each edit/deactivate INSERTs a new version row; existing version rows are
+-- never UPDATEd — immutable_row() (already installed by inbox_operations)
+-- blocks that at the trigger level. A "delete" (deactivate) inserts a
+-- tombstone version with is_active=false; it never touches an already
+-- accepted operation, which only ever holds a frozen detached copy of the
+-- definition (action-definition.ts's `definition(saved.definition)`).
+CREATE TABLE inbox_saved_actions.definitions (
+ org_id uuid NOT NULL,
+ id uuid NOT NULL,
+ requester_id uuid NOT NULL,
+ version integer NOT NULL CHECK (version>0),
+ name text NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 120),
+ schema_version integer NOT NULL DEFAULT 1 CHECK (schema_version=1),
+ definition jsonb NOT NULL CHECK (jsonb_typeof(definition)='object' AND octet_length(definition::text)<=131072),
+ is_active boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY (org_id,id,version),
+ UNIQUE (org_id,requester_id,id,version)
+);
+ALTER TABLE inbox_saved_actions.definitions ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE inbox_saved_actions.definitions FROM PUBLIC,anon,authenticated,service_role;
+CREATE TRIGGER immutable_saved_action_version BEFORE UPDATE OR DELETE ON inbox_saved_actions.definitions
+ FOR EACH ROW EXECUTE FUNCTION inbox_operations.immutable_row();
+
+-- Reference validation, reused at SAVE (create/update) and again at EXECUTE
+-- (every get() call, which is what the TS glue calls immediately before
+-- feeding the snapshot into parseInboxActionIntent). Mirrors the allowed
+-- step-type/ordering/gating rules inbox_action_api.prepare() enforces for
+-- the metadata lane (experiments/inbox-operation-preparation/setup.sql):
+-- outcome, assignment, promotion, and unknown-sender commands are wired to
+-- the durable metadata executor. A final 'review_reply' is a hand-off to the
+-- separate reply prepare/accept lane; it may follow a metadata prefix but is
+-- never accepted or sent as part of that metadata operation. dnc stays
+-- permanently gated off (matches inbox_action_api.prepare).
+CREATE FUNCTION inbox_saved_actions.validate_definition(o uuid,definition jsonb) RETURNS void
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE step jsonb;types text[];assignee uuid;
+BEGIN
+ IF jsonb_typeof(definition) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(definition))<>2
+  OR definition->'version' IS DISTINCT FROM '1'::jsonb OR jsonb_typeof(definition->'steps') IS DISTINCT FROM 'array'
+  OR jsonb_array_length(definition->'steps') NOT BETWEEN 1 AND 5 THEN
+  RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';
+ END IF;
+ SELECT array_agg(value->>'type') INTO types FROM jsonb_array_elements(definition->'steps');
+ IF EXISTS(SELECT 1 FROM unnest(types) t WHERE t NOT IN ('outcome','assign','promote','dismiss_unknown','restore_unknown','review_reply')) THEN
+  RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_TYPE_DISABLED';
+ END IF;
+ -- This mirrors action-definition.ts: metadata may contain one of each
+ -- supported command, with outcome before assignment, and review_reply is an
+ -- optional final hand-off. It is deliberately not limited to the old
+ -- outcome/assign pair; saved definitions must use the same grammar as the
+ -- inline prepare envelope.
+ IF (SELECT count(*) FROM unnest(types) t WHERE t='outcome')>1
+  OR (SELECT count(*) FROM unnest(types) t WHERE t='assign')>1
+  OR (SELECT count(*) FROM unnest(types) t WHERE t='promote')>1
+  OR (SELECT count(*) FROM unnest(types) t WHERE t IN ('dismiss_unknown','restore_unknown'))>1
+  OR (SELECT count(*) FROM unnest(types) t WHERE t='review_reply')>1 THEN
+  RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
+ END IF;
+ IF 'review_reply'=ANY(types) AND types[array_length(types,1)]<>'review_reply' THEN
+  RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
+ END IF;
+ IF array_position(types,'assign') IS NOT NULL
+  AND (array_position(types,'outcome') IS NULL OR array_position(types,'outcome')>array_position(types,'assign')) THEN
+  RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
+ END IF;
+ IF array_position(types,'dismiss_unknown') IS NOT NULL AND array_position(types,'restore_unknown') IS NOT NULL THEN
+  RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';
+ END IF;
+ FOR step IN SELECT value FROM jsonb_array_elements(definition->'steps') LOOP
+  IF step->>'type'='outcome' THEN
+   IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR NOT(step ? 'value') THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';END IF;
+   IF step->>'value'='dnc' THEN RAISE EXCEPTION 'permanent_dnc_not_enabled';END IF;
+   IF step->>'value' IS NULL OR step->>'value' NOT IN ('wrong_number','bad_number','not_interested','needs_sequence','nurture','opted_out') THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';END IF;
+  ELSIF step->>'type'='assign' THEN
+   IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR NOT(step ? 'userId') THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';END IF;
+   IF jsonb_typeof(step->'userId')='string' THEN
+    assignee:=(step->>'userId')::uuid;
+    IF NOT EXISTS(SELECT 1 FROM public.memberships WHERE org_id=o AND user_id=assignee AND access_status='active' AND deletion_prepared_at IS NULL AND (access_expires_at IS NULL OR access_expires_at>clock_timestamp())) THEN
+     RAISE EXCEPTION 'INBOX_SAVED_ACTION_ASSIGNEE_UNAVAILABLE';
+    END IF;
+   ELSIF step->'userId' IS DISTINCT FROM 'null'::jsonb THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';
+   END IF;
+  ELSIF step->>'type' IN ('promote','dismiss_unknown','restore_unknown') THEN
+   IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>1 OR NOT(step ? 'type') THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';END IF;
+  ELSIF step->>'type'='review_reply' THEN
+   IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR NOT(step ? 'text')
+    OR jsonb_typeof(step->'text') IS DISTINCT FROM 'string' OR length(btrim(step->>'text')) NOT BETWEEN 1 AND 1600 THEN
+    RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';
+   END IF;
+  ELSE RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_TYPE_DISABLED';
+  END IF;
+ END LOOP;
+END $$;
+
+CREATE FUNCTION inbox_saved_actions.create(o uuid,u uuid,name text,definition jsonb) RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_saved_actions.definitions;
+BEGIN
+ PERFORM inbox_action_api.authorize(o,u);
+ IF name IS NULL OR length(btrim(name)) NOT BETWEEN 1 AND 120 THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_NAME';END IF;
+ PERFORM inbox_saved_actions.validate_definition(o,definition);
+ INSERT INTO inbox_saved_actions.definitions(org_id,id,requester_id,version,name,schema_version,definition,is_active)
+ VALUES(o,gen_random_uuid(),u,1,btrim(name),1,definition,true) RETURNING * INTO row;
+ RETURN jsonb_build_object('id',row.id,'version',row.version,'name',row.name,'definition',row.definition,'org_id',row.org_id,'requester_id',row.requester_id,'is_active',row.is_active,'created_at',row.created_at);
+END $$;
+
+CREATE FUNCTION inbox_saved_actions.update(o uuid,u uuid,target_id uuid,name text,definition jsonb) RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE current inbox_saved_actions.definitions;row inbox_saved_actions.definitions;
+BEGIN
+ PERFORM inbox_action_api.authorize(o,u);
+ IF target_id IS NULL THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_NOT_FOUND';END IF;
+ -- Serialize version assignment for this (org,requester,id): the immutable
+ -- table has no row to FOR UPDATE-lock across a concurrent INSERT of the
+ -- next version, so use the same advisory-lock idiom as
+ -- inbox_action_api.lock_request_key.
+ PERFORM pg_advisory_xact_lock(hashtextextended('sandra:inbox:saved_action:v1:'||o::text||':'||u::text||':'||target_id::text,0));
+ SELECT * INTO current FROM inbox_saved_actions.definitions WHERE org_id=o AND requester_id=u AND id=target_id ORDER BY version DESC LIMIT 1;
+ IF NOT FOUND OR NOT current.is_active THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_NOT_FOUND';END IF;
+ IF name IS NULL OR length(btrim(name)) NOT BETWEEN 1 AND 120 THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_NAME';END IF;
+ PERFORM inbox_saved_actions.validate_definition(o,definition);
+ INSERT INTO inbox_saved_actions.definitions(org_id,id,requester_id,version,name,schema_version,definition,is_active)
+ VALUES(o,target_id,u,current.version+1,btrim(name),1,definition,true) RETURNING * INTO row;
+ RETURN jsonb_build_object('id',row.id,'version',row.version,'name',row.name,'definition',row.definition,'org_id',row.org_id,'requester_id',row.requester_id,'is_active',row.is_active,'created_at',row.created_at);
+END $$;
+
+CREATE FUNCTION inbox_saved_actions.deactivate(o uuid,u uuid,target_id uuid) RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE current inbox_saved_actions.definitions;row inbox_saved_actions.definitions;
+BEGIN
+ PERFORM inbox_action_api.authorize(o,u);
+ IF target_id IS NULL THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_NOT_FOUND';END IF;
+ PERFORM pg_advisory_xact_lock(hashtextextended('sandra:inbox:saved_action:v1:'||o::text||':'||u::text||':'||target_id::text,0));
+ SELECT * INTO current FROM inbox_saved_actions.definitions WHERE org_id=o AND requester_id=u AND id=target_id ORDER BY version DESC LIMIT 1;
+ IF NOT FOUND OR NOT current.is_active THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_NOT_FOUND';END IF;
+ -- Tombstone version only. Never mutates current/prior rows, never touches
+ -- an already accepted operation (which only holds a frozen, detached copy).
+ INSERT INTO inbox_saved_actions.definitions(org_id,id,requester_id,version,name,schema_version,definition,is_active)
+ VALUES(o,target_id,u,current.version+1,current.name,current.schema_version,current.definition,false) RETURNING * INTO row;
+ RETURN jsonb_build_object('id',row.id,'version',row.version,'is_active',row.is_active);
+END $$;
+
+CREATE FUNCTION inbox_saved_actions.list(o uuid,u uuid) RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE result jsonb;
+BEGIN
+ PERFORM inbox_action_api.authorize(o,u);
+ SELECT coalesce(jsonb_agg(jsonb_build_object('id',d.id,'version',d.version,'name',d.name,'definition',d.definition,'created_at',d.created_at) ORDER BY d.name,d.id),'[]') INTO result
+ FROM (SELECT DISTINCT ON (id) * FROM inbox_saved_actions.definitions WHERE org_id=o AND requester_id=u ORDER BY id,version DESC) d
+ WHERE d.is_active;
+ RETURN jsonb_build_object('items',result);
+END $$;
+
+-- Requester-scoped read of the EXACT stored immutable version. Re-validates
+-- references/gated-step-types at EXECUTE time (P3: "Validate saved-action
+-- references... when saved AND again at execution"), and refuses a version
+-- that is no longer current (a stale definition edited or deactivated
+-- since), so a disabled gated step type or a since-ineligible reference can
+-- never be executed through it.
+CREATE FUNCTION inbox_saved_actions.get(o uuid,u uuid,target_id uuid,target_version integer) RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE row inbox_saved_actions.definitions;
+BEGIN
+ PERFORM inbox_action_api.authorize(o,u);
+ IF target_id IS NULL OR target_version IS NULL OR target_version<1 THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_NOT_FOUND';END IF;
+ SELECT * INTO row FROM inbox_saved_actions.definitions WHERE org_id=o AND requester_id=u AND id=target_id AND version=target_version;
+ IF NOT FOUND THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_NOT_FOUND';END IF;
+ IF EXISTS(SELECT 1 FROM inbox_saved_actions.definitions WHERE org_id=o AND requester_id=u AND id=target_id AND version>target_version) THEN
+  RAISE EXCEPTION 'INBOX_SAVED_ACTION_STALE_VERSION';
+ END IF;
+ IF NOT row.is_active THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_NOT_FOUND';END IF;
+ PERFORM inbox_saved_actions.validate_definition(o,row.definition);
+ RETURN jsonb_build_object('id',row.id,'version',row.version,'name',row.name,'definition',row.definition,'org_id',row.org_id,'requester_id',row.requester_id,'is_active',row.is_active,'created_at',row.created_at);
+END $$;
+
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_saved_actions FROM PUBLIC,anon,authenticated,service_role;
+
+
+
+-- Pinned saved_actions_public_api: experiments/inbox-saved-actions/public-api.sql
+-- source_sha256=f0229a3e1062c06ba13a7209532579b6eba67d7961b8362b2fc6469999ab369c
+-- Session-scoped wrappers + public SECURITY DEFINER grants, mirroring
+-- experiments/inbox-operation-preparation/public-api.sql and the
+-- assignees()/authorize(NULL) idiom in review.sql.
+
+CREATE FUNCTION inbox_saved_actions.create_for_session(name text,definition jsonb) RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE a jsonb;
+BEGIN a:=inbox_action_api.authorize(NULL); RETURN inbox_saved_actions.create((a->>'org_id')::uuid,(a->>'user_id')::uuid,name,definition); END $$;
+
+CREATE FUNCTION inbox_saved_actions.update_for_session(target_id uuid,name text,definition jsonb) RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE a jsonb;
+BEGIN a:=inbox_action_api.authorize(NULL); RETURN inbox_saved_actions.update((a->>'org_id')::uuid,(a->>'user_id')::uuid,target_id,name,definition); END $$;
+
+CREATE FUNCTION inbox_saved_actions.deactivate_for_session(target_id uuid) RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE a jsonb;
+BEGIN a:=inbox_action_api.authorize(NULL); RETURN inbox_saved_actions.deactivate((a->>'org_id')::uuid,(a->>'user_id')::uuid,target_id); END $$;
+
+CREATE FUNCTION inbox_saved_actions.list_for_session() RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE a jsonb;
+BEGIN a:=inbox_action_api.authorize(NULL); RETURN inbox_saved_actions.list((a->>'org_id')::uuid,(a->>'user_id')::uuid); END $$;
+
+CREATE FUNCTION inbox_saved_actions.get_for_session(target_id uuid,target_version integer) RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE a jsonb;
+BEGIN a:=inbox_action_api.authorize(NULL); RETURN inbox_saved_actions.get((a->>'org_id')::uuid,(a->>'user_id')::uuid,target_id,target_version); END $$;
+
+CREATE FUNCTION public.inbox_saved_action_create(name text,definition jsonb) RETURNS jsonb
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_saved_actions.create_for_session(name,definition) $$;
+CREATE FUNCTION public.inbox_saved_action_update(id uuid,name text,definition jsonb) RETURNS jsonb
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_saved_actions.update_for_session(id,name,definition) $$;
+CREATE FUNCTION public.inbox_saved_action_deactivate(id uuid) RETURNS jsonb
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_saved_actions.deactivate_for_session(id) $$;
+CREATE FUNCTION public.inbox_saved_action_list() RETURNS jsonb
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_saved_actions.list_for_session() $$;
+CREATE FUNCTION public.inbox_saved_action_get(id uuid,version integer) RETURNS jsonb
+LANGUAGE sql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$ SELECT inbox_saved_actions.get_for_session(id,version) $$;
+
+REVOKE ALL ON FUNCTION public.inbox_saved_action_create(text,jsonb),public.inbox_saved_action_update(uuid,text,jsonb),
+ public.inbox_saved_action_deactivate(uuid),public.inbox_saved_action_list(),public.inbox_saved_action_get(uuid,integer)
+ FROM PUBLIC,anon,service_role;
+GRANT EXECUTE ON FUNCTION public.inbox_saved_action_create(text,jsonb),public.inbox_saved_action_update(uuid,text,jsonb),
+ public.inbox_saved_action_deactivate(uuid),public.inbox_saved_action_list(),public.inbox_saved_action_get(uuid,integer)
+ TO authenticated;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_saved_actions FROM PUBLIC,anon,authenticated,service_role;
+
+
+
 -- Pinned operation_domain_setup: experiments/inbox-operation-domain/setup.sql
 -- source_sha256=b7ca70de5cfe321ad3996b98de2f6097ba9b0545e7e2eb7bb0c955e9cc2a35ff
 -- Private canonical property-effect adapter. Acceptance/preparation remain separate.
@@ -725,7 +973,7 @@ END $$;
 
 
 -- Pinned operation_setup: experiments/inbox-operation-preparation/setup.sql
--- source_sha256=46c24f338f7a0c38612ea535e71327117dbfae25814ba51448367aa30be8ca74
+-- source_sha256=c4e131938309b88f6d1b6a7ed8216846b551a2287fd0caaad8676c37a0b62917
 -- Authoritative metadata preparation candidate. Private fixture installation only.
 
 CREATE SCHEMA inbox_action_api;
@@ -801,27 +1049,29 @@ BEGIN
  definition:=intent->'definition';
  IF jsonb_typeof(definition) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(definition))<>2 OR definition->'version' IS DISTINCT FROM '1'::jsonb OR jsonb_typeof(definition->'steps') IS DISTINCT FROM 'array' OR jsonb_array_length(definition->'steps') NOT BETWEEN 1 AND 5 THEN RAISE EXCEPTION 'Unsupported action definition';END IF;
  FOR step IN SELECT value FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY q(value,position) ORDER BY position LOOP
-  IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 THEN RAISE EXCEPTION 'Unsupported action step';END IF;
+  IF jsonb_typeof(step) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION 'Unsupported action step';END IF;
   IF step->>'type'='outcome' THEN
-   IF has_outcome OR has_assignment OR NOT(step ? 'value') THEN RAISE EXCEPTION 'Invalid action order';END IF;has_outcome:=true;
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR has_outcome OR has_assignment OR NOT(step ? 'value') THEN RAISE EXCEPTION 'Invalid action order';END IF;has_outcome:=true;
    IF step->>'value'='dnc' THEN RAISE EXCEPTION 'permanent_dnc_not_enabled';END IF;
    IF step->>'value' IS NULL OR step->>'value' NOT IN ('wrong_number','bad_number','not_interested','needs_sequence','nurture','opted_out') THEN RAISE EXCEPTION 'Unsupported outcome';END IF;
    has_sms:=step->>'value'='opted_out';
   ELSIF step->>'type'='assign' THEN
-   IF has_assignment OR NOT(step ? 'userId') THEN RAISE EXCEPTION 'Invalid assignment';END IF;has_assignment:=true;assignee:=(step->>'userId')::uuid;
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR has_assignment OR NOT(step ? 'userId') THEN RAISE EXCEPTION 'Invalid assignment';END IF;has_assignment:=true;assignee:=(step->>'userId')::uuid;
    IF assignee IS NOT NULL THEN
     PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=assignee FOR SHARE;
     IF NOT FOUND THEN RAISE EXCEPTION 'assignee_unavailable';END IF;
    END IF;
    IF assignee IS NOT NULL AND NOT EXISTS(SELECT 1 FROM public.memberships WHERE org_id=o AND user_id=assignee AND access_status='active' AND deletion_prepared_at IS NULL AND (access_expires_at IS NULL OR access_expires_at>clock_timestamp())) THEN RAISE EXCEPTION 'assignee_unavailable';END IF;
   ELSIF step->>'type'='promote' THEN
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>1 THEN RAISE EXCEPTION 'Unsupported action step';END IF;
    IF has_promotion OR has_assignment THEN RAISE EXCEPTION 'Invalid action order';END IF;has_promotion:=true;
   ELSIF step->>'type' IN ('dismiss_unknown','restore_unknown') THEN
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>1 THEN RAISE EXCEPTION 'Unsupported action step';END IF;
    IF has_assignment OR has_outcome AND has_assignment THEN RAISE EXCEPTION 'Invalid action order';END IF;
    IF unknown_action IS NOT NULL AND unknown_action IS DISTINCT FROM step->>'type' THEN RAISE EXCEPTION 'Invalid unknown action order';END IF;
    unknown_action:=step->>'type';
   ELSIF step->>'type'='review_reply' THEN
-   IF step->>'text' IS NULL OR btrim(step->>'text')='' OR length(step->>'text')>1600 THEN RAISE EXCEPTION 'Unsupported review reply step';END IF;
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR step->>'text' IS NULL OR btrim(step->>'text')='' OR length(btrim(step->>'text'))>1600 THEN RAISE EXCEPTION 'Unsupported review reply step';END IF;
    follow_up_template:=btrim(step->>'text');
   ELSE RAISE EXCEPTION 'Unsupported action step';END IF;
  END LOOP;
@@ -897,8 +1147,11 @@ BEGIN
  END LOOP;
  FOR row IN SELECT key,value FROM jsonb_each(plans) ORDER BY key LOOP
   metadata_ordinal:=0;
- FOR step IN SELECT value||jsonb_build_object('ordinal',ordinality-1) FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY LOOP
-   IF step->>'type'='review_reply' THEN CONTINUE; END IF;
+  FOR step IN SELECT value||jsonb_build_object('ordinal',ordinality-1) FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY LOOP
+   -- Unknown-sender commands have no property effect or property payload.
+   -- Mixed selections still prepare their frozen sender-group effect in the
+   -- separate loop below; never route one through apply_property_step.
+   IF step->>'type' NOT IN ('outcome','assign','promote') THEN CONTINUE; END IF;
    step:=step||jsonb_build_object('ordinal',metadata_ordinal);
    SELECT row.value||jsonb_build_object('targets',jsonb_agg(jsonb_build_object('conversation_id',i->>'target_id','revision',v.revision::text,'valid_until',i->'resolution'->'valid_until') ORDER BY i->>'target_id')) INTO plan
     FROM jsonb_array_elements(items) i JOIN inbox_operation_domain.target_versions v ON v.org_id=o AND v.conversation_id=(i->>'target_id')::uuid WHERE i->>'exclusion_code' IS NULL AND i->'resolution'->>'property_id'=row.key;
@@ -909,7 +1162,10 @@ BEGIN
  IF unknown_action IS NOT NULL THEN
   FOR row IN SELECT i FROM jsonb_array_elements(items) i WHERE i->>'kind'='unknown_sender_group' AND i->>'exclusion_code' IS NULL ORDER BY i->>'target_id' LOOP
    metadata_ordinal:=0;
-   effects:=effects||jsonb_build_array(jsonb_build_object('effect_key','unknown:'||(row.i->>'target_id'),'ordinal',metadata_ordinal,'action',unknown_action,'payload',row.i->'resolution'->'unknown_action','dependencies',jsonb_build_object('unknown_action',row.i->'resolution'->'unknown_action'),'item_ids',jsonb_build_array(row.i->>'id')));
+   -- The item resolution is already the frozen unknown-action snapshot.
+   -- Pass that object directly to apply_unknown_step; an extra
+   -- resolution.unknown_action lookup would produce a NULL payload.
+   effects:=effects||jsonb_build_array(jsonb_build_object('effect_key','unknown:'||(row.i->>'target_id'),'ordinal',metadata_ordinal,'action',unknown_action,'payload',row.i->'resolution','dependencies',jsonb_build_object('unknown_action',row.i->'resolution'),'item_ids',jsonb_build_array(row.i->>'id')));
    metadata_effect_count:=metadata_effect_count+1;metadata_ordinal:=metadata_ordinal+1;
   END LOOP;
  END IF;
@@ -921,6 +1177,209 @@ BEGIN
  RETURN jsonb_build_object('preparation_id',prep_id,'idempotency_key',k,'input_hash',hash,'expires_at',expires,'definition',definition,'items',items,'effect_count',jsonb_array_length(effects),'metadata_effect_count',metadata_effect_count,'affected_property_count',(SELECT count(*) FROM jsonb_object_keys(plans)));
 END $$;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_action_api FROM PUBLIC,anon,authenticated,service_role;
+
+
+
+-- Pinned saved_actions_prepare_reference: experiments/inbox-saved-actions/action-prepare-saved-reference.sql
+-- source_sha256=8ad5f6977e166ecb2ed91c2f8609728349faaf20c11935d3ef7d1c5fcd72fdf7
+-- Astra round-1 blocker #1 fix: the already-deployed inbox_action_api.prepare
+-- (experiments/inbox-operation-preparation/setup.sql) reserved the
+-- `savedAction` envelope field but hard-required it to be JSON null
+-- unconditionally ("intent->'savedAction' IS DISTINCT FROM 'null'::jsonb"),
+-- written before any saved-action backend existed. parseInboxActionIntent's
+-- `saved` branch (action-definition.ts, unmodified) ALWAYS emits a non-null
+-- `{id,version}` savedAction once a snapshot is resolved — so a saved action
+-- could never reach prepare()/accept() end-to-end: the RPC unconditionally
+-- rejected it as "Invalid action envelope". This widens the shape guard to
+-- accept a well-formed `{id,version}` reference (uuid id, positive integer
+-- version, exactly those 2 keys), then binds that reference again inside the
+-- authoritative SQL transaction. The requester/org-scoped saved-action
+-- lookup rejects missing, foreign, stale, and deactivated versions, and the
+-- submitted definition must equal the stored immutable definition byte-for-
+-- byte as JSONB. The TypeScript glue still resolves the snapshot for normal
+-- requests, but the public RPC is independently callable by an authenticated
+-- role, so SQL must not trust a shape-valid reference or client definition.
+-- All existing definition-shape, target, membership, assignee, and policy
+-- checks remain in place after this server-side snapshot binding.
+
+
+CREATE OR REPLACE FUNCTION inbox_action_api.invalid_saved_action_reference(value jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE SET search_path='' AS $$
+ SELECT value IS DISTINCT FROM 'null'::jsonb AND (
+  jsonb_typeof(value) IS DISTINCT FROM 'object'
+  OR (SELECT count(*) FROM jsonb_object_keys(value))<>2
+  OR NOT(value ?& ARRAY['id','version'])
+  OR jsonb_typeof(value->'id') IS DISTINCT FROM 'string'
+  OR (value->>'id') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  OR jsonb_typeof(value->'version') IS DISTINCT FROM 'number'
+  OR (value->>'version')::numeric<=0
+  OR (value->>'version')::numeric<>trunc((value->>'version')::numeric)
+ )
+$$;
+
+CREATE OR REPLACE FUNCTION inbox_action_api.prepare(canonical_input text,k uuid) RETURNS jsonb
+LANGUAGE plpgsql SET search_path='' AS $$
+DECLARE intent jsonb; a jsonb;o uuid;u uuid;definition jsonb;saved_action jsonb;stored_saved_action jsonb;step jsonb;target jsonb;resolved jsonb;
+ p public.properties;assignee uuid;item jsonb;items jsonb:='[]';effects jsonb:='[]';plans jsonb:='{}';plan jsonb;requirements jsonb;sms_scope jsonb;
+ property_ids uuid[];enrollment_ids uuid[];message_ids uuid[];unknown_group uuid;unknown_raw text;unknown_revision bigint;unknown_action text;row record;prep_id uuid:=gen_random_uuid();hash text;expires timestamptz:=clock_timestamp()+interval '5 minutes';exclusion text;has_sms boolean:=false;has_outcome boolean:=false;has_assignment boolean:=false;has_promotion boolean:=false;metadata_effect_count integer:=0;metadata_ordinal integer:=0;follow_up_template text;
+BEGIN
+ IF k IS NULL OR canonical_input IS NULL OR octet_length(canonical_input)>131072 THEN RAISE EXCEPTION 'Invalid action input';END IF;
+ PERFORM inbox_action_api.assert_json_shape(canonical_input::json);
+ intent:=canonical_input::jsonb;
+ IF jsonb_typeof(intent) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(intent))<>6 OR NOT(intent ?& ARRAY['purpose','organizationId','requesterId','targets','definition','savedAction']) OR intent->>'purpose' IS DISTINCT FROM 'prepare_action' OR inbox_action_api.invalid_saved_action_reference(intent->'savedAction') OR (SELECT count(*) FROM json_each(canonical_input::json))<>6 THEN RAISE EXCEPTION 'Invalid action envelope';END IF;
+ o:=(intent->>'organizationId')::uuid;u:=(intent->>'requesterId')::uuid;
+ IF o IS NULL OR u IS NULL THEN RAISE EXCEPTION 'Invalid action actor';END IF;
+ a:=inbox_action_api.authorize(o,u);
+ definition:=intent->'definition';
+ IF jsonb_typeof(definition) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(definition))<>2 OR definition->'version' IS DISTINCT FROM '1'::jsonb OR jsonb_typeof(definition->'steps') IS DISTINCT FROM 'array' OR jsonb_array_length(definition->'steps') NOT BETWEEN 1 AND 5 THEN RAISE EXCEPTION 'Unsupported action definition';END IF;
+ -- The savedAction reference is an immutable snapshot binding, not a type
+ -- marker. Resolve the exact requester/org-scoped row again inside the
+ -- authoritative prepare transaction and require the submitted definition to
+ -- be that row's stored definition. The TypeScript transport performs the
+ -- same lookup for normal requests, but this public RPC is independently
+ -- callable by an authenticated role; without this check a caller could
+ -- submit any valid definition alongside an existing, stale, foreign, or
+ -- fabricated-looking reference and the shape-only guard would accept it.
+ -- get() also revalidates the saved definition and rejects stale,
+ -- deactivated, missing, or out-of-scope versions before any target work.
+ saved_action:=intent->'savedAction';
+ IF saved_action IS DISTINCT FROM 'null'::jsonb THEN
+  stored_saved_action:=inbox_saved_actions.get(o,u,(saved_action->>'id')::uuid,(saved_action->>'version')::integer);
+  IF stored_saved_action->>'id' IS DISTINCT FROM saved_action->>'id'
+   OR stored_saved_action->>'version' IS DISTINCT FROM saved_action->>'version'
+   OR stored_saved_action->>'org_id' IS DISTINCT FROM o::text
+   OR stored_saved_action->>'requester_id' IS DISTINCT FROM u::text
+   OR stored_saved_action->'definition' IS DISTINCT FROM definition THEN
+   RAISE EXCEPTION 'INBOX_SAVED_ACTION_DEFINITION_MISMATCH';
+  END IF;
+ END IF;
+ FOR step IN SELECT value FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY q(value,position) ORDER BY position LOOP
+  IF jsonb_typeof(step) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION 'Unsupported action step';END IF;
+  IF step->>'type'='outcome' THEN
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR has_outcome OR has_assignment OR NOT(step ? 'value') THEN RAISE EXCEPTION 'Invalid action order';END IF;has_outcome:=true;
+   IF step->>'value'='dnc' THEN RAISE EXCEPTION 'permanent_dnc_not_enabled';END IF;
+   IF step->>'value' IS NULL OR step->>'value' NOT IN ('wrong_number','bad_number','not_interested','needs_sequence','nurture','opted_out') THEN RAISE EXCEPTION 'Unsupported outcome';END IF;
+   has_sms:=step->>'value'='opted_out';
+  ELSIF step->>'type'='assign' THEN
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR has_assignment OR NOT(step ? 'userId') THEN RAISE EXCEPTION 'Invalid assignment';END IF;has_assignment:=true;assignee:=(step->>'userId')::uuid;
+   IF assignee IS NOT NULL THEN
+    PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=assignee FOR SHARE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'assignee_unavailable';END IF;
+   END IF;
+   IF assignee IS NOT NULL AND NOT EXISTS(SELECT 1 FROM public.memberships WHERE org_id=o AND user_id=assignee AND access_status='active' AND deletion_prepared_at IS NULL AND (access_expires_at IS NULL OR access_expires_at>clock_timestamp())) THEN RAISE EXCEPTION 'assignee_unavailable';END IF;
+  ELSIF step->>'type'='promote' THEN
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>1 THEN RAISE EXCEPTION 'Unsupported action step';END IF;
+   IF has_promotion OR has_assignment THEN RAISE EXCEPTION 'Invalid action order';END IF;has_promotion:=true;
+  ELSIF step->>'type' IN ('dismiss_unknown','restore_unknown') THEN
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>1 THEN RAISE EXCEPTION 'Unsupported action step';END IF;
+   IF has_assignment THEN RAISE EXCEPTION 'Invalid action order';END IF;
+   IF unknown_action IS NOT NULL AND unknown_action IS DISTINCT FROM step->>'type' THEN RAISE EXCEPTION 'Invalid unknown action order';END IF;
+   unknown_action:=step->>'type';
+  ELSIF step->>'type'='review_reply' THEN
+   IF (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR step->>'text' IS NULL OR btrim(step->>'text')='' OR length(btrim(step->>'text'))>1600 THEN RAISE EXCEPTION 'Unsupported review reply step';END IF;
+   follow_up_template:=btrim(step->>'text');
+  ELSE RAISE EXCEPTION 'Unsupported action step';END IF;
+ END LOOP;
+ IF (SELECT count(*) FROM jsonb_array_elements(definition->'steps') s WHERE s->>'type'='review_reply')>1 OR ((SELECT count(*) FROM jsonb_array_elements(definition->'steps') s WHERE s->>'type'='review_reply')=1 AND (definition->'steps'->-1)->>'type'<>'review_reply') THEN RAISE EXCEPTION 'Invalid review reply order';END IF;
+ IF jsonb_typeof(intent->'targets') IS DISTINCT FROM 'array' OR jsonb_array_length(intent->'targets') NOT BETWEEN 1 AND 500 THEN RAISE EXCEPTION 'Invalid bounded targets';END IF;
+ IF (SELECT count(DISTINCT (value->>'kind')||':'||(value->>'id')) FROM jsonb_array_elements(intent->'targets'))<>jsonb_array_length(intent->'targets') THEN RAISE EXCEPTION 'Duplicate targets';END IF;
+ FOR target IN SELECT value FROM jsonb_array_elements(intent->'targets') ORDER BY value->>'kind',value->>'id' LOOP
+  IF jsonb_typeof(target) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(target))<>2 OR NOT(target ?& ARRAY['kind','id']) OR target->>'kind' IS NULL OR target->>'kind' NOT IN ('conversation','unknown_sender_group') OR target->>'id' IS NULL THEN RAISE EXCEPTION 'Invalid typed target';END IF;
+  PERFORM (target->>'id')::uuid;exclusion:=NULL;resolved:='{}';
+  IF target->>'kind'='unknown_sender_group' AND unknown_action IS NULL THEN exclusion:='unsupported_target';
+  ELSIF target->>'kind'='unknown_sender_group' THEN
+   unknown_group:=(target->>'id')::uuid;
+   SELECT g.raw_sender INTO unknown_raw FROM inbox_message_capture.sender_groups g WHERE g.org_id=o AND g.sender_group_id=unknown_group FOR SHARE;
+   IF unknown_raw IS NULL THEN exclusion:='conversation_unavailable';
+   ELSE
+    SELECT v.revision INTO unknown_revision FROM inbox_message_capture.versions v WHERE v.org_id=o AND v.namespace='unknown_action' AND v.target_id=unknown_group FOR UPDATE;
+    IF unknown_revision IS NULL THEN exclusion:='source_baseline_unavailable';
+    ELSE
+     SELECT array_agg(q.id ORDER BY q.id) INTO message_ids FROM (SELECT m.id FROM public.messages m WHERE m.org_id=o AND m.channel='sms' AND m.direction='inbound' AND m.contact_id IS NULL AND m.from_address=unknown_raw AND CASE unknown_action WHEN 'dismiss_unknown' THEN m.dismissed_at IS NULL WHEN 'restore_unknown' THEN m.dismissed_at IS NOT NULL ELSE false END ORDER BY m.id LIMIT 501) q;
+     IF cardinality(message_ids) IS NULL OR cardinality(message_ids)=0 THEN exclusion:='conversation_unavailable';
+     ELSIF cardinality(message_ids)>500 THEN exclusion:='scope_too_large';
+     ELSE resolved:=jsonb_build_object('unknown_action',jsonb_build_object('sender_group_id',unknown_group,'raw_sender',unknown_raw,'revision',unknown_revision::text,'message_ids',to_jsonb(message_ids))); END IF;
+    END IF;
+   END IF;
+  ELSE
+   -- Avoid persistent counters for arbitrary nonexistent client UUIDs. This
+   -- first read is only a negative fast path, never the prepared mapping.
+   resolved:=inbox_summary_contract.compute(o,(target->>'id')::uuid,clock_timestamp());
+   IF resolved->>'exists'='true' THEN
+    INSERT INTO inbox_operation_domain.target_versions VALUES(o,(target->>'id')::uuid,1) ON CONFLICT DO NOTHING;
+    PERFORM 1 FROM inbox_operation_domain.target_versions WHERE org_id=o AND conversation_id=(target->>'id')::uuid FOR UPDATE;
+    resolved:=inbox_summary_contract.compute(o,(target->>'id')::uuid,clock_timestamp());
+   END IF;
+   IF resolved->>'exists' IS DISTINCT FROM 'true' THEN exclusion:='conversation_unavailable';
+   ELSIF resolved->>'property_id' IS NULL THEN exclusion:='property_unavailable';
+   ELSE
+    SELECT jsonb_agg(jsonb_build_object('namespace',n,'key',jsonb_build_array((resolved->>'property_id')::uuid))) INTO requirements FROM unnest(ARRAY['property_identity','property_policy','property_outcome','property_assignment','property_reviews']) n;
+    PERFORM inbox_action_api.policy(o,requirements);
+    SELECT * INTO p FROM public.properties WHERE org_id=o AND id=(resolved->>'property_id')::uuid;
+    IF NOT FOUND OR p.deleted_at IS NOT NULL THEN exclusion:='property_unavailable';
+    ELSIF p.is_dnc_locked THEN exclusion:='property_locked';
+    ELSIF p.is_training THEN exclusion:='training_target';
+    ELSE
+     IF NOT(plans ? p.id::text) THEN
+      sms_scope:='null';
+      IF has_sms AND p.homeowner_contact_id IS NOT NULL THEN
+       INSERT INTO inbox_operation_domain.sms_scopes VALUES(o,p.homeowner_contact_id,1) ON CONFLICT DO NOTHING;
+       PERFORM 1 FROM inbox_operation_domain.sms_scopes WHERE org_id=o AND contact_id=p.homeowner_contact_id FOR UPDATE;
+       SELECT array_agg(id ORDER BY id) INTO property_ids FROM (SELECT id FROM public.properties WHERE org_id=o AND homeowner_contact_id=p.homeowner_contact_id ORDER BY id LIMIT 501) q;
+       SELECT array_agg(e.id ORDER BY e.id) INTO enrollment_ids FROM (SELECT id FROM public.sequence_enrollments WHERE org_id=o AND property_id=ANY(property_ids) AND status='active' ORDER BY id LIMIT 501) e;
+       IF cardinality(property_ids)>500 OR cardinality(enrollment_ids)>500 THEN exclusion:='scope_too_large';
+       ELSE sms_scope:=jsonb_build_object('contact_id',p.homeowner_contact_id,'revision',(SELECT revision::text FROM inbox_operation_domain.sms_scopes WHERE org_id=o AND contact_id=p.homeowner_contact_id),'property_ids',to_jsonb(property_ids),'enrollment_ids',to_jsonb(coalesce(enrollment_ids,ARRAY[]::uuid[])));END IF;
+      END IF;
+      IF exclusion IS NULL THEN
+       SELECT jsonb_agg(jsonb_build_object('namespace',n,'key',jsonb_build_array(p.id))) INTO requirements FROM unnest(ARRAY['property_identity','property_policy','property_outcome','property_assignment','property_reviews']) n;
+       requirements:=requirements||jsonb_build_array(jsonb_build_object('namespace','membership_access','key',jsonb_build_array(u)));
+       IF assignee IS NOT NULL AND assignee<>u THEN requirements:=requirements||jsonb_build_array(jsonb_build_object('namespace','membership_access','key',jsonb_build_array(assignee)));END IF;
+       IF has_sms AND p.homeowner_contact_id IS NOT NULL THEN
+        requirements:=requirements||jsonb_build_array(jsonb_build_object('namespace','contact_identity','key',jsonb_build_array(p.homeowner_contact_id)),jsonb_build_object('namespace','contact_policy','key',jsonb_build_array(p.homeowner_contact_id)),jsonb_build_object('namespace','contact_channel_consent','key',jsonb_build_array(p.homeowner_contact_id,'sms')));
+       END IF;
+       plan:=jsonb_build_object('policy',inbox_action_api.policy(o,requirements),'sms_scope',sms_scope);
+       plans:=plans||jsonb_build_object(p.id::text,plan);
+      END IF;
+     END IF;
+    END IF;
+   END IF;
+  END IF;
+  item:=jsonb_build_object('id',gen_random_uuid(),'kind',target->>'kind','target_id',(target->>'id')::uuid,'resolution',CASE WHEN target->>'kind'='unknown_sender_group' THEN coalesce(resolved->'unknown_action','{}'::jsonb) ELSE jsonb_build_object('property_id',CASE WHEN exclusion IS NULL THEN resolved->>'property_id' END,'valid_until',resolved->'next_window_expiry') END,'exclusion_code',exclusion);
+  items:=items||jsonb_build_array(item);
+ END LOOP;
+ FOR row IN SELECT key,value FROM jsonb_each(plans) ORDER BY key LOOP
+  metadata_ordinal:=0;
+  FOR step IN SELECT value||jsonb_build_object('ordinal',ordinality-1) FROM jsonb_array_elements(definition->'steps') WITH ORDINALITY LOOP
+   -- Unknown-sender commands have no property effect or property payload.
+   -- Mixed selections still prepare their frozen sender-group effect in the
+   -- separate loop below; never route one through apply_property_step.
+   IF step->>'type' NOT IN ('outcome','assign','promote') THEN CONTINUE; END IF;
+   step:=step||jsonb_build_object('ordinal',metadata_ordinal);
+   SELECT row.value||jsonb_build_object('targets',jsonb_agg(jsonb_build_object('conversation_id',i->>'target_id','revision',v.revision::text,'valid_until',i->'resolution'->'valid_until') ORDER BY i->>'target_id')) INTO plan
+    FROM jsonb_array_elements(items) i JOIN inbox_operation_domain.target_versions v ON v.org_id=o AND v.conversation_id=(i->>'target_id')::uuid WHERE i->>'exclusion_code' IS NULL AND i->'resolution'->>'property_id'=row.key;
+   effects:=effects||jsonb_build_array(jsonb_build_object('effect_key','property:'||row.key,'ordinal',(step->>'ordinal')::integer,'action',step->>'type','payload',CASE WHEN step->>'type'='outcome' THEN jsonb_build_object('property_id',row.key,'value',step->>'value') WHEN step->>'type'='promote' THEN jsonb_build_object('property_id',row.key) ELSE jsonb_build_object('property_id',row.key,'user_id',step->'userId') END,'dependencies',plan,'item_ids',(SELECT jsonb_agg(i->>'id' ORDER BY i->>'id') FROM jsonb_array_elements(items) i WHERE i->>'exclusion_code' IS NULL AND i->'resolution'->>'property_id'=row.key)));
+   metadata_effect_count:=metadata_effect_count+1;metadata_ordinal:=metadata_ordinal+1;
+  END LOOP;
+ END LOOP;
+ IF unknown_action IS NOT NULL THEN
+  FOR row IN SELECT i FROM jsonb_array_elements(items) i WHERE i->>'kind'='unknown_sender_group' AND i->>'exclusion_code' IS NULL ORDER BY i->>'target_id' LOOP
+   metadata_ordinal:=0;
+   -- The item resolution is already the frozen unknown-action snapshot.
+   -- Pass that object directly to apply_unknown_step; an extra
+   -- resolution.unknown_action lookup would produce a NULL payload.
+   effects:=effects||jsonb_build_array(jsonb_build_object('effect_key','unknown:'||(row.i->>'target_id'),'ordinal',metadata_ordinal,'action',unknown_action,'payload',row.i->'resolution','dependencies',jsonb_build_object('unknown_action',row.i->'resolution'),'item_ids',jsonb_build_array(row.i->>'id')));
+   metadata_effect_count:=metadata_effect_count+1;metadata_ordinal:=metadata_ordinal+1;
+  END LOOP;
+ END IF;
+ IF assignee IS NOT NULL AND NOT EXISTS(SELECT 1 FROM public.memberships WHERE org_id=o AND user_id=assignee AND access_status='active' AND deletion_prepared_at IS NULL AND (access_expires_at IS NULL OR access_expires_at>clock_timestamp())) THEN RAISE EXCEPTION 'assignee_unavailable';END IF;
+ PERFORM inbox_action_api.authorize(o,u);
+ hash:=encode(sha256(convert_to('sandra:inbox:action:v1','utf8')||decode('00','hex')||convert_to(canonical_input,'utf8')),'hex');
+ INSERT INTO inbox_operations.preparations VALUES(prep_id,o,u,canonical_input,hash,definition,jsonb_build_object('items',items,'effects',effects),expires);
+ INSERT INTO inbox_action_api.preparation_requests VALUES(prep_id,o,u,k,hash);
+ RETURN jsonb_build_object('preparation_id',prep_id,'idempotency_key',k,'input_hash',hash,'expires_at',expires,'definition',definition,'items',items,'effect_count',jsonb_array_length(effects),'metadata_effect_count',metadata_effect_count,'affected_property_count',(SELECT count(*) FROM jsonb_object_keys(plans)));
+END $$;
+
+REVOKE ALL ON FUNCTION inbox_action_api.invalid_saved_action_reference(jsonb),inbox_action_api.prepare(text,uuid) FROM PUBLIC,anon,authenticated,service_role;
 
 
 
@@ -3418,7 +3877,39 @@ BEGIN
  a:=inbox_action_api.authorize(NULL);
  RETURN inbox_reply_send.accept((a->>'org_id')::uuid,(a->>'user_id')::uuid,idempotency_key,preparation_id);
 END $$;
+CREATE OR REPLACE FUNCTION public.inbox_saved_action_create(name text,definition jsonb) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_control.admit_command('action_saved_write');
+ RETURN inbox_saved_actions.create_for_session(name,definition);
+END $$;
+CREATE OR REPLACE FUNCTION public.inbox_saved_action_update(id uuid,name text,definition jsonb) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_control.admit_command('action_saved_write');
+ RETURN inbox_saved_actions.update_for_session(id,name,definition);
+END $$;
+CREATE OR REPLACE FUNCTION public.inbox_saved_action_deactivate(id uuid) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_control.admit_command('action_saved_write');
+ RETURN inbox_saved_actions.deactivate_for_session(id);
+END $$;
+CREATE OR REPLACE FUNCTION public.inbox_saved_action_list() RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_control.admit_command('action_saved_read');
+ RETURN inbox_saved_actions.list_for_session();
+END $$;
+CREATE OR REPLACE FUNCTION public.inbox_saved_action_get(id uuid,version integer) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_control.admit_command('action_saved_read');
+ RETURN inbox_saved_actions.get_for_session(id,version);
+END $$;
 REVOKE ALL ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_accept_action(uuid,uuid),public.inbox_capture_reply_recipients(uuid[]),public.inbox_freeze_reply_review(text,uuid),public.inbox_reply_source_context(uuid),public.inbox_accept_reply(uuid,uuid) FROM PUBLIC,anon,service_role;
 GRANT EXECUTE ON FUNCTION public.inbox_prepare_action(text,uuid),public.inbox_accept_action(uuid,uuid),public.inbox_capture_reply_recipients(uuid[]),public.inbox_freeze_reply_review(text,uuid),public.inbox_reply_source_context(uuid),public.inbox_accept_reply(uuid,uuid) TO authenticated;
+REVOKE ALL ON FUNCTION public.inbox_saved_action_create(text,jsonb),public.inbox_saved_action_update(uuid,text,jsonb),public.inbox_saved_action_deactivate(uuid),public.inbox_saved_action_list(),public.inbox_saved_action_get(uuid,integer) FROM PUBLIC,anon,service_role;
+GRANT EXECUTE ON FUNCTION public.inbox_saved_action_create(text,jsonb),public.inbox_saved_action_update(uuid,text,jsonb),public.inbox_saved_action_deactivate(uuid),public.inbox_saved_action_list(),public.inbox_saved_action_get(uuid,integer) TO authenticated;
 
 COMMIT;

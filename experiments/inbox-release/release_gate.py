@@ -172,6 +172,8 @@ def verify_backend_packet() -> dict[str, Any]:
     required = (
         "admit_command('action_prepare')",
         "admit_command('action_accept')",
+        "admit_command('action_saved_read')",
+        "admit_command('action_saved_write')",
         "admit_command('reply_prepare')",
         "admit_command('reply_accept')",
         "current_database()<>'sandra_inbox_release_20260917'",
@@ -187,8 +189,12 @@ def verify_backend_packet() -> dict[str, Any]:
         return result("FAIL", "reply recovery is still admission-gated")
     sources = manifest.get("sql_sources")
     runtime = manifest.get("runtime_sources")
-    if not isinstance(sources, list) or len(sources) != 23 or not isinstance(runtime, list) or len(runtime) != 14:
+    if not isinstance(sources, list) or len(sources) != 26 or not isinstance(runtime, list) or len(runtime) != 14:
         return result("FAIL", "backend packet source inventory is incomplete", sql_sources=len(sources or []), runtime_sources=len(runtime or []))
+    source_names = {item.get("name") for item in sources if isinstance(item, dict)}
+    required_source_names = {"saved_actions_setup", "saved_actions_public_api", "saved_actions_prepare_reference"}
+    if not required_source_names.issubset(source_names):
+        return result("FAIL", "saved-action source packet is incomplete", missing=sorted(required_source_names - source_names))
     return result("PASS", "exact backend operation/reply packet assembled and hash-verified", packet_sha256=actual_hash, sql_sources=len(sources), runtime_sources=len(runtime))
 
 

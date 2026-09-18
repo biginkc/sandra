@@ -113,7 +113,9 @@ backend snapshot and remains `PENDING_REVIEW_NO_INSTALL` until the runtime combo
 proof, wrapper admission transforms, and receipt rollback proofs are complete.
 `assemble-backend-packet.py` re-reads that exact commit with `git show`, records
 every SQL/runtime hash, emits the transformed SQL packet, and has no database or
-container side effects.
+container side effects. The packet includes saved-action version storage and the
+prepare-time immutable reference binding, then gates saved create/update/delete
+and list/get wrappers with the separate saved read/write command families.
 
 The reproducible disposable HTTP fixture templates are checked in beside the
 manifest: `http-stack-compose.yml`, `http-stack-kong.yml`, and the two
