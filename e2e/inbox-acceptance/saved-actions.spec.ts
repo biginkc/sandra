@@ -147,6 +147,7 @@ test("saved action CRUD persists immutable edits and deactivation", async ({ pag
     },
   });
 
+  await page.getByRole("button", { name: "Create saved action", exact: true }).click();
   page.once("dialog", (dialog) => void dialog.accept());
   const deleteResponse = responseFor(page, "/api/inbox/saved-actions", "DELETE");
   const deleteDialog = page.getByRole("dialog", { name: "Create saved action" });
