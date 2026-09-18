@@ -6,7 +6,7 @@ CREATE OR REPLACE FUNCTION inbox_bridge.authorized_scope(scope_id uuid) RETURNS 
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path='' AS $$
 DECLARE a jsonb;w inbox_bridge.worksets;
 BEGIN
- a:=inbox_bridge.authorize(NULL);
+ a:=inbox_bridge.authorize_serving(NULL);
  SELECT * INTO w FROM inbox_bridge.worksets WHERE id=scope_id;
  IF NOT FOUND OR w.revoked OR w.expires_at<=clock_timestamp() OR w.org_id<>(a->>'org_id')::uuid OR w.user_id<>(a->>'user_id')::uuid OR w.session_id<>(a->>'session_id')::uuid OR w.access_epoch<>(a->>'access_epoch')::bigint THEN RETURN NULL;END IF;
  IF (a->>'expires_at')::timestamptz<=clock_timestamp() THEN RETURN NULL;END IF;
@@ -20,7 +20,7 @@ BEGIN
  -- Same lock order as workset creation and access-capture writers. A revocation
  -- committed before this lock is acquired must be observed by the fresh check.
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=auth.uid() FOR UPDATE;
- a:=inbox_bridge.authorize(NULL);
+ a:=inbox_bridge.authorize_serving(NULL);
  SELECT * INTO w FROM inbox_bridge.worksets WHERE id=scope_id FOR UPDATE;
  IF NOT FOUND OR w.revoked OR w.org_id<>(a->>'org_id')::uuid OR w.user_id<>(a->>'user_id')::uuid OR w.session_id<>(a->>'session_id')::uuid OR w.access_epoch<>(a->>'access_epoch')::bigint OR partition_index>=jsonb_array_length(w.handles) THEN RETURN NULL;END IF;
  actual:=inbox_bridge.scope_json(w);

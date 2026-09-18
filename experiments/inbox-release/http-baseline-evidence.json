@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "api_url": "http://127.0.0.1:54321",
+  "user_id": "2a67e59f-9ed2-4c12-b452-9c8ff585f44b",
+  "organization_id": "00000000-0000-0000-0000-000000000bbb",
+  "app_metadata_purpose": "disposable-e2e-baseline",
+  "database_marker": "sandra-inbox-http-owned-synthetic-20260917"
+}

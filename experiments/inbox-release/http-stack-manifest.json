@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "status": "LOCAL_HTTP_FIXTURE_ONLY",
+  "owner": "release-infra",
+  "marker": "sandra-inbox-release-http-owned-20260917",
+  "docker_socket": "unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock",
+  "network": "sandra-inbox-release-http-20260917",
+  "volume": "sandra_inbox_release_http_pgdata_20260917",
+  "containers": {
+    "db": "sandra-inbox-release-http-db-20260917",
+    "auth": "sandra-inbox-release-http-auth-20260917",
+    "rest": "sandra-inbox-release-http-rest-20260917",
+    "gateway": "sandra-inbox-release-http-kong-20260917",
+    "realtime": "sandra-inbox-release-http-realtime-20260917",
+    "projection": "sandra-inbox-release-http-projection-20260917"
+  },
+  "endpoints": {
+    "supabase_url": "http://127.0.0.1:54321",
+    "auth_direct_health": "http://127.0.0.1:58432/health",
+    "rest_direct_openapi": "http://127.0.0.1:58433/"
+  },
+  "realtime": {
+    "required": true,
+    "image": "public.ecr.aws/supabase/realtime:v2.129.3@sha256:3211f8ebd59edcd0aa772186f1c8249c82c6b1ae5565f40dedb7aa93e951fe37",
+    "network_alias": "realtime",
+    "gateway_path": "/realtime/v1/",
+    "websocket_path": "/realtime/v1/websocket",
+    "upstream_socket_path": "/socket/websocket",
+    "database_role": "supabase_realtime_admin",
+    "memory_bytes": 402653184,
+    "cpus": 0.5,
+    "host_port": null
+  },
+  "projection": {
+    "required": true,
+    "image": "sandra-inbox-projection-worker:release-20260917@sha256:23776b77652be03e4619b5379f6070b1688fa2a2f9159a3dae9fc4f9fc41a283",
+    "database_role": "inbox_projection_worker via inbox_projection_runtime_20260917",
+    "network_mode": "host",
+    "health_url": "http://127.0.0.1:59081/health",
+    "memory_bytes": 268435456,
+    "cpus": 0.25,
+    "host_port": 59081
+  },
+  "database_endpoint": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+  "database": "postgres",
+  "serving_enabled": true,
+  "provider_traffic": "forbidden",
+  "resource_bounds": {
+    "database_memory_bytes": 805306368,
+    "database_cpus": 1,
+    "auth_memory_bytes": 268435456,
+    "auth_cpus": 0.25,
+    "rest_memory_bytes": 134217728,
+    "rest_cpus": 0.25,
+    "gateway_memory_bytes": 134217728,
+    "gateway_cpus": 0.25,
+    "realtime_memory_bytes": 402653184,
+    "realtime_cpus": 0.5,
+    "projection_memory_bytes": 268435456,
+    "projection_cpus": 0.25,
+    "initial_new_disk_budget_bytes": 524288000
+  },
+  "fixture_user": {
+    "email": "release-http-user-20260917@example.invalid",
+    "password_file": "work/inbox-http-user.env",
+    "organization_id": "11111111-1111-4111-8111-111111111111"
+  },
+  "baseline_owner_organization_id": "00000000-0000-0000-0000-000000000bbb",
+  "safety": {
+    "shared_supabase_ports_58421_58422_excluded": true,
+    "original_t2_database_excluded": true,
+    "new_spending": false,
+    "customer_sends": false
+  }
+}

@@ -1,6 +1,6 @@
 {
   "passed": true,
-  "org": "c9160ffd-34f2-484d-a5aa-330c832ca4ab",
+  "org": "6e9fcda3-d1c6-4ff9-b6ee-e6b0e6bc7e74",
   "checks": [
     "canonical message capture through durable worker",
     "canonical owner assignment",
@@ -18,7 +18,7 @@
       "processed": {
         "baseline": 10,
         "backfill": 0,
-        "parent": 2,
+        "parent": 3,
         "summary": 2,
         "expiry": 0
       },

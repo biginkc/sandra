@@ -4,7 +4,14 @@ from pathlib import Path
 P=Path(__file__).resolve().parent
 sys.path.insert(0,str(P.parent/'inbox-projection/fixture'));from guards import validate_container,validate_cron
 SOCKET=os.environ.get('INBOX_T2_DOCKER_SOCKET','unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock')
-D=['docker','--host',SOCKET];N='sandra-inbox-projection-t2-db';DB='sandra_inbox_install_20260913'
+D=['docker','--host',SOCKET];N='sandra-inbox-projection-t2-db'
+# Do not silently retarget the backend-owned install database.  The release
+# harness can select only the explicitly dedicated database after ownership
+# has been confirmed and the marker has been installed.
+DB=os.environ.get('INBOX_RELEASE_DATABASE','sandra_inbox_install_20260913')
+if DB not in {'sandra_inbox_install_20260913','sandra_inbox_release_20260917'}:
+    raise RuntimeError('Refusing unapproved candidate database: '+DB)
+EXPECTED_MARKER=os.environ.get('INBOX_RELEASE_FIXTURE_MARKER','sandra-inbox-production-candidate-owned-synthetic')
 def sql(q,role='postgres',retry=False):
  for attempt in range(3 if retry else 1):
   r=subprocess.run(D+['exec','-i',N,'psql','-XqAt','-U',role,'-d',DB,'-v','ON_ERROR_STOP=1','-v','VERBOSITY=verbose'],input="SET statement_timeout='30s';SET lock_timeout='2s';"+q,text=True,capture_output=True,timeout=40)
@@ -15,7 +22,7 @@ def sql(q,role='postgres',retry=False):
 def guard():
  validate_container(json.loads(subprocess.check_output(D+['inspect',N],text=True))[0])
  validate_cron(sql('SHOW cron.launch_active_jobs',role='supabase_admin'))
- if sql('SELECT marker FROM install_fixture.identity',role='supabase_admin')!='sandra-inbox-production-candidate-owned-synthetic':raise RuntimeError('Wrong candidate fixture marker')
+ if sql('SELECT marker FROM install_fixture.identity',role='supabase_admin')!=EXPECTED_MARKER:raise RuntimeError('Wrong candidate fixture marker')
 def literal(value):return "'"+str(value).replace("'","''")+"'"
 
 def ensure_concurrent_index(q):

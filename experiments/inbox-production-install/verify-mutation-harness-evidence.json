@@ -88,7 +88,7 @@
     {
       "case": "function_overload_added",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Conflicting overload(s) installed for inbox_read.detail: ['o uuid, c uuid', 'o uuid, c uuid, extra text']",
+      "drift_error": "RuntimeError: Conflicting overload(s) installed for inbox_read.detail: ['o uuid, c uuid, extra text', 'o uuid, c uuid']",
       "restored_pass": true
     },
     {

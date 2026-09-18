@@ -36,9 +36,9 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 DECLARE a jsonb; result jsonb; position inbox_read.unknown_history_cursors;
  expires timestamptz:=clock_timestamp()+interval '5 minutes';last_message jsonb;next_cursor uuid;
 BEGIN
- a:=inbox_bridge.authorize(o);
+ a:=inbox_bridge.authorize_serving(o);
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=(a->>'user_id')::uuid FOR SHARE;
- a:=inbox_bridge.authorize(o);
+ a:=inbox_bridge.authorize_serving(o);
  IF before_cursor IS NOT NULL THEN
   SELECT * INTO position FROM inbox_read.unknown_history_cursors WHERE id=before_cursor;
   IF NOT FOUND OR position.org_id IS DISTINCT FROM o OR position.sender_group_id IS DISTINCT FROM g
@@ -56,7 +56,7 @@ BEGIN
    VALUES(o,g,(a->>'user_id')::uuid,(a->>'session_id')::uuid,(a->>'access_epoch')::bigint,expires,
     (last_message->>'created_at_raw')::timestamptz,(last_message->>'id')::uuid) RETURNING id INTO next_cursor;
  END IF;
- PERFORM inbox_bridge.authorize(o);
+ PERFORM inbox_bridge.authorize_serving(o);
  IF expires<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_READ_EXPIRED' USING ERRCODE='55000';END IF;
  RETURN (result-'exists')||jsonb_build_object('requester_id',a->>'user_id','org_id',o,'sender_group_id',g,'next_cursor',next_cursor,'expires_at',expires);
 END $$;

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "status": "BLOCKED_UNBUILT_CURRENT_SOURCE",
+  "owner": "release-infra",
+  "services": {
+    "operation-worker": {
+      "Dockerfile": "253488776860278dd5abd1eb2a2f6babb4f6760d706f37ea837262948913afaf",
+      "package.json": "0bdc3fa5f6ffb7cea32841bf1d3307aef1f7beeec8794d689cda5ce25f2cff24",
+      "package-lock.json": "0b6abafac1b331c4857c9459659a11d425a4b52d9be76ae2c72322ac7a11d7e8",
+      "core.mjs": "13f460f8c2853c34211956317b1345830998010de2962ec37e2ef47f9fe8e265",
+      "server.mjs": "cdde01d18962dec67f68324bce668ea1be326ba17ec69acd658a0bbf4b71343c"
+    },
+    "reply-send-worker": {
+      "Dockerfile": "910306b915a0d7cf213ae22f8bbb73eee324665204757283b8eeeeed9af9a7fa",
+      "package.json": "d1b67cc34e2ffc6250407aa145d5f63666b6ec89c9deb99bbf417533831d8286",
+      "core.mjs": "6d0380b385840532bf52a35d7598c18ae8921e78a83aadfe08bcf0de4483e314",
+      "runner.mjs": "6cc46d4cb25943611a3c91d80c83b451278a8611225ce33ff4931f85191beb0b",
+      "server.mjs": "e071daa5b94c70426001955686cb967ac5dc9a42da372534596ff7a45af6ef7b",
+      "vendor/reply-provider.mjs": "2847add8a5d1e87e671c04949f13487e10f6af81209635fb622ea253c659b75f",
+      "vendor/test-transport.mjs": "b346a492edff21297fed9f72d294528512727485fe3a4555e43c4c5510aabf36",
+      "worker-role.sql": "086f384ecb54a0966e16aa3d007cd767a73e3ba06faa120141c36926858de465",
+      "worker.sql": "a4c4a5229a74a538addeec29e153e4633c1c3dbf2bd5e91cc5fa1f28a475486c"
+    }
+  },
+  "base_images": {
+    "node": "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
+    "cached_historical_action": "sandra-inbox-action-worker:20260913",
+    "cached_historical_projection": "sandra-inbox-projection-worker:20260913",
+    "cached_historical_relay": "sandra-inbox-sync-relay:20260913"
+  },
+  "requirements": {
+    "operation_command_adapters": "required for action prepare/accept and saved CRUD; absent from installed release DB",
+    "reply_command_adapters": "required for reply prepare/accept; absent from installed release DB",
+    "projection_worker": "requires worker-role.sql and worker grants on target DB; absent on HTTP fixture",
+    "current_source_build": "required before execution image is accepted; no current image claim is made",
+    "provider_traffic": "forbidden",
+    "customer_sends": "forbidden"
+  },
+  "resource_bounds": {
+    "operation_worker_memory_bytes": 268435456,
+    "operation_worker_cpus": 0.25,
+    "reply_worker_memory_bytes": 268435456,
+    "reply_worker_cpus": 0.25
+  },
+  "safety": {
+    "shared_stack_excluded": true,
+    "production_deploy": false,
+    "new_spending": false
+  }
+}

@@ -2,7 +2,7 @@
   "installed": true,
   "atomic_late_failure_probe": true,
   "serving_enabled": false,
-  "foundation_wall_seconds": 0.09672533399134409,
+  "foundation_wall_seconds": 0.09635979199083522,
   "concurrent_indexes": [
     "inbox_parent_message_property",
     "inbox_parent_message_contact",
@@ -12,6 +12,6 @@
     "inbox_backfill_threads",
     "inbox_backfill_thread_identity"
   ],
-  "source_sha256": "7ac0ec5264e5d481daa711bb430e2a10896713c4bc9dafef2374b17500f42f5c",
+  "source_sha256": "27f4da86593eefd8b328bd760310d457ab03eff3470abb238f1278903037269d",
   "scope": "Owned new DB only; not production lock/performance acceptance"
 }

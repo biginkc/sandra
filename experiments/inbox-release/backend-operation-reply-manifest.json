@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "status": "PENDING_REVIEW_NO_INSTALL",
+  "source_repository": "/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/release-integration",
+  "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+  "source_commit_role": "backend exact snapshot supplied by coordinator; no branch import",
+  "install_order": [
+    "operation_foundation",
+    "operation_domain_setup",
+    "operation_domain_scope",
+    "operation_domain_effect",
+    "operation_domain_apply",
+    "operation_setup",
+    "operation_accept",
+    "operation_worker",
+    "operation_worker_role",
+    "operation_public_api",
+    "reply_review_setup",
+    "reply_source_operation",
+    "reply_review_public_api",
+    "reply_attempts",
+    "reply_accept",
+    "reply_callback",
+    "reply_public_api",
+    "reply_worker",
+    "reply_worker_role"
+  ],
+  "sources": [
+    {
+      "name": "operation_foundation",
+      "source_path": "experiments/inbox-operation-worker/fixture-companion.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "5fd578c67b401fcaa45d6ca6f5fba3e7022b6ad76b60ca3b3c8c6987daf2b090",
+      "bytes": 100986
+    },
+    {
+      "name": "operation_domain_setup",
+      "source_path": "experiments/inbox-operation-domain/setup.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "b7ca70de5cfe321ad3996b98de2f6097ba9b0545e7e2eb7bb0c955e9cc2a35ff",
+      "bytes": 15034
+    },
+    {
+      "name": "operation_domain_scope",
+      "source_path": "experiments/inbox-operation-domain/restrictive-scope.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "8b21a491160fedfb84ef85d1156fcede5ffdb8f56855786d430faed1784776d9",
+      "bytes": 3746
+    },
+    {
+      "name": "operation_domain_effect",
+      "source_path": "experiments/inbox-operation-domain/restrictive-effect.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "3e643d1cd5b370f7cea3588a4caf9146a29e25da6eec808b0c4621ca424124df",
+      "bytes": 7746
+    },
+    {
+      "name": "operation_domain_apply",
+      "source_path": "experiments/inbox-operation-domain/restrictive-apply.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "2edf586f49f3f1e6f57ab1c9180c67a37d3190a5879bbbde4151c08474d59938",
+      "bytes": 28593
+    },
+    {
+      "name": "operation_setup",
+      "source_path": "experiments/inbox-operation-preparation/setup.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "46c24f338f7a0c38612ea535e71327117dbfae25814ba51448367aa30be8ca74",
+      "bytes": 18755
+    },
+    {
+      "name": "operation_accept",
+      "source_path": "experiments/inbox-operation-preparation/accept.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "fdd19c945b24f40057ed1fe63e90833ef27217462e977bb8d14945163cae24a9",
+      "bytes": 8042
+    },
+    {
+      "name": "operation_worker",
+      "source_path": "experiments/inbox-operation-preparation/worker.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "7e9c67e47951abcb0e353d481d51372b9f39ba1fe6ca585189a5d08be5d769b8",
+      "bytes": 10600
+    },
+    {
+      "name": "operation_worker_role",
+      "source_path": "experiments/inbox-operation-preparation/worker-role.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "a686aec664667bf60e2a7507e5fad03508de5bc9d3d49265a3480797d3039948",
+      "bytes": 2835
+    },
+    {
+      "name": "operation_public_api",
+      "source_path": "experiments/inbox-operation-preparation/public-api.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "45bafaf0f48c30c9cb98e1bd808b9d2112b7c191c692ee6de4302f1f624bc768",
+      "bytes": 1127
+    },
+    {
+      "name": "reply_review_setup",
+      "source_path": "experiments/inbox-reply-review/setup.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
+      "bytes": 14194
+    },
+    {
+      "name": "reply_source_operation",
+      "source_path": "experiments/inbox-reply-review/source-operation.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "769d1ebed24f1a301926955a43c77d8e4b95c46f3a8c9c2c288befdbd39e0f50",
+      "bytes": 2927
+    },
+    {
+      "name": "reply_review_public_api",
+      "source_path": "experiments/inbox-reply-review/public-api.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "0711295976fce7ff258f4948a08ed71e49374ccd1a5759034c230c505e3cb263",
+      "bytes": 2913
+    },
+    {
+      "name": "reply_attempts",
+      "source_path": "experiments/inbox-reply-send/attempts.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9",
+      "bytes": 36291
+    },
+    {
+      "name": "reply_accept",
+      "source_path": "experiments/inbox-reply-send/accept.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "375fcb63bdd59e14168f49b05e46ab33f2f4f55c04e72ea5242b4165f6a54621",
+      "bytes": 18742
+    },
+    {
+      "name": "reply_callback",
+      "source_path": "experiments/inbox-reply-send/callback.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "71ec54276bbd13e70408586c2efd151f5811b06ac8b31d238a542ae30a39f66c",
+      "bytes": 21025
+    },
+    {
+      "name": "reply_public_api",
+      "source_path": "experiments/inbox-reply-send/public-api.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "4d5e1c7d76bd3464ca12c68d0a173bc6a58c3bc1e743d2e6f69b0b57da79fe0e",
+      "bytes": 2899
+    },
+    {
+      "name": "reply_worker",
+      "source_path": "experiments/inbox-reply-send-worker/worker.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "a4c4a5229a74a538addeec29e153e4633c1c3dbf2bd5e91cc5fa1f28a475486c",
+      "bytes": 12627
+    },
+    {
+      "name": "reply_worker_role",
+      "source_path": "experiments/inbox-reply-send-worker/worker-role.sql",
+      "source_commit": "ef5b239ab3ead7820fbceb0e0762ca5c1c735627",
+      "sha256": "086f384ecb54a0966e16aa3d007cd767a73e3ba06faa120141c36926858de465",
+      "bytes": 3862
+    }
+  ],
+  "compiler_transforms_required": [
+    "replace historical inbox_t2_fixture identity guard with explicit release database marker before installation",
+    "add inbox_control.admit_command action_prepare/action_accept/reply_prepare/reply_accept at authenticated public command wrappers",
+    "leave status/recover receipt reads session-authorized and available when serving is disabled",
+    "retain reply review admission as an additional gate; never bypass it",
+    "install worker roles only after exact source and target catalog review"
+  ],
+  "required_proofs_before_install_receipt": [
+    "operation/reply source and public wrapper hashes match this manifest",
+    "authenticated direct prepare/accept denied with INBOX_COMMAND_DISABLED after rollback",
+    "authenticated status/recover receipt reads remain available after rollback",
+    "no customer sends or provider traffic",
+    "backend runtime combo proof complete"
+  ],
+  "safety": {
+    "release_db": "sandra_inbox_release_20260917",
+    "http_db": "postgres",
+    "production_install": false,
+    "provider_traffic": false,
+    "customer_sends": false
+  }
+}

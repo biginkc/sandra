@@ -24,7 +24,29 @@ for c in m['components']:
  if c['id']=='auth':
   needle='BEGIN\n IF u IS NULL'
   if s.count(needle)!=1:raise RuntimeError('Authorization gate insertion drift')
-  s=s.replace(needle,"BEGIN\n IF NOT EXISTS(SELECT 1 FROM inbox_control.rollout WHERE singleton AND serving_enabled) THEN RAISE EXCEPTION 'INBOX_NOT_READY' USING ERRCODE='55000';END IF;\n IF u IS NULL")
+  s=s.replace(needle,"BEGIN\n IF u IS NULL")
+  # Session/membership authorization is intentionally independent from the
+  # serving gate.  Receipts and recovery use this authority during rollback;
+  # read-serving callers are rewritten below to authorize_serving().
+  marker='END $$;\nALTER TABLE inbox_bridge.access_epochs ENABLE ROW LEVEL SECURITY;'
+  helpers="""END $$;
+CREATE FUNCTION inbox_bridge.assert_serving() RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET statement_timeout='2s' AS $$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM inbox_control.rollout WHERE singleton AND serving_enabled) THEN RAISE EXCEPTION 'INBOX_NOT_READY' USING ERRCODE='55000';END IF;
+END $$;
+CREATE FUNCTION inbox_bridge.authorize_serving(o uuid DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET statement_timeout='5s' AS $$
+DECLARE a jsonb;
+BEGIN
+ PERFORM inbox_bridge.assert_serving();a:=inbox_bridge.authorize(o);RETURN a;
+END $$;
+ALTER TABLE inbox_bridge.access_epochs ENABLE ROW LEVEL SECURITY;"""
+  if s.count(marker)!=1:raise RuntimeError('Authorization helper insertion drift')
+  s=s.replace(marker,helpers)
+ else:
+  # All read/workset callers retain the serving gate after authorize() is
+  # split.  Action/operation adapters are intentionally outside this pinned
+  # candidate and call authorize() for receipt/recovery instead.
+  s=s.replace('inbox_bridge.authorize(', 'inbox_bridge.authorize_serving(')
  # This historical INSERT cannot be a production-size migration side effect.
  if c['id']=='queue':
   s,nq=re.subn(r'INSERT INTO inbox_maintained.queue\(org_id,target_kind,target_id\)\s+SELECT d\.org_id.*?ON CONFLICT DO NOTHING;', '-- Historical enqueue is performed by bounded backfill/repair after installation.',s,flags=re.S)
@@ -57,9 +79,10 @@ ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY FULL;
 -- Capture remains installed; serving is disabled until independent activation gates.
 COMMIT;
 """
-(out/'install-candidate.sql').write_text(pre+'\n'.join(chunks)+(P/'runtime.sql').read_text()+(P/'harden-private.sql').read_text()+post)
+admission=(P/'command-admission.sql').read_text()
+(out/'install-candidate.sql').write_text(pre+'\n'.join(chunks)+(P/'runtime.sql').read_text()+admission+(P/'harden-private.sql').read_text()+post)
 (out/'indexes.json').write_text(json.dumps(indexes,indent=2)+'\n')
 for i,q in enumerate(indexes,1):(out/f'index-{i:02d}.sql').write_text(q+'\n')
-(out/'rollback-serving.sql').write_text("BEGIN;UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton;COMMIT;\n-- Preserve retained heads, epochs, worksets, receipts and capture. Never drop/reset them as routine rollback.\n")
-(out/'build-receipt.json').write_text(json.dumps({'components':receipts,'canonical_concurrent_indexes':len(indexes),'serving_enabled':False,'compiler_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'runtime_sha256':hashlib.sha256((P/'runtime.sql').read_bytes()).hexdigest(),'hardening_sha256':hashlib.sha256((P/'harden-private.sql').read_bytes()).hexdigest(),'foundation_sha256':hashlib.sha256((out/'install-candidate.sql').read_bytes()).hexdigest(),'external_dependencies':m['external_dependencies']},indent=2)+'\n')
+(out/'rollback-serving.sql').write_text("BEGIN;UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton;UPDATE inbox_control.command_admission SET enabled=false,updated_at=clock_timestamp();COMMIT;\n-- Preserve retained heads, epochs, worksets, receipts and capture. Never drop/reset them as routine rollback.\n-- Admission is disabled atomically with serving; authenticated receipt/status/recovery authority remains available.\n")
+(out/'build-receipt.json').write_text(json.dumps({'components':receipts,'canonical_concurrent_indexes':len(indexes),'serving_enabled':False,'compiler_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'runtime_sha256':hashlib.sha256((P/'runtime.sql').read_bytes()).hexdigest(),'admission_sha256':hashlib.sha256(admission.encode()).hexdigest(),'hardening_sha256':hashlib.sha256((P/'harden-private.sql').read_bytes()).hexdigest(),'foundation_sha256':hashlib.sha256((out/'install-candidate.sql').read_bytes()).hexdigest(),'external_dependencies':m['external_dependencies']},indent=2)+'\n')
 print(f'Compiled {len(chunks)} pinned components, {len(indexes)} separate concurrent indexes; no DB connection')

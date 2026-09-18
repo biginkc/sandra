@@ -29,9 +29,9 @@ CREATE FUNCTION inbox_read.detail(o uuid,c uuid) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 DECLARE a jsonb; result jsonb;
 BEGIN
- a:=inbox_bridge.authorize(o);
+ a:=inbox_bridge.authorize_serving(o);
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=(a->>'user_id')::uuid FOR UPDATE;
- a:=inbox_bridge.authorize(o);
+ a:=inbox_bridge.authorize_serving(o);
  WITH snapshot AS MATERIALIZED (
   SELECT inbox_authenticated_detail.detail_v2(o,c) AS data,
    g.generation FROM inbox_capture_boundary.generation g WHERE singleton IS TRUE
@@ -44,7 +44,7 @@ BEGIN
  ) SELECT s.data || jsonb_build_object('read_boundary',r.id,'boundary_expires_at',r.expires_at,
   'capture_generation',s.generation) INTO result FROM snapshot s CROSS JOIN recorded r;
  IF result IS NULL THEN RAISE EXCEPTION 'INBOX_CAPTURE_METADATA_UNAVAILABLE' USING ERRCODE='55000'; END IF;
- PERFORM inbox_bridge.authorize(o);
+ PERFORM inbox_bridge.authorize_serving(o);
  RETURN result;
 END $$;
 
@@ -58,9 +58,9 @@ DECLARE a jsonb; w inbox_read.boundaries; r inbox_read.receipts;
 BEGIN
  IF b IS NULL OR batch_number IS NULL OR batch_number<0 THEN
   RAISE EXCEPTION 'INBOX_INVALID_READ_BATCH' USING ERRCODE='22023'; END IF;
- a:=inbox_bridge.authorize(NULL);
+ a:=inbox_bridge.authorize_serving(NULL);
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=(a->>'user_id')::uuid FOR UPDATE;
- a:=inbox_bridge.authorize(NULL);
+ a:=inbox_bridge.authorize_serving(NULL);
  SELECT * INTO w FROM inbox_read.boundaries WHERE id=b FOR UPDATE;
  IF NOT FOUND OR w.requester_id<>(a->>'user_id')::uuid OR w.org_id<>(a->>'org_id')::uuid
   OR w.session_id IS DISTINCT FROM (a->>'session_id')::uuid OR w.access_epoch IS DISTINCT FROM (a->>'access_epoch')::bigint THEN
@@ -98,7 +98,7 @@ BEGIN
    AND m.org_id=w.org_id AND m.conversation_id=w.conversation_id AND m.channel='sms'
    AND m.direction='inbound' AND m.read_at IS NULL AND m.inbox_inbound_revision<=w.revision RETURNING m.id
  ) SELECT count(*) INTO changed_count FROM changed;
- a:=inbox_bridge.authorize(w.org_id);
+ a:=inbox_bridge.authorize_serving(w.org_id);
  IF w.access_epoch IS DISTINCT FROM (a->>'access_epoch')::bigint THEN
   RAISE EXCEPTION 'INBOX_READ_NOT_FOUND' USING ERRCODE='42501'; END IF;
  IF (w.execution_deadline IS NULL AND w.expires_at<=clock_timestamp()) OR w.execution_deadline<=clock_timestamp() THEN
@@ -151,9 +151,9 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 DECLARE a jsonb; result jsonb; position inbox_read.history_cursors;
  boundary inbox_read.boundaries; last_message jsonb; next_cursor uuid;
 BEGIN
- a:=inbox_bridge.authorize(o);
+ a:=inbox_bridge.authorize_serving(o);
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=(a->>'user_id')::uuid FOR UPDATE;
- a:=inbox_bridge.authorize(o);
+ a:=inbox_bridge.authorize_serving(o);
  IF before_cursor IS NULL THEN
   result:=inbox_read.detail(o,c);
   SELECT * INTO STRICT boundary FROM inbox_read.boundaries WHERE id=(result->>'read_boundary')::uuid;
@@ -179,7 +179,7 @@ BEGIN
    ON CONFLICT(boundary_id,session_id,access_epoch,before_at,before_id) DO UPDATE SET boundary_id=EXCLUDED.boundary_id
    RETURNING id INTO next_cursor;
  END IF;
- PERFORM inbox_bridge.authorize(o);
+ PERFORM inbox_bridge.authorize_serving(o);
  IF boundary.expires_at<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_READ_EXPIRED' USING ERRCODE='55000';END IF;
  RETURN result||jsonb_build_object('next_cursor',next_cursor);
 END $$;
@@ -230,9 +230,9 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 DECLARE a jsonb; result jsonb; position inbox_read.unknown_history_cursors;
  expires timestamptz:=clock_timestamp()+interval '5 minutes';last_message jsonb;next_cursor uuid;
 BEGIN
- a:=inbox_bridge.authorize(o);
+ a:=inbox_bridge.authorize_serving(o);
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=(a->>'user_id')::uuid FOR SHARE;
- a:=inbox_bridge.authorize(o);
+ a:=inbox_bridge.authorize_serving(o);
  IF before_cursor IS NOT NULL THEN
   SELECT * INTO position FROM inbox_read.unknown_history_cursors WHERE id=before_cursor;
   IF NOT FOUND OR position.org_id IS DISTINCT FROM o OR position.sender_group_id IS DISTINCT FROM g
@@ -250,7 +250,7 @@ BEGIN
    VALUES(o,g,(a->>'user_id')::uuid,(a->>'session_id')::uuid,(a->>'access_epoch')::bigint,expires,
     (last_message->>'created_at_raw')::timestamptz,(last_message->>'id')::uuid) RETURNING id INTO next_cursor;
  END IF;
- PERFORM inbox_bridge.authorize(o);
+ PERFORM inbox_bridge.authorize_serving(o);
  IF expires<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_READ_EXPIRED' USING ERRCODE='55000';END IF;
  RETURN (result-'exists')||jsonb_build_object('requester_id',a->>'user_id','org_id',o,'sender_group_id',g,'next_cursor',next_cursor,'expires_at',expires);
 END $$;
@@ -269,7 +269,7 @@ CREATE OR REPLACE FUNCTION inbox_bridge.authorized_scope(scope_id uuid) RETURNS 
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path='' AS $$
 DECLARE a jsonb;w inbox_bridge.worksets;
 BEGIN
- a:=inbox_bridge.authorize(NULL);
+ a:=inbox_bridge.authorize_serving(NULL);
  SELECT * INTO w FROM inbox_bridge.worksets WHERE id=scope_id;
  IF NOT FOUND OR w.revoked OR w.expires_at<=clock_timestamp() OR w.org_id<>(a->>'org_id')::uuid OR w.user_id<>(a->>'user_id')::uuid OR w.session_id<>(a->>'session_id')::uuid OR w.access_epoch<>(a->>'access_epoch')::bigint THEN RETURN NULL;END IF;
  IF (a->>'expires_at')::timestamptz<=clock_timestamp() THEN RETURN NULL;END IF;
@@ -283,7 +283,7 @@ BEGIN
  -- Same lock order as workset creation and access-capture writers. A revocation
  -- committed before this lock is acquired must be observed by the fresh check.
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=auth.uid() FOR UPDATE;
- a:=inbox_bridge.authorize(NULL);
+ a:=inbox_bridge.authorize_serving(NULL);
  SELECT * INTO w FROM inbox_bridge.worksets WHERE id=scope_id FOR UPDATE;
  IF NOT FOUND OR w.revoked OR w.org_id<>(a->>'org_id')::uuid OR w.user_id<>(a->>'user_id')::uuid OR w.session_id<>(a->>'session_id')::uuid OR w.access_epoch<>(a->>'access_epoch')::bigint OR partition_index>=jsonb_array_length(w.handles) THEN RETURN NULL;END IF;
  actual:=inbox_bridge.scope_json(w);

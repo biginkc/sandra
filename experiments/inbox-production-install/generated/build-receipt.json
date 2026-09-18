@@ -73,17 +73,17 @@
     {
       "component": "auth",
       "source_sha256": "cf675f9e1e034022f4dbadb591395b71814b856ed476a7a6a8cba4e1359dca1e",
-      "compiled_sha256": "88115752bb8f7d0aee8a204a0efb09250ad450beda26391ebbde26ab12bf3533"
+      "compiled_sha256": "3d02bf2eb4cd736a95b5a8656219724b60a3f1f6a298a6b62c4044860364e7e2"
     },
     {
       "component": "worksets",
       "source_sha256": "52ecaf8d217f2f5554dc733305b81de646fb81cf721b9e044c4d2aa21c1fd3bb",
-      "compiled_sha256": "673599f75955fcfe317f9e8111f4726e52d6e1146aab175e22d356846f180334"
+      "compiled_sha256": "84eeea00790e69503e118a11e430325d6df828215fc354166b8c67fef7f4f6c7"
     },
     {
       "component": "public_api",
       "source_sha256": "fda8ba3148d4da43e821137980dc286789b8041ed93062f4b4d3a583b89429aa",
-      "compiled_sha256": "0edb48e6f4db41c5b79e13ada3608acbef9fb468d663183ebc98cc463237a82f"
+      "compiled_sha256": "9cd463938b7dd1c773157536a48cdd37d8f696b842c112a5dce84e070c3399eb"
     },
     {
       "component": "typed_filters",
@@ -93,20 +93,21 @@
     {
       "component": "parity",
       "source_sha256": "c0af18a7c18171b5847dc53820c0e2494069ea5d4705247ee596749a2bfb2399",
-      "compiled_sha256": "16237ad46d3e1485346068da0eb88d4c4a67db5033aaa9eedc405b43a210937d"
+      "compiled_sha256": "e1c21a8e1488ece24807e28aa8574e01c1ddc0962701c31c7e314ca546c63685"
     },
     {
       "component": "outcomes",
       "source_sha256": "fc365e47abf71613744e9f9aa8b8cb7c937cdf2042e655d689d83f0ce793a299",
-      "compiled_sha256": "a2b5486e47c841ff1661bcf80b2c53751f68107970ff4f1d2d2709020e563d8d"
+      "compiled_sha256": "2791ae56c216a87fe57fcacc6ff982a56664d94466f37553cb36e40406c252c4"
     }
   ],
   "canonical_concurrent_indexes": 7,
   "serving_enabled": false,
-  "compiler_sha256": "18df1292862df552fc90639a0f18797007a229bd8a4dc554de04267c4bf87ff5",
+  "compiler_sha256": "6368752a9aa3209f18a49d8b93d946836b9b12fcfbe02420ca1b8e9deeefe0f4",
   "runtime_sha256": "9fe0f76c653fa431c664285009f091491f723ede2749bfcd25201bf767790920",
+  "admission_sha256": "466dcbf7f7e2f69073291a1f55c86cc01ace5f93f57e10f5c80d6024a1351b99",
   "hardening_sha256": "4a1d6a89d263ff2b40949e313b14d90529eba69c38a9839b6fb3d0820f99944a",
-  "foundation_sha256": "9dbda65aa4c9b810bb94968a97c97d04f19d9744a76b642f47fa625c858fb938",
+  "foundation_sha256": "27f4da86593eefd8b328bd760310d457ab03eff3470abb238f1278903037269d",
   "external_dependencies": {
     "read": "Reviewed PR579/db852ee9 pinned companion compiled and installed in owned full-Auth fixture; separate companion manifest and evidence",
     "operations": "Operations-owned durable acceptance/domain/provider final reviewed source pending",

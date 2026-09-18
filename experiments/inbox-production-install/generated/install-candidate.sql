@@ -1412,7 +1412,6 @@ CREATE TRIGGER zzzzzzz_inbox_access AFTER INSERT OR UPDATE OR DELETE ON auth.ses
 CREATE FUNCTION inbox_bridge.authorize(o uuid DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path='' AS $$
 DECLARE u uuid:=auth.uid();j jsonb:=auth.jwt();sid uuid;session_expiry timestamptz;claim_expiry timestamptz;membership jsonb;n integer;epoch bigint;expiry timestamptz;session_found boolean;checked_at timestamptz;
 BEGIN
- IF NOT EXISTS(SELECT 1 FROM inbox_control.rollout WHERE singleton AND serving_enabled) THEN RAISE EXCEPTION 'INBOX_NOT_READY' USING ERRCODE='55000';END IF;
  IF u IS NULL OR auth.role() IS DISTINCT FROM 'authenticated' OR jsonb_typeof(j->'session_id') IS DISTINCT FROM 'string' OR (j->>'session_id')!~'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' OR coalesce(j->>'exp','')!~'^[0-9]{1,12}$' THEN RAISE EXCEPTION 'INBOX_AUTH_REQUIRED' USING ERRCODE='42501';END IF;
  sid:=(j->>'session_id')::uuid;claim_expiry:=to_timestamp((j->>'exp')::double precision);
  IF claim_expiry<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_SESSION_EXPIRED' USING ERRCODE='42501';END IF;
@@ -1438,6 +1437,15 @@ BEGIN
  IF expiry<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_SESSION_EXPIRED' USING ERRCODE='42501';END IF;
  RETURN jsonb_build_object('user_id',u,'session_id',sid,'org_id',(membership->>'org_id')::uuid,'access_epoch',epoch::text,'expires_at',expiry,'session_active',true,'active_membership_count',n);
 END $$;
+CREATE FUNCTION inbox_bridge.assert_serving() RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET statement_timeout='2s' AS $$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM inbox_control.rollout WHERE singleton AND serving_enabled) THEN RAISE EXCEPTION 'INBOX_NOT_READY' USING ERRCODE='55000';END IF;
+END $$;
+CREATE FUNCTION inbox_bridge.authorize_serving(o uuid DEFAULT NULL) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET statement_timeout='5s' AS $$
+DECLARE a jsonb;
+BEGIN
+ PERFORM inbox_bridge.assert_serving();a:=inbox_bridge.authorize(o);RETURN a;
+END $$;
 ALTER TABLE inbox_bridge.access_epochs ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON ALL TABLES IN SCHEMA inbox_bridge FROM PUBLIC,anon,authenticated,service_role;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_bridge FROM PUBLIC,anon,authenticated,service_role;
@@ -1462,10 +1470,10 @@ CREATE FUNCTION inbox_bridge.create_scope(o uuid,f jsonb,n integer,replaces uuid
 DECLARE a jsonb;u uuid;sid uuid;e bigint;now_at timestamptz;prior inbox_bridge.worksets;created inbox_bridge.worksets;ids jsonb;gen bigint;last_at timestamptz;view_name text;
 BEGIN
  IF n IS NULL OR n<1 OR n>500 OR f IS NULL OR jsonb_typeof(f)<>'object' OR (f-'view')<>'{}'::jsonb OR jsonb_typeof(f->'view') IS DISTINCT FROM 'string' OR f->>'view' NOT IN ('active','dismissed','review','unread') THEN RAISE EXCEPTION 'INBOX_INVALID_WORKSET' USING ERRCODE='22023';END IF;
- a:=inbox_bridge.authorize(o);u:=(a->>'user_id')::uuid;sid:=(a->>'session_id')::uuid;
+ a:=inbox_bridge.authorize_serving(o);u:=(a->>'user_id')::uuid;sid:=(a->>'session_id')::uuid;
  -- Persistent actor row serializes generation allocation, access capture, and replacement.
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=u FOR UPDATE;
- a:=inbox_bridge.authorize(o);e:=(a->>'access_epoch')::bigint;now_at:=clock_timestamp();
+ a:=inbox_bridge.authorize_serving(o);e:=(a->>'access_epoch')::bigint;now_at:=clock_timestamp();
  SELECT max(generation),max(created_at) INTO gen,last_at FROM inbox_bridge.worksets WHERE user_id=u AND session_id=sid;
  IF last_at>now_at-interval '1 second' THEN RAISE EXCEPTION 'INBOX_GENERATION_RATE' USING ERRCODE='55000';END IF;
  IF replaces IS NOT NULL THEN
@@ -1486,7 +1494,7 @@ DECLARE w inbox_bridge.worksets;a jsonb;
 BEGIN
  SELECT * INTO w FROM inbox_bridge.worksets WHERE id=scope_id;
  IF NOT FOUND OR w.revoked OR w.expires_at<=clock_timestamp() THEN RETURN NULL;END IF;
- a:=inbox_bridge.authorize(w.org_id);
+ a:=inbox_bridge.authorize_serving(w.org_id);
  IF w.user_id<>(a->>'user_id')::uuid OR w.session_id<>(a->>'session_id')::uuid OR w.access_epoch<>(a->>'access_epoch')::bigint THEN RETURN NULL;END IF;
  RETURN inbox_bridge.scope_json(w);
 END $$;
@@ -1509,7 +1517,7 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_bridge FROM PUBLIC,anon,authenticate
 -- Owned fixture only; production application requires reviewed migration installation.
 
 
-CREATE FUNCTION public.inbox_authorize_sync(org_id uuid DEFAULT NULL) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_bridge.authorize(org_id) $$;
+CREATE FUNCTION public.inbox_authorize_sync(org_id uuid DEFAULT NULL) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_bridge.authorize_serving(org_id) $$;
 CREATE FUNCTION public.inbox_create_workset(org_id uuid,filter jsonb,"limit" integer,replaces_scope_id uuid DEFAULT NULL) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_bridge.create_scope(org_id,filter,"limit",replaces_scope_id) $$;
 CREATE FUNCTION public.inbox_get_sync_scope(scope_id uuid) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_bridge.get_scope(scope_id) $$;
 CREATE FUNCTION public.inbox_bind_sync_handle(scope_id uuid,partition_index integer,expected_handle text,next_handle text) RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_bridge.bind_handle(scope_id,partition_index,expected_handle,next_handle) $$;
@@ -1658,9 +1666,9 @@ $$;
 CREATE FUNCTION public.inbox_counts_v2(org_id uuid,filter jsonb) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
 DECLARE a jsonb;after_access jsonb;f jsonb;result jsonb;
 BEGIN
- a:=inbox_bridge.authorize(org_id);f:=inbox_bridge.normalize_filter(filter);
+ a:=inbox_bridge.authorize_serving(org_id);f:=inbox_bridge.normalize_filter(filter);
  SELECT inbox_bridge.counts_typed(org_id,(a->>'user_id')::uuid,f) INTO result;
- after_access:=inbox_bridge.authorize(org_id);
+ after_access:=inbox_bridge.authorize_serving(org_id);
  IF (after_access->>'user_id',after_access->>'session_id',after_access->>'access_epoch') IS DISTINCT FROM (a->>'user_id',a->>'session_id',a->>'access_epoch') THEN RAISE EXCEPTION 'INBOX_ACCESS_CHANGED' USING ERRCODE='42501';END IF;
  RETURN jsonb_build_object('counts',result,'as_of',statement_timestamp(),'access_epoch',a->>'access_epoch');
 END $$;
@@ -1670,10 +1678,10 @@ DECLARE a jsonb;u uuid;sid uuid;e bigint;now_at timestamptz;prior inbox_bridge.w
 BEGIN
  f:=inbox_bridge.normalize_filter(filter);
  IF n IS NULL OR n<1 OR n>500 THEN RAISE EXCEPTION 'INBOX_INVALID_WORKSET' USING ERRCODE='22023';END IF;
- a:=inbox_bridge.authorize(o);u:=(a->>'user_id')::uuid;sid:=(a->>'session_id')::uuid;
+ a:=inbox_bridge.authorize_serving(o);u:=(a->>'user_id')::uuid;sid:=(a->>'session_id')::uuid;
  -- Persistent actor row serializes generation allocation, access capture, and replacement.
  PERFORM 1 FROM inbox_bridge.access_epochs WHERE user_id=u FOR UPDATE;
- a:=inbox_bridge.authorize(o);e:=(a->>'access_epoch')::bigint;now_at:=clock_timestamp();
+ a:=inbox_bridge.authorize_serving(o);e:=(a->>'access_epoch')::bigint;now_at:=clock_timestamp();
  SELECT max(generation),max(created_at) INTO gen,last_at FROM inbox_bridge.worksets WHERE user_id=u AND session_id=sid;
  IF last_at>now_at-interval '1 second' THEN RAISE EXCEPTION 'INBOX_GENERATION_RATE' USING ERRCODE='55000';END IF;
  IF replaces IS NOT NULL THEN
@@ -1757,9 +1765,9 @@ $$;
 CREATE FUNCTION public.inbox_outcome_counts_v1(org_id uuid,filter jsonb) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path='' AS $$
 DECLARE a jsonb;after_access jsonb;f jsonb;result jsonb;
 BEGIN
- a:=inbox_bridge.authorize(org_id);f:=inbox_bridge.normalize_filter(filter);
+ a:=inbox_bridge.authorize_serving(org_id);f:=inbox_bridge.normalize_filter(filter);
  SELECT inbox_bridge.outcome_counts(org_id,(a->>'user_id')::uuid,f) INTO result;
- after_access:=inbox_bridge.authorize(org_id);
+ after_access:=inbox_bridge.authorize_serving(org_id);
  IF (after_access->>'user_id',after_access->>'session_id',after_access->>'access_epoch') IS DISTINCT FROM (a->>'user_id',a->>'session_id',a->>'access_epoch') THEN RAISE EXCEPTION 'INBOX_ACCESS_CHANGED' USING ERRCODE='42501';END IF;
  RETURN result||jsonb_build_object('as_of',statement_timestamp(),'access_epoch',a->>'access_epoch','semantics',jsonb_build_object('known','recent_known_conversations','hide_noise',(f->>'hide_noise')::boolean,'search',f->'search','unknown','active_unknown_ignores_known_search','unit','conversation','view','all'));
 END $$;
@@ -1837,6 +1845,74 @@ BEGIN
  RETURN n;
 END $$;
 REVOKE ALL ON FUNCTION inbox_control.prune_expired_worksets(integer,integer) FROM PUBLIC,anon,authenticated,service_role;
+-- Compiler-owned admission contract for command RPCs.
+--
+-- This packet deliberately has no application grants and no production
+-- enablement.  An authenticated command must pass both the normal
+-- session/membership authority and this independent family/cohort gate.  The
+-- actor is always derived from the verified request context; there is no
+-- caller-supplied user id to trust.
+CREATE TABLE inbox_control.command_admission(
+ command_family text PRIMARY KEY CHECK(command_family IN (
+  'action_prepare','action_accept','action_saved_read','action_saved_write',
+  'reply_prepare','reply_accept'
+ )),
+ enabled boolean NOT NULL DEFAULT false,
+ cohort_mode text NOT NULL DEFAULT 'pilot' CHECK(cohort_mode IN ('pilot','all')),
+ updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+INSERT INTO inbox_control.command_admission(command_family)
+VALUES ('action_prepare'),('action_accept'),('action_saved_read'),
+       ('action_saved_write'),('reply_prepare'),('reply_accept');
+ALTER TABLE inbox_control.command_admission ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON inbox_control.command_admission FROM PUBLIC,anon,authenticated,service_role;
+
+CREATE TABLE inbox_control.command_cohort(
+ command_family text NOT NULL REFERENCES inbox_control.command_admission(command_family),
+ org_id uuid NOT NULL,
+ user_id uuid NOT NULL,
+ enrolled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ PRIMARY KEY(command_family,org_id,user_id)
+);
+ALTER TABLE inbox_control.command_cohort ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON inbox_control.command_cohort FROM PUBLIC,anon,authenticated,service_role;
+
+CREATE FUNCTION inbox_control.admit_command(command_family text) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET statement_timeout='2s' SET lock_timeout='2s' AS $$
+DECLARE a jsonb;actor uuid;org uuid;enabled boolean;mode text;
+BEGIN
+ IF command_family IS NULL OR command_family NOT IN (
+  'action_prepare','action_accept','action_saved_read','action_saved_write',
+  'reply_prepare','reply_accept') THEN
+  RAISE EXCEPTION 'INBOX_COMMAND_UNKNOWN' USING ERRCODE='22023';
+ END IF;
+ -- authorize() verifies role, session, expiry and exactly one active
+ -- membership.  The returned org/user are therefore server-derived and
+ -- cannot be replaced by a JSON/request argument.
+ a:=inbox_bridge.authorize(NULL);
+ actor:=auth.uid();org:=(a->>'org_id')::uuid;
+ IF actor IS NULL OR actor IS DISTINCT FROM (a->>'user_id')::uuid OR org IS NULL THEN
+  RAISE EXCEPTION 'INBOX_AUTH_REQUIRED' USING ERRCODE='42501';
+ END IF;
+ SELECT c.enabled,c.cohort_mode INTO enabled,mode
+ FROM inbox_control.command_admission c
+ WHERE c.command_family=admit_command.command_family;
+ IF NOT FOUND OR NOT enabled THEN
+  RAISE EXCEPTION 'INBOX_COMMAND_DISABLED' USING ERRCODE='55000';
+ END IF;
+ IF mode='all' OR EXISTS(
+  SELECT 1 FROM inbox_control.command_cohort c
+  WHERE c.command_family=admit_command.command_family
+    AND c.org_id=org AND c.user_id=actor
+ ) THEN
+  -- Preserve every verified authority field while adding the admission
+  -- decision.  Callers can compare user/org/session/epoch to authorize().
+  RETURN a||jsonb_build_object('command_family',command_family,'cohort_mode',mode);
+ END IF;
+ RAISE EXCEPTION 'INBOX_COMMAND_NOT_IN_COHORT' USING ERRCODE='42501';
+END $$;
+
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_control FROM PUBLIC,anon,authenticated,service_role;
 -- Production candidate has only explicitly reviewed public API entry points.
 -- SECURITY DEFINER internal calls retain owner access; dedicated worker grants are separate.
 DO $$ DECLARE n text; BEGIN

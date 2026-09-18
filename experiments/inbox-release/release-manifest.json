@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "candidate": {
+    "base_commit": "36ee3f8c",
+    "production_install_dir": "experiments/inbox-production-install",
+    "serving_enabled": false,
+    "provider_traffic": "forbidden",
+    "deployment": "forbidden"
+  },
+  "review_requirements": {
+    "exact_head_approval": "Opus 5",
+    "reset_on_new_commit": true,
+    "coordinator_gate_required": true
+  },
+  "dependencies": [
+    {
+      "id": "PR611",
+      "head": "4f7a0c331eeb4d263828d517ec3dbd5cc392f1d5",
+      "role": "installed-catalog verifier and installer CI",
+      "required_for": ["installed_schema_exact"],
+      "status": "unmerged"
+    },
+    {
+      "id": "PR607",
+      "head": "b2e1313f43b7be5a306e876b73faebeaf6088d58",
+      "role": "per-item projection poison tolerance",
+      "required_for": ["worker_recovery"],
+      "status": "unmerged"
+    },
+    {
+      "id": "PR606",
+      "head": "4c6d490800d51becaf2ad0174f9e1426e9e94b1b",
+      "role": "Next/relay token parity and owned-local proof",
+      "required_for": ["relay_parity"],
+      "status": "unmerged"
+    },
+    {
+      "id": "PR610",
+      "head": "854304dabd236e830545884b1564d5a0f2dedfbe",
+      "role": "per-user pilot cohort gate",
+      "required_for": ["pilot_enablement"],
+      "status": "unmerged"
+    }
+  ],
+  "budgets": {
+    "first_open_p95_ms": 1000,
+    "revisit_p95_ms": 200,
+    "selection_p95_ms": 100,
+    "bulk_reply_recipient_cap": 50,
+    "sample_minimum": 10
+  },
+  "required_gates": [
+    "candidate_package",
+    "service_unit_checks",
+    "installed_schema_exact",
+    "acceptance_matrix",
+    "current_volume_stress",
+    "three_x_volume_stress",
+    "worker_recovery",
+    "relay_parity",
+    "rollback_receipt_read",
+    "pilot_enablement"
+  ],
+  "source_manifest": {
+    "path": "experiments/inbox-production-install/source-manifest.json",
+    "mode": "exact_sha256"
+  },
+  "fixture_manifests": {
+    "http": "experiments/inbox-release/http-stack-manifest.json",
+    "execution": "experiments/inbox-release/execution-stack-manifest.json",
+    "backend_operation_reply": "experiments/inbox-release/backend-operation-reply-manifest.json"
+  },
+  "command_admission": {
+    "families": [
+      "action_prepare",
+      "action_accept",
+      "action_saved_read",
+      "action_saved_write",
+      "reply_prepare",
+      "reply_accept"
+    ],
+    "actor": "server-derived auth.uid plus verified session/membership",
+    "rollback": "disable all families atomically while receipt/status/recovery omit admission"
+  },
+  "fixture_policy": {
+    "original_container": "sandra-inbox-projection-t2-db",
+    "original_database": "sandra_inbox_install_20260913",
+    "original_database_owner": "backend",
+    "release_database": "sandra_inbox_release_20260917",
+    "release_database_owner": "release-infra",
+    "network": "none",
+    "http_fixture": {
+      "owner": "release-infra",
+      "marker": "sandra-inbox-release-http-owned-20260917",
+      "network": "sandra-inbox-release-http-20260917",
+      "api": "http://127.0.0.1:54321",
+      "database": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+      "baseline_owner_org": "00000000-0000-0000-0000-000000000bbb"
+    },
+    "shared_http_stack_excluded": true,
+    "must_have_marker": "sandra-inbox-release-owned-synthetic",
+    "must_not_reset_existing_database": true
+  }
+}

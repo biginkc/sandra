@@ -24,6 +24,10 @@ for entry in manifest:
  if rename_prefix:
   s=s.replace(rename_prefix,'inbox_')
   if rename_prefix in s:raise RuntimeError('Untranslated fixture reference: '+entry['source_file'])
+ # Read/history RPCs are serving callers.  The bridge's base authorize()
+ # remains available to receipt/recovery adapters during rollback; these
+ # reviewed read callers must retain the independent serving admission.
+ s=s.replace('inbox_bridge.authorize(', 'inbox_bridge.authorize_serving(')
  if entry.get('concurrent_index'):
   concurrent_indexes.extend(q.replace('CREATE INDEX ','CREATE INDEX CONCURRENTLY ',1) for q in re.findall(r'CREATE INDEX \w+ ON public\.\w+[^;]*;',s))
   s=re.sub(r'CREATE INDEX \w+ ON public\.\w+[^;]*;','-- Canonical index moved to separate concurrent packet.',s)
