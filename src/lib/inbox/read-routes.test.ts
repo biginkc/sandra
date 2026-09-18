@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
-const mocks = vi.hoisted(() => ({ createClient: vi.fn(), rpc: vi.fn(), getUser: vi.fn() }));
+const mocks = vi.hoisted(() => ({ createClient: vi.fn(), rpc: vi.fn(), getUser: vi.fn(), memberships: vi.fn() }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: mocks.createClient }));
+vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow: mocks.memberships }));
 import { GET } from "@/app/api/inbox/conversations/[conversationId]/detail/route";
 import { POST } from "@/app/api/inbox/read-acknowledgments/route";
 const boundaryId = "33333333-3333-3333-3333-333333333333";
@@ -17,6 +18,7 @@ beforeEach(() => {
   vi.stubEnv("INBOX_WORKSPACE_PILOT_USER_IDS", pilotUserId);
   mocks.createClient.mockResolvedValue({ rpc: mocks.rpc, auth: { getUser: mocks.getUser } });
   mocks.getUser.mockResolvedValue({ data: { user: { id: pilotUserId } } });
+  mocks.memberships.mockResolvedValue([{ user_id: pilotUserId, org_id: pilotUserId, role: "owner", acquisitions_enabled: false, access_status: "active" }]);
   mocks.rpc.mockImplementation(() => ({ abortSignal: async () => ({ data: { boundary_id: boundaryId, batch: 0, changed: 1, completed: true }, error: null }) }));
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
