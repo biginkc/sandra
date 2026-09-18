@@ -1,7 +1,8 @@
 {
   "status": "RELEASE_CANDIDATE_WITH_BLOCKED_RUNTIME_AND_STRESS_GATES",
-  "candidate_sha": "68555650bb5b09b9d2f01a4c0429da1f12c91840",
-  "evidence_scope": "This packet records the exact source snapshot exercised by the owned browser and SQL proofs. Packet and evidence metadata commits follow that source snapshot; no production claim is made.",
+  "candidate_sha": "a656f3847f6775b960446155f6cd8708736dad60",
+  "source_snapshot_sha": "68555650bb5b09b9d2f01a4c0429da1f12c91840",
+  "evidence_scope": "Owned browser, SQL, and cleanup proofs ran at candidate_sha. The generated operation/reply packet is intentionally pinned to source_snapshot_sha; every SQL/runtime path listed by the backend and execution manifests is byte-identical between those commits. This evidence file is metadata only and does not claim production deployment.",
   "flags": {
     "production_inbox_actions_server_enabled": "off",
     "production_inbox_replies_server_enabled": "off",
@@ -19,7 +20,8 @@
   },
   "gates": {
     "source_manifest": "PASS",
-    "acceptance_matrix": "PASS: 50 artifact-backed rows from the complete 52-test owned browser matrix; teardown completed cleanly",
+    "acceptance_matrix": "PASS at candidate_sha: 50 artifact-backed rows from the complete 52-test owned browser matrix; teardown completed cleanly",
+    "backend_packet_provenance": "PASS: packet source_snapshot_sha is the reviewed backend snapshot and current manifest hashes match it at candidate_sha",
     "http_stack_probe": "PASS: authenticated RPCs, WebSocket 101, projection health",
     "saved_action_fixture_reconciliation": "PASS: owned T2 SQL proof reconciled the validator and completed immutable/scoping/reference/guard checks",
     "worker_recovery": "BLOCKED: release-gate recovery evidence was not produced for this source snapshot",
@@ -29,7 +31,7 @@
   "validation": {
     "release_unit_tests": "PASS: 43 tests",
     "production_install_unit_tests": "PASS: 15 tests",
-    "inbox_vitest": "PASS: 571 tests",
+    "inbox_vitest": "PASS: 571 tests across 36 files (src/lib/inbox subset: 567 tests)",
     "typecheck": "PASS",
     "realtime_bootstrap_tests": "PASS: 23 tests",
     "realtime_cdc_tests": "PASS: 8 tests",
