@@ -23,7 +23,7 @@ jobs:
           python-version: '3.12'
       # DB-less determinism gate. This calls the same verifier entry point as
       # the native installed proof; --source-only stops after its hash-pinned
-      # source/AST/compiler checks and never opens a database. Keeping one
+      # source/AST/compiler/receipt checks and never opens a database. Keeping one
       # implementation prevents the CI prefix from drifting away from the
       # verifier's actual source manifest and compiler inputs.
       - name: Source-manifest + compiler determinism (DB-less)
@@ -31,7 +31,8 @@ jobs:
         run: |
           python3 verify.py --source-only
       # --- verify.py --installed, verify.py --selftest, and
-      # verify-mutation-harness.py --owned-fixture (41 cases) are all NOT
+      # verify-mutation-harness.py --owned-fixture (40 mutation cases plus a
+      # clean baseline) are all NOT
       # run in this job. Rounds 2-3 ran --selftest here DB-lessly (it
       # exercised pure text-normalization functions -- bool_ast, proconfig
       # parsing -- with no live catalog needed). Round 4 (Astra NO/4)
@@ -77,8 +78,9 @@ jobs:
       # Both proofs are produced locally instead: `verify.py --selftest`
       # (run manually against the owned fixture before every push) and
       # verify-mutation-harness.py --owned-fixture, whose result is
-      # committed in verify-mutation-harness-evidence.json (currently 41
-      # cases, including table_owner_changed, table_acl_grant_added,
+      # committed in verify-mutation-harness-evidence.json (currently 40
+      # mutation cases; the harness also records a clean baseline before them),
+      # including table_owner_changed, table_acl_grant_added,
       # table_set_unlogged, table_rewrite_rule_added and
       # table_policy_and_extra_trigger_added from this round -- round 6
       # closed the RELATION-level class the same way round 4 closed the
@@ -90,4 +92,4 @@ jobs:
       # object scan being scoped to private schemas only).
       - name: Record known CI scope gap
         run: |
-          echo "verify.py --installed, verify.py --selftest, and verify-mutation-harness.py --owned-fixture (live-catalog proof, 41 cases) all require the locally-pinned T2 fixture (see guards.py) and are not run in this job -- Postgres-canonical-deparse comparison has no DB-less form. Both are run locally before every push; see workflow comments." >> "$GITHUB_STEP_SUMMARY"
+          echo "verify.py --installed, verify.py --selftest, and verify-mutation-harness.py --owned-fixture (live-catalog proof: 40 mutation cases plus a clean baseline) all require the locally-pinned T2 fixture (see guards.py) and are not run in this job -- Postgres-canonical-deparse comparison has no DB-less form. Both are run locally before every push; see workflow comments." >> "$GITHUB_STEP_SUMMARY"

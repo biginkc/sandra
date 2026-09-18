@@ -7,6 +7,7 @@ can replace the canonical JSON, and the installer owner is derived from the
 reviewed build contract rather than from the live catalog.
 """
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -47,6 +48,18 @@ def load(name):
 
 
 def source_check():
+    manifest = load('source-manifest.json')
+    for name, digest in manifest.items():
+        # This receipt is deliberately pinned by verify.py after a fresh
+        # guarded catalog read.  Skipping it here avoids a deadlock where a
+        # changed generator cannot regenerate the receipt because its old
+        # generator hash is still present in the manifest.
+        if name == 'catalog-pin-provenance.json':
+            continue
+        if hashlib.sha256((P / name).read_bytes()).hexdigest() != digest:
+            raise RuntimeError('Bundle source manifest drift: ' + name)
+    for path in P.glob('*.py'):
+        ast.parse(path.read_text(), filename=str(path))
     owner = installer_owner()
     owner_pins = load('function-owners.json')
     relation_owners = load('relation-owners.json')
@@ -57,7 +70,13 @@ def source_check():
     contract = load('column-acl.json')
     if contract.get('contract') != 'no-column-specific-grants':
         raise RuntimeError('column-acl.json must declare no-column-specific-grants')
-    subprocess.run([sys.executable, str(P / 'verify.py'), '--source-only'], cwd=P, check=True)
+    # Keep regeneration possible when this generator itself changes: the
+    # source-only verifier validates the live provenance receipt, which must be
+    # regenerated after a generator change.  These compiler checks are the
+    # DB-less prerequisites needed before that read-only native regeneration;
+    # verify.py --source-only remains the CI admission gate.
+    subprocess.run([sys.executable, str(P / 'build.py')], cwd=P, check=True)
+    subprocess.run([sys.executable, str(P / 'read-companion.py')], cwd=P, check=True)
     candidate = (P / 'generated/install-candidate.sql').read_text()
     if re.search(r'\bGRANT\s+[A-Z ,]+\([^)]*\)\s+ON\s+', candidate, re.I):
         raise RuntimeError('Candidate contains column-specific GRANT syntax but the reviewed contract is empty')
@@ -159,7 +178,20 @@ def verify_scope(snapshot, owner):
     }
 
 
-def write_outputs(outputs, owner, source_sha):
+def snapshot_sha256(snapshot):
+    """Hash the complete catalog snapshot returned by the guarded read.
+
+    The reduced pin files intentionally retain only the owner/ACL facts needed
+    by the installer.  Provenance must still identify the complete observed
+    catalog read, so hashing ``outputs`` here would falsely certify a snapshot
+    after unrelated catalog fields disappeared during reduction.
+    """
+    return hashlib.sha256(
+        json.dumps(snapshot, sort_keys=True, separators=(',', ':')).encode()
+    ).hexdigest()
+
+
+def write_outputs(outputs, owner, source_sha, observed_snapshot_sha):
     out = a.output_dir.resolve()
     out.mkdir(parents=True, exist_ok=True)
     files = {
@@ -181,7 +213,8 @@ def write_outputs(outputs, owner, source_sha):
         'generator_sha256': hashlib.sha256((P / 'generate-catalog-pins.py').read_bytes()).hexdigest(),
         'installer_owner': owner,
         'candidate_sha256': source_sha,
-        'catalog_snapshot_sha256': hashlib.sha256(snapshot).hexdigest(),
+        'catalog_snapshot_sha256': observed_snapshot_sha,
+        'pin_output_sha256': hashlib.sha256(snapshot).hexdigest(),
         'scope': 'Guarded native fixture catalog read; no database writes; existing pins matched before replacement',
     }
     (out / 'catalog-pin-provenance.json').write_text(json.dumps(provenance, indent=2, sort_keys=True) + '\n')
@@ -194,8 +227,9 @@ if a.source_only:
     raise SystemExit(0)
 if not a.owned_fixture:
     raise SystemExit('Explicit --owned-fixture required for catalog reads')
-outputs = verify_scope(read_catalog(), owner)
+observed_snapshot = read_catalog()
+outputs = verify_scope(observed_snapshot, owner)
 if a.write:
-    write_outputs(outputs, owner, source_sha)
+    write_outputs(outputs, owner, source_sha, snapshot_sha256(observed_snapshot))
 else:
     print(f'Native catalog pins match reviewed source and installer owner {owner}; use --write to materialize provenance')

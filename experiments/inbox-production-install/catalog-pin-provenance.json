@@ -1,0 +1,9 @@
+{
+  "candidate_sha256": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6",
+  "catalog_snapshot_sha256": "17b7d67643a10db13e68a3fbbb8987f4da6362d3890df45aa0540996c5fc7e96",
+  "generator": "generate-catalog-pins.py",
+  "generator_sha256": "294f8520a2bea024e175ee8217795900a8e3d90c95d8c397addd78f76ec2544a",
+  "installer_owner": "postgres",
+  "pin_output_sha256": "74a7551b75544c8feed74386aad3faf5c1e342f0958de7ce6ba03db00a4a49a8",
+  "scope": "Guarded native fixture catalog read; no database writes; existing pins matched before replacement"
+}

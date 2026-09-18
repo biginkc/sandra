@@ -44,15 +44,65 @@ if any(value!=INSTALLER_OWNER for value in json.loads((P/'relation-owners.json')
  raise RuntimeError('relation-owners.json contains a value outside the installer owner contract')
 if re.search(r'\bGRANT\s+[A-Z ,]+\([^)]*\)\s+ON\s+',cand+'\n'+companion,re.I):
  raise RuntimeError('Source candidate contains column-specific GRANT syntax but column-acl.json declares no-column-specific-grants')
+
+def receipt_contract(candidate_sha):
+ # The DB-less gate must reject a source bundle whose installed receipt or
+ # catalog-pin provenance is absent, stale, or malformed.  The catalog hash is
+ # produced from the complete guarded read by generate-catalog-pins.py; this
+ # gate validates its binding to the exact candidate and generator, while the
+ # installed verifier remains responsible for the live catalog comparison.
+ install_path=P/'install-evidence.json'
+ provenance_path=P/'catalog-pin-provenance.json'
+ if not install_path.exists():
+  raise RuntimeError('Missing install-evidence.json; source-only cannot certify an unrecorded installation')
+ if not provenance_path.exists():
+  raise RuntimeError('Missing catalog-pin-provenance.json; source-only cannot certify unproven catalog pins')
+ try:
+  install=json.loads(install_path.read_text())
+  provenance=json.loads(provenance_path.read_text())
+ except (OSError,json.JSONDecodeError) as e:
+  raise RuntimeError(f'Unreadable installer receipt/provenance: {e}') from e
+ if install.get('installed') is not True or install.get('serving_enabled') is not False:
+  raise RuntimeError('install-evidence.json must record installed=true and serving_enabled=false')
+ if install.get('source_sha256')!=candidate_sha:
+  raise RuntimeError('install-evidence.json source_sha256 does not match generated candidate')
+ if provenance.get('generator')!='generate-catalog-pins.py':
+  raise RuntimeError('catalog-pin-provenance.json generator identity drift')
+ generator_sha=hashlib.sha256((P/'generate-catalog-pins.py').read_bytes()).hexdigest()
+ if provenance.get('generator_sha256')!=generator_sha:
+  raise RuntimeError('catalog-pin-provenance.json generator_sha256 does not match this source')
+ if provenance.get('installer_owner')!=INSTALLER_OWNER:
+  raise RuntimeError('catalog-pin-provenance.json installer owner drift')
+ if provenance.get('candidate_sha256')!=candidate_sha:
+  raise RuntimeError('catalog-pin-provenance.json candidate_sha256 does not match generated candidate')
+ for key in ('catalog_snapshot_sha256','pin_output_sha256'):
+  value=provenance.get(key)
+  if not isinstance(value,str) or re.fullmatch(r'[0-9a-f]{64}',value) is None:
+   raise RuntimeError(f'catalog-pin-provenance.json {key} must be a SHA-256 digest')
+ try:
+  pin_outputs={
+   'function_owners':json.loads((P/'function-owners.json').read_text()),
+   'function_grants':json.loads((P/'function-grants.json').read_text()),
+   'relation_owners':json.loads((P/'relation-owners.json').read_text()),
+   'relation_acls':json.loads((P/'relation-acl.json').read_text()),
+   'column_acls':column_acl_contract.get('columns',{}),
+  }
+ except (OSError,json.JSONDecodeError,AttributeError) as e:
+  raise RuntimeError(f'Unreadable catalog pin file: {e}') from e
+ pin_output_sha=hashlib.sha256(json.dumps(pin_outputs,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+ if provenance.get('pin_output_sha256')!=pin_output_sha:
+  raise RuntimeError('catalog-pin-provenance.json pin_output_sha256 does not match canonical pin files')
+ return install
+
+receipt=receipt_contract(digest)
 if a.source_only:
- print('Source-manifest hashes match, bundle Python parses, and candidate/read companion compile deterministically (no DB).')
+ print('Source-manifest hashes, compiler outputs, installation receipt, and catalog-pin provenance contract match (no DB).')
  sys.exit(0)
 # The companion (read/history) namespace and the main candidate share the same
 # installed catalog (inbox_* schemas, pinned canonical helpers). All structural
 # checks below are derived from BOTH sources combined, so drift in the companion
 # alone is caught the same way as in the foundation.
 s=cand+'\n'+companion
-receipt=json.loads((P/'install-evidence.json').read_text())
 drifted=receipt['source_sha256']!=digest
 if drifted:
  correction=P/'hardening-evidence.json'

@@ -24,7 +24,7 @@
   "unknown-retention-test.py": "15c027cc365b46d2fdc21e7ff4e0ca6ea74afef21949f8a9c70424a9eb1d99c7",
   "unknown-retention.sql": "974eab36185aa70d78099eb1867e35c741a51bf5b5b0d68155be74e5604e6504",
   "verify-mutation-harness.py": "1a7fcf4aae481a7ee7c0782eee22ae14c3b7764a146b7d901e746075f05f95e0",
-  "verify.py": "ca6e6fba1a6b21fd8fa96bc2a51b2b58bde8d87967b3ce205e954f0406655221",
+  "verify.py": "d8f686fc9d204e65ed47c64d3acf87ad0d79d2c6d1b62542a5e9f9981b0c37e1",
   "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15",
   "selection-review.sql": "8c7d3492ec6766963e2d518d24b221316545f07bc1ba7923f25402dc23802dbd",
   "reviewed-read/06-inbox-workset-updates-setup.sql": "7916e78557da25af1044c6a2c4697be06c48606776a3533ea876b039a2a28106",
@@ -36,6 +36,7 @@
   "function-grants.json": "00e891fa0b42a4efb0d741738fb9b1caaa839c588309ba8ec77cda3aef7fe3b7",
   "relation-owners.json": "aedfbd764a4f31e32f899f8dd94c807265af331db06cb66d2c61ea8a0e78810e",
   "relation-acl.json": "840d2b885da6052c624b91ef8e686c86dd6eded5e758ad006e68487629493bc8",
-  "generate-catalog-pins.py": "f47a231a2e57753cf9ac7803074fef64bc256c1699b128b75952510d0bd13663",
-  "column-acl.json": "5b8231e6ce255137a3d5e1a0d0abb7bf4d6693563eb836eefafc21b4f1050ade"
+  "generate-catalog-pins.py": "294f8520a2bea024e175ee8217795900a8e3d90c95d8c397addd78f76ec2544a",
+  "column-acl.json": "0e2d92be9a0252c009395a4353d7c5723b08f04ae67c5e92752e0f0d8231371a",
+  "catalog-pin-provenance.json": "71b91ff986963ee6e5eb3e4d712c28327199e04d364d7a7c23bee77d47866b34"
 }
