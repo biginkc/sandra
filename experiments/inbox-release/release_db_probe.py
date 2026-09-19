@@ -43,6 +43,9 @@ RECEIPT_EXPECTED_ERRORS: dict[str, tuple[str, ...]] = {
     "public.inbox_recover_reply(uuid,uuid)": ("INBOX_REPLY_PREPARATION_UNAVAILABLE",),
 }
 
+HTTP_PRIOR_SERVING: str | None = None
+HTTP_STATE_NORMALIZED = False
+
 
 class ReceiptProbeError(RuntimeError):
     """The wrapper probe did not produce the expected authenticated outcome."""
@@ -98,6 +101,9 @@ def classify_receipt_probe(signature: str, code: int, output: str, stderr: str) 
 
 
 def fail(message: str) -> int:
+    cleanup_error = restore_http_serving_state()
+    if cleanup_error:
+        message = f"{message}; additionally could not restore serving state: {cleanup_error}"
     print(json.dumps({"status": "FAIL", "detail": message}, indent=2))
     return 1
 
@@ -129,6 +135,22 @@ def sql(statement: str) -> tuple[int, str, str]:
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
+def restore_http_serving_state() -> str | None:
+    global HTTP_STATE_NORMALIZED
+    if TARGET != "http" or not HTTP_STATE_NORMALIZED:
+        return None
+    prior = HTTP_PRIOR_SERVING or "false"
+    code, _, stderr = sql(
+        "UPDATE inbox_control.rollout SET serving_enabled="
+        + ("true" if prior == "true" else "false")
+        + " WHERE singleton;"
+    )
+    if code:
+        return stderr or "restore update failed"
+    HTTP_STATE_NORMALIZED = False
+    return None
+
+
 def main() -> int:
     if DATABASE != EXPECTED_DATABASE:
         return fail("INBOX_RELEASE_DATABASE is not the dedicated release database")
@@ -153,15 +175,6 @@ def main() -> int:
     if details.get("Config", {}).get("Labels", {}).get("purpose") != EXPECTED_PURPOSE:
         return fail("release probe found the wrong container ownership label")
 
-    # The HTTP fixture is explicitly owned by the release harness.  Normalize
-    # its admission row before the identity check so rerunning this probe after
-    # a prior rollback does not consume its own precondition.  The actual
-    # rollback assertion below remains transactional and is rolled back.
-    if TARGET == "http":
-        code, _, stderr = sql("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton;")
-        if code:
-            return fail(f"could not normalize owned HTTP fixture serving state: {stderr}")
-
     code, identity, stderr = sql(
         "SELECT current_database() || '|' || "
         "coalesce((SELECT marker FROM install_fixture.identity LIMIT 1),'') || '|' || "
@@ -169,8 +182,29 @@ def main() -> int:
     )
     if code:
         return fail(f"release database identity query failed: {stderr}")
-    expected_identity = f"{EXPECTED_DATABASE}|{EXPECTED_MARKER}|{EXPECTED_INITIAL_SERVING}"
-    if identity != expected_identity:
+    identity_parts = identity.split("|")
+    if len(identity_parts) != 3 or identity_parts[:2] != [EXPECTED_DATABASE, EXPECTED_MARKER]:
+        return fail(f"wrong release database identity: {identity!r}")
+    if TARGET == "http":
+        global HTTP_PRIOR_SERVING, HTTP_STATE_NORMALIZED
+        if identity_parts[2] not in {"true", "false"}:
+            return fail(f"HTTP fixture serving state is invalid: {identity!r}")
+        HTTP_PRIOR_SERVING = identity_parts[2]
+        # The HTTP fixture is explicitly owned by the release harness. Normalize
+        # its admission row before the rollback assertion so a prior run cannot
+        # consume its own precondition; restore the captured state on every exit.
+        code, _, stderr = sql("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton;")
+        if code:
+            return fail(f"could not normalize owned HTTP fixture serving state: {stderr}")
+        HTTP_STATE_NORMALIZED = True
+        code, identity, stderr = sql(
+            "SELECT current_database() || '|' || "
+            "coalesce((SELECT marker FROM install_fixture.identity LIMIT 1),'') || '|' || "
+            "coalesce((SELECT serving_enabled::text FROM inbox_control.rollout WHERE singleton),'missing');"
+        )
+        if code or identity != f"{EXPECTED_DATABASE}|{EXPECTED_MARKER}|true":
+            return fail(f"HTTP fixture normalization did not produce the owned serving state: {stderr or identity!r}")
+    elif identity != f"{EXPECTED_DATABASE}|{EXPECTED_MARKER}|{EXPECTED_INITIAL_SERVING}":
         return fail(f"wrong release database identity or serving state: {identity!r}")
 
     # With serving disabled, this direct authenticated-domain RPC must fail
@@ -298,6 +332,9 @@ def main() -> int:
             else "rollback direct read proof passed; " + direct_prepare_detail + "; receipt/status/recovery=" + ("verified" if receipt_checks else "not installed")
         ),
     }
+    restore_error = restore_http_serving_state()
+    if restore_error:
+        return fail(f"rollback probe could not restore the captured HTTP serving state: {restore_error}")
     print(json.dumps(result, indent=2))
     return 0 if result["status"] == "PASS" else 3
 

@@ -26,6 +26,8 @@ class ReleaseDbProbeTests(unittest.TestCase):
         source = (HERE / "release_db_probe.py").read_text()
         self.assertIn('if TARGET == "http":', source)
         self.assertIn("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton", source)
+        self.assertIn("restore_http_serving_state", source)
+        self.assertIn("HTTP_PRIOR_SERVING", source)
     def test_privileged_fixture_setup_precedes_authenticated_role(self):
         script = module.receipt_probe_sql(
             "11111111-1111-4111-8111-111111111111",
