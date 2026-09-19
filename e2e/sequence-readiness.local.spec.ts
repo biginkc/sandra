@@ -688,7 +688,7 @@ test.describe("sequence readiness — local browser contract", () => {
 
     const sequenceName = `Browser SMS ${Date.now()}`;
     const sequenceId = await createSequence(page, sequenceName);
-    const body = "Hello from the local sequence readiness lane";
+    const body = "Mel with BMH — hello from the local sequence readiness lane";
     await addSmsStep(page, sequenceId, body);
     await addStatusStep(page, sequenceId, 2);
     const { propertyId } = await seedLead(admin, "sms");
