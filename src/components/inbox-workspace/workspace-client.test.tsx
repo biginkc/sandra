@@ -138,10 +138,21 @@ it("does not let an abandoned automatic retry publish after the workspace remoun
   const stale = state.resolveDeferredWorkset!;
   cleanup();
   state.replacements = [];
-  await loaded();
-  const replacementsAfterRemount = state.replacements.length;
   await act(async () => stale());
-  expect(state.replacements).toHaveLength(replacementsAfterRemount);
+  await loaded();
+  expect(state.replacements).toHaveLength(1);
+});
+
+it("remembers a scope committed after the component unmounts", async () => {
+  state.deferNextWorkset = true;
+  render(<InboxWorkspaceClient identity={identity} initialFilter={{ view: "all", hide_noise: true }} />);
+  await waitFor(() => expect(state.resolveDeferredWorkset).toBeTruthy());
+  const resolveStale = state.resolveDeferredWorkset!;
+  cleanup();
+  await act(async () => resolveStale());
+  state.replacements = [];
+  await loaded();
+  expect(state.worksetBodies.at(-1)?.replacesScopeId).toBe(scopeId);
 });
 
 it("selection never fetches history; opening and revisiting use the bounded detail cache", async () => {

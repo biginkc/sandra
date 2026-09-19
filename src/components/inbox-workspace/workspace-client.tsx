@@ -23,6 +23,11 @@ type WorksetUpdates = { scopeId: string; orgId: string; requesterId: string; ses
 type SelectionReviewBackendItem = { kind: "conversation" | "unknown_sender_group"; id: string; status: "matching" | "outside_filter" | "unavailable"; name: string | null };
 type SelectionReviewItem = { id: WorkspaceId; status: "matching_loaded" | "matching_unloaded" | "outside_filter" | "unavailable"; name: string };
 type SelectionReviewState = { status: "loading" | "ready" | "error"; generation: string; ids: readonly WorkspaceId[]; filter: InboxFilter; items: SelectionReviewItem[]; error?: string };
+type WorksetFlight = { tail: Promise<void>; latestScopeId: string | null; pending: number };
+const worksetFlights = new Map<string, WorksetFlight>();
+function worksetFlightKey(identity: InboxQueryIdentity): string {
+  return [identity.orgId, identity.userId, identity.sessionId, identity.accessEpoch].join(":");
+}
 class InboxResponseError extends Error {
   constructor(readonly status: number, message: string, readonly retryAfterMs: number | null = null) { super(message); }
 }
@@ -52,6 +57,35 @@ function storeWorksetId(identity: InboxQueryIdentity, scopeId: string): void {
 function clearStoredWorksetId(identity: InboxQueryIdentity): void {
   if (typeof window === "undefined") return;
   try { window.sessionStorage.removeItem(worksetStorageKey(identity)); } catch { /* storage is an optional reload optimization */ }
+}
+async function enqueueWorkset(identity: InboxQueryIdentity, create: (replacesScopeId: string | null, signal: AbortSignal) => Promise<Scope>): Promise<Scope> {
+  const key = worksetFlightKey(identity);
+  let flight = worksetFlights.get(key);
+  if (!flight) {
+    flight = { tail: Promise.resolve(), latestScopeId: null, pending: 0 };
+    worksetFlights.set(key, flight);
+  }
+  // Keep the hint while a request is still in flight so a remount can inherit
+  // its committed scope; reset it between independent tab/test lifetimes.
+  if (flight.pending === 0 && !readStoredWorksetId(identity)) flight.latestScopeId = null;
+  flight.pending++;
+  const run = flight.tail.then(async () => {
+    const controller = new AbortController();
+    const value = await create(flight!.latestScopeId ?? readStoredWorksetId(identity), controller.signal);
+    // Persist every committed scope even if the component that started it has
+    // unmounted. The next request can then replace it instead of leaking a
+    // live generation behind the server's two-generation cap.
+    flight!.latestScopeId = value.scopeId;
+    storeWorksetId(identity, value.scopeId);
+    return value;
+  });
+  flight.tail = run.then(() => undefined, () => undefined);
+  try {
+    return await run;
+  } finally {
+    flight.pending--;
+    if (flight.pending === 0) worksetFlights.delete(key);
+  }
 }
 
 function newSelectionReviewGeneration(): string {
@@ -140,7 +174,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const accessLost = useCallback(() => {
     if (denied.current) return;
     denied.current = true; sequence.current++;
-    request.current?.abort(); clearActions.current(); cache.close();
+    clearActions.current(); cache.close();
     if (worksetCooldownTimer.current) clearTimeout(worksetCooldownTimer.current);
     worksetCooldownTimer.current = null; pendingFilter.current = null;
     clearStoredWorksetId(identity);
@@ -208,7 +242,6 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     pendingFilter.current = next;
     selectionReviewSequence.current++; selectionReviewRequest.current?.abort(); selectionReviewRequest.current = null; setReview(false); setSelectionReview(null);
     worksetUpdateSequence.current++; worksetUpdateRequest.current?.abort(); worksetUpdateRequest.current = null; setPageScope(null); setWorksetUpdateLabel(undefined); setWorksetUpdateError(false);
-    request.current?.abort();
     const controller = new AbortController(); request.current = controller;
     // Keep the last authorized resident rows mounted while a replacement scope is
     // being created. Workset creation is rate limited, so a fast filter change may
@@ -217,7 +250,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     // replacement below remains the only point that swaps the resident page.
     setBusy(true); setError(undefined);
     try {
-      const value = await json<Scope>("/api/inbox/worksets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orgId: identity.orgId, filter: next, cursor, limit: 500, ...(scope.current ? { replacesScopeId: scope.current.scopeId } : {}) }) }, controller.signal);
+      const value = await enqueueWorkset(identity, (replacesScopeId, signal) => json<Scope>("/api/inbox/worksets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orgId: identity.orgId, filter: next, cursor, limit: 500, ...(replacesScopeId ? { replacesScopeId } : {}) }) }, signal));
       if (controller.signal.aborted || loadToken !== worksetLoadSequence.current) return;
       if (value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch) { accessLost(); return; }
       if (!(value.nextCursor === null || typeof value.nextCursor === "string") || typeof value.refreshed !== "boolean" || typeof value.generation !== "string" || value.generation.length === 0) throw Error("Invalid workspace response");
@@ -291,7 +324,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     void load(initialFilter);
     const expiry = setTimeout(accessLost, Math.max(0, identity.expiresAt - Date.now()));
     return () => {
-      invalidateViews(); worksetLoadSequence.current++; request.current?.abort(); abortSelectionReview(selectionReviewSequence, selectionReviewRequest); abortWorksetUpdates(worksetUpdateSequence, worksetUpdateRequest); if (worksetCooldownTimer.current) clearTimeout(worksetCooldownTimer.current); worksetCooldownTimer.current = null; pendingFilter.current = null; clearTimeout(expiry); adapter.reset(); sync.current = null;
+      invalidateViews(); worksetLoadSequence.current++; abortSelectionReview(selectionReviewSequence, selectionReviewRequest); abortWorksetUpdates(worksetUpdateSequence, worksetUpdateRequest); if (worksetCooldownTimer.current) clearTimeout(worksetCooldownTimer.current); worksetCooldownTimer.current = null; pendingFilter.current = null; clearTimeout(expiry); adapter.reset(); sync.current = null;
       // React Strict Mode immediately installs another owned adapter; a real
       // unmount closes the cache once that synchronous replay is complete.
       queueMicrotask(() => { if (sync.current === null) cache.close(); });
