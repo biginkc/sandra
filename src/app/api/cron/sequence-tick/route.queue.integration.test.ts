@@ -109,7 +109,11 @@ async function seedQueuedMessage(opts: {
       from_address:
         opts.fromPhone === undefined ? MOCK_SENDER_PRIMARY : opts.fromPhone,
       to_address: opts.toPhone,
-      body: body.includes("Mel with BMH") ? body : `Mel with BMH: ${body}`,
+      body: body.includes("Mel with BMH")
+        ? body
+        : body.startsWith("FAIL-")
+          ? body.replace(/^(FAIL-[A-Z_]+)/, "$1: Mel with BMH")
+          : `Mel with BMH: ${body}`,
       scheduled_for: opts.scheduledFor?.toISOString() ?? null,
       metadata: opts.metadata ?? null,
     })
