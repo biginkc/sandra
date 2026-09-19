@@ -580,6 +580,26 @@ describe("native quiet-hours and explicit recovery", () => {
     setApplicationTimeAfterPersistedDue(repairedSchedule.next_run_at!);
 
     const repaired = await runSequenceTick(supabase);
+    if (repaired.outcomes.sent !== 1) {
+      const [enrollmentState, runs, messages] = await Promise.all([
+        loadEnrollment(enrollmentId),
+        readStepRuns(enrollmentId),
+        supabase
+          .from("messages")
+          .select("status, error_message, from_address, external_id")
+          .eq("property_id", lead.propertyId),
+      ]);
+      throw new Error(
+        JSON.stringify({
+          repaired,
+          enrollmentState,
+          runs,
+          messages: messages.data,
+          messagesError: messages.error?.message,
+          mockLog: getMockMessageLog(),
+        }),
+      );
+    }
     expect(repaired).toMatchObject({ outcomes: { sent: 1 } });
     expect(getMockMessageLog()).toHaveLength(1);
     expect(getMockMessageLog()[0].input.from).toBe(MOCK_SENDER_PRIMARY);
