@@ -618,6 +618,7 @@ export async function processEnrollmentTick(
         }
         return { status: "paused", enrollmentId: enrollment.id, reason: outcome.reason };
       }
+      case "provider_unknown":
       case "provider_failed":
       case "blocked_provider_off":
       case "property_not_found":
@@ -626,6 +627,8 @@ export async function processEnrollmentTick(
         const deliveryOutcome: SequenceAttemptOutcome =
           outcome.status === "provider_failed"
             ? outcome.deliveryOutcome ?? "unknown"
+            : outcome.status === "provider_unknown"
+              ? "unknown"
             : outcome.status === "db_error"
               ? outcome.deliveryOutcome ??
                 (outcome.externalId ? "accepted" : "not_attempted")
