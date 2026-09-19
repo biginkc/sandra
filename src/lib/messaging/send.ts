@@ -985,7 +985,7 @@ export async function sendSmsToContact(
           status: "db_error",
           messageId: pending.id,
           externalId: result.externalId,
-          deliveryOutcome: "accepted",
+          ...(input.sequenceContext ? { deliveryOutcome: "accepted" as const } : {}),
           error: "The provider accepted the SMS, but its durable receipt could not be recorded. Review before retrying.",
         };
       }
@@ -1014,7 +1014,7 @@ export async function sendSmsToContact(
         status: "db_error",
         messageId: pending.id,
         externalId: result.externalId,
-        deliveryOutcome: "accepted",
+        ...(input.sequenceContext ? { deliveryOutcome: "accepted" as const } : {}),
         error: updateError?.message ?? "message changed while marking sent",
       };
     }
@@ -1045,7 +1045,9 @@ export async function sendSmsToContact(
         status: "db_error",
         messageId: pending.id,
         externalId: acceptedExternalId,
-        deliveryOutcome: acceptedExternalId ? "accepted" : "unknown",
+        ...(input.sequenceContext
+          ? { deliveryOutcome: acceptedExternalId ? ("accepted" as const) : ("unknown" as const) }
+          : {}),
         error: message,
       };
     }
@@ -1109,7 +1111,9 @@ export async function sendSmsToContact(
       status: "provider_failed",
       messageId: pending.id,
       error: message,
-      deliveryOutcome: classifySequenceProviderFailure(e),
+      ...(input.sequenceContext
+        ? { deliveryOutcome: classifySequenceProviderFailure(e) }
+        : {}),
       ...(manualDispatch && !providerCallStarted ? { providerAttempted: false } : {}),
     };
   }

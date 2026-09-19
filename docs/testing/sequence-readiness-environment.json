@@ -5,7 +5,7 @@
     "copiedMigrationsSha256": "2b963e64e820a71b73f42e016ad0df9df9cc131ceb3b3da4e597c4336a13df8a",
     "copiedCriticalMigrations": {
       "018_sequences_v1.sql": "4cbb6c480a9d237c655e8e51cdc08bb7cc16ae82fcab06f5434c38d73bf59f85",
-      "20260917110000_sequence_runtime_recovery.sql": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73"
+      "20260919090000_sequence_runtime_recovery.sql": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73"
     },
     "sourceFiles": {
       "quietHours": {
@@ -41,7 +41,7 @@
         "sha256": "4cbb6c480a9d237c655e8e51cdc08bb7cc16ae82fcab06f5434c38d73bf59f85"
       },
       "runtimeMigration": {
-        "path": "supabase/migrations/20260917110000_sequence_runtime_recovery.sql",
+        "path": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
         "sha256": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73"
       }
     }
@@ -101,7 +101,7 @@
     "reason": "No production inspection was performed by this local runner."
   },
   "criticalConstraint": {
-    "migration": "supabase/migrations/20260917110000_sequence_runtime_recovery.sql",
+    "migration": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
     "index": "idx_step_runs_active_enrollment_step",
     "key": [
       "enrollment_id",
@@ -251,7 +251,7 @@
       {
         "id": "provider_intent_timestamp",
         "sourceKey": "runtimeMigration",
-        "sourcePath": "supabase/migrations/20260917110000_sequence_runtime_recovery.sql",
+        "sourcePath": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
         "function": "authorize_sequence_provider_attempt",
         "predicate": "provider-intent attempt_started_at",
         "clock": "PostgreSQL now()"
@@ -259,7 +259,7 @@
       {
         "id": "retry_resume_schedule",
         "sourceKey": "runtimeMigration",
-        "sourcePath": "supabase/migrations/20260917110000_sequence_runtime_recovery.sql",
+        "sourcePath": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
         "function": "retry_sequence_step, resume_sequence_enrollment",
         "predicate": "explicit recovery next_run_at",
         "clock": "PostgreSQL now()"
@@ -267,7 +267,7 @@
       {
         "id": "stale_claim_reconciliation",
         "sourceKey": "runtimeMigration",
-        "sourcePath": "supabase/migrations/20260917110000_sequence_runtime_recovery.sql",
+        "sourcePath": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
         "function": "retire_stale_sequence_claim",
         "predicate": "bounded stale claim age",
         "clock": "PostgreSQL now()"

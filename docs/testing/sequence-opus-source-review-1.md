@@ -4,7 +4,7 @@ Session: f7b3ec94-5722-4541-806e-570e4e6a2942
 
 # Source Review — Sandra Sequence Reliability (WIP snapshot)
 
-Reviewed: `20260917110000_sequence_runtime_recovery.sql`, `src/lib/sequences/tick.ts`, `src/lib/sequences/enrollment.ts`, `src/lib/messaging/send.ts`, `src/lib/messaging/providers/sendillo.ts`. No tool access; findings derive from the snapshot text only. The three known in-flight fixes (post-provider `db_error`, `markRunSkipped` ambiguity preservation, authenticated audit-field mutation) are not re-listed as findings — where I have materially new detail on them it is called out as such and marked.
+Reviewed: `20260919090000_sequence_runtime_recovery.sql`, `src/lib/sequences/tick.ts`, `src/lib/sequences/enrollment.ts`, `src/lib/messaging/send.ts`, `src/lib/messaging/providers/sendillo.ts`. No tool access; findings derive from the snapshot text only. The three known in-flight fixes (post-provider `db_error`, `markRunSkipped` ambiguity preservation, authenticated audit-field mutation) are not re-listed as findings — where I have materially new detail on them it is called out as such and marked.
 
 The fence design is sound in its core: enrollment lock → claim lock → joint recheck → intent write → immediate provider call, with `unknown` as the default post-authorization state. The defects below are almost all in the *recovery and rollout* surface around that core, not the core itself.
 
@@ -14,7 +14,7 @@ The fence design is sound in its core: enrollment lock → claim lock → joint 
 
 ### 1. Migration backfill marks every historical run row as a live claim, and the column default is wrong for new inserts
 
-`supabase/migrations/20260917110000_sequence_runtime_recovery.sql`, the `alter table ... add column` block.
+`supabase/migrations/20260919090000_sequence_runtime_recovery.sql`, the `alter table ... add column` block.
 
 ```sql
 add column if not exists claim_active boolean not null default true,

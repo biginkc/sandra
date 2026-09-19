@@ -146,7 +146,7 @@ const mutationDefinitions = {
   "unsafe-ambiguous-retry": {
     kind: "migration",
     name: "allow retry of an ambiguous accepted or unknown claim",
-    file: "supabase/migrations/20260917110000_sequence_runtime_recovery.sql",
+    file: "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
     from: "  if prior.id is not null and (\n       prior.attempt_outcome not in ('not_attempted', 'definitively_rejected')\n     ) then",
     to: "  if false then",
     expected: 1,

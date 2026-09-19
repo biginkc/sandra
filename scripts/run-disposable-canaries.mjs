@@ -119,7 +119,7 @@ const CLOCK_AUDIT = [
   {
     id: 'provider_intent_timestamp',
     sourceKey: 'runtimeMigration',
-    sourcePath: 'supabase/migrations/20260917110000_sequence_runtime_recovery.sql',
+    sourcePath: 'supabase/migrations/20260919090000_sequence_runtime_recovery.sql',
     function: 'authorize_sequence_provider_attempt',
     predicate: 'provider-intent attempt_started_at',
     clock: 'PostgreSQL now()',
@@ -128,7 +128,7 @@ const CLOCK_AUDIT = [
   {
     id: 'retry_resume_schedule',
     sourceKey: 'runtimeMigration',
-    sourcePath: 'supabase/migrations/20260917110000_sequence_runtime_recovery.sql',
+    sourcePath: 'supabase/migrations/20260919090000_sequence_runtime_recovery.sql',
     function: 'retry_sequence_step, resume_sequence_enrollment',
     predicate: 'explicit recovery next_run_at',
     clock: 'PostgreSQL now()',
@@ -137,7 +137,7 @@ const CLOCK_AUDIT = [
   {
     id: 'stale_claim_reconciliation',
     sourceKey: 'runtimeMigration',
-    sourcePath: 'supabase/migrations/20260917110000_sequence_runtime_recovery.sql',
+    sourcePath: 'supabase/migrations/20260919090000_sequence_runtime_recovery.sql',
     function: 'retire_stale_sequence_claim',
     predicate: 'bounded stale claim age',
     clock: 'PostgreSQL now()',
@@ -329,7 +329,7 @@ async function assertSourceContracts() {
     fixtureOrgSource: path.join(root, 'tests/integration/fixtures/multi-user.ts'),
     vercel: path.join(root, 'vercel.json'),
     sequenceMigration: path.join(root, 'supabase/migrations/018_sequences_v1.sql'),
-    runtimeMigration: path.join(root, 'supabase/migrations/20260917110000_sequence_runtime_recovery.sql'),
+    runtimeMigration: path.join(root, 'supabase/migrations/20260919090000_sequence_runtime_recovery.sql'),
   };
   const source = Object.fromEntries(await Promise.all(Object.entries(paths).map(async ([name, filepath]) => [name, { filepath, text: await readFile(filepath, 'utf8'), sha256: await fileSha256(filepath) }])));
   const contracts = [
@@ -404,7 +404,7 @@ async function printEnvironmentManifest(status, workdir, cliVersionOutput) {
       copiedMigrationsSha256: await directorySha256(migrationDirectory),
       copiedCriticalMigrations: Object.fromEntries(await Promise.all([
         '018_sequences_v1.sql',
-        '20260917110000_sequence_runtime_recovery.sql',
+        '20260919090000_sequence_runtime_recovery.sql',
       ].map(async (name) => [name, await fileSha256(path.join(migrationDirectory, name))]))),
       sourceFiles: Object.fromEntries(Object.entries(source).map(([name, value]) => [name, { path: path.relative(root, value.filepath), sha256: value.sha256 }])),
     },
@@ -454,7 +454,7 @@ async function printEnvironmentManifest(status, workdir, cliVersionOutput) {
       reason: PRODUCTION_EQUIVALENCE_UNKNOWN_REASON,
     },
     criticalConstraint: {
-      migration: 'supabase/migrations/20260917110000_sequence_runtime_recovery.sql',
+        migration: 'supabase/migrations/20260919090000_sequence_runtime_recovery.sql',
       index: 'idx_step_runs_active_enrollment_step',
       key: ['enrollment_id', 'step_id'],
       predicate: 'claim_active',
