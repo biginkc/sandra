@@ -85,7 +85,9 @@ sources = [P.parent / 'inbox-reply-boundary/context.sql', P.parent / 'inbox-repl
            P.parent / 'inbox-reply-review/setup.sql', P.parent / 'inbox-reply-review/public-api.sql', P.parent / 'inbox-reply-send/attempts.sql',
            P.parent / 'inbox-reply-send/accept.sql', P.parent / 'inbox-reply-send/public-api.sql', P / 'worker.sql', P / 'worker-role.sql']
 CLEANUP = ("DROP FUNCTION IF EXISTS public.inbox_capture_reply_recipients(uuid[]);DROP FUNCTION IF EXISTS public.inbox_freeze_reply_review(text,uuid);"
+           "DROP FUNCTION IF EXISTS public.inbox_reply_source_context(uuid);"
            "DROP FUNCTION IF EXISTS public.inbox_accept_reply(uuid,uuid);DROP FUNCTION IF EXISTS public.inbox_recover_reply(uuid,uuid);DROP FUNCTION IF EXISTS public.inbox_reply_operation_status(uuid);"
+           "DROP FUNCTION IF EXISTS public.inbox_reply_sweep_unmatched_callbacks(integer);DROP FUNCTION IF EXISTS public.inbox_reply_reconcile_callback(text,text,text,jsonb);"
            "DROP SCHEMA IF EXISTS inbox_reply_send CASCADE;DROP SCHEMA IF EXISTS inbox_reply_review CASCADE;DROP SCHEMA IF EXISTS inbox_reply_preparation CASCADE;DROP SCHEMA IF EXISTS inbox_reply_context CASCADE;")
 ROLE_CLEANUP = "DROP ROLE IF EXISTS inbox_reply_send_worker;"
 
