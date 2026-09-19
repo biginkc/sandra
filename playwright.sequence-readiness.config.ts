@@ -146,7 +146,7 @@ export default defineConfig({
     timezoneId: "America/Chicago",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
-    video: "retain-on-failure",
+    video: browserChannel ? "off" : "retain-on-failure",
   },
   webServer: [
     {
