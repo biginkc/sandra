@@ -165,10 +165,17 @@ class ReleaseGateStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             evidence_dir = Path(directory)
             path = evidence_dir / f"worker-runtime-proof-{sha[:8]}.json"
+            runner = gate.ROOT / "experiments/inbox-reply-send-worker/runtime-proof.py"
             path.write_text(json.dumps({
                 "candidate_sha": sha,
                 "status": "PASS",
                 "proof_groups": 5,
+                "killed_after_marker": True,
+                "transport_calls_after_redelivery": 1,
+                "discovered_tables": 142,
+                "cleanup_baseline_content_match": True,
+                "runner_path": "experiments/inbox-reply-send-worker/runtime-proof.py",
+                "runner_sha256": gate.sha256(runner),
                 "checks": [
                     "dispatch_started marker committed and observed before transport returned",
                     "docker kill terminated worker mid-flight before provider result/persist",
@@ -181,6 +188,47 @@ class ReleaseGateStatusTests(unittest.TestCase):
         self.assertEqual(status, "PASS")
         self.assertIn("dispatch-boundary", detail)
         self.assertEqual(found, path)
+
+    def test_worker_boundary_rejects_negated_double_dispatch_text(self) -> None:
+        sha = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_dir = Path(directory)
+            runner = gate.ROOT / "experiments/inbox-reply-send-worker/runtime-proof.py"
+            (evidence_dir / f"worker-runtime-proof-{sha[:8]}.json").write_text(json.dumps({
+                "candidate_sha": sha, "status": "PASS", "proof_groups": 5,
+                "killed_after_marker": True, "transport_calls_after_redelivery": 2,
+                "discovered_tables": 142, "cleanup_baseline_content_match": True,
+                "runner_path": "experiments/inbox-reply-send-worker/runtime-proof.py",
+                "runner_sha256": gate.sha256(runner),
+                "checks": ["transport call count was 2, NOT exactly 1 — a DOUBLE DISPATCH occurred"],
+            }))
+            status, detail, _ = gate.validate_worker_send_boundary(evidence_dir, sha)
+        self.assertEqual(status, "FAIL")
+        self.assertIn("exactly one transport call", detail)
+
+    def test_worker_boundary_exercises_each_structured_guard(self) -> None:
+        sha = "a" * 40
+        runner = gate.ROOT / "experiments/inbox-reply-send-worker/runtime-proof.py"
+        base = {
+            "candidate_sha": sha, "status": "PASS", "proof_groups": 5,
+            "killed_after_marker": True, "transport_calls_after_redelivery": 1,
+            "discovered_tables": 142, "cleanup_baseline_content_match": True,
+            "runner_path": "experiments/inbox-reply-send-worker/runtime-proof.py",
+            "runner_sha256": gate.sha256(runner), "checks": [],
+        }
+        for field, value, expected in (
+            ("killed_after_marker", False, "post-marker worker kill"),
+            ("transport_calls_after_redelivery", 2, "exactly one transport call"),
+            ("discovered_tables", 0, "positive discovered table count"),
+            ("cleanup_baseline_content_match", False, "whole-database baseline"),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                evidence_dir = Path(directory)
+                item = dict(base, **{field: value})
+                (evidence_dir / f"worker-runtime-proof-{sha[:8]}.json").write_text(json.dumps(item))
+                status, detail, _ = gate.validate_worker_send_boundary(evidence_dir, sha)
+                self.assertEqual(status, "FAIL")
+                self.assertIn(expected, detail)
 
     def test_worker_recovery_boundary_proof_cannot_be_reused_from_another_head(self) -> None:
         sha = "e" * 40

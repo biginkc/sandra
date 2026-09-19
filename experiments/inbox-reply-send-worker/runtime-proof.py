@@ -21,7 +21,7 @@ re-enters as existing/uncertain) -> the attempt settles to 'uncertain', the
 transport call count stays at exactly 1, and no double dispatch occurred.
 """
 if not __debug__: raise SystemExit('Optimized Python refused')
-import json, os, secrets, subprocess, sys, time, uuid
+import hashlib, json, os, secrets, subprocess, sys, time, uuid
 from pathlib import Path
 P = Path(__file__).resolve().parent
 sys.path.insert(0, str(P.parent / 'inbox-projection' / 'fixture'))
@@ -33,6 +33,9 @@ N = 'sandra-inbox-projection-t2-db'
 RESTATE = 'docker.restate.dev/restatedev/restate@sha256:675b85e7bf674f9dfda04a391fa33e850650d57e464b694ca8df5866acad95cc'
 IMAGE_TAG = 'sandra-inbox-reply-send-worker:pr-f-runtime-proof'
 LABEL = 'sandra-inbox-reply-send-worker-owned'
+PROOF_OUTPUT = os.environ.get('INBOX_RUNTIME_PROOF_OUTPUT')
+proof_checks = []
+proof_result = None
 
 
 def run(args, input=None, timeout=60):
@@ -231,15 +234,24 @@ try:
     need(calls_after_restart == 1, f'THE CORE PROOF: transport was called {calls_after_restart} times (expected exactly 1) — a redelivery after the crash called the provider AGAIN, i.e. a double send')
     need(sql(f"SELECT dispatch_token IS NOT NULL AND evidence='reentered_without_result' FROM inbox_reply_send.attempts WHERE org_id='{o}' AND id='{attempt_id}'") == 't', 'Attempt did not carry the expected crash re-entry evidence')
 
-    checks = [
+    proof_checks = [
         'a REAL worker container, driven by a REAL Restate engine over signed HTTP, claimed and start_dispatched a real accepted operation on its own (no test code called claim/start_dispatch directly)',
         'the ledger marker (dispatch_started) committed and was durably observed BEFORE the transport call returned',
         'killing the worker container mid-flight (docker kill, real process death) left the attempt at dispatch_started with no persist ever having run',
         'restarting the worker let Restate redeliver the SAME durable invocation; the attempt re-entered via claim() and settled to uncertain WITHOUT a second transport call',
         f'transport call count stayed at exactly 1 across the crash/redelivery cycle (no double dispatch)',
     ]
-    for c in checks: print('  OK  ' + c)
-    print(f'\nALL {len(checks)} RUNTIME PROOF GROUPS PASSED')
+    for c in proof_checks: print('  OK  ' + c)
+    proof_result = {
+        'status': 'PASS',
+        'proof_groups': len(proof_checks),
+        'killed_after_marker': True,
+        'transport_calls_after_redelivery': calls_after_restart,
+        'discovered_tables': len(ALL_TABLES),
+        'cleanup_baseline_content_match': True,
+        'checks': proof_checks,
+    }
+    print(f'\nALL {len(proof_checks)} RUNTIME PROOF GROUPS PASSED')
 finally:
     print('\nCleaning up owned runtime containers/volume/role/schemas...')
     for name in (worker_id, engine_id):
@@ -285,3 +297,19 @@ finally:
     need(sql("SELECT to_regnamespace('inbox_reply_send') IS NULL", check=False) == 't', 'inbox_reply_send schema not dropped')
     need(sql("SELECT NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='inbox_reply_send_worker')", check=False) == 't', 'inbox_reply_send_worker role not dropped')
     print('Cleanup verified: containers/volume/image removed, schemas and worker role dropped, zero residual owned rows')
+    if PROOF_OUTPUT and proof_result is not None:
+        runner = P / 'runtime-proof.py'
+        candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=P.parent.parent, text=True).strip()
+        artifact = {
+            'candidate_sha': candidate,
+            'command': 'python3 experiments/inbox-reply-send-worker/runtime-proof.py --run-owned',
+            'fixture': {'database_container': N, 'provider_traffic': False, 'customer_sends': False, 'owned': True},
+            'runner_path': 'experiments/inbox-reply-send-worker/runtime-proof.py',
+            'runner_sha256': hashlib.sha256(runner.read_bytes()).hexdigest(),
+            'captured_at_unix': time.time(),
+            **proof_result,
+        }
+        output = Path(PROOF_OUTPUT)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(artifact, indent=2) + '\n')
+        print(f'Wrote structured runtime proof: {output}')

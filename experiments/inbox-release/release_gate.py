@@ -658,17 +658,26 @@ def validate_worker_send_boundary(evidence_dir: Path, candidate_sha: str) -> tup
     checks = evidence.get("checks")
     if not isinstance(checks, list):
         return "FAIL", "worker runtime proof checks are missing", path
-    serialized = json.dumps(checks, sort_keys=True).lower()
-    required = (
-        "dispatch_started marker committed",
-        "docker kill terminated worker mid-flight",
-        "redelivery",
-        "exactly 1",
-        "142-table baseline",
-    )
-    missing = [needle for needle in required if needle.lower() not in serialized]
-    if missing:
-        return "FAIL", f"worker runtime proof omits decisive assertions: {missing}", path
+    if evidence.get("killed_after_marker") is not True:
+        return "FAIL", "worker runtime proof does not record a post-marker worker kill", path
+    if evidence.get("transport_calls_after_redelivery") != 1:
+        return "FAIL", "worker runtime proof does not prove exactly one transport call after redelivery", path
+    discovered_tables = evidence.get("discovered_tables")
+    if isinstance(discovered_tables, bool) or not isinstance(discovered_tables, int) or discovered_tables <= 0:
+        return "FAIL", "worker runtime proof does not record a positive discovered table count", path
+    if evidence.get("cleanup_baseline_content_match") is not True:
+        return "FAIL", "worker runtime proof does not prove whole-database baseline content match", path
+    runner_path = evidence.get("runner_path")
+    runner_sha256 = evidence.get("runner_sha256")
+    if not isinstance(runner_path, str) or not isinstance(runner_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", runner_sha256):
+        return "FAIL", "worker runtime proof is missing runner provenance", path
+    runner = (ROOT / runner_path).resolve()
+    try:
+        runner.relative_to(ROOT.resolve())
+    except ValueError:
+        return "FAIL", "worker runtime proof runner path escapes the repository", path
+    if not runner.is_file() or sha256(runner) != runner_sha256:
+        return "FAIL", "worker runtime proof runner provenance does not match the candidate worktree", path
     return "PASS", "dispatch-boundary crash/redelivery proof is bound to HEAD", path
 
 

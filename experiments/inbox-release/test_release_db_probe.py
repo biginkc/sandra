@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest import mock
 
 
 HERE = Path(__file__).resolve().parent
@@ -28,6 +29,41 @@ class ReleaseDbProbeTests(unittest.TestCase):
         self.assertIn("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton", source)
         self.assertIn("restore_http_serving_state", source)
         self.assertIn("HTTP_PRIOR_SERVING", source)
+
+    def test_http_restore_executes_and_restores_captured_false_state(self):
+        original_target = module.TARGET
+        original_prior = module.HTTP_PRIOR_SERVING
+        original_normalized = module.HTTP_STATE_NORMALIZED
+        try:
+            module.TARGET = "http"
+            module.HTTP_PRIOR_SERVING = "false"
+            module.HTTP_STATE_NORMALIZED = True
+            with mock.patch.object(module, "sql", return_value=(0, "", "")) as execute:
+                self.assertIsNone(module.restore_http_serving_state())
+            execute.assert_called_once_with(
+                "UPDATE inbox_control.rollout SET serving_enabled=false WHERE singleton;"
+            )
+            self.assertFalse(module.HTTP_STATE_NORMALIZED)
+        finally:
+            module.TARGET = original_target
+            module.HTTP_PRIOR_SERVING = original_prior
+            module.HTTP_STATE_NORMALIZED = original_normalized
+
+    def test_http_restore_reports_failed_cleanup_and_keeps_state_marked(self):
+        original_target = module.TARGET
+        original_prior = module.HTTP_PRIOR_SERVING
+        original_normalized = module.HTTP_STATE_NORMALIZED
+        try:
+            module.TARGET = "http"
+            module.HTTP_PRIOR_SERVING = "true"
+            module.HTTP_STATE_NORMALIZED = True
+            with mock.patch.object(module, "sql", return_value=(1, "", "timeout")):
+                self.assertEqual(module.restore_http_serving_state(), "timeout")
+            self.assertTrue(module.HTTP_STATE_NORMALIZED)
+        finally:
+            module.TARGET = original_target
+            module.HTTP_PRIOR_SERVING = original_prior
+            module.HTTP_STATE_NORMALIZED = original_normalized
     def test_privileged_fixture_setup_precedes_authenticated_role(self):
         script = module.receipt_probe_sql(
             "11111111-1111-4111-8111-111111111111",

@@ -340,4 +340,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # The HTTP fixture may be normalized for the rollback assertion. Always
+    # restore the captured admission state, including unexpected exceptions
+    # such as subprocess timeouts, before the process exits.
+    try:
+        raise SystemExit(main())
+    finally:
+        restore_error = restore_http_serving_state()
+        if restore_error:
+            print(json.dumps({"status": "FAIL", "detail": f"HTTP serving-state restore failed: {restore_error}"}))
