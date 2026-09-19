@@ -237,7 +237,7 @@ async function readStepRuns(enrollmentId: string) {
   const { data, error } = await supabase
     .from("sequence_step_runs")
     .select(
-      "id, claim_active, attempt_outcome, attempt_started_at, run_at, message_id, skipped_reason, failure_reason, recovery_action, recovery_evidence",
+      "id, claim_active, attempt_outcome, attempt_started_at, run_at, message_id, skipped_reason, recovery_action, recovery_evidence",
     )
     .eq("enrollment_id", enrollmentId)
     .order("created_at", { ascending: true });
@@ -554,7 +554,7 @@ describe("native quiet-hours and explicit recovery", () => {
     expect(clearSenderError).toBeNull();
 
     const sequence = await seedSequence("missing-sender-recovery", [
-      { delay: 0, body: "repaired sender body" },
+      { delay: 0, body: "Mel with BMH repaired sender body" },
     ]);
     const lead = await seedLead({ phone: "+18175552003", seedInbound: false });
     const enrollmentId = await enroll(sequence.id, lead.propertyId);
@@ -580,27 +580,7 @@ describe("native quiet-hours and explicit recovery", () => {
     setApplicationTimeAfterPersistedDue(repairedSchedule.next_run_at!);
 
     const repaired = await runSequenceTick(supabase);
-    if (repaired.outcomes.sent !== 1) {
-      const [enrollmentState, runs, messages] = await Promise.all([
-        loadEnrollment(enrollmentId),
-        readStepRuns(enrollmentId),
-        supabase
-          .from("messages")
-          .select("status, error_message, from_address, external_id")
-          .eq("property_id", lead.propertyId),
-      ]);
-      throw new Error(
-        JSON.stringify({
-          repaired,
-          enrollmentState,
-          runs,
-          messages: messages.data,
-          messagesError: messages.error?.message,
-          mockLog: getMockMessageLog(),
-        }),
-      );
-    }
-    expect(repaired).toMatchObject({ outcomes: { sent: 1 } });
+    expect(repaired.outcomes.sent).toBe(1);
     expect(getMockMessageLog()).toHaveLength(1);
     expect(getMockMessageLog()[0].input.from).toBe(MOCK_SENDER_PRIMARY);
     expect((await loadEnrollment(enrollmentId)).status).toBe("completed");
