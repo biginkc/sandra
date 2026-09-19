@@ -49,7 +49,7 @@ CREATE TRIGGER immutable_saved_action_version BEFORE UPDATE OR DELETE ON inbox_s
 -- inbox_action_api.prepare's 'permanent_dnc_not_enabled').
 CREATE FUNCTION inbox_saved_actions.validate_definition(o uuid,definition jsonb) RETURNS void
 LANGUAGE plpgsql SET search_path='' AS $$
-DECLARE step jsonb;types text[];assignee uuid;
+DECLARE step jsonb;types text[];assignee uuid;reply text;reply_units integer;
 BEGIN
  IF jsonb_typeof(definition) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(definition))<>2
   OR definition->'version' IS DISTINCT FROM '1'::jsonb OR jsonb_typeof(definition->'steps') IS DISTINCT FROM 'array'
@@ -60,8 +60,12 @@ BEGIN
  IF 'review_reply'=ANY(types) THEN
   IF array_length(types,1)<>1 THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';END IF;
   step:=definition->'steps'->0;
+  reply:=btrim(step->>'text');
+  SELECT char_length(reply)+count(*) INTO reply_units
+  FROM generate_series(1,char_length(reply)) AS g(pos)
+  WHERE get_byte(convert_to(substr(reply,pos,1),'UTF8'),0)>=240;
   IF jsonb_typeof(step) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(step))<>2 OR NOT(step ? 'text')
-   OR jsonb_typeof(step->'text') IS DISTINCT FROM 'string' OR length(step->>'text') NOT BETWEEN 1 AND 1600 THEN
+   OR jsonb_typeof(step->'text') IS DISTINCT FROM 'string' OR reply_units NOT BETWEEN 1 AND 1600 THEN
    RAISE EXCEPTION 'INBOX_SAVED_ACTION_INVALID_DEFINITION';
   END IF;
   RETURN;

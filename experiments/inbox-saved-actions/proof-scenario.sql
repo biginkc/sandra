@@ -138,6 +138,32 @@ BEGIN
  IF NOT failed THEN RAISE EXCEPTION 'GATED dnc OUTCOME ADMITTED AT SAVE'; END IF;
  RAISE NOTICE 'PASS gated dnc outcome rejected at save';
 
+ -- 9b) review_reply whitespace-only text must match the TypeScript parser's
+ -- trim-before-length contract and be rejected at save.
+ failed:=false;
+ BEGIN
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  PERFORM public.inbox_saved_action_create('Blank reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','review_reply','text','   '))));
+  EXECUTE 'RESET ROLE';
+ EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM='INBOX_SAVED_ACTION_INVALID_DEFINITION' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
+ END;
+ IF NOT failed THEN RAISE EXCEPTION 'WHITESPACE-ONLY REVIEW REPLY ADMITTED AT SAVE'; END IF;
+ RAISE NOTICE 'PASS whitespace-only review_reply rejected at save';
+
+ -- 9c) SQL must match JavaScript UTF-16 length semantics: 1600 astral
+ -- code points occupy 3200 JS code units and must be rejected.
+ failed:=false;
+ BEGIN
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  PERFORM public.inbox_saved_action_create('Long emoji reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','review_reply','text',repeat('😀',1600)))));
+  EXECUTE 'RESET ROLE';
+ EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM='INBOX_SAVED_ACTION_INVALID_DEFINITION' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
+ END;
+ IF NOT failed THEN RAISE EXCEPTION 'UTF-16-OVERSIZE REVIEW REPLY ADMITTED AT SAVE'; END IF;
+ RAISE NOTICE 'PASS UTF-16-oversize review_reply rejected at save';
+
  -- 10) DEACTIVATE -> version 3, is_active=false; stale get() of v2 now rejected (stale version)
  EXECUTE 'SET LOCAL ROLE authenticated';
  b:=public.inbox_saved_action_deactivate(saved_id);

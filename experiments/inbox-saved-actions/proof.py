@@ -6,10 +6,9 @@ gated-step-type rejection (promote/dismiss_unknown/restore_unknown/dnc),
 stale-version rejection after edit/deactivate, and public-wrapper
 least-privilege. Owned fixture only.
 
-Installs the schema once (idempotent: skipped if already present, mirroring
-the "refuse existing schema" guard other experiments use, but here as a
-skip rather than a hard refusal since this schema is itself this PR's
-deliverable and is expected to already be installed across repeated runs).
+Installs the schema only into a fresh fixture. An already-present schema is a
+hard refusal: reusing it could prove a different revision than the checked-
+out source under review.
 The entire proof scenario runs inside ONE explicit transaction that always
 ROLLBACKs (never commits fixture rows), so no cleanup sweep is needed for
 correctness — owned_cleanup's discover/snapshot_baseline/assert_clean are
@@ -63,7 +62,7 @@ if sql("SELECT to_regnamespace('inbox_saved_actions') IS NULL") == 't':
         raise RuntimeError(f'install failed: {r.stderr}')
     print('INSTALLED inbox_saved_actions schema')
 else:
-    print('inbox_saved_actions already installed; reusing')
+    raise RuntimeError('inbox_saved_actions already installed; refusing to reuse stale schema — run against a fresh owned fixture')
 
 # Astra round-1 blocker #1: (re-)apply the widened inbox_action_api.prepare
 # envelope guard every run. Idempotent (CREATE OR REPLACE of the exact
