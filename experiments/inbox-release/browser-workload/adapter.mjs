@@ -317,7 +317,10 @@ export async function findRow(page, orgId, conversationId, { timeoutMs = 15_000 
     }, expected);
     if (state.error) throw new WorkloadBlocked("authenticated workset rendered an error while locating the pre-seeded conversation");
     if (state.mountedIndex >= 0) return list.locator("[data-workspace-row]").nth(state.mountedIndex);
-    if (state.empty && !state.busy) throw new WorkloadBlocked(`conversation ${conversationId} is absent from the authenticated workset`);
+    // A development remount can briefly show an empty, non-busy list while a
+    // server-committed replacement workset is being adopted. Keep the bounded
+    // lookup alive until the deadline so that transient 429/retry windows do
+    // not get misreported as an authenticated data loss.
     if (!Number.isSafeInteger(state.setSize) || state.setSize < 0) {
       await sleep(50);
       continue;

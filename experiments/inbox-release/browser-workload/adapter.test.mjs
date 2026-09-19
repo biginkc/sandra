@@ -246,6 +246,29 @@ test("bounded row lookup stops when the list never reports a ready workset", asy
   }
 });
 
+test("bounded row lookup tolerates a transient empty replacement before retry", async () => {
+  const { chromium } = await import("@playwright/test");
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const orgId = id(903);
+  const conversationId = id(904);
+  await page.setContent(`<div role="list" aria-label="Inbox conversations" aria-busy="false"></div><script>
+    setTimeout(() => {
+      const list = document.querySelector('[role=list]');
+      list.setAttribute('aria-setsize', '1');
+      const row = document.createElement('div');
+      row.setAttribute('data-workspace-row', JSON.stringify([${JSON.stringify(orgId)}, 'conversation', ${JSON.stringify(conversationId)}]));
+      list.append(row);
+    }, 40);
+  </script>`);
+  try {
+    const row = await findRow(page, orgId, conversationId, { timeoutMs: 500 });
+    assert.equal(await row.getAttribute("data-workspace-row"), JSON.stringify([orgId, "conversation", conversationId]));
+  } finally {
+    await browser.close();
+  }
+});
+
 test("selection timing scopes the exact feedback node when the action rail repeats its text", async () => {
   const { chromium } = await import("@playwright/test");
   const browser = await chromium.launch({ headless: true });
