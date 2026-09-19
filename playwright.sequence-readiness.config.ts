@@ -125,6 +125,8 @@ const productionLocalEnv = {
   NEXT_TELEMETRY_DISABLED: "1",
   SEQUENCE_READINESS_PRODUCTION_BROWSER: "1",
 };
+const browserChannel =
+  process.env.PLAYWRIGHT_BROWSER_CHANNEL === "chrome" ? "chrome" : undefined;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -139,6 +141,7 @@ export default defineConfig({
   outputDir: "test-results/sequence-readiness",
   use: {
     ...devices["Desktop Chrome"],
+    ...(browserChannel ? { channel: browserChannel } : {}),
     baseURL,
     timezoneId: "America/Chicago",
     trace: "retain-on-failure",
