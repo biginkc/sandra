@@ -530,7 +530,7 @@ describe("native quiet-hours and explicit recovery", () => {
     );
     setApplicationTimeAfterPersistedDue(repairedSchedule.next_run_at!);
     const repaired = await runSequenceTick(supabase);
-    expect(repaired).toMatchObject({ outcomes: { sent: 1 } });
+    expect(repaired.outcomes.sent).toBe(1);
     expect(getMockMessageLog()).toHaveLength(1);
     expect(getMockMessageLog()[0].body).toContain("repaired template body");
     expect((await loadEnrollment(enrollmentId)).status).toBe("completed");
@@ -580,7 +580,7 @@ describe("native quiet-hours and explicit recovery", () => {
     setApplicationTimeAfterPersistedDue(repairedSchedule.next_run_at!);
 
     const repaired = await runSequenceTick(supabase);
-    expect(repaired.outcomes.sent).toBe(1);
+    expect(repaired).toMatchObject({ outcomes: { sent: 1 } });
     expect(getMockMessageLog()).toHaveLength(1);
     expect(getMockMessageLog()[0].input.from).toBe(MOCK_SENDER_PRIMARY);
     expect((await loadEnrollment(enrollmentId)).status).toBe("completed");
