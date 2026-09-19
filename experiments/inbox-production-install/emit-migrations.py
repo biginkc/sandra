@@ -24,6 +24,54 @@ matches EXACTLY that text and fails loudly if:
   - a file NOT expected to hold a guard contains install_fixture.identity
     anyway (an unclassified/unexpected guard).
 
+--- R1 AMENDMENT (DoD#5 defect 1, 2026-09-19) ---
+The original packaging emitted `auth-upgrade.sql` plus all five
+`read-upgrade-*.sql` files as migrations that run AFTER a fresh
+`read-companion.sql` install. `install-read-upgrade.py`'s own docstring
+says the read-upgrade set is "the reviewed alternative" path for a
+database that ALREADY has an older read schema — not a chain to run on
+top of a fresh install. Production has no inbox schema at all, so it
+takes the fresh-install path, not the existing-schema upgrade path.
+
+Object-level proof (every FUNCTION/GRANT/REVOKE object in all five
+read-upgrade files, plus `auth-upgrade.sql`'s own `authorize()`, cross
+diffed against read-companion.sql / install-candidate.sql): every single
+object in these six files is BYTE-IDENTICAL (once `CREATE FUNCTION` is
+normalized to `CREATE OR REPLACE FUNCTION`) to what read-companion.sql /
+install-candidate.sql already creates. This is not a coincidence: both
+sides are compiled from the exact same manifest chunks in
+read-companion.py — `read-upgrade-current.sql` is `base` (chunks[:5]) +
+the two additive entries, i.e. the same 7 manifest entries that also
+produce read-companion.sql; each single-purpose read-upgrade file is one
+of those same chunks re-wrapped as CREATE OR REPLACE. `auth-upgrade.sql`'s
+`inbox_bridge.authorize()` body is byte-identical to the one
+install-candidate.sql already installs.
+
+There are two non-function, non-idempotent overlaps, both byte-identical
+in both files: (1) manifest entry 3's own chunk (source
+`04-inbox-unknown-history-setup.sql`) contains a plain
+`CREATE TABLE inbox_read.unknown_history_cursors (...)` +
+`ALTER TABLE ... ENABLE ROW LEVEL SECURITY` + `REVOKE ALL ON TABLE ...`,
+present verbatim in BOTH read-companion.sql (as part of the 7-chunk
+compile) and read-upgrade-unknown.sql (as that chunk, unwrapped —
+`replace_create_function()` only rewrites `CREATE FUNCTION`, never touches
+`CREATE TABLE`); (2) `unknown-retention.sql` (plain
+`CREATE INDEX unknown_history_retention` + plain, non-OR-REPLACE
+`CREATE FUNCTION prune_expired_unknown_cursors`), appended to BOTH
+read-companion.sql's compiled output AND read-upgrade-unknown.sql. Either
+duplicate non-idempotent CREATE (table or index) reproduces the 42P07 the
+scratch dry run hit at read-upgrade-unknown.sql.
+
+No genuine additive delta (category iii in the brief) and no
+newer-body conflict (category ii) was found anywhere in these six files.
+Per the brief's instruction, an unresolved conflict would be reported
+rather than guessed at — none was found: all six files are pure
+redundant re-application of what the fresh-install path already ships,
+so they are DROPPED from the emitted set entirely. The fresh-install
+path is exactly: install-candidate.sql, then read-companion.sql, then
+Batch B's backend-operation-reply.sql.
+--- end amendment ---
+
 This script performs NO database access, NO docker, and applies nothing.
 It only reads source files under this repo and writes plain .sql files
 under supabase/migrations/ (plus one operator index script elsewhere).
@@ -41,6 +89,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import re
 import sys
 from pathlib import Path
 
@@ -85,10 +134,14 @@ GUARD_HTTP = (
 #
 # Ordering matches the dependency order established by the compiler itself
 # (install-candidate.sql creates inbox_control/inbox_bridge before anything
-# else references them; read-companion.sql creates inbox_read before the
-# read-upgrade-*.sql files CREATE OR REPLACE functions in it; Batch B calls
-# inbox_control.admit_command(), which only install-candidate.sql defines,
-# so Batch B must land after all of Batch A).
+# else references them, including read-companion.sql's calls to
+# inbox_bridge.authorize_serving(); Batch B calls inbox_control.admit_command(),
+# which only install-candidate.sql defines, so Batch B must land after all of
+# Batch A). Per the R1 amendment above, `auth-upgrade.sql` and all five
+# `read-upgrade-*.sql` files are DROPPED — they are the reviewed alternative
+# path for an existing-schema install, not part of a fresh install, and every
+# object in them is byte-identical to what install-candidate.sql /
+# read-companion.sql already create.
 # ---------------------------------------------------------------------------
 
 BATCH_A = [
@@ -99,59 +152,37 @@ BATCH_A = [
         count=0,
     ),
     dict(
-        source=INSTALL_GENERATED / "auth-upgrade.sql",
-        output="20260919120100_inbox_auth_bridge.sql",
-        guard=GUARD_AUTH,
-        count=1,
-    ),
-    dict(
         source=INSTALL_GENERATED / "read-companion.sql",
-        output="20260919120200_inbox_read_companion.sql",
+        output="20260919120100_inbox_read_companion.sql",
         guard=None,
         count=0,
-    ),
-    dict(
-        source=INSTALL_GENERATED / "read-upgrade-current.sql",
-        output="20260919120300_inbox_read_upgrade_current.sql",
-        guard=GUARD_READ_UPGRADE,
-        count=1,
-    ),
-    dict(
-        source=INSTALL_GENERATED / "read-upgrade-selection-review.sql",
-        output="20260919120400_inbox_read_upgrade_selection_review.sql",
-        guard=GUARD_READ_UPGRADE,
-        count=1,
-    ),
-    dict(
-        source=INSTALL_GENERATED / "read-upgrade-sync-authority.sql",
-        output="20260919120500_inbox_read_upgrade_sync_authority.sql",
-        guard=GUARD_READ_UPGRADE,
-        count=1,
-    ),
-    dict(
-        source=INSTALL_GENERATED / "read-upgrade-unknown.sql",
-        output="20260919120600_inbox_read_upgrade_unknown.sql",
-        guard=GUARD_READ_UPGRADE,
-        count=1,
-    ),
-    dict(
-        source=INSTALL_GENERATED / "read-upgrade-workset-updates.sql",
-        output="20260919120700_inbox_read_upgrade_workset_updates.sql",
-        guard=GUARD_READ_UPGRADE,
-        count=1,
     ),
 ]
 
 BATCH_B = [
     dict(
         source=RELEASE_GENERATED / "backend-operation-reply.sql",
-        output="20260919120800_inbox_backend_operation_reply.sql",
+        output="20260919120200_inbox_backend_operation_reply.sql",
         guard=GUARD_HTTP,
         count=10,
     ),
 ]
 
 FILE_SPECS = BATCH_A + BATCH_B
+
+# Files that were part of the original (R1) emitted set and are now
+# deliberately dropped by the amendment above. --check treats any of these
+# still sitting in supabase/migrations/ as stale, same as any other unowned
+# 2026091912*.sql file, via the existing stale-scan below — no separate
+# logic needed. Listed here only for human/documentation traceability.
+DROPPED_BY_R1_AMENDMENT = [
+    "20260919120100_inbox_auth_bridge.sql",
+    "20260919120300_inbox_read_upgrade_current.sql",
+    "20260919120400_inbox_read_upgrade_selection_review.sql",
+    "20260919120500_inbox_read_upgrade_sync_authority.sql",
+    "20260919120600_inbox_read_upgrade_unknown.sql",
+    "20260919120700_inbox_read_upgrade_workset_updates.sql",
+]
 
 # Statements that must never appear in emitted migrations. Note: we check
 # for the actual DDL ("CREATE INDEX CONCURRENTLY"), not the bare word —
@@ -170,6 +201,64 @@ FORBIDDEN_SUBSTRINGS = [
 
 class EmitError(RuntimeError):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Non-idempotent object collision check (DoD#5 defect 1, new guard).
+#
+# `CREATE OR REPLACE FUNCTION` is safe to repeat. `CREATE TABLE`,
+# `CREATE INDEX` (non-CONCURRENTLY; CONCURRENTLY is separately forbidden
+# above), `CREATE TYPE`, `CREATE SCHEMA` and a bare `CREATE FUNCTION`
+# (no OR REPLACE) are NOT — running one twice against the same database is
+# exactly the 42P07 duplicate_object failure this amendment exists to catch
+# (it is what read-upgrade-unknown.sql's re-application of
+# unknown-retention.sql's plain `CREATE INDEX`/`CREATE FUNCTION` produced).
+# This walks the emitted files in FILE_SPECS order and fails if any emitted
+# migration creates, non-idempotently, an object an EARLIER emitted
+# migration already created non-idempotently.
+# ---------------------------------------------------------------------------
+
+_NONIDEMPOTENT_PATTERNS = {
+    "TABLE": re.compile(r"\bCREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS\b)([\w.]+)", re.IGNORECASE),
+    "INDEX": re.compile(r"\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(\w+)\s+ON\b", re.IGNORECASE),
+    "TYPE": re.compile(r"\bCREATE\s+TYPE\s+([\w.]+)", re.IGNORECASE),
+    "SCHEMA": re.compile(r"\bCREATE\s+SCHEMA\s+(?!IF\s+NOT\s+EXISTS\b)([\w.]+)", re.IGNORECASE),
+    # Bare CREATE FUNCTION only -- CREATE OR REPLACE FUNCTION is idempotent
+    # and must not be flagged. "REPLACE " is a fixed 8-char lookbehind.
+    "FUNCTION": re.compile(r"(?<!REPLACE )\bCREATE\s+FUNCTION\s+([\w.]+)\(", re.IGNORECASE),
+}
+
+
+def find_nonidempotent_objects(text: str) -> dict[str, str]:
+    """Return {qualified_name: kind} for every non-idempotently-created
+    object in `text` (kind prefixed so e.g. an index and a table can never
+    collide by bare name alone)."""
+    found: dict[str, str] = {}
+    for kind, pattern in _NONIDEMPOTENT_PATTERNS.items():
+        for m in pattern.finditer(text):
+            found[f"{kind}:{m.group(1).lower()}"] = kind
+    return found
+
+
+def assert_no_cross_file_object_collisions(emitted: dict[str, str]) -> None:
+    """Walk emitted files in FILE_SPECS order; fail if a later file
+    non-idempotently re-creates an object an earlier file already created
+    non-idempotently."""
+    seen: dict[str, str] = {}  # object key -> filename that first created it
+    for spec in FILE_SPECS:
+        name = spec["output"]
+        if name not in emitted:
+            continue
+        for key in find_nonidempotent_objects(emitted[name]):
+            if key in seen:
+                raise EmitError(
+                    f"{name}: non-idempotently re-creates {key}, already "
+                    f"non-idempotently created by {seen[key]} earlier in the "
+                    f"emitted migration order -- this is the class of bug "
+                    f"(42P07 duplicate_object) that motivated the R1 "
+                    f"amendment; refusing to emit"
+                )
+            seen[key] = name
 
 
 def apply_transform(spec: dict) -> str:
@@ -240,6 +329,7 @@ def compute_emitted() -> dict[str, str]:
         text = apply_transform(spec)
         assert_prod_safe(spec["output"], text)
         out[spec["output"]] = text
+    assert_no_cross_file_object_collisions(out)
     return out
 
 

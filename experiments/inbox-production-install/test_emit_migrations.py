@@ -82,7 +82,16 @@ class EmitMigrationsTests(unittest.TestCase):
         self.assertEqual(emit_migrations.write_mode(), 0)
         self.assertEqual(emit_migrations.check_mode(), 0)
         emitted = list(emit_migrations.MIGRATIONS_DIR.glob("*.sql"))
-        self.assertEqual(len(emitted), 9)
+        # R1 amendment: auth-upgrade.sql and all five read-upgrade-*.sql
+        # files are dropped (existing-schema alternative path, not part of
+        # a fresh install) -- only install-candidate.sql, read-companion.sql
+        # and Batch B's backend-operation-reply.sql are emitted.
+        self.assertEqual(len(emitted), 3)
+
+    def test_dropped_r1_files_are_not_emitted(self) -> None:
+        emitted = emit_migrations.compute_emitted()
+        for name in emit_migrations.DROPPED_BY_R1_AMENDMENT:
+            self.assertNotIn(name, emitted)
 
     def test_emitted_files_contain_no_guard_or_forbidden_text(self) -> None:
         emitted = emit_migrations.compute_emitted()
@@ -97,32 +106,50 @@ class EmitMigrationsTests(unittest.TestCase):
         # Baseline: unmutated tree emits cleanly.
         self.assertEqual(emit_migrations.write_mode(), 0)
 
-        # Mutate the auth-upgrade.sql guard's marker string in the scratch
-        # copy only (never the real repo). This simulates the guard having
-        # drifted from what emit-migrations.py expects.
-        target = emit_migrations.INSTALL_GENERATED / "auth-upgrade.sql"
+        # Mutate backend-operation-reply.sql's HTTP guard marker string in
+        # the scratch copy only (never the real repo) -- this is the one
+        # remaining guarded file after the R1 amendment dropped
+        # auth-upgrade.sql / read-upgrade-*.sql from FILE_SPECS entirely.
+        target = emit_migrations.RELEASE_GENERATED / "backend-operation-reply.sql"
         original = target.read_text()
         mutated = original.replace(
-            "sandra-inbox-release-owned-synthetic",
-            "sandra-inbox-release-owned-synthetic-MUTATED",
+            "sandra-inbox-http-owned-synthetic-20260917",
+            "sandra-inbox-http-owned-synthetic-20260917-MUTATED",
         )
         self.assertNotEqual(original, mutated, "mutation did not change the file")
         target.write_text(mutated)
 
         with self.assertRaises(emit_migrations.EmitError) as ctx:
             emit_migrations.compute_emitted()
-        self.assertIn("auth-upgrade.sql", str(ctx.exception))
+        self.assertIn("backend-operation-reply.sql", str(ctx.exception))
 
     def test_removing_a_guard_entirely_makes_emit_fail(self) -> None:
-        target = emit_migrations.INSTALL_GENERATED / "read-upgrade-current.sql"
+        target = emit_migrations.RELEASE_GENERATED / "backend-operation-reply.sql"
         original = target.read_text()
-        mutated = original.replace(emit_migrations.GUARD_READ_UPGRADE, "")
+        mutated = original.replace(emit_migrations.GUARD_HTTP, "", 1)
         self.assertNotEqual(original, mutated)
         target.write_text(mutated)
 
         with self.assertRaises(emit_migrations.EmitError) as ctx:
             emit_migrations.compute_emitted()
-        self.assertIn("read-upgrade-current.sql", str(ctx.exception))
+        self.assertIn("backend-operation-reply.sql", str(ctx.exception))
+
+    def test_auth_upgrade_and_read_upgrade_sources_are_ignored_even_if_mutated(self) -> None:
+        # These source files are no longer in FILE_SPECS at all (R1
+        # amendment). Mutating them must have zero effect on emitted output
+        # -- proves they are genuinely dropped, not just guard-stripped.
+        self.assertEqual(emit_migrations.write_mode(), 0)
+        baseline = emit_migrations.compute_emitted()
+        for fname in (
+            "auth-upgrade.sql",
+            "read-upgrade-current.sql",
+            "read-upgrade-selection-review.sql",
+            "read-upgrade-sync-authority.sql",
+            "read-upgrade-unknown.sql",
+            "read-upgrade-workset-updates.sql",
+        ):
+            (emit_migrations.INSTALL_GENERATED / fname).write_text("garbage not even sql")
+        self.assertEqual(emit_migrations.compute_emitted(), baseline)
 
     def test_unexpected_guard_in_a_no_guard_file_fails(self) -> None:
         # install-candidate.sql is expected to have NO fixture guard. If one
@@ -155,9 +182,67 @@ class EmitMigrationsTests(unittest.TestCase):
 
     def test_deleting_an_emitted_migration_fails_check(self) -> None:
         self.assertEqual(emit_migrations.write_mode(), 0)
-        target = emit_migrations.MIGRATIONS_DIR / "20260919120800_inbox_backend_operation_reply.sql"
+        target = emit_migrations.MIGRATIONS_DIR / "20260919120200_inbox_backend_operation_reply.sql"
         target.unlink()
         self.assertEqual(emit_migrations.check_mode(), 1)
+
+    # -- non-idempotent cross-file object collision (R1 amendment guard) --
+
+    def test_cross_file_nonidempotent_table_collision_is_rejected(self) -> None:
+        with self.assertRaises(emit_migrations.EmitError):
+            emit_migrations.assert_no_cross_file_object_collisions(
+                {
+                    "20260919120000_inbox_control_foundation.sql": "CREATE TABLE public.widgets(id int);",
+                    "20260919120100_inbox_read_companion.sql": "CREATE TABLE public.widgets(id int);",
+                    "20260919120200_inbox_backend_operation_reply.sql": "",
+                }
+            )
+
+    def test_cross_file_nonidempotent_index_collision_is_rejected(self) -> None:
+        # This is the ACTUAL bug this guard exists to catch: read-companion
+        # and read-upgrade-unknown both plain-CREATE the same retention
+        # index, which is exactly the 42P07 the scratch dry run hit.
+        with self.assertRaises(emit_migrations.EmitError) as ctx:
+            emit_migrations.assert_no_cross_file_object_collisions(
+                {
+                    "20260919120000_inbox_control_foundation.sql": "",
+                    "20260919120100_inbox_read_companion.sql": (
+                        "CREATE INDEX unknown_history_retention ON inbox_read.unknown_history_cursors(id);"
+                    ),
+                    "20260919120200_inbox_backend_operation_reply.sql": (
+                        "CREATE INDEX unknown_history_retention ON inbox_read.unknown_history_cursors(id);"
+                    ),
+                }
+            )
+        self.assertIn("INDEX:unknown_history_retention", str(ctx.exception))
+
+    def test_bare_create_function_collision_is_rejected_but_or_replace_is_not(self) -> None:
+        # A bare CREATE FUNCTION repeated across files is a real 42723/42P13
+        # risk; CREATE OR REPLACE FUNCTION repeated across files is the
+        # normal, safe shape used throughout this pipeline and must never
+        # be flagged.
+        with self.assertRaises(emit_migrations.EmitError):
+            emit_migrations.assert_no_cross_file_object_collisions(
+                {
+                    "20260919120000_inbox_control_foundation.sql": "CREATE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+                    "20260919120100_inbox_read_companion.sql": "CREATE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+                    "20260919120200_inbox_backend_operation_reply.sql": "",
+                }
+            )
+        # No exception for the OR REPLACE shape repeated across files.
+        emit_migrations.assert_no_cross_file_object_collisions(
+            {
+                "20260919120000_inbox_control_foundation.sql": "CREATE OR REPLACE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+                "20260919120100_inbox_read_companion.sql": "CREATE OR REPLACE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+                "20260919120200_inbox_backend_operation_reply.sql": "",
+            }
+        )
+
+    def test_real_emitted_set_has_no_collisions(self) -> None:
+        # The actual verified source tree must pass this check cleanly --
+        # proves the guard doesn't false-positive on the real files.
+        emitted = emit_migrations.compute_emitted()
+        emit_migrations.assert_no_cross_file_object_collisions(emitted)
 
     # -- forbidden-content guards
 
