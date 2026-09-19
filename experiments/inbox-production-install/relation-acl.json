@@ -1,0 +1,121 @@
+{
+  "schema:inbox_authenticated_detail": [
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_backfill": [
+    "inbox_projection_worker=U/postgres",
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_bridge": [
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_capture_boundary": [
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_control": [
+    "inbox_projection_worker=U/postgres",
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_maintained": [
+    "inbox_projection_worker=U/postgres",
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_message_capture": [
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_parent": [
+    "inbox_projection_worker=U/postgres",
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_policy": [
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_read": [
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_safety": [
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_summary_contract": [
+    "postgres=UC/postgres"
+  ],
+  "schema:inbox_unknown_summary": [
+    "postgres=UC/postgres"
+  ],
+  "table:inbox_backfill.collisions": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_backfill.jobs": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_bridge.access_epochs": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_bridge.cursors": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_bridge.filter_rows": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_bridge.summaries": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_bridge.worksets": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_capture_boundary.generation": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_control.baseline_progress": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_control.rollout": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_maintained.queue": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_maintained.rows": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_message_capture.dirty": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_message_capture.route_edges": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_message_capture.sender_buckets": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_message_capture.sender_groups": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_message_capture.versions": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_parent.work": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_policy.versions": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_read.boundaries": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_read.history_cursors": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_read.receipts": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_read.unknown_history_cursors": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:inbox_safety.routes": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "table:public.inbox_inbound_heads": [
+    "postgres=arwdDxtm/postgres"
+  ],
+  "type:inbox_bridge.cursor_context": []
+}

@@ -22,7 +22,11 @@
   "smoke.py": "48fb552e52de31bdce662f44c149ed87fef84e2efd2cbb8748069fd5edec6e96",
   "unknown-retention-test.py": "15c027cc365b46d2fdc21e7ff4e0ca6ea74afef21949f8a9c70424a9eb1d99c7",
   "unknown-retention.sql": "974eab36185aa70d78099eb1867e35c741a51bf5b5b0d68155be74e5604e6504",
-  "verify-mutation-harness.py": "3c1c0209359ef8028cb92ea0a64dcf0c6dab288a035bc3bc8ae6604ad9116c17",
-  "verify.py": "f85d5740db82e9de171145dfab6268340efe0f854e42ecbedd3f5b13198a2aaa",
-  "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15"
+  "verify-mutation-harness.py": "f0eb7385adbf9f565f195ea2f37ff43d49b9634a5ed4ebe2b349832952482ab4",
+  "verify.py": "a44432170c461bfa653bddd1ed0caf8806fbcbee5c38364781a340d4a4b4cdea",
+  "worker-step.py": "a3e2c49ea0540bb73af9c08dfb14c5da77831848a689a930c31630fe009c8e15",
+  "function-owners.json": "b532fc854058ce968f4348ab28a19ddd0e49351f9556b003c58c7b82198cecc6",
+  "function-grants.json": "75719eeb05c41d1bf266eaa398a5e397eb766e327a04e48c5fc3d73ec88ef0c5",
+  "relation-owners.json": "913df96eb6101d25fc6673b3f9691bee1eed5eb9578f245db5708f0cd200b96b",
+  "relation-acl.json": "33b7ee306b0c5e0057e6d3eb3c872c4079645304a3615df08a19ee335f3d1370"
 }
