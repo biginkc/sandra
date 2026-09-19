@@ -26,7 +26,7 @@ const server=createServer((req,res)=>{
   if(req.method!=='GET'||req.url!=='/health'){res.writeHead(404);res.end();return;}
   const healthy=!failed&&!stopping&&lastSuccess>0&&Date.now()-lastSuccess<60000;
   res.writeHead(healthy?200:503,{'content-type':'application/json','cache-control':'no-store'});
-  res.end(JSON.stringify({healthy,lastSuccess,counts:lastResult?.counts??null,poolConnections:pool.totalCount}));
+  res.end(JSON.stringify({healthy,lastSuccess,counts:lastResult?.counts??null,poisoned:lastResult?.counts?.poisoned??0,poolConnections:pool.totalCount}));
 });
 server.listen(port,process.env.INBOX_PROJECTION_BIND??'0.0.0.0');
 process.on('SIGTERM',()=>{stopping=true;});process.on('SIGINT',()=>{stopping=true;});
@@ -36,7 +36,7 @@ try{
     try{lastResult=await projectionRound(client,{batchSize,shouldStop:()=>stopping});}finally{client.release();}
     if(lastResult.stopped)break;
     lastSuccess=Date.now();
-    const worked=lastResult.counts.summary+lastResult.counts.parent+lastResult.counts.backfill+lastResult.counts.expiry;
+    const worked=lastResult.counts.summary+lastResult.counts.parent+lastResult.counts.backfill+lastResult.counts.expiry+lastResult.counts.poisoned;
     if(worked)console.log(JSON.stringify({event:'projection_round',elapsedMs:performance.now()-started,...lastResult}));
     await delay(worked?10:idleMs);
   }
