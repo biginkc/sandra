@@ -24,6 +24,7 @@ function makeQueryResult(data: unknown, error: unknown = null) {
   const chain = () => builder;
   builder.select = chain;
   builder.eq = chain;
+  builder.in = chain;
   builder.update = chain;
   builder.insert = chain;
   builder.order = chain;
@@ -99,6 +100,7 @@ describe("processEnrollmentTick — outbound suppression boundary", () => {
           return builder;
         };
         builder.eq = () => builder;
+        builder.in = () => builder;
         builder.then = (resolve: (v: { data: unknown; error: unknown }) => unknown) =>
           resolve({ data: null, error: null });
         return builder;
@@ -186,13 +188,6 @@ describe("processEnrollmentTick — outbound suppression boundary", () => {
   );
 
   it("still permanently opts out on dnc (regression: SUPPRESSED_DISPOS path unaffected)", async () => {
-    const client = makeClient({
-      status: "lead",
-      state: "MO",
-      address: "123 Main St",
-      outreach_dispo: "dnc",
-    });
-
     let capturedUpdate: unknown;
     const from = vi.fn((table: string) => {
       if (table === "sequence_steps") return makeQueryResult(STEP_ROW);
@@ -210,6 +205,7 @@ describe("processEnrollmentTick — outbound suppression boundary", () => {
           return builder;
         };
         builder.eq = () => builder;
+        builder.in = () => builder;
         builder.then = (resolve: (v: { data: unknown; error: unknown }) => unknown) =>
           resolve({ data: null, error: null });
         return builder;
@@ -288,13 +284,13 @@ describe("processEnrollmentTick — advancement persistence", () => {
             claimed = true;
             return ok({ id: "run-1" });
           }
-          if (opts.runWriteError) return fail("run write failed");
-          return ok(null);
+          if (opts.runWriteError && operation === "update") return fail("run write failed");
+          return ok({ id: "run-1" });
         }
         if (table === "sequence_enrollments") {
           if (opts.enrollmentWriteError) return fail("enrollment write failed");
           Object.assign(enrollment, payload);
-          return ok(null);
+          return ok({ id: "enrollment-1" });
         }
         throw new Error(`Unexpected table: ${table}`);
       };
@@ -306,7 +302,14 @@ describe("processEnrollmentTick — advancement persistence", () => {
       builder.then = (resolve: (value: ReturnType<typeof result>) => unknown) => resolve(result());
       return builder;
     });
-    return { client: { from } as never, enrollment, from };
+    return {
+      client: {
+        from,
+        rpc: vi.fn().mockResolvedValue({ data: [{ outcome: "active" }], error: null }),
+      } as never,
+      enrollment,
+      from,
+    };
   }
 
   beforeEach(() => {
@@ -320,7 +323,8 @@ describe("processEnrollmentTick — advancement persistence", () => {
       expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({
         status: "failed", message: expect.stringContaining("next step lookup failed"),
       });
-      expect(enrollment.status).toBe("active");
+      expect(enrollment.status).toBe("paused");
+      expect(enrollment.pause_reason).toBe("reconciliation_required");
       expect(enrollment.completed_at).toBeUndefined();
       expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({ status: "skipped_already_claimed" });
       expect(sendSmsToContact).toHaveBeenCalledTimes(action === "send_sms" ? 1 : 0);
@@ -369,6 +373,46 @@ describe("processEnrollmentTick — advancement persistence", () => {
     expect(sendSmsToContact).toHaveBeenCalledTimes(1);
   });
 
+  it("pauses for reconciliation when provider acceptance is known but receipt persistence fails", async () => {
+    vi.mocked(sendSmsToContact).mockResolvedValue({
+      status: "db_error",
+      messageId: "msg-1",
+      externalId: "provider-accepted",
+      deliveryOutcome: "accepted",
+      error: "message write failed",
+    });
+    const { client, enrollment } = fixture({ nextStep: true });
+
+    const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
+
+    expect(outcome).toMatchObject({
+      status: "failed",
+      message: "message write failed",
+    });
+    expect(enrollment).toMatchObject({
+      status: "paused",
+      pause_reason: "reconciliation_required",
+      current_step_index: 0,
+    });
+  });
+
+  it("retires a quiet-hours claim with audit state before rescheduling", async () => {
+    vi.mocked(sendSmsToContact).mockResolvedValue({
+      status: "blocked_quiet_hours",
+      reason: "quiet hours",
+      check: { ok: false, reason: "outside_window", localTime: "22:00", zone: "America/Chicago" },
+    });
+    const { client, enrollment } = fixture();
+
+    const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
+
+    expect(outcome).toMatchObject({
+      status: "rescheduled_quiet_hours",
+      enrollmentId: "enrollment-1",
+    });
+    expect(enrollment.next_run_at).toEqual(expect.any(String));
+  });
+
   it("completes after the final successful step", async () => {
     const { client, enrollment } = fixture();
     expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({ status: "sent" });
@@ -404,7 +448,9 @@ describe("processEnrollmentTick — send_sms race: booking lands after the early
         builder.update = () => builder;
         builder.select = () => builder;
         builder.eq = () => builder;
+        builder.in = () => builder;
         builder.single = () => Promise.resolve({ data: { id: "run-1" }, error: null });
+        builder.maybeSingle = () => Promise.resolve({ data: { id: "run-1" }, error: null });
         builder.then = (resolve: (v: { data: unknown; error: unknown }) => unknown) =>
           resolve({ data: null, error: null });
         return builder;
@@ -442,7 +488,6 @@ describe("processEnrollmentTick — send_sms race: booking lands after the early
 describe("processEnrollmentTick — change_status DNC race", () => {
   it("does not report a status change when a concurrent DNC lock wins", async () => {
     let propertyCall = 0;
-    let runCall = 0;
     let enrollmentUpdate: unknown;
     const changeStep = {
       ...STEP_ROW,
@@ -466,8 +511,7 @@ describe("processEnrollmentTick — change_status DNC race", () => {
         return makeQueryResult({ is_dnc_locked: true });
       }
       if (table === "sequence_step_runs") {
-        runCall += 1;
-        return makeQueryResult(runCall === 1 ? { id: "run-1" } : null);
+        return makeQueryResult({ id: "run-1" });
       }
       if (table === "sequence_enrollments") {
         const builder = makeQueryResult(null) as Record<string, unknown>;
@@ -498,7 +542,6 @@ describe("processEnrollmentTick — change_status DNC race", () => {
 
   it("reports failure when stopping the enrollment after the race fails", async () => {
     let propertyCall = 0;
-    let runCall = 0;
     const changeStep = {
       ...STEP_ROW,
       action_type: "change_status",
@@ -521,8 +564,7 @@ describe("processEnrollmentTick — change_status DNC race", () => {
         return makeQueryResult({ is_dnc_locked: true });
       }
       if (table === "sequence_step_runs") {
-        runCall += 1;
-        return makeQueryResult(runCall === 1 ? { id: "run-1" } : null);
+        return makeQueryResult({ id: "run-1" });
       }
       if (table === "sequence_enrollments") {
         return makeQueryResult(null, { message: "enrollment write failed" });

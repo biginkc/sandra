@@ -1,0 +1,1476 @@
+[
+  {
+    "run": 35221922638,
+    "status": "PASS",
+    "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+    "mutation": "claim-uniqueness-removed",
+    "docker": {
+      "host": "unix:///var/run/docker.sock",
+      "project": "seqmut-claim-uniqueness-removed-2288-mu5itvks",
+      "hostedDatabase": false,
+      "providerMode": "mock"
+    },
+    "phases": {
+      "baselineBefore": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "mutant": {
+        "targetExit": 1,
+        "targetCount": 1,
+        "targetFailures": 1,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "baselineAfter": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      }
+    },
+    "failures": [
+      {
+        "ancestorTitles": [
+          "native claim concurrency"
+        ],
+        "fullName": "native claim concurrency uses one provider invocation in 20 synchronized two-client claim trials and still progresses an unrelated enrollment",
+        "status": "failed",
+        "title": "uses one provider invocation in 20 synchronized two-client claim trials and still progresses an unrelated enrollment",
+        "duration": 392.50704300000007,
+        "failureMessages": [
+          "AssertionError: expected [ { to: '[SYNTHETIC_FIXTURE_PHONE]', \u2026(2) }, \u2026(1) ] to have a length of 1 but got 2\n    at Proxy.<anonymous> (file: [REDACTED]\n    at Proxy.<anonymous> (file: [REDACTED]\n    at Proxy.methodWrapper (file:///home/runner/work/sandra/sandra/node_modules/chai/index.js:1700:25)\n    at /tmp/sandra-sequence-mutation-worktree-4dZfUd/seqmut-claim-uniqueness-removed-2288-mu5itvks/src/lib/sequences/reliability.integration.test.ts:611:35\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///home/runner/work/sandra/sandra/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20"
+        ],
+        "meta": {},
+        "tags": []
+      }
+    ],
+    "sourceMutation": {
+      "kind": "postflight-ddl",
+      "sql": "drop index if exists public.idx_step_runs_active_enrollment_step",
+      "beforeSha256": "8902056136eeae4300c0c67c9475e6a53beacb43bd1ad3be8cc899973b42ca4f",
+      "afterSha256": null
+    },
+    "preflight": [
+      {
+        "phase": "clean-before-mutation",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      },
+      {
+        "phase": "after-restore",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      }
+    ],
+    "cleanup": [
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0
+      }
+    ],
+    "cleanupCommandOutputs": [
+      {
+        "file": "022-supabase-stop.stderr.log",
+        "bytes": 227,
+        "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+        "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+      },
+      {
+        "file": "022-supabase-stop.stdout.log",
+        "bytes": 65,
+        "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+        "content": "Stopping containers...\nStopped supabase local development setup.\n"
+      },
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      }
+    ]
+  },
+  {
+    "run": 35224977706,
+    "status": "PASS",
+    "commit": "72cab7c88442bf145aa382101bb77265465f55b0",
+    "mutation": "advancement-suppressed",
+    "docker": {
+      "host": "unix:///var/run/docker.sock",
+      "project": "seqmut-advancement-suppressed-2530-mu5jxy9t",
+      "hostedDatabase": false,
+      "providerMode": "mock",
+      "imageRegistry": "ghcr.io"
+    },
+    "phases": {
+      "baselineBefore": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "mutant": {
+        "targetExit": 1,
+        "targetCount": 1,
+        "targetFailures": 1,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "baselineAfter": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      }
+    },
+    "failures": [
+      {
+        "ancestorTitles": [
+          "native sequence lifecycle and due scheduling"
+        ],
+        "fullName": "native sequence lifecycle and due scheduling fires two SMS steps and a due status-change step, then completes the enrollment",
+        "status": "failed",
+        "title": "fires two SMS steps and a due status-change step, then completes the enrollment",
+        "duration": 492.4264509999998,
+        "failureMessages": [
+          "AssertionError: expected { \u2026(5) } to match object { status: 'active', \u2026(1) }\n(3 matching properties omitted from actual)\n    at Proxy.<anonymous> (file: [REDACTED]\n    at Proxy.<anonymous> (file: [REDACTED]\n    at Proxy.methodWrapper (file:///home/runner/work/sandra/sandra/node_modules/chai/index.js:1700:25)\n    at /tmp/sandra-sequence-mutation-worktree-wdPGBW/seqmut-advancement-suppressed-2530-mu5jxy9t/src/lib/sequences/reliability.integration.test.ts:522:24\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///home/runner/work/sandra/sandra/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20"
+        ],
+        "meta": {},
+        "tags": []
+      }
+    ],
+    "sourceMutation": {
+      "kind": "source",
+      "file": "src/lib/sequences/tick.ts",
+      "beforeSha256": "2aec090c4bc664bf2c9bd31a43dfcdb82b074fcf9af5f060f430339fa24af3da",
+      "afterSha256": "3a8ec622a22c0066176356de02f17f52dbde42d9935f1ca017f4bbebc475d317",
+      "from": "const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);",
+      "to": "const advanceError = null;"
+    },
+    "preflight": [
+      {
+        "phase": "clean-before-mutation",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      },
+      {
+        "phase": "after-restore",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      }
+    ],
+    "cleanup": [
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0
+      }
+    ],
+    "cleanupCommandOutputs": [
+      {
+        "file": "022-supabase-stop.stderr.log",
+        "bytes": 227,
+        "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+        "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+      },
+      {
+        "file": "022-supabase-stop.stdout.log",
+        "bytes": 65,
+        "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+        "content": "Stopping containers...\nStopped supabase local development setup.\n"
+      },
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      }
+    ]
+  },
+  {
+    "run": 35227327569,
+    "status": "PASS",
+    "commit": "540924657928eb47c89f28eb03376c436f8d920c",
+    "mutation": "final-authorization-removed",
+    "docker": {
+      "host": "unix:///var/run/docker.sock",
+      "project": "seqmut-final-authorization-remo-2506-mu5kpoks",
+      "hostedDatabase": false,
+      "providerMode": "mock",
+      "imageRegistry": "ghcr.io"
+    },
+    "phases": {
+      "baselineBefore": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "mutant": {
+        "targetExit": 1,
+        "targetCount": 1,
+        "targetFailures": 1,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "baselineAfter": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      }
+    },
+    "failures": [
+      {
+        "ancestorTitles": [
+          "native scheduler snapshot versus reply/cancel"
+        ],
+        "fullName": "native scheduler snapshot versus reply/cancel does not send when a reply pauses the enrollment after the scheduler snapshot",
+        "status": "failed",
+        "title": "does not send when a reply pauses the enrollment after the scheduler snapshot",
+        "duration": 571.962763,
+        "failureMessages": [
+          "AssertionError: expected 'failed' to be 'paused' // Object.is equality\n    at /tmp/sandra-sequence-mutation-worktree-ZfOi7i/seqmut-final-authorization-remo-2506-mu5kpoks/src/lib/sequences/reliability.integration.test.ts:1115:30\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///home/runner/work/sandra/sandra/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20"
+        ],
+        "meta": {},
+        "tags": []
+      }
+    ],
+    "sourceMutation": {
+      "kind": "source",
+      "file": "src/lib/messaging/send.ts",
+      "beforeSha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+      "afterSha256": "764864c8283519356a3f9b0b05db3b002b5bfd726a461162365f5454c8ef22f6",
+      "from": "  if (input.sequenceContext) {",
+      "to": "  if (false && input.sequenceContext) {"
+    },
+    "preflight": [
+      {
+        "phase": "clean-before-mutation",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      },
+      {
+        "phase": "after-restore",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      }
+    ],
+    "cleanup": [
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0
+      }
+    ],
+    "cleanupCommandOutputs": [
+      {
+        "file": "022-supabase-stop.stderr.log",
+        "bytes": 227,
+        "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+        "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+      },
+      {
+        "file": "022-supabase-stop.stdout.log",
+        "bytes": 65,
+        "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+        "content": "Stopping containers...\nStopped supabase local development setup.\n"
+      },
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      }
+    ]
+  },
+  {
+    "run": 35221931081,
+    "status": "PASS",
+    "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+    "mutation": "persistence-error-ignored",
+    "docker": {
+      "host": "unix:///var/run/docker.sock",
+      "project": "seqmut-persistence-error-ignored-2515-mu5is702",
+      "hostedDatabase": false,
+      "providerMode": "mock"
+    },
+    "phases": {
+      "baselineBefore": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "mutant": {
+        "targetExit": 1,
+        "targetCount": 1,
+        "targetFailures": 1,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "baselineAfter": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      }
+    },
+    "failures": [
+      {
+        "ancestorTitles": [
+          "native accepted-message persistence recovery"
+        ],
+        "fullName": "native accepted-message persistence recovery keeps an accepted provider attempt reconciliable when message receipt persistence returns a DB error",
+        "status": "failed",
+        "title": "keeps an accepted provider attempt reconciliable when message receipt persistence returns a DB error",
+        "duration": 463.58760699999993,
+        "failureMessages": [
+          "AssertionError: expected undefined to be 1 // Object.is equality\n    at /tmp/sandra-sequence-mutation-worktree-675pVw/seqmut-persistence-error-ignored-2515-mu5is702/src/lib/sequences/scheduling-reliability.integration.test.ts:880:35\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///home/runner/work/sandra/sandra/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20"
+        ],
+        "meta": {},
+        "tags": []
+      }
+    ],
+    "sourceMutation": {
+      "kind": "source",
+      "file": "src/lib/messaging/send.ts",
+      "beforeSha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+      "afterSha256": "31d3f1a4d7b3e37bf5eece15f51e54b49ac53f6adef6372a8fa7807f6080b2ec",
+      "from": "    if (updateError || !updated) {",
+      "to": "    if (false) {"
+    },
+    "preflight": [
+      {
+        "phase": "clean-before-mutation",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      },
+      {
+        "phase": "after-restore",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      }
+    ],
+    "cleanup": [
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0
+      }
+    ],
+    "cleanupCommandOutputs": [
+      {
+        "file": "022-supabase-stop.stderr.log",
+        "bytes": 227,
+        "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+        "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+      },
+      {
+        "file": "022-supabase-stop.stdout.log",
+        "bytes": 65,
+        "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+        "content": "Stopping containers...\nStopped supabase local development setup.\n"
+      },
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      }
+    ]
+  },
+  {
+    "run": 35221933931,
+    "status": "PASS",
+    "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+    "mutation": "unsafe-ambiguous-retry",
+    "docker": {
+      "host": "unix:///var/run/docker.sock",
+      "project": "seqmut-unsafe-ambiguous-retry-2297-mu5itfbl",
+      "hostedDatabase": false,
+      "providerMode": "mock"
+    },
+    "phases": {
+      "baselineBefore": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "mutant": {
+        "targetExit": 1,
+        "targetCount": 1,
+        "targetFailures": 1,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "baselineAfter": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      }
+    },
+    "failures": [
+      {
+        "ancestorTitles": [
+          "native retained-claim recovery"
+        ],
+        "fullName": "native retained-claim recovery never blindly re-sends an accepted native SMS when claim receipt bookkeeping is ambiguous",
+        "status": "failed",
+        "title": "never blindly re-sends an accepted native SMS when claim receipt bookkeeping is ambiguous",
+        "duration": 393.10233299999993,
+        "failureMessages": [
+          "AssertionError: expected { status: 'retried' } to match object { status: 'reconciliation_required' }\n    at Proxy.<anonymous> (file: [REDACTED]\n    at Proxy.<anonymous> (file: [REDACTED]\n    at Proxy.methodWrapper (file:///home/runner/work/sandra/sandra/node_modules/chai/index.js:1700:25)\n    at /tmp/sandra-sequence-mutation-worktree-hHiHWK/seqmut-unsafe-ambiguous-retry-2297-mu5itfbl/src/lib/sequences/reliability.integration.test.ts:990:28\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///home/runner/work/sandra/sandra/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20"
+        ],
+        "meta": {},
+        "tags": []
+      }
+    ],
+    "sourceMutation": {
+      "kind": "migration",
+      "file": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
+      "beforeSha256": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73",
+      "afterSha256": "a805af3df9838c0a191c2ea702c4f86cf2512cc4df42cbe9b8806d4b4cbef885",
+      "from": "  if prior.id is not null and (\n       prior.attempt_outcome not in ('not_attempted', 'definitively_rejected')\n     ) then",
+      "to": "  if false then"
+    },
+    "preflight": [
+      {
+        "phase": "clean-before-mutation",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      },
+      {
+        "phase": "after-mutation-reset",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      },
+      {
+        "phase": "after-restore",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      }
+    ],
+    "cleanup": [
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "027-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "027-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "028-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "028-docker-list-volume.stdout.log",
+        "bytes": 0
+      }
+    ],
+    "cleanupCommandOutputs": [
+      {
+        "file": "024-supabase-stop.stderr.log",
+        "bytes": 227,
+        "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+        "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+      },
+      {
+        "file": "024-supabase-stop.stdout.log",
+        "bytes": 65,
+        "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+        "content": "Stopping containers...\nStopped supabase local development setup.\n"
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "028-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "028-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "029-git-worktree-remove.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "029-git-worktree-remove.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      }
+    ]
+  },
+  {
+    "run": 35221937134,
+    "status": "PASS",
+    "commit": "215777a84ad9775d1d9950ff245bf90de539b06b",
+    "mutation": "suppression-bypassed",
+    "docker": {
+      "host": "unix:///var/run/docker.sock",
+      "project": "seqmut-suppression-bypassed-2513-mu5iv2jx",
+      "hostedDatabase": false,
+      "providerMode": "mock"
+    },
+    "phases": {
+      "baselineBefore": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "mutant": {
+        "targetExit": 1,
+        "targetCount": 1,
+        "targetFailures": 1,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "baselineAfter": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      }
+    },
+    "failures": [
+      {
+        "ancestorTitles": [
+          "sendSmsToContact (integration)"
+        ],
+        "fullName": "sendSmsToContact (integration) automated sends are blocked on a human-owned dispo the early SUPPRESSED_DISPOS check does not catch \u2014 zero provider calls",
+        "status": "failed",
+        "title": "automated sends are blocked on a human-owned dispo the early SUPPRESSED_DISPOS check does not catch \u2014 zero provider calls",
+        "duration": 405.40761899999984,
+        "failureMessages": [
+          "AssertionError: expected 'sent' to be 'blocked_automated_suppressed' // Object.is equality\n    at /tmp/sandra-sequence-mutation-worktree-jIbBbP/seqmut-suppression-bypassed-2513-mu5iv2jx/src/lib/messaging/send.integration.test.ts:473:30\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at withSafeSendWindow (/tmp/sandra-sequence-mutation-worktree-jIbBbP/seqmut-suppression-bypassed-2513-mu5iv2jx/src/lib/messaging/send.integration.test.ts:37:12)\n    at /tmp/sandra-sequence-mutation-worktree-jIbBbP/seqmut-suppression-bypassed-2513-mu5iv2jx/src/lib/messaging/send.integration.test.ts:458:5\n    at file:///home/runner/work/sandra/sandra/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20"
+        ],
+        "meta": {},
+        "tags": []
+      }
+    ],
+    "sourceMutation": {
+      "kind": "source",
+      "file": "src/lib/messaging/send.ts",
+      "beforeSha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b",
+      "afterSha256": "54c8e075254e4ae4dec162aa09e517d844107745961fbf1a5233ee2bbf0bdd67",
+      "from": "  if (input.origin === \"automated\") {",
+      "to": "  if (false && input.origin === \"automated\") {"
+    },
+    "preflight": [
+      {
+        "phase": "clean-before-mutation",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      },
+      {
+        "phase": "after-restore",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      }
+    ],
+    "cleanup": [
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0
+      }
+    ],
+    "cleanupCommandOutputs": [
+      {
+        "file": "022-supabase-stop.stderr.log",
+        "bytes": 227,
+        "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+        "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+      },
+      {
+        "file": "022-supabase-stop.stdout.log",
+        "bytes": 65,
+        "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+        "content": "Stopping containers...\nStopped supabase local development setup.\n"
+      },
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      }
+    ]
+  },
+  {
+    "run": 35228139492,
+    "status": "PASS",
+    "commit": "2ddeaf555436ce0316f824639c061a4f7b9eab95",
+    "mutation": "ui-persistence-dropped",
+    "docker": {
+      "host": "unix:///var/run/docker.sock",
+      "project": "seqmut-ui-persistence-dropped-2977-mu5l3wns",
+      "hostedDatabase": false,
+      "providerMode": "mock",
+      "imageRegistry": "ghcr.io"
+    },
+    "phases": {
+      "baselineBefore": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "mutant": {
+        "targetExit": 1,
+        "targetCount": 1,
+        "targetFailures": 1,
+        "controls": [
+          0,
+          0
+        ]
+      },
+      "baselineAfter": {
+        "targetExit": 0,
+        "targetCount": 1,
+        "targetFailures": 0,
+        "controls": [
+          0,
+          0
+        ]
+      }
+    },
+    "failures": [
+      {
+        "fullName": "sequence-readiness.local.spec.ts sequence readiness \u2014 local browser contract create/edit/enroll then persist pause, resume, cancel, and reload",
+        "failureMessages": [
+          "Error: \u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32m\"Edited local description\"\u001b[39m\nReceived: \u001b[31m\"Local browser persistence contract\"\u001b[39m\n\nCall Log:\n- Timeout 10000ms exceeded while waiting on the predicate\n    at /tmp/sandra-sequence-mutation-worktree-a4cWvg/seqmut-ui-persistence-dropped-2977-mu5l3wns/e2e/sequence-readiness.local.spec.ts:615:5"
+        ],
+        "failed": true
+      }
+    ],
+    "sourceMutation": {
+      "kind": "source",
+      "file": "src/app/(dashboard)/sequences/actions.ts",
+      "beforeSha256": "923cdf5aae8513cb0064eb80b8c13e24c135f0474b2c0beb337e6ba9e7dbd46d",
+      "afterSha256": "990297e58fadc701ebdebdf902c1ecc9debc722607cea9096642546887447573",
+      "from": "    if (patch.description !== undefined) update.description = patch.description;",
+      "to": "    if (false && patch.description !== undefined) update.description = patch.description;"
+    },
+    "preflight": [
+      {
+        "phase": "clean-before-mutation",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      },
+      {
+        "phase": "after-restore",
+        "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+        "database": "postgres",
+        "transactionIsolation": "read committed",
+        "indexes": [
+          {
+            "name": "idx_enrollments_unique_active",
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+          },
+          {
+            "name": "idx_step_runs_active_enrollment_step",
+            "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+          }
+        ],
+        "activeClaimIndexPresent": true
+      }
+    ],
+    "cleanup": [
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0
+      }
+    ],
+    "cleanupCommandOutputs": [
+      {
+        "file": "022-supabase-stop.stderr.log",
+        "bytes": 227,
+        "sha256": "cef8404f30c271da109713be1efef2765047bc713daf87cb6117e9fb1155a4d3",
+        "content": "A new version of Supabase CLI is available: v2.117.0 (currently installed v2.116.0)\nWe recommend updating regularly for new features and bug fixes: https://supabase.com/docs/guides/cli/getting-started#updating-the-supabase-cli\n"
+      },
+      {
+        "file": "022-supabase-stop.stdout.log",
+        "bytes": 65,
+        "sha256": "a357c2665e8225aeff497c0dd3e31a85613e37c905495c233127a76e5120478c",
+        "content": "Stopping containers...\nStopped supabase local development setup.\n"
+      },
+      {
+        "file": "023-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "023-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "024-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "025-docker-list-container.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "026-docker-list-volume.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stderr.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      },
+      {
+        "file": "027-git-worktree-remove.stdout.log",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "content": ""
+      }
+    ]
+  }
+]

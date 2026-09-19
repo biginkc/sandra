@@ -2,9 +2,26 @@ name: Disposable canary validation
 
 # Validate this candidate branch without changing production schedules.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      mutation:
+        description: Run one bounded reliability mutation after the baseline canary passes
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - claim-uniqueness-removed
+          - advancement-suppressed
+          - final-authorization-removed
+          - persistence-error-ignored
+          - unsafe-ambiguous-retry
+          - suppression-bypassed
+          - ui-persistence-dropped
   push:
-    branches: [codex/disposable-canary-runner-20260912]
+    branches:
+      - codex/disposable-canary-runner-20260912
+      - codex/sequence-readiness-20260917
 
 permissions:
   contents: read
@@ -23,7 +40,135 @@ jobs:
         with:
           version: 2.116.0
       - run: npm ci
+      - name: Install Chromium for local browser acceptance
+        run: npx playwright install --with-deps chromium
       - name: Verify cancellation cleanup contract
         run: node --test scripts/run-disposable-canaries.test.mjs
-      - name: Verify AI, escalation, STOP, and sequence behavior on a disposable database
+      - name: Verify application, sequence, reliability, and browser behavior on a disposable database
+        env:
+          SANDRA_CANARY_BROWSER: "1"
         run: node scripts/run-disposable-canaries.mjs
+      - name: Prepare scrubbed disposable browser evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination=.artifacts/disposable-sequence-browser
+          mkdir -p "$destination"
+          if [[ -d test-results/sequence-readiness ]]; then
+            while IFS= read -r -d '' file; do
+              relative="${file#test-results/sequence-readiness/}"
+              target="$destination/$relative"
+              mkdir -p "$(dirname "$target")"
+              if [[ "$file" == *.md || "$file" == *.json ]]; then
+                python3 - "$file" "$target" <<'PY'
+          import re
+          import sys
+
+          source, target = sys.argv[1:]
+          text = open(source, encoding="utf-8").read()
+          text = re.sub(r"(postgres(?:ql)?://[^:/\s]+:)[^@\s]+@", r"\1[REDACTED]@", text, flags=re.I)
+          text = re.sub(r"(bearer\s+)[A-Za-z0-9._-]+", r"\1[REDACTED]", text, flags=re.I)
+          text = re.sub(r"((?:anon|service[_ -]?role|jwt|access|refresh)[_-]?(?:key|token|secret)?\s*[:=]\s*)[^\s,]+", r"\1[REDACTED]", text, flags=re.I)
+          open(target, "w", encoding="utf-8").write(text)
+          PY
+              else
+                cp "$file" "$target"
+              fi
+            done < <(find test-results/sequence-readiness -type f \( -name 'error-context.md' -o -name '*.json' -o -name '*.png' \) -print0)
+          fi
+      - name: Upload scrubbed disposable browser evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: disposable-sequence-browser-evidence
+          path: .artifacts/disposable-sequence-browser/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  production-build:
+    if: ${{ github.event_name == 'push' || inputs.mutation == 'none' }}
+    name: Compile production application without hosted credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - name: Verify production build with loopback placeholders and offline fonts
+        env:
+          NEXT_PUBLIC_SITE_URL: http://127.0.0.1:3557
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: build-only-local-anon-key
+          MESSAGING_PROVIDER: mock
+          NEXT_FONT_GOOGLE_MOCKED_RESPONSES: ${{ github.workspace }}/tests/sequence-readiness/google-fonts-mock.cjs
+          NEXT_FONT_GOOGLE_TURBOPACK_MOCKED_RESPONSES: "1"
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: npm run build
+
+  selected-sequence-mutation:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mutation != 'none' && needs.canary-behaviors.result == 'success' }}
+    needs: canary-behaviors
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SANDRA_CANARY_DOCKER_HOST: unix:///var/run/docker.sock
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+      - run: npm ci
+      - name: Install Chromium for browser mutation
+        if: inputs.mutation == 'ui-persistence-dropped'
+        run: npx playwright install --with-deps chromium
+      - name: Run selected reliability mutation on a fresh disposable database
+        run: >-
+          node scripts/run-sequence-reliability-mutations.mjs
+          --commit=${{ github.sha }}
+          --mutation=${{ inputs.mutation }}
+          --artifacts-dir=/tmp/sandra-sequence-mutation-artifacts
+      - name: Prepare scrubbed mutation evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=/tmp/sandra-sequence-mutation-artifacts
+          destination=.artifacts/disposable-sequence-mutation
+          mkdir -p "$destination"
+          if [[ -d "$source" ]]; then
+            while IFS= read -r -d '' file; do
+              relative="${file#"$source"/}"
+              target="$destination/$relative"
+              mkdir -p "$(dirname "$target")"
+              python3 - "$file" "$target" <<'PY'
+          import re
+          import sys
+
+          source, target = sys.argv[1:]
+          text = open(source, encoding="utf-8", errors="replace").read()
+          text = re.sub(r"(postgres(?:ql)?://[^:/\s]+:)[^@\s]+@", r"\1[REDACTED]@", text, flags=re.I)
+          text = re.sub(r"(bearer\s+)[A-Za-z0-9._-]+", r"\1[REDACTED]", text, flags=re.I)
+          text = re.sub(r"((?:anon|service[_ -]?role|jwt|access|refresh)[_-]?(?:key|token|secret)?\s*[:=]\s*)[^\s,]+", r"\1[REDACTED]", text, flags=re.I)
+          open(target, "w", encoding="utf-8").write(text)
+          PY
+            done < <(find "$source" -type f -print0)
+          fi
+      - name: Upload scrubbed selected mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: disposable-sequence-mutation-${{ inputs.mutation }}
+          path: .artifacts/disposable-sequence-mutation/
+          if-no-files-found: ignore
+          retention-days: 7

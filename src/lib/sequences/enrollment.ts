@@ -201,7 +201,7 @@ export async function pausePropertyEnrollments(
   },
 ): Promise<{ paused: number }> {
   const newStatus = params.permanent ? "opted_out" : "paused";
-  const { data: pausedRows, error } = await client
+  let pauseQuery = client
     .from("sequence_enrollments")
     .update({
       status: newStatus,
@@ -209,9 +209,11 @@ export async function pausePropertyEnrollments(
       ...(params.permanent ? { next_run_at: null } : {}),
       updated_at: new Date().toISOString(),
     })
-    .eq("property_id", params.propertyId)
-    .eq("status", "active")
-    .select("id, sequence_id");
+    .eq("property_id", params.propertyId);
+  pauseQuery = params.permanent
+    ? pauseQuery.in("status", ["active", "paused"])
+    : pauseQuery.eq("status", "active");
+  const { data: pausedRows, error } = await pauseQuery.select("id, sequence_id");
   if (error) {
     throw new Error(`pausePropertyEnrollments: ${error.message}`);
   }
@@ -271,24 +273,31 @@ export async function resumeByProperty(
   params: { propertyId: string; actor?: SequenceEventActor },
 ): Promise<{ resumed: number }> {
   await assertNotTrainingTarget(client, { propertyId: params.propertyId });
-  const { data: resumedRows, error } = await client
+  const { data: pausedRows, error } = await client
     .from("sequence_enrollments")
-    .update({
-      status: "active",
-      pause_reason: null,
-      next_run_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
+    .select("id, sequence_id")
     .eq("property_id", params.propertyId)
     .eq("status", "paused")
-    .eq("pause_reason", "call_in_progress")
-    .select("id, sequence_id");
+    .eq("pause_reason", "call_in_progress");
   if (error) throw new Error(`resumeByProperty: ${error.message}`);
-  const resumed = resumedRows?.length ?? 0;
+  const actor = params.actor ?? SYSTEM_ACTOR;
+  const resumedRows: Array<{ id: string; sequence_id: string }> = [];
+  for (const row of pausedRows ?? []) {
+    const { data, error: resumeError } = await client.rpc(
+      "resume_sequence_enrollment",
+      {
+        p_enrollment_id: row.id,
+        p_actor_user_id: actor.actorType === "user" ? actor.actorId : null,
+      },
+    );
+    if (resumeError) throw new Error(`resumeByProperty: ${resumeError.message}`);
+    if (data?.[0]?.outcome === "resumed") resumedRows.push(row);
+  }
+  const resumed = resumedRows.length;
   if (resumed > 0) {
     await recordLeadEvent({
       propertyId: params.propertyId,
-      ...(params.actor ?? SYSTEM_ACTOR),
+      ...actor,
       eventType: LEAD_EVENT_TYPES.SEQUENCE_RESUMED,
       payload: {
         count: resumed,
@@ -330,7 +339,7 @@ export async function pauseContactEnrollments(
   if (propertyIds.length === 0) return { paused: 0 };
 
   const newStatus = params.permanent ? "opted_out" : "paused";
-  const { data: pausedRows, error } = await client
+  let pauseQuery = client
     .from("sequence_enrollments")
     .update({
       status: newStatus,
@@ -338,9 +347,11 @@ export async function pauseContactEnrollments(
       ...(params.permanent ? { next_run_at: null } : {}),
       updated_at: new Date().toISOString(),
     })
-    .in("property_id", propertyIds)
-    .eq("status", "active")
-    .select("id, property_id, sequence_id");
+    .in("property_id", propertyIds);
+  pauseQuery = params.permanent
+    ? pauseQuery.in("status", ["active", "paused"])
+    : pauseQuery.eq("status", "active");
+  const { data: pausedRows, error } = await pauseQuery.select("id, property_id, sequence_id");
   if (error) {
     throw new Error(`pauseContactEnrollments: ${error.message}`);
   }
@@ -384,44 +395,51 @@ export async function resumeEnrollment(
 ): Promise<
   | { status: "resumed" }
   | { status: "not_paused" }
+  | { status: "reconciliation_required" }
   | { status: "failed"; message: string }
 > {
   const { data: enrollment, error: loadErr } = await client
     .from("sequence_enrollments")
-    .select("id, status, sequence_id, property_id, current_step_index")
+    .select("id, status, sequence_id, property_id, current_step_index, pause_reason")
     .eq("id", enrollmentId)
     .maybeSingle();
   if (loadErr) return { status: "failed", message: loadErr.message };
   if (!enrollment) return { status: "failed", message: "Enrollment not found" };
   await assertNotTrainingTarget(client, { propertyId: enrollment.property_id });
   if (enrollment.status !== "paused") return { status: "not_paused" };
-
-  const { data: currentStep, error: stepErr } = await client
-    .from("sequence_steps")
-    .select("delay_after_previous_minutes")
-    .eq("sequence_id", enrollment.sequence_id)
-    .eq("step_index", enrollment.current_step_index)
-    .maybeSingle();
-  if (stepErr) return { status: "failed", message: stepErr.message };
-
-  // Step may have been deleted during edit — treat that as "no work left".
-  const delay = currentStep?.delay_after_previous_minutes ?? 0;
-  const nextRunAt = delayToDate(delay, new Date()).toISOString();
-
-  const { data: updated, error: updateErr } = await client
-    .from("sequence_enrollments")
-    .update({
-      status: "active",
-      pause_reason: null,
-      next_run_at: nextRunAt,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", enrollmentId)
-    .eq("status", "paused")
-    .select("id")
-    .maybeSingle();
-  if (updateErr) return { status: "failed", message: updateErr.message };
-  if (!updated) return { status: "not_paused" };
+  // A provider attempt that may have reached the provider is never made
+  // retryable by a normal resume. The explicit retry RPC below is restricted
+  // to claims proven not_attempted/definitively_rejected.
+  if (
+    enrollment.pause_reason === "reconciliation_required" ||
+    enrollment.pause_reason === "provider_failed"
+  ) {
+    return { status: "reconciliation_required" };
+  }
+  const { data: resumed, error: resumeError } = await client.rpc(
+    "resume_sequence_enrollment",
+    {
+      p_enrollment_id: enrollmentId,
+      p_actor_user_id: actor.actorType === "user" ? actor.actorId : null,
+    },
+  );
+  if (resumeError) return { status: "failed", message: resumeError.message };
+  const resumeResult = resumed?.[0];
+  if (!resumeResult || resumeResult.outcome === "not_found") {
+    return { status: "failed", message: "Enrollment not found" };
+  }
+  if (resumeResult.outcome === "not_paused") return { status: "not_paused" };
+  if (
+    resumeResult.outcome === "reconciliation_required" ||
+    resumeResult.outcome === "retry_required"
+  ) {
+    return { status: "reconciliation_required" };
+  }
+  if (resumeResult.outcome !== "resumed") {
+    return { status: "failed", message: "Enrollment resume was not authorized" };
+  }
+  const nextRunAt = resumeResult.next_run_at;
+  if (!nextRunAt) return { status: "failed", message: "Enrollment resume did not schedule a next run" };
 
   await recordLeadEvent({
     propertyId: enrollment.property_id,
@@ -435,4 +453,57 @@ export async function resumeEnrollment(
   });
 
   return { status: "resumed" };
+}
+
+/**
+ * Explicitly retry a sequence step only after its active claim is proven
+ * `not_attempted` or `definitively_rejected`. The RPC retires that claim and
+ * creates a new audited claim atomically; accepted/unknown claims remain
+ * reconciliation-only.
+ */
+export async function retrySequenceStep(
+  client: SupabaseClient<Database>,
+  enrollmentId: string,
+  actor: SequenceEventActor = SYSTEM_ACTOR,
+): Promise<
+  | { status: "retried" }
+  | { status: "reconciliation_required" }
+  | { status: "not_found" }
+  | { status: "failed"; message: string }
+> {
+  const { data, error } = await client.rpc("retry_sequence_step", {
+    p_enrollment_id: enrollmentId,
+    p_actor_user_id: actor.actorType === "user" ? actor.actorId : null,
+  });
+  if (error) return { status: "failed", message: error.message };
+  const result = data?.[0];
+  if (!result || result.outcome === "not_found") return { status: "not_found" };
+  if (result.outcome === "not_authorized") {
+    return { status: "failed", message: "Enrollment retry was not authorized." };
+  }
+  if (result.outcome !== "retried") return { status: "reconciliation_required" };
+
+  const { data: enrollment, error: loadError } = await client
+    .from("sequence_enrollments")
+    .select("property_id, sequence_id")
+    .eq("id", enrollmentId)
+    .maybeSingle();
+  if (loadError || !enrollment) {
+    return {
+      status: "failed",
+      message: loadError?.message ?? "Enrollment disappeared after retry.",
+    };
+  }
+  await recordLeadEvent({
+    propertyId: enrollment.property_id,
+    ...actor,
+    eventType: LEAD_EVENT_TYPES.SEQUENCE_RESUMED,
+    payload: {
+      enrollment_id: enrollmentId,
+      sequence_id: enrollment.sequence_id,
+      reason: "explicit_sequence_step_retry",
+      step_index: result.step_index,
+    },
+  });
+  return { status: "retried" };
 }

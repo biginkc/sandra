@@ -381,6 +381,8 @@ export type SendSmsOutcome =
       error: string;
       /** False means the manual authorization fence failed before fetch. */
       providerAttempted?: boolean;
+      /** Native sequence sends retain ambiguity instead of guessing no-send. */
+      deliveryOutcome?: SequenceAttemptOutcome;
     }
   | {
       /**
@@ -401,7 +403,33 @@ export type SendSmsOutcome =
     }
   | { status: "contact_not_found" }
   | { status: "property_not_found" }
-  | { status: "db_error"; error: string; messageId?: string; externalId?: string };
+  | {
+      status: "blocked_sequence_authorization";
+      messageId: string;
+      reason: string;
+      attemptOutcome: SequenceAttemptOutcome;
+    }
+  | {
+      status: "db_error";
+      error: string;
+      messageId?: string;
+      externalId?: string;
+      /** Set when the provider accepted before receipt persistence failed. */
+      deliveryOutcome?: SequenceAttemptOutcome;
+    };
+
+/** Evidence classification for one native sequence provider attempt. */
+export type SequenceAttemptOutcome =
+  | "not_attempted"
+  | "definitively_rejected"
+  | "accepted"
+  | "unknown";
+
+export type SequenceSendContext = {
+  enrollmentId: string;
+  stepId: string;
+  claimId: string;
+};
 
 export type SendSmsInput = {
   /**
@@ -470,6 +498,8 @@ export type SendSmsInput = {
    * replay authority and messages.idempotency_key is intentionally ignored.
    */
   repSmsReceipt?: RepSmsDeliveryReceiptAuthority | null;
+  /** Native sequence fence; omitted by manual, AI, and campaign callers. */
+  sequenceContext?: SequenceSendContext;
 };
 
 export async function sendSmsToContact(
@@ -861,6 +891,72 @@ export async function sendSmsToContact(
     }
   }
 
+  // Native sequence sends have one stricter final fence than other
+  // automated origins. The RPC locks the current enrollment and jointly
+  // rechecks its expected step, contact/property boundary, consent,
+  // selected phone, and durable phone suppression. On success it records
+  // provider intent as `unknown` in the same transaction. Keep the provider
+  // invocation directly after this await: there must be no intervening read
+  // or write that could make a cancellation appear to prove non-delivery.
+  if (input.sequenceContext) {
+    const { data: authorization, error: authorizationError } = await supabase.rpc(
+      "authorize_sequence_provider_attempt",
+      {
+        p_enrollment_id: input.sequenceContext.enrollmentId,
+        p_step_id: input.sequenceContext.stepId,
+        p_claim_id: input.sequenceContext.claimId,
+        p_contact_id: input.contactId,
+        p_property_id: input.propertyId,
+        p_phone: normalizedToPhone,
+        p_message_id: pending.id,
+      },
+    );
+    if (authorizationError) {
+      await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: `Held: sequence authorization unavailable (${authorizationError.message}).`,
+        })
+        .eq("id", pending.id)
+        .eq("status", "pending");
+      return {
+        status: "blocked_sequence_authorization",
+        messageId: pending.id,
+        reason: authorizationError.message,
+        // An RPC error cannot prove whether its transaction committed the
+        // provider intent marker; retain the safe unknown classification.
+        attemptOutcome: "unknown",
+      };
+    }
+    const decision = authorization?.[0];
+    if (!decision?.authorized) {
+      const reason = decision?.reason ?? "sequence authorization denied";
+      await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          failed_at: new Date().toISOString(),
+          error_message: reason,
+        })
+        .eq("id", pending.id)
+        .eq("status", "pending");
+      const attemptOutcome: SequenceAttemptOutcome =
+        decision?.attempt_outcome === "definitively_rejected" ||
+        decision?.attempt_outcome === "accepted" ||
+        decision?.attempt_outcome === "unknown"
+          ? decision.attempt_outcome
+          : "not_attempted";
+      return {
+        status: "blocked_sequence_authorization",
+        messageId: pending.id,
+        reason,
+        attemptOutcome,
+      };
+    }
+  }
+
   // 6. Send. Keep accepted-provider errors outside provider failure handling.
   let acceptedExternalId: string | undefined;
   let providerAccepted = false;
@@ -889,6 +985,7 @@ export async function sendSmsToContact(
           status: "db_error",
           messageId: pending.id,
           externalId: result.externalId,
+          ...(input.sequenceContext ? { deliveryOutcome: "accepted" as const } : {}),
           error: "The provider accepted the SMS, but its durable receipt could not be recorded. Review before retrying.",
         };
       }
@@ -917,6 +1014,7 @@ export async function sendSmsToContact(
         status: "db_error",
         messageId: pending.id,
         externalId: result.externalId,
+        ...(input.sequenceContext ? { deliveryOutcome: "accepted" as const } : {}),
         error: updateError?.message ?? "message changed while marking sent",
       };
     }
@@ -947,6 +1045,9 @@ export async function sendSmsToContact(
         status: "db_error",
         messageId: pending.id,
         externalId: acceptedExternalId,
+        ...(input.sequenceContext
+          ? { deliveryOutcome: acceptedExternalId ? ("accepted" as const) : ("unknown" as const) }
+          : {}),
         error: message,
       };
     }
@@ -997,11 +1098,12 @@ export async function sendSmsToContact(
         error_message: message,
         metadata: {
           ...(inputMetadata ?? {}),
-          providerAttempt: {
-            pendingAt,
-            maxPendingMs: PROVIDER_PENDING_STALE_MS,
-            terminal: true,
-          },
+            providerAttempt: {
+              pendingAt,
+              maxPendingMs: PROVIDER_PENDING_STALE_MS,
+              terminal: true,
+              outcome: classifySequenceProviderFailure(e),
+            },
         } as Json,
       })
       .eq("id", pending.id);
@@ -1009,9 +1111,28 @@ export async function sendSmsToContact(
       status: "provider_failed",
       messageId: pending.id,
       error: message,
+      ...(input.sequenceContext
+        ? { deliveryOutcome: classifySequenceProviderFailure(e) }
+        : {}),
       ...(manualDispatch && !providerCallStarted ? { providerAttempted: false } : {}),
     };
   }
+}
+
+function classifySequenceProviderFailure(error: unknown): SequenceAttemptOutcome {
+  // Only an adapter-provided marker is evidence of a definitive rejection.
+  // Generic Error text, a failed messages row, and missing provider linkage
+  // are all ambiguous once the provider call has begun.
+  if (
+    error instanceof ProviderError &&
+    error.details?.definitiveRejection === true
+  ) {
+    return "definitively_rejected";
+  }
+  if (error instanceof ProviderError && error.details?.notSent === true) {
+    return "not_attempted";
+  }
+  return "unknown";
 }
 
 /**

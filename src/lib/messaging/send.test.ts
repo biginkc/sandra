@@ -65,7 +65,13 @@ function chain(result: { data: unknown; error: { message: string } | null }) {
 /** Fake Supabase client whose `.from(table)` hands back the next queued
  *  chain for that table (FIFO per table) — lets a test script exactly
  *  which result each successive call to the same table should return. */
-function fakeSupabase(queues: Record<string, Array<{ data: unknown; error: { message: string; code?: string } | null }>>) {
+function fakeSupabase(
+  queues: Record<string, Array<{ data: unknown; error: { message: string; code?: string } | null }>>,
+  rpcResult: { data: unknown; error: { message: string } | null } = {
+    data: [{ authorized: true, reason: null, attempt_outcome: "unknown" }],
+    error: null,
+  },
+) {
   return {
     from: (table: string) => {
       const q = queues[table];
@@ -74,6 +80,7 @@ function fakeSupabase(queues: Record<string, Array<{ data: unknown; error: { mes
       }
       return chain(q.shift()!);
     },
+    rpc: vi.fn().mockResolvedValue(rpcResult),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
 }

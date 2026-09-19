@@ -1,0 +1,277 @@
+{
+  "kind": "sandra-disposable-canary-environment",
+  "source": {
+    "commitSha": "2ddeaf555436ce0316f824639c061a4f7b9eab95",
+    "copiedMigrationsSha256": "2b963e64e820a71b73f42e016ad0df9df9cc131ceb3b3da4e597c4336a13df8a",
+    "copiedCriticalMigrations": {
+      "018_sequences_v1.sql": "4cbb6c480a9d237c655e8e51cdc08bb7cc16ae82fcab06f5434c38d73bf59f85",
+      "20260919090000_sequence_runtime_recovery.sql": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73"
+    },
+    "sourceFiles": {
+      "quietHours": {
+        "path": "src/lib/messaging/quiet-hours.ts",
+        "sha256": "7a7780a583099c0bf302589e23e35595de4f133ee4606fd3dfd52869d306f340"
+      },
+      "enrollment": {
+        "path": "src/lib/sequences/enrollment.ts",
+        "sha256": "db01b5187715c517fd59275f2aa31f0c771e27713cdc9cdeeeb3aba0d02c1db5"
+      },
+      "tick": {
+        "path": "src/lib/sequences/tick.ts",
+        "sha256": "2aec090c4bc664bf2c9bd31a43dfcdb82b074fcf9af5f060f430339fa24af3da"
+      },
+      "handlers": {
+        "path": "src/app/api/cron/sequence-tick/handlers.ts",
+        "sha256": "9f4a84e0616b9746c9567b351681d2f5ba5e574d772ce2b8bc145387640c11d7"
+      },
+      "send": {
+        "path": "src/lib/messaging/send.ts",
+        "sha256": "9f5667614584554a0d09df456f34576506e29b89b4caac0376d0d9f3e46dec2b"
+      },
+      "fixtureOrgSource": {
+        "path": "tests/integration/fixtures/multi-user.ts",
+        "sha256": "1432bef876901ab0ab2ca5f59b999017132d01f6e8ce877bd8a4547e13f65d0e"
+      },
+      "vercel": {
+        "path": "vercel.json",
+        "sha256": "0ff71a42824a441726fc8255426c51cb83a4a72ba387eb2d9e7661b9628e28ef"
+      },
+      "sequenceMigration": {
+        "path": "supabase/migrations/018_sequences_v1.sql",
+        "sha256": "4cbb6c480a9d237c655e8e51cdc08bb7cc16ae82fcab06f5434c38d73bf59f85"
+      },
+      "runtimeMigration": {
+        "path": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
+        "sha256": "52236e609918a0335763741a9fd8524672e8128d8e7b26c127bc14c766b84f73"
+      }
+    }
+  },
+  "database": {
+    "supabaseCli": "2.116.0",
+    "postgrestVersion": "UNKNOWN (local Supabase status does not expose PostgREST version; no container inspection performed)",
+    "postgresVersion": "PostgreSQL 17.6 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 15.2.0, 64-bit",
+    "database": "postgres",
+    "transactionIsolation": "read committed",
+    "apiOrigin": "http://127.0.0.1:54321",
+    "dbOrigin": "127.0.0.1:54322"
+  },
+  "fixtureOrg": {
+    "id": "00000000-0000-0000-0000-000000000bbb",
+    "source": "tests/integration/fixtures/multi-user.ts:BMH_ORG_ID",
+    "role": "canonical integration tenant"
+  },
+  "isolation": {
+    "project": "unique temporary Supabase project",
+    "docker": "dedicated local Unix socket only",
+    "excludedSupabaseServices": [
+      "studio",
+      "postgres-meta",
+      "realtime",
+      "edge-runtime",
+      "logflare",
+      "vector",
+      "mailpit",
+      "imgproxy"
+    ],
+    "hostedDatabase": false,
+    "providerCredentials": false,
+    "providerMode": "mock",
+    "browserAcceptance": true,
+    "browserOnly": false,
+    "testLane": "integration-and-browser",
+    "providerLedger": "loopback token-protected ledger",
+    "testFileParallelism": false,
+    "teardown": "supabase stop --no-backup, then remove temporary project directory"
+  },
+  "providerContractCoverage": {
+    "selectedProvider": "mock",
+    "outbound": "mock invocation log records a distinct invocation and accepted external ID; no external provider request is permitted",
+    "sequenceFailures": "native sequence tests cover definitive rejection and ambiguous provider outcomes with the mock transport",
+    "inbound": "Sendillo and Dialpad webhook route fixtures, including signature and STOP/replay handling",
+    "adapterMapping": "Sendillo outbound adapter unit coverage is outside this disposable integration lane; its documented 400 rejection and ambiguous timeout/network/5xx/2xx-without-ID mapping is not treated as production-provider evidence here",
+    "configuredProductionProvider": "UNKNOWN (production inspection was not performed)"
+  },
+  "productionEquivalence": {
+    "status": "UNKNOWN",
+    "postgresVersion": "UNKNOWN",
+    "postgrestVersion": "UNKNOWN",
+    "transactionIsolation": "UNKNOWN",
+    "configuredProvider": "UNKNOWN",
+    "deployedCronCadence": "UNKNOWN",
+    "reason": "No production inspection was performed by this local runner."
+  },
+  "criticalConstraint": {
+    "migration": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
+    "index": "idx_step_runs_active_enrollment_step",
+    "key": [
+      "enrollment_id",
+      "step_id"
+    ],
+    "predicate": "claim_active",
+    "legacyIndex": "idx_step_runs_unique_enrollment_step (retired by runtime recovery migration)",
+    "claimColumns": {
+      "claim_active": {
+        "default": true
+      },
+      "attempt_outcome": {
+        "default": "unknown"
+      },
+      "attempt_started_at": {
+        "databaseClock": "now()"
+      },
+      "attempt_count": {
+        "default": 0
+      },
+      "failure_reason": {
+        "default": null
+      }
+    },
+    "staleClaimClockClamp": "least(coalesce(p_stale_before, now() - interval '15 minutes'), now() - interval '15 minutes')",
+    "databaseIndexes": [
+      {
+        "name": "idx_enrollments_unique_active",
+        "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))"
+      },
+      {
+        "name": "idx_step_runs_active_enrollment_step",
+        "definition": "CREATE UNIQUE INDEX idx_step_runs_active_enrollment_step ON public.sequence_step_runs USING btree (enrollment_id, step_id) WHERE claim_active"
+      }
+    ]
+  },
+  "clocks": {
+    "quietHoursLocal": "[08:00, 21:00)",
+    "quietDeferralMs": 36000000,
+    "enrollmentAndTick": "application Date / Date.now()",
+    "resumeAndRetry": {
+      "clock": "PostgreSQL now()",
+      "paths": [
+        "public.resume_sequence_enrollment",
+        "public.retry_sequence_step"
+      ],
+      "retryNextRun": "now()",
+      "resumeNextRun": "now() + make_interval(mins => step.delay_after_previous_minutes)"
+    },
+    "staleClaimPredicate": {
+      "clock": "PostgreSQL now()",
+      "expression": "least(coalesce(p_stale_before, now() - interval '15 minutes'), now() - interval '15 minutes')"
+    },
+    "databaseAuditDefaults": "PostgreSQL now() (not substituted by fake application Date)",
+    "staleClaimMinimumAgeMs": 900000,
+    "queueDeferralMs": 1800000,
+    "sequenceTickBatch": 100,
+    "retainedClaimLookaheadRows": 100,
+    "retainedClaimLookaheadPages": 1,
+    "sequenceTickDrain": 240,
+    "sequenceTickBudgetMs": 240000,
+    "cronCadence": "*/5 * * * *",
+    "audit": [
+      {
+        "id": "enrollment_first_due",
+        "sourceKey": "enrollment",
+        "sourcePath": "src/lib/sequences/enrollment.ts",
+        "function": "enrollLead",
+        "predicate": "step 0 delay to sequence_enrollments.next_run_at",
+        "clock": "application Date / new Date()"
+      },
+      {
+        "id": "tick_due_and_budget",
+        "sourceKey": "handlers",
+        "sourcePath": "src/app/api/cron/sequence-tick/handlers.ts",
+        "function": "runSequenceTick",
+        "predicate": "due enrollment/message selection and elapsed budget",
+        "clock": "application Date / Date.now()"
+      },
+      {
+        "id": "native_claim_stale_cutoff",
+        "sourceKey": "tick",
+        "sourcePath": "src/lib/sequences/tick.ts",
+        "function": "processEnrollmentTick",
+        "predicate": "claim scheduled_for and application stale-cutoff input",
+        "clock": "application Date / Date.now(); DB RPC clamps minimum age"
+      },
+      {
+        "id": "quiet_hours",
+        "sourceKey": "quietHours",
+        "sourcePath": "src/lib/messaging/quiet-hours.ts",
+        "function": "checkQuietHours",
+        "predicate": "local send window and test override",
+        "clock": "application Date / E2E_QUIET_HOURS_NOW override"
+      },
+      {
+        "id": "direct_quiet_deferral",
+        "sourceKey": "tick",
+        "sourcePath": "src/lib/sequences/tick.ts",
+        "function": "processEnrollmentTick",
+        "predicate": "quiet-hours next_run_at deferral",
+        "clock": "application Date / Date.now()"
+      },
+      {
+        "id": "next_step_due",
+        "sourceKey": "tick",
+        "sourcePath": "src/lib/sequences/tick.ts",
+        "function": "advanceEnrollment",
+        "predicate": "next step delay to sequence_enrollments.next_run_at",
+        "clock": "application Date / new Date()"
+      },
+      {
+        "id": "queue_pending_stale_sweep",
+        "sourceKey": "handlers",
+        "sourcePath": "src/app/api/cron/sequence-tick/handlers.ts",
+        "function": "failStalePendingProviderAttempts",
+        "predicate": "pending provider attempt age cutoff",
+        "clock": "application Date / Date.now()"
+      },
+      {
+        "id": "queue_due_and_pending_age",
+        "sourceKey": "send",
+        "sourcePath": "src/lib/messaging/send.ts",
+        "function": "releaseQueuedMessage",
+        "constant": "PROVIDER_PENDING_STALE_MS",
+        "predicate": "queued release due check and provider-pending age",
+        "clock": "application Date / Date.now()"
+      },
+      {
+        "id": "queue_retry_backoff",
+        "sourceKey": "send",
+        "sourcePath": "src/lib/messaging/send.ts",
+        "function": "buildProviderRetryUpdate",
+        "relatedFunction": "deferQueuedMessage",
+        "predicate": "provider transient retry nextRetryAt/scheduled_for",
+        "clock": "application Date / Date.now()",
+        "attempt": "* attempt"
+      },
+      {
+        "id": "sequence_audit_defaults",
+        "sourceKey": "sequenceMigration",
+        "sourcePath": "supabase/migrations/018_sequences_v1.sql",
+        "function": "sequence_step_runs.created_at default",
+        "predicate": "audit row creation timestamp",
+        "clock": "PostgreSQL now()"
+      },
+      {
+        "id": "provider_intent_timestamp",
+        "sourceKey": "runtimeMigration",
+        "sourcePath": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
+        "function": "authorize_sequence_provider_attempt",
+        "predicate": "provider-intent attempt_started_at",
+        "clock": "PostgreSQL now()"
+      },
+      {
+        "id": "retry_resume_schedule",
+        "sourceKey": "runtimeMigration",
+        "sourcePath": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
+        "function": "retry_sequence_step, resume_sequence_enrollment",
+        "predicate": "explicit recovery next_run_at",
+        "clock": "PostgreSQL now()"
+      },
+      {
+        "id": "stale_claim_reconciliation",
+        "sourceKey": "runtimeMigration",
+        "sourcePath": "supabase/migrations/20260919090000_sequence_runtime_recovery.sql",
+        "function": "retire_stale_sequence_claim",
+        "predicate": "bounded stale claim age",
+        "clock": "PostgreSQL now()"
+      }
+    ]
+  }
+}

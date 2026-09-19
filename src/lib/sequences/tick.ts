@@ -1,6 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { sendSmsToContact } from "@/lib/messaging/send";
+import {
+  sendSmsToContact,
+  type SequenceAttemptOutcome,
+} from "@/lib/messaging/send";
 import { shouldSuppressAutomatedSend } from "@/lib/messaging/suppression";
 import type { Database } from "@/lib/supabase/types";
 import { pickFromPool } from "@/lib/templates/pool";
@@ -29,7 +32,7 @@ const FIRST_TOUCH_SENDER_PAUSE_REASON =
  *   4. For send_sms: call `sendSmsToContact` (which enforces consent +
  *      quiet hours). Branch on its outcome:
  *        - `sent` / `queued` → advance, stamp message_id on the run row.
- *        - `blocked_quiet_hours` → reschedule +N hours, DELETE the claim
+ *        - `blocked_quiet_hours` → reschedule +N hours, retire the claim only through a proof-gated update
  *           so the next tick can re-fire after the window opens.
  *        - `blocked_no_consent` → mark enrollment opted_out permanently.
  *        - `blocked_no_phone` → pause with reason.
@@ -49,6 +52,9 @@ export type TickOutcome =
   | { status: "skipped_already_claimed"; enrollmentId: string }
   | { status: "skipped_no_step"; enrollmentId: string }
   | { status: "failed"; enrollmentId: string; message: string };
+
+/** A live provider attempt gets this long before requiring reconciliation. */
+export const SEQUENCE_CLAIM_STALE_MS = 15 * 60_000;
 
 type EnrollmentRow = {
   id: string;
@@ -77,7 +83,7 @@ export async function processEnrollmentTick(
   }
   if (!step) {
     // No step at this index — enrollment has effectively completed. Mark it.
-    const { error: completionError } = await client
+    const { data: completed, error: completionError } = await client
       .from("sequence_enrollments")
       .update({
         status: "completed",
@@ -85,9 +91,17 @@ export async function processEnrollmentTick(
         next_run_at: null,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", enrollment.id);
-    if (completionError) {
-      return { status: "failed", enrollmentId: enrollment.id, message: completionError.message };
+      .eq("id", enrollment.id)
+      .eq("status", "active")
+      .eq("current_step_index", enrollment.current_step_index)
+      .select("id")
+      .maybeSingle();
+    if (completionError || !completed) {
+      return {
+        status: "failed",
+        enrollmentId: enrollment.id,
+        message: completionError?.message ?? "enrollment changed before completion",
+      };
     }
     return { status: "completed", enrollmentId: enrollment.id };
   }
@@ -183,11 +197,49 @@ export async function processEnrollmentTick(
       enrollment_id: enrollment.id,
       step_id: step.id,
       scheduled_for: new Date().toISOString(),
+      attempt_outcome: "not_attempted",
     })
     .select("id")
     .single();
   if (claimErr) {
     if (claimErr.code === "23505") {
+      const { data: existingClaim, error: existingClaimError } = await client
+        .from("sequence_step_runs")
+        .select("id")
+        .eq("enrollment_id", enrollment.id)
+        .eq("step_id", step.id)
+        .eq("claim_active", true)
+        .maybeSingle();
+      if (existingClaimError || !existingClaim) {
+        return {
+          status: "failed",
+          enrollmentId: enrollment.id,
+          message: existingClaimError?.message ?? "active sequence claim disappeared",
+        };
+      }
+      const { data: staleResult, error: staleError } = await client.rpc(
+        "retire_stale_sequence_claim",
+        {
+          p_enrollment_id: enrollment.id,
+          p_step_id: step.id,
+          p_claim_id: existingClaim.id,
+          p_stale_before: new Date(Date.now() - SEQUENCE_CLAIM_STALE_MS).toISOString(),
+        },
+      );
+      if (staleError) {
+        return { status: "failed", enrollmentId: enrollment.id, message: staleError.message };
+      }
+      const staleOutcome = staleResult?.[0]?.outcome;
+      if (staleOutcome === "retired") {
+        return { status: "paused", enrollmentId: enrollment.id, reason: "provider_failed" };
+      }
+      if (staleOutcome === "reconciliation_required") {
+        return {
+          status: "paused",
+          enrollmentId: enrollment.id,
+          reason: "reconciliation_required",
+        };
+      }
       return { status: "skipped_already_claimed", enrollmentId: enrollment.id };
     }
     return { status: "failed", enrollmentId: enrollment.id, message: claimErr.message };
@@ -196,7 +248,15 @@ export async function processEnrollmentTick(
   // 4 / 5. Execute action.
   if (step.action_type === "send_sms") {
     if (!enrollment.contact_id) {
-      await markRunSkipped(client, claim.id, "no_phone");
+      const runError = await markRunSkipped(client, claim.id, "no_phone");
+      if (runError) {
+        return failAfterRunWrite(
+          client,
+          enrollment.id,
+          runError,
+          "No-phone sequence bookkeeping failed",
+        );
+      }
       const pauseError = await pauseEnrollment(
         client,
         enrollment.id,
@@ -228,14 +288,18 @@ export async function processEnrollmentTick(
     // author can fix it instead of silently looping on failure.
     let bodySource: string;
     if (step.template_id) {
-      const { data: tmpl, error: tmplErr } = await client
-        .from("sms_templates")
-        .select("content")
-        .eq("id", step.template_id)
-        .is("deleted_at", null)
-        .maybeSingle();
+        const { data: tmpl, error: tmplErr } = await client
+          .from("sms_templates")
+          .select("content")
+          .eq("id", step.template_id)
+          .eq("org_id", enrollment.org_id)
+          .is("deleted_at", null)
+          .maybeSingle();
       if (tmplErr) {
-        await markRunSkipped(client, claim.id, "provider_failed");
+        const runError = await markRunSkipped(client, claim.id, "provider_failed");
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "Template fetch bookkeeping failed");
+        }
         return {
           status: "failed",
           enrollmentId: enrollment.id,
@@ -243,7 +307,10 @@ export async function processEnrollmentTick(
         };
       }
       if (!tmpl) {
-        await markRunSkipped(client, claim.id, "provider_failed");
+        const runError = await markRunSkipped(client, claim.id, "provider_failed");
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "Missing-template bookkeeping failed");
+        }
         const pauseError = await pauseEnrollment(
           client,
           enrollment.id,
@@ -268,7 +335,10 @@ export async function processEnrollmentTick(
         enrollment.id,
       );
       if (!poolTemplate) {
-        await markRunSkipped(client, claim.id, "provider_failed");
+        const runError = await markRunSkipped(client, claim.id, "provider_failed");
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "Template-pool bookkeeping failed");
+        }
         const pauseError = await pauseEnrollment(
           client,
           enrollment.id,
@@ -297,7 +367,10 @@ export async function processEnrollmentTick(
     // Pause the enrollment with `step_misconfigured` so the author can fix
     // it instead of sending an empty SMS the provider would silently bill.
     if (!bodySource.trim()) {
-      await markRunSkipped(client, claim.id, "provider_failed");
+      const runError = await markRunSkipped(client, claim.id, "provider_failed");
+      if (runError) {
+        return failAfterRunWrite(client, enrollment.id, runError, "Misconfigured-step bookkeeping failed");
+      }
       const pauseError = await pauseEnrollment(
         client,
         enrollment.id,
@@ -330,24 +403,56 @@ export async function processEnrollmentTick(
       allowDefaultFromWhenNoSticky: true,
       requiresOpeningIdentity:
         step.step_index === 0 && step.template_category === "Opener - Homeowner",
+      sequenceContext: {
+        enrollmentId: enrollment.id,
+        stepId: step.id,
+        claimId: claim.id,
+      },
     });
 
     switch (outcome.status) {
       case "sent":
       case "queued": {
         const messageId = outcome.messageId;
-        const { error: runError } = await client
+        const { data: runWrite, error: runError } = await client
           .from("sequence_step_runs")
-          .update({ run_at: new Date().toISOString(), message_id: messageId })
-          .eq("id", claim.id);
+          .update({
+            run_at: new Date().toISOString(),
+            message_id: messageId,
+            attempt_outcome: "accepted",
+            failure_reason: null,
+          })
+          .eq("id", claim.id)
+          .select("id")
+          .maybeSingle();
         // The message has already been accepted. Keep the unique claim even
         // on bookkeeping failure: releasing it could send the same SMS twice.
-        if (runError) {
-          return { status: "failed", enrollmentId: enrollment.id, message: `Message ${messageId} accepted; run write failed: ${runError.message}` };
+        if (runError || !runWrite) {
+          const pauseError = await pauseEnrollment(
+            client,
+            enrollment.id,
+            "reconciliation_required",
+            false,
+          );
+          return {
+            status: "failed",
+            enrollmentId: enrollment.id,
+            message: `Message ${messageId} accepted; run write failed: ${runError?.message ?? "no run row updated"}${pauseError ? `; ${pauseError}` : ""}`,
+          };
         }
         const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
         if (advanceError) {
-          return { status: "failed", enrollmentId: enrollment.id, message: `Message ${messageId} accepted; ${advanceError}` };
+          const pauseError = await pauseEnrollment(
+            client,
+            enrollment.id,
+            "reconciliation_required",
+            false,
+          );
+          return {
+            status: "failed",
+            enrollmentId: enrollment.id,
+            message: `Message ${messageId} accepted; ${advanceError}${pauseError ? `; ${pauseError}` : ""}`,
+          };
         }
         return {
           status: "sent",
@@ -357,23 +462,55 @@ export async function processEnrollmentTick(
         };
       }
       case "blocked_quiet_hours": {
-        // Don't advance; reschedule and delete the claim so we can retry
-        // after quiet hours. +10h is a safe approximation that always
+        // Don't advance; retire only this proven no-attempt claim so we can retry after quiet hours.
+        // +10h is a safe approximation that always
         // crosses the 21:00 → 08:00 gap on a US timezone (precise
         // "next 08:00 local" optimization deferred; see TODO).
         // TODO: compute exact next 08:00 local from property.state zone.
         const nextRunAt = new Date(Date.now() + 10 * 60 * 60 * 1000);
-        await client
+        const { data: retiredQuietClaim, error: quietClaimError } = await client
           .from("sequence_step_runs")
-          .delete()
-          .eq("id", claim.id);
-        await client
+          .update({
+            claim_active: false,
+            run_at: new Date().toISOString(),
+            skipped_reason: "quiet_hours",
+            attempt_outcome: "not_attempted",
+            recovery_action: "quiet_hours_deferred",
+            recovery_evidence: "provider was not authorized during quiet hours",
+          })
+          .eq("id", claim.id)
+          .eq("claim_active", true)
+          .eq("attempt_outcome", "not_attempted")
+          .select("id")
+          .maybeSingle();
+        if (quietClaimError || !retiredQuietClaim) {
+          return failAfterRunWrite(
+            client,
+            enrollment.id,
+            quietClaimError?.message ?? "quiet-hours claim changed before retirement",
+            "Quiet-hours claim bookkeeping failed",
+          );
+        }
+        const { data: rescheduled, error: rescheduleError } = await client
           .from("sequence_enrollments")
           .update({
             next_run_at: nextRunAt.toISOString(),
             updated_at: new Date().toISOString(),
           })
-          .eq("id", enrollment.id);
+          .eq("id", enrollment.id)
+          .eq("status", "active")
+          .eq("current_step_index", enrollment.current_step_index)
+          .select("id")
+          .maybeSingle();
+        if (rescheduleError || !rescheduled) {
+          return {
+            status: "failed",
+            enrollmentId: enrollment.id,
+            message:
+              rescheduleError?.message ??
+              "Enrollment changed before quiet-hours reschedule",
+          };
+        }
         return {
           status: "rescheduled_quiet_hours",
           enrollmentId: enrollment.id,
@@ -381,7 +518,10 @@ export async function processEnrollmentTick(
         };
       }
       case "blocked_no_consent": {
-        await markRunSkipped(client, claim.id, "consent_revoked");
+        const runError = await markRunSkipped(client, claim.id, "consent_revoked", "definitively_rejected");
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "Consent-revocation bookkeeping failed");
+        }
         const pauseError = await pauseEnrollment(
           client,
           enrollment.id,
@@ -395,7 +535,10 @@ export async function processEnrollmentTick(
       }
       case "blocked_terminal_dispo":
       case "blocked_automated_suppressed": {
-        await markRunSkipped(client, claim.id, "paused");
+        const runError = await markRunSkipped(client, claim.id, "paused", "definitively_rejected");
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "Suppression bookkeeping failed");
+        }
         const permanent =
           outcome.source === "consent_state" ||
           outcome.source === "sms_opted_out" ||
@@ -416,7 +559,10 @@ export async function processEnrollmentTick(
       }
       case "blocked_no_phone":
       case "contact_not_found": {
-        await markRunSkipped(client, claim.id, "no_phone");
+        const runError = await markRunSkipped(client, claim.id, "no_phone", "definitively_rejected");
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "No-phone bookkeeping failed");
+        }
         const pauseError = await pauseEnrollment(
           client,
           enrollment.id,
@@ -429,7 +575,10 @@ export async function processEnrollmentTick(
         return { status: "paused", enrollmentId: enrollment.id, reason: "no_phone" };
       }
       case "blocked_no_approved_sender": {
-        await markRunSkipped(client, claim.id, "provider_failed");
+        const runError = await markRunSkipped(client, claim.id, "provider_failed", "not_attempted");
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "Sender-selection bookkeeping failed");
+        }
         const pauseError = await pauseEnrollment(
           client,
           enrollment.id,
@@ -445,16 +594,81 @@ export async function processEnrollmentTick(
           reason: FIRST_TOUCH_SENDER_PAUSE_REASON,
         };
       }
+      case "blocked_sequence_authorization": {
+        const runError = await markRunSkipped(
+          client,
+          claim.id,
+          "provider_failed",
+          outcome.attemptOutcome,
+          outcome.reason,
+        );
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "Sequence-authorization bookkeeping failed");
+        }
+        const pauseError = await pauseEnrollment(
+          client,
+          enrollment.id,
+          outcome.attemptOutcome === "definitively_rejected"
+            ? "provider_failed"
+            : "reconciliation_required",
+          false,
+        );
+        if (pauseError) {
+          return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+        }
+        return { status: "paused", enrollmentId: enrollment.id, reason: outcome.reason };
+      }
+      case "provider_unknown":
       case "provider_failed":
       case "blocked_provider_off":
       case "property_not_found":
       case "db_error":
       default: {
-        await markRunSkipped(client, claim.id, "provider_failed");
+        const deliveryOutcome: SequenceAttemptOutcome =
+          outcome.status === "provider_failed"
+            ? outcome.deliveryOutcome ?? "unknown"
+            : outcome.status === "provider_unknown"
+              ? "unknown"
+            : outcome.status === "db_error"
+              ? outcome.deliveryOutcome ??
+                (outcome.externalId ? "accepted" : "not_attempted")
+              : "not_attempted";
+        const failureReason =
+          "error" in outcome
+            ? outcome.error
+            : "reason" in outcome
+              ? outcome.reason
+              : undefined;
+        const runError = await markRunSkipped(
+          client,
+          claim.id,
+          "provider_failed",
+          deliveryOutcome,
+          failureReason,
+        );
+        if (runError) {
+          return failAfterRunWrite(client, enrollment.id, runError, "Provider-outcome bookkeeping failed");
+        }
+        const pauseError = await pauseEnrollment(
+          client,
+          enrollment.id,
+          deliveryOutcome === "unknown" || deliveryOutcome === "accepted"
+            ? "reconciliation_required"
+            : "provider_failed",
+          false,
+        );
+        if (pauseError) {
+          return { status: "failed", enrollmentId: enrollment.id, message: pauseError };
+        }
         return {
           status: "failed",
           enrollmentId: enrollment.id,
-          message: "reason" in outcome ? outcome.reason : outcome.status,
+          message:
+            "reason" in outcome
+              ? outcome.reason
+              : "error" in outcome
+                ? outcome.error
+                : outcome.status,
         };
       }
     }
@@ -472,7 +686,10 @@ export async function processEnrollmentTick(
       .select("id")
       .maybeSingle();
     if (changeError) {
-      await markRunSkipped(client, claim.id, "provider_failed");
+      const runError = await markRunSkipped(client, claim.id, "provider_failed");
+      if (runError) {
+        return failAfterRunWrite(client, enrollment.id, runError, "Status-change bookkeeping failed");
+      }
       return {
         status: "failed",
         enrollmentId: enrollment.id,
@@ -485,7 +702,10 @@ export async function processEnrollmentTick(
         .select("is_dnc_locked")
         .eq("id", enrollment.property_id)
         .maybeSingle();
-      await markRunSkipped(client, claim.id, "paused");
+      const runError = await markRunSkipped(client, claim.id, "paused");
+      if (runError) {
+        return failAfterRunWrite(client, enrollment.id, runError, "DNC status-race bookkeeping failed");
+      }
       if (reconcileError || !currentProperty?.is_dnc_locked) {
         return {
           status: "failed",
@@ -508,16 +728,38 @@ export async function processEnrollmentTick(
       }
       return { status: "paused", enrollmentId: enrollment.id, reason: "dnc" };
     }
-    const { error: runError } = await client
+    const { data: runWrite, error: runError } = await client
       .from("sequence_step_runs")
       .update({ run_at: new Date().toISOString() })
-      .eq("id", claim.id);
-    if (runError) {
-      return { status: "failed", enrollmentId: enrollment.id, message: `Property status changed; run write failed: ${runError.message}` };
+      .eq("id", claim.id)
+      .select("id")
+      .maybeSingle();
+    if (runError || !runWrite) {
+      const pauseError = await pauseEnrollment(
+        client,
+        enrollment.id,
+        "reconciliation_required",
+        false,
+      );
+      return {
+        status: "failed",
+        enrollmentId: enrollment.id,
+        message: `Property status changed; run write failed: ${runError?.message ?? "no run row updated"}${pauseError ? `; ${pauseError}` : ""}`,
+      };
     }
     const advanceError = await advanceEnrollment(client, enrollment.id, enrollment.sequence_id, step.step_index);
     if (advanceError) {
-      return { status: "failed", enrollmentId: enrollment.id, message: `Property status changed; ${advanceError}` };
+      const pauseError = await pauseEnrollment(
+        client,
+        enrollment.id,
+        "reconciliation_required",
+        false,
+      );
+      return {
+        status: "failed",
+        enrollmentId: enrollment.id,
+        message: `Property status changed; ${advanceError}${pauseError ? `; ${pauseError}` : ""}`,
+      };
     }
     return {
       status: "status_changed",
@@ -527,7 +769,10 @@ export async function processEnrollmentTick(
   }
 
   // Shouldn't reach here given the check constraint, but stay safe.
-  await markRunSkipped(client, claim.id, "provider_failed");
+  const runError = await markRunSkipped(client, claim.id, "provider_failed");
+  if (runError) {
+    return failAfterRunWrite(client, enrollment.id, runError, "Unsupported-step bookkeeping failed");
+  }
   return {
     status: "failed",
     enrollmentId: enrollment.id,
@@ -555,7 +800,7 @@ async function advanceEnrollment(
   if (nextStepError) return `next step lookup failed: ${nextStepError.message}`;
 
   if (!nextStep) {
-    const { error } = await client
+    const { data: completed, error } = await client
       .from("sequence_enrollments")
       .update({
         status: "completed",
@@ -563,34 +808,95 @@ async function advanceEnrollment(
         next_run_at: null,
         updated_at: new Date().toISOString(),
       })
-      .eq("id", enrollmentId);
-    return error ? `completion write failed: ${error.message}` : null;
+      .eq("id", enrollmentId)
+      .eq("status", "active")
+      .eq("current_step_index", currentStepIndex)
+      .select("id")
+      .maybeSingle();
+    return error
+      ? `completion write failed: ${error.message}`
+      : completed
+        ? null
+        : "enrollment changed before completion";
   }
 
   const nextRunAt = delayToDate(
     nextStep.delay_after_previous_minutes,
     new Date(),
   ).toISOString();
-  const { error } = await client
+  const { data: advanced, error } = await client
     .from("sequence_enrollments")
     .update({
       current_step_index: currentStepIndex + 1,
       next_run_at: nextRunAt,
       updated_at: new Date().toISOString(),
     })
-    .eq("id", enrollmentId);
-  return error ? `advancement write failed: ${error.message}` : null;
+    .eq("id", enrollmentId)
+    .eq("status", "active")
+    .eq("current_step_index", currentStepIndex)
+    .select("id")
+    .maybeSingle();
+  return error
+    ? `advancement write failed: ${error.message}`
+    : advanced
+      ? null
+      : "enrollment changed before advancement";
 }
 
 async function markRunSkipped(
   client: SupabaseClient<Database>,
   runId: string,
   reason: "quiet_hours" | "consent_revoked" | "paused" | "escalated" | "no_phone" | "provider_failed",
-): Promise<void> {
-  await client
+  attemptOutcome: SequenceAttemptOutcome = "not_attempted",
+  failureReason?: string,
+): Promise<string | null> {
+  // Outcome transitions are monotonic. In particular, an accepted/unknown
+  // provider intent may never be downgraded to not_attempted by a later
+  // bookkeeping path. The retry RPC also requires run_at, so a failed write
+  // remains reconciliation-only rather than silently granting a resend.
+  const allowedCurrentOutcomes: SequenceAttemptOutcome[] =
+    attemptOutcome === "not_attempted"
+      ? ["not_attempted"]
+      : attemptOutcome === "definitively_rejected"
+        ? ["not_attempted", "definitively_rejected", "unknown"]
+        : attemptOutcome === "accepted"
+          ? ["unknown", "accepted"]
+          : ["unknown"];
+  const { data, error } = await client
     .from("sequence_step_runs")
-    .update({ run_at: new Date().toISOString(), skipped_reason: reason })
-    .eq("id", runId);
+    .update({
+      run_at: new Date().toISOString(),
+      skipped_reason: reason,
+      attempt_outcome: attemptOutcome,
+      failure_reason: failureReason ?? null,
+    })
+    .eq("id", runId)
+    .eq("claim_active", true)
+    .in("attempt_outcome", allowedCurrentOutcomes)
+    .select("id")
+    .maybeSingle();
+  if (error) return `sequence run write failed: ${error.message}`;
+  if (!data) return "sequence run outcome changed before bookkeeping";
+  return null;
+}
+
+async function failAfterRunWrite(
+  client: SupabaseClient<Database>,
+  enrollmentId: string,
+  runError: string,
+  context: string,
+): Promise<TickOutcome> {
+  const pauseError = await pauseEnrollment(
+    client,
+    enrollmentId,
+    "reconciliation_required",
+    false,
+  );
+  return {
+    status: "failed",
+    enrollmentId,
+    message: `${context}: ${runError}${pauseError ? `; ${pauseError}` : ""}`,
+  };
 }
 
 async function pauseEnrollment(
@@ -599,7 +905,7 @@ async function pauseEnrollment(
   reason: string,
   permanent: boolean,
 ): Promise<string | null> {
-  const { error } = await client
+  let pauseQuery = client
     .from("sequence_enrollments")
     .update({
       status: permanent ? "opted_out" : "paused",
@@ -608,5 +914,9 @@ async function pauseEnrollment(
       updated_at: new Date().toISOString(),
     })
     .eq("id", enrollmentId);
+  pauseQuery = permanent
+    ? pauseQuery.in("status", ["active", "paused"])
+    : pauseQuery.eq("status", "active");
+  const { error } = await pauseQuery;
   return error?.message ?? null;
 }

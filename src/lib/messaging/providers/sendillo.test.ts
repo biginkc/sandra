@@ -146,6 +146,23 @@ describe("SendilloMessagingProvider.sendSms", () => {
     });
   });
 
+  it("marks only the documented 400 invalid-request response as definitive", async () => {
+    mockFetch({
+      status: 400,
+      body: { error: { message: "invalid body" } },
+    });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await expect(
+      provider.sendSms({ to: "+18165551234", body: "hello there" }),
+    ).rejects.toMatchObject({
+      details: expect.objectContaining({ status: 400, definitiveRejection: true }),
+    });
+  });
+
   // Codex round 12 (finding 1): a 2xx with no reconcilable id is "accepted
   // without a provable receipt" — the SAME uncertainty class as a
   // transport failure or abort, flagged `acceptedWithoutId` so callers
@@ -207,6 +224,39 @@ describe("SendilloMessagingProvider.sendSms", () => {
             reject(abortError);
           });
         }),
+    );
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    const pending = provider.sendSms({ to: "+18165551234", body: "hello there" });
+    const assertion = expect(pending).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      details: expect.objectContaining({ isAbort: true }),
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+    vi.useRealTimers();
+  });
+
+  it("keeps the send deadline through a stalled response body", async () => {
+    vi.useFakeTimers();
+    (global.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_url: string, init?: RequestInit) => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        text: () =>
+          new Promise<string>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              const abortError = new Error("The response body was aborted");
+              abortError.name = "AbortError";
+              reject(abortError);
+            });
+          }),
+      }),
     );
     const provider = new SendilloMessagingProvider(
       "sendillo-test-key",

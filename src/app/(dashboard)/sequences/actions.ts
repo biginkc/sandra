@@ -5,8 +5,11 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
-import { enrollLead, resumeEnrollment } from "@/lib/sequences/enrollment";
+import {
+  enrollLead,
+  resumeEnrollment,
+  retrySequenceStep,
+} from "@/lib/sequences/enrollment";
 import { getSequenceImpact } from "@/lib/sequences/impact";
 
 import { requireSequenceAdmin } from "./admin";
@@ -415,11 +418,42 @@ export async function deleteSequenceStep(
     if (!guard.ok) return { ok: false, error: guard.error };
 
     const supabase = await createClient();
+    const { count: historicalRuns, error: historyError } = await supabase
+      .from("sequence_step_runs")
+      .select("id", { count: "exact", head: true })
+      .eq("step_id", stepId);
+    if (historyError) {
+      return {
+        ok: false,
+        error: { code: "STEP_DELETE_FAILED", message: historyError.message },
+      };
+    }
+    if ((historicalRuns ?? 0) > 0) {
+      return {
+        ok: false,
+        error: {
+          code: "STEP_DELETE_HAS_HISTORY",
+          message:
+            "This step has execution history and cannot be deleted. Archive the sequence or create a replacement step.",
+        },
+      };
+    }
     const { error } = await supabase
       .from("sequence_steps")
       .delete()
-      .eq("id", stepId);
+      .eq("id", stepId)
+      .eq("sequence_id", sequenceId);
     if (error) {
+      if (error.code === "42501" || /runtime-managed|audit history/i.test(error.message)) {
+        return {
+          ok: false,
+          error: {
+            code: "STEP_DELETE_HAS_HISTORY",
+            message:
+              "This step has execution history and cannot be deleted. Archive the sequence or create a replacement step.",
+          },
+        };
+      }
       return {
         ok: false,
         error: { code: "STEP_DELETE_FAILED", message: error.message },
@@ -525,52 +559,34 @@ export async function cancelEnrollment(
         error: { code: "UNAUTHENTICATED", message: "Not signed in" },
       };
     }
-    const { data: enrollment, error: loadError } = await supabase
-      .from("sequence_enrollments")
-      .select("id, property_id, sequence_id, status")
-      .eq("id", enrollmentId)
-      .maybeSingle();
-    if (loadError) {
-      return {
-        ok: false,
-        error: { code: "CANCEL_FAILED", message: loadError.message },
-      };
-    }
-    if (!enrollment || !["active", "paused"].includes(enrollment.status)) {
-      return ok(null);
-    }
 
-    const { data: updated, error } = await supabase
-      .from("sequence_enrollments")
-      .update({
-        status: "completed",
-        completed_at: new Date().toISOString(),
-        next_run_at: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", enrollmentId)
-      .in("status", ["active", "paused"])
-      .select("id")
-      .maybeSingle();
+    const { data, error } = await supabase.rpc(
+      "cancel_sequence_enrollment",
+      {
+        p_enrollment_id: enrollmentId,
+        p_actor_user_id: user.id,
+      },
+    );
     if (error) {
       return {
         ok: false,
         error: { code: "CANCEL_FAILED", message: error.message },
       };
     }
-    if (!updated) return ok(null);
-    await recordLeadEvent({
-      propertyId: enrollment.property_id,
-      actorType: "user",
-      actorId: user.id,
-      eventType: LEAD_EVENT_TYPES.SEQUENCE_CANCELED,
-      payload: {
-        enrollment_id: enrollmentId,
-        sequence_id: enrollment.sequence_id,
-      },
-      sourceType: "sequence_enrollments.canceled",
-      sourceId: enrollmentId,
-    });
+
+    const result = data?.[0];
+    if (!result || result.outcome === "not_found" || result.outcome === "not_active") {
+      return ok(null);
+    }
+    if (result.outcome !== "canceled") {
+      return {
+        ok: false,
+        error: {
+          code: "CANCEL_FAILED",
+          message: "Enrollment could not be canceled.",
+        },
+      };
+    }
     return ok(null);
   } catch (e) {
     reportError(e, {
@@ -605,10 +621,64 @@ export async function resumeEnrollmentAction(
         error: { code: "RESUME_FAILED", message: outcome.message },
       };
     }
+    if (outcome.status === "reconciliation_required") {
+      return {
+        ok: false,
+        error: {
+          code: "RECONCILIATION_REQUIRED",
+          message:
+            "This step may have reached the provider. Reconcile its delivery before resuming.",
+        },
+      };
+    }
     return ok(null);
   } catch (e) {
     reportError(e, { tags: { surface: "resume_enrollment" } });
     return errFromUnknown(e, "RESUME_FAILED");
+  }
+}
+
+/** Retry a provider step only when the durable claim proves no provider
+ * attempt occurred or the adapter definitively rejected it. */
+export async function retrySequenceStepAction(
+  enrollmentId: string,
+): Promise<Result<null>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "UNAUTHENTICATED", message: "Not signed in" },
+      };
+    }
+    const outcome = await retrySequenceStep(supabase, enrollmentId, {
+      actorType: "user",
+      actorId: user.id,
+    });
+    if (outcome.status === "failed") {
+      return {
+        ok: false,
+        error: { code: "RETRY_FAILED", message: outcome.message },
+      };
+    }
+    if (outcome.status !== "retried") {
+      return {
+        ok: false,
+        error: {
+          code: "RECONCILIATION_REQUIRED",
+          message:
+            "This provider attempt cannot be retried safely until delivery is reconciled.",
+        },
+      };
+    }
+    revalidatePath("/sequences");
+    return ok(null);
+  } catch (e) {
+    reportError(e, { tags: { surface: "retry_sequence_step" } });
+    return errFromUnknown(e, "RETRY_FAILED");
   }
 }
 
@@ -638,6 +708,12 @@ export async function listPropertyEnrollments(propertyId: string): Promise<
       current_step_index: number;
       next_run_at: string | null;
       sequence: { id: string; name: string };
+      current_run: {
+        id: string;
+        attempt_outcome: string;
+        failure_reason: string | null;
+        message_id: string | null;
+      } | null;
     }>
   >
 > {
@@ -657,6 +733,41 @@ export async function listPropertyEnrollments(propertyId: string): Promise<
         error: { code: "LIST_ENROLL_FAILED", message: error.message },
       };
     }
+    const enrollmentIds = (data ?? []).map((row) => row.id);
+    const { data: runs, error: runsError } =
+      enrollmentIds.length === 0
+        ? { data: [], error: null }
+        : await supabase
+            .from("sequence_step_runs")
+            .select("id, enrollment_id, attempt_outcome, failure_reason, message_id")
+            .in("enrollment_id", enrollmentIds)
+            .eq("claim_active", true)
+            .order("created_at", { ascending: false });
+    if (runsError) {
+      return {
+        ok: false,
+        error: { code: "LIST_ENROLL_FAILED", message: runsError.message },
+      };
+    }
+    const currentRunByEnrollment = new Map<
+      string,
+      {
+        id: string;
+        attempt_outcome: string;
+        failure_reason: string | null;
+        message_id: string | null;
+      }
+    >();
+    for (const run of runs ?? []) {
+      if (!currentRunByEnrollment.has(run.enrollment_id)) {
+        currentRunByEnrollment.set(run.enrollment_id, {
+          id: run.id,
+          attempt_outcome: run.attempt_outcome,
+          failure_reason: run.failure_reason,
+          message_id: run.message_id,
+        });
+      }
+    }
     return ok(
       (data ?? []).map((row) => ({
         id: row.id,
@@ -665,6 +776,7 @@ export async function listPropertyEnrollments(propertyId: string): Promise<
         current_step_index: row.current_step_index,
         next_run_at: row.next_run_at,
         sequence: row.sequence as { id: string; name: string },
+        current_run: currentRunByEnrollment.get(row.id) ?? null,
       })),
     );
   } catch (e) {
