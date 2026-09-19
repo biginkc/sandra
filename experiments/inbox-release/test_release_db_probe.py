@@ -21,6 +21,11 @@ class ReleaseDbProbeTests(unittest.TestCase):
         source = (HERE / "release_db_probe.py").read_text()
         self.assertIn("observed_state||'|'||observed_message", source)
         self.assertNotIn('SELECT \'INBOX_NOT_READY\'', source)
+
+    def test_http_probe_normalizes_owned_fixture_before_identity_check(self):
+        source = (HERE / "release_db_probe.py").read_text()
+        self.assertIn('if TARGET == "http":', source)
+        self.assertIn("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton", source)
     def test_privileged_fixture_setup_precedes_authenticated_role(self):
         script = module.receipt_probe_sql(
             "11111111-1111-4111-8111-111111111111",

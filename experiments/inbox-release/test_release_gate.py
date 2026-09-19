@@ -160,6 +160,39 @@ class ReleaseGateStatusTests(unittest.TestCase):
         live = {"status": "BLOCKED", "detail": "release database probe not requested"}
         self.assertIs(gate.authoritative_rollback_gate(live), live)
 
+    def test_worker_recovery_requires_exact_head_dispatch_boundary_proof(self) -> None:
+        sha = "d" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_dir = Path(directory)
+            path = evidence_dir / f"worker-runtime-proof-{sha[:8]}.json"
+            path.write_text(json.dumps({
+                "candidate_sha": sha,
+                "status": "PASS",
+                "proof_groups": 5,
+                "checks": [
+                    "dispatch_started marker committed and observed before transport returned",
+                    "docker kill terminated worker mid-flight before provider result/persist",
+                    "worker restart caused same durable invocation to re-enter via claim and settle uncertain",
+                    "synthetic transport call count remained exactly 1 across crash/redelivery; no double dispatch",
+                    "cleanup removed containers/volume/image/role/schemas and dynamic 142-table baseline check passed",
+                ],
+            }))
+            status, detail, found = gate.validate_worker_send_boundary(evidence_dir, sha)
+        self.assertEqual(status, "PASS")
+        self.assertIn("dispatch-boundary", detail)
+        self.assertEqual(found, path)
+
+    def test_worker_recovery_boundary_proof_cannot_be_reused_from_another_head(self) -> None:
+        sha = "e" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_dir = Path(directory)
+            (evidence_dir / "worker-runtime-proof-eeeeeeee.json").write_text(
+                json.dumps({"candidate_sha": "f" * 40, "status": "PASS", "proof_groups": 5, "checks": []})
+            )
+            status, detail, _ = gate.validate_worker_send_boundary(evidence_dir, sha)
+        self.assertEqual(status, "FAIL")
+        self.assertIn("candidate SHA", detail)
+
     def test_whole_database_cleanup_is_a_decisive_evidence_gate(self) -> None:
         sha = "c" * 40
         fixture = {"database": "postgres", "marker": "http-marker"}

@@ -153,6 +153,15 @@ def main() -> int:
     if details.get("Config", {}).get("Labels", {}).get("purpose") != EXPECTED_PURPOSE:
         return fail("release probe found the wrong container ownership label")
 
+    # The HTTP fixture is explicitly owned by the release harness.  Normalize
+    # its admission row before the identity check so rerunning this probe after
+    # a prior rollback does not consume its own precondition.  The actual
+    # rollback assertion below remains transactional and is rolled back.
+    if TARGET == "http":
+        code, _, stderr = sql("UPDATE inbox_control.rollout SET serving_enabled=true WHERE singleton;")
+        if code:
+            return fail(f"could not normalize owned HTTP fixture serving state: {stderr}")
+
     code, identity, stderr = sql(
         "SELECT current_database() || '|' || "
         "coalesce((SELECT marker FROM install_fixture.identity LIMIT 1),'') || '|' || "

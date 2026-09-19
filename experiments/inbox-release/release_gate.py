@@ -635,6 +635,43 @@ def validate_evidence_file(path: Path, candidate_sha: str, policy: dict[str, Any
     return "PASS", "verified evidence", evidence
 
 
+def validate_worker_send_boundary(evidence_dir: Path, candidate_sha: str) -> tuple[str, str, Path | None]:
+    """Require the dispatch-boundary proof alongside restart liveness evidence.
+
+    ``worker-recovery.json`` exercises service restart liveness.  The durable
+    send guarantee is a separate, stronger assertion: kill the worker after
+    ``dispatch_started`` and prove Restate redelivery does not call the
+    transport twice.  Keep the proof SHA-bound and discover only the exact
+    candidate-suffixed artifact so an older run cannot satisfy this gate.
+    """
+    path = evidence_dir / f"worker-runtime-proof-{candidate_sha[:8]}.json"
+    try:
+        evidence = load_json(path)
+    except GateError as exc:
+        return "BLOCKED", str(exc), None
+    if evidence.get("candidate_sha") != candidate_sha:
+        return "FAIL", "worker runtime proof candidate SHA does not match HEAD", path
+    if str(evidence.get("status", "")).upper() != "PASS":
+        return "BLOCKED", "worker runtime proof is not PASS", path
+    if evidence.get("proof_groups") != 5:
+        return "FAIL", "worker runtime proof does not contain all five proof groups", path
+    checks = evidence.get("checks")
+    if not isinstance(checks, list):
+        return "FAIL", "worker runtime proof checks are missing", path
+    serialized = json.dumps(checks, sort_keys=True).lower()
+    required = (
+        "dispatch_started marker committed",
+        "docker kill terminated worker mid-flight",
+        "redelivery",
+        "exactly 1",
+        "142-table baseline",
+    )
+    missing = [needle for needle in required if needle.lower() not in serialized]
+    if missing:
+        return "FAIL", f"worker runtime proof omits decisive assertions: {missing}", path
+    return "PASS", "dispatch-boundary crash/redelivery proof is bound to HEAD", path
+
+
 def validate_measurements(
     evidence: dict[str, Any], budgets: dict[str, Any], *, tier: str
 ) -> tuple[str, str]:
@@ -803,7 +840,15 @@ def check_evidence(
         if status == "PASS" and evidence is not None and gate.endswith("stress"):
             tier = "current" if gate == "current_volume_stress" else "three_x"
             status, detail = validate_measurements(evidence, budgets, tier=tier)
-        checks[gate] = {"status": status, "detail": detail, "path": str(path)}
+        if gate == "worker_recovery" and status == "PASS":
+            boundary_status, boundary_detail, boundary_path = validate_worker_send_boundary(evidence_dir, candidate_sha)
+            if boundary_status != "PASS":
+                status = boundary_status
+                detail = f"restart liveness passed, but dispatch-boundary proof is not green: {boundary_detail}"
+            checks_path = str(boundary_path) if boundary_path else str(path)
+        else:
+            checks_path = str(path)
+        checks[gate] = {"status": status, "detail": detail, "path": checks_path}
         if status == "FAIL":
             overall = "FAIL"
         elif status == "BLOCKED" and overall == "PASS":
