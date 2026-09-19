@@ -76,6 +76,7 @@ async function enqueueWorkset(identity: InboxQueryIdentity, create: (replacesSco
   const run = flight.tail.then(async () => {
     const controller = new AbortController();
     const value = await create(flight!.latestScopeId ?? readStoredWorksetId(identity), controller.signal);
+    if (value.orgId !== identity.orgId || value.requesterId !== identity.userId || value.sessionId !== identity.sessionId || value.accessEpoch !== identity.accessEpoch || !UUID.test(value.scopeId)) throw Error("Invalid workspace response");
     // Persist every committed scope even if the component that started it has
     // unmounted. The next request can then replace it instead of leaking a
     // live generation behind the server's two-generation cap.
