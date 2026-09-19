@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const REQUIRED_PROFILE_KEYS = ["arrival_rate_rps", "concurrency", "tenant_count", "history_skew"];
-const MEASURED_TIMING_EVENTS = new Set(["first_open", "revisit", "selection", "ingestion", "queue"]);
+const MEASURED_TIMING_EVENTS = new Set(["first_open", "revisit", "selection", "ingestion", "queue", "workset_retry"]);
 const MEASURED_METRICS = new Set(["arrival_rate_rps", "operator_arrival_rate_rps"]);
 const WORKLOAD_SCENARIOS = new Set(["steady", "burst", "cold_start", "reconnect"]);
 
@@ -412,7 +412,12 @@ async function runCycle(browser, input, job, sample, onCycleStart) {
       const retryVisible = await page.getByRole("button", { name: "Retry list", exact: true }).count() > 0
         || (await list.textContent())?.includes("Please wait before refreshing this view.");
       if (!retryVisible) break;
+      const retryStart = performance.now();
       await sleep(1_100);
+      emitTiming(input.profile.name, "workset_retry", performance.now() - retryStart, {
+        attempt: attempt + 1,
+        reason: "server_rate_limit_or_retry_shell",
+      }, input.scenario);
       list = await loadList();
     }
     if (input.scenario === "reconnect") {

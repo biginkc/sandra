@@ -644,6 +644,30 @@ def validate_measurements(
     timing_samples = raw_samples.get("timing")
     if not isinstance(timing_samples, list):
         return "FAIL", f"{tier} evidence raw_samples.timing is missing"
+    metric_samples = raw_samples.get("metric")
+    recovery_samples = raw_samples.get("recovery")
+    if not isinstance(metric_samples, list):
+        return "FAIL", f"{tier} evidence raw_samples.metric is missing"
+    if not isinstance(recovery_samples, list):
+        return "FAIL", f"{tier} evidence raw_samples.recovery is missing"
+    for record in timing_samples:
+        if not isinstance(record, dict) or not isinstance(record.get("event"), str):
+            return "FAIL", f"{tier} raw_samples.timing contains a malformed record"
+        duration = record.get("duration_ms")
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(float(duration)) or duration < 0:
+            return "FAIL", f"{tier} raw_samples.timing contains an invalid duration"
+    for record in metric_samples:
+        if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+            return "FAIL", f"{tier} raw_samples.metric contains a malformed record"
+        value = record.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or value < 0:
+            return "FAIL", f"{tier} raw_samples.metric contains an invalid value"
+    for record in recovery_samples:
+        if not isinstance(record, dict) or not isinstance(record.get("fault"), str) or record.get("recovered") is not True:
+            return "FAIL", f"{tier} raw_samples.recovery contains an invalid recovery record"
+        duration = record.get("duration_ms")
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(float(duration)) or duration <= 0:
+            return "FAIL", f"{tier} raw_samples.recovery contains an invalid duration"
     observed_events = {
         record.get("event")
         for record in timing_samples
@@ -683,6 +707,17 @@ def validate_measurements(
         ]
         if len(event_samples) != samples:
             return "FAIL", f"{tier} {metric} raw sample count {len(event_samples)} does not match measured count {samples}"
+        observed = sorted(float(record["duration_ms"]) for record in event_samples)
+        position95 = (len(observed) - 1) * 0.95
+        lower95, upper95 = math.floor(position95), math.ceil(position95)
+        recomputed_p95 = observed[lower95] if lower95 == upper95 else observed[lower95] + (observed[upper95] - observed[lower95]) * (position95 - lower95)
+        position99 = (len(observed) - 1) * 0.99
+        lower99, upper99 = math.floor(position99), math.ceil(position99)
+        recomputed_p99 = observed[lower99] if lower99 == upper99 else observed[lower99] + (observed[upper99] - observed[lower99]) * (position99 - lower99)
+        if not math.isclose(float(p95), recomputed_p95, rel_tol=1e-9, abs_tol=1e-9):
+            return "FAIL", f"{tier} {metric} reported p95 does not match raw samples"
+        if not math.isclose(float(p99), recomputed_p99, rel_tol=1e-9, abs_tol=1e-9):
+            return "FAIL", f"{tier} {metric} reported p99 does not match raw samples"
     cap = evidence.get("bulk_reply_recipient_cap")
     if cap != budgets.get("bulk_reply_recipient_cap"):
         return "FAIL", f"{tier} bulk reply cap is not the approved server cap"

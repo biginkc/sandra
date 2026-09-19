@@ -61,6 +61,54 @@ class ReleaseGateStatusTests(unittest.TestCase):
         self.assertEqual(status, "FAIL")
         self.assertIn("raw sample count", detail)
 
+    def test_stress_measurements_recompute_reported_percentiles(self) -> None:
+        evidence = {
+            "measurements": {
+                event: {"samples": 2, "p95_ms": 999.0, "p99_ms": 999.0}
+                for event in ("first_open", "revisit", "selection")
+            },
+            "bulk_reply_recipient_cap": 50,
+            "arrival_rate": {"samples": 1},
+            "raw_samples": {
+                "timing": [
+                    {"event": event, "duration_ms": value}
+                    for event in ("first_open", "revisit", "selection")
+                    for value in (1.0, 2.0)
+                ],
+                "metric": [],
+                "recovery": [],
+            },
+        }
+        status, detail = gate.validate_measurements(
+            evidence,
+            {"sample_minimum": 2, "first_open_p95_ms": 1000, "revisit_p95_ms": 200, "selection_p95_ms": 100, "bulk_reply_recipient_cap": 50},
+            tier="current",
+        )
+        self.assertEqual(status, "FAIL")
+        self.assertIn("p95 does not match", detail)
+
+    def test_stress_measurements_validate_metric_and_recovery_raw_records(self) -> None:
+        evidence = {
+            "measurements": {
+                event: {"samples": 1, "p95_ms": 1.0, "p99_ms": 1.0}
+                for event in ("first_open", "revisit", "selection")
+            },
+            "bulk_reply_recipient_cap": 50,
+            "arrival_rate": {"samples": 1},
+            "raw_samples": {
+                "timing": [{"event": event, "duration_ms": 1.0} for event in ("first_open", "revisit", "selection")],
+                "metric": [{"name": "cpu_percent", "value": "bad"}],
+                "recovery": [],
+            },
+        }
+        status, detail = gate.validate_measurements(
+            evidence,
+            {"sample_minimum": 1, "first_open_p95_ms": 1000, "revisit_p95_ms": 200, "selection_p95_ms": 100, "bulk_reply_recipient_cap": 50},
+            tier="current",
+        )
+        self.assertEqual(status, "FAIL")
+        self.assertIn("raw_samples.metric", detail)
+
     def test_unlisted_integrity_failure_is_decisive(self) -> None:
         statuses = gate.reduce_gate_statuses(
             {
