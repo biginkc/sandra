@@ -25,6 +25,7 @@ type SelectionReviewItem = { id: WorkspaceId; status: "matching_loaded" | "match
 type SelectionReviewState = { status: "loading" | "ready" | "error"; generation: string; ids: readonly WorkspaceId[]; filter: InboxFilter; items: SelectionReviewItem[]; error?: string };
 type WorksetFlight = { tail: Promise<void>; latestScopeId: string | null; pending: number };
 const worksetFlights = new Map<string, WorksetFlight>();
+const invalidatedWorksets = new Set<string>();
 function worksetFlightKey(identity: InboxQueryIdentity): string {
   return [identity.orgId, identity.userId, identity.sessionId, identity.accessEpoch].join(":");
 }
@@ -67,7 +68,10 @@ async function enqueueWorkset(identity: InboxQueryIdentity, create: (replacesSco
   }
   // Keep the hint while a request is still in flight so a remount can inherit
   // its committed scope; reset it between independent tab/test lifetimes.
-  if (flight.pending === 0 && !readStoredWorksetId(identity)) flight.latestScopeId = null;
+  if (flight.pending === 0) {
+    invalidatedWorksets.delete(key);
+    if (!readStoredWorksetId(identity)) flight.latestScopeId = null;
+  }
   flight.pending++;
   const run = flight.tail.then(async () => {
     const controller = new AbortController();
@@ -75,8 +79,10 @@ async function enqueueWorkset(identity: InboxQueryIdentity, create: (replacesSco
     // Persist every committed scope even if the component that started it has
     // unmounted. The next request can then replace it instead of leaking a
     // live generation behind the server's two-generation cap.
-    flight!.latestScopeId = value.scopeId;
-    storeWorksetId(identity, value.scopeId);
+    if (!invalidatedWorksets.has(key)) {
+      flight!.latestScopeId = value.scopeId;
+      storeWorksetId(identity, value.scopeId);
+    }
     return value;
   });
   flight.tail = run.then(() => undefined, () => undefined);
@@ -174,6 +180,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const accessLost = useCallback(() => {
     if (denied.current) return;
     denied.current = true; sequence.current++;
+    invalidatedWorksets.add(worksetFlightKey(identity));
     clearActions.current(); cache.close();
     if (worksetCooldownTimer.current) clearTimeout(worksetCooldownTimer.current);
     worksetCooldownTimer.current = null; pendingFilter.current = null;
