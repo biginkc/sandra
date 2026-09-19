@@ -237,7 +237,7 @@ async function readStepRuns(enrollmentId: string) {
   const { data, error } = await supabase
     .from("sequence_step_runs")
     .select(
-      "id, claim_active, attempt_outcome, attempt_started_at, run_at, message_id, skipped_reason, recovery_action, recovery_evidence",
+      "id, claim_active, attempt_outcome, attempt_started_at, run_at, message_id, skipped_reason, failure_reason, recovery_action, recovery_evidence",
     )
     .eq("enrollment_id", enrollmentId)
     .order("created_at", { ascending: true });
