@@ -80,7 +80,7 @@ jobs:
           # The long shared shard can lose its Next/RSC stream after several
           # minutes, which also takes down the local ledger used by these
           # tests and turns valid sequence assertions into ECONNREFUSED.
-          npm run test:e2e -- e2e/sequence-readiness.local.spec.ts
+          TEST_SUPABASE_DB_URL="$E2E_CI_SUPABASE_DB_URL" npx playwright test --config playwright.sequence-readiness.config.ts
           # Bound each serial group to a fresh Next dev server. Beyond roughly
           # six minutes the CI server has emitted ECONNRESET and stopped
           # committing otherwise-valid RSC interactions. Three disjoint broad
