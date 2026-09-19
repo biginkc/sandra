@@ -163,7 +163,7 @@ describe("runSequenceTick (integration)", () => {
   it("uses the approved provider default for a cold first-touch sequence send with no prior inbound", async () => {
     const seqId = await seedSequence({
       name: "Cold default sender",
-      steps: [{ delay: 0, body: "Hi {{first_name}}, cash offer?" }],
+      steps: [{ delay: 0, body: "Mel with BMH: Hi {{first_name}}, cash offer?" }],
     });
     const { propertyId, contactId } = await seedLead({
       phone: "+18165551101",
