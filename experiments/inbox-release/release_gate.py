@@ -650,6 +650,10 @@ def validate_measurements(
         return "FAIL", f"{tier} evidence raw_samples.metric is missing"
     if not isinstance(recovery_samples, list):
         return "FAIL", f"{tier} evidence raw_samples.recovery is missing"
+    if not metric_samples:
+        return "FAIL", f"{tier} evidence raw_samples.metric is empty"
+    if not recovery_samples:
+        return "FAIL", f"{tier} evidence raw_samples.recovery is empty"
     for record in timing_samples:
         if not isinstance(record, dict) or not isinstance(record.get("event"), str):
             return "FAIL", f"{tier} raw_samples.timing contains a malformed record"
@@ -724,6 +728,53 @@ def validate_measurements(
     arrivals = evidence.get("arrival_rate")
     if not isinstance(arrivals, dict) or not isinstance(arrivals.get("samples"), int) or arrivals["samples"] <= 0:
         return "FAIL", f"{tier} evidence lacks a real sustained-arrival sample"
+    arrival_samples = [record for record in metric_samples if record.get("name") == "arrival_rate_rps"]
+    if len(arrival_samples) != arrivals["samples"]:
+        return "FAIL", f"{tier} arrival_rate sample count does not match raw samples"
+    arrival_p95 = arrivals.get("p95_rps")
+    if not isinstance(arrival_p95, (int, float)) or not math.isfinite(float(arrival_p95)) or float(arrival_p95) < 0:
+        return "FAIL", f"{tier} arrival_rate p95 is not a finite non-negative value"
+    arrival_values = sorted(float(record["value"]) for record in arrival_samples)
+    arrival_position = (len(arrival_values) - 1) * 0.95
+    arrival_lower, arrival_upper = math.floor(arrival_position), math.ceil(arrival_position)
+    arrival_recomputed = arrival_values[arrival_lower] if arrival_lower == arrival_upper else arrival_values[arrival_lower] + (arrival_values[arrival_upper] - arrival_values[arrival_lower]) * (arrival_position - arrival_lower)
+    if not math.isclose(float(arrival_p95), arrival_recomputed, rel_tol=1e-9, abs_tol=1e-9):
+        return "FAIL", f"{tier} arrival_rate p95 does not match raw samples"
+    operator_arrivals = evidence.get("operator_arrival_rate")
+    if not isinstance(operator_arrivals, dict) or not isinstance(operator_arrivals.get("samples"), int) or operator_arrivals["samples"] <= 0:
+        return "FAIL", f"{tier} evidence lacks a real operator-arrival sample"
+    operator_samples = [record for record in metric_samples if record.get("name") == "operator_arrival_rate_rps"]
+    if len(operator_samples) != operator_arrivals["samples"]:
+        return "FAIL", f"{tier} operator_arrival_rate sample count does not match raw samples"
+    operator_p95 = operator_arrivals.get("p95_rps")
+    if not isinstance(operator_p95, (int, float)) or not math.isfinite(float(operator_p95)) or float(operator_p95) < 0:
+        return "FAIL", f"{tier} operator_arrival_rate p95 is not a finite non-negative value"
+    operator_values = sorted(float(record["value"]) for record in operator_samples)
+    operator_position = (len(operator_values) - 1) * 0.95
+    operator_lower, operator_upper = math.floor(operator_position), math.ceil(operator_position)
+    operator_recomputed = operator_values[operator_lower] if operator_lower == operator_upper else operator_values[operator_lower] + (operator_values[operator_upper] - operator_values[operator_lower]) * (operator_position - operator_lower)
+    if not math.isclose(float(operator_p95), operator_recomputed, rel_tol=1e-9, abs_tol=1e-9):
+        return "FAIL", f"{tier} operator_arrival_rate p95 does not match raw samples"
+    system_metrics = evidence.get("system_metrics")
+    required_system_metrics = ("cpu_percent", "memory_bytes", "locks", "connections")
+    if not isinstance(system_metrics, dict):
+        return "FAIL", f"{tier} evidence lacks system_metrics"
+    for name in required_system_metrics:
+        summary = system_metrics.get(name)
+        samples = [record for record in metric_samples if record.get("name") == name]
+        if not isinstance(summary, dict) or not isinstance(summary.get("sample_count"), int) or summary["sample_count"] <= 0:
+            return "FAIL", f"{tier} system metric {name} is missing samples"
+        if len(samples) != summary["sample_count"]:
+            return "FAIL", f"{tier} system metric {name} sample count does not match raw samples"
+        p95 = summary.get("p95")
+        if not isinstance(p95, (int, float)) or not math.isfinite(float(p95)) or float(p95) < 0:
+            return "FAIL", f"{tier} system metric {name} p95 is not a finite non-negative value"
+        values = sorted(float(record["value"]) for record in samples)
+        position = (len(values) - 1) * 0.95
+        lower, upper = math.floor(position), math.ceil(position)
+        recomputed = values[lower] if lower == upper else values[lower] + (values[upper] - values[lower]) * (position - lower)
+        if not math.isclose(float(p95), recomputed, rel_tol=1e-9, abs_tol=1e-9):
+            return "FAIL", f"{tier} system metric {name} p95 does not match raw samples"
     return "PASS", f"{tier} measurements meet approved latency targets"
 
 

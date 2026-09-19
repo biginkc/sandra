@@ -49,8 +49,8 @@ class ReleaseGateStatusTests(unittest.TestCase):
                     {"event": "selection", "duration_ms": 1.0},
                     {"event": "selection", "duration_ms": 1.0},
                 ],
-                "metric": [],
-                "recovery": [],
+                "metric": [{"name": "cpu_percent", "value": 1.0}],
+                "recovery": [{"fault": "owned", "recovered": True, "duration_ms": 1.0}],
             },
         }
         status, detail = gate.validate_measurements(
@@ -75,8 +75,8 @@ class ReleaseGateStatusTests(unittest.TestCase):
                     for event in ("first_open", "revisit", "selection")
                     for value in (1.0, 2.0)
                 ],
-                "metric": [],
-                "recovery": [],
+                "metric": [{"name": "cpu_percent", "value": 1.0}],
+                "recovery": [{"fault": "owned", "recovered": True, "duration_ms": 1.0}],
             },
         }
         status, detail = gate.validate_measurements(
@@ -98,7 +98,7 @@ class ReleaseGateStatusTests(unittest.TestCase):
             "raw_samples": {
                 "timing": [{"event": event, "duration_ms": 1.0} for event in ("first_open", "revisit", "selection")],
                 "metric": [{"name": "cpu_percent", "value": "bad"}],
-                "recovery": [],
+                "recovery": [{"fault": "owned", "recovered": True, "duration_ms": 1.0}],
             },
         }
         status, detail = gate.validate_measurements(
@@ -108,6 +108,42 @@ class ReleaseGateStatusTests(unittest.TestCase):
         )
         self.assertEqual(status, "FAIL")
         self.assertIn("raw_samples.metric", detail)
+
+    def _valid_measurement_evidence(self) -> dict:
+        timing = [{"event": event, "duration_ms": 1.0} for event in ("first_open", "revisit", "selection")]
+        metric = [
+            {"name": "arrival_rate_rps", "value": 1.0},
+            {"name": "operator_arrival_rate_rps", "value": 1.0},
+            *[{"name": name, "value": 1.0} for name in ("cpu_percent", "memory_bytes", "locks", "connections")],
+        ]
+        return {
+            "measurements": {event: {"samples": 1, "p95_ms": 1.0, "p99_ms": 1.0} for event in ("first_open", "revisit", "selection")},
+            "bulk_reply_recipient_cap": 50,
+            "arrival_rate": {"samples": 1, "p95_rps": 1.0},
+            "operator_arrival_rate": {"samples": 1, "p95_rps": 1.0},
+            "system_metrics": {name: {"sample_count": 1, "p95": 1.0} for name in ("cpu_percent", "memory_bytes", "locks", "connections")},
+            "raw_samples": {"timing": timing, "metric": metric, "recovery": [{"fault": "owned", "recovered": True, "duration_ms": 1.0}]},
+        }
+
+    def test_stress_measurements_reject_empty_metric_and_recovery_backing(self) -> None:
+        for field in ("metric", "recovery"):
+            evidence = self._valid_measurement_evidence()
+            evidence["raw_samples"][field] = []
+            status, detail = gate.validate_measurements(evidence, {"sample_minimum": 1, "first_open_p95_ms": 1000, "revisit_p95_ms": 200, "selection_p95_ms": 100, "bulk_reply_recipient_cap": 50}, tier="current")
+            self.assertEqual(status, "FAIL")
+            self.assertIn(f"raw_samples.{field} is empty", detail)
+
+    def test_stress_measurements_reject_fabricated_arrival_and_system_summaries(self) -> None:
+        evidence = self._valid_measurement_evidence()
+        evidence["arrival_rate"]["p95_rps"] = -500
+        status, detail = gate.validate_measurements(evidence, {"sample_minimum": 1, "first_open_p95_ms": 1000, "revisit_p95_ms": 200, "selection_p95_ms": 100, "bulk_reply_recipient_cap": 50}, tier="current")
+        self.assertEqual(status, "FAIL")
+        self.assertIn("arrival_rate p95", detail)
+        evidence = self._valid_measurement_evidence()
+        del evidence["system_metrics"]["connections"]
+        status, detail = gate.validate_measurements(evidence, {"sample_minimum": 1, "first_open_p95_ms": 1000, "revisit_p95_ms": 200, "selection_p95_ms": 100, "bulk_reply_recipient_cap": 50}, tier="current")
+        self.assertEqual(status, "FAIL")
+        self.assertIn("system metric connections", detail)
 
     def test_unlisted_integrity_failure_is_decisive(self) -> None:
         statuses = gate.reduce_gate_statuses(
