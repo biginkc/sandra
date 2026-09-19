@@ -246,14 +246,22 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554001",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "yeah I'm interested, tell me more",
+      fromPhone: "+18167554001",
+    });
 
     const outcome = await dispatchAiResponse(
       supabase,
       {
         propertyId,
         contactId,
-        inboundToPhone: MOCK_SENDER_PRIMARY,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
         inboundBody: "yeah I'm interested, tell me more",
+        inboundFromPhone: "+18167554001",
       },
       { anthropic: stubAnthropic(HAPPY_OUT) },
     );
@@ -1401,13 +1409,21 @@ describe("dispatchAiResponse (integration)", () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18167554009",
     });
+    const inbound = await seedAiInbound({
+      propertyId,
+      contactId,
+      body: "you people are useless",
+      fromPhone: "+18167554009",
+    });
     const outcome = await dispatchAiResponse(
       supabase,
       {
         propertyId,
         contactId,
-        inboundToPhone: MOCK_SENDER_PRIMARY,
+        conversationId: inbound.conversationId,
+        inboundMessageId: inbound.id,
         inboundBody: "you people are useless",
+        inboundFromPhone: "+18167554009",
       },
       {
         anthropic: stubAnthropic({

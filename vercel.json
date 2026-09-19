@@ -49,7 +49,7 @@
     "deploymentEnabled": {
       "codex/my-leads-prd-20260911": false,
       "codex/my-leads-migration-history": false,
-      "codex/e2e-reliability-20260912": false
+      "codex/disposable-canary-runner-20260912": false
     }
   }
 }

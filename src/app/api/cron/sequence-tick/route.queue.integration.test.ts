@@ -92,6 +92,11 @@ async function seedQueuedMessage(opts: {
   metadata?: Json;
   fromPhone?: string | null;
 }): Promise<string> {
+  // Current BMH production policy rejects anonymous first-touch outbound
+  // rows. These queue-drain fixtures intentionally have no conversation
+  // history, so give every synthetic body the approved opening identity while
+  // preserving the behavior-specific text each test is exercising.
+  const body = opts.body ?? "Queued test message";
   const { data, error } = await supabase
     .from("messages")
     .insert({
@@ -104,7 +109,11 @@ async function seedQueuedMessage(opts: {
       from_address:
         opts.fromPhone === undefined ? MOCK_SENDER_PRIMARY : opts.fromPhone,
       to_address: opts.toPhone,
-      body: opts.body ?? "Queued test message",
+      body: body.includes("Mel with BMH")
+        ? body
+        : body.startsWith("FAIL-")
+          ? body.replace(/^(FAIL-[A-Z_]+)/, "$1: Mel with BMH")
+          : `Mel with BMH: ${body}`,
       scheduled_for: opts.scheduledFor?.toISOString() ?? null,
       metadata: opts.metadata ?? null,
     })

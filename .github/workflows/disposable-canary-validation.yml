@@ -1,0 +1,29 @@
+name: Disposable canary validation
+
+# Validate this candidate branch without changing production schedules.
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [codex/disposable-canary-runner-20260912]
+
+permissions:
+  contents: read
+
+jobs:
+  canary-behaviors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+      - run: npm ci
+      - name: Verify cancellation cleanup contract
+        run: node --test scripts/run-disposable-canaries.test.mjs
+      - name: Verify AI, escalation, STOP, and sequence behavior on a disposable database
+        run: node scripts/run-disposable-canaries.mjs
