@@ -1,0 +1,14 @@
+fixture-platform-foundation
+vendor/realtime-role.sql
+vendor/0013-add-bucket-custom-limits.sql
+vendor/0014-use-bytes-for-max-size.sql
+vendor/20250623125453_tmp_grant_storage_tables_to_postgres_with_grant_option.sql
+Traceback (most recent call last):
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-production-install/experiments/inbox-production-install/rehearse-bootstrap.py", line 43, in <module>
+    sql("BEGIN;"+role+"SET LOCAL storage.install_roles='false';SET LOCAL statement_timeout='60s';SET LOCAL lock_timeout='2s';"+body+f"\nRESET ROLE;INSERT INTO install_fixture.ledger VALUES('{name}','{digest}');COMMIT;")
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jarradhenry/Documents/ChatGPT/New project 2/tmp/inbox-production-install/experiments/inbox-production-install/rehearse-bootstrap.py", line 14, in sql
+    if r.returncode:raise RuntimeError(r.stderr)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: NOTICE:  extension "pgcrypto" already exists, skipping
+ERROR:  publication "supabase_realtime" does not exist

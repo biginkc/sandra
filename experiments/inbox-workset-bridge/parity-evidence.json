@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "checks": [
+    "mine, unassigned, unread and noise predicates",
+    "opaque cursor preserves microseconds",
+    "cursor filter binding",
+    "unknown and expired cursors denied"
+  ],
+  "limitations": [
+    "Synthetic maintained rows test predicates; not full canonical source parity",
+    "Search cases and realistic plans still required"
+  ]
+}

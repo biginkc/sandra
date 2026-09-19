@@ -8,7 +8,9 @@ import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { hasActiveSandraAccess } from "@/lib/auth/access-state";
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { dispatchRepSms, readRepSmsContext } from "@/lib/messaging/rep-sms";
+import { assertSendilloOrganizationScope } from "@/lib/messaging/rep-sms-scope";
+import { getCallerMemberships, getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
 export type { TeamMember } from "@/lib/auth/team-member";
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
@@ -2086,9 +2088,24 @@ export type SendSmsPayload = {
  */
 export async function listFromNumbers(): Promise<Result<DialpadFromOption[]>> {
   try {
+    const memberships = await getCallerMembershipsOrThrow();
+    if (!memberships.length || memberships.some(m => m.acquisitions_enabled && m.role !== "owner")) return ok([]);
     const provider = getMessagingProvider();
     if (!provider || !provider.listFromNumbers) {
       return ok([]);
+    }
+    if (provider.providerId === "sendillo") {
+      // This legacy owner composer has no property argument at catalog-read
+      // time. Only expose the app-scoped catalog when the caller belongs to
+      // the configured tenant; otherwise return an empty, non-leaking list.
+      const configuredOrgId = process.env.SENDILLO_ORG_ID?.trim() || null;
+      assertSendilloOrganizationScope(
+        configuredOrgId ?? memberships[0]?.org_id,
+        provider.providerId,
+      );
+      if (!configuredOrgId || !memberships.some((m) => m.org_id === configuredOrgId)) {
+        return ok([]);
+      }
     }
     const numbers = await provider.listFromNumbers();
     return ok(numbers);
@@ -2125,6 +2142,15 @@ export async function sendSmsFromLead(
   }
 
   try {
+    const memberships = await getCallerMembershipsOrThrow();
+    if (!memberships.length) throw new Error("Sign in to send a message.");
+    if (memberships.some(m => m.acquisitions_enabled && m.role !== "owner")) {
+      if (queueOnly) throw new Error("Rep texts must be sent immediately.");
+      const context = await readRepSmsContext(propertyId);
+      const sender = from ? context.senders.find(s => s.number === from) : context.senders.find(s => s.isDefault);
+      if (!sender) throw new Error("Choose a texting number assigned to you.");
+      return ok({ outcome: await dispatchRepSms({ propertyId, assignmentId: sender.id, body: trimmed, to }) });
+    }
     const supabase = await createClient();
     await assertNotTrainingTarget(supabase, { propertyId });
     const unlocked = await assertPropertyDncUnlocked(supabase, propertyId);

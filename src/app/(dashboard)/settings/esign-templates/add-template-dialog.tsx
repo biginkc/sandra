@@ -249,7 +249,7 @@ export function AddTemplateDialog({
                 placeholder="Template ID from Dropbox Sign"
               />
               <p className="text-muted-foreground text-xs">
-                Sandra validates the provider template server-side. It must be a non-embedded website template with Seller then Buyer signer roles and Sandra&apos;s five merge fields.
+                Sandra validates the provider template server-side. It must be a non-embedded website template with Seller and Buyer roles, or Seller, Seller 2, and Buyer for a novation packet. Sender fields must match a supported contract schema.
               </p>
             </div>
           ) : (
@@ -346,12 +346,14 @@ export function AddTemplateDialog({
             />
           ) : null}
 
-          <div className="bg-muted/50 rounded-lg border p-3 text-xs">
-            <p className="font-medium">Merge fields included</p>
-            <p className="text-muted-foreground mt-1 font-mono">
-              {ESIGN_MERGE_FIELD_NAMES.join(" · ")}
-            </p>
-          </div>
+          {mode === "embedded" ? (
+            <div className="bg-muted/50 rounded-lg border p-3 text-xs">
+              <p className="font-medium">Merge fields included</p>
+              <p className="text-muted-foreground mt-1 font-mono">
+                {ESIGN_MERGE_FIELD_NAMES.join(" · ")}
+              </p>
+            </div>
+          ) : null}
 
           {(error || validationError || disabledReason) && (
             <p role="alert" className="text-destructive text-sm">

@@ -14,6 +14,8 @@ import globalSetup, {
  * exactly the race this guard exists to prevent.
  */
 const ENV_KEYS = [
+  "E2E_DISPOSABLE_DATABASE",
+  "TEST_SUPABASE_URL",
   "CI",
   "GITHUB_ACTIONS",
   "E2E_CI_SUPABASE_DB_URL",
@@ -153,5 +155,19 @@ describe("e2e/global-setup.ts fail-closed behavior", () => {
     it("is false when CI is set to an unrelated truthy-looking value", () => {
       expect(isCiEnvironment({ CI: "0" })).toBe(false);
     });
+  });
+});
+
+ describe("disposable database lock target", () => {
+  const localDb = "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
+  const env = { E2E_DISPOSABLE_DATABASE: "1", TEST_SUPABASE_URL: "http://127.0.0.1:54321" };
+  it("accepts only the matching local lock", () => {
+    expect(assertLockTargetsExpectedProject(localDb, env).hostname).toBe("127.0.0.1");
+  });
+  it.each(["postgresql://postgres:postgres@remote:54322/postgres", localDb + "?host=remote", "postgresql://postgres:postgres@127.0.0.1:54323/postgres"])("rejects a mismatched lock %s", (url) => {
+    expect(() => assertLockTargetsExpectedProject(url, env)).toThrow(/exact loopback/);
+  });
+  it("rejects a local lock paired with a hosted API", () => {
+    expect(() => assertLockTargetsExpectedProject(localDb, { ...env, TEST_SUPABASE_URL: "https://bnkipfoqggwyttbykjfn.supabase.co" })).toThrow(/exact loopback/);
   });
 });

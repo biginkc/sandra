@@ -1,0 +1,17 @@
+{
+  "image_id": "sha256:342e150254c6850be892c771771447f232c8f05167b0035c19fcef8fc1c6e984",
+  "user": "node",
+  "source_hashes": {
+    "core.mjs": "7cc905417f90bd5bdefdb70552b4292f97b2092f245b2f03b7da6f116fe312a4",
+    "core.test.mjs": "ee4f6d557d0fc5c3f87e81cd6205c2b524a7b2ca9bbf74110f2366a86a8a4d09",
+    "server.mjs": "cdb6f6e487c5c16b3f8b04afc0410eb533c21330f341993643953d9bd6d1a3ac",
+    "Dockerfile": "253488776860278dd5abd1eb2a2f6babb4f6760d706f37ea837262948913afaf",
+    "package.json": "0bdc3fa5f6ffb7cea32841bf1d3307aef1f7beeec8794d689cda5ce25f2cff24",
+    "package-lock.json": "0b6abafac1b331c4857c9459659a11d425a4b52d9be76ae2c72322ac7a11d7e8"
+  },
+  "unit_checks": 15,
+  "limits": [
+    "Image build only; no worker or Restate instance started",
+    "Actual signed callback, role admission, restart and database proof outstanding"
+  ]
+}

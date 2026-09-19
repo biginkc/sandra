@@ -17,10 +17,31 @@ export function isPublicPath(path: string): boolean {
     path.startsWith("/brand") ||
     path.startsWith("/api/webhooks") ||
     path.startsWith("/api/cron") ||
+    path === "/api/internal/sentry-canary" ||
+    path === "/sentry-canary" ||
     path.startsWith("/api/internal/jitter") ||
     path.startsWith("/api/internal/closer/practice-outcomes/") ||
     path.startsWith("/api/internal/bmh-institute/course-outcomes/")
   );
+}
+
+function loginDenialResponse(request: NextRequest, url: URL): NextResponse {
+  if (request.method === "POST" && request.headers.has("next-action")) {
+    // Pinned Next.js action transport: server-action-reducer consumes this
+    // header before validating RSC content. A bare HTTP redirect follows the
+    // POST to /login and produces an unexpected non-RSC response instead.
+    // Keep this localized and recheck the protocol when upgrading Next.js.
+    return new NextResponse(null, {
+      status: 200,
+      headers: {
+        // Relative destination preserves the browser origin when Next normalizes
+        // a loopback hostname or runs behind an internal reverse proxy.
+        "x-action-redirect": `${url.pathname}${url.search}${url.hash};replace`,
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+  return NextResponse.redirect(url);
 }
 
 export async function updateSession(request: NextRequest) {
@@ -67,7 +88,7 @@ export async function updateSession(request: NextRequest) {
     url.searchParams.set("error", error);
     return expireSupabaseAuthCookies(
       request,
-      NextResponse.redirect(url),
+      loginDenialResponse(request, url),
       writtenCookieNames,
     );
   };
@@ -79,7 +100,12 @@ export async function updateSession(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("next", path + request.nextUrl.search);
-    return NextResponse.redirect(url);
+    const response = loginDenialResponse(request, url);
+    // Auth may have attempted a refresh and written cookie chunks before
+    // returning no user. Do not retain those chunks on an action denial.
+    return request.method === "POST" && request.headers.has("next-action")
+      ? expireSupabaseAuthCookies(request, response, writtenCookieNames)
+      : response;
   }
 
   // Domain allowlist — if someone's authenticated but not on the

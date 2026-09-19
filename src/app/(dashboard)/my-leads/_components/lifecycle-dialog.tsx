@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, type FormEvent } from "react"
+import { useContext, useEffect, useState, type FormEvent } from "react"
 
 import {
   Dialog,
@@ -17,6 +17,8 @@ import {
   WorkflowDialogHeader,
   WorkflowFormError,
   centralDateTimeToIso,
+  centralDateTimeFromIso,
+  WorkflowRecoveryContext,
   useAcquisitionSubmit,
 } from "./workflow-form"
 import type {
@@ -85,6 +87,26 @@ export function AcquisitionLifecycleDialog({
   const [confirmed, setConfirmed] = useState(false)
   const [clientError, setClientError] = useState<string | null>(null)
   const [clientFieldErrors, setClientFieldErrors] = useState<Record<string, string>>({})
+  const recovery = useContext(WorkflowRecoveryContext)
+  const reconciliation = recovery?.reconciliation
+  const reconciliationLocked = Boolean(reconciliation)
+  useEffect(() => {
+    if (!reconciliation) return
+    const payload = reconciliation.payload
+    if (mode === "contract-signed") {
+      setSignedAt(centralDateTimeFromIso(payload.signedAt))
+      setOfferId(typeof payload.offerId === "string" ? payload.offerId : "")
+    } else if (mode === "decline-offer") {
+      setDeclinedAt(centralDateTimeFromIso(payload.occurredAt))
+    } else if (mode === "handoff") {
+      setReason(payload.reason === "not_interested" || payload.reason === "needs_nurture" ? payload.reason : "")
+      setRecipientUserId(typeof payload.recipientUserId === "string" ? payload.recipientUserId : "")
+    } else {
+      setConfirmed(payload.confirmed === true)
+    }
+    setClientError(null)
+    setClientFieldErrors({})
+  }, [mode, reconciliation])
   const resetFields = () => {
     setSignedAt("")
     setDeclinedAt("")
@@ -205,6 +227,7 @@ export function AcquisitionLifecycleDialog({
                   label="Signed at"
                   value={signedAt}
                   onChange={setSignedAt}
+                  disabled={reconciliationLocked}
                   error={fieldError("signedAt")}
                 />
                 <div className="flex flex-col gap-1.5">
@@ -212,6 +235,7 @@ export function AcquisitionLifecycleDialog({
                   <input
                     id="acquisition-contract-offer-id"
                     value={offerId}
+                    disabled={reconciliationLocked}
                     onChange={(event) => setOfferId(event.target.value)}
                     placeholder="Leave blank if there is no matching offer"
                     className="border-input bg-background flex h-[38px] w-full rounded-[12px] border px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
@@ -234,6 +258,7 @@ export function AcquisitionLifecycleDialog({
                   label="Declined at"
                   value={declinedAt}
                   onChange={setDeclinedAt}
+                  disabled={reconciliationLocked}
                   error={fieldError("occurredAt")}
                 />
               </>
@@ -249,6 +274,7 @@ export function AcquisitionLifecycleDialog({
                   <select
                     id="acquisition-handoff-reason"
                     value={reason}
+                    disabled={reconciliationLocked}
                     onChange={(event) => setReason(event.target.value as typeof reason)}
                     aria-invalid={Boolean(fieldError("reason"))}
                     aria-describedby={fieldError("reason") ? "acquisition-handoff-reason-error" : undefined}
@@ -268,6 +294,7 @@ export function AcquisitionLifecycleDialog({
                   <select
                     id="acquisition-handoff-recipient"
                     value={recipientUserId}
+                    disabled={reconciliationLocked}
                     onChange={(event) => setRecipientUserId(event.target.value)}
                     aria-invalid={Boolean(fieldError("recipientUserId"))}
                     aria-describedby={fieldError("recipientUserId") ? "acquisition-handoff-recipient-error" : undefined}
@@ -292,6 +319,7 @@ export function AcquisitionLifecycleDialog({
                   type="checkbox"
                   checked={confirmed}
                   onChange={(event) => setConfirmed(event.target.checked)}
+                  disabled={reconciliationLocked}
                   aria-invalid={Boolean(fieldError("confirmed"))}
                   aria-describedby={fieldError("confirmed") ? "acquisition-archive-confirmed-error" : undefined}
                   className="mt-0.5"

@@ -46,8 +46,17 @@ import {
   dispatchOwnerMessageAdded,
   dispatchOwnerMessageAddedNeedsTriage,
 } from "@/lib/notifications/dispatch";
-import { pausePropertyEnrollments } from "@/lib/sequences/enrollment";
+import {
+  pausePropertyEnrollments,
+  promotePropertyEnrollmentPauseReason,
+} from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
+import {
+  findRepSmsHumanTakeoverSource,
+  persistRepSmsHumanTakeoverFallback,
+  recordRepSmsHumanTakeover,
+  REP_SMS_HUMAN_TAKEOVER_REASON,
+} from "./rep-sms-human-takeover";
 import { aiReplyDelayWorkflow } from "@/workflows/ai-reply-delay";
 import { applyPhoneLevelOptOut } from "./opt-out-phone";
 import type { MessagingProvider } from "./types";
@@ -326,10 +335,10 @@ export async function handleInboundWebhook(
           provider.providerId,
           ev.externalId,
         );
-        await markInboundSmsIntentSideEffectsComplete(
-          supabase,
-          intentClaim.intentId,
-        );
+        // A semantic duplicate shares the canonical intent's side effects.
+        // Do not mark that intent complete here: the canonical webhook may
+        // still be between message insertion and takeover/sequence pause, and
+        // doing so would make a later canonical retry skip the required work.
         continue;
       }
 
@@ -807,12 +816,20 @@ export async function handleInboundWebhook(
         }
       }
 
-      if (!inboundState.propertyEnrollmentsPausedAt) {
+      // Pause before rep-SMS attribution so a lookup or takeover persistence
+      // failure still leaves the automated sequence fail-safe paused. A
+      // confirmed takeover below promotes this generic reason to the precise
+      // human-handoff reason without reopening the enrollment.
+      let propertyEnrollmentsPauseCompleted = Boolean(
+        inboundState.propertyEnrollmentsPausedAt,
+      );
+      if (!propertyEnrollmentsPauseCompleted) {
         try {
           await pausePropertyEnrollments(supabase, {
             propertyId: effectivePropertyId,
             reason: "inbound_reply",
           });
+          propertyEnrollmentsPauseCompleted = true;
           await markInboundMessageState(supabase, insertOutcome.messageId, {
             propertyEnrollmentsPausedAt: new Date().toISOString(),
           });
@@ -824,9 +841,140 @@ export async function handleInboundWebhook(
             extra: {
               propertyId: effectivePropertyId,
               externalId: ev.externalId,
+              reason: "inbound_reply",
             },
           });
         }
+      }
+
+      // A reply to a human rep SMS belongs to that lead's assigned rep. The
+      // outbound metadata is the durable handoff marker; record the takeover
+      // before considering any AI path so both immediate and delayed replies
+      // observe the existing attention/thread suppression state.
+      let repSmsHumanTakeover = false;
+      let takeoverSource: Awaited<
+        ReturnType<typeof findRepSmsHumanTakeoverSource>
+      > = null;
+      try {
+        takeoverSource = await findRepSmsHumanTakeoverSource(supabase, {
+          conversationId: insertOutcome.conversationId,
+          propertyId: effectivePropertyId,
+          contactId: effectiveContactId,
+          inboundMessageId: insertOutcome.messageId,
+          inboundReceivedAt: ev.receivedAt.toISOString(),
+          inboundToNumber: ev.to,
+        });
+      } catch (e) {
+        // A lookup error does not establish that this inbound belongs to a
+        // rep SMS. Do not mark an ordinary inbound as a takeover. Mark the
+        // webhook event as retryable and leave the intent incomplete so the
+        // provider can deliver it again after the database recovers.
+        reportError(e, {
+          tags: {
+            surface: `${provider.providerId}_webhook_rep_sms_human_takeover`,
+          },
+          extra: {
+            propertyId: effectivePropertyId,
+            externalId: ev.externalId,
+            inboundMessageId: insertOutcome.messageId,
+          },
+        });
+        await failInboundWebhookForRetry(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+          e,
+        );
+      }
+
+      if (takeoverSource) {
+        try {
+          await recordRepSmsHumanTakeover(supabase, {
+            propertyId: effectivePropertyId,
+            conversationId: insertOutcome.conversationId,
+            inboundMessageId: insertOutcome.messageId,
+            source: takeoverSource,
+          });
+          await markInboundMessageState(supabase, insertOutcome.messageId, {
+            aiResponder: {
+              outcome: "escalated",
+              reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+              completedAt: new Date().toISOString(),
+            },
+          });
+          // The fail-safe pause above may have already changed active rows to
+          // `paused/inbound_reply`. If it failed, rows may still be active.
+          // Cover both states and only then acknowledge the takeover so the
+          // exact reason is durable even across retries or concurrent
+          // deliveries.
+          await pausePropertyEnrollments(supabase, {
+            propertyId: effectivePropertyId,
+            reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+          });
+          await promotePropertyEnrollmentPauseReason(supabase, {
+            propertyId: effectivePropertyId,
+            fromReason: "inbound_reply",
+            reason: REP_SMS_HUMAN_TAKEOVER_REASON,
+          });
+          if (!propertyEnrollmentsPauseCompleted) {
+            await markInboundMessageState(supabase, insertOutcome.messageId, {
+              propertyEnrollmentsPausedAt: new Date().toISOString(),
+            });
+            propertyEnrollmentsPauseCompleted = true;
+          }
+          repSmsHumanTakeover = true;
+        } catch (e) {
+          // The source is confirmed, so an incomplete durable write must not
+          // be treated like an ordinary inbound. Keep the property attention
+          // gate fail-closed when possible, but always retry until the full
+          // takeover state has been persisted.
+          reportError(e, {
+            tags: {
+              surface: `${provider.providerId}_webhook_rep_sms_human_takeover_persistence`,
+            },
+            extra: {
+              propertyId: effectivePropertyId,
+              externalId: ev.externalId,
+              inboundMessageId: insertOutcome.messageId,
+            },
+          });
+          try {
+            await persistRepSmsHumanTakeoverFallback(
+              supabase,
+              effectivePropertyId,
+            );
+          } catch (fallbackError) {
+            reportError(fallbackError, {
+              tags: {
+                surface: `${provider.providerId}_webhook_rep_sms_human_takeover_fallback`,
+              },
+              extra: {
+                propertyId: effectivePropertyId,
+                externalId: ev.externalId,
+                inboundMessageId: insertOutcome.messageId,
+              },
+            });
+          }
+          await failInboundWebhookForRetry(
+            supabase,
+            provider.providerId,
+            ev.externalId,
+            e,
+          );
+        }
+      }
+
+      if (repSmsHumanTakeover) {
+        await markWebhookEventProcessed(
+          supabase,
+          provider.providerId,
+          ev.externalId,
+        );
+        await markInboundSmsIntentSideEffectsComplete(
+          supabase,
+          intentClaim.intentId,
+        );
+        continue;
       }
 
       if (effectiveContactId && !inboundState.aiResponder) {
@@ -1280,6 +1428,30 @@ async function markWebhookEventError(
       `markWebhookEventError: expected one webhook event for ${providerId}/${externalId}`,
     );
   }
+}
+
+/**
+ * Mark a reserved inbound as retryable, then fail the request. This helper is
+ * intentionally used before the intent side-effects-complete marker: a
+ * takeover lookup or persistence failure must never be acknowledged as done.
+ */
+async function failInboundWebhookForRetry(
+  supabase: SupabaseClient<Database>,
+  providerId: string,
+  externalId: string,
+  cause: unknown,
+): Promise<never> {
+  const message =
+    cause instanceof Error ? cause.message : "rep SMS takeover processing failed";
+  try {
+    await markWebhookEventError(supabase, providerId, externalId, message);
+  } catch (markError) {
+    reportError(markError, {
+      tags: { surface: `${providerId}_webhook_retry_marker` },
+      extra: { externalId },
+    });
+  }
+  throw cause instanceof Error ? cause : new Error(message);
 }
 
 function isWebhookProcessingLeaseExpired(

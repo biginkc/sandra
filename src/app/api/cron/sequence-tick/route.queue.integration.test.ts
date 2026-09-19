@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const telemetry = vi.hoisted(() => ({ reportError: vi.fn() }));
+vi.mock("@/lib/errors/report", () => ({ reportError: telemetry.reportError }));
+
 import { createTestClient } from "@tests/integration/client";
 import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
 import { resetTenantTables } from "@tests/integration/reset";
@@ -12,7 +15,7 @@ import {
   seedSenderCatalog,
 } from "@tests/integration/delivery";
 
-import { DRAIN_BATCH_SIZE, runSequenceTick } from "./route";
+import { DRAIN_BATCH_SIZE, runSequenceTick } from "./handlers";
 import type { Json } from "@/lib/supabase/types";
 
 const supabase = createTestClient();
@@ -113,6 +116,7 @@ async function seedQueuedMessage(opts: {
 
 describe("runSequenceTick — queue drain (integration)", () => {
   beforeEach(async () => {
+    telemetry.reportError.mockClear();
     await resetTenantTables(supabase);
     resetMockState();
     await seedSenderCatalog(supabase, await getOrgId(), [MOCK_SENDER_PRIMARY]);
@@ -308,6 +312,19 @@ describe("runSequenceTick — queue drain (integration)", () => {
     expect(summary.stalePendingFailed).toBe(1);
     expect(summary.drained).toBe(0);
     expect(getMockMessageLog()).toHaveLength(0);
+    expect(telemetry.reportError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "SMS provider attempts expired with unknown outcome" }),
+      {
+        tags: {
+          surface: "cron_sequence_tick_provider_attempt_recovery",
+          kind: "stale_pending_terminal",
+        },
+        extra: { count: 1 },
+      },
+    );
+    const repeat = await runSequenceTick(supabase);
+    expect(repeat.stalePendingFailed).toBe(0);
+    expect(telemetry.reportError).toHaveBeenCalledTimes(1);
 
     const { data: msg } = await supabase
       .from("messages")

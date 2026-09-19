@@ -1,0 +1,9 @@
+[
+  "CREATE INDEX CONCURRENTLY inbox_parent_message_property ON public.messages(org_id,property_id,id);",
+  "CREATE INDEX CONCURRENTLY inbox_parent_message_contact ON public.messages(org_id,contact_id,id);",
+  "CREATE INDEX CONCURRENTLY inbox_parent_review_property ON public.ai_disposition_reviews(org_id,property_id,id);",
+  "CREATE INDEX CONCURRENTLY inbox_backfill_messages ON public.messages(org_id,id);",
+  "CREATE INDEX CONCURRENTLY inbox_backfill_reviews ON public.ai_disposition_reviews(org_id,id);",
+  "CREATE INDEX CONCURRENTLY inbox_backfill_threads ON public.message_threads(org_id,id);",
+  "CREATE INDEX CONCURRENTLY inbox_backfill_thread_identity ON public.message_threads(org_id,conversation_id,id);"
+]

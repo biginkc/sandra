@@ -1,13 +1,16 @@
 import Image from "next/image";
 import Link from "next/link";
+import { notFound } from "next/navigation";
 
 import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { LEAD_SOURCES } from "@/lib/leads/sources";
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
 import { getDayBoundsInZone } from "@/lib/time/zoned";
 import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
+import { reportError } from "@/lib/errors/report";
 import {
   loadOrgTeamMembers,
   loadTeamMembersForOrgs,
@@ -44,10 +47,15 @@ export default async function LeadsPage({
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  const [{ data: counties }, memberships] = await Promise.all([
-    supabase.from("counties").select("market").order("state").order("name"),
-    getCallerMemberships(),
-  ]);
+  const memberships = await getCallerMembershipsOrThrow();
+  if (!canAccessMessagesAndLeadsBoard(memberships)) {
+    notFound();
+  }
+  const { data: counties } = await supabase
+    .from("counties")
+    .select("market")
+    .order("state")
+    .order("name");
   // Resolve every active organization from the server session. Board cards
   // can span those organizations, so eSign decoration is scoped per card
   // rather than selecting an arbitrary first membership.
@@ -86,7 +94,10 @@ export default async function LeadsPage({
       name: orgNames.get(orgId)!,
       teamMembers,
     }));
-  } catch {
+  } catch (error) {
+    reportError(error, {
+      tags: { operation: "leads_roster_load", surface: "leads_page" },
+    });
     rosterLoadError = true;
   }
   const inboundFilters = resolveInboundLeadFilters(params, {
@@ -130,7 +141,10 @@ export default async function LeadsPage({
       dayEnd: dayEnd.toISOString(),
       orgIds,
     });
-  } catch {
+  } catch (error) {
+    reportError(error, {
+      tags: { operation: "leads_board_load", surface: "leads_page" },
+    });
     loadFailed = true;
   }
 

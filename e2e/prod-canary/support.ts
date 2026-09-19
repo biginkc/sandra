@@ -636,13 +636,18 @@ export async function getOrCreateCanarySmsRecipientContact(
 
   const { data: existing, error: lookupError } = await client
     .from("contacts")
-    .select("id")
+    .select("id,last_name")
     .eq("phone_1", input.phone)
     .maybeSingle();
   if (lookupError) {
     throw new Error(`Could not look up canary SMS contact: ${lookupError.message}`);
   }
   if (existing?.id) {
+    if (existing.last_name !== input.lastName) {
+      throw new Error(
+        "The allowlisted canary phone belongs to a different contact. Refusing to reuse or modify it.",
+      );
+    }
     return { id: existing.id, created: false };
   }
 

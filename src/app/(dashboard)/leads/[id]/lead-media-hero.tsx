@@ -13,12 +13,16 @@ export function LeadMediaHero({
   address,
   locationLine,
   homeownerName,
+  collectionHref = "/leads",
+  collectionLabel = "Leads",
   actions,
 }: {
   media: LeadMediaPresentation;
   address: string;
   locationLine: string;
   homeownerName: string | null;
+  collectionHref?: "/leads" | "/properties" | "/my-leads";
+  collectionLabel?: "Leads" | "Prospects" | "My Leads";
   actions: React.ReactNode;
 }) {
   const description = [locationLine, homeownerName].filter(Boolean).join(" · ");
@@ -80,8 +84,8 @@ export function LeadMediaHero({
         >
           <span>Workspace</span>
           <span aria-hidden>/</span>
-          <Link href="/leads" className="hover:text-foreground">
-            Leads
+          <Link href={collectionHref} className="hover:text-foreground">
+            {collectionLabel}
           </Link>
           <span aria-hidden>/</span>
           <span className="text-foreground break-words">{address}</span>
@@ -98,6 +102,8 @@ export function LeadMediaHero({
           <div
             className={`flex min-w-0 flex-wrap items-center gap-2 [&_[data-testid=call-lead-button]]:border-slate-900 [&_[data-testid=call-lead-button]]:bg-slate-900 [&_[data-testid=call-lead-button]]:text-white [&_button]:min-h-9 ${actionFocusClasses}`}
             data-testid="lead-media-actions"
+            role="group"
+            aria-label="Lead actions"
           >
             {actions}
           </div>
@@ -195,10 +201,10 @@ export function LeadMediaHero({
             <span>Workspace</span>
             <span aria-hidden>/</span>
             <Link
-              href="/leads"
+              href={collectionHref}
               className="transition-colors hover:text-white"
             >
-              Leads
+              {collectionLabel}
             </Link>
             <span aria-hidden>/</span>
             <span className="break-words text-white">{address}</span>
@@ -213,6 +219,8 @@ export function LeadMediaHero({
         <div
           className={`flex min-w-0 flex-wrap items-center gap-2 [&_button]:min-h-9 [&_button]:border-white/80 [&_button]:bg-white/95 [&_button]:text-slate-950 [&_button]:shadow-sm [&_button]:hover:bg-white ${actionFocusClasses}`}
           data-testid="lead-media-actions"
+          role="group"
+          aria-label="Lead actions"
         >
           {actions}
         </div>

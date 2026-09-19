@@ -1,0 +1,191 @@
+{
+  "status": "completed",
+  "fixtureConversations": 55000,
+  "initialListMs": 2354.793625,
+  "observations": [
+    {
+      "phase": "first_open",
+      "milliseconds": 2401.6239170000003
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 1846.428417
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 2367.0113329999995
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 14945.917749999999
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 1863.632458
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 13447.933707999997
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 14448.597583000002
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 2362.1218329999974
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 13932.614832999992
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 14448.55183299999
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 1879.7597920000117
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 1865.4557499999937
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 3881.0486669999955
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 2361.8152499999997
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 12930.702124999996
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 1897.138082999998
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 2347.848417000001
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 13431.689916000003
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 12931.977459000002
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 3878.9475840000086
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1898.671708000009
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1847.88612499999
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1864.3956249999756
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1848.2169579999754
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 2865.0809590000135
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1863.2040419999976
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1865.5954590000038
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1863.3606250000012
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1847.6808329999913
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1862.5390829999815
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1865.6359159999993
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1880.7361659999879
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1848.4691250000033
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1880.498082999984
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1848.6958330000052
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1880.5430000000051
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1864.8787500000035
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1861.5244589999784
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1864.7795419999748
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 1880.5526669999817
+    }
+  ],
+  "visibleRows": 200,
+  "blockedExternalRequests": 0,
+  "pageErrors": [],
+  "limitations": [
+    "Local production build with synthetic password session; not genuine Hugo production SSO",
+    "20 first opens and 20 revisits; no incoming load; local synthetic measurements only",
+    "Synthetic mark-read effects only; no sends or outcomes",
+    "Click-to-correct-panel plus two animation frames includes Playwright overhead",
+    "Some first opens took 13\u201315 seconds; detailed browser tracing is needed to separate UI readiness/automation waits from server work"
+  ],
+  "summary": {
+    "firstOpen": {
+      "count": 20,
+      "p50": 2401.6,
+      "p95": 14448.6,
+      "p99": 14945.9
+    },
+    "revisit": {
+      "count": 20,
+      "p50": 1864.4,
+      "p95": 1898.7,
+      "p99": 2865.1
+    }
+  }
+}

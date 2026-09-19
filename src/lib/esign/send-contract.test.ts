@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ESIGN_MERGE_FIELD_NAMES,
+  ESIGN_RESIDENTIAL_FIELD_NAMES,
+  ESIGN_NOVATION_FIELD_NAMES,
+  type EsignMergeValues,
   type DropboxSignProvider,
   type ProviderSignature,
   type TemplateOption,
@@ -275,5 +278,43 @@ describe("sendContractWithTemplate", () => {
     await expect(sendContractWithTemplate(adapter, input())).rejects.toThrow(
       "signer details that do not match",
     );
+  });
+});
+
+describe("residential purchase contract", () => {
+  const residentialTemplate = { ...template, mergeFieldNames: ESIGN_RESIDENTIAL_FIELD_NAMES };
+  const residentialValues = { ...mergeValues, buyer_name: "BMH Buyer LLC", property_city: "Kansas City",
+    property_state: "MO", property_zip: "64108", legal_description: "Internal fixture lot",
+    earnest_money_holder: "Internal escrow fixture", cash_balance: "$124,000", additional_terms: "" };
+  it("sends all thirteen values, including optional blank terms", async () => {
+    const adapter = provider();
+    await sendContractWithTemplate(adapter, input({ template: residentialTemplate, mergeValues: residentialValues }));
+    expect(adapter.sendWithTemplate).toHaveBeenCalledWith(expect.objectContaining({ mergeValues: residentialValues }));
+  });
+  it("rejects a residential payload for a legacy template", async () => {
+    await expect(sendContractWithTemplate(provider(), input({ mergeValues: residentialValues }))).rejects.toThrow(/required contract fields/);
+  });
+  it("rejects a legacy payload for a residential template", async () => {
+    await expect(sendContractWithTemplate(provider(), input({ template: residentialTemplate }))).rejects.toThrow(/required residential/);
+  });
+  it.each(["buyer_name", "legal_description", "cash_balance", "property_city"])("requires %s", async (name) => {
+    await expect(sendContractWithTemplate(provider(), input({ template: residentialTemplate,
+      mergeValues: { ...residentialValues, [name]: " " } }))).rejects.toThrow(/required residential/);
+  });
+});
+
+describe("novation packet", () => {
+  const novationTemplate = { ...template, documentType: "novation_agreement", mergeFieldNames: ESIGN_NOVATION_FIELD_NAMES };
+  const values = { ...mergeValues, ...Object.fromEntries(ESIGN_NOVATION_FIELD_NAMES.map((name) => [name, `${name} fixture`])) } as EsignMergeValues;
+
+  it("sends exactly the packet field set", async () => {
+    const adapter = provider();
+    await sendContractWithTemplate(adapter, input({ template: novationTemplate, mergeValues: values }));
+    expect(adapter.sendWithTemplate).toHaveBeenCalledWith(expect.objectContaining({ mergeValues: values }));
+  });
+
+  it("rejects a missing required packet value", async () => {
+    await expect(sendContractWithTemplate(provider(), input({ template: novationTemplate,
+      mergeValues: { ...values, attorney_in_fact: " " } }))).rejects.toThrow(/required novation packet/);
   });
 });

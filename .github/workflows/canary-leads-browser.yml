@@ -1,0 +1,39 @@
+name: Leads Browser Canary
+
+# Enable the weekday schedule only after a dedicated Hugo canary identity has
+# completed a live workflow_dispatch run. The current legacy canary password is
+# rejected by Hugo, so scheduling this now would produce a guaranteed failure.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  leads-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI: "1"
+      RUN_PROD_CANARIES: "1"
+      PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+      PROD_EMAIL: ${{ secrets.PROD_EMAIL }}
+      PROD_PASSWORD: ${{ secrets.PROD_PASSWORD }}
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Check dedicated Hugo identity, My Leads queue, and lead detail
+        run: npx playwright test --config playwright.canary.config.ts e2e/prod-canary/my-leads-queue.spec.ts e2e/prod-canary/lead-management.spec.ts
+      - name: Preserve failure trace
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: leads-browser-canary-trace
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

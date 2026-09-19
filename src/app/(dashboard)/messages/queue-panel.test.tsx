@@ -388,6 +388,32 @@ describe("<QueuePanel /> infinite scroll", () => {
     expect(toast.error).not.toHaveBeenCalledWith("blocked_terminal_dispo");
   });
 
+  it("removes an ambiguous provider result from the queue and tells the operator to reconcile", async () => {
+    releaseMessage.mockResolvedValue({
+      ok: true,
+      data: {
+        outcome: {
+          status: "provider_unknown",
+          messageId: "attempted-message",
+          error: "The provider did not return a definitive receipt.",
+        },
+      },
+    });
+
+    render(<QueuePanel initial={[makeRow(1)]} initialHasMore={false} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(toast.warning).toHaveBeenCalledWith("Send pending reconciliation", {
+        description:
+          "The messaging provider did not provide a definitive receipt. Review the message history before retrying to avoid a duplicate message.",
+      });
+    });
+    expect(screen.queryByText("1 Main St")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
+  });
+
   it("keeps the configured cadence after a row is consumed instead of restarting immediately", async () => {
     vi.useFakeTimers();
     releaseMessage.mockResolvedValue({

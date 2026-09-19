@@ -338,11 +338,13 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     await page.goto("/sequences");
     // Preserve a real sidebar client-navigation assertion while keeping the
     // full route matrix independent from a long-lived dev server's RSC state.
-    const overviewLink = page
-      .getByRole("navigation", { name: "Primary" })
-      .getByRole("link", { name: /^Overview$/ });
+    const primaryNav = page.getByRole("navigation", { name: "Primary" });
+    // Wait for responsive styles after navigation: desktop and mobile navs
+    // coexist in the DOM, but exactly one must be exposed to the user.
+    await expect(primaryNav).toHaveCount(1);
+    const overviewLink = primaryNav.getByRole("link", { name: /^Overview$/ });
     await overviewLink.click();
-    await expect(page).toHaveURL((url) => url.pathname === "/dashboard");
+    await expect(page).toHaveURL((url) => url.pathname === "/dashboard", { timeout: 30_000 });
     await page.goto("/sequences");
 
     // Assert every primary link's exact mapping and clickability, then require
@@ -364,6 +366,7 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
       // Sidebar is semantic <nav aria-label="Primary">; target that to avoid
       // matching stray links in page content.
       const nav = page.getByRole("navigation", { name: "Primary" });
+      await expect(nav).toHaveCount(1);
       const link = nav.getByRole("link", { name: t.label });
       await expect(link).toHaveAttribute("href", t.href);
       await link.click({ trial: true });

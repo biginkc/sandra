@@ -4,8 +4,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LEAD_SOURCES } from "@/lib/leads/sources";
-import { getCallerMemberships } from "@/lib/auth/memberships";
+import { getCallerMembershipsOrThrow } from "@/lib/auth/memberships";
+import { canAccessMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
+import { notFound } from "next/navigation";
 
 import { submitNewLead } from "./actions";
 import { SOURCE_LABELS, STATES } from "./form-options";
@@ -37,6 +39,11 @@ export default async function NewLeadPage({
     );
   }
 
+  const memberships = await getCallerMembershipsOrThrow();
+  if (!canAccessMessagesAndLeadsBoard(memberships)) {
+    notFound();
+  }
+
   // Markets list — fetched from the counties table per phase 02 D-01.
   // Sorted by state then name to match the import wizard's order.
   const { data: counties } = await supabase
@@ -45,7 +52,6 @@ export default async function NewLeadPage({
     .order("state", { ascending: true })
     .order("name", { ascending: true });
   const markets: string[] = (counties ?? []).map((c) => c.market);
-  const memberships = await getCallerMemberships();
   const orgIds = memberships.map((membership) => membership.org_id);
   const { data: organizations, error: organizationsError } = orgIds.length
     ? await supabase

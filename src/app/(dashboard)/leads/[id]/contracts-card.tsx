@@ -82,6 +82,11 @@ export function ContractsCard({
                   >
                     <TableCell>
                       <div className="font-medium">{contract.templateName}</div>
+                      {contract.createdByLabel ? (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          Prepared by {contract.createdByLabel}
+                        </div>
+                      ) : null}
                       {contract.testMode ? (
                         <div className="mt-1 text-xs text-muted-foreground">
                           Test mode

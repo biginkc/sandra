@@ -14,10 +14,25 @@ import type { ActivityRow } from "../queries";
 
 import { RelativeTime } from "./relative-time";
 
-type Props = { events: ActivityRow[] };
+type Props = {
+  events: ActivityRow[];
+  /** Restricted Acquisitions members may follow lead links, but not read
+   * inbound message bodies from the shared Messages workspace. */
+  showMessagesAndLeads?: boolean;
+};
 
-export function ActivityFeed({ events }: Props) {
-  if (events.length === 0) {
+export function ActivityFeed({
+  events,
+  showMessagesAndLeads = true,
+}: Props) {
+  const visibleEvents = events.filter(
+    (event) =>
+      showMessagesAndLeads ||
+      event.kind !== "inbound_message" ||
+      event.property_id !== null,
+  );
+
+  if (visibleEvents.length === 0) {
     return (
       <div className="border-border bg-card rounded-2xl border px-5 py-5">
         <h2 className="text-foreground text-base font-bold">Recent activity</h2>
@@ -32,9 +47,12 @@ export function ActivityFeed({ events }: Props) {
     <div className="border-border bg-card rounded-2xl border px-5 py-5">
       <h2 className="text-foreground mb-4 text-base font-bold">Recent activity</h2>
       <ul className="space-y-3">
-        {events.map((e, i) => (
+        {visibleEvents.map((e, i) => (
           <li key={`${e.kind}-${e.at}-${i}`}>
-            <ActivityRowView event={e} />
+            <ActivityRowView
+              event={e}
+              showMessagePreview={showMessagesAndLeads}
+            />
           </li>
         ))}
       </ul>
@@ -42,8 +60,14 @@ export function ActivityFeed({ events }: Props) {
   );
 }
 
-function ActivityRowView({ event }: { event: ActivityRow }) {
-  const meta = formatEvent(event);
+function ActivityRowView({
+  event,
+  showMessagePreview,
+}: {
+  event: ActivityRow;
+  showMessagePreview: boolean;
+}) {
+  const meta = formatEvent(event, showMessagePreview);
   const Icon = meta.icon;
   const inner = (
     <div className="flex items-start gap-3">
@@ -87,14 +111,19 @@ type EventMeta = {
   href?: string;
 };
 
-function formatEvent(event: ActivityRow): EventMeta {
+function formatEvent(
+  event: ActivityRow,
+  showMessagePreview = true,
+): EventMeta {
   switch (event.kind) {
     case "inbound_message":
       return {
         icon: MessageSquare,
         iconBg: "bg-stone-100",
         iconColor: "text-stone-700",
-        summary: `New reply${event.address ? ` — ${formatLocation(event)}` : ""}: "${truncate(event.preview, 60)}"`,
+        summary: showMessagePreview
+          ? `New reply${event.address ? ` — ${formatLocation(event)}` : ""}: "${truncate(event.preview, 60)}"`
+          : `New reply${event.address ? ` — ${formatLocation(event)}` : ""}`,
         href: event.property_id ? `/leads/${event.property_id}` : undefined,
       };
     case "sequence_completed":

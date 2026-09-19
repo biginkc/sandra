@@ -1,0 +1,11 @@
+{
+  "database": "sandra_inbox_install_20260913",
+  "marker": "sandra-inbox-production-candidate-owned-synthetic",
+  "runner_sha256": "88159f03bb4d43628d5414958f9bca80cba8c032029c415e81a2ff75c4d0ae88",
+  "compiled_sha256": "5fd578c67b401fcaa45d6ca6f5fba3e7022b6ad76b60ca3b3c8c6987daf2b090",
+  "verified_functions": 35,
+  "schema_reload_notified": true,
+  "limits": [
+    "Notification issued; actual authenticated HTTP cache visibility verified separately by browser harness"
+  ]
+}

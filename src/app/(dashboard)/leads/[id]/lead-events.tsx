@@ -3,6 +3,8 @@
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import { ActivityIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import { formatDollars } from "@/lib/calculators/closr-v1";
 
 import { OPERATOR_TIME_ZONE } from "@/lib/messages/message-metrics";
 import { validateTemplateTitle } from "@/lib/esign/template-contract";
@@ -143,6 +145,9 @@ export function LeadEventPill({
       <span className="text-foreground font-medium">
         {formatLeadEventSentence(event, authorEmails, currentUserId)}
       </span>
+      {event.event_type === 'calculation_saved' && typeof readPayload(event.payload).calculation_id === 'string' && /^[0-9a-f-]{36}$/i.test(String(readPayload(event.payload).calculation_id)) ? (
+        <Link className="font-medium underline underline-offset-2" href={`/leads/${event.property_id}/calculations/${readPayload(event.payload).calculation_id}`}>Open calculation</Link>
+      ) : null}
       <span aria-hidden>·</span>
       <time
         dateTime={event.created_at}
@@ -167,6 +172,13 @@ export function formatLeadEventSentence(
   const batchSuffix = formatBatchSuffix(payload);
 
   switch (event.event_type) {
+    case "calculation_saved": {
+      const approach = payload.approach === 'wholesale' ? 'wholesale' : 'novation';
+      const proposed = typeof payload.proposed_offer === 'number' && Number.isFinite(payload.proposed_offer)
+        ? ` · proposed ${formatDollars(payload.proposed_offer)}` : '';
+      const version = typeof payload.version === 'number' ? ` v${payload.version}` : '';
+      return `${actor} saved ${approach} calculation${version}${proposed}`;
+    }
     case "lead_created":
       return `${actor} created the lead`;
     case "qualified":

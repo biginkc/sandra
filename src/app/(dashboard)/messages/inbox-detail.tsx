@@ -58,6 +58,9 @@ type Props = {
   /** Narrow list/detail navigation. The parent owns focus restoration. */
   onBackToList?: () => void;
   nowMs?: number;
+  onRevalidate?: () => void;
+  onReplySent?: (messageId: string, threadId: string) => void;
+  revalidationPending?: boolean;
 };
 
 const DISPO_LABELS: Record<string, string> = {
@@ -386,16 +389,19 @@ export function InboxDetail({
   currentUserId,
   onBackToList,
   nowMs,
+  onRevalidate,
+  onReplySent,
+  revalidationPending = false,
 }: Props) {
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = nowMs ?? fallbackNowMs;
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [openLeadPending, startOpenLeadTransition] = useTransition();
   const [resolveOpen, setResolveOpen] = useState(false);
   const [replyRefreshGate, setReplyRefreshGate] =
     useState<ReplyRefreshGate | null>(null);
   const replyRefreshGateRef = useRef<ReplyRefreshGate | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const updateReplyRefreshGate = (gate: ReplyRefreshGate | null) => {
     replyRefreshGateRef.current = gate;
     setReplyRefreshGate(gate);
@@ -468,9 +474,12 @@ export function InboxDetail({
   const recordLabel = propertyIsLead ? "lead" : "prospect";
   const openLeadFromHeader = () => {
     if (!data.propertyId) return;
-    startOpenLeadTransition(() => {
-      router.push(`/leads/${data.propertyId}`);
-    });
+    if (typeof window === "undefined") return;
+    window.open(
+      `/leads/${data.propertyId}`,
+      "_blank",
+      "noopener,noreferrer",
+    );
   };
   const copy = async (value: string, label: string) => {
     const ok = await copyToClipboard(value);
@@ -536,6 +545,7 @@ export function InboxDetail({
         )
       : null;
   const replyRefreshPending =
+    revalidationPending ||
     initialPendingOutboundMessageIds.size > 0 ||
     (replyRefreshGate?.threadId === data.threadId &&
       (replyRefreshGate.initialMessages === null
@@ -583,7 +593,8 @@ export function InboxDetail({
         messageId: message.id,
         initialMessages: data.initialMessages,
       });
-      router.refresh();
+      if (onRevalidate) onRevalidate();
+      else router.refresh();
       return;
     }
 
@@ -601,7 +612,8 @@ export function InboxDetail({
         messageId: message.id,
         initialMessages: data.initialMessages,
       });
-      router.refresh();
+      if (onRevalidate) onRevalidate();
+      else router.refresh();
       return;
     }
 
@@ -616,7 +628,8 @@ export function InboxDetail({
         messageId: message.id,
         initialMessages: data.initialMessages,
       });
-      router.refresh();
+      if (onRevalidate) onRevalidate();
+      else router.refresh();
       return;
     }
 
@@ -630,7 +643,8 @@ export function InboxDetail({
       messageId: message.id,
       initialMessages: data.initialMessages,
     });
-    router.refresh();
+    if (onRevalidate) onRevalidate();
+      else router.refresh();
   };
 
   const replyPhoneUnavailableMessage =
@@ -734,7 +748,6 @@ export function InboxDetail({
             <Button
               type="button"
               onClick={openLeadFromHeader}
-              disabled={openLeadPending}
               variant="outline"
               size="sm"
               className="min-h-11"
@@ -862,6 +875,7 @@ export function InboxDetail({
       <div
         className="flex-1 overflow-y-auto px-6 py-5 bg-[#faf9f8]"
         data-testid="inbox-detail-scroll"
+        ref={scrollContainerRef}
       >
         {/* Key on the resolved thread so switching conversations remounts
             the component and resets its local snapshot immediately. */}
@@ -872,6 +886,7 @@ export function InboxDetail({
           conversationId={data.conversationId}
           propertyId={data.propertyId}
           onLiveMessage={handleLiveMessage}
+          scrollContainerRef={scrollContainerRef}
           nowMs={renderNowMs}
         />
       </div>
@@ -931,6 +946,7 @@ export function InboxDetail({
                   phoneUnavailableMessage={replyPhoneUnavailableMessage}
                   routeRefreshPending={replyRefreshPending}
                   suspended={isSmsRestricted}
+                  onSent={onReplySent ? (messageId) => onReplySent(messageId, data.threadId) : undefined}
                 />
               </div>
             ) : !isSmsRestricted ? (

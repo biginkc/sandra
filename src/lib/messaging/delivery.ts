@@ -22,6 +22,7 @@ import { reportError } from "@/lib/errors/report";
 import { ok, type Result } from "@/lib/errors/result";
 import type { Database, Json } from "@/lib/supabase/types";
 import { getMessagingProvider } from "./registry";
+import { assertSendilloOrganizationScope } from "./rep-sms-scope";
 import type { MessagingProvider } from "./types";
 
 type Supabase = SupabaseClient<Database>;
@@ -87,6 +88,9 @@ export async function syncProviderCatalog(
   if (!provider || !providerSupportsSenderInventory(provider)) {
     return { supported: false, provider: provider?.providerId ?? null };
   }
+  // Catalog reads use the provider's application-scoped credentials. Never
+  // let a caller populate another tenant's synced sender inventory.
+  assertSendilloOrganizationScope(orgId, provider.providerId);
 
   const syncKey = `${orgId}:${provider.providerId}`;
   const inflight = catalogSyncInflight.get(syncKey);
@@ -244,6 +248,7 @@ export async function loadDeliveryCatalog(
       lastSyncedAt: null,
     };
   }
+  assertSendilloOrganizationScope(orgId, provider.providerId);
 
   const [sendersResult, campaignsResult] = await Promise.all([
     client
@@ -326,6 +331,7 @@ export async function getSenderInventoryState(
   providerId: string,
   fromAddress: string,
 ): Promise<SenderInventoryState> {
+  assertSendilloOrganizationScope(orgId, providerId);
   const phone = normalizeSenderNumber(fromAddress);
   const { data, error } = await client
     .from("provider_sender_numbers")
@@ -397,6 +403,17 @@ export async function resolveDeliverySelection(
         code: "DELIVERY_LOOKUP_FAILED",
         message:
           "Messaging is off — set MESSAGING_PROVIDER before configuring Delivery.",
+      },
+    };
+  }
+  try {
+    assertSendilloOrganizationScope(orgId, currentProvider.providerId);
+  } catch (e) {
+    return {
+      ok: false,
+      error: {
+        code: "DELIVERY_LOOKUP_FAILED",
+        message: e instanceof Error ? e.message : String(e),
       },
     };
   }

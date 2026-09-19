@@ -1,0 +1,43 @@
+{
+  "installed_bodies_verified": 15,
+  "permissions": [
+    {
+      "anon": false,
+      "name": "inbox_acknowledge_read(uuid,integer)",
+      "service": false,
+      "authenticated": true
+    },
+    {
+      "anon": false,
+      "name": "inbox_history_page(uuid,uuid,uuid)",
+      "service": false,
+      "authenticated": true
+    },
+    {
+      "anon": false,
+      "name": "inbox_read_detail(uuid,uuid)",
+      "service": false,
+      "authenticated": true
+    },
+    {
+      "anon": false,
+      "name": "inbox_sync_finalize_v1(uuid,jsonb,integer,text,text)",
+      "service": false,
+      "authenticated": true
+    },
+    {
+      "anon": false,
+      "name": "inbox_sync_snapshot_v1(uuid)",
+      "service": false,
+      "authenticated": true
+    },
+    {
+      "anon": false,
+      "name": "inbox_unknown_history_page(uuid,uuid,uuid)",
+      "service": false,
+      "authenticated": true
+    }
+  ],
+  "compiled_sha256": "fefeaac92ee566eb57b7964057f4848671da5dda981f1772c8c84988c2de7ef0",
+  "scope": "Actual fresh DB catalog proof; browser transport is independent evidence"
+}

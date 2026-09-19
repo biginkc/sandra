@@ -1,0 +1,37 @@
+{
+  "status": "PASS",
+  "at": "2026-09-13T12:27:45Z",
+  "checks": [
+    {
+      "name": "authorized exact head/history, raw microsecond tie cursor, empty page and zero head",
+      "passed": true
+    },
+    {
+      "name": "other requester/org, unknown conversation, missing auth, anon and service ACL denied precisely",
+      "passed": true
+    },
+    {
+      "name": "actual Hugo expiry, revocation, suspension and deletion-prepared lifecycle denied",
+      "passed": true
+    },
+    {
+      "name": "held arrival excludes both row/head then committed snapshot includes both",
+      "passed": true
+    },
+    {
+      "name": "cross-org visible ambiguity preserved; inaccessible other org excluded",
+      "passed": true
+    }
+  ],
+  "org": "20558929-974a-46a1-9bbd-4e7033ef2c32",
+  "container_id": "603c10117cb7ef6a07d81448dd1a25b0c1ee2787a59f75871015c4a416cac557",
+  "setup_sha256": "8e13aaea327dafa55bac4185ead4024099b467e52f6a65908331018df810d8c6",
+  "harness_sha256": "cf7bd823db03a511462e107266477674fa622e4aad69bbaf327c8d643f0ee1d4",
+  "limits": [
+    "Simulated trusted request.jwt.claims; no JWT signature, HTTP, PostgREST, token, receipt or browser proof",
+    "Tiny fixture conversations; no internal RPC query-plan/performance guarantee",
+    "Membership authorization follows caller statement snapshot; revocation committed during statement needs gateway recheck before response",
+    "Unknown/no-message conversations denied: canonical schema has no conversation identity registry",
+    "Private candidate schema and synthetic fixtures retained; no public API/migration installed"
+  ]
+}

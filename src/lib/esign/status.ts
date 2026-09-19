@@ -39,9 +39,9 @@ export function normalizeDropboxSignLifecycleEvent(
     case "signature_request_viewed":
       return lifecycle(eventType, "viewed", false, "viewed");
     case "signature_request_all_signed":
-      return lifecycle(eventType, "signed", false, "all_signed");
+      return lifecycle(eventType, "signed", true, "all_signed");
     case "signature_request_downloadable":
-      return lifecycle(eventType, "signed", true, "downloadable");
+      return lifecycle(eventType, null, false, "downloadable");
     case "signature_request_declined":
       return lifecycle(eventType, "declined", false, "declined");
     case "signature_request_canceled":

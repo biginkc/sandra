@@ -12,11 +12,13 @@ import {
 } from "lucide-react"
 
 import Link from "next/link"
+import { RepSmsComposer } from "../rep-sms-composer"
 
 import { Badge } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { MyLeadDetailPanel } from "./detail-panel"
+import { MyLeadSmsStrip } from "./sms-strip"
 import {
   MY_LEAD_STAGE_LABELS,
   MY_LEAD_STAGE_ORDER,
@@ -60,7 +62,7 @@ const NEEDS_COPY: Record<MyLeadStage, React.ReactNode> = {
   ),
   contacted: (
     <>
-      Needs: <span className="font-bold text-green-700 dark:text-green-400">reached ✓</span> — mark ready for an offer when there&apos;s a reason to keep going.
+      Needs: <span className="font-bold text-teal-700 dark:text-teal-300">follow-up plan or offer decision</span> — mark ready when there&apos;s a reason to keep going.
     </>
   ),
   needs_offer: (
@@ -129,6 +131,7 @@ const ACTIONS_BY_STAGE: Record<
 
 export type MyLeadQueueRowProps = {
   row: MyLeadQueueRow
+  sectionVisible?: boolean
   detailsOpen: boolean
   detailState?: MyLeadDetailState
   onToggleDetails: () => void
@@ -136,7 +139,7 @@ export type MyLeadQueueRowProps = {
   onDetailChanged?: () => void
   onLoadDetailPage?: (
     group: MyLeadDetailGroupName,
-    cursor: string
+    cursor: string | null
   ) => Promise<MyLeadDetailPageResult>
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRow) => void
 }
@@ -144,6 +147,7 @@ export type MyLeadQueueRowProps = {
 export function MyLeadQueueRow({
   row,
   detailsOpen,
+  sectionVisible = true,
   detailState,
   onToggleDetails,
   onRetryDetails,
@@ -237,7 +241,8 @@ export function MyLeadQueueRow({
       </button>
 
       <div id={`my-lead-detail-${row.propertyId}`} hidden={!detailsOpen}>
-      {detailsOpen && <>
+      {/* Retain loaded detail state through collapse without mounting unopened details. */}
+      {(detailsOpen || detailState?.status === "ready") && <>
       <div className="border-t border-[#f0eeec] pl-[33px] pr-[18px] pt-2 pb-[18px] dark:border-border">
         <p className="flex items-center gap-2 pt-2 text-sm text-muted-foreground"><Phone className="size-3.5" aria-hidden="true" />{row.phone || "Phone unavailable"}</p>
 
@@ -278,6 +283,12 @@ export function MyLeadQueueRow({
             </span>
           )}
         </div>
+
+        <MyLeadSmsStrip
+          state={detailState ?? { status: "loading" }}
+          onRetry={onRetryDetails}
+          onLoadDetailPage={onLoadDetailPage}
+        />
 
         <div className="pt-4">
           <p className="mb-[9px] text-[10px] font-extrabold tracking-[0.08em] text-muted-foreground uppercase">Where it is</p>
@@ -344,6 +355,7 @@ export function MyLeadQueueRow({
       </div>
 
       <MyLeadDetailPanel
+            visible={detailsOpen && sectionVisible}
             state={detailState ?? { status: "loading" }}
             onRetry={onRetryDetails}
             propertyId={row.propertyId}
@@ -351,49 +363,56 @@ export function MyLeadQueueRow({
             onLoadDetailPage={onLoadDetailPage}
           />
 
-      <div className="flex flex-wrap items-center gap-2.5 border-t border-[#f0eeec] px-4 pt-4 dark:border-border">
-        <Button
-          type="button"
-          variant="default"
-          size="sm"
-          onClick={(event) => {
-            event.stopPropagation()
-            onStageAction(primaryAction.action, row)
-          }}
-        >
-          <ArrowRight className="size-[15px]" aria-hidden="true" />
-          {primaryAction.label}
-        </Button>
-        <Link href={`/leads/${row.propertyId}`} prefetch={false} className={buttonVariants({ variant: "outline", size: "sm" })}>Open lead</Link>
-        {row.zillowHref && (
-          <a
-            href={row.zillowHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            className={buttonVariants({ variant: "outline", size: "sm", className: "border-[#bfdbfe] text-[#1d4ed8] dark:border-blue-900 dark:text-blue-300" })}
-          >
-            <ExternalLink aria-hidden="true" /> Open in Zillow
-          </a>
-        )}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2 px-4 pt-2.5 pb-4">
-        {secondaryActions.map(({ action, label, danger }) => (
+      <div data-testid={`my-lead-actions-${row.propertyId}`} role="group" aria-label="Lead actions">
+        <div className="flex flex-wrap items-center gap-2.5 border-t border-[#f0eeec] px-4 pt-4 dark:border-border">
           <Button
-            key={action}
             type="button"
-            variant={danger ? "destructive" : "outline"}
+            variant="default"
             size="sm"
-            className={cn(!danger && "border-[#e5e1df] bg-background text-muted-foreground hover:text-foreground dark:border-border", danger && "ml-auto")}
             onClick={(event) => {
               event.stopPropagation()
-              onStageAction(action, row)
+              onStageAction(primaryAction.action, row)
             }}
           >
-            {action === "start-call" && <Phone className="size-[13px]" aria-hidden="true" />}
-            {label}
+            <ArrowRight className="size-[15px]" aria-hidden="true" />
+            {primaryAction.label}
           </Button>
-        ))}
+          <Link href={`/leads/${row.propertyId}`} prefetch={false} className={buttonVariants({ variant: "outline", size: "sm" })}>Open lead</Link>
+          {row.zillowHref && (
+            <a
+              href={row.zillowHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={buttonVariants({ variant: "outline", size: "sm", className: "border-[#bfdbfe] text-[#1d4ed8] dark:border-blue-900 dark:text-blue-300" })}
+            >
+              <ExternalLink aria-hidden="true" /> Open in Zillow
+            </a>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 px-4 pt-2.5 pb-4">
+          <RepSmsComposer
+            propertyId={row.propertyId}
+            placement="action"
+            onSent={() => { onRetryDetails(); onDetailChanged?.(); }}
+          />
+          {secondaryActions.map(({ action, label, danger }) => (
+            <Button
+              key={action}
+              type="button"
+              variant={danger ? "destructive" : "outline"}
+              size="sm"
+              className={cn(!danger && "border-[#e5e1df] bg-background text-muted-foreground hover:text-foreground dark:border-border", danger && "ml-auto")}
+              onClick={(event) => {
+                event.stopPropagation()
+                onStageAction(action, row)
+              }}
+            >
+              {action === "start-call" && <Phone className="size-[13px]" aria-hidden="true" />}
+              {label}
+            </Button>
+          ))}
+        </div>
       </div>
       </>}
       </div>

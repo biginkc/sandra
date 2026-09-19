@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "targets": 500,
+  "partitions": 5,
+  "cas_per_partition": true,
+  "extra_partitions_denied": [
+    -1,
+    5,
+    999
+  ],
+  "scalar_rpc_sample": "rpc-sample.json"
+}

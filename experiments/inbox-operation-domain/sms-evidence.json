@@ -1,0 +1,76 @@
+{
+  "checks": [
+    {
+      "name": "SMS side-effect rollback and permanent DNC gate",
+      "passed": true
+    },
+    {
+      "name": "SMS opt-out, contact consent, two sibling enrollment stops and dependent assignment",
+      "passed": true
+    },
+    {
+      "name": "preexisting paused enrollment preserved",
+      "passed": true
+    },
+    {
+      "name": "distinct sibling sequence events",
+      "passed": true
+    },
+    {
+      "name": "canonical outcome/followup/review supersession and dependent assignment",
+      "passed": true
+    },
+    {
+      "name": "external edit conflict",
+      "passed": true
+    },
+    {
+      "name": "canonical effect/event/receipt transaction rollback",
+      "passed": true
+    },
+    {
+      "name": "current requester revocation",
+      "passed": true
+    },
+    {
+      "name": "completed replay retains one event",
+      "passed": true
+    },
+    {
+      "name": "zero mappings denied",
+      "passed": true
+    },
+    {
+      "name": "message reparent changes target dependency",
+      "passed": true
+    },
+    {
+      "name": "global ambiguous requester denied",
+      "passed": true
+    },
+    {
+      "name": "ordering changes conflict",
+      "passed": true
+    },
+    {
+      "name": "canonical recompute rejects rebased wrong property",
+      "passed": true
+    },
+    {
+      "name": "read/delivery do not invalidate metadata target",
+      "passed": true
+    },
+    {
+      "name": "recent conversation outcome then assignment",
+      "passed": true
+    }
+  ],
+  "setup_sha256": {
+    "setup.sql": "b7ca70de5cfe321ad3996b98de2f6097ba9b0545e7e2eb7bb0c955e9cc2a35ff",
+    "restrictive-scope.sql": "8b21a491160fedfb84ef85d1156fcede5ffdb8f56855786d430faed1784776d9",
+    "restrictive-effect.sql": "3e643d1cd5b370f7cea3588a4caf9146a29e25da6eec808b0c4621ca424124df",
+    "restrictive-apply.sql": "c92977a209ead8e9c25e468887ecdc5d4e00a5688ae65128f7980996ed2ccdfa"
+  },
+  "runner_sha256": "3ee6889b1046270b70d5fb30ecf9cef962d18ae70806cdd05ccaaffa78577c38",
+  "fixture_operation_id": "a2604533-d9ac-4622-8b19-146cf394e74e"
+}

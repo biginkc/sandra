@@ -6,8 +6,9 @@ import { ValidationError } from "@/lib/errors/classes";
 import { reportError } from "@/lib/errors/report";
 import { err, ok, type Result } from "@/lib/errors/result";
 import { isValidEsignEmail } from "@/lib/esign/email";
+import { buildEsignInvitation } from "@/lib/esign/invitation";
 import {
-  ESIGN_MERGE_FIELD_NAMES,
+  getEsignFieldSchema,
   type EsignDeliveryState,
   type EsignStatus,
   type ProviderSignature,
@@ -57,6 +58,7 @@ export type LeadSendContext = Readonly<{
   hasHomeownerContact: boolean;
   sellerEmailAddress: string | null;
   propertyAddress: string;
+  residentialAddress?: { street: string; city: string; state: string; zip: string };
   connected: boolean;
   sendingEnabled: boolean;
   testMode: boolean;
@@ -73,6 +75,8 @@ export type EsignRequestRecord = Readonly<{
   orgId: string;
   propertyId: string;
   template: TemplateOption;
+  /** Resolved from persisted created_by, never supplied by the browser. */
+  createdByLabel?: string | null;
   signers: readonly (SignerAssignment &
     Readonly<{
       id?: string;
@@ -276,6 +280,7 @@ export type ProviderDispatchOutcome =
     }>
   | Readonly<{ outcome: "ambiguous" }>
   | Readonly<{ outcome: "definitive_failure" }>
+  | Readonly<{ outcome: "canary_lease_blocked" }>
   | Readonly<{ outcome: "provider_plan_required" }>;
 
 export type ProviderMutationOutcome =
@@ -292,6 +297,8 @@ export type EsignActionProvider = Readonly<{
     providerTemplateId: string;
     signers: readonly SignerAssignment[];
     mergeValues: ContractMergeValues;
+    subject?: string;
+    message?: string;
     signal: AbortSignal;
   }): Promise<ProviderDispatchOutcome>;
   remind(input: {
@@ -394,6 +401,7 @@ async function loadPreflight(
       name: context.sellerName.trim(),
       emailAddress: context.sellerEmailAddress?.trim() ?? "",
     },
+    residentialAddress: context.residentialAddress,
     mergeDefaults: {
       seller_name: context.sellerName.trim(),
       property_address: context.propertyAddress.trim(),
@@ -575,6 +583,12 @@ async function dispatchClaimed(
         providerTemplateId: request.template.providerTemplateId,
         signers: request.signers,
         mergeValues: request.mergeValues,
+        ...buildEsignInvitation({
+          propertyAddress: request.mergeValues.property_address,
+          documentType: request.template.documentType,
+          createdByLabel: request.createdByLabel,
+          testMode: request.testMode,
+        }),
         signal,
       }),
     );
@@ -595,6 +609,10 @@ async function dispatchClaimed(
   if (outcome.outcome === "definitive_failure") {
     await markFailed(dependencies, request, "PROVIDER_REJECTED");
     fail("SEND_FAILED", "Dropbox Sign could not send this contract.");
+  }
+  if (outcome.outcome === "canary_lease_blocked") {
+    await markFailed(dependencies, request, "CANARY_LEASE_BLOCKED");
+    fail("CANARY_LEASE_BLOCKED", "The test contract was stopped by its canary lease. No request was sent.");
   }
   if (outcome.outcome === "provider_plan_required") {
     const repaired = await repairProviderPlanRequiredSend(dependencies, request);
@@ -1164,9 +1182,9 @@ function normalizeSendInput(input: SendContractInput): SendContractInput {
         emailAddress: signer.emailAddress.trim(),
       })),
     mergeValues: Object.fromEntries(
-      ESIGN_MERGE_FIELD_NAMES.map((name) => [
+      getEsignFieldSchema(Object.keys(input.mergeValues))!.names.map((name) => [
         name,
-        input.mergeValues[name].trim(),
+        input.mergeValues[name]!.trim(),
       ]),
     ) as ContractMergeValues,
   };
@@ -1179,12 +1197,9 @@ function assertExactRuntimeSendShape(input: SendContractInput): void {
   ) {
     fail("INVALID_SEND_INPUT", "The contract send details are invalid.");
   }
-  const expectedMergeKeys = [...ESIGN_MERGE_FIELD_NAMES].sort();
-  const actualMergeKeys = Object.keys(input.mergeValues).sort();
-  if (
-    actualMergeKeys.length !== expectedMergeKeys.length ||
-    actualMergeKeys.some((key, index) => key !== expectedMergeKeys[index])
-  ) {
+  if (!input.mergeValues || typeof input.mergeValues !== "object" ||
+    !getEsignFieldSchema(Object.keys(input.mergeValues)) ||
+    Object.values(input.mergeValues).some((value) => typeof value !== "string")) {
     fail("INVALID_SEND_INPUT", "The contract send details are invalid.");
   }
   const expectedSignerKeys = "emailAddress,name,order,role";
@@ -1212,7 +1227,7 @@ export function hashSendPayload(input: SendContractInput): string {
             name,
             emailAddress,
           })),
-        mergeValues: ESIGN_MERGE_FIELD_NAMES.map((name) => [
+        mergeValues: getEsignFieldSchema(Object.keys(input.mergeValues))!.names.map((name) => [
           name,
           input.mergeValues[name],
         ]),

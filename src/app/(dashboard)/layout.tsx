@@ -1,4 +1,5 @@
 import Image from "next/image";
+import { recordingViewer } from "@/lib/recordings/data";
 import { GlobalSearchProvider } from "@/components/search/global-search-provider";
 import { GlobalSearchTrigger } from "@/components/search/global-search-trigger";
 import Link from "next/link";
@@ -16,7 +17,11 @@ import { JobFailureNotifier } from "@/components/job-failure-notifier";
 import { NotificationsBell } from "@/components/notifications-bell";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "@/components/softphone/softphone-provider";
 import { isAdminEmail } from "@/lib/auth/allowlist";
+import { getCallerMemberships } from "@/lib/auth/memberships";
+import { canViewMyLeads } from "@/lib/my-leads/access";
+import { canViewCalculators } from "@/lib/calculators/access";
 import { getAcquisitionBadge, getAcquisitionRoster } from "@/lib/my-leads/queries";
+import { canAccessMessagesAndLeadsBoard, shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { createClient } from "@/lib/supabase/server";
 import { refreshMyLeadsBadge } from "./my-leads/nav-actions";
 
@@ -31,18 +36,31 @@ export default async function DashboardLayout({
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
   const showAdmin = isAdminEmail(user.email);
-  const [rosterResult, badgeResult] = await Promise.allSettled([
+  const recordingAccess = await recordingViewer().catch(() => null);
+  const [rosterResult, badgeResult, surfaceMembershipsResult] = await Promise.allSettled([
     getAcquisitionRoster(),
     getAcquisitionBadge(),
+    getCallerMemberships(),
   ]);
   const acquisitionRoster =
     rosterResult.status === "fulfilled" ? rosterResult.value : null;
+  const restrictedAcquisitionMember =
+    surfaceMembershipsResult.status === "fulfilled" &&
+    shouldRestrictMessagesAndLeadsBoard(surfaceMembershipsResult.value);
   const showMyLeads = Boolean(
-    acquisitionRoster &&
-      (acquisitionRoster.roster.settings.enabled || acquisitionRoster.viewer.isOwner),
+    restrictedAcquisitionMember || (acquisitionRoster &&
+      canViewMyLeads(acquisitionRoster.roster, acquisitionRoster.viewer.userId, acquisitionRoster.viewer.isOwner)),
   );
   const initialAcquisitionBadge =
     showMyLeads && badgeResult.status === "fulfilled" ? badgeResult.value : null;
+  const showCalculators = Boolean(acquisitionRoster && canViewCalculators(
+    acquisitionRoster.roster,
+    acquisitionRoster.viewer.userId,
+    acquisitionRoster.viewer.isOwner,
+  ));
+  const showMessagesAndLeads =
+    surfaceMembershipsResult.status === "fulfilled" &&
+    canAccessMessagesAndLeadsBoard(surfaceMembershipsResult.value);
 
   return (
     <SoftphoneProvider>
@@ -102,7 +120,11 @@ export default async function DashboardLayout({
           />
         </Link>
         <DashboardSidebar
+          showCalculators={showCalculators}
+          showMessagesAndLeads={showMessagesAndLeads}
           showMyLeads={showMyLeads}
+          showRecordings={recordingAccess?.owner}
+          showMyRecordings={recordingAccess?.mine}
           initialAcquisitionBadge={initialAcquisitionBadge}
           onRefreshAcquisitionBadge={refreshMyLeadsBadge}
         />
@@ -116,7 +138,11 @@ export default async function DashboardLayout({
 
       <div className="nav-field fixed inset-x-0 top-16 z-30 border-b border-white/10 md:hidden">
         <DashboardMobileNav
+          showCalculators={showCalculators}
+          showMessagesAndLeads={showMessagesAndLeads}
           showMyLeads={showMyLeads}
+          showRecordings={recordingAccess?.owner}
+          showMyRecordings={recordingAccess?.mine}
           initialAcquisitionBadge={initialAcquisitionBadge}
           onRefreshAcquisitionBadge={refreshMyLeadsBadge}
         />

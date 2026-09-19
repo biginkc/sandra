@@ -12,6 +12,9 @@ export type PageHeaderProps = {
   /** Right-side action slot — typically buttons. Aligned to the title's
    *  bottom baseline on md+. */
   actions?: ReactNode;
+  /** Optional page-specific context rendered below the description while
+   *  preserving the shared header typography and spacing. */
+  context?: ReactNode;
 };
 
 /**
@@ -27,6 +30,7 @@ export function PageHeader({
   description,
   breadcrumb,
   actions,
+  context,
 }: PageHeaderProps) {
   return (
     <header className="flex flex-col gap-2">
@@ -70,6 +74,7 @@ export function PageHeader({
               {description}
             </p>
           )}
+          {context}
         </div>
         {actions && (
           <div className="flex shrink-0 items-center gap-3">{actions}</div>

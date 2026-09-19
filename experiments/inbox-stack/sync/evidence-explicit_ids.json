@@ -1,0 +1,98 @@
+{
+  "at": "2026-09-13T11:14:27.818Z",
+  "status": "PASS",
+  "strategy": "explicit_ids",
+  "size": 100,
+  "results": [
+    {
+      "name": "unauthenticated rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "scope and bounds request tamper rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "bounded base snapshot and tenant exclusion",
+      "status": "PASS",
+      "details": {
+        "rows": 100,
+        "upstreamUrlBytes": 6302
+      }
+    },
+    {
+      "name": "cross-user workset and handle tamper rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "direct database update delivered through resumed shape",
+      "status": "PASS",
+      "details": {
+        "matched": true
+      }
+    },
+    {
+      "name": "outside-ID and other-tenant updates absent from bounded shape",
+      "status": "PASS",
+      "details": {
+        "changedRows": 1
+      }
+    },
+    {
+      "name": "TanStack actual collection snapshot and live canonical update",
+      "status": "PASS",
+      "details": {
+        "size": 100,
+        "matched": true
+      }
+    },
+    {
+      "name": "collection lifecycle reset remains bounded",
+      "status": "PASS",
+      "details": {
+        "size": 100,
+        "kind": "client lifecycle rebuild, not server409"
+      }
+    },
+    {
+      "name": "access epoch changed before body forwarding denies entire response",
+      "status": "PASS",
+      "details": {
+        "noRowsForwarded": true
+      }
+    },
+    {
+      "name": "revoked membership denied",
+      "status": "PASS"
+    },
+    {
+      "name": "expired workset denied",
+      "status": "PASS"
+    }
+  ],
+  "stats": {
+    "denialReasons": [
+      "synthetic_session_required",
+      "only_limit_1_to_500",
+      "only_limit_1_to_500",
+      "only_limit_1_to_500",
+      "workset_missing",
+      "handle_not_bound_to_workset",
+      "protocol_parameter_not_allowed",
+      "sync_unavailable",
+      "access_epoch_changed",
+      "membership_revoked",
+      "workset_expired"
+    ],
+    "forwardedRows": 312,
+    "upstreamRequests": 11,
+    "maxUpstreamUrlBytes": 6377,
+    "denied": 11
+  },
+  "limits": [
+    "Synthetic sessions only; not Hugo",
+    "Eager collection over bounded500 IDs; on-demand runtime not tested",
+    "Lifecycle resnapshot only; server409 not yet tested",
+    "No production scale/browser latency claim"
+  ]
+}

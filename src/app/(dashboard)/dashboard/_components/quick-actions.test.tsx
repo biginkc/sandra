@@ -22,4 +22,12 @@ describe("<QuickActions />", () => {
       "/sequences",
     );
   });
+
+  it("hides the shared Messages shortcut for restricted Acquisitions members", () => {
+    render(<QuickActions isAdmin={false} showMessagesAndLeads={false} />);
+
+    expect(
+      screen.queryByRole("link", { name: /view messages/i }),
+    ).not.toBeInTheDocument();
+  });
 });

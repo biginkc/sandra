@@ -1,0 +1,43 @@
+{
+  "message": "locator.waitFor: Error: strict mode violation: getByText('Browser Ada message 55', { exact: true }) resolved to 2 elements:\n    1) <div class=\"workspace-module__wpaNva__preview\">Browser Ada message 55</div> aka getByLabel('Inbox Ada, selected, open.').getByText('Browser Ada message')\n    2) <p class=\"whitespace-pre-wrap break-words\">Browser Ada message 55</p> aka getByLabel('Conversation history').getByText('Browser Ada message 55')\n\nCall log:\n\u001b[2m  - waiting for getByText('Browser Ada message 55', { exact: true }) to be visible\u001b[22m\n",
+  "url": "http://127.0.0.1:52582/inbox",
+  "text": "SANDRA\n← Back to Inbox overview\nInbox workspace\nAll\nSearch Search\nView \nAll\nAssigned to me\nUnassigned\nUnread\nNeeds review\nHas outcome\nNeeds outcome\nUnknown senders\nDismissed\n Hide DNC and test conversations\n2 matching · counted 5:32:00 PM\nCurrent workspace is synchronized\n2 selected\nReview selection\nClear\n\nClick selects one · Shift-click adds/removes · Shift-drag draws a box. Or use checkboxes.\n\nInbox BeaUnread\nNo property linked\nBrowser Bea message\nNo outcome\nUnassigned\n2026-09-13T22:28:10.546289+00:00\nOpen ›\nInbox AdaOPENUnread\nNo property linked\nBrowser Ada message 55\nNo outcome\nUnassigned\n2026-09-13T22:27:10.52772+00:00\nOpen ›\n2 loadedRefresh viewNext 500\nInbox Ada\n\nNo property linked\n\nClose\nLoad older messages\n\nBrowser Ada message 6\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 7\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 8\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 9\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 10\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 11\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 12\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 13\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 14\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 15\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 16\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 17\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 18\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 19\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 20\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 21\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 22\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 23\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 24\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 25\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 26\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 27\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 28\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 29\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 30\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 31\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 32\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 33\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 34\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 35\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 36\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 37\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 38\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 39\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 40\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 41\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 42\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 43\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 44\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 45\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 46\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 47\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 48\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 49\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 50\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 51\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 52\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 53\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 54\n\nReceived · 9/13/2026, 5:27:10 PM\n\nBrowser Ada message 55\n\nReceived · 9/13/2026, 5:27:10 PM\n\nUpdating read status…\nACTIONS · CLICK OR DROP\n\n2 selected · click or drag\n\nNo actions available.\n\nBulk actions and remaining individual tools are being connected.",
+  "calls": [
+    {
+      "path": "/api/inbox/counts",
+      "status": 200,
+      "durationMs": 400.20425
+    },
+    {
+      "path": "/api/inbox/worksets",
+      "status": 201,
+      "durationMs": 442.905792
+    },
+    {
+      "path": "/api/inbox/sync/999716df-0965-4a1b-a74f-c7725c41733d",
+      "status": 200,
+      "durationMs": 586.9285420000001
+    },
+    {
+      "path": "/api/inbox/sync/999716df-0965-4a1b-a74f-c7725c41733d",
+      "status": 200,
+      "durationMs": 578.126917
+    },
+    {
+      "path": "/api/inbox/conversations/1db63bbc-21c5-484d-bc97-6aa3ffa278d4/detail",
+      "status": 200,
+      "durationMs": 199.12279200000012
+    },
+    {
+      "path": "/api/inbox/read-acknowledgments",
+      "status": 200,
+      "durationMs": 208.96508300000005
+    },
+    {
+      "path": "/api/inbox/conversations/1db63bbc-21c5-484d-bc97-6aa3ffa278d4/detail",
+      "status": 200,
+      "durationMs": 149.05062499999985
+    }
+  ],
+  "errors": []
+}

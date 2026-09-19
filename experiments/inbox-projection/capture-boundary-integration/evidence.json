@@ -1,0 +1,41 @@
+{
+  "at": "2026-09-13T12:43:40.182Z",
+  "node": "v22.23.2",
+  "checks": [
+    {
+      "name": "authorized DB snapshot issues actual application token and verifies against current authorized DB context",
+      "passed": true
+    },
+    {
+      "name": "other requester/org rejected by DB and token; expiry rejected",
+      "passed": true
+    },
+    {
+      "name": "authenticated and service_role cannot read or rotate private generation directly",
+      "passed": true
+    },
+    {
+      "name": "missing generation fails closed; aborted test restores singleton",
+      "passed": true
+    },
+    {
+      "name": "concurrent generation rotation preserves statement snapshot; subsequent current-context verification rejects old token without head reset",
+      "passed": true
+    },
+    {
+      "name": "original authenticated function preserved; no read acknowledgment occurred",
+      "passed": true
+    }
+  ],
+  "org": "66396887-75cc-4886-8546-71263febd5c5",
+  "conversation": "68472cca-bc2f-45f8-931d-d2d48bb455f2",
+  "token_sha256": "3ccf9fe0af467229cafbefccef50eb6c3284a3776c3a6e363904152a7207e389",
+  "codec_sha256": "eafd5532b9cfd39d92826d7b4b137c208717c28cb09de4812e82c886db64bc7b",
+  "limits": [
+    "Dedicated random signing key only in process memory; no key or full token logged",
+    "Simulated trusted claims; no HTTP/JWT/PostgREST/gateway proof",
+    "Generation rotation does not repair bypassed writers or restores; capture fencing still required",
+    "No acknowledgment receipts or replay prevention; live access and generation must be rechecked during writes",
+    "Private fixture wrapper only, no production migration or route activation"
+  ]
+}

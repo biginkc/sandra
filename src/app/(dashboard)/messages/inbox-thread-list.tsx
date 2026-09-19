@@ -39,6 +39,7 @@ type Props = {
   /** Truthful copy for an empty all-inbox vs an empty filtered view. */
   emptyMessage?: string;
   nowMs?: number;
+  onRefresh?: () => void;
 };
 
 const THREAD_DISPO_LABELS: Record<string, string> = {
@@ -76,13 +77,16 @@ export function InboxThreadList({
   onSelectThread,
   emptyMessage = "No conversations yet. Inbound messages will appear here.",
   nowMs,
+  onRefresh,
 }: Props) {
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = nowMs ?? fallbackNowMs;
-  const requestRefresh = useThrottledRefresh();
+  const requestRefresh = useThrottledRefresh(undefined, onRefresh);
   const [threadUpdates, setThreadUpdates] = useState<
     Record<string, ThreadUpdate>
   >({});
+  const [lastInitial, setLastInitial] = useState(initial);
+  if (lastInitial !== initial) { setLastInitial(initial); setThreadUpdates({}); }
   const threads = applyThreadUpdates(initial, threadUpdates);
 
   useEffect(() => {

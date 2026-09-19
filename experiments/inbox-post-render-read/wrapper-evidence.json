@@ -1,0 +1,46 @@
+{
+  "checks": [
+    "actual authenticated mixed history: inbound positive revision and outbound zero baseline; explicit null insertion denied",
+    "actual authenticated public acknowledgment affects only inbound",
+    "anon and service_role denied both wrapper functions with42501"
+  ],
+  "public_api_sha256": "26ee2bb0c23ef6223083455f4ff49eca221f2167edea49af00c430f9d7a310b5",
+  "runner_sha256": "5823975fe4fd8a9e2204c6d3fd04128966e866b45f6649a192d8b787b520efae",
+  "scalar_detail": {
+    "org_id": "0fd7cd85-7574-41aa-b714-8a51f3ad9158",
+    "history": [
+      {
+        "id": "b7032f89-1204-4b54-a2d0-622e0c267976",
+        "body": "Synthetic inbound",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-14 04:42:09.315266+00",
+        "inbound_revision": "1"
+      },
+      {
+        "id": "0e846968-c873-4d22-b786-9648045d7fec",
+        "body": "Synthetic outbound",
+        "direction": "outbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-14 04:42:09.315266+00",
+        "inbound_revision": "0"
+      }
+    ],
+    "requester_id": "158e1009-bd97-4f89-912b-b3fc712707ae",
+    "head_revision": "1",
+    "read_boundary": "fb8f4c88-f256-4e13-a932-b6bdc68b23c8",
+    "conversation_id": "826733d3-8f85-44c0-a5c5-936e98ed0143",
+    "capture_generation": "9788de28-dfa7-46af-80e0-409f7c383ca1",
+    "boundary_expires_at": "2026-09-14T04:47:09.393075+00:00"
+  },
+  "scalar_acknowledgment": {
+    "batch": 0,
+    "changed": 1,
+    "completed": true,
+    "boundary_id": "fb8f4c88-f256-4e13-a932-b6bdc68b23c8"
+  },
+  "limits": [
+    "Trusted SQL claims only; not an HTTP/JWT proof",
+    "Actual repository decoder can consume retained synthetic scalar_detail"
+  ]
+}

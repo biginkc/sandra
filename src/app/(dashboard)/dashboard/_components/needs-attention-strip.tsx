@@ -3,7 +3,10 @@ import { ChevronRight } from "lucide-react";
 
 import type { DashboardSummary } from "../queries";
 
-type Props = { needs: DashboardSummary["needs_attention"] };
+type Props = {
+  needs: DashboardSummary["needs_attention"];
+  showMessagesAndLeads?: boolean;
+};
 
 type Row = {
   count: number;
@@ -12,7 +15,10 @@ type Row = {
   dotClass: string;
 };
 
-export function NeedsAttentionStrip({ needs }: Props) {
+export function NeedsAttentionStrip({
+  needs,
+  showMessagesAndLeads = true,
+}: Props) {
   const rows: Row[] = [
     {
       count: needs.escalated_unhandled,
@@ -40,7 +46,18 @@ export function NeedsAttentionStrip({ needs }: Props) {
     },
   ];
 
-  const visible = rows.filter((r) => r.count > 0);
+  const visible = rows.filter(
+    (row) =>
+      row.count > 0 &&
+      (showMessagesAndLeads ||
+        (row.href !== "/messages?filter=escalated" &&
+          !row.href.startsWith("/leads"))),
+  );
+
+  // The remaining rows are aggregate shared-workspace signals. A restricted
+  // Acquisitions member must not be shown a misleading "all clear" state
+  // after those rows are removed.
+  if (visible.length === 0 && !showMessagesAndLeads) return null;
 
   if (visible.length === 0) {
     return (

@@ -1,0 +1,9 @@
+{
+  "verdict": "APPROVE",
+  "model": "claude-fable-5-1",
+  "sha256": "324728a59cbb5aa0c6c3a0ac79c1899a8cb1d4706edfe9608456c96c93881d49",
+  "scope": "Full phased implementation contract under evidence gates; P5-P7 remain gated placeholders",
+  "user_authorized_development": true,
+  "review_result_file": "inbox-development-fable-run-v2.json",
+  "application_implemented": false
+}

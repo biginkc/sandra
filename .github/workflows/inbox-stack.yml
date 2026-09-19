@@ -1,0 +1,61 @@
+name: Inbox stack isolated checks
+
+on:
+  pull_request:
+    paths:
+      - "experiments/inbox-stack/**"
+      - "experiments/inbox-projection/**"
+      - "experiments/inbox-post-render-read/**"
+      - "experiments/inbox-history-paging/**"
+      - "experiments/inbox-unknown-history/**"
+      - ".github/workflows/inbox-stack.yml"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/inbox-stack/**"
+      - "experiments/inbox-projection/**"
+      - "experiments/inbox-post-render-read/**"
+      - "experiments/inbox-history-paging/**"
+      - "experiments/inbox-unknown-history/**"
+      - ".github/workflows/inbox-stack.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fixture-sources:
+    name: Fixture source integrity and isolation guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 experiments/inbox-projection/verify_sources.py
+      - run: python3 experiments/inbox-post-render-read/verify.py
+      - run: python3 experiments/inbox-history-paging/verify.py
+      - run: python3 experiments/inbox-unknown-history/verify.py
+      - run: python3 experiments/inbox-projection/fixture/transaction_envelope.py
+      - run: python3 -O experiments/inbox-projection/fixture/guards_test.py
+      # Canonical database/concurrency proofs require the explicit owned fixture.
+      # Source checks do not rerun or certify those recorded runtime results.
+  contracts:
+    name: Pinned packages and selection invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: experiments/inbox-stack
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: experiments/inbox-stack/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run test:selection
+      # Runtime fault/browser proofs use the separately owned local fixture.
+      # This job does not certify Electric/Restate availability or production.

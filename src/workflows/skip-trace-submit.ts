@@ -9,6 +9,7 @@
 
 import { runSkipTraceEnrichment } from "@/lib/skip-trace/skip-trace-job";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { reportTerminalWorkflowFailure } from "./terminal-telemetry";
 import type { Json } from "@/lib/supabase/types";
 import {
   buildSkipTraceEligibilityAudit,
@@ -273,7 +274,16 @@ export async function skipTraceSubmitWorkflow(
 ): Promise<SubmitOutcome> {
   "use workflow";
 
-  return submitSkipTraceJob(params.jobId, params.orgId);
+  try {
+    return await submitSkipTraceJob(params.jobId, params.orgId);
+  } catch (error) {
+    try {
+      await reportTerminalWorkflowFailure("skip_trace_submit");
+    } catch {
+      // The reporting step can fail before its internal transport guard runs.
+    }
+    throw error;
+  }
 }
 
 Object.assign(submitSkipTraceJob, { maxRetries: 0 });

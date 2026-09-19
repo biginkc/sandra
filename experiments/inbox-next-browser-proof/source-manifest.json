@@ -1,0 +1,19 @@
+{
+  "foundation-evidence.json": "aeadd3ab970c003d55b1adb1bd4e3df62e2272ecbc120e4bd141afd90349c966",
+  "browser-locator-failure.png": "3d8222fbd558d7ea9f7823b37d9a3d55c0db8eef3ee5a6e41c5adbd743b0b8b0",
+  "browser-read-origin-failure.json": "8f9c9be201babcd7e3538ab11e334b53f62d0d22cf413e0a42b9d9395f954595",
+  "browser-locator-failure.json": "86fb291fb46794af718c5a330cbf74944acae5a9b7159a65ea14636622bed0cc",
+  "fullscreen.png": "c3a315b9509680f84445cdf2d821dfbc3cc1749b1219b1e8e99678350a3b5078",
+  "revocation.ts": "7534628a6416ec779a6e27bb84f6d87ecbb3bfff515851d62491d7f3c34a31e7",
+  "browser-identities.json": "56831074ad4e23cafe350e5288d6c5ac7dbaee9ff7d8f4213cc6be17662c9b6b",
+  "application.ts": "7c413cbcdbfb05be41e0da97c67b9bc6e98ff4b9b9695be8d40e76fa6aab92db",
+  "browser.ts": "261cb2e3637c8fce333c6fc49d08a1703a6705d313024c514d5732831fcbb222",
+  "foundation.ts": "80dfc2283163275b4e51593dc49e45f949fd94532c7a8e255967c3724ef8f14d",
+  "verified-idle-polls.json": "17b627c80fab400c12e4010ac66f2cdbab9d87297ecb2db882f0eed8095aaaac",
+  "browser-evidence.json": "917dec49a4379a0ea866d88eccfa2f33d0ab08c820052159ac1648d96ab957f8",
+  "browser-origin-failure.json": "d8492b0468a9437ca5523cd66581649c51590855738cd957a563a805cdc561db",
+  "browser-origin-failure.png": "80b64ee1a819aa358920b33781432ad11a20dd6fc3588560babb5c7cda4c71d5",
+  "revocation-evidence.json": "68f97a77de5854f9ee8fbe8bc59c659b4bcb146fafeacde45fbb8704ab66b6ee",
+  "application-evidence.json": "d639b41ba0397a9ee55127c6d90efe4f43a18a58d3d6c4cd6589c9615729c85e",
+  "browser-read-origin-failure.png": "80b64ee1a819aa358920b33781432ad11a20dd6fc3588560babb5c7cda4c71d5"
+}

@@ -6,7 +6,9 @@ import { getMessagingProvider, getWebhookProvider } from "../registry";
 import { MockMessagingProvider } from "./mock";
 import {
   SendilloMessagingProvider,
+  sendilloConfiguredAccountId,
   sendilloFromEnv,
+  sendilloFromEnvWithOptions,
 } from "./sendillo";
 
 const ORIGINAL_FETCH = global.fetch;
@@ -15,6 +17,8 @@ const ORIGINAL_ENV = {
   SENDILLO_API_KEY: process.env.SENDILLO_API_KEY,
   SENDILLO_FROM_NUMBER: process.env.SENDILLO_FROM_NUMBER,
   SENDILLO_WEBHOOK_SECRET: process.env.SENDILLO_WEBHOOK_SECRET,
+  SENDILLO_CONNECTION_ID: process.env.SENDILLO_CONNECTION_ID,
+  SENDILLO_PROVIDER_ACCOUNT_ID: process.env.SENDILLO_PROVIDER_ACCOUNT_ID,
 };
 
 beforeEach(() => {
@@ -28,6 +32,8 @@ afterEach(() => {
   process.env.SENDILLO_API_KEY = ORIGINAL_ENV.SENDILLO_API_KEY;
   process.env.SENDILLO_FROM_NUMBER = ORIGINAL_ENV.SENDILLO_FROM_NUMBER;
   process.env.SENDILLO_WEBHOOK_SECRET = ORIGINAL_ENV.SENDILLO_WEBHOOK_SECRET;
+  process.env.SENDILLO_CONNECTION_ID = ORIGINAL_ENV.SENDILLO_CONNECTION_ID;
+  process.env.SENDILLO_PROVIDER_ACCOUNT_ID = ORIGINAL_ENV.SENDILLO_PROVIDER_ACCOUNT_ID;
 });
 
 function mockFetch(response: { status: number; body: unknown }) {
@@ -65,6 +71,38 @@ describe("SendilloMessagingProvider.sendSms", () => {
       to: "+18165551234",
       body: "hello there",
     });
+    expect((init as RequestInit).redirect).toBe("error");
+    expect((init as RequestInit).cache).toBe("no-store");
+  });
+
+  it("uses a supplied sender explicitly even when the provider has no environment default", async () => {
+    mockFetch({
+      status: 200,
+      body: { data: { messageId: "snd_explicit", status: "accepted" } },
+    });
+    const provider = new SendilloMessagingProvider("sendillo-test-key", null);
+
+    await provider.sendSms({
+      from: "+18164876899",
+      to: "+18165551234",
+      body: "hello there",
+    });
+
+    const [, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string).from).toBe("+18164876899");
+  });
+
+  it("fails before fetch when neither an explicit nor environment sender exists", async () => {
+    const provider = new SendilloMessagingProvider("sendillo-test-key", null);
+
+    await expect(
+      provider.sendSms({ to: "+18165551234", body: "hello there" }),
+    ).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      details: expect.objectContaining({ notSent: true }),
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it("returns messageId and status from the documented response envelope", async () => {
@@ -126,6 +164,31 @@ describe("SendilloMessagingProvider.sendSms", () => {
       errorClass: "provider",
       provider: "sendillo",
       details: expect.objectContaining({ acceptedWithoutId: true }),
+    });
+  });
+
+  it("marks a response-body read failure ambiguous after Sendillo returned headers", async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      text: vi.fn().mockRejectedValue(new Error("response stream reset")),
+    } as unknown as Response);
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key",
+      "+18165550000",
+    );
+
+    await expect(
+      provider.sendSms({ to: "+18165551234", body: "hello there" }),
+    ).rejects.toMatchObject({
+      errorClass: "provider",
+      provider: "sendillo",
+      details: expect.objectContaining({
+        status: 200,
+        bodyReadFailure: true,
+        ambiguousDelivery: true,
+      }),
     });
   });
 
@@ -556,14 +619,16 @@ describe("SendilloMessagingProvider.listPurchasedNumbers", () => {
       body: {
         data: [
           {
-            id: "num_1",
+            id: 1,
             phoneNumber: "+18165550001",
-            status: "active",
+            numberStatus: "Active",
+            status: "inactive",
             messagingStatus: "ready",
           },
           {
-            numberId: "num_2",
+            numberId: 2,
             phone_number: "+18165550002",
+            number_status: "Pending",
             status: "active",
             messaging_status: "pending",
           },
@@ -580,17 +645,107 @@ describe("SendilloMessagingProvider.listPurchasedNumbers", () => {
     expect(numbers).toHaveLength(2);
     expect(numbers[0]).toMatchObject({
       phoneE164: "+18165550001",
-      providerNumberId: "num_1",
-      status: "active",
+      providerNumberId: "1",
+      status: "Active",
       messagingStatus: "ready",
     });
     expect(numbers[1]).toMatchObject({
       phoneE164: "+18165550002",
-      providerNumberId: "num_2",
+      providerNumberId: "2",
+      status: "Pending",
       messagingStatus: "pending",
     });
     // Raw entries preserved for the catalog audit column.
-    expect(numbers[0].raw).toMatchObject({ id: "num_1" });
+    expect(numbers[0].raw).toMatchObject({ id: 1 });
+  });
+
+  it("uses the configured nonsecret connection identity when the catalog omits an account id", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        data: [
+          {
+            id: 101,
+            phoneNumber: "+18165550101",
+            numberStatus: "Active",
+            messagingStatus: "Active",
+          },
+        ],
+      },
+    });
+
+    const first = new SendilloMessagingProvider("sendillo-test-key-a", "+18165550000", null, "bmh-sendillo-production");
+    const sameKey = new SendilloMessagingProvider("sendillo-test-key-a", "+18165550000", null, "bmh-sendillo-production");
+    const rotatedKey = new SendilloMessagingProvider("sendillo-test-key-b", "+18165550000", null, "bmh-sendillo-production");
+    const differentConnection = new SendilloMessagingProvider("sendillo-test-key-a", "+18165550000", null, "other-sendillo-connection");
+
+    const firstNumber = (await first.listPurchasedNumbers())[0];
+    const sameKeyNumber = (await sameKey.listPurchasedNumbers())[0];
+    const rotatedKeyNumber = (await rotatedKey.listPurchasedNumbers())[0];
+
+    expect(firstNumber.providerAccountId).toBe("bmh-sendillo-production");
+    expect(firstNumber.providerAccountId).toBe(sameKeyNumber.providerAccountId);
+    expect(firstNumber.providerAccountId).toBe(rotatedKeyNumber.providerAccountId);
+    expect(firstNumber.providerAccountId).not.toBe((await differentConnection.listPurchasedNumbers())[0].providerAccountId);
+  });
+
+  it("fails closed when the catalog omits an account id and no connection identity is configured", async () => {
+    mockFetch({
+      status: 200,
+      body: { data: [{ id: 103, phoneNumber: "+18165550103", numberStatus: "Active", messagingStatus: "Active" }] },
+    });
+    const provider = new SendilloMessagingProvider("sendillo-test-key", "+18165550000");
+
+    const [number] = await provider.listPurchasedNumbers();
+
+    expect(number.providerAccountId).toBeUndefined();
+  });
+
+  it("reads the canonical connection env and retains the account-id alias", () => {
+    process.env.SENDILLO_CONNECTION_ID = "configured-connection";
+    process.env.SENDILLO_PROVIDER_ACCOUNT_ID = "legacy-account-id";
+    expect(sendilloConfiguredAccountId()).toBe("configured-connection");
+    delete process.env.SENDILLO_CONNECTION_ID;
+    expect(sendilloConfiguredAccountId()).toBe("legacy-account-id");
+  });
+
+  it("passes the configured connection identity through the environment provider factory", async () => {
+    process.env.SENDILLO_API_KEY = "sendillo-rotated-key";
+    process.env.SENDILLO_CONNECTION_ID = "bmh-sendillo-production";
+    mockFetch({
+      status: 200,
+      body: { data: [{ id: 104, phoneNumber: "+18165550104", numberStatus: "Active", messagingStatus: "Active" }] },
+    });
+
+    const provider = sendilloFromEnvWithOptions({ requireDefaultFrom: false });
+    const [number] = await provider.listPurchasedNumbers();
+
+    expect(number.providerAccountId).toBe("bmh-sendillo-production");
+  });
+
+  it("prefers a native provider account id over the credential-scope fallback", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        data: [
+          {
+            id: 102,
+            phoneNumber: "+18165550102",
+            accountId: 9876,
+            numberStatus: "Active",
+            messagingStatus: "Active",
+          },
+        ],
+      },
+    });
+    const provider = new SendilloMessagingProvider(
+      "sendillo-test-key-native",
+      "+18165550000",
+    );
+
+    const [number] = await provider.listPurchasedNumbers();
+
+    expect(number.providerAccountId).toBe("9876");
   });
 
   it("parses a top-level array and accepts number/phone field aliases", async () => {
@@ -714,7 +869,7 @@ describe("SendilloMessagingProvider.listFromNumbers", () => {
     ]);
   });
 
-  it("falls back to a non-'available' status when the provider omits one, so the composer's Dialpad-only unassigned filter never hides a real Sendillo number", async () => {
+  it("preserves an omitted status as empty evidence instead of guessing active", async () => {
     mockFetch({
       status: 200,
       body: { data: [{ number: "+18165550003" }] },
@@ -727,7 +882,7 @@ describe("SendilloMessagingProvider.listFromNumbers", () => {
     const options = await provider.listFromNumbers();
 
     expect(options).toHaveLength(1);
-    expect(options[0].status).not.toBe("available");
+    expect(options[0].status).toBe("");
   });
 
   it("propagates the underlying ProviderError when the catalog fetch fails", async () => {
@@ -823,7 +978,7 @@ describe("SendilloMessagingProvider.listProviderCampaigns", () => {
       status: 200,
       body: [
         { name: "No Id Campaign" },
-        { id: "camp_3", name: "Has Id" },
+        { id: 3, name: "Has Id" },
       ],
     });
     const provider = new SendilloMessagingProvider(
@@ -834,7 +989,7 @@ describe("SendilloMessagingProvider.listProviderCampaigns", () => {
     const campaigns = await provider.listProviderCampaigns();
 
     expect(campaigns).toHaveLength(1);
-    expect(campaigns[0].externalId).toBe("camp_3");
+    expect(campaigns[0].externalId).toBe("3");
     expect(errorSpy).toHaveBeenCalledWith(
       "[reportError]",
       expect.objectContaining({

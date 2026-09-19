@@ -33,6 +33,41 @@ export const ESIGN_MERGE_FIELD_NAMES = [
   "earnest_money",
 ] as const;
 
+// Keep the legacy order stable: it is part of persisted send-intent hashes.
+export const ESIGN_RESIDENTIAL_FIELD_NAMES = [
+  "seller_name", "buyer_name", "property_address", "property_city",
+  "property_state", "property_zip", "legal_description", "offer_price",
+  "earnest_money_holder", "earnest_money", "cash_balance", "closing_date",
+  "additional_terms",
+] as const;
+
+export const ESIGN_NOVATION_FIELD_NAMES = [
+  "seller_name", "buyer_name", "property_address", "agreement_date",
+  "legal_description", "offer_price", "seller_closing_cost_cap", "earnest_money_holder", "earnest_money",
+  "property_state", "closing_date", "closing_agent_name", "due_diligence_days",
+  "access_days_per_week", "access_hours_per_visit", "offer_expiration",
+  "acceptance_date", "buyer_phone", "seller_phone", "buyer_email",
+  "seller_email", "closing_agent_phone", "closing_agent_address",
+  "attorney_in_fact", "release_date", "additional_terms",
+] as const;
+
+export const ESIGN_FIELD_SCHEMAS = [
+  { version: "legacy-v1", names: ESIGN_MERGE_FIELD_NAMES },
+  { version: "residential-v1", names: ESIGN_RESIDENTIAL_FIELD_NAMES },
+  { version: "novation-v1", names: ESIGN_NOVATION_FIELD_NAMES },
+] as const;
+
+export function getEsignFieldSchema(names: readonly string[] | null | undefined) {
+  if (!names) return null;
+  return ESIGN_FIELD_SCHEMAS.find((schema) =>
+    names.length === schema.names.length && new Set(names).size === names.length &&
+    schema.names.every((name) => names.includes(name)),
+  ) ?? null;
+}
+
+export type EsignMergeValues = Record<(typeof ESIGN_MERGE_FIELD_NAMES)[number], string> &
+  Partial<Record<(typeof ESIGN_RESIDENTIAL_FIELD_NAMES)[number] | (typeof ESIGN_NOVATION_FIELD_NAMES)[number], string>>;
+
 export const ESIGN_TEMPLATE_MERGE_FIELDS = ESIGN_MERGE_FIELD_NAMES;
 export const ESIGN_TEMPLATE_TITLE_MAX_LENGTH = 160;
 
@@ -41,7 +76,13 @@ export const ESIGN_TEMPLATE_SIGNER_ROLES = [
   { name: "Buyer", order: 1 },
 ] as const;
 
-export type EsignMergeFieldName = (typeof ESIGN_MERGE_FIELD_NAMES)[number];
+export const ESIGN_NOVATION_TWO_SELLER_ROLES = [
+  { name: "Seller", order: 0 },
+  { name: "Seller 2", order: 1 },
+  { name: "Buyer", order: 2 },
+] as const;
+
+export type EsignMergeFieldName = (typeof ESIGN_RESIDENTIAL_FIELD_NAMES)[number] | (typeof ESIGN_NOVATION_FIELD_NAMES)[number];
 export type EsignTemplateMergeField = EsignMergeFieldName;
 
 export type TemplateSignerRole = {
@@ -74,7 +115,7 @@ export type TemplateOption = {
   providerTemplateId: string;
   sellerRoleName: string;
   signerRoles: readonly TemplateSignerRole[];
-  mergeFieldNames: typeof ESIGN_MERGE_FIELD_NAMES;
+  mergeFieldNames: readonly EsignMergeFieldName[];
 };
 
 export function validateTemplateTitle(value: unknown): string | null {
@@ -156,6 +197,8 @@ export type SendWithTemplateOutput = {
 };
 
 export type ProviderSignatureRequestMetadata = {
+  isComplete: boolean | null;
+  signatures: ProviderSignature[];
   signatureRequestId: string;
   localRequestId: string | null;
   testMode: boolean | null;

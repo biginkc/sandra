@@ -1,0 +1,10 @@
+{
+  "at": "2026-09-13T11:22:21.392Z",
+  "passed": 4,
+  "checks": [
+    "malformed JSON returns400",
+    "missing identity returns401",
+    "accepted command replay returns202 same operation without writes",
+    "unknown command field returns400"
+  ]
+}

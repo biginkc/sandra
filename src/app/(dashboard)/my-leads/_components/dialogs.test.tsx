@@ -111,7 +111,7 @@ describe("My Leads workflow dialogs", () => {
     })
   })
 
-  it("accepts an optional recording for a DialPad manual call", async () => {
+  it("requires and submits the curated no-answer follow-up composition", async () => {
     const user = userEvent.setup()
     const onSubmit = vi.fn(async () => ({ ok: true as const }))
     render(
@@ -122,12 +122,21 @@ describe("My Leads workflow dialogs", () => {
     )
 
     await user.selectOptions(screen.getByLabelText("External outcome"), "no_answer")
+    expect(screen.getByLabelText("Curated follow-up template")).toHaveValue("")
     fireEvent.change(screen.getByLabelText("When did the outreach occur?"), {
       target: { value: "2026-09-12T09:00" },
     })
     await user.click(screen.getByRole("button", { name: "Save attempt" }))
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(screen.getByText("Choose a curated follow-up template.")).toBeInTheDocument()
 
-    expect(onSubmit).toHaveBeenCalledWith({
+    await user.selectOptions(screen.getByLabelText("Curated follow-up template"), "no-answer-callback-time")
+    const remainder = screen.getByLabelText("Editable follow-up remainder")
+    await user.clear(remainder)
+    await user.type(remainder, "Please text Maria a time that works.")
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       propertyId: "property-1",
       kind: "call",
       source: "dialpad",
@@ -136,7 +145,120 @@ describe("My Leads workflow dialogs", () => {
       note: null,
       recordingUrl: null,
       callActivityId: null,
+      smsBody: "Hey, this is Mel with BMH, Maria's assistant.\n\nPlease text Maria a time that works.",
+      followUp: expect.objectContaining({
+        policyVersion: 1,
+        introId: "mel-maria-assistant-1",
+        templateId: "no-answer-callback-time",
+        remainder: "Please text Maria a time that works.",
+      }),
+    }))
+  })
+
+  it("freezes a recorded no-answer attempt and leaves its obligation for the composer to resume", async () => {
+    const user = userEvent.setup()
+    const onOpenChange = vi.fn()
+    const onSubmit = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true as const,
+        attemptRecorded: true,
+        followUp: { status: "blocked" as const, message: "Sender assignment missing." },
+      })
+    render(<AcquisitionAttemptDialog {...baseProps} onOpenChange={onOpenChange} onSubmit={onSubmit} />)
+    await user.selectOptions(screen.getByLabelText("External outcome"), "no_answer")
+    await user.selectOptions(screen.getByLabelText("Curated follow-up template"), "no-answer-availability")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-12T09:00" } })
+    const saveButton = screen.getByRole("button", { name: "Save attempt" })
+    await user.click(saveButton)
+    expect(screen.getByText("Follow-up blocked")).toBeInTheDocument()
+    expect(screen.getByLabelText("Editable follow-up remainder")).toHaveValue("When would be a good time for you and Maria to connect about the property?")
+    expect(onOpenChange).not.toHaveBeenCalledWith(false)
+    expect(screen.getByLabelText("External outcome")).toBeDisabled()
+    expect(screen.getByLabelText("Editable follow-up remainder")).toBeDisabled()
+    expect(saveButton).toBeDisabled()
+
+    // A changed draft cannot turn the already-recorded attempt into another
+    // submission. The separate Text lead composer resumes the saved obligation.
+    await user.click(saveButton)
+    expect(onSubmit).toHaveBeenCalledOnce()
+    expect(onOpenChange).not.toHaveBeenCalledWith(false)
+  })
+
+  it("describes a missing required follow-up template to assistive technology", async () => {
+    const user = userEvent.setup()
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={vi.fn()} />)
+    await user.selectOptions(screen.getByLabelText("External outcome"), "no_answer")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-12T09:00" } })
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+
+    expect(screen.getByLabelText("Curated follow-up template")).toHaveAttribute(
+      "aria-describedby",
+      "acquisition-follow-up-template-error",
+    )
+  })
+
+  it("keeps Sandra unavailable without a call and explains how to log external outreach", async () => {
+    const user = userEvent.setup()
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={vi.fn()} />)
+    expect(screen.getByRole("option", { name: "Sandra" })).toBeDisabled()
+    expect(screen.getByLabelText("Recording link (required)")).toBeInTheDocument()
+    expect(screen.getByText(/No Sandra calls need an outcome/)).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText("Source"), "sandra")
+    expect(screen.getByLabelText("Source")).toHaveValue("dialpad")
+    expect(screen.queryByLabelText("Sandra call")).not.toBeInTheDocument()
+  })
+
+  it("selects a real Sandra call and submits its reference", async () => {
+    const user = userEvent.setup()
+    const onSubmit = vi.fn(async () => ({ ok: true as const }))
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={onSubmit} callReferenceOptions={[
+      { id: "call-1", label: "Sep 12, 2026, 9:00 AM Central" },
+      { id: "call-2", label: "Sep 12, 2026, 10:00 AM Central" },
+    ]} />)
+    await user.selectOptions(screen.getByLabelText("Source"), "sandra")
+    await user.selectOptions(screen.getByLabelText("Sandra call"), "call-2")
+    await user.selectOptions(screen.getByLabelText("External outcome"), "reached")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), { target: { value: "2026-09-12T10:00" } })
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ source: "sandra", callActivityId: "call-2", outcome: "reached" }))
+  })
+
+  it("automatically selects the only pending Sandra call", async () => {
+    const user = userEvent.setup()
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={vi.fn()} callReferenceOptions={[{ id: "call-1", label: "9 AM Central" }]} />)
+    await user.selectOptions(screen.getByLabelText("Source"), "sandra")
+    expect(screen.getByLabelText("Sandra call")).toHaveValue("call-1")
+  })
+
+  it("uses the call supplied by the call flow on the first render", () => {
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={vi.fn()} initialCallActivityId="call-1" />)
+    expect(screen.getByLabelText("Source")).toHaveValue("sandra")
+    expect(screen.getByLabelText("Sandra call")).toHaveValue("call-1")
+  })
+
+  it("normalizes manual outreach to the supported outreach kind", async () => {
+    const user = userEvent.setup()
+    const onSubmit = vi.fn(async () => ({ ok: true as const }))
+    render(
+      <AcquisitionAttemptDialog
+        {...baseProps}
+        onSubmit={onSubmit}
+      />
+    )
+
+    await user.selectOptions(screen.getByLabelText("Source"), "manual")
+    expect(screen.getByLabelText("Kind")).toHaveValue("outreach")
+    await user.selectOptions(screen.getByLabelText("External outcome"), "no_answer")
+    await user.selectOptions(screen.getByLabelText("Curated follow-up template"), "no-answer-availability")
+    fireEvent.change(screen.getByLabelText("When did the outreach occur?"), {
+      target: { value: "2026-09-12T09:00" },
     })
+    await user.click(screen.getByRole("button", { name: "Save attempt" }))
+
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "outreach",
+      source: "manual",
+    }))
   })
 
   it("preserves fields after a failed submit and prevents duplicate requests", async () => {

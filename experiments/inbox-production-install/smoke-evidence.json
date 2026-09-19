@@ -1,0 +1,75 @@
+{
+  "passed": true,
+  "org": "c9160ffd-34f2-484d-a5aa-330c832ca4ab",
+  "checks": [
+    "canonical message capture through durable worker",
+    "canonical owner assignment",
+    "property outcome/unassignment fanout",
+    "authenticated known/unknown outcome facets",
+    "canonical timestamp expiry removal",
+    "API enablement assertion rolled back",
+    "T0 positive control acknowledges and marks read (inbox_read.* via public wrapper)",
+    "T1 session replacement rejected without writes (inbox_read.* via public wrapper)",
+    "T2 access-epoch bump rejected without writes (inbox_read.* via public wrapper)"
+  ],
+  "worker_passes": [
+    {
+      "rounds": 10,
+      "processed": {
+        "baseline": 10,
+        "backfill": 0,
+        "parent": 2,
+        "summary": 2,
+        "expiry": 0
+      },
+      "readiness": {
+        "due_expiry": false,
+        "baseline_done": true,
+        "queue_pending": false,
+        "parent_pending": false,
+        "serving_enabled": false,
+        "backfill_pending": false,
+        "collisions_unresolved": false
+      }
+    },
+    {
+      "rounds": 10,
+      "processed": {
+        "baseline": 10,
+        "backfill": 0,
+        "parent": 2,
+        "summary": 1,
+        "expiry": 0
+      },
+      "readiness": {
+        "due_expiry": false,
+        "baseline_done": true,
+        "queue_pending": false,
+        "parent_pending": false,
+        "serving_enabled": false,
+        "backfill_pending": false,
+        "collisions_unresolved": false
+      }
+    },
+    {
+      "rounds": 10,
+      "processed": {
+        "baseline": 10,
+        "backfill": 0,
+        "parent": 0,
+        "summary": 1,
+        "expiry": 0
+      },
+      "readiness": {
+        "due_expiry": false,
+        "baseline_done": true,
+        "queue_pending": false,
+        "parent_pending": false,
+        "serving_enabled": false,
+        "backfill_pending": false,
+        "collisions_unresolved": false
+      }
+    }
+  ],
+  "scope": "Owned synthetic DB only; does not prove production throughput or human display-name updates. Companion session-isolation mirror covers T0-T2 only; T3 (two-connection fence) is proven against the identical source in inbox-post-render-read/run.py, not re-run here."
+}

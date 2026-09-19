@@ -9,6 +9,14 @@ const dispatchAiResponseSpy = vi.hoisted(() =>
 const { start } = vi.hoisted(() => ({
   start: vi.fn(async () => ({ runId: "ai-delay-run" })),
 }));
+const takeoverSpies = vi.hoisted(() => ({
+  find: vi.fn(),
+  record: vi.fn(),
+}));
+const enrollmentSpies = vi.hoisted(() => ({
+  pause: vi.fn(),
+  promote: vi.fn(),
+}));
 
 vi.mock("@/lib/ai-responder/dispatch", async () => {
   const actual = await vi.importActual<typeof import("@/lib/ai-responder/dispatch")>(
@@ -24,6 +32,34 @@ vi.mock("@/lib/ai-responder/dispatch", async () => {
 vi.mock("workflow/api", () => ({
   start,
 }));
+
+vi.mock("@/lib/messaging/rep-sms-human-takeover", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/lib/messaging/rep-sms-human-takeover")
+  >("@/lib/messaging/rep-sms-human-takeover");
+  takeoverSpies.find.mockImplementation(actual.findRepSmsHumanTakeoverSource);
+  takeoverSpies.record.mockImplementation(actual.recordRepSmsHumanTakeover);
+  return {
+    ...actual,
+    findRepSmsHumanTakeoverSource: takeoverSpies.find,
+    recordRepSmsHumanTakeover: takeoverSpies.record,
+  };
+});
+
+vi.mock("@/lib/sequences/enrollment", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/sequences/enrollment")>(
+    "@/lib/sequences/enrollment",
+  );
+  enrollmentSpies.pause.mockImplementation(actual.pausePropertyEnrollments);
+  enrollmentSpies.promote.mockImplementation(
+    actual.promotePropertyEnrollmentPauseReason,
+  );
+  return {
+    ...actual,
+    pausePropertyEnrollments: enrollmentSpies.pause,
+    promotePropertyEnrollmentPauseReason: enrollmentSpies.promote,
+  };
+});
 
 import { createTestClient } from "@tests/integration/client";
 import { getCanonicalTestOrgId } from "@tests/integration/fixtures/multi-user";
@@ -118,6 +154,128 @@ async function seedPropertyThread(input: {
   return { contactId, propertyId: property!.id };
 }
 
+async function seedRepSmsTakeoverFixture(input: {
+  phone: string;
+  suffix: string;
+}) {
+  const contactId = await seedContact(input.phone);
+  const orgId = await getOrgId();
+  const { data: property, error: propertyError } = await supabase
+    .from("properties")
+    .insert({
+      address: `${input.suffix} Sendillo Rep SMS Recovery Ln`,
+      state: "MO",
+      status: "new_lead",
+      homeowner_contact_id: contactId,
+    })
+    .select("id")
+    .single();
+  if (propertyError || !property) {
+    throw new Error(
+      `rep SMS recovery property seed failed: ${propertyError?.message ?? "no property"}`,
+    );
+  }
+
+  const { data: sequence, error: sequenceError } = await supabase
+    .from("sequences")
+    .insert({
+      org_id: orgId,
+      name: `${input.suffix} rep SMS recovery sequence`,
+      active: true,
+    })
+    .select("id")
+    .single();
+  if (sequenceError || !sequence) {
+    throw new Error(
+      `rep SMS recovery sequence seed failed: ${sequenceError?.message ?? "no sequence"}`,
+    );
+  }
+  const { error: stepError } = await supabase.from("sequence_steps").insert({
+    sequence_id: sequence.id,
+    step_index: 0,
+    action_type: "send_sms",
+    template_body: "recovery step",
+  });
+  if (stepError) throw new Error(`rep SMS recovery step seed failed: ${stepError.message}`);
+  const { error: enrollmentError } = await supabase
+    .from("sequence_enrollments")
+    .insert({
+      org_id: orgId,
+      sequence_id: sequence.id,
+      property_id: property.id,
+      status: "active",
+      next_run_at: "2026-07-02T19:10:00.000Z",
+    });
+  if (enrollmentError) {
+    throw new Error(`rep SMS recovery enrollment seed failed: ${enrollmentError.message}`);
+  }
+
+  const conversationId = "33333333-4444-4555-8666-777777777777";
+  const { error: outboundError } = await supabase.from("messages").insert({
+    channel: "sms",
+    direction: "outbound",
+    status: "sent",
+    provider: "sendillo",
+    external_id: `snd_${input.suffix.toLowerCase()}_outbound_001`,
+    from_address: "+18164876899",
+    to_address: input.phone,
+    body: "Hey, this is Mel with BMH, Maria's assistant.",
+    contact_id: contactId,
+    property_id: property.id,
+    conversation_id: conversationId,
+    sent_at: "2026-07-02T19:08:00.000Z",
+    metadata: {
+      repSms: {
+        workflow: "maria-through-mel",
+        persona: "Mel",
+        assistant: "Maria",
+        actorUserId: "rep-1",
+        senderAssignmentId: "sender-1",
+      },
+    },
+  });
+  if (outboundError) {
+    throw new Error(`rep SMS recovery outbound seed failed: ${outboundError.message}`);
+  }
+
+  return {
+    contactId,
+    phone: input.phone,
+    propertyId: property.id,
+    sequenceId: sequence.id,
+    conversationId,
+    body: "I need to check with Maria",
+    receivedAt: "2026-07-02T19:09:39.000Z",
+    canonicalId: `snd_${input.suffix.toLowerCase()}_canonical_001`,
+    duplicateId: `snd_${input.suffix.toLowerCase()}_duplicate_001`,
+  };
+}
+
+async function readRepSmsRecoveryState(input: {
+  contactId: string;
+  propertyId: string;
+  sequenceId: string;
+  canonicalId: string;
+}) {
+  const { data: enrollment } = await supabase
+    .from("sequence_enrollments")
+    .select("status, pause_reason")
+    .eq("sequence_id", input.sequenceId)
+    .eq("property_id", input.propertyId)
+    .single();
+  const { data: intent } = await supabase
+    .from("sms_inbound_intents")
+    .select("status")
+    .eq("first_provider_message_id", input.canonicalId)
+    .single();
+  const { count: inboundCount } = await supabase
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("direction", "inbound")
+    .eq("contact_id", input.contactId);
+  return { enrollment, intent, inboundCount };
+}
+
 async function expectNoMessageOrWebhookReservation(externalId: string) {
   const { count: messageCount } = await supabase
     .from("messages")
@@ -178,6 +336,24 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     });
     start.mockClear();
     start.mockResolvedValue({ runId: "ai-delay-run" });
+    const actualTakeover = await vi.importActual<
+      typeof import("@/lib/messaging/rep-sms-human-takeover")
+    >("@/lib/messaging/rep-sms-human-takeover");
+    takeoverSpies.find
+      .mockReset()
+      .mockImplementation(actualTakeover.findRepSmsHumanTakeoverSource);
+    takeoverSpies.record
+      .mockReset()
+      .mockImplementation(actualTakeover.recordRepSmsHumanTakeover);
+    const actualEnrollment = await vi.importActual<
+      typeof import("@/lib/sequences/enrollment")
+    >("@/lib/sequences/enrollment");
+    enrollmentSpies.pause
+      .mockReset()
+      .mockImplementation(actualEnrollment.pausePropertyEnrollments);
+    enrollmentSpies.promote
+      .mockReset()
+      .mockImplementation(actualEnrollment.promotePropertyEnrollmentPauseReason);
     await resetTenantTables(supabase);
   });
 
@@ -426,6 +602,215 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
     expect(deliveryCount).toBe(3);
   });
 
+  it("does not complete an incomplete canonical intent from a semantic duplicate", async () => {
+    const phone = "+18165550141";
+    const contactId = await seedContact(phone);
+    const { data: property } = await supabase
+      .from("properties")
+      .insert({
+        address: "141 Sendillo Semantic Retry Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    const conversationId = "22222222-3333-4444-8555-666666666666";
+    await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "sendillo",
+      external_id: "snd_semantic_retry_outbound_001",
+      from_address: "+18164876899",
+      to_address: phone,
+      body: "seed outbound",
+      contact_id: contactId,
+      property_id: property!.id,
+      conversation_id: conversationId,
+    });
+
+    const receivedAt = new Date("2026-07-02T19:09:39.000Z");
+    const orgId = await getOrgId();
+    const canonical = await claimInboundSmsIntent(supabase, {
+      orgId,
+      providerId: "sendillo",
+      externalId: "snd_semantic_retry_canonical_001",
+      from: phone,
+      to: "+18164876899",
+      body: "I need to check with Maria",
+      receivedAt,
+      raw: { messageId: "snd_semantic_retry_canonical_001" },
+      mediaUrls: null,
+      webhookEventId: null,
+      contactId,
+      propertyId: property!.id,
+      conversationId,
+      routingResolution: "matched_recipient_number",
+    });
+    expect(canonical).toMatchObject({ duplicate: false });
+    if (canonical.duplicate) throw new Error("canonical claim unexpectedly duplicated");
+    if (!canonical.intentId) throw new Error("canonical intent was not created");
+
+    const { error: incompleteError } = await supabase
+      .from("sms_inbound_intents")
+      .update({ status: "message_inserted" })
+      .eq("id", canonical.intentId);
+    if (incompleteError) throw new Error(incompleteError.message);
+
+    const res = await POST(
+      makeSendilloInboundRequest({
+        messageId: "snd_semantic_retry_duplicate_001",
+        from: phone,
+        body: "I need to check with Maria",
+        receivedAt: receivedAt.toISOString(),
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const { data: intent } = await supabase
+      .from("sms_inbound_intents")
+      .select("status")
+      .eq("id", canonical.intentId)
+      .single();
+    expect(intent?.status).toBe("message_inserted");
+  });
+
+  it("keeps the fail-safe pause and canonical intent recoverable after lookup failure and a semantic duplicate", async () => {
+    const fixture = await seedRepSmsTakeoverFixture({
+      phone: "+18165550142",
+      suffix: "LookupFailure",
+    });
+    takeoverSpies.find.mockRejectedValueOnce(new Error("injected lookup failure"));
+
+    const first = await POST(
+      makeSendilloInboundRequest({
+        messageId: fixture.canonicalId,
+        from: "+18165550142",
+        body: fixture.body,
+        receivedAt: fixture.receivedAt,
+      }),
+    );
+    expect(first.status).toBe(500);
+
+    let state = await readRepSmsRecoveryState(fixture);
+    expect(state.enrollment).toEqual({
+      status: "paused",
+      pause_reason: "inbound_reply",
+    });
+    expect(state.intent).toEqual({ status: "message_inserted" });
+    expect(state.inboundCount).toBe(1);
+    expect(dispatchAiResponseSpy).not.toHaveBeenCalled();
+
+    const duplicate = await POST(
+      makeSendilloInboundRequest({
+        messageId: fixture.duplicateId,
+        from: "+18165550142",
+        body: fixture.body,
+        receivedAt: fixture.receivedAt,
+      }),
+    );
+    expect(duplicate.status).toBe(200);
+
+    state = await readRepSmsRecoveryState(fixture);
+    expect(state.intent).toEqual({ status: "message_inserted" });
+    expect(state.inboundCount).toBe(1);
+
+    const replay = await POST(
+      makeSendilloInboundRequest({
+        messageId: fixture.canonicalId,
+        from: "+18165550142",
+        body: fixture.body,
+        receivedAt: fixture.receivedAt,
+      }),
+    );
+    expect(replay.status).toBe(200);
+
+    state = await readRepSmsRecoveryState(fixture);
+    expect(state.enrollment).toEqual({
+      status: "paused",
+      pause_reason: "rep_sms_human_takeover",
+    });
+    expect(state.intent).toEqual({ status: "side_effects_complete" });
+    expect(state.inboundCount).toBe(1);
+    expect(dispatchAiResponseSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["takeover write", "record"],
+    ["exact pause", "pause"],
+    ["pause reason promotion", "promote"],
+  ] as const)(
+    "recovers the canonical Sendillo reply after an injected %s failure",
+    async (_label, failure) => {
+      const fixture = await seedRepSmsTakeoverFixture({
+        phone:
+          failure === "record"
+            ? "+18165550143"
+            : failure === "pause"
+              ? "+18165550144"
+              : "+18165550145",
+        suffix: `Recovery${failure}`,
+      });
+      if (failure === "record") {
+        takeoverSpies.record.mockRejectedValueOnce(
+          new Error("injected takeover write failure"),
+        );
+      } else if (failure === "pause") {
+        const actualEnrollment = await vi.importActual<
+          typeof import("@/lib/sequences/enrollment")
+        >("@/lib/sequences/enrollment");
+        enrollmentSpies.pause.mockImplementationOnce(
+          actualEnrollment.pausePropertyEnrollments,
+        );
+        enrollmentSpies.pause.mockRejectedValueOnce(
+          new Error("injected exact pause failure"),
+        );
+      } else {
+        enrollmentSpies.promote.mockRejectedValueOnce(
+          new Error("injected pause promotion failure"),
+        );
+      }
+
+      const first = await POST(
+        makeSendilloInboundRequest({
+          messageId: fixture.canonicalId,
+          from: fixture.phone,
+          body: fixture.body,
+          receivedAt: fixture.receivedAt,
+        }),
+      );
+      expect(first.status).toBe(500);
+
+      let state = await readRepSmsRecoveryState(fixture);
+      expect(state.enrollment).toEqual({
+        status: "paused",
+        pause_reason: "inbound_reply",
+      });
+      expect(state.intent).toEqual({ status: "message_inserted" });
+      expect(state.inboundCount).toBe(1);
+
+      const replay = await POST(
+        makeSendilloInboundRequest({
+          messageId: fixture.canonicalId,
+          from: fixture.phone,
+          body: fixture.body,
+          receivedAt: fixture.receivedAt,
+        }),
+      );
+      expect(replay.status).toBe(200);
+
+      state = await readRepSmsRecoveryState(fixture);
+      expect(state.enrollment).toEqual({
+        status: "paused",
+        pause_reason: "rep_sms_human_takeover",
+      });
+      expect(state.intent).toEqual({ status: "side_effects_complete" });
+      expect(state.inboundCount).toBe(1);
+      expect(dispatchAiResponseSpy).not.toHaveBeenCalled();
+    },
+  );
+
   it("lets the same Sendillo ID resume a partially claimed inbound intent", async () => {
     const contactId = await seedContact("+18165550104");
     const { data: contact } = await supabase
@@ -650,6 +1035,117 @@ describe("POST /api/webhooks/sendillo/sms (integration)", () => {
           delaySeconds: params.delaySeconds,
           scheduledAt: expect.any(String),
           workflowRunId: "ai-delay-run",
+        },
+      },
+    });
+  });
+
+  it("pauses a reply to a Maria-through-Mel SMS with the takeover reason", async () => {
+    const phone = "+18165550140";
+    const contactId = await seedContact(phone);
+    const orgId = await getOrgId();
+    const { data: property, error: propertyError } = await supabase
+      .from("properties")
+      .insert({
+        address: "140 Sendillo Rep SMS Integration Ln",
+        state: "MO",
+        status: "new_lead",
+        homeowner_contact_id: contactId,
+      })
+      .select("id")
+      .single();
+    if (propertyError || !property) {
+      throw new Error(`rep SMS property seed failed: ${propertyError?.message ?? "no property"}`);
+    }
+
+    const { data: sequence, error: sequenceError } = await supabase
+      .from("sequences")
+      .insert({
+        org_id: orgId,
+        name: "Sendillo rep SMS takeover integration",
+        active: true,
+      })
+      .select("id")
+      .single();
+    if (sequenceError || !sequence) {
+      throw new Error(`rep SMS sequence seed failed: ${sequenceError?.message ?? "no sequence"}`);
+    }
+    const { error: stepError } = await supabase.from("sequence_steps").insert({
+      sequence_id: sequence.id,
+      step_index: 0,
+      action_type: "send_sms",
+      template_body: "integration step",
+    });
+    if (stepError) throw new Error(`rep SMS step seed failed: ${stepError.message}`);
+    const { error: enrollmentError } = await supabase
+      .from("sequence_enrollments")
+      .insert({
+        org_id: orgId,
+        sequence_id: sequence.id,
+        property_id: property.id,
+        status: "active",
+        next_run_at: "2026-07-02T19:10:00.000Z",
+      });
+    if (enrollmentError) {
+      throw new Error(`rep SMS enrollment seed failed: ${enrollmentError.message}`);
+    }
+
+    const conversationId = "11111111-2222-4333-8444-555555555555";
+    const { error: outboundError } = await supabase.from("messages").insert({
+      channel: "sms",
+      direction: "outbound",
+      status: "sent",
+      provider: "sendillo",
+      from_address: "+18164876899",
+      to_address: phone,
+      body: "Hey, this is Mel with BMH, Maria's assistant.",
+      contact_id: contactId,
+      property_id: property.id,
+      conversation_id: conversationId,
+      sent_at: "2026-07-02T19:09:00.000Z",
+      metadata: {
+        repSms: {
+          workflow: "maria-through-mel",
+          persona: "Mel",
+          assistant: "Maria",
+          actorUserId: "rep-1",
+          senderAssignmentId: "sender-1",
+        },
+      },
+    });
+    if (outboundError) throw new Error(`rep SMS outbound seed failed: ${outboundError.message}`);
+
+    const res = await POST(
+      makeSendilloInboundRequest({
+        messageId: "snd_rep_sms_takeover_pause_001",
+        from: phone,
+        body: "Yes, tell Maria I am interested.",
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(dispatchAiResponseSpy).not.toHaveBeenCalled();
+
+    const { data: enrollment } = await supabase
+      .from("sequence_enrollments")
+      .select("status, pause_reason")
+      .eq("sequence_id", sequence.id)
+      .eq("property_id", property.id)
+      .single();
+    expect(enrollment).toEqual({
+      status: "paused",
+      pause_reason: "rep_sms_human_takeover",
+    });
+
+    const { data: inbound } = await supabase
+      .from("messages")
+      .select("metadata")
+      .eq("external_id", "snd_rep_sms_takeover_pause_001")
+      .single();
+    expect(inbound?.metadata).toMatchObject({
+      processing: {
+        aiResponder: {
+          outcome: "escalated",
+          reason: "rep_sms_human_takeover",
         },
       },
     });

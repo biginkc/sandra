@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, type FormEvent } from "react"
+import { useContext, useEffect, useState, type FormEvent } from "react"
 
 import {
   Dialog,
@@ -18,6 +18,7 @@ import {
   WorkflowDialogFooter,
   WorkflowDialogHeader,
   WorkflowFormError,
+  WorkflowRecoveryContext,
   useAcquisitionSubmit,
 } from "./workflow-form"
 import type {
@@ -56,6 +57,23 @@ export function AcquisitionReadinessDialog({
   const [temperature, setTemperature] = useState<AcquisitionTemperature>(initialTemperature)
   const [clientError, setClientError] = useState<string | null>(null)
   const [clientFieldErrors, setClientFieldErrors] = useState<Record<string, string>>({})
+  const recovery = useContext(WorkflowRecoveryContext)
+  const reconciliation = recovery?.reconciliation
+  const reconciliationLocked = Boolean(reconciliation)
+  useEffect(() => {
+    if (!reconciliation) return
+    const response = reconciliation.payload.motivationResponse
+    if (response && typeof response === "object" && !Array.isArray(response) && (response as Record<string, unknown>).kind === "no_motivation") {
+      setMotivationKind("no_motivation")
+      setMotivationText("")
+    } else if (response && typeof response === "object" && !Array.isArray(response) && (response as Record<string, unknown>).kind === "specified") {
+      setMotivationKind("specified")
+      setMotivationText(typeof (response as Record<string, unknown>).text === "string" ? (response as Record<string, unknown>).text as string : "")
+    }
+    setTemperature(typeof reconciliation.payload.temperature === "string" ? reconciliation.payload.temperature as AcquisitionTemperature : null)
+    setClientError(null)
+    setClientFieldErrors({})
+  }, [reconciliation])
   const resetFields = () => {
     setMotivationKind(initialMotivationResponse?.kind || "specified")
     setMotivationText(
@@ -126,6 +144,7 @@ export function AcquisitionReadinessDialog({
                   name="acquisition-motivation-response"
                   value="specified"
                   checked={motivationKind === "specified"}
+                  disabled={reconciliationLocked}
                   onChange={() => {
                     setMotivationKind("specified")
                     clearClientErrors()
@@ -137,6 +156,7 @@ export function AcquisitionReadinessDialog({
                   name="acquisition-motivation-response"
                   value="no_motivation"
                   checked={motivationKind === "no_motivation"}
+                  disabled={reconciliationLocked}
                   onChange={() => {
                     setMotivationKind("no_motivation")
                     setMotivationText("")
@@ -151,6 +171,7 @@ export function AcquisitionReadinessDialog({
                   <Textarea
                     id="acquisition-motivation-text"
                     value={motivationText}
+                    disabled={reconciliationLocked}
                     onChange={(event) => setMotivationText(event.target.value)}
                     aria-invalid={Boolean(clientFieldErrors.motivationText || submitState.fieldErrors.motivationText)}
                     aria-describedby={clientFieldErrors.motivationText || submitState.fieldErrors.motivationText ? "acquisition-motivation-text-error" : undefined}
@@ -168,6 +189,7 @@ export function AcquisitionReadinessDialog({
               <select
                 id="acquisition-motivation-temperature"
                 value={temperature || ""}
+                disabled={reconciliationLocked}
                 onChange={(event) => setTemperature((event.target.value || null) as AcquisitionTemperature)}
                 className={SELECT_FIELD_CLASS}
               >

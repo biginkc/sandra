@@ -287,7 +287,7 @@ describe("<LeadCallSummary />", () => {
               summary: null,
               summary_status: "failed",
               error_message: "Deepgram timed out",
-              summary_error_message: "Claude rejected the response",
+              summary_error_message: "Your credit balance is too low",
             }),
           ],
         }),
@@ -304,8 +304,9 @@ describe("<LeadCallSummary />", () => {
       screen.getByText("Transcript failed: Deepgram timed out"),
     ).toHaveClass("break-words");
     expect(
-      screen.getByText("AI summary failed: Claude rejected the response"),
+      screen.getByText("AI summary unavailable. Please reach out to an admin."),
     ).toHaveClass("break-words");
+    expect(screen.queryByText(/credit balance/i)).not.toBeInTheDocument();
   });
 
   it("is empty and disables the Jitter CTA when the host is absent", () => {
@@ -603,7 +604,7 @@ describe("<LeadCallSummary />", () => {
     await act(async () => resolveOlder({ data: older, error: null }));
     expect(screen.queryByText("Stale summary")).not.toBeInTheDocument();
     expect(
-      screen.getByText("AI summary failed: Latest summary failure"),
+      screen.getByText("AI summary unavailable. Please reach out to an admin."),
     ).toBeInTheDocument();
   });
 

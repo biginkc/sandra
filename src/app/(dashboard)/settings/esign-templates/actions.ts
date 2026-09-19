@@ -44,9 +44,9 @@ const KNOWN_WEBSITE_TEMPLATE_ERRORS: Record<string, string> = {
   template_account_mismatch:
     "The template must be available to the connected Dropbox Sign account.",
   signer_role_mismatch:
-    "Dropbox Sign signer roles must be exactly Seller then Buyer.",
+    "Dropbox Sign signer roles must be Seller then Buyer, or Seller, Seller 2, then Buyer for a novation packet.",
   merge_field_mismatch:
-    "Dropbox Sign Sender merge fields must be exactly seller_name, property_address, offer_price, closing_date, and earnest_money.",
+    "Dropbox Sign Sender merge fields must match a supported contract field set, including all 26 novation fields when used.",
   template_field_mismatch:
     "Dropbox Sign must include required signature fields for Seller and Buyer.",
 };

@@ -60,6 +60,8 @@ const actionFocusClasses = [
 
 function expectVisibleActionFocus() {
   const actions = screen.getByTestId("lead-media-actions");
+  expect(actions).toHaveRole("group");
+  expect(actions).toHaveAccessibleName("Lead actions");
   for (const className of actionFocusClasses) {
     expect(actions.className).toContain(className);
   }
@@ -374,6 +376,23 @@ describe("<LeadMediaHero />", () => {
     expect(actions?.className).toContain("[&_button]:min-h-9");
     expectVisibleActionFocus();
     expect(screen.getByText(/Street View unavailable/)).toBeVisible();
+  });
+
+  it("supports a My Leads breadcrumb for an Acquisitions member", () => {
+    render(
+      <LeadMediaHero
+        {...shared}
+        collectionHref="/my-leads"
+        collectionLabel="My Leads"
+        media={{ kind: "flat", reason: "missing-location" }}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "My Leads" })).toHaveAttribute(
+      "href",
+      "/my-leads",
+    );
+    expect(screen.queryByRole("link", { name: "Leads" })).toBeNull();
   });
 
   it("keeps linked hero actions visibly focused without clipping their pill", () => {

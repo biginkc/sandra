@@ -1,0 +1,73 @@
+{
+  "run_id": "18bc08d7-5784-414b-a9f1-c838702a4a16",
+  "organization_id": "00000000-0000-0000-0000-000000000bbb",
+  "batches": [
+    {
+      "start": 0,
+      "end": 100,
+      "seconds": 0.13181445900409017,
+      "canonical_messages": 125
+    },
+    {
+      "start": 100,
+      "end": 200,
+      "seconds": 0.1427984589972766,
+      "canonical_messages": 125
+    },
+    {
+      "start": 200,
+      "end": 300,
+      "seconds": 0.14923833399370778,
+      "canonical_messages": 125
+    },
+    {
+      "start": 300,
+      "end": 400,
+      "seconds": 0.23349016699648928,
+      "canonical_messages": 125
+    },
+    {
+      "start": 400,
+      "end": 500,
+      "seconds": 0.25366141699487343,
+      "canonical_messages": 125
+    },
+    {
+      "start": 500,
+      "end": 600,
+      "seconds": 0.26957804200355895,
+      "canonical_messages": 125
+    },
+    {
+      "start": 600,
+      "end": 700,
+      "seconds": 0.2509328329906566,
+      "canonical_messages": 125
+    },
+    {
+      "start": 700,
+      "end": 800,
+      "seconds": 0.2827495419915067,
+      "canonical_messages": 125
+    },
+    {
+      "start": 800,
+      "end": 900,
+      "seconds": 0.23407937500451226,
+      "canonical_messages": 125
+    },
+    {
+      "start": 900,
+      "end": 1000,
+      "seconds": 0.2301234999904409,
+      "canonical_messages": 125
+    }
+  ],
+  "canonical_counts": {
+    "messages": 1250,
+    "conversations": 1000,
+    "unknown_senders": 0
+  },
+  "progress": 1000,
+  "scope": "Owned fixture canonical writes only; worker drain and summary reconciliation are separate"
+}

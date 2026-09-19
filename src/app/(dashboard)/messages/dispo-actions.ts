@@ -10,6 +10,8 @@ import { qualifyProperty } from "@/lib/leads/qualify";
 import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
 import { createClient } from "@/lib/supabase/server";
 
+import { assertMessagesWorkspaceAccess } from "./workspace-access";
+
 // "booked_appointment" is set only by `fn_book_appointment`
 // (components/appointments/book-appointment-action.ts), never through
 // `setOutreachDispo` — same as `callback_requested` just above this type,
@@ -59,6 +61,12 @@ export async function confirmAiDispositionReview(
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return { ok: false, error: "Not signed in" };
+
+  try {
+    await assertMessagesWorkspaceAccess();
+  } catch {
+    return { ok: false, error: "Messages workspace access is unavailable" };
+  }
 
   const { data, error } = await supabase.rpc(
     "fn_confirm_ai_disposition_review",
@@ -282,6 +290,7 @@ export async function moveMessageThreadToLead(
   }
 
   try {
+    await assertMessagesWorkspaceAccess();
     await assertNotTrainingTarget(supabase, { propertyId });
     const outcome = await qualifyProperty(supabase, propertyId, user.id);
     switch (outcome.status) {

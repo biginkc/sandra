@@ -1,4 +1,6 @@
+import { LeadRepSmsComposer } from "./rep-sms-composer";
 import Link from "next/link";
+import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
 
@@ -9,8 +11,13 @@ import { Page } from "@/components/page";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { getCallerMemberships } from "@/lib/auth/memberships";
 import { teamMemberPrimaryLabel } from "@/lib/auth/team-member";
 import { loadOrgTeamMembers } from "@/lib/auth/team-roster";
+import {
+  leadDetailCollection,
+  shouldRestrictMessagesAndLeadsBoard,
+} from "@/lib/auth/surface-access";
 import { leadNoticeMessage } from "@/lib/leads/notices";
 import { createClient } from "@/lib/supabase/server";
 import { loadIntegrationPrefs } from "@/lib/integrations/prefs";
@@ -71,12 +78,14 @@ import type { TagRow } from "../tags-actions";
 import type { Database } from "@/lib/supabase/types";
 import { LeadMediaHero } from "./lead-media-hero";
 import { resolveLeadMediaPresentation } from "./lead-media";
+import {loadLeadAcquisitionHistory} from "./acquisition-history-actions";
 import { LeadActivityTimeline } from "./lead-activity";
 import type { LeadEvent } from "./lead-events";
 import { AddNoteComposer } from "./notes-feed";
 import { SendForSignature } from "./send-for-signature";
 import { ContractsCard } from "./contracts-card";
 import { LeadFilesCard } from "./lead-files-card";
+import { LeadCalculationsSection } from "./lead-calculations-section";
 import { loadLeadEsignPageModel } from "./lead-esign-bindings";
 import {
   downloadLeadFileAction,
@@ -127,6 +136,9 @@ export default async function LeadDetailPage({
   const { id } = await params;
   const warning = leadNoticeMessage((await searchParams)?.notice);
   const supabase = await createClient();
+  const isAcquisitionMember = shouldRestrictMessagesAndLeadsBoard(
+    await getCallerMemberships(),
+  );
   const { data, error } = await supabase
     .from("properties")
     .select(
@@ -144,6 +156,7 @@ export default async function LeadDetailPage({
     .maybeSingle();
 
   if (error) {
+    const collection = leadDetailCollection(isAcquisitionMember);
     console.error("[leads] detail fetch failed", {
       message: error.message,
       code: error.code,
@@ -153,7 +166,7 @@ export default async function LeadDetailPage({
         <PageHeader
           breadcrumb={[
             { label: "Workspace" },
-            { label: "Leads", href: "/leads" },
+            { label: collection.label, href: collection.href },
             { label: "Error" },
           ]}
           title="Lead"
@@ -184,9 +197,17 @@ export default async function LeadDetailPage({
         prevId={prevId}
         nextId={nextId}
         mode={lockedMode}
+        isAcquisitionMember={isAcquisitionMember}
       />
     );
   }
+  const collection = leadDetailCollection(
+    isAcquisitionMember,
+    // Non-Acquisitions prospect details historically return to Leads. The
+    // stage-aware destination remains for the locked DNC detail below.
+    isAcquisitionMember && lead.status === "prospect" ? "prospect" : "lead",
+  );
+  const acquisitionHistory=await loadLeadAcquisitionHistory(lead.id);
   const training = lead.is_training;
   const esign: Awaited<ReturnType<typeof loadLeadEsignPageModel>> = training
     ? { blockers: ["sending_disabled"], contracts: [], files: [], contractsError: null, filesError: null }
@@ -524,6 +545,15 @@ export default async function LeadDetailPage({
         phoneLineType: inlineRoutePhoneChoice?.lineType ?? null,
       })
     : smsPresentation;
+  // Acquisitions uses the exact saved thread recipient when one is available
+  // (`replyToPhone={inlineReplyPhone}`). The header gate must make the same
+  // phone-level decision or a divergent thread number can be displayed as
+  // textable while the composer is correctly fenced (or vice versa). When a
+  // thread route is unusable, RepSmsComposer falls back to the context's best
+  // mobile and the header's best-phone presentation remains authoritative.
+  const acquisitionSmsPresentation = inlineReplyPhone
+    ? inlineSmsPresentation
+    : smsPresentation;
 
   // Tags attached to this property, with the tag row joined inline.
   const { data: tagRowsRaw, error: tagRowsError } = await supabase
@@ -614,19 +644,19 @@ export default async function LeadDetailPage({
     <>
       <SoftphoneLeadButton lead={detailSoftphoneLead} />
       <SmsEntryPointGate
-        restricted={smsPresentation.smsRestricted}
+        restricted={isAcquisitionMember ? acquisitionSmsPresentation.smsRestricted : smsPresentation.smsRestricted}
         placement="header"
-        restrictionLabel={smsPresentation.consentLabel}
-        restrictionDetail={smsPresentation.consentDetail}
+        restrictionLabel={isAcquisitionMember ? acquisitionSmsPresentation.consentLabel : smsPresentation.consentLabel}
+        restrictionDetail={isAcquisitionMember ? acquisitionSmsPresentation.consentDetail : smsPresentation.consentDetail}
       >
-        <fieldset disabled={training} inert={training || undefined} className="contents"><SmsComposer
+        <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? <LeadRepSmsComposer propertyId={lead.id} replyToPhone={inlineReplyPhone} placement="action" /> : <SmsComposer
           propertyId={lead.id}
           homeownerContactId={lead.homeowner?.id ?? null}
           homeownerPhone={homeownerSmsPhone}
           homeownerName={homeownerName}
           preferredFromNumber={preferredFromNumber}
           templates={templateOptions}
-        /></fieldset>
+        />}</fieldset>
       </SmsEntryPointGate>
       <fieldset disabled={training} inert={training || undefined} className="contents"><BookAppointmentPopover
         propertyId={lead.id}
@@ -719,6 +749,8 @@ export default async function LeadDetailPage({
         address={lead.address}
         locationLine={locationLine}
         homeownerName={homeownerName}
+        collectionHref={collection.href}
+        collectionLabel={collection.label}
         actions={heroActions}
       />
       <DealSnapshotStrip lead={lead} />
@@ -824,6 +856,7 @@ export default async function LeadDetailPage({
               initialNotes={initialNotes}
               initialCalls={initialCallRows}
               initialEvents={initialLeadEvents}
+              initialAcquisitionHistory={acquisitionHistory}
               messageError={threadError?.message ?? null}
               noteError={notesError?.message ?? null}
               callError={callRollupError?.message ?? null}
@@ -854,7 +887,7 @@ export default async function LeadDetailPage({
                 restrictionLabel={inlineSmsPresentation.consentLabel}
                 restrictionDetail={inlineSmsPresentation.consentDetail}
               >
-                <fieldset disabled={training} inert={training || undefined} className="contents"><InlineReply
+                <fieldset disabled={training} inert={training || undefined} className="contents">{isAcquisitionMember ? null : <InlineReply
                   propertyId={lead.id}
                   homeownerContactId={lead.homeowner?.id ?? null}
                   homeownerPhone={inlineReplyPhone}
@@ -867,9 +900,9 @@ export default async function LeadDetailPage({
                       <AddNoteComposer propertyId={lead.id} compact />
                     ) : null
                   }
-                /></fieldset>
+                />}</fieldset>
               </SmsEntryPointGate>
-              {inlineSmsPresentation.smsRestricted || inlineReplyUnavailable ? (
+              {isAcquisitionMember || inlineSmsPresentation.smsRestricted || inlineReplyUnavailable ? (
                 <div className="mt-2 flex justify-end">
                   <AddNoteComposer propertyId={lead.id} compact />
                 </div>
@@ -883,6 +916,7 @@ export default async function LeadDetailPage({
               loadError={esign.filesError}
               downloadAction={downloadLeadFileAction}
             />
+            <Suspense fallback={<p className="text-sm text-muted-foreground">Loading saved calculations…</p>}><LeadCalculationsSection propertyId={lead.id} /></Suspense>
             <Section title="Homeowner" compact>
               {lead.homeowner ? (
                 <>
@@ -1157,6 +1191,7 @@ export default async function LeadDetailPage({
                   <fieldset disabled={training} inert={training || undefined} className="contents"><DeleteLeadButton
                     propertyId={lead.id}
                     address={lead.address}
+                    redirectHref={collection.href}
                   /></fieldset>
                 </div>
               </div>
@@ -1240,14 +1275,17 @@ function LockedDncPropertyDetail({
   prevId,
   nextId,
   mode,
+  isAcquisitionMember,
 }: {
   lead: DetailedLead;
   prevId: string | null;
   nextId: string | null;
   mode: "prospect" | "lead";
+  isAcquisitionMember: boolean;
 }) {
-  const collectionHref = mode === "prospect" ? "/properties" : "/leads";
-  const collectionLabel = mode === "prospect" ? "Prospects" : "Leads";
+  const collection = leadDetailCollection(isAcquisitionMember, mode);
+  const collectionHref = collection.href;
+  const collectionLabel = collection.label;
   const recordLabel = mode === "prospect" ? "prospect" : "lead";
   const zillowHref = zillowUrl({
     address: lead.address,

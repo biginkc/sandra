@@ -48,20 +48,18 @@ export function stagePages(snapshot:QueueSnapshot):Record<MyLeadStage,MyLeadStag
   return {not_contacted:build('not_contacted'),contacted:build('contacted'),needs_offer:build('needs_offer'),offer_sent:build('offer_sent'),under_contract:build('under_contract')};
 }
 export function kpiTiles(kpis:AcquisitionKpis):MyLeadsKpis {
-  const ratio=(n:number,d:number)=>d?`${Math.round(n/d*100)}% (${n}/${d})`:null;
-  return {attempts:kpis.attempts,contactRateLabel:ratio(kpis.reached,kpis.attempts),
-    assignToFirstCallLabel:kpis.firstCallSamples&&kpis.firstCallElapsedSeconds!==null?`${Math.round(kpis.firstCallElapsedSeconds/60)} min elapsed`:null,
-    appointmentsKeptLabel:ratio(kpis.appointmentsHeld,kpis.appointmentsDue),offersSent:kpis.offersSent,staleLeads:kpis.staleLeads};
+  return {...kpis};
 }
 export function detailView(detail:AcquisitionDetail,roster:AcquisitionRoster):MyLeadDetail {
   const actor=(id:string|null)=>roster.members.find(m=>m.id===id)?.label??'Team member';
   const group=(name:keyof AcquisitionDetail['groups'])=>detail.groups[name]?.rows??[];
   const wrap=<T,>(name:keyof AcquisitionDetail['groups'],rows:T[])=>({rows,hasMore:detail.groups[name]?.hasMore??false,nextCursor:detail.groups[name]?.cursor??null});
   return {
-    notes:wrap('notes',group('notes').map(r=>({id:r.id,authorLabel:actor(r.actorId),body:r.body??'',createdLabel:dateLabel(r.at)}))),
-    attempts:wrap('attempts',group('attempts').map(r=>({id:r.id,actorLabel:actor(r.actorId),outcomeLabel:({no_answer:'No answer',reached:'Reached',wrong_number:'Wrong number'} as Record<string,string>)[r.outcome??'']??r.outcome??'Outcome pending',occurredLabel:dateLabel(r.at),sourceLabel:({sandra:'Sandra',dialpad:'DialPad',manual:'Manual'} as Record<string,string>)[r.source??''],recordingUrl:recordingUrl(r.recordingUrl)}))),
+    notes:wrap('notes',group('notes').map(r=>({id:r.id,authorLabel:r.actorLabel??actor(r.actorId),body:r.body??'',createdLabel:dateLabel(r.at)}))),
+    messages:wrap('messages',group('messages').flatMap(r=>r.direction==='inbound'||r.direction==='outbound'?[{id:r.id,body:r.body??'',direction:r.direction,createdAt:r.at,createdLabel:exactLabel(r.at)??'Unavailable',deliveryStatus:r.deliveryStatus??'',attachmentCount:r.attachmentCount??0}]:[])),
+    attempts:wrap('attempts',group('attempts').map(r=>({id:r.id,actorLabel:r.actorLabel??actor(r.actorId),outcomeLabel:({no_answer:'No answer',reached:'Reached',wrong_number:'Wrong number'} as Record<string,string>)[r.outcome??'']??r.outcome??'Outcome pending',occurredLabel:dateLabel(r.at),sourceLabel:({sandra:'Sandra',dialpad:'DialPad',manual:'Manual'} as Record<string,string>)[r.source??''],recordingUrl:recordingUrl(r.recordingUrl),callActivityId:r.source==='sandra'?r.callActivityId??null:null,followUpObligationId:r.followUpObligationId??null,followUpStatus:r.followUpStatus??null,followUpMessage:r.followUpMessage??null,followUpBlockedReason:r.followUpBlockedReason??null}))),
     appointments:wrap('appointments',group('appointments').map(r=>({id:r.id,label:r.title??'Appointment',dueLabel:dateLabel(r.at),statusLabel:r.outcome??r.status??'Unknown',callbackAction:r.type==='callback'&&r.callbackActionAllowed?{taskId:r.id}:undefined,lifecycleAction:r.type==='appointment'&&r.currentAssigneeId&&r.lifecycleState?{taskId:r.id,assigneeId:r.currentAssigneeId,state:r.lifecycleState}:undefined}))),
     offers:wrap('offers',group('offers').map(r=>({id:r.id,amountLabel:dollars.format((r.amountCents??0)/100),method:r.method??'',sentLabel:dateLabel(r.at),outcomeLabel:r.outcome??'pending'}))),
-    history:wrap('history',group('history').map(r=>({id:r.id,label:`${r.kind==='launch'?'Initialized for':'Assigned to'} ${actor(r.actorId)}${r.endedAt?' (ended)':''}`,createdLabel:dateLabel(r.at)}))),
+    history:wrap('history',group('history').map(r=>({id:r.id,label:`${r.kind==='launch'?'Initialized for':'Assigned to'} ${r.actorLabel??actor(r.actorId)}${r.endedAt?' (ended)':''}`,createdLabel:dateLabel(r.at)}))),
   };
 }

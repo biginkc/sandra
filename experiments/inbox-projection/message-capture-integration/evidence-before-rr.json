@@ -1,0 +1,91 @@
+{
+  "at": "2026-09-13T12:58:35Z",
+  "checks": [
+    {
+      "name": "AFTER capture uses finalized canonical conversation; nested arrival self-stamp adds no dirty/content increment",
+      "passed": true
+    },
+    {
+      "name": "read_at, delivery-only status and timing do not invalidate prepared reply content",
+      "passed": true
+    },
+    {
+      "name": "body and address mutation dirty once, bump content once and update normalized source edge",
+      "passed": true
+    },
+    {
+      "name": "explicit conservative queued/paused boundary versions entry/exit; queued-to-paused remains display-only",
+      "passed": true
+    },
+    {
+      "name": "metadata change advances relevant content dependency without fabricated summary dirtiness",
+      "passed": true
+    },
+    {
+      "name": "message property dependency replacement captured directly",
+      "passed": true
+    },
+    {
+      "name": "persistent unknown UUIDs preserve exact raw strings, whitespace and tenant identity",
+      "passed": true
+    },
+    {
+      "name": "4000-character raw identity is not a truncated or oversized btree key",
+      "passed": true
+    },
+    {
+      "name": "dismissal advances unknown-action version; read/delivery status does not change unknown grouping or action version",
+      "passed": true
+    },
+    {
+      "name": "match/unmatch captures departed unknown and finalized known identities with stable sender UUID",
+      "passed": true
+    },
+    {
+      "name": "raw sender replacement dirties old and new typed targets",
+      "passed": true
+    },
+    {
+      "name": "SMS/email exit and reentry capture memberships and source route edges",
+      "passed": true
+    },
+    {
+      "name": "organization/conversation move dirties both scoped identities and moves route edge",
+      "passed": true
+    },
+    {
+      "name": "delete/reinsert retains unknown UUID and persistent message/action generations while removing transient edges",
+      "passed": true
+    },
+    {
+      "name": "rollback restores registry, dirty counters, versions and edges together",
+      "passed": true
+    },
+    {
+      "name": "concurrent first inserts block then share one persistent sender UUID with two generations",
+      "passed": true
+    },
+    {
+      "name": "all mutations leave unrelated conversation reply dependency unchanged",
+      "passed": true
+    },
+    {
+      "name": "authenticated/service roles cannot allocate registry identities directly",
+      "passed": true
+    },
+    {
+      "name": "all earlier capture/guard triggers preserved",
+      "passed": true
+    }
+  ],
+  "org": "33ae9df2-142a-4920-8d12-66df4d1ade7e",
+  "other_org": "88e1e0cb-fd8e-493c-9942-11db0fc1e3e7",
+  "setup_sha256": "7a86e82dc5eaff685952ad065473fa7f135d838012c8c4a225fccc98fe6ea5e4",
+  "limits": [
+    "Private direct-message rehearsal; no parent fanout/expiry/backfill/production migration",
+    "Existing smaller lab dirty trigger also runs; duplicate lab effects are not deployment topology or write-amplification evidence",
+    "Queued/paused boundary versioning is a conservative implementation assumption pending full reply validation",
+    "Hash buckets serialize exact raw identity allocation; privileged direct table writes bypass helper invariant",
+    "No privileged restore/trigger-disable repair or universal deadlock-freedom proof"
+  ]
+}

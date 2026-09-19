@@ -1,0 +1,82 @@
+{
+  "source_hashes": {
+    "worker.sql": "5ddff6ea035d79a59d2396b825eb87bd9d4a75669588a5edd32fe7d4254a6a12",
+    "setup.sql": "1d16fc352a4694ae02dcc2b076cd99a78eb3756ea5a4377ac2d185bfb9860feb",
+    "accept.sql": "ddc2714337cc5aa813bd51b63af9b20047148a0bb9a5f7e467a1c5825d6552bc",
+    "public-api.sql": "45bafaf0f48c30c9cb98e1bd808b9d2112b7c191c692ee6de4302f1f624bc768"
+  },
+  "writer_source_hashes": {
+    "inbox-projection/policy-versions/setup.sql": "ae524b76ebbd24295e6145c33fe100208299523b5145c61019e132a19f01d4d1",
+    "inbox-operation-domain/setup.sql": "b7ca70de5cfe321ad3996b98de2f6097ba9b0545e7e2eb7bb0c955e9cc2a35ff",
+    "inbox-operation-domain/restrictive-scope.sql": "8b21a491160fedfb84ef85d1156fcede5ffdb8f56855786d430faed1784776d9",
+    "inbox-operation-domain/restrictive-effect.sql": "3e643d1cd5b370f7cea3588a4caf9146a29e25da6eec808b0c4621ca424124df",
+    "inbox-operation-domain/restrictive-apply.sql": "c92977a209ead8e9c25e468887ecdc5d4e00a5688ae65128f7980996ed2ccdfa"
+  },
+  "guarded_functions": [
+    "inbox_t2_policy.validate_key",
+    "inbox_t2_policy.bump",
+    "inbox_t2_policy.capture_properties",
+    "inbox_t2_policy.capture_contacts",
+    "inbox_t2_policy.capture_consent_events",
+    "inbox_t2_policy.capture_sms_phone_suppressions",
+    "inbox_t2_policy.capture_message_threads",
+    "inbox_t2_policy.capture_ai_disposition_reviews",
+    "inbox_t2_policy.capture_memberships",
+    "inbox_t2_policy.snapshot",
+    "inbox_operation_domain.capture_target",
+    "inbox_operation_domain.apply_property_step",
+    "inbox_operation_domain.capture_sms_scope",
+    "inbox_operation_domain.apply_sms_opt_out"
+  ],
+  "guarded_triggers": [
+    [
+      "public.properties",
+      "inbox_t2_policy.capture_properties"
+    ],
+    [
+      "public.contacts",
+      "inbox_t2_policy.capture_contacts"
+    ],
+    [
+      "public.consent_events",
+      "inbox_t2_policy.capture_consent_events"
+    ],
+    [
+      "public.sms_phone_suppressions",
+      "inbox_t2_policy.capture_sms_phone_suppressions"
+    ],
+    [
+      "public.message_threads",
+      "inbox_t2_policy.capture_message_threads"
+    ],
+    [
+      "public.ai_disposition_reviews",
+      "inbox_t2_policy.capture_ai_disposition_reviews"
+    ],
+    [
+      "public.memberships",
+      "inbox_t2_policy.capture_memberships"
+    ],
+    [
+      "public.messages",
+      "inbox_operation_domain.capture_target"
+    ],
+    [
+      "public.ai_disposition_reviews",
+      "inbox_operation_domain.capture_target"
+    ],
+    [
+      "public.properties",
+      "inbox_operation_domain.capture_sms_scope"
+    ],
+    [
+      "public.sequence_enrollments",
+      "inbox_operation_domain.capture_sms_scope"
+    ]
+  ],
+  "limits": [
+    "Private fixture only",
+    "No worker/application route enabled",
+    "Lazy baseline concurrency still requires actual tests"
+  ]
+}

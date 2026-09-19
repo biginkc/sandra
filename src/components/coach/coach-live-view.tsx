@@ -49,6 +49,7 @@ export type CoachLiveViewProps = {
   muted: boolean;
   held: boolean;
   holdPending: boolean;
+  endingCall?: boolean;
   onDigit: (digit: DtmfDigit) => void;
   onMute: () => void;
   onHold: () => void;
@@ -134,6 +135,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     muted,
     held,
     holdPending,
+    endingCall = false,
     onDigit,
     onMute,
     onHold,
@@ -283,7 +285,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
                 type="button"
                 data-testid="coach-reconnect-audio"
                 onClick={onReconnectAudio}
-                disabled={callStatus === "audio_reconnecting"}
+                disabled={endingCall || callStatus === "audio_reconnecting"}
                 className="rounded-md border border-[var(--coach-amber)] bg-card px-3 py-1.5 font-bold disabled:cursor-wait disabled:opacity-60"
               >
                 Reconnect Audio
@@ -292,10 +294,12 @@ export function CoachLiveView(props: CoachLiveViewProps) {
             <button
               type="button"
               data-testid="coach-warning-hangup"
+              disabled={endingCall}
+              aria-busy={endingCall}
               onClick={onHangup}
-              className="rounded-md border border-destructive bg-destructive px-3 py-1.5 font-bold text-white"
+              className="rounded-md border border-destructive bg-destructive px-3 py-1.5 font-bold text-white disabled:cursor-wait disabled:opacity-60"
             >
-              Hang Up
+              {endingCall ? "Ending call…" : "Hang Up"}
             </button>
           </div>
         </div>
@@ -340,6 +344,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         muted={muted}
         held={held}
         holdPending={holdPending}
+        endingCall={endingCall}
         onDigit={onDigit}
         onMute={onMute}
         onHold={onHold}
@@ -1024,6 +1029,7 @@ function CallControlDock({
   muted,
   held,
   holdPending,
+  endingCall,
   onDigit,
   onMute,
   onHold,
@@ -1036,6 +1042,7 @@ function CallControlDock({
   muted: boolean;
   held: boolean;
   holdPending: boolean;
+  endingCall: boolean;
   onDigit: (digit: DtmfDigit) => void;
   onMute: () => void;
   onHold: () => void;
@@ -1072,7 +1079,7 @@ function CallControlDock({
 
   return (
     <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-[var(--coach-rail)] px-6 py-3">
-      {keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || holdPending || !live} /> : null}
+      {keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={endingCall || held || holdPending || !live} /> : null}
       <div
         data-testid="coach-call-dock-row"
         className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between"
@@ -1096,7 +1103,7 @@ function CallControlDock({
             variant={muted ? "default" : "outline"}
             size="sm"
             aria-pressed={muted}
-            disabled={callStatus !== "live"}
+            disabled={endingCall || callStatus !== "live"}
             data-testid="coach-mute"
             onClick={onMute}
           >
@@ -1108,7 +1115,7 @@ function CallControlDock({
             variant={keypadOpen ? "default" : "outline"}
             size="sm"
             aria-expanded={keypadOpen}
-            disabled={held || holdPending || !live}
+            disabled={endingCall || held || holdPending || !live}
             data-testid="coach-keypad-toggle"
             onClick={() => onKeypadOpenChange(!keypadOpen)}
           >
@@ -1119,16 +1126,16 @@ function CallControlDock({
             variant={held ? "default" : "outline"}
             size="sm"
             aria-pressed={held}
-            disabled={holdPending || callStatus !== "live"}
+            disabled={endingCall || holdPending || callStatus !== "live"}
             data-testid="coach-hold"
             onClick={onHold}
           >
             {held ? <PlayIcon className="size-4" aria-hidden /> : <PauseIcon className="size-4" aria-hidden />}
             {held ? "Resume" : "Hold"}
           </Button>
-          <Button type="button" variant="destructive" size="sm" data-testid="coach-hangup" onClick={onHangup}>
+          <Button type="button" variant="destructive" size="sm" data-testid="coach-hangup" disabled={endingCall} aria-busy={endingCall} onClick={onHangup}>
             <PhoneOffIcon className="size-4" aria-hidden />
-            Hang up
+            {endingCall ? "Ending call…" : "Hang up"}
           </Button>
         </div>
       </div>

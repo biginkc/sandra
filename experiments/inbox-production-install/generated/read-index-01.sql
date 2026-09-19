@@ -1,0 +1,1 @@
+CREATE INDEX CONCURRENTLY inbox_unknown_history_page ON public.messages(org_id,md5(from_address),created_at DESC,id DESC) WHERE channel='sms';

@@ -1,0 +1,12 @@
+{
+  "scope": "Actual existing dedicated login SQL authority, read-only session-authorization probe; updated service image not yet installed",
+  "result": {
+    "role": "inbox_projection_worker",
+    "database": "sandra_inbox_install_20260913",
+    "login": "inbox_projection_login_20260913",
+    "login_safe": true,
+    "only_projection_membership": true,
+    "no_direct_data": true,
+    "only_expected_definers": true
+  }
+}

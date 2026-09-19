@@ -1,0 +1,3 @@
+{"level":"info","msg":"Go runtime metrics collection started","time":"2026-09-13T22:11:24Z"}
+{"args":[0.00496995],"component":"pop","level":"info","msg":"%.4f seconds","time":"2026-09-13T22:11:24Z"}
+{"level":"fatal","msg":"running db migrations: Migrator: problem creating schema migrations: could not execute CREATE TABLE \"schema_migrations\" (\n\"version\" VARCHAR (14) NOT NULL,\nPRIMARY KEY(\"version\")\n);\nCREATE UNIQUE INDEX \"schema_migrations_version_idx\" ON \"schema_migrations\" (version);: ERROR: permission denied for schema public (SQLSTATE 42501)","time":"2026-09-13T22:11:24Z"}

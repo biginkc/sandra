@@ -5,9 +5,20 @@ import { humanizeMachineValue } from "@/lib/presentation/system-labels";
 
 import { isOlderThan, RelativeTime } from "./relative-time";
 
-type Props = { threads: ThreadRow[]; totalCount: number; nowMs: number };
+type Props = {
+  threads: ThreadRow[];
+  totalCount: number;
+  nowMs: number;
+  showMessagesAndLeads?: boolean;
+};
 
-export function ThreadsNeedingAttention({ threads, totalCount, nowMs }: Props) {
+export function ThreadsNeedingAttention({
+  threads,
+  totalCount,
+  nowMs,
+  showMessagesAndLeads = true,
+}: Props) {
+  if (!showMessagesAndLeads) return null;
   if (threads.length === 0) {
     return (
       <div className="border-border bg-card rounded-2xl border px-5 py-5">

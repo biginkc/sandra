@@ -257,6 +257,160 @@ export async function seedProspects(
   return data.map((r) => ({ id: r.id, address: r.address }));
 }
 
+/**
+ * Org-scoped cleanup for the inbox acceptance harness (Astra #8).
+ *
+ * `resetTenantTables()` / `deleteTenantCoreRows()` above are an
+ * ORG-UNSCOPED broad delete — every row in messages/notifications/
+ * properties/contacts, regardless of org_id. That's fine for specs that
+ * own the whole shared fixture DB for their run, but it's a hazard for a
+ * harness that must coexist with other proofs touching the same shared
+ * fixture: a stray call would blow away rows seeded by an unrelated org.
+ *
+ * This variant deletes ONLY rows scoped to the given org_id (defaults to
+ * DEFAULT_ORG_ID, the harness's fixture org). Today this test project is
+ * single-tenant (every row uses DEFAULT_ORG_ID = SANDRA_ORG_ID), so an
+ * org_id-scoped delete and a full-table delete affect the same rows right
+ * now — the value is contractual, not yet behavioral: it stops being a
+ * silent full-table wipe the moment a second org_id ever appears in this
+ * fixture, and it makes the acceptance harness's own cleanup call explicit
+ * about what it owns instead of reaching for the broad RPC. It does NOT
+ * touch `resetTenantTables`'s signature or behavior — this is a new,
+ * additive helper for e2e/inbox-acceptance/* callers only.
+ */
+export async function deleteOrgScopedFixtureRows(
+  client: SupabaseClient<Database>,
+  orgId: string = DEFAULT_ORG_ID,
+): Promise<void> {
+  const deleteScoped = async (
+    table: "messages" | "notifications",
+  ): Promise<void> => {
+    const { error } = await client.from(table).delete().eq("org_id", orgId);
+    if (error) {
+      throw new Error(
+        `deleteOrgScopedFixtureRows: failed to clear ${table} for org ${orgId}: ${error.message}`,
+      );
+    }
+  };
+
+  await deleteScoped("messages");
+  await deleteScoped("notifications");
+
+  // lead_events is an append-only audit ledger by design (see migration
+  // 20260825170000_lead_events_ledger.sql: service_role is GRANTed only
+  // select+insert on it, never delete/update — the only privileged path
+  // that can truncate it is the reset_tenant_tables() RPC's SECURITY
+  // DEFINER body). Actions this harness exercises (e.g. releaseMessage)
+  // record a lead_event automatically. Deleting it directly is not just
+  // unauthorized, it would be wrong: this cleanup must not undermine the
+  // ledger's intentional immutability. Any property still referenced by a
+  // lead_event for this org is therefore left in place below instead of
+  // being force-deleted — the harness's fixture properties are otherwise
+  // inert (no PII, address-only rows), so this residue is a known,
+  // accepted byproduct of exercising a real send/dispo action, not a
+  // fixture leak.
+  const { data: retainedProperties, error: leadEventsReadError } = await client
+    .from("lead_events")
+    .select("property_id")
+    .eq("org_id", orgId);
+  if (leadEventsReadError) {
+    throw new Error(
+      `deleteOrgScopedFixtureRows: failed to read lead_events for org ${orgId}: ${leadEventsReadError.message}`,
+    );
+  }
+  const retainedPropertyIds = [...new Set((retainedProperties ?? []).map((row) => row.property_id))];
+
+  // Unlink property <-> contact references within this org only before
+  // deleting contacts, mirroring deleteTenantCoreRows' ordering so FK
+  // constraints never block the delete below.
+  const { error: unlinkError } = await client
+    .from("properties")
+    .update({ homeowner_contact_id: null, agent_contact_id: null })
+    .eq("org_id", orgId);
+  if (unlinkError) {
+    throw new Error(
+      `deleteOrgScopedFixtureRows: failed to unlink property contacts for org ${orgId}: ${unlinkError.message}`,
+    );
+  }
+
+  const { error: contactsError } = await client
+    .from("contacts")
+    .delete()
+    .eq("org_id", orgId);
+  if (contactsError) {
+    throw new Error(
+      `deleteOrgScopedFixtureRows: failed to clear contacts for org ${orgId}: ${contactsError.message}`,
+    );
+  }
+
+  let propertiesQuery = client.from("properties").delete().eq("org_id", orgId);
+  if (retainedPropertyIds.length > 0) {
+    propertiesQuery = propertiesQuery.not(
+      "id",
+      "in",
+      `(${retainedPropertyIds.join(",")})`,
+    );
+  }
+  const { error: propertiesError } = await propertiesQuery;
+  if (propertiesError) {
+    throw new Error(
+      `deleteOrgScopedFixtureRows: failed to clear properties for org ${orgId}: ${propertiesError.message}`,
+    );
+  }
+}
+
+/**
+ * Count rows still scoped to `orgId` across the four core tenant tables.
+ * The acceptance harness uses this immediately after
+ * `deleteOrgScopedFixtureRows` to assert its own seeded rows are gone
+ * without needing to assert anything about other orgs' rows.
+ *
+ * `properties` rows still referenced by a `lead_events` row are excluded
+ * from this count — deleteOrgScopedFixtureRows deliberately leaves those
+ * in place (lead_events is an append-only ledger service_role cannot
+ * delete; see the comment there), so counting them here would make a
+ * correctly-behaving cleanup look broken.
+ */
+export async function countOrgScopedFixtureRows(
+  client: SupabaseClient<Database>,
+  orgId: string = DEFAULT_ORG_ID,
+): Promise<number> {
+  const { data: retainedProperties, error: leadEventsError } = await client
+    .from("lead_events")
+    .select("property_id")
+    .eq("org_id", orgId);
+  if (leadEventsError) {
+    throw new Error(
+      `countOrgScopedFixtureRows: failed to read lead_events for org ${orgId}: ${leadEventsError.message}`,
+    );
+  }
+  const retainedPropertyIds = [...new Set((retainedProperties ?? []).map((row) => row.property_id))];
+
+  let total = 0;
+  for (const table of [
+    "messages",
+    "notifications",
+    "contacts",
+    "properties",
+  ] as const) {
+    let query = client
+      .from(table)
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", orgId);
+    if (table === "properties" && retainedPropertyIds.length > 0) {
+      query = query.not("id", "in", `(${retainedPropertyIds.join(",")})`);
+    }
+    const { count, error } = await query;
+    if (error) {
+      throw new Error(
+        `countOrgScopedFixtureRows: failed to count ${table} for org ${orgId}: ${error.message}`,
+      );
+    }
+    total += count ?? 0;
+  }
+  return total;
+}
+
 export async function seedList(
   client: SupabaseClient<Database>,
   name: string,

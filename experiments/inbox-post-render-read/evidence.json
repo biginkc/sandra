@@ -1,0 +1,24 @@
+{
+  "checks": [
+    "bounded latest50 snapshot records boundary without acknowledging history",
+    "three bounded batches acknowledge451 including older pages; backdated later arrival remains unread",
+    "lost-response replay returns immutable completed receipt without re-marking later unread",
+    "unknown boundary and direct private storage access denied",
+    "expired unaccepted boundary fails without writes",
+    "current membership suspension and session deletion deny acknowledgment",
+    "T0 positive control: same session/epoch acknowledges and marks read",
+    "T1 session replacement: different session_id, same epoch, is rejected without writes",
+    "T2 access-epoch bump: same session_id but stale epoch is rejected without writes",
+    "T3 two-connection fence: acknowledge() actually blocks on the FOR UPDATE epoch lock; once the holder bumps the epoch and commits, the resumed call observes the new epoch and rejects without writes",
+    "mutation control: removing the session_id equality clause lets a replaced session (S2) wrongly acknowledge S1's boundary -- T1 fails as expected, proving the check is load-bearing",
+    "post-restore re-check: T1 rejects again after restoring the exact source session_id equality clause"
+  ],
+  "setup_sha256": "955693a70b6fe44f85a22fda0f9310b64eda011386a55c18a05cade8a84c0f09",
+  "runner_sha256": "031f546d8905757331da6b8cedad269150572c78d38ed72b432a328972b17793",
+  "limits": [
+    "SQL trusted claims only, no JWT transport",
+    "No browser render binding yet",
+    "DNC case pending here (covered in concurrency.py)",
+    "No production migration or activation"
+  ]
+}

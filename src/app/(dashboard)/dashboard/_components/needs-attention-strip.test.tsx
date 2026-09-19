@@ -20,4 +20,20 @@ describe("<NeedsAttentionStrip />", () => {
       screen.getByRole("link", { name: /escalated, needs reply/i }),
     ).toHaveAttribute("href", "/messages?filter=escalated");
   });
+
+  it("hides shared Messages and Leads attention links when access is restricted", () => {
+    const { container } = render(
+      <NeedsAttentionStrip
+        needs={{
+          escalated_unhandled: 2,
+          stale_conversations: 3,
+          sequence_ended_no_followup: 4,
+          unassigned: 5,
+        }}
+        showMessagesAndLeads={false}
+      />,
+    );
+
+    expect(container).toBeEmptyDOMElement();
+  });
 });

@@ -46,6 +46,11 @@ import {
   isSoftphoneTransportEnabled,
 } from "@/lib/dialer/transport-selection";
 import { transitionSoftphoneState, type SoftphoneState } from "@/lib/dialer/state-machine";
+import {
+  createReliabilityTimingSession,
+  publishPendingReliabilityTiming,
+  type ReliabilityTimingSession,
+} from "@/lib/dialer/reliability-timing";
 
 export type SoftphoneLead = {
   id: string;
@@ -186,6 +191,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [endingCall, setEndingCall] = useState(false);
   const [startedAt, setStartedAt] = useState<string | null>(null);
   const [callOutcome, setCallOutcome] = useState<"connected_human" | "failed">("connected_human");
   const [teardownUnconfirmed, setTeardownUnconfirmed] = useState(false);
@@ -367,6 +373,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     terminalHandledRef.current = false;
     teardownWarningRef.current = false;
     setTeardownUnconfirmed(false);
+    setEndingCall(false);
     setTarget(null);
     dialInputRef.current = "";
     setDialInput("");
@@ -470,12 +477,16 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   const startTarget = useCallback(async (
     prepare: () => Promise<{ ok: true; data: SoftphoneTarget } | { ok: false; error: string }>,
     provisionalTarget?: SoftphoneTarget,
+    suppliedTiming?: ReliabilityTimingSession,
   ) => {
     if (!callingEnabled) {
       setError("Calling not yet enabled");
       return;
     }
     if (startInFlightRef.current) return;
+    const reliabilityTiming = suppliedTiming ?? createReliabilityTimingSession();
+    if (!suppliedTiming) reliabilityTiming.mark("ui_click");
+    reliabilityTiming.mark("ui_handler");
     startInFlightRef.current = true;
     terminalHandledRef.current = false;
     teardownWarningRef.current = false;
@@ -532,6 +543,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     }
     let result: { ok: true; data: SoftphoneTarget } | { ok: false; error: string };
     try {
+      reliabilityTiming.mark("preparation_started");
       result = await prepare();
     } catch {
       if (provisionalTarget?.propertyId) {
@@ -548,6 +560,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       setError("Could not prepare the call. Try again.");
       return;
     }
+    if (result.ok) reliabilityTiming.mark("preparation_completed");
     setPending(false);
     if (!result.ok) {
       startInFlightRef.current = false;
@@ -570,6 +583,10 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     const callToken = startIntent?.callToken ?? crypto.randomUUID();
     const intentCapability = startIntent?.intentCapability;
     setWrapToken(callToken);
+    // Keep the pre-call markers in memory until the transport has validated
+    // the exact QA destination/caller pair. The browser-only timing session
+    // never crosses the Server Action serialization boundary.
+    if (jitterTransport) publishPendingReliabilityTiming(reliabilityTiming);
     const transport = transportFactory();
     transportRef.current = transport;
     let terminalPromise: Promise<void> | null = null;
@@ -590,30 +607,35 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     const finishTerminal = (kind: "ended" | "failed") => {
       if (terminalPromise) return terminalPromise;
       terminalHandledRef.current = true;
+      setEndingCall(true);
       // Terminal state must win synchronously, before hangup/recovery awaits.
       // Otherwise a still-pending transport.start() can resolve inside that
       // gap and publish coachCallId for a call that has already ended.
       attemptGenerationRef.current += 1;
       setCoachCallId(null);
       terminalPromise = (async () => {
-        forgetRetainedActiveCall();
-        const terminalResult = transport.terminalIsAuthoritative?.()
-          ? { durationSeconds: Math.max(0, Math.floor((Date.now() - Date.parse(result.data.startedAt)) / 1000)), outcome: kind === "ended" ? "connected_human" as const : "failed" as const }
-          : await transport.hangup();
-        setCallOutcome(kind === "failed" ? "failed" : terminalResult.outcome);
-        setFinalSeconds(terminalResult.durationSeconds);
-        setWrapToken((value) => value ?? crypto.randomUUID());
-        if (kind === "failed" && result.data.propertyId) {
-          try {
-            await resumeFailedSoftphoneCall(result.data.propertyId);
-          } catch {
-            // Recovery is idempotent and can be reconciled independently; a
-            // lost response must not trap the operator in a dead call screen.
+        try {
+          forgetRetainedActiveCall();
+          const terminalResult = transport.terminalIsAuthoritative?.()
+            ? { durationSeconds: Math.max(0, Math.floor((Date.now() - Date.parse(result.data.startedAt)) / 1000)), outcome: kind === "ended" ? "connected_human" as const : "failed" as const }
+            : await transport.hangup();
+          setCallOutcome(kind === "failed" ? "failed" : terminalResult.outcome);
+          setFinalSeconds(terminalResult.durationSeconds);
+          setWrapToken((value) => value ?? crypto.randomUUID());
+          if (kind === "failed" && result.data.propertyId) {
+            try {
+              await resumeFailedSoftphoneCall(result.data.propertyId);
+            } catch {
+              // Recovery is idempotent and can be reconciled independently; a
+              // lost response must not trap the operator in a dead call screen.
+            }
           }
-        }
-        transition(kind === "failed" ? { type: "call_failed" } : { type: "hangup" });
-        if (kind === "failed" && !teardownWarningRef.current) {
-          setError(terminalFailureMessage);
+          transition(kind === "failed" ? { type: "call_failed" } : { type: "hangup" });
+          if (kind === "failed" && !teardownWarningRef.current) {
+            setError(terminalFailureMessage);
+          }
+        } finally {
+          setEndingCall(false);
         }
       })();
       return terminalPromise;
@@ -785,6 +807,8 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
 
   const openLead = useCallback((lead: SoftphoneLead) => {
     if (!callingEnabled || startInFlightRef.current) return;
+    const reliabilityTiming = createReliabilityTimingSession();
+    reliabilityTiming.mark("ui_click");
     const phoneE164 = lead.phones[0] ?? "";
     void startTarget(() => prepareLeadCall(lead.id), {
       propertyId: lead.id,
@@ -795,7 +819,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       address: lead.address,
       state: lead.state,
       startedAt: new Date().toISOString(),
-    });
+    }, reliabilityTiming);
   }, [callingEnabled, startTarget]);
 
   const openIdle = useCallback(() => {
@@ -809,7 +833,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
 
   const hangup = useCallback(async () => {
     const transport = transportRef.current;
-    if (!transport) return;
+    if (!transport || manualHangupRef.current) return;
     // Invalidates any startTarget() attempt still awaiting
     // transport.start() (reachable if the rep hangs up while the call is
     // still "preparing") — its post-await commit must see itself
@@ -819,6 +843,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     setCoachCallId(null);
     manualHangupRef.current = true;
     terminalHandledRef.current = true;
+    setEndingCall(true);
     try {
       const result = await transport.hangup();
       setCallOutcome(result.outcome);
@@ -827,6 +852,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       setWrapToken((value) => value ?? crypto.randomUUID());
       transition({ type: "hangup" });
     } finally {
+      setEndingCall(false);
       manualHangupRef.current = false;
     }
   }, [transition]);
@@ -974,6 +1000,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
             muted={muted}
             held={held}
             holdPending={holdPending}
+            endingCall={endingCall}
             onDigit={sendLiveDigit}
             onMute={() => { void toggleMute(); }}
             onHold={() => { void toggleHold(); }}
@@ -1010,9 +1037,21 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
                 callerIdReady={callerIdReady}
                 onCallerIdChange={selectCallerId}
                 onRetryCallerIds={() => { void loadCallerIds(); }}
-                onLead={(suggestion) => void startTarget(() => prepareLeadCall(suggestion.propertyId))}
-                onRecent={(recent) => void startTarget(() => recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164))}
-                onManual={() => void startTarget(() => prepareManualCall(manualDigits))}
+                onLead={(suggestion) => {
+                  const reliabilityTiming = createReliabilityTimingSession();
+                  reliabilityTiming.mark("ui_click");
+                  void startTarget(() => prepareLeadCall(suggestion.propertyId), undefined, reliabilityTiming);
+                }}
+                onRecent={(recent) => {
+                  const reliabilityTiming = createReliabilityTimingSession();
+                  reliabilityTiming.mark("ui_click");
+                  void startTarget(() => recent.propertyId ? prepareLeadCall(recent.propertyId) : prepareManualCall(recent.phoneE164), undefined, reliabilityTiming);
+                }}
+                onManual={() => {
+                  const reliabilityTiming = createReliabilityTimingSession();
+                  reliabilityTiming.mark("ui_click");
+                  void startTarget(() => prepareManualCall(manualDigits), undefined, reliabilityTiming);
+                }}
                 onDigit={enterManualDigit}
                 onBackspace={() => { const next = dialInputRef.current.slice(0, -1); dialInputRef.current = next; setDialInput(next); }}
                 error={error}
@@ -1020,7 +1059,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
             ) : phone === "preparing" ? (
               <PreparingView target={target} />
             ) : isOnCall ? (
-              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { void toggleMute(); }} onHold={() => { void toggleHold(); }} onReconnectAudio={() => { void reconnectAudio(); }} onHangup={hangup} coachAvailable={coachUiEnabled} onReopenCoach={() => { updateCoachPreference({ ...coachPreference, enabled: true }); setCoachCollapsed(false); }} />
+              <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} endingCall={endingCall} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { void toggleMute(); }} onHold={() => { void toggleHold(); }} onReconnectAudio={() => { void reconnectAudio(); }} onHangup={hangup} coachAvailable={coachUiEnabled} onReopenCoach={() => { updateCoachPreference({ ...coachPreference, enabled: true }); setCoachCollapsed(false); }} />
             ) : (
               <WrapView target={target} finalSeconds={finalSeconds} notes={notes} setNotes={setNotes} callbackOpen={callbackOpen} setCallbackOpen={setCallbackOpen} callbackTime={callbackTime} setCallbackTime={setCallbackTime} pending={pending} error={error} teardownUnconfirmed={teardownUnconfirmed} onRetryTeardown={() => { void retryTeardown(); }} onDisposition={(disposition) => {
                 const config = SOFTPHONE_DISPOSITIONS.find((item) => item.value === disposition);
@@ -1120,7 +1159,7 @@ function PreparingView({ target }: { target: SoftphoneTarget | null }) {
   return <div data-testid="call-preparing" className="p-8 text-center"><span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-blue-800">Preparing call</span><div className="mt-4 text-lg font-extrabold">{target?.name || "Connecting…"}</div><div className="mt-1 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : "Checking call details and microphone…"}</div></div>;
 }
 
-function LiveView({ target, callName, callStatus, seconds, muted, held, holdPending, keypadOpen, onToggleKeypad, onDigit, onMute, onHold, onReconnectAudio, onHangup, coachAvailable, onReopenCoach }: { target: SoftphoneTarget | null; callName: string; callStatus: LiveCallStatus | null; seconds: number; muted: boolean; held: boolean; holdPending: boolean; keypadOpen: boolean; onToggleKeypad: () => void; onDigit: (digit: DtmfDigit) => void; onMute: () => void; onHold: () => void; onReconnectAudio: () => void; onHangup: () => void; coachAvailable: boolean; onReopenCoach: () => void }) {
+function LiveView({ target, callName, callStatus, seconds, muted, held, holdPending, endingCall, keypadOpen, onToggleKeypad, onDigit, onMute, onHold, onReconnectAudio, onHangup, coachAvailable, onReopenCoach }: { target: SoftphoneTarget | null; callName: string; callStatus: LiveCallStatus | null; seconds: number; muted: boolean; held: boolean; holdPending: boolean; endingCall: boolean; keypadOpen: boolean; onToggleKeypad: () => void; onDigit: (digit: DtmfDigit) => void; onMute: () => void; onHold: () => void; onReconnectAudio: () => void; onHangup: () => void; coachAvailable: boolean; onReopenCoach: () => void }) {
   useEffect(() => {
     if (!keypadOpen || held || callStatus !== "live") return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1133,10 +1172,10 @@ function LiveView({ target, callName, callStatus, seconds, muted, held, holdPend
   }, [callStatus, held, keypadOpen, onDigit]);
 
   const audioInterrupted = callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required";
-  return <div className="p-5 pb-4 text-center">{coachAvailable ? <button type="button" data-testid="reopen-coach" onClick={onReopenCoach} className="mb-3 inline-flex items-center gap-1 rounded-full border border-[#d6d1ce] bg-white px-2.5 py-1 text-[11px] font-bold text-[#57534e] hover:bg-[#f5f4f2]">Open live coach</button> : null}<span data-testid="call-live-pill" className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] ${audioInterrupted ? "border-amber-200 bg-amber-50 text-amber-900" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}><span className={`size-1.5 animate-pulse rounded-full ${audioInterrupted ? "bg-amber-500" : "bg-emerald-500"}`} />{holdPending ? "Updating hold…" : held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : callStatus === "audio_reconnecting" ? "Reconnecting browser audio…" : callStatus === "audio_reconnect_required" ? "Call live · audio interrupted" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div>{audioInterrupted ? <div role="alert" data-testid="audio-reconnect-warning" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-950"><div>{AUDIO_RECONNECT_WARNING}</div>{callStatus === "audio_reconnect_required" ? <button type="button" data-testid="reconnect-audio" onClick={onReconnectAudio} className="mt-2 rounded-md border border-amber-300 bg-white px-3 py-1.5 font-bold text-amber-950">Reconnect Audio</button> : null}</div> : null}<div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div>{keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={held || holdPending || callStatus !== "live"} /> : null}<div className="mt-3 flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" disabled={callStatus !== "live"} onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold disabled:opacity-40 ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-expanded={keypadOpen} data-testid="call-keypad" disabled={held || holdPending || callStatus !== "live"} onClick={onToggleKeypad} className="min-w-16 rounded-[9px] border border-[#e5e1df] bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Keypad</button><button type="button" aria-pressed={held} data-testid="call-hold" disabled={holdPending || callStatus !== "live"} onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold disabled:opacity-40 ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700">Hang up</button></div></div>;
+  return <div className="p-5 pb-4 text-center">{coachAvailable ? <button type="button" data-testid="reopen-coach" onClick={onReopenCoach} className="mb-3 inline-flex items-center gap-1 rounded-full border border-[#d6d1ce] bg-white px-2.5 py-1 text-[11px] font-bold text-[#57534e] hover:bg-[#f5f4f2]">Open live coach</button> : null}<span data-testid="call-live-pill" className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] ${audioInterrupted ? "border-amber-200 bg-amber-50 text-amber-900" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}><span className={`size-1.5 animate-pulse rounded-full ${audioInterrupted ? "bg-amber-500" : "bg-emerald-500"}`} />{endingCall ? "Ending call…" : holdPending ? "Updating hold…" : held ? "On hold" : callStatus === "connecting" ? "Connecting" : callStatus === "ringing" ? "Ringing" : callStatus === "audio_reconnecting" ? "Reconnecting browser audio…" : callStatus === "audio_reconnect_required" ? "Call live · audio interrupted" : "Live · browser audio"}</span><div className="mt-3.5 text-lg font-extrabold">{callName}</div><div className="mt-0.5 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : ""}</div>{audioInterrupted ? <div role="alert" data-testid="audio-reconnect-warning" className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-950"><div>{AUDIO_RECONNECT_WARNING}</div>{callStatus === "audio_reconnect_required" ? <button type="button" data-testid="reconnect-audio" onClick={onReconnectAudio} className="mt-2 rounded-md border border-amber-300 bg-white px-3 py-1.5 font-bold text-amber-950">Reconnect Audio</button> : null}</div> : null}<div data-testid="call-timer" className={`my-4.5 font-mono text-[34px] font-bold leading-none ${held ? "text-amber-700" : "text-emerald-600"}`}>{timerText(seconds)}</div>{keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={endingCall || held || holdPending || callStatus !== "live"} /> : null}<div className="mt-3 flex justify-center gap-2"><button type="button" aria-pressed={muted} data-testid="call-mute" disabled={endingCall || callStatus !== "live"} onClick={onMute} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold disabled:opacity-40 ${muted ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{muted ? "Unmute" : "Mute"}</button><button type="button" aria-expanded={keypadOpen} data-testid="call-keypad" disabled={endingCall || held || holdPending || callStatus !== "live"} onClick={onToggleKeypad} className="min-w-16 rounded-[9px] border border-[#e5e1df] bg-white px-3 py-2 text-xs font-bold disabled:opacity-40">Keypad</button><button type="button" aria-pressed={held} data-testid="call-hold" disabled={endingCall || holdPending || callStatus !== "live"} onClick={onHold} className={`min-w-16 rounded-[9px] border px-3 py-2 text-xs font-bold disabled:opacity-40 ${held ? "border-[#111827] bg-[#111827] text-white" : "border-[#e5e1df] bg-white"}`}>{held ? "Resume" : "Hold"}</button><button type="button" data-testid="call-hangup" disabled={endingCall} aria-busy={endingCall} onClick={onHangup} className="rounded-[9px] border-0 bg-red-600 px-4 py-2 text-xs font-bold text-white hover:bg-red-700 disabled:opacity-50">{endingCall ? "Ending call…" : "Hang up"}</button></div></div>;
 }
 
 function WrapView({ target, finalSeconds, notes, setNotes, callbackOpen, setCallbackOpen, callbackTime, setCallbackTime, pending, error, teardownUnconfirmed, onRetryTeardown, onDisposition, onCallback, onCustomCallback }: { target: SoftphoneTarget | null; finalSeconds: number; notes: string; setNotes: (value: string) => void; callbackOpen: boolean; setCallbackOpen: (value: boolean) => void; callbackTime: string; setCallbackTime: (value: string) => void; pending: boolean; error: string | null; teardownUnconfirmed: boolean; onRetryTeardown: () => void; onDisposition: (disposition: SoftphoneDisposition) => void; onCallback: (kind: "today_pm" | "tomorrow_am") => void; onCustomCallback: () => void }) {
   const disabled = !notes.trim() || pending || teardownUnconfirmed;
-  return <div className="p-[18px] pb-4 text-center"><span className="inline-flex rounded-full border border-[#e5e1df] bg-[#f6f4f2] px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-[#78716c]">Call ended · {timerText(finalSeconds)}</span><div className="mt-3 text-[15px] font-extrabold">{target?.name}</div><div className="my-1.5 mb-3 text-[11.5px] text-[#78716c]">How&apos;d it go? One tap logs it and you&apos;re done.</div><textarea data-testid="dispo-notes" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Notes (required) — saved to the lead with the outcome…" rows={3} className="mb-3 w-full resize-none rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-[12.5px] leading-[1.5] outline-none" />{error ? <div role="alert" className="mb-2 text-xs text-red-700">{error}</div> : null}{teardownUnconfirmed ? <button type="button" data-testid="retry-jitter-teardown" disabled={pending} onClick={onRetryTeardown} className="mb-2 rounded-[9px] border border-red-300 bg-white px-3 py-2 text-xs font-bold text-red-700 disabled:opacity-50">Retry ending call</button> : null}<div className="flex flex-wrap justify-center gap-1.5">{SOFTPHONE_DISPOSITIONS.map((item) => <button type="button" key={item.value} data-testid={item.testId} disabled={disabled} onClick={() => onDisposition(item.value)} className={`rounded-full border px-3 py-1.5 text-[11.5px] font-bold ${disabled ? "cursor-not-allowed border-[#e5e1df] bg-[#fafaf9] text-[#a8a29e]" : item.danger ? "border-red-200 bg-white text-red-700 hover:border-red-400 hover:bg-red-50" : "border-[#e5e1df] bg-white hover:border-[#111827] hover:bg-[#111827] hover:text-white"}`}>{item.label}</button>)}</div>{disabled ? <div className="mt-2.5 text-[11px] text-[#a8a29e]">{teardownUnconfirmed ? "Confirm the call ended before logging the outcome." : "Add a note to log the outcome."}</div> : null}{callbackOpen ? <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/60 p-2.5 text-left"><div className="mb-2 text-xs font-bold text-blue-900">Schedule callback</div><div className="flex flex-wrap gap-1.5"><button type="button" onClick={() => onCallback("today_pm")} className="rounded-full border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-blue-900">Today PM</button><button type="button" onClick={() => onCallback("tomorrow_am")} className="rounded-full border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-blue-900">Tomorrow AM</button><input aria-label="Pick a time" type="datetime-local" value={callbackTime} onChange={(event) => setCallbackTime(event.target.value)} className="rounded-md border border-blue-200 bg-white px-2 py-1 text-[11px]" /><button type="button" onClick={onCustomCallback} disabled={!callbackTime} className="rounded-full bg-blue-700 px-2.5 py-1.5 text-[11px] font-bold text-white disabled:opacity-50">Schedule</button><button type="button" onClick={() => setCallbackOpen(false)} className="rounded-full px-2 py-1.5 text-[11px] font-bold text-[#78716c]">Cancel</button></div></div> : null}</div>;
+  return <div className="p-[18px] pb-4 text-center"><span className="inline-flex rounded-full border border-[#e5e1df] bg-[#f6f4f2] px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-[#78716c]">Call ended · {timerText(finalSeconds)}</span><div className="mt-3 text-[15px] font-extrabold">{target?.name}</div><div className="my-1.5 mb-3 text-[11.5px] text-[#78716c]">How&apos;d it go? One tap logs it and you&apos;re done.</div><textarea data-testid="dispo-notes" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Notes (required) — saved to the lead with the outcome…" rows={3} className="mb-3 w-full resize-none rounded-[10px] border border-[#e5e1df] bg-[#fafaf9] px-3 py-2.5 text-[12.5px] leading-[1.5] outline-none" />{error ? <div role="alert" className="mb-2 text-xs text-red-700">{error}</div> : null}{teardownUnconfirmed ? <button type="button" data-testid="retry-jitter-teardown" aria-busy={pending} disabled={pending} onClick={onRetryTeardown} className="mb-2 rounded-[9px] border border-red-300 bg-white px-3 py-2 text-xs font-bold text-red-700 disabled:opacity-50">{pending ? "Retrying…" : "Retry ending call"}</button> : null}<div className="flex flex-wrap justify-center gap-1.5">{SOFTPHONE_DISPOSITIONS.map((item) => <button type="button" key={item.value} data-testid={item.testId} disabled={disabled} onClick={() => onDisposition(item.value)} className={`rounded-full border px-3 py-1.5 text-[11.5px] font-bold ${disabled ? "cursor-not-allowed border-[#e5e1df] bg-[#fafaf9] text-[#a8a29e]" : item.danger ? "border-red-200 bg-white text-red-700 hover:border-red-400 hover:bg-red-50" : "border-[#e5e1df] bg-white hover:border-[#111827] hover:bg-[#111827] hover:text-white"}`}>{item.label}</button>)}</div>{disabled ? <div className="mt-2.5 text-[11px] text-[#a8a29e]">{teardownUnconfirmed ? "Confirm the call ended before logging the outcome." : "Add a note to log the outcome."}</div> : null}{callbackOpen ? <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/60 p-2.5 text-left"><div className="mb-2 text-xs font-bold text-blue-900">Schedule callback</div><div className="flex flex-wrap gap-1.5"><button type="button" onClick={() => onCallback("today_pm")} className="rounded-full border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-blue-900">Today PM</button><button type="button" onClick={() => onCallback("tomorrow_am")} className="rounded-full border border-blue-200 bg-white px-2.5 py-1.5 text-[11px] font-bold text-blue-900">Tomorrow AM</button><input aria-label="Pick a time" type="datetime-local" value={callbackTime} onChange={(event) => setCallbackTime(event.target.value)} className="rounded-md border border-blue-200 bg-white px-2 py-1 text-[11px]" /><button type="button" onClick={onCustomCallback} disabled={!callbackTime} className="rounded-full bg-blue-700 px-2.5 py-1.5 text-[11px] font-bold text-white disabled:opacity-50">Schedule</button><button type="button" onClick={() => setCallbackOpen(false)} className="rounded-full px-2 py-1.5 text-[11px] font-bold text-[#78716c]">Cancel</button></div></div> : null}</div>;
 }

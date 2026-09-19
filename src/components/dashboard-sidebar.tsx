@@ -2,7 +2,9 @@
 
 import {
   Briefcase,
+  Headphones,
   Calendar,
+  Calculator,
   ClipboardList,
   Download,
   FileText,
@@ -62,11 +64,27 @@ const ITEMS: readonly Item[] = [
   { href: "/messages", label: "Messages", icon: MessageSquare },
   { href: "/leads", label: "Leads", icon: LayoutDashboard },
   { href: "/my-leads", label: "My Leads", icon: ClipboardList },
+  { href: "/calculators", label: "Calculators", icon: Calculator },
   { href: "/jobs", label: "Jobs", icon: Briefcase },
 ];
 
-function visibleItems(showMyLeads: boolean): readonly Item[] {
-  return showMyLeads ? ITEMS : ITEMS.filter((item) => item.href !== "/my-leads");
+function visibleItems(
+  showMyLeads: boolean,
+  showRecordings: boolean,
+  showMyRecordings: boolean,
+  showCalculators: boolean,
+  showMessagesAndLeads: boolean,
+): readonly Item[] {
+  const items = ITEMS.filter(
+    (item) =>
+      (item.href !== "/my-leads" || showMyLeads) &&
+      (item.href !== "/calculators" || showCalculators) &&
+      ((item.href !== "/messages" && item.href !== "/leads") || showMessagesAndLeads),
+  );
+  const recordings: Item[] = [];
+  if (showRecordings) recordings.push({ href: "/owner/recordings", label: "Recordings", icon: Headphones });
+  if (showMyRecordings) recordings.push({ href: "/my-recordings", label: "My Recordings", icon: Headphones });
+  return [...items.slice(0,-1), ...recordings, ...items.slice(-1)];
 }
 
 const ITEM_BASE =
@@ -83,16 +101,30 @@ const MOBILE_ITEM_INACTIVE =
   "text-white/75 hover:bg-white/[0.07] hover:text-white";
 
 export function DashboardSidebar({
+  showCalculators = false,
   showMyLeads = true,
+  showRecordings = false,
+  showMyRecordings = false,
+  showMessagesAndLeads = true,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
 }: {
+  showCalculators?: boolean;
   showMyLeads?: boolean;
+  showRecordings?: boolean;
+  showMyRecordings?: boolean;
+  showMessagesAndLeads?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
 }) {
   const pathname = usePathname();
-  const items = visibleItems(showMyLeads);
+  const items = visibleItems(
+    showMyLeads,
+    showRecordings,
+    showMyRecordings,
+    showCalculators,
+    showMessagesAndLeads,
+  );
 
   const isActive = (item: Item): boolean => {
     if (pathname === item.href) return true;
@@ -104,7 +136,7 @@ export function DashboardSidebar({
   };
 
   return (
-    <nav aria-label="Primary" className="flex flex-1 flex-col gap-1">
+    <nav aria-label="Primary" className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
       {items.map((item) => {
         const active = isActive(item);
         const Icon = item.icon;
@@ -131,16 +163,30 @@ export function DashboardSidebar({
 }
 
 export function DashboardMobileNav({
+  showCalculators = false,
   showMyLeads = true,
+  showRecordings = false,
+  showMyRecordings = false,
+  showMessagesAndLeads = true,
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
 }: {
+  showCalculators?: boolean;
   showMyLeads?: boolean;
+  showRecordings?: boolean;
+  showMyRecordings?: boolean;
+  showMessagesAndLeads?: boolean;
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
 }) {
   const pathname = usePathname();
-  const items = visibleItems(showMyLeads);
+  const items = visibleItems(
+    showMyLeads,
+    showRecordings,
+    showMyRecordings,
+    showCalculators,
+    showMessagesAndLeads,
+  );
 
   const isActiveHref = (href: string): boolean =>
     pathname === href || pathname.startsWith(href + "/");

@@ -5,7 +5,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types";
 
 import {
-  ESIGN_MERGE_FIELD_NAMES,
+  getEsignFieldSchema,
+  ESIGN_NOVATION_TWO_SELLER_ROLES,
   ESIGN_TEMPLATE_SIGNER_ROLES,
   requireTemplateTitle,
   type ProviderTemplateField,
@@ -81,8 +82,10 @@ export async function registerDropboxWebsiteTemplate(
     documentType: input.documentType.trim(),
     providerTemplateId: metadata.providerTemplateId,
     sellerRoleName: "Seller",
-    signerRoles: ESIGN_TEMPLATE_SIGNER_ROLES,
-    mergeFieldNames: ESIGN_MERGE_FIELD_NAMES,
+    signerRoles: metadata.signerRoles.map((role) => ({ ...role })),
+    mergeFieldNames: getEsignFieldSchema([...new Set(metadata.documents.flatMap((document) =>
+      document.customFields.filter((field) => field.assignedTo === "sender").map((field) => field.name ?? ""),
+    ))])!.names,
   };
 }
 
@@ -235,24 +238,29 @@ function validateWebsiteProviderMetadata(
       { providerCode: "template_account_mismatch" },
     );
   }
-  if (JSON.stringify(metadata.signerRoles) !== JSON.stringify(ESIGN_TEMPLATE_SIGNER_ROLES)) {
+  const fields = metadata.documents.flatMap((document) => document.customFields);
+  const schema = getEsignFieldSchema([...new Set(fields.filter((field) =>
+    field.assignedTo === "sender").map((field) => field.name ?? ""))]);
+  const validRoles = JSON.stringify(metadata.signerRoles) === JSON.stringify(ESIGN_TEMPLATE_SIGNER_ROLES) ||
+    (schema?.version === "novation-v1" &&
+      JSON.stringify(metadata.signerRoles) === JSON.stringify(ESIGN_NOVATION_TWO_SELLER_ROLES));
+  if (!validRoles) {
     throw new ProviderError(
-      "Dropbox Sign signer roles must be exactly Seller then Buyer.",
+      "Dropbox Sign signer roles must match a supported Sandra contract signing path.",
       "dropbox_sign",
       { providerCode: "signer_role_mismatch" },
     );
   }
-  const customFields = metadata.documents.flatMap((document) => document.customFields);
-  if (!hasExactSenderMergeFields(customFields)) {
+  if (!hasExactSenderMergeFields(fields)) {
     throw new ProviderError(
-      "Dropbox Sign merge fields must exactly match Sandra's five Sender fields.",
+      "Dropbox Sign merge fields must exactly match a supported Sandra contract field set.",
       "dropbox_sign",
       { providerCode: "merge_field_mismatch" },
     );
   }
-  if (!hasRequiredSignatureFields(metadata.formFields)) {
+  if (!hasRequiredSignatureFields(metadata.formFields, metadata.signerRoles)) {
     throw new ProviderError(
-      "Dropbox Sign template must include required signature fields for Seller and Buyer.",
+      "Dropbox Sign template must include a required signature field for every signer role.",
       "dropbox_sign",
       { providerCode: "template_field_mismatch" },
     );
@@ -260,31 +268,17 @@ function validateWebsiteProviderMetadata(
 }
 
 function hasExactSenderMergeFields(fields: readonly ProviderTemplateField[]): boolean {
-  const expectedFields = [...ESIGN_MERGE_FIELD_NAMES].sort();
-  const expectedNameFields = fields.filter(
-    (field) =>
-      typeof field.name === "string" &&
-      ESIGN_MERGE_FIELD_NAMES.includes(
-        field.name as (typeof ESIGN_MERGE_FIELD_NAMES)[number],
-      ),
-  );
   const senderFields = fields.filter((field) => field.assignedTo === "sender");
-  const actualFields = senderFields
-    .filter(
-      (field) =>
-        isValidSenderMergeField(field) &&
-        ESIGN_MERGE_FIELD_NAMES.includes(
-          field.name as (typeof ESIGN_MERGE_FIELD_NAMES)[number],
-        ),
-    )
-    .map((field) => field.name as string)
-    .sort();
-  return (
-    expectedNameFields.length === expectedFields.length &&
-    senderFields.length === expectedFields.length &&
-    actualFields.length === expectedFields.length &&
-    actualFields.every((field, index) => field === expectedFields[index])
-  );
+  const names = senderFields.map((field) => field.name ?? "");
+  const schema = getEsignFieldSchema([...new Set(names)]);
+  if (!schema) return false;
+  return senderFields.every(isValidSenderMergeField) &&
+    fields.length === senderFields.length &&
+    (schema.version === "novation-v1" || names.length === schema.names.length) &&
+    (schema.version !== "residential-v1" || senderFields.every((field) =>
+      field.required === (field.name !== "additional_terms"))) &&
+    (schema.version !== "novation-v1" || senderFields.every((field) =>
+      field.required === (field.name !== "additional_terms")));
 }
 
 function isValidSenderMergeField(field: ProviderTemplateField): boolean {
@@ -297,13 +291,14 @@ function isValidSenderMergeField(field: ProviderTemplateField): boolean {
   );
 }
 
-function hasRequiredSignatureFields(fields: readonly ProviderTemplateField[]): boolean {
+function hasRequiredSignatureFields(
+  fields: readonly ProviderTemplateField[],
+  roles: ProviderTemplateMetadata["signerRoles"],
+): boolean {
   const requiredSignatureFields = fields.filter(
     (field) => field.type === "signature" && field.required === true,
   );
-  const acceptedRoles = new Set<string>(
-    ESIGN_TEMPLATE_SIGNER_ROLES.map((role) => role.name),
-  );
+  const acceptedRoles = new Set<string>(roles.map((role) => role.name));
   if (
     requiredSignatureFields.some(
       (field) =>
@@ -323,7 +318,7 @@ function hasRequiredSignatureFields(fields: readonly ProviderTemplateField[]): b
       )
       .map((field) => field.signerRoleName),
   );
-  return ESIGN_TEMPLATE_SIGNER_ROLES.every((role) =>
+  return roles.every((role) =>
     rolesWithRequiredSignature.has(role.name),
   );
 }

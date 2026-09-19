@@ -1,0 +1,7 @@
+{
+  "passed": true,
+  "replacementDuringLockWaitDenied": true,
+  "naturalExpiryDenied": true,
+  "scopeId": "aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae",
+  "note": "Owned canonical wrappers under actual PostgreSQL locks; no Auth/session mutation."
+}

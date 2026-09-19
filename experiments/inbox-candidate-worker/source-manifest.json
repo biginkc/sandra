@@ -1,0 +1,133 @@
+{
+  "scope": "Current package sources and receipts; each historical runtime receipt retains its original source identity",
+  "files": [
+    {
+      "path": "experiments/inbox-action-runtime-bootstrap/auth-foundation.json",
+      "sha256": "66e122eb7932d77941b67aada00bdc2029123ff92e75375cf9c14827fc1cce2a"
+    },
+    {
+      "path": "experiments/inbox-action-runtime-bootstrap/bootstrap-evidence.json",
+      "sha256": "7bc83973098ec5cac9c2d5f154039e76d82926b4b15edb13abc973a850ad757e"
+    },
+    {
+      "path": "experiments/inbox-action-runtime-bootstrap/bootstrap.py",
+      "sha256": "719e8baf9a40a0dde284bbb1a6687d3e17c3dfc2c61ec61693e316ccf1e74a3a"
+    },
+    {
+      "path": "experiments/inbox-action-runtime-bootstrap/catalog-evidence.json",
+      "sha256": "70111d90639ed0d1f6cee88f1cb022b816a4b30bf0d1d82ce157f58f819cb50e"
+    },
+    {
+      "path": "experiments/inbox-action-runtime-bootstrap/install-evidence.json",
+      "sha256": "c2e6948fd5d7357bd87c30ca9515bb62b205adcac4a5362e03822ec2727c1434"
+    },
+    {
+      "path": "experiments/inbox-action-runtime-bootstrap/install.py",
+      "sha256": "ecc8e48abef1748f6357a72e0c227de0c671e55d3ee16fcacb1e912157ea7bc0"
+    },
+    {
+      "path": "experiments/inbox-action-runtime-bootstrap/profile-receipt.json",
+      "sha256": "f89f626459447a2879de455880c7a052c8222673c9fb1f757db847c26bdab098"
+    },
+    {
+      "path": "experiments/inbox-candidate-volume/admission-baseline.json",
+      "sha256": "a66e53ef82eb0cb537a40d3ef8a0da7c8cff075a9a7de155fbdc12422f020251"
+    },
+    {
+      "path": "experiments/inbox-candidate-volume/admission-drain-samples.json",
+      "sha256": "9b2c696aad22e9a71c7a6bb0f8048df735d0165ec1b0d2c03eb1f9ebc16e6b41"
+    },
+    {
+      "path": "experiments/inbox-candidate-volume/admission-evidence.json",
+      "sha256": "ce30b2aa95cf7581298135dc6382ab8e3517ed7caaf45bee661cbcefac729e6c"
+    },
+    {
+      "path": "experiments/inbox-candidate-volume/admission-worker-rounds.json",
+      "sha256": "150047b7fac579d4f305ea666f9dd95612166d7b2d23d758a7ad757f03204a13"
+    },
+    {
+      "path": "experiments/inbox-candidate-volume/manifest-18bc08d7-5784-414b-a9f1-c838702a4a16.json",
+      "sha256": "9b8fc3dfaa4af550f7cbad45260082d30c142e296c51db71ae5f6fab8e39edd7"
+    },
+    {
+      "path": "experiments/inbox-candidate-volume/manifest-a40e57a8-7174-4979-9c30-c111231f8370.json",
+      "sha256": "6c8e09dbf386f84fb11b1a4b728ff1f3eb5407e7166a339351763edbeced0481"
+    },
+    {
+      "path": "experiments/inbox-candidate-volume/receipt-18bc08d7-5784-414b-a9f1-c838702a4a16-1000.json",
+      "sha256": "d6607c5cbecb5f4b413760afcd702ffb28a40bc20d5e365a14fa65cfe85b82be"
+    },
+    {
+      "path": "experiments/inbox-candidate-volume/seed.py",
+      "sha256": "473579735c23347f48fb7a4853a5516a68392b1a2f4b1cac443021a8160c5589"
+    },
+    {
+      "path": "experiments/inbox-candidate-volume/source-evidence.json",
+      "sha256": "842a603f834111edbb9c5b2764842299331ad1e7f235a960bb18437ca7b086cc"
+    },
+    {
+      "path": "experiments/inbox-candidate-worker/live-evidence.json",
+      "sha256": "85053e4b6efbe601a9b0882544f2e05b7b601a78235d74019b6e2072783a1649"
+    },
+    {
+      "path": "experiments/inbox-candidate-worker/persistent-evidence.json",
+      "sha256": "e8883d5b95a51546b8bac3c4881fa317cc695c1378707bee827bf16670cd66a7"
+    },
+    {
+      "path": "experiments/inbox-candidate-worker/persistent-live-evidence.json",
+      "sha256": "4a7a53ab8a2ff30ae3a2c58c6707dda6b67ef3b2ae9a05fa1e91bb0ecbde8895"
+    },
+    {
+      "path": "experiments/inbox-candidate-worker/run.py",
+      "sha256": "5338ebf41a98a96ade65d34ce081d68c2a4416b0f1685486d5c5a70826c74269"
+    },
+    {
+      "path": "experiments/inbox-candidate-worker/start-persistent.py",
+      "sha256": "299ce82b2dad9a4be1fee9558c2639d6b48cd4131811cbb05ebd97323cc8ab5d"
+    },
+    {
+      "path": "services/inbox-projection-worker/Dockerfile",
+      "sha256": "f30e4fe8a1db80724fb8355c2f1eebe9a6ef40dc55fcc4fcbdc1af3cbd083091"
+    },
+    {
+      "path": "services/inbox-projection-worker/core.mjs",
+      "sha256": "c8b5ea065579cf6ef0c5c83fce7a884000e7b11716871654b74de43d20f26a43"
+    },
+    {
+      "path": "services/inbox-projection-worker/core.test.mjs",
+      "sha256": "c5d9b30f2bd70bccc5bee93d2a6b225b86e19f25c83948de1d26ef3041ec4900"
+    },
+    {
+      "path": "services/inbox-projection-worker/package-lock.json",
+      "sha256": "ce33cf8eabdd72dd596204ecad3612df265bf471766f478aa806123acec1c2da"
+    },
+    {
+      "path": "services/inbox-projection-worker/package.json",
+      "sha256": "93c75a66175e33248b6c6869d3b7881a3c23064168c532bdfd063a3c866a6050"
+    },
+    {
+      "path": "services/inbox-projection-worker/server.mjs",
+      "sha256": "9f8a5cdf8183a0dca74c504492559607743c3f77a137cbea2958fd128be3af0f"
+    },
+    {
+      "path": "services/inbox-projection-worker/worker-role.sql",
+      "sha256": "e44f574ff5fc11eb3f5a47ef95778798a01260d756022228967dcc439922df30"
+    },
+    {
+      "path": "services/inbox-projection-worker/server.test.mjs",
+      "sha256": "b1e70761cf90bc3ac29b2c3a36a90af8a9df97ccdf161accf77592a6bdb5c9ed"
+    },
+    {
+      "path": "services/inbox-projection-worker/config.mjs",
+      "sha256": "977a32029fd3a435e6249d4e8dc4235479a529b015fa0ecf9c507fb150dffd48"
+    },
+    {
+      "path": "services/inbox-projection-worker/config.test.mjs",
+      "sha256": "3211ac34db3a77215a72d6b5d68fb591454ca47e26e7ef2d1cb3011ac46c72da"
+    },
+    {
+      "path": "experiments/inbox-candidate-worker/login-catalog-evidence.json",
+      "sha256": "8b06550aefbde01f0cf43eb5b44260e7c3bdb1f28fb1513d1dddc1370edce1d0"
+    }
+  ]
+}

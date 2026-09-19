@@ -1,0 +1,24 @@
+{
+  "sources": [
+    {
+      "path": "src/lib/messages/list-unknown-senders.ts",
+      "sha256": "fceb4bdd3704292f02b2564894dcf6aeb036498a6387a641f02b4c9b7b0a6c7e"
+    },
+    {
+      "path": "src/lib/messages/triage.ts",
+      "sha256": "17c283d6354aa72422b14637126bad1dfbf213f005eef03f6b0ba4f8afae7dc3"
+    },
+    {
+      "path": "src/app/(dashboard)/messages/page.tsx",
+      "sha256": "fee769b86cbc7d3f80eaf29ebdee29a3807844aee958b4ad641845ac886e7e0e"
+    }
+  ],
+  "status": "offline_runtime_passed",
+  "parity_scope": "single-org RLS, actual source classifier via mocked transport; legacy ties excluded from exact parity",
+  "decisions": [
+    "Preserve exact raw sender text within required organization scope",
+    "No unknown90day/review/noise/suppression filter invented",
+    "UUID tie ordering explicitly differs from undefined legacy ordering",
+    "Persisted typed targetID mapping not implemented"
+  ]
+}

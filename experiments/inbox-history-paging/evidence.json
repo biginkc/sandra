@@ -1,0 +1,843 @@
+{
+  "checks": [
+    "four exact pages 50/50/50/3 with microsecond/tied timestamp order",
+    "unchanged cursor repeat is stable; all pages preserve original read boundary",
+    "same-user other-session, wrong-conversation and unknown cursor denied",
+    "anon/service_role direct execution denied",
+    "late backdated arrival visible in older history but excluded from original acknowledgment",
+    "expired history cursor denied",
+    "mutation control: fabricated cursor with matching session but a different session's boundary is rejected by the boundary.session_id/access_epoch clause; removing that clause lets it wrongly succeed, restoring it rejects again"
+  ],
+  "source_sha256": "8b44f376f75d2be90d54c0537a521985a2212137df74a0594feecb0b7b7e402b",
+  "runner_sha256": "e13a58e6db39b2fc728e08ddaa7a52d94357d556203b6ee59a97cb7653369268",
+  "first_page": {
+    "org_id": "691ff344-3550-4f8e-8366-6a31fb16ed3c",
+    "history": [
+      {
+        "id": "05200575-f83f-44c0-84f3-e8588794eb04",
+        "body": "Synthetic history 153",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123051+00",
+        "inbound_revision": "153"
+      },
+      {
+        "id": "f1d78550-7c41-43ad-b775-338a7ddc8da7",
+        "body": "Synthetic history 151",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12305+00",
+        "inbound_revision": "151"
+      },
+      {
+        "id": "2aec0ec1-234b-4da6-b91d-0de5d43570ff",
+        "body": "Synthetic history 150",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12305+00",
+        "inbound_revision": "150"
+      },
+      {
+        "id": "024772de-2cf1-4e6c-a637-7c25aba25a5e",
+        "body": "Synthetic history 152",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12305+00",
+        "inbound_revision": "152"
+      },
+      {
+        "id": "cb26e604-f8b2-4fa6-b109-b403dd6dd74e",
+        "body": "Synthetic history 148",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123049+00",
+        "inbound_revision": "148"
+      },
+      {
+        "id": "bc7035c8-4a5a-4e4c-b995-d7e8cb4b33c6",
+        "body": "Synthetic history 149",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123049+00",
+        "inbound_revision": "149"
+      },
+      {
+        "id": "4446d4ca-05f2-4b70-960f-0e40eb58146b",
+        "body": "Synthetic history 147",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123049+00",
+        "inbound_revision": "147"
+      },
+      {
+        "id": "d7128904-c609-4c80-82ef-e3311255202f",
+        "body": "Synthetic history 145",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123048+00",
+        "inbound_revision": "145"
+      },
+      {
+        "id": "1c81c250-de17-403e-8ed5-2f4d2acf2128",
+        "body": "Synthetic history 146",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123048+00",
+        "inbound_revision": "146"
+      },
+      {
+        "id": "0274f6c6-0b5d-46d1-a238-8ce4aa048f04",
+        "body": "Synthetic history 144",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123048+00",
+        "inbound_revision": "144"
+      },
+      {
+        "id": "74bc01e8-6b73-4a32-b3de-0460e5781947",
+        "body": "Synthetic history 142",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123047+00",
+        "inbound_revision": "142"
+      },
+      {
+        "id": "48d236d5-d0b6-48c0-9647-ce422309cab8",
+        "body": "Synthetic history 141",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123047+00",
+        "inbound_revision": "141"
+      },
+      {
+        "id": "474644ed-10fa-42fc-8cd2-d0696caadd1d",
+        "body": "Synthetic history 143",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123047+00",
+        "inbound_revision": "143"
+      },
+      {
+        "id": "b512ecea-3810-4c29-9666-32596049bf16",
+        "body": "Synthetic history 139",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123046+00",
+        "inbound_revision": "139"
+      },
+      {
+        "id": "2b189c24-5c1d-4204-8a42-b12a4749dbc6",
+        "body": "Synthetic history 140",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123046+00",
+        "inbound_revision": "140"
+      },
+      {
+        "id": "15fe26f4-18a0-47cc-8f6f-9d351d384ab0",
+        "body": "Synthetic history 138",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123046+00",
+        "inbound_revision": "138"
+      },
+      {
+        "id": "a3c38fb8-dbed-4e55-8cb2-6a84c283cc47",
+        "body": "Synthetic history 137",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123045+00",
+        "inbound_revision": "137"
+      },
+      {
+        "id": "9fe09fdc-efba-4a7a-a1d6-c11097c057a1",
+        "body": "Synthetic history 136",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123045+00",
+        "inbound_revision": "136"
+      },
+      {
+        "id": "9fbdb6a7-5d01-4c92-b0a2-e342bbd76bac",
+        "body": "Synthetic history 135",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123045+00",
+        "inbound_revision": "135"
+      },
+      {
+        "id": "9598e7a7-e741-43c7-967e-e9d649518d66",
+        "body": "Synthetic history 134",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123044+00",
+        "inbound_revision": "134"
+      },
+      {
+        "id": "8ea80930-2934-4b88-84cc-784006b72b21",
+        "body": "Synthetic history 133",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123044+00",
+        "inbound_revision": "133"
+      },
+      {
+        "id": "28595b82-c12c-430e-8ffb-a4893ef94795",
+        "body": "Synthetic history 132",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123044+00",
+        "inbound_revision": "132"
+      },
+      {
+        "id": "daa3c976-193a-4415-8611-14aa5d3923d8",
+        "body": "Synthetic history 129",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123043+00",
+        "inbound_revision": "129"
+      },
+      {
+        "id": "c5f9d00f-9321-4165-993c-bc8f7e16ac6a",
+        "body": "Synthetic history 130",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123043+00",
+        "inbound_revision": "130"
+      },
+      {
+        "id": "56adb06f-ce4f-4cfd-81ff-5bd513a21a47",
+        "body": "Synthetic history 131",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123043+00",
+        "inbound_revision": "131"
+      },
+      {
+        "id": "85fd96a1-4793-45e0-8af4-e3e4de99bfe5",
+        "body": "Synthetic history 128",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123042+00",
+        "inbound_revision": "128"
+      },
+      {
+        "id": "7935175e-f259-4190-8dae-262b7164aeaa",
+        "body": "Synthetic history 127",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123042+00",
+        "inbound_revision": "127"
+      },
+      {
+        "id": "69934fd0-4def-4289-863c-14bda32b4492",
+        "body": "Synthetic history 126",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123042+00",
+        "inbound_revision": "126"
+      },
+      {
+        "id": "ea6bf879-5b7a-4eb8-847a-d5da4d968265",
+        "body": "Synthetic history 124",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123041+00",
+        "inbound_revision": "124"
+      },
+      {
+        "id": "7d7eec75-1380-4650-bc59-750aac5e8d1d",
+        "body": "Synthetic history 123",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123041+00",
+        "inbound_revision": "123"
+      },
+      {
+        "id": "1323f3f3-7e00-443a-a725-ec375a0daecd",
+        "body": "Synthetic history 125",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123041+00",
+        "inbound_revision": "125"
+      },
+      {
+        "id": "7e15d069-9d67-4588-b09d-558d855cdbf7",
+        "body": "Synthetic history 120",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12304+00",
+        "inbound_revision": "120"
+      },
+      {
+        "id": "7523dfeb-8d51-4cb0-b923-9c7c7f2e0865",
+        "body": "Synthetic history 121",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12304+00",
+        "inbound_revision": "121"
+      },
+      {
+        "id": "3025d336-3471-4b73-a5cd-4dcdee934a81",
+        "body": "Synthetic history 122",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12304+00",
+        "inbound_revision": "122"
+      },
+      {
+        "id": "6717782c-0c22-4c61-99e6-63aeddcdbc22",
+        "body": "Synthetic history 117",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123039+00",
+        "inbound_revision": "117"
+      },
+      {
+        "id": "4b6a468c-8ca3-4c39-b5dc-fc8778e8b64d",
+        "body": "Synthetic history 118",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123039+00",
+        "inbound_revision": "118"
+      },
+      {
+        "id": "33ea16b8-4eb5-4df2-88c8-c6a3c66dab60",
+        "body": "Synthetic history 119",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123039+00",
+        "inbound_revision": "119"
+      },
+      {
+        "id": "7c1d88e1-6888-46a5-a296-6daa7ee616b7",
+        "body": "Synthetic history 114",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123038+00",
+        "inbound_revision": "114"
+      },
+      {
+        "id": "549f1f8a-0f6c-4828-a734-e076e83ebfa8",
+        "body": "Synthetic history 116",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123038+00",
+        "inbound_revision": "116"
+      },
+      {
+        "id": "3a96b6b6-1cd0-427c-9907-b3fc5a14ae77",
+        "body": "Synthetic history 115",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123038+00",
+        "inbound_revision": "115"
+      },
+      {
+        "id": "856668cc-25ce-4724-a15b-b0b2e6b5316a",
+        "body": "Synthetic history 112",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123037+00",
+        "inbound_revision": "112"
+      },
+      {
+        "id": "5f3c3c1a-521b-4353-a0f1-54fd583e1f2b",
+        "body": "Synthetic history 111",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123037+00",
+        "inbound_revision": "111"
+      },
+      {
+        "id": "3e505622-5137-47a2-9dab-676ed52c9e98",
+        "body": "Synthetic history 113",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123037+00",
+        "inbound_revision": "113"
+      },
+      {
+        "id": "b1f4ef7a-c862-43d3-91e2-1cff1b85bb78",
+        "body": "Synthetic history 110",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123036+00",
+        "inbound_revision": "110"
+      },
+      {
+        "id": "a64082ed-96c7-4ce4-a906-a15eed90ab4b",
+        "body": "Synthetic history 108",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123036+00",
+        "inbound_revision": "108"
+      },
+      {
+        "id": "4074d804-1c31-42da-9b1e-d7fe900fe996",
+        "body": "Synthetic history 109",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123036+00",
+        "inbound_revision": "109"
+      },
+      {
+        "id": "f742feb9-07be-462f-b6cc-b1e127881331",
+        "body": "Synthetic history 105",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123035+00",
+        "inbound_revision": "105"
+      },
+      {
+        "id": "bb2be17a-67b9-4614-ab10-a01e891f2c53",
+        "body": "Synthetic history 106",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123035+00",
+        "inbound_revision": "106"
+      },
+      {
+        "id": "5b32ee27-0b66-440b-9e51-16d3890e8da9",
+        "body": "Synthetic history 107",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123035+00",
+        "inbound_revision": "107"
+      },
+      {
+        "id": "a04242e0-9b6f-4f49-812e-6dc765a304b3",
+        "body": "Synthetic history 103",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123034+00",
+        "inbound_revision": "103"
+      }
+    ],
+    "next_cursor": "26f204d1-f583-49bb-a217-8d1bdd1cdd95",
+    "requester_id": "49a025ae-59f6-4eb9-b2fa-7f6c8c6c092b",
+    "head_revision": "153",
+    "read_boundary": "5576bad5-7bce-44e3-b021-d78b175db275",
+    "conversation_id": "a8baa824-09fa-48ee-ba00-17ddc2d68b51",
+    "capture_generation": "9788de28-dfa7-46af-80e0-409f7c383ca1",
+    "boundary_expires_at": "2026-09-14T04:47:09.90768+00:00"
+  },
+  "second_page": {
+    "org_id": "691ff344-3550-4f8e-8366-6a31fb16ed3c",
+    "history": [
+      {
+        "id": "4e933997-fd5f-4c15-a539-fab8bd5eca5a",
+        "body": "Synthetic history 104",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123034+00",
+        "inbound_revision": "104"
+      },
+      {
+        "id": "2fe89623-121f-4781-a772-a74fb65a9469",
+        "body": "Synthetic history 102",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123034+00",
+        "inbound_revision": "102"
+      },
+      {
+        "id": "cf7de60a-5f67-40ba-b93d-542bde4650cb",
+        "body": "Synthetic history 100",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123033+00",
+        "inbound_revision": "100"
+      },
+      {
+        "id": "3452aab1-6116-44e3-bc9f-36646cccfb23",
+        "body": "Synthetic history 101",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123033+00",
+        "inbound_revision": "101"
+      },
+      {
+        "id": "00e9b748-0fce-4f16-92ad-119fd7a167e2",
+        "body": "Synthetic history 99",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123033+00",
+        "inbound_revision": "99"
+      },
+      {
+        "id": "ee3d1586-c63f-45b0-9b73-9dc5fd98bf57",
+        "body": "Synthetic history 97",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123032+00",
+        "inbound_revision": "97"
+      },
+      {
+        "id": "8c318ab1-c2a3-456b-8c5e-cc3d9ca4093b",
+        "body": "Synthetic history 98",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123032+00",
+        "inbound_revision": "98"
+      },
+      {
+        "id": "1859332c-3565-4185-9a93-e999e54c2c67",
+        "body": "Synthetic history 96",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123032+00",
+        "inbound_revision": "96"
+      },
+      {
+        "id": "544e845c-bc2a-4c28-ac2d-1169c30cdb92",
+        "body": "Synthetic history 95",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123031+00",
+        "inbound_revision": "95"
+      },
+      {
+        "id": "2f388cdf-34c7-40e8-8746-95a258b6cfe8",
+        "body": "Synthetic history 94",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123031+00",
+        "inbound_revision": "94"
+      },
+      {
+        "id": "051b3428-b78b-4525-af8b-87915bf9edf8",
+        "body": "Synthetic history 93",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123031+00",
+        "inbound_revision": "93"
+      },
+      {
+        "id": "a61c6640-ce09-42f3-b862-96829746e07d",
+        "body": "Synthetic history 90",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12303+00",
+        "inbound_revision": "90"
+      },
+      {
+        "id": "a392f5f1-1e15-459b-a7ed-9aa83fe5c37e",
+        "body": "Synthetic history 91",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12303+00",
+        "inbound_revision": "91"
+      },
+      {
+        "id": "94d8da1f-e5bc-454f-be25-b702a872b8dd",
+        "body": "Synthetic history 92",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12303+00",
+        "inbound_revision": "92"
+      },
+      {
+        "id": "e9360718-8165-4a1f-bdb1-28dfd4e7e841",
+        "body": "Synthetic history 88",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123029+00",
+        "inbound_revision": "88"
+      },
+      {
+        "id": "d63beef8-12e1-449b-aa3c-6ebdecec1038",
+        "body": "Synthetic history 89",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123029+00",
+        "inbound_revision": "89"
+      },
+      {
+        "id": "4046573b-0def-4c4b-a1dd-3f5861071bfb",
+        "body": "Synthetic history 87",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123029+00",
+        "inbound_revision": "87"
+      },
+      {
+        "id": "d642a28e-5a7c-4d89-a9ab-332132597c8d",
+        "body": "Synthetic history 86",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123028+00",
+        "inbound_revision": "86"
+      },
+      {
+        "id": "d4603d6b-9bbf-470e-942f-e03aecea1078",
+        "body": "Synthetic history 85",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123028+00",
+        "inbound_revision": "85"
+      },
+      {
+        "id": "bdf22d78-a87e-4b43-80c7-6eb28e4de282",
+        "body": "Synthetic history 84",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123028+00",
+        "inbound_revision": "84"
+      },
+      {
+        "id": "c4f12fcd-ef0f-47f0-b2f3-f62e7da73931",
+        "body": "Synthetic history 81",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123027+00",
+        "inbound_revision": "81"
+      },
+      {
+        "id": "c12d9a31-a263-45b0-aebe-7ee7872e610a",
+        "body": "Synthetic history 83",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123027+00",
+        "inbound_revision": "83"
+      },
+      {
+        "id": "13668e2b-e4fb-4a06-9197-843155bae582",
+        "body": "Synthetic history 82",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123027+00",
+        "inbound_revision": "82"
+      },
+      {
+        "id": "df3ba797-9678-4dac-a86c-24208f6fb4b0",
+        "body": "Synthetic history 78",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123026+00",
+        "inbound_revision": "78"
+      },
+      {
+        "id": "7ec466fa-5e59-49bd-a0e6-a4be4f032c3b",
+        "body": "Synthetic history 79",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123026+00",
+        "inbound_revision": "79"
+      },
+      {
+        "id": "4da0d8d8-18c4-4e8a-ba1c-de38c1085fa2",
+        "body": "Synthetic history 80",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123026+00",
+        "inbound_revision": "80"
+      },
+      {
+        "id": "74f785c7-3037-4e3d-8006-30d47094ea02",
+        "body": "Synthetic history 75",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123025+00",
+        "inbound_revision": "75"
+      },
+      {
+        "id": "19f269ef-cd82-4198-9705-997e3145a19e",
+        "body": "Synthetic history 77",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123025+00",
+        "inbound_revision": "77"
+      },
+      {
+        "id": "0b705ca0-692d-45b0-99e1-851033d34619",
+        "body": "Synthetic history 76",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123025+00",
+        "inbound_revision": "76"
+      },
+      {
+        "id": "d4d6bed7-bd70-4c15-9f72-f50c3319aef6",
+        "body": "Synthetic history 73",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123024+00",
+        "inbound_revision": "73"
+      },
+      {
+        "id": "4fb24a0d-8a36-4b32-8f18-10b0c9202d78",
+        "body": "Synthetic history 74",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123024+00",
+        "inbound_revision": "74"
+      },
+      {
+        "id": "3b0671e1-6deb-46e7-9755-d3c0d5782b11",
+        "body": "Synthetic history 72",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123024+00",
+        "inbound_revision": "72"
+      },
+      {
+        "id": "9095b39f-77cf-46be-87d4-a5856ca0b12c",
+        "body": "Synthetic history 70",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123023+00",
+        "inbound_revision": "70"
+      },
+      {
+        "id": "3520ef06-6f09-4004-85a7-2ca23cd2ee02",
+        "body": "Synthetic history 71",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123023+00",
+        "inbound_revision": "71"
+      },
+      {
+        "id": "13b569cd-7f9d-45a6-b4e9-2de9700ca82a",
+        "body": "Synthetic history 69",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123023+00",
+        "inbound_revision": "69"
+      },
+      {
+        "id": "b30371de-581e-4f73-9c32-f1941dbd2367",
+        "body": "Synthetic history 67",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123022+00",
+        "inbound_revision": "67"
+      },
+      {
+        "id": "414d8dbd-57ad-4060-b17b-b7853971f86d",
+        "body": "Synthetic history 68",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123022+00",
+        "inbound_revision": "68"
+      },
+      {
+        "id": "1cf82bee-ab47-4a79-8664-92e5f2190fe9",
+        "body": "Synthetic history 66",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123022+00",
+        "inbound_revision": "66"
+      },
+      {
+        "id": "fc45185d-d003-433b-a0af-6404b94886ea",
+        "body": "Synthetic history 64",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123021+00",
+        "inbound_revision": "64"
+      },
+      {
+        "id": "a07bcf05-636c-4ccb-ae40-a927b78752ae",
+        "body": "Synthetic history 65",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123021+00",
+        "inbound_revision": "65"
+      },
+      {
+        "id": "1756866e-418a-43da-aea2-1e5a4f4eda01",
+        "body": "Synthetic history 63",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123021+00",
+        "inbound_revision": "63"
+      },
+      {
+        "id": "6f14be7e-b201-4a57-b17f-e1d418594bf1",
+        "body": "Synthetic history 62",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12302+00",
+        "inbound_revision": "62"
+      },
+      {
+        "id": "2cfbd403-7fc5-47e1-90d3-6cc087d966c6",
+        "body": "Synthetic history 61",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12302+00",
+        "inbound_revision": "61"
+      },
+      {
+        "id": "1104a5c6-e412-4392-9900-d887fffd687f",
+        "body": "Synthetic history 60",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.12302+00",
+        "inbound_revision": "60"
+      },
+      {
+        "id": "de714a76-2dd8-4285-bbd4-b4a11f0e0a6e",
+        "body": "Synthetic history 59",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123019+00",
+        "inbound_revision": "59"
+      },
+      {
+        "id": "2da35a0e-446a-40dc-808f-d04c25888adb",
+        "body": "Synthetic history 58",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123019+00",
+        "inbound_revision": "58"
+      },
+      {
+        "id": "27a64332-45fc-418f-bbd9-28edb33b589a",
+        "body": "Synthetic history 57",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123019+00",
+        "inbound_revision": "57"
+      },
+      {
+        "id": "e034df25-f275-4b5f-a58d-e8890d4347b8",
+        "body": "Synthetic history 56",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123018+00",
+        "inbound_revision": "56"
+      },
+      {
+        "id": "5a722d53-dfad-4ea1-8024-7cc4742efd86",
+        "body": "Synthetic history 54",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123018+00",
+        "inbound_revision": "54"
+      },
+      {
+        "id": "33c316c3-50e0-402e-ae46-240d28d6cbce",
+        "body": "Synthetic history 55",
+        "direction": "inbound",
+        "read_at_raw": null,
+        "created_at_raw": "2026-09-01 12:00:00.123018+00",
+        "inbound_revision": "55"
+      }
+    ],
+    "next_cursor": "cedf6d86-63be-4c02-b522-19b89e75f855",
+    "requester_id": "49a025ae-59f6-4eb9-b2fa-7f6c8c6c092b",
+    "head_revision": "153",
+    "read_boundary": "5576bad5-7bce-44e3-b021-d78b175db275",
+    "conversation_id": "a8baa824-09fa-48ee-ba00-17ddc2d68b51",
+    "capture_generation": "9788de28-dfa7-46af-80e0-409f7c383ca1",
+    "boundary_expires_at": "2026-09-14T04:47:09.90768+00:00"
+  },
+  "limitations": [
+    "SQL claims, not JWT transport",
+    "Live keyset traversal, not an immutable history snapshot",
+    "50-row exact terminal page can require one empty final request",
+    "Cursor retention/admission still requires release design"
+  ]
+}

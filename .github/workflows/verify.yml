@@ -2,7 +2,7 @@ name: Verify
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/esign-release-e2e-contracts-20260912]
   pull_request:
     branches: [main]
 
@@ -26,6 +26,17 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Rehearse My Leads metrics and signed call evidence
+        run: node scripts/verify-my-leads-metrics.mjs && node scripts/rehearse-call-metrics-writeback.mjs
+
+      - name: Rehearse rep SMS assignments and queue authorization
+        run: node scripts/verify-rep-sms.mjs
+
+      - name: Rehearse recording library authorization and catalog
+        env:
+          SANDRA_POSTGRES_BIN: /usr/lib/postgresql/17/bin
+        run: node scripts/rehearse-recording-library.mjs
 
       - name: Run verify
         env:

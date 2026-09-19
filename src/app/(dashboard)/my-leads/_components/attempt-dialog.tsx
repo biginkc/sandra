@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, type FormEvent } from "react"
+import { useContext, useEffect, useMemo, useState, type FormEvent } from "react"
 
 import {
   Dialog,
@@ -20,16 +20,47 @@ import {
   WorkflowDialogHeader,
   WorkflowFormError,
   centralDateTimeToIso,
+  centralDateTimeFromIso,
+  WorkflowRecoveryContext,
   useAcquisitionSubmit,
 } from "./workflow-form"
 import type {
   AcquisitionAttemptFormPayload,
   AcquisitionAttemptKind,
   AcquisitionAttemptSource,
+  AcquisitionAttemptFollowUp,
   AcquisitionCallReferenceOption,
   AcquisitionFormSubmitResult,
   AcquisitionSubmit,
 } from "./types"
+import {
+  composeRepSms,
+  DEFAULT_REP_SMS_INTRODUCTION,
+  REP_SMS_COMPOSITION_POLICY_VERSION,
+  REP_SMS_INTRODUCTIONS,
+  REP_SMS_TEMPLATES,
+} from "@/lib/messaging/rep-sms-composition"
+
+const GSM7_EXTENDED = new Set(["^", "{", "}", "\\", "[", "~", "]", "|", "€"])
+const GSM7_BASIC = new Set(
+  Array.from("@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà"),
+)
+
+function smsInfo(text: string) {
+  const gsm7 = Array.from(text).every((character) => GSM7_BASIC.has(character) || GSM7_EXTENDED.has(character))
+  const units = gsm7
+    ? Array.from(text).reduce((total, character) => total + (GSM7_EXTENDED.has(character) ? 2 : 1), 0)
+    : Array.from(text).length
+  const single = gsm7 ? 160 : 70
+  const multipart = gsm7 ? 153 : 67
+  const segments = units <= single ? 1 : Math.ceil(units / multipart)
+  return { length: Array.from(text).length, units, segments, encoding: gsm7 ? "GSM-7" : "UCS-2" } as const
+}
+
+type FollowUpState = {
+  status: "required" | "draft" | "sending" | "accepted" | "delivered" | "delivery_failed" | "blocked" | "failed_not_dispatched" | "unknown"
+  message?: string | null
+}
 
 export type AcquisitionAttemptDialogProps = {
   open: boolean
@@ -37,6 +68,9 @@ export type AcquisitionAttemptDialogProps = {
   propertyLabel: string
   initialCallActivityId?: string | null
   callReferenceOptions?: readonly AcquisitionCallReferenceOption[]
+  callReferencesLoading?: boolean
+  callReferencesError?: string | null
+  onRetryCallReferences?: () => void
   onOpenChange: (open: boolean) => void
   onSubmit: AcquisitionSubmit<AcquisitionAttemptFormPayload>
 }
@@ -47,18 +81,68 @@ export function AcquisitionAttemptDialog({
   propertyLabel,
   initialCallActivityId = null,
   callReferenceOptions = [],
+  callReferencesLoading = false,
+  callReferencesError = null,
+  onRetryCallReferences,
   onOpenChange,
   onSubmit,
 }: AcquisitionAttemptDialogProps) {
-  const [source, setSource] = useState<AcquisitionAttemptSource>("dialpad")
+  const [source, setSource] = useState<AcquisitionAttemptSource>(initialCallActivityId ? "sandra" : "dialpad")
   const [kind, setKind] = useState<AcquisitionAttemptKind>("call")
   const [outcome, setOutcome] = useState<AcquisitionAttemptFormPayload["outcome"] | "">("")
   const [occurredAt, setOccurredAt] = useState("")
   const [note, setNote] = useState("")
   const [recordingUrl, setRecordingUrl] = useState("")
   const [callActivityId, setCallActivityId] = useState(initialCallActivityId || "")
+  const [introId, setIntroId] = useState(DEFAULT_REP_SMS_INTRODUCTION.id)
+  const [templateId, setTemplateId] = useState("")
+  const [remainder, setRemainder] = useState("")
+  const [followUpState, setFollowUpState] = useState<FollowUpState | null>(null)
+  // Once the attempt has been durably recorded, this dialog becomes a
+  // receipt for that attempt. Keeping its original payload frozen prevents a
+  // user from changing a field and accidentally generating a second attempt
+  // with a new idempotency key while the follow-up is still unresolved.
+  const [attemptRecorded, setAttemptRecorded] = useState(false)
   const [clientError, setClientError] = useState<string | null>(null)
   const [clientFieldErrors, setClientFieldErrors] = useState<Record<string, string>>({})
+  const recovery = useContext(WorkflowRecoveryContext)
+  const reconciliation = recovery?.reconciliation
+  const reconciliationLocked = Boolean(reconciliation)
+  const preservedCallId = reconciliationLocked && source === "sandra" && callActivityId && !callReferenceOptions.some(call => call.id === callActivityId)
+    ? callActivityId
+    : null
+  const availableCalls = initialCallActivityId && !callReferenceOptions.some(call => call.id === initialCallActivityId)
+    ? [{ id: initialCallActivityId, label: "Selected Sandra call" }, ...callReferenceOptions]
+    : preservedCallId
+      ? [{ id: preservedCallId, label: "Original saved Sandra call" }, ...callReferenceOptions]
+      : callReferenceOptions
+  const sandraAvailable = availableCalls.length > 0
+  useEffect(() => {
+    if (!reconciliation) return
+    const payload = reconciliation.payload
+    if (typeof payload.source === "string") setSource(payload.source as AcquisitionAttemptSource)
+    if (typeof payload.kind === "string") setKind(payload.kind as AcquisitionAttemptKind)
+    if (typeof payload.outcome === "string") setOutcome(payload.outcome as AcquisitionAttemptFormPayload["outcome"])
+    setOccurredAt(centralDateTimeFromIso(payload.occurredAt))
+    setNote(typeof payload.note === "string" ? payload.note : "")
+    setRecordingUrl(typeof payload.recordingUrl === "string" ? payload.recordingUrl : "")
+    setCallActivityId(typeof payload.callActivityId === "string" ? payload.callActivityId : "")
+    const followUp = payload.followUp && typeof payload.followUp === "object" && !Array.isArray(payload.followUp)
+      ? payload.followUp as Record<string, unknown>
+      : null
+    if (followUp) {
+      if (typeof followUp.introId === "string") setIntroId(followUp.introId)
+      if (typeof followUp.templateId === "string") setTemplateId(followUp.templateId)
+      if (typeof followUp.remainder === "string") setRemainder(followUp.remainder)
+    } else {
+      setIntroId(DEFAULT_REP_SMS_INTRODUCTION.id)
+      setTemplateId("")
+      setRemainder("")
+    }
+    setClientError(null)
+    setClientFieldErrors({})
+    setFollowUpState(null)
+  }, [reconciliation])
   const resetFields = () => {
     setSource(initialCallActivityId ? "sandra" : "dialpad")
     setKind("call")
@@ -67,10 +151,29 @@ export function AcquisitionAttemptDialog({
     setNote("")
     setRecordingUrl("")
     setCallActivityId(initialCallActivityId || "")
+    setIntroId(DEFAULT_REP_SMS_INTRODUCTION.id)
+    setTemplateId("")
+    setRemainder("")
+    setFollowUpState(null)
+    setAttemptRecorded(false)
     setClientError(null)
     setClientFieldErrors({})
   }
-  const submitState = useAcquisitionSubmit(onSubmit, () => {
+  const submitState = useAcquisitionSubmit(onSubmit, (result) => {
+    if (result.ok && result.attemptRecorded) setAttemptRecorded(true)
+    if (outcome === "no_answer") {
+      const nextFollowUp: FollowUpState = result.ok && result.followUp
+        ? result.followUp
+        : { status: "required", message: "Attempt recorded. Follow-up still needs to be accepted or delivered." }
+      setFollowUpState(nextFollowUp)
+      if (nextFollowUp.status === "accepted" || nextFollowUp.status === "delivered") {
+        resetFields()
+        onOpenChange(false)
+      } else {
+        setClientError(nextFollowUp.message ?? `Attempt recorded. Follow-up is ${nextFollowUp.status.replaceAll("_", " ")}. Your draft is retained.`)
+      }
+      return
+    }
     resetFields()
     onOpenChange(false)
   })
@@ -85,17 +188,59 @@ export function AcquisitionAttemptDialog({
     setClientError(null)
     setClientFieldErrors({})
     submitState.clearErrors()
+    setFollowUpState(null)
   }
+
+  const selectedIntroduction = REP_SMS_INTRODUCTIONS.find((candidate) => candidate.id === introId) ?? DEFAULT_REP_SMS_INTRODUCTION
+  const selectedTemplate = REP_SMS_TEMPLATES.find((candidate) => candidate.id === templateId)
+  const followUpComposition = useMemo(() => {
+    if (outcome !== "no_answer" || !selectedTemplate || !remainder.trim()) return null
+    try {
+      return composeRepSms({
+        introId: selectedIntroduction.id,
+        introVersion: selectedIntroduction.version,
+        templateId: selectedTemplate.id,
+        templateVersion: selectedTemplate.version,
+        initialRemainder: selectedTemplate.remainder,
+        remainder,
+      })
+    } catch {
+      return null
+    }
+  }, [outcome, remainder, selectedIntroduction.id, selectedIntroduction.version, selectedTemplate])
+  const followUpPreview = followUpComposition?.finalBody ?? `${selectedIntroduction.body}${remainder.trim() ? `\n\n${remainder.trim()}` : ""}`
+  const followUpSmsInfo = smsInfo(followUpPreview)
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (submitState.submitting) return
+    if (submitState.submitting || attemptRecorded) return
     clearClientErrors()
 
     const nextFieldErrors: Record<string, string> = {}
     if (!outcome) nextFieldErrors.outcome = "Choose the external outcome."
-    if (source === "sandra" && !callActivityId.trim()) {
-      nextFieldErrors.callActivityId = "Enter the existing Sandra call reference."
+    if (source === "sandra" && !availableCalls.some(call => call.id === callActivityId)) {
+      nextFieldErrors.callActivityId = "Choose the Sandra call you want to record an outcome for."
+    }
+    const followUp = outcome === "no_answer"
+      ? (() => {
+          if (!selectedTemplate) nextFieldErrors.followUpTemplate = "Choose a curated follow-up template."
+          if (!remainder.trim()) nextFieldErrors.followUpRemainder = "Add the editable follow-up remainder."
+          try {
+            return composeRepSms({
+              introId: selectedIntroduction.id,
+              introVersion: selectedIntroduction.version,
+              templateId: selectedTemplate?.id ?? null,
+              templateVersion: selectedTemplate?.version ?? null,
+              initialRemainder: selectedTemplate?.remainder ?? null,
+              remainder,
+            })
+          } catch {
+            return null
+          }
+        })()
+      : null
+    if (outcome === "no_answer" && !followUp) {
+      nextFieldErrors.followUpRemainder ??= "Choose a template and review the follow-up message."
     }
     const occurred = centralDateTimeToIso(occurredAt)
     if (!occurred.ok) nextFieldErrors.occurredAt = occurred.message
@@ -114,6 +259,19 @@ export function AcquisitionAttemptDialog({
       note: note.trim() || null,
       recordingUrl: recordingUrl.trim() || null,
       callActivityId: source === "sandra" ? callActivityId.trim() : null,
+      ...(followUp ? {
+        smsBody: followUp.finalBody,
+        followUp: {
+          policyVersion: REP_SMS_COMPOSITION_POLICY_VERSION,
+          introId: followUp.introId,
+          introVersion: followUp.introVersion,
+          templateId: followUp.templateId ?? selectedTemplate!.id,
+          templateVersion: followUp.templateVersion ?? selectedTemplate!.version,
+          initialRemainder: followUp.initialRemainder,
+          remainder: followUp.remainder,
+          body: followUp.finalBody,
+        } satisfies AcquisitionAttemptFollowUp,
+      } : {}),
     })
   }
 
@@ -142,13 +300,18 @@ export function AcquisitionAttemptDialog({
                 <select
                   id="acquisition-attempt-source"
                   value={source}
+                  disabled={attemptRecorded || reconciliationLocked}
                   onChange={(event) => {
-                    setSource(event.target.value as AcquisitionAttemptSource)
+                    const nextSource = event.target.value as AcquisitionAttemptSource
+                    if (nextSource === "sandra" && !sandraAvailable) return
+                    setSource(nextSource)
+                    if (nextSource === "sandra" && availableCalls.length === 1) setCallActivityId(availableCalls[0].id)
+                    setKind(nextSource === "manual" ? "outreach" : "call")
                     clearClientErrors()
                   }}
                   className={SELECT_FIELD_CLASS}
                 >
-                  <option value="sandra">Sandra</option>
+                  <option value="sandra" disabled={!sandraAvailable}>Sandra</option>
                   <option value="dialpad">DialPad</option>
                   <option value="manual">Manual outreach</option>
                 </select>
@@ -160,6 +323,7 @@ export function AcquisitionAttemptDialog({
                   <select
                     id="acquisition-attempt-kind"
                     value={kind}
+                disabled={attemptRecorded || reconciliationLocked}
                     onChange={(event) => setKind(event.target.value as AcquisitionAttemptKind)}
                     className={SELECT_FIELD_CLASS}
                   >
@@ -174,25 +338,41 @@ export function AcquisitionAttemptDialog({
               )}
             </div>
 
+            <div className="text-sm text-muted-foreground">
+              {callReferencesLoading ? (
+                <p role="status">Loading Sandra calls… You can still log outreach made outside Sandra.</p>
+              ) : callReferencesError ? (
+                <div role="alert">
+                  <p>Could not load Sandra calls. Retry to select a call made in Sandra.</p>
+                  {onRetryCallReferences && <button type="button" className="mt-1 underline" onClick={onRetryCallReferences}>Retry loading Sandra calls</button>}
+                </div>
+              ) : !sandraAvailable ? (
+                <p>No Sandra calls need an outcome for this lead. Calls made in Sandra appear here automatically. For outreach made outside Sandra, choose DialPad or Manual outreach.</p>
+              ) : (
+                <p>For a call made in Sandra, choose Sandra and select the call by date and time.</p>
+              )}
+            </div>
+
             {source === "sandra" && (
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center">
-                  <Label htmlFor="acquisition-attempt-call-reference">Sandra call reference</Label>
+                  <Label htmlFor="acquisition-attempt-call-reference">Sandra call</Label>
                   <RequiredHint />
                 </div>
-                {callReferenceOptions.length > 0 ? (
+                {sandraAvailable ? (
                   <select
                     id="acquisition-attempt-call-reference"
-                    aria-label="Sandra call reference"
+                    aria-label="Sandra call"
                     value={callActivityId}
+                disabled={attemptRecorded || reconciliationLocked}
                     onChange={(event) => setCallActivityId(event.target.value)}
                     aria-invalid={Boolean(clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId)}
                     aria-describedby={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId ? "acquisition-attempt-call-reference-error" : undefined}
                     aria-required="true"
                     className={SELECT_FIELD_CLASS}
                   >
-                    <option value="">Choose verified call</option>
-                    {callReferenceOptions.map((reference) => (
+                    <option value="">Choose a call</option>
+                    {availableCalls.map((reference) => (
                       <option key={reference.id} value={reference.id}>
                         {reference.label}
                       </option>
@@ -200,7 +380,7 @@ export function AcquisitionAttemptDialog({
                   </select>
                 ) : (
                   <p className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-                    A verified Sandra call reference must be supplied by the call flow.
+                    This call is no longer available. Close and reopen this dialog to refresh Sandra calls.
                   </p>
                 )}
                 <FieldError id="acquisition-attempt-call-reference-error" message={clientFieldErrors.callActivityId || submitState.fieldErrors.callActivityId} />
@@ -215,7 +395,11 @@ export function AcquisitionAttemptDialog({
               <select
                 id="acquisition-attempt-outcome"
                 value={outcome}
-                onChange={(event) => setOutcome(event.target.value as AcquisitionAttemptFormPayload["outcome"])}
+                disabled={attemptRecorded || reconciliationLocked}
+                onChange={(event) => {
+                  setOutcome(event.target.value as AcquisitionAttemptFormPayload["outcome"])
+                  clearClientErrors()
+                }}
                 aria-invalid={Boolean(clientFieldErrors.outcome || submitState.fieldErrors.outcome)}
                 aria-describedby={clientFieldErrors.outcome || submitState.fieldErrors.outcome ? "acquisition-attempt-outcome-error" : undefined}
                 aria-required="true"
@@ -229,25 +413,127 @@ export function AcquisitionAttemptDialog({
               <FieldError id="acquisition-attempt-outcome-error" message={clientFieldErrors.outcome || submitState.fieldErrors.outcome} />
             </div>
 
+            {outcome === "no_answer" && (
+              <section className="space-y-3 rounded-[14px] border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900 dark:bg-blue-950/30" aria-labelledby="acquisition-follow-up-heading">
+                <div>
+                  <h3 id="acquisition-follow-up-heading" className="text-sm font-semibold">Required follow-up text</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">The no-answer result stays recorded. Choose approved copy for the follow-up that will be sent by the rep SMS workflow.</p>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center">
+                    <Label htmlFor="acquisition-follow-up-intro">Assistant introduction</Label>
+                  </div>
+                  <select
+                    id="acquisition-follow-up-intro"
+                    aria-label="Assistant introduction"
+                    value={introId}
+                    disabled={attemptRecorded || reconciliationLocked}
+                    onChange={(event) => {
+                      setIntroId(event.target.value)
+                      clearClientErrors()
+                    }}
+                    className={SELECT_FIELD_CLASS}
+                  >
+                    {REP_SMS_INTRODUCTIONS.map((introduction) => (
+                      <option key={introduction.id} value={introduction.id}>{introduction.body}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">Fixed approved introduction: {selectedIntroduction.body}</p>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center">
+                    <Label htmlFor="acquisition-follow-up-template">Curated template</Label>
+                    <RequiredHint />
+                  </div>
+                  <select
+                    id="acquisition-follow-up-template"
+                    aria-label="Curated follow-up template"
+                    value={templateId}
+                    disabled={attemptRecorded || reconciliationLocked}
+                    onChange={(event) => {
+                      const nextId = event.target.value
+                      setTemplateId(nextId)
+                      const template = REP_SMS_TEMPLATES.find((candidate) => candidate.id === nextId)
+                      if (template) setRemainder(template.remainder)
+                      clearClientErrors()
+                    }}
+                    aria-required="true"
+                    aria-invalid={Boolean(clientFieldErrors.followUpTemplate || submitState.fieldErrors.followUpTemplate)}
+                    aria-describedby={clientFieldErrors.followUpTemplate || submitState.fieldErrors.followUpTemplate ? "acquisition-follow-up-template-error" : undefined}
+                    className={SELECT_FIELD_CLASS}
+                  >
+                    <option value="">Choose a follow-up template…</option>
+                    {REP_SMS_TEMPLATES.map((template) => (
+                      <option key={template.id} value={template.id}>{template.label}</option>
+                    ))}
+                  </select>
+                  <FieldError id="acquisition-follow-up-template-error" message={clientFieldErrors.followUpTemplate || submitState.fieldErrors.followUpTemplate} />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="acquisition-follow-up-remainder">Editable remainder</Label>
+                  <Textarea
+                    id="acquisition-follow-up-remainder"
+                    aria-label="Editable follow-up remainder"
+                    value={remainder}
+                    disabled={attemptRecorded || reconciliationLocked}
+                    onChange={(event) => {
+                      setRemainder(event.target.value)
+                      clearClientErrors()
+                    }}
+                    aria-invalid={Boolean(clientFieldErrors.followUpRemainder || submitState.fieldErrors.followUpRemainder)}
+                    aria-describedby={clientFieldErrors.followUpRemainder || submitState.fieldErrors.followUpRemainder ? "acquisition-follow-up-remainder-error" : undefined}
+                    maxLength={2000}
+                    rows={3}
+                    placeholder="Choose a template first"
+                    className={TEXT_FIELD_CLASS}
+                  />
+                  <FieldError id="acquisition-follow-up-remainder-error" message={clientFieldErrors.followUpRemainder || submitState.fieldErrors.followUpRemainder} />
+                </div>
+                <div className="space-y-1.5 rounded-[10px] border bg-background p-2.5">
+                  <p className="text-xs font-semibold">Complete preview</p>
+                  <p className="whitespace-pre-wrap break-words text-sm">{followUpPreview}</p>
+                  <p className="text-xs text-muted-foreground">{followUpSmsInfo.length} characters · {followUpSmsInfo.encoding} · {followUpSmsInfo.segments} {followUpSmsInfo.segments === 1 ? "segment" : "segments"}</p>
+                </div>
+                {followUpState && (
+                  <div role={followUpState.status === "sending" ? "status" : "alert"} aria-live="polite" className="rounded-[10px] border px-3 py-2 text-sm">
+                    <p className="font-medium">Follow-up {followUpState.status.replaceAll("_", " ")}</p>
+                    {followUpState.message && <p className="mt-0.5 text-muted-foreground">{followUpState.message}</p>}
+                  </div>
+                )}
+                {attemptRecorded && followUpState?.status !== "accepted" && followUpState?.status !== "delivered" && (
+                  <p className="text-xs text-muted-foreground">
+                    This attempt is already recorded. Close this dialog and use the lead&apos;s Text lead action to resume the saved follow-up.
+                  </p>
+                )}
+              </section>
+            )}
+
             <DateTimeField
               id="acquisition-attempt-occurred-at"
               label="When did the outreach occur?"
               value={occurredAt}
               onChange={setOccurredAt}
               error={clientFieldErrors.occurredAt || submitState.fieldErrors.occurredAt}
+              disabled={attemptRecorded || reconciliationLocked}
             />
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="acquisition-attempt-recording">Recording link (optional)</Label>
+              <Label htmlFor="acquisition-attempt-recording">Recording link {source === "dialpad" ? "(required)" : "(optional)"}</Label>
               <Input
                 id="acquisition-attempt-recording"
                 type="url"
                 value={recordingUrl}
+                disabled={attemptRecorded || reconciliationLocked}
                 onChange={(event) => setRecordingUrl(event.target.value)}
                 placeholder="https://…"
+                aria-invalid={Boolean(clientFieldErrors.recordingUrl)}
                 className={TEXT_FIELD_CLASS}
               />
-              <p className="text-xs text-muted-foreground">Recording links are optional for Sandra and DialPad.</p>
+              {clientFieldErrors.recordingUrl ? (
+                <p className="text-xs text-destructive">{clientFieldErrors.recordingUrl}</p>
+              ) : (
+                <p className="text-xs text-muted-foreground">Paste the shared DialPad recording link. Sandra recordings attach automatically.</p>
+              )}
             </div>
 
             <div className="flex flex-col gap-1.5">
@@ -255,6 +541,7 @@ export function AcquisitionAttemptDialog({
               <Textarea
                 id="acquisition-attempt-note"
                 value={note}
+                disabled={attemptRecorded || reconciliationLocked}
                 onChange={(event) => setNote(event.target.value)}
                 placeholder="Add context for the next rep"
                 rows={3}
@@ -264,8 +551,9 @@ export function AcquisitionAttemptDialog({
           </div>
           <WorkflowDialogFooter
             submitting={submitState.submitting}
-            submitLabel="Save attempt"
+            submitLabel={attemptRecorded ? "Attempt recorded" : "Save attempt"}
             onCancel={closeDialog}
+            disabled={attemptRecorded}
           />
         </form>
       </DialogContent>

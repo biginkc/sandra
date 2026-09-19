@@ -1136,6 +1136,24 @@ describe("template action orchestration", () => {
     expect(ports.repository.softDelete).toHaveBeenLastCalledWith("org-1", "template-1", true);
   });
 
+  it("removes a website template locally without deleting its provider document", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.getTemplate).mockResolvedValue({ ...finalized, templateOrigin: "dropbox_website" });
+    vi.mocked(ports.repository.softDelete).mockResolvedValue({ outcome: "deleted", recentSendCount: 1 });
+    expect(await createTemplateOrchestrator(ports).delete("template-1", true)).toEqual({ ok: true, data: null });
+    expect(ports.provider.deleteTemplate).not.toHaveBeenCalled();
+  });
+
+  it("reports an RPC removal failure without claiming the usage count failed", async () => {
+    const ports = makePorts();
+    vi.mocked(ports.repository.getTemplate).mockResolvedValue({ ...finalized, templateOrigin: "dropbox_website" });
+    vi.mocked(ports.repository.softDelete).mockRejectedValue(new Error("private constraint details"));
+    expect(await createTemplateOrchestrator(ports).delete("template-1", true)).toEqual({
+      ok: false, error: { code: "TEMPLATE_DELETE_FAILED", message: "The template could not be removed from Sandra. Try again." },
+    });
+    expect(ports.provider.deleteTemplate).not.toHaveBeenCalled();
+  });
+
   it("treats provider 404 delete as idempotent after the atomic local delete", async () => {
     const ports = makePorts();
     const notFound = new Error("provider detail");

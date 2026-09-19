@@ -24,10 +24,11 @@ import {
 
 loadProdCanaryEnvFiles(__dirname);
 const baseURL = process.env.PROD_BASE_URL ?? DEFAULT_PROD_BASE_URL;
-const hugoAuthStorageState = requireHugoAuthStorageState(
-  "PROD_HUGO_STORAGE_STATE",
-  baseURL,
-);
+// A fresh Hugo login is required for unattended cloud runs. A pre-captured
+// storage state remains available for local, read-only diagnostics.
+const hugoAuthStorageState = process.env.PROD_HUGO_STORAGE_STATE
+  ? requireHugoAuthStorageState("PROD_HUGO_STORAGE_STATE", baseURL)
+  : undefined;
 
 export default defineConfig({
   testDir: "./e2e/prod-canary",
@@ -48,7 +49,7 @@ export default defineConfig({
     {
       name: "setup",
       testMatch: /auth\.setup\.ts$/,
-      use: { storageState: hugoAuthStorageState },
+      use: hugoAuthStorageState ? { storageState: hugoAuthStorageState } : {},
     },
     {
       name: "chromium",

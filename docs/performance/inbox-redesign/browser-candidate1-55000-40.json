@@ -1,0 +1,231 @@
+{
+  "summary": {
+    "firstOpen": {
+      "count": 20,
+      "p50": 231.36366700000053,
+      "p95": 238.52162499999986,
+      "p99": 248.31420799999978
+    },
+    "revisit": {
+      "count": 20,
+      "p50": 64.7168329999995,
+      "p95": 65.4042500000005,
+      "p99": 65.48816699999952
+    }
+  },
+  "experiment": "candidate1 independent read and bounded cache",
+  "status": "completed",
+  "fixtureConversations": 55000,
+  "initialListMs": 1813.745125,
+  "observations": [
+    {
+      "phase": "first_open",
+      "milliseconds": 238.52162499999986,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 233.0081250000003,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 230.34587499999998,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 230.6407919999997,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 232.62470799999983,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.25720800000045,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.43954200000007,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 248.31420799999978,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.54575000000023,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.11129100000016,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.3569579999994,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.44695899999988,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.79675000000043,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.66562499999964,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 230.7279580000004,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.36366700000053,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.34470899999997,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 231.2733330000001,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 213.55745899999965,
+      "readSource": "network"
+    },
+    {
+      "phase": "first_open",
+      "milliseconds": 232.30408400000033,
+      "readSource": "network"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 65.4042500000005,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 63.942541999999776,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 65.48816699999952,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.1964169999992,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.77920900000026,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.05249999999978,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.79124999999931,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.35091600000032,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 65.2425830000002,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 62.75029199999972,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 65.33850000000075,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.7168329999995,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 65.2510000000002,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.72620800000004,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.59770899999967,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.13366700000006,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 63.98683399999936,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 65.16012499999852,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 64.95524999999907,
+      "readSource": "memory"
+    },
+    {
+      "phase": "revisit",
+      "milliseconds": 63.92541600000004,
+      "readSource": "memory"
+    }
+  ],
+  "visibleRows": 200,
+  "blockedExternalRequests": 0,
+  "pageErrors": [],
+  "limitations": [
+    "Local production build with synthetic password session; not genuine Hugo production SSO",
+    "20 first opens and 20 revisits; no incoming load; local synthetic measurements only",
+    "Read-only experiment: no mark-read, sends or outcomes; minimal page omits full Inbox parity",
+    "Click-to-correct-panel plus two animation frames includes Playwright overhead"
+  ]
+}

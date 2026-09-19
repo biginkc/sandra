@@ -6,7 +6,7 @@ import { ProviderError } from "@/lib/errors/classes";
 import { getSingleActiveMembership } from "@/lib/auth/memberships";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-import { ESIGN_MERGE_FIELD_NAMES, type TemplateOption, type TemplateSignerRole } from "./contracts";
+import { getEsignFieldSchema, type TemplateOption, type TemplateSignerRole } from "./contracts";
 import {
   requireEsignTemplateManagementCredentials,
   configuredDropboxSignEmbeddedDomain,
@@ -591,11 +591,10 @@ function signerRoles(value: unknown): readonly TemplateSignerRole[] {
   return roles.sort((left, right) => left.order - right.order);
 }
 
-function exactFields(value: string[] | null): typeof ESIGN_MERGE_FIELD_NAMES {
-  if (!value || value.length !== ESIGN_MERGE_FIELD_NAMES.length || !ESIGN_MERGE_FIELD_NAMES.every((field) => value.includes(field))) {
-    throw new Error("invalid merge fields");
-  }
-  return ESIGN_MERGE_FIELD_NAMES;
+function exactFields(value: string[] | null): TemplateOption["mergeFieldNames"] {
+  const schema = getEsignFieldSchema(value);
+  if (!schema) throw new Error("invalid merge fields");
+  return schema.names;
 }
 
 function optionFromRow(row: {

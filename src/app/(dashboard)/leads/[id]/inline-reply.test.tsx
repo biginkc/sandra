@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,6 +25,25 @@ import { InlineReply } from "./inline-reply";
 describe("<InlineReply /> disabled explanations", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("notifies the Messages resource owner exactly once after a double keyboard send", async () => {
+    let finish!: (value: Awaited<ReturnType<typeof sendSmsFromLead>>) => void;
+    vi.mocked(sendSmsFromLead).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const onSent = vi.fn();
+    render(<InlineReply propertyId="property-1" homeownerContactId="contact-1" homeownerPhone="+18165550123" onSent={onSent} />);
+    const composer = screen.getByLabelText("Reply to this lead");
+    fireEvent.change(composer, { target: { value: "Owned test reply" } });
+    act(() => {
+      fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
+      fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
+    });
+    expect(sendSmsFromLead).toHaveBeenCalledOnce();
+    await act(async () => finish({ ok: true, data: { outcome: { status: "sent", messageId: "confirmed-message", externalId: "test-provider" } } } as Awaited<ReturnType<typeof sendSmsFromLead>>));
+    expect(onSent).toHaveBeenCalledExactlyOnceWith("confirmed-message");
+    expect(routerRefreshMock).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Reply to this lead")).toBe(composer);
+    expect(composer).toHaveValue("");
   });
 
   it("stacks the send control at narrow widths instead of forcing overflow", () => {
@@ -155,6 +174,43 @@ describe("<InlineReply /> disabled explanations", () => {
     expect(toast.error).toHaveBeenCalledWith("Send not confirmed", {
       description:
         "Provider rejected the message. Check the thread before retrying to avoid a duplicate message.",
+    });
+    expect(routerRefreshMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves the draft and disables resend while provider reconciliation is pending", async () => {
+    const user = userEvent.setup();
+    vi.mocked(sendSmsFromLead).mockResolvedValueOnce({
+      ok: true,
+      data: {
+        outcome: {
+          status: "provider_unknown",
+          messageId: "attempted-message",
+          error: "The provider did not return a definitive receipt.",
+        },
+      },
+    } as Awaited<ReturnType<typeof sendSmsFromLead>>);
+
+    render(
+      <InlineReply
+        propertyId="property-1"
+        homeownerContactId="contact-1"
+        homeownerPhone="+18165550123"
+      />,
+    );
+
+    const composer = screen.getByLabelText("Reply to this lead");
+    await user.type(composer, "Keep this pending-reconciliation draft");
+    await user.click(screen.getByRole("button", { name: "Send reply" }));
+
+    await waitFor(() => expect(sendSmsFromLead).toHaveBeenCalledOnce());
+    expect(composer).toHaveValue("Keep this pending-reconciliation draft");
+    expect(composer).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send reply" })).toBeDisabled();
+    expect(screen.getByText(/pending reconciliation/i)).toBeVisible();
+    expect(toast.warning).toHaveBeenCalledWith("Send pending reconciliation", {
+      description:
+        "The messaging provider did not provide a definitive receipt. Your draft is preserved. Review the thread before retrying to avoid a duplicate message.",
     });
     expect(routerRefreshMock).not.toHaveBeenCalled();
   });

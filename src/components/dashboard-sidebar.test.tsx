@@ -61,4 +61,15 @@ describe("DashboardMobileNav", () => {
     expect(screen.queryByRole("link", { name: "My Leads" })).not.toBeInTheDocument();
     expect(screen.queryByTestId("my-leads-badge")).not.toBeInTheDocument();
   });
+
+  it("hides Messages and the Leads board together for restricted members", () => {
+    render(<DashboardSidebar showMessagesAndLeads={false} />);
+
+    expect(screen.queryByRole("link", { name: "Messages" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Leads" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "My Leads" })).toHaveAttribute(
+      "href",
+      "/my-leads",
+    );
+  });
 });

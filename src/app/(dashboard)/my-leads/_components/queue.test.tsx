@@ -12,7 +12,12 @@ import {
   type MyLeadsQueueProps,
 } from "./types"
 
+const noteActions = vi.hoisted(() => ({ createLeadNote: vi.fn() }))
+vi.mock("@/app/(dashboard)/leads/[id]/sandra-recording-player", () => ({ SandraRecordingPlayer: () => <audio data-testid="recording-audio" /> }))
+vi.mock("@/app/(dashboard)/leads/actions", () => ({ createLeadNote: noteActions.createLeadNote }))
+
 const EMPTY_DETAIL: MyLeadDetail = {
+  messages: { rows: [], hasMore: false, nextCursor: null },
   notes: { rows: [], hasMore: false, nextCursor: null },
   attempts: { rows: [], hasMore: false, nextCursor: null },
   appointments: { rows: [], hasMore: false, nextCursor: null },
@@ -57,18 +62,9 @@ function buildProps(overrides: Partial<MyLeadsQueueProps> = {}): MyLeadsQueuePro
 
   return {
     stages,
-    kpis: {
-      attempts: 12,
-      contactRateLabel: "50%",
-      assignToFirstCallLabel: "2h 10m",
-      appointmentsKeptLabel: "3 / 4",
-      offersSent: 2,
-      staleLeads: 1,
-    },
+    kpis: {attempts: 12, reached: 6, offersSent: 2, contactWithoutFollowUp: 2, needsOffers: 3, appointmentsOverdue: 4, lastAttemptAt: null, asOf: "2026-09-11T14:00:00Z", missingRecordings: 1, recordingExpectationUnknown: 0, averageTalkSeconds: 180, talkTimeSamples: 1, talkTimeUnknown: 0, conversationsOverFiveMinutes: 0,},
     search: "",
     selectedRepId: "maria",
-    selectedPeriod: "week",
-    selectedDateRange: null,
     repOptions: [
       { id: "maria", label: "Maria" },
       { id: "jarrad", label: "Jarrad" },
@@ -77,8 +73,6 @@ function buildProps(overrides: Partial<MyLeadsQueueProps> = {}): MyLeadsQueuePro
     canSelectRep: true,
     onSearchChange: vi.fn(),
     onRepChange: vi.fn(),
-    onPeriodChange: vi.fn(),
-    onDateRangeChange: vi.fn(),
     onLoadMore: vi.fn(),
     onLoadDetail: vi.fn(async () => ({ ok: true as const, detail: EMPTY_DETAIL })),
     onStageAction: vi.fn(),
@@ -87,20 +81,76 @@ function buildProps(overrides: Partial<MyLeadsQueueProps> = {}): MyLeadsQueuePro
 }
 
 describe("MyLeadsQueue", () => {
-  it("renders the five PRD sections and the six KPI tiles in order", () => {
+  it("loads SMS with expanded details and prepends older texts without duplicates", async () => {
+    const user = userEvent.setup()
+    const message = (id: string, body: string, direction: "inbound" | "outbound") => ({
+      id, body, direction, createdAt: "2026-09-13T18:00:00Z", createdLabel: "Sep 13, 2026, 1:00 PM CDT", deliveryStatus: "delivered", attachmentCount: 0,
+    })
+    const newest = message("3", "What price works?", "outbound")
+    const previous = message("2", "Yes, I am interested.", "inbound")
+    const oldest = message("1", "Would you consider selling?", "outbound")
+    const onLoadDetail = vi.fn(async () => ({ ok: true as const, detail: {
+      ...EMPTY_DETAIL, messages: { rows: [newest, previous], hasMore: true, nextCursor: "sms-cursor" },
+    } }))
+    const onLoadDetailPage = vi.fn(async () => ({ ok: true as const, group: "messages" as const,
+      page: { rows: [previous, oldest], hasMore: false, nextCursor: null },
+    }))
+    render(<MyLeadsQueue {...buildProps({ onLoadDetail, onLoadDetailPage })} />)
+    expect(onLoadDetail).not.toHaveBeenCalled()
+    await user.click(screen.getByRole("button", { name: "Show details for 1 Main Street" }))
+    const strip = await screen.findByRole("list", { name: "Text message history" })
+    expect(within(strip).getAllByRole("listitem").map(item => item.textContent)).toEqual([
+      expect.stringContaining("Yes, I am interested."), expect.stringContaining("What price works?"),
+    ])
+    const motivation = screen.getByText("Needs a simple sale")
+    expect(motivation.compareDocumentPosition(strip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Load earlier texts" }))
+    await waitFor(() => expect(within(strip).getAllByRole("listitem")).toHaveLength(3))
+    expect(within(strip).getAllByRole("listitem").map(item => item.textContent)).toEqual([
+      expect.stringContaining("Would you consider selling?"), expect.stringContaining("Yes, I am interested."), expect.stringContaining("What price works?"),
+    ])
+    expect(onLoadDetailPage).toHaveBeenCalledWith("property-1", "messages", "sms-cursor")
+    expect(onLoadDetail).toHaveBeenCalledTimes(1)
+  })
+
+  it("renders the five PRD sections and the nine KPI tiles in order", () => {
     render(<MyLeadsQueue {...buildProps()} />)
 
     expect(screen.getByRole("heading", { name: "My Leads" })).toBeInTheDocument()
     expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual([
+      "Needs attention · Includes previous days",
+      "Today’s activity · Central time",
       "Not contacted",
       "Contacted",
       "Needs offer / Interested",
       "Offer Sent",
       "Under Contract",
     ])
-    expect(screen.getByTestId("kpi-attempts")).toHaveTextContent("Attempts12")
-    expect(screen.getByTestId("kpi-contact-rate")).toHaveTextContent("Contact rate50%")
-    expect(screen.getByTestId("kpi-stale-leads")).toHaveTextContent("Stale leads1")
+    expect(screen.getByTestId("kpi-contacts")).toHaveTextContent("Contacts6 / 12")
+    expect(screen.getByTestId("kpi-average-talk-time")).toHaveTextContent("Average talk time3m 0s")
+    expect(screen.getByTestId("kpi-missing-recordings")).toHaveTextContent("Missing recordings1")
+  })
+
+  it("refreshes only the text group when a new reply or delivery update arrives", async () => {
+    const user = userEvent.setup()
+    const sent = { id: "sent", body: "Would 2 PM work?", direction: "outbound" as const, createdAt: "2026-09-13T18:00:00Z", createdLabel: "Today", deliveryStatus: "sent", attachmentCount: 0 }
+    const onLoadDetail = vi.fn(async () => ({ ok: true as const, detail: { ...EMPTY_DETAIL,
+      messages: { rows: [sent], hasMore: false, nextCursor: null },
+      notes: { rows: [{ id: "note", authorLabel: "Maria", body: "Keep this note visible", createdLabel: "Today" }], hasMore: false, nextCursor: null },
+    } }))
+    const onLoadDetailPage = vi.fn(async () => ({ ok: true as const, group: "messages" as const, page: {
+      rows: [{ ...sent, id: "reply", direction: "inbound" as const, body: "Please call at 3 PM." }, { ...sent, deliveryStatus: "failed" }], hasMore: false, nextCursor: null,
+    } }))
+    render(<MyLeadsQueue {...buildProps({ onLoadDetail, onLoadDetailPage })} />)
+    await user.click(screen.getByRole("button", { name: "Show details for 1 Main Street" }))
+    const note = await screen.findByText("Keep this note visible")
+    expect(screen.queryByText("Not delivered")).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Refresh texts" }))
+    await screen.findByText("Please call at 3 PM.")
+    expect(screen.getByText("Not delivered")).toBeVisible()
+    expect(screen.getByText("Keep this note visible")).toBe(note)
+    expect(onLoadDetailPage).toHaveBeenCalledWith("property-1", "messages", null)
+    expect(onLoadDetail).toHaveBeenCalledTimes(1)
   })
 
   it("collapses a section so its leads are hidden", async () => {
@@ -143,33 +193,24 @@ describe("MyLeadsQueue", () => {
     expect(screen.getByRole("button", { name: "Load more Offer Sent" })).toBeInTheDocument()
   })
 
-  it("passes search, member, period, date range, and stage actions to typed callbacks", async () => {
+  it("passes search, member, and stage actions to typed callbacks", async () => {
     const user = userEvent.setup()
     const props = buildProps({
       onSearchChange: vi.fn(),
       onRepChange: vi.fn(),
-      onPeriodChange: vi.fn(),
-      onDateRangeChange: vi.fn(),
       onStageAction: vi.fn(),
     })
-    const { rerender } = render(<MyLeadsQueue {...props} />)
+    render(<MyLeadsQueue {...props} />)
 
     fireEvent.change(screen.getByRole("textbox", { name: "Search My Leads" }), {
       target: { value: "oak" },
     })
     await user.selectOptions(screen.getByRole("combobox", { name: "Acquisitions member" }), "jarrad")
-    await user.selectOptions(screen.getByRole("combobox", { name: "KPI period" }), "custom")
-    rerender(<MyLeadsQueue {...props} selectedPeriod="custom" />)
-    fireEvent.change(screen.getByLabelText("KPI start date"), {
-      target: { value: "2026-09-01" },
-    })
     await user.click(screen.getByRole("button", { name: "Show details for 2 Main Street" }))
     await user.click(screen.getByRole("button", { name: "Ready to make an offer" }))
 
     expect(props.onSearchChange).toHaveBeenLastCalledWith("oak")
     expect(props.onRepChange).toHaveBeenCalledWith("jarrad")
-    expect(props.onPeriodChange).toHaveBeenCalledWith("custom")
-    expect(props.onDateRangeChange).toHaveBeenCalled()
     expect(props.onStageAction).toHaveBeenCalledWith("ready-for-offer", expect.objectContaining({ queueStage: "contacted" }))
   })
 
@@ -205,7 +246,8 @@ describe("MyLeadsQueue", () => {
     expect(onLoadDetail).not.toHaveBeenCalled()
     await user.click(screen.getByRole("button", { name: "Show details for 1 Main Street" }))
     expect(onLoadDetail).toHaveBeenCalledWith("property-1")
-    expect(screen.getByRole("status")).toHaveTextContent("Loading details…")
+    expect(screen.getByText("Loading details…")).toHaveAttribute("role", "status")
+    expect(screen.getByText("Loading texts…")).toHaveAttribute("role", "status")
 
     resolveDetails({
       ok: true,
@@ -342,6 +384,77 @@ describe("MyLeadsQueue", () => {
     expect(row.queryByRole("button", { name: "Log attempt" })).not.toBeInTheDocument()
   })
 
+  it("groups the Text lead trigger with the other lead actions", async () => {
+    const user = userEvent.setup()
+    render(<MyLeadsQueue {...buildProps()} />)
+
+    const row = within(screen.getByTestId("my-lead-row-property-1"))
+    await user.click(row.getByRole("button", { name: "Show details for 1 Main Street" }))
+
+    const details = await row.findByRole("region", { name: "Lead details" })
+    const actions = row.getByTestId("my-lead-actions-property-1")
+    const composer = within(actions).getByTestId("rep-sms-composer")
+    const textTrigger = within(actions).getByRole("button", { name: "Text lead" })
+
+    expect(actions).toContainElement(composer)
+    expect(composer).toHaveClass("contents")
+    expect(textTrigger).toHaveClass("h-8")
+    expect(details.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it("describes the contacted gate without claiming the seller was reached", async () => {
+    const user = userEvent.setup()
+    render(<MyLeadsQueue {...buildProps()} />)
+
+    const row = within(screen.getByTestId("my-lead-row-property-2"))
+    await user.click(row.getByRole("button", { name: "Show details for 2 Main Street" }))
+
+    expect(row.getByText(/follow-up plan or offer decision/)).toBeInTheDocument()
+    expect(row.queryByText(/reached ✓/i)).not.toBeInTheDocument()
+  })
+
+  it("refetches open detail after a successful workflow mutation", async () => {
+    const user = userEvent.setup()
+    const onLoadDetail = vi.fn()
+      .mockResolvedValueOnce({ ok: true as const, detail: EMPTY_DETAIL })
+      .mockResolvedValueOnce({
+        ok: true as const,
+        detail: {
+          ...EMPTY_DETAIL,
+          offers: {
+            rows: [{ id: "offer-1", amountLabel: "$1", method: "Verbal", sentLabel: "Today", outcomeLabel: "Pending" }],
+            hasMore: false,
+            nextCursor: null,
+          },
+        },
+      })
+    const props = buildProps({ onLoadDetail })
+    const { rerender } = render(<MyLeadsQueue {...props} detailRevision={0} />)
+
+    await user.click(screen.getByRole("button", { name: "Show details for 1 Main Street" }))
+    await waitFor(() => expect(onLoadDetail).toHaveBeenCalledTimes(1))
+    rerender(<MyLeadsQueue {...props} detailRevision={1} />)
+
+    await waitFor(() => expect(screen.getByText("$1 · Verbal")).toBeInTheDocument())
+    expect(onLoadDetail).toHaveBeenCalledTimes(2)
+  })
+
+  it("does not invalidate other open details when another row is expanded", async () => {
+    const user = userEvent.setup()
+    const onLoadDetail = vi.fn(async () => ({ ok: true as const, detail: EMPTY_DETAIL }))
+    const props = buildProps({ onLoadDetail })
+    const { rerender } = render(<MyLeadsQueue {...props} detailRevision={1} />)
+
+    await user.click(screen.getByRole("button", { name: "Show details for 1 Main Street" }))
+    await waitFor(() => expect(onLoadDetail).toHaveBeenCalledTimes(1))
+    rerender(<MyLeadsQueue {...props} detailRevision={2} />)
+    await waitFor(() => expect(onLoadDetail).toHaveBeenCalledTimes(2))
+
+    await user.click(screen.getByRole("button", { name: "Show details for 2 Main Street" }))
+    await waitFor(() => expect(onLoadDetail).toHaveBeenCalledTimes(3))
+    expect(onLoadDetail).toHaveBeenCalledTimes(3)
+  })
+
   it("shows member selection only with owner authority", () => {
     const props = buildProps({ canSelectRep: false })
     const { rerender } = render(<MyLeadsQueue {...props} />)
@@ -371,3 +484,108 @@ describe("MyLeadsQueue", () => {
   })
 
 })
+
+
+it.each(["row", "section", "all"])("preserves a note draft through %s collapse and saves it to the original property", async (mode) => {
+  const user=userEvent.setup();
+  noteActions.createLeadNote.mockReset();
+  noteActions.createLeadNote.mockResolvedValue({ok:true,data:{id:"saved-note"}});
+  const onLoadDetail=vi.fn().mockResolvedValueOnce({ok:true,detail:EMPTY_DETAIL}).mockResolvedValue({ok:true,detail:{...EMPTY_DETAIL,notes:{rows:[{id:"saved-note",body:"Retained draft",authorLabel:"Maria",createdLabel:"Now"}],hasMore:false,nextCursor:null}}});
+  const props=buildProps({onLoadDetail});
+  render(<MyLeadsQueue {...props}/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));
+  await user.click(await screen.findByText("+ Add note"));
+  const composer=screen.getByRole("textbox",{name:"Add a note"});
+  await user.type(composer,"Retained draft");
+  const section=screen.getByTestId("my-leads-section-not_contacted");
+  const stageToggle=within(section).getAllByRole("button")[0];
+  if(mode==="row")await user.click(screen.getByRole("button",{name:"Hide details for 1 Main Street"}));
+  else if(mode==="section")await user.click(stageToggle);
+  else await user.click(screen.getByRole("button",{name:"Collapse all"}));
+  expect(composer).not.toBeVisible();
+  expect(onLoadDetail).toHaveBeenCalledTimes(1);
+  if(mode==="section")await user.click(stageToggle);
+  else await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));
+  expect(screen.getByRole("textbox",{name:"Add a note"})).toBe(composer);
+  expect(composer).toHaveValue("Retained draft");
+  expect(onLoadDetail).toHaveBeenCalledTimes(1);
+  await user.click(within(screen.getByTestId("lead-add-note-composer")).getByRole("button"));
+  await waitFor(()=>expect(noteActions.createLeadNote).toHaveBeenCalledWith("property-1","Retained draft"));
+  expect(noteActions.createLeadNote).toHaveBeenCalledTimes(1);
+  expect(await screen.findByText("Retained draft",{selector:"p"})).toBeVisible();
+});
+
+it("clears retained notes on scope change and does not attach another property's draft",async()=>{
+  const user=userEvent.setup();const props=buildProps();
+  const view=render(<MyLeadsQueue {...props}/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));
+  await user.click(await screen.findByText("+ Add note"));
+  await user.type(screen.getByRole("textbox",{name:"Add a note"}),"Private first scope draft");
+  await user.click(screen.getByRole("button",{name:"Hide details for 1 Main Street"}));
+  view.rerender(<MyLeadsQueue {...props} selectedRepId="jarrad"/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 2 Main Street"}));
+  await user.click(await screen.findByText("+ Add note"));
+  expect(screen.getByRole("textbox",{name:"Add a note"})).toHaveValue("");
+  expect(screen.queryByDisplayValue("Private first scope draft")).not.toBeInTheDocument();
+});
+
+
+it("refreshes only notes after a later-page save, preserving both rows and another draft", async () => {
+  const user=userEvent.setup();noteActions.createLeadNote.mockReset();noteActions.createLeadNote.mockResolvedValue({ok:true,data:{id:"new-note"}});
+  const onLeadChanged=vi.fn();
+  const onLoadDetailPage=vi.fn().mockResolvedValue({ok:true,group:"notes",page:{rows:[{id:"new-note",body:"Later seller note",authorLabel:"Maria",createdLabel:"Now"}],hasMore:false,nextCursor:null}});
+  const props=buildProps({onLeadChanged,onLoadDetailPage});
+  const view=render(<MyLeadsQueue {...props}/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));
+  await user.click(await screen.findByText("+ Add note"));
+  const original=screen.getByRole("textbox",{name:"Add a note"});await user.type(original,"Keep another draft");
+  const appended={...props.stages,not_contacted:{...props.stages.not_contacted,rows:[...props.stages.not_contacted.rows,makeRow("not_contacted",99)],totalCount:2}};
+  view.rerender(<MyLeadsQueue {...props} stages={appended}/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 99 Main Street"}));
+  const later=screen.getByTestId("my-lead-row-property-99");
+  await user.click(await within(later).findByText("+ Add note"));
+  await user.type(within(later).getByRole("textbox",{name:"Add a note"}),"Later seller note");
+  await user.click(within(later).getByRole("button",{name:"Add"}));
+  expect(await within(later).findByText("Later seller note",{selector:"p"})).toBeVisible();
+  expect(onLoadDetailPage).toHaveBeenCalledWith("property-99","notes",null);
+  expect(noteActions.createLeadNote).toHaveBeenCalledWith("property-99","Later seller note");
+  expect(onLeadChanged).not.toHaveBeenCalled();
+  expect(props.onLoadDetail).toHaveBeenCalledTimes(2);
+  expect(original).toHaveValue("Keep another draft");
+  expect(screen.getByTestId("my-lead-row-property-1")).toBeVisible();
+  expect(later).toBeVisible();
+});
+
+it.each(["row","section"])("unmounts audio and suspends artifact polling while %s is hidden",async mode=>{
+  const user=userEvent.setup();
+  const fetchMock=vi.spyOn(globalThis,"fetch").mockResolvedValue({ok:true,json:async()=>({recordingStatus:"available",durationSeconds:30,transcriptStatus:"none",transcript:null,summaryStatus:"none",summary:null})} as Response);
+  try{
+    const detail={...EMPTY_DETAIL,attempts:{rows:[{id:"attempt",outcomeLabel:"Reached",actorLabel:"Maria",occurredLabel:"Now",sourceLabel:"Sandra",recordingUrl:null,callActivityId:"call-1"}],hasMore:false,nextCursor:null}};
+    render(<MyLeadsQueue {...buildProps({onLoadDetail:vi.fn().mockResolvedValue({ok:true,detail})})}/>);
+    await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));
+    await screen.findByTestId("recording-audio");
+    const signal=fetchMock.mock.calls[0][1]?.signal;
+    vi.useFakeTimers();
+    const toggle=mode==="row"?screen.getByRole("button",{name:"Hide details for 1 Main Street"}):within(screen.getByTestId("my-leads-section-not_contacted")).getAllByRole("button")[0];
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId("recording-audio")).not.toBeInTheDocument();
+    expect(signal?.aborted).toBe(true);
+    await act(async()=>{vi.advanceTimersByTime(60_000);window.dispatchEvent(new Event("focus"));});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  }finally{vi.useRealTimers();fetchMock.mockRestore();}
+});
+
+
+it("reports failed saved-note refresh and retries the first page without another write",async()=>{
+  const user=userEvent.setup();noteActions.createLeadNote.mockReset();noteActions.createLeadNote.mockResolvedValue({ok:true,data:{id:"saved"}});
+  const onLoadDetailPage=vi.fn().mockResolvedValueOnce({ok:false,message:"History refresh failed"}).mockResolvedValueOnce({ok:true,group:"notes",page:{rows:[{id:"saved",body:"Already persisted",authorLabel:"Maria",createdLabel:"Now"}],hasMore:false,nextCursor:null}});
+  const onLeadChanged=vi.fn();render(<MyLeadsQueue {...buildProps({onLoadDetailPage,onLeadChanged})}/>);
+  await user.click(screen.getByRole("button",{name:"Show details for 1 Main Street"}));await user.click(await screen.findByText("+ Add note"));
+  await user.type(screen.getByRole("textbox",{name:"Add a note"}),"Already persisted");
+  await user.click(within(screen.getByTestId("lead-add-note-composer")).getByRole("button"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("History refresh failed");
+  await user.click(screen.getByRole("button",{name:"Retry"}));
+  expect(await screen.findByText("Already persisted",{selector:"p"})).toBeVisible();
+  expect(onLoadDetailPage.mock.calls).toEqual([["property-1","notes",null],["property-1","notes",null]]);
+  expect(noteActions.createLeadNote).toHaveBeenCalledTimes(1);expect(onLeadChanged).not.toHaveBeenCalled();
+});

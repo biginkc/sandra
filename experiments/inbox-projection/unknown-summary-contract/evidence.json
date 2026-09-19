@@ -1,0 +1,67 @@
+{
+  "status": "PASS",
+  "at": "2026-09-13T12:41:44Z",
+  "org": "32f71c92-d60f-453c-9b3e-5b0d9c7dd966",
+  "other_org": "04f70277-f7fe-445b-953c-d2692ad2ebde",
+  "setup_sha256": "e8604e26e0032b17fd1226da93b8717926cedd824b4bab08434ac58c305b7769",
+  "runner_sha256": "74b86e3f56ac1fe0397edcfbe3650972e3180e685f1669cf891ebc76677de811",
+  "checks": [
+    {
+      "name": "private unknown summary and proposal SQL compile",
+      "passed": true
+    },
+    {
+      "name": "latest dismissed hides group despite older active row; all history counts",
+      "passed": true
+    },
+    {
+      "name": "latest active bucket and unnormalized distinct raw keys",
+      "passed": true
+    },
+    {
+      "name": "same raw sender remains separate within each organization",
+      "passed": true
+    },
+    {
+      "name": "whitespace retained while empty address is skipped",
+      "passed": true
+    },
+    {
+      "name": "queued status included but email outbound and matched contact excluded",
+      "passed": true
+    },
+    {
+      "name": "unknown list preserves suppressed and test-like senders",
+      "passed": true
+    },
+    {
+      "name": "1005-row count complete and bounded proposal rejects partial group",
+      "passed": true
+    },
+    {
+      "name": "actual legacy paginated classifier parity under single-org RLS",
+      "passed": true,
+      "rows_read": 1013,
+      "groups": 6
+    },
+    {
+      "name": "new deterministic UUID tie ordering is explicitly not legacy tie parity",
+      "passed": true
+    },
+    {
+      "name": "frozen synthetic IDs exclude later arrivals and non-inbound-SMS rows",
+      "passed": true
+    },
+    {
+      "name": "private summary access denied with42501",
+      "passed": true
+    }
+  ],
+  "limits": [
+    "No persisted sender_group_id mapping or operation workset; proposal never grants command authority",
+    "Legacy tie ordering undefined; UUID tie choice is explicit new determinism",
+    "Actual classifier called against SQL-filtered synthetic rows via mocked pagination; no PostgREST transport or browser proof",
+    "Counts scan full raw-sender history; no bounded-work or capacity claim",
+    "No90day, review, noise or suppression exclusion exists in canonical unknown list"
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "runId": "d7a381d2-7c7e-465e-b682-2f513035f184",
+  "orgId": "b2ca8c17-4565-4e95-8099-8a74064bdcf7",
+  "startedAt": "2026-09-13T08:44:27.550Z",
+  "requestedConversations": 1000,
+  "status": "failed",
+  "observations": [],
+  "limitations": [
+    "Modeled synthetic volume, not verified production distribution",
+    "Local ordinary-user source read timings, not browser click latency",
+    "Serial requests without concurrent arrivals; no performance budget pass claimed",
+    "Percentiles from 20 repeats are descriptive, not tail-latency certification",
+    "Fixtures retained in exclusively owned local stack; repeated runs increase total database size"
+  ],
+  "guards": {
+    "project": "sandra-inbox-redesign-20260913",
+    "apiPort": 58421,
+    "databasePort": 58422,
+    "outboundTriggers": 0,
+    "activeCronJobs": 0,
+    "authenticatedStatementTimeout": "8s",
+    "seedStatementTimeout": "15s"
+  },
+  "failedPhase": "fixture_user",
+  "errorType": "error",
+  "errorCode": "P0001",
+  "finishedAt": "2026-09-13T08:44:27.856Z"
+}

@@ -23,7 +23,7 @@ test("production canary sends a real outbound SMS from a canary lead", async ({
   const token = env.runId.replace(/[^a-zA-Z0-9-]/g, "-");
   const address = `${env.label} SMS ${token} 801 Provider St`;
   const contactLastName = `PROD-CANARY SMS ${token}`;
-  const body = `${env.label} outbound SMS ${token}`;
+  const body = `Mel with BMH. ${env.label} outbound SMS ${token}`;
   let contactId: string | null = null;
   let createdContact = false;
   testInfo.annotations.push({ type: "runId", description: env.runId });

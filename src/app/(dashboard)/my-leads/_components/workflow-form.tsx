@@ -1,6 +1,6 @@
 "use client"
 
-import { useRef, useState, type ReactNode } from "react"
+import { createContext, useContext, useRef, useState, type ReactNode } from "react"
 import { AlertCircle } from "lucide-react"
 
 import {
@@ -14,7 +14,35 @@ import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import { wallTimeToUtc } from "@/lib/time/zoned"
 import { ACQUISITION_TIME_ZONE } from "@/lib/my-leads/time"
+import type { Json } from "@/lib/supabase/types"
 import type { AcquisitionFormSubmitResult, AcquisitionSubmit } from "./types"
+
+export type WorkflowReconciliation = {
+  command: string
+  payload: Record<string, Json>
+}
+
+export const WorkflowRecoveryContext = createContext<{
+  message: string; blocked: boolean; busy: boolean; refresh: () => void
+  reconciliation?: WorkflowReconciliation
+} | null>(null)
+
+export function centralDateTimeFromIso(value: unknown): string {
+  if (typeof value !== "string") return ""
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return ""
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: ACQUISITION_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date)
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? ""
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`
+}
 
 // Shared card shell to match the approved My Leads dialog mock: a 22px
 // rounded card (~420-440px) with a muted footer band. Spread this onto each
@@ -45,6 +73,7 @@ export function OptionCard({
   label,
   hint,
   className,
+  disabled = false,
 }: {
   id: string
   name: string
@@ -54,6 +83,7 @@ export function OptionCard({
   label: ReactNode
   hint?: ReactNode
   className?: string
+  disabled?: boolean
 }) {
   return (
     <label
@@ -62,6 +92,7 @@ export function OptionCard({
         "flex cursor-pointer items-center gap-2.5 rounded-[12px] border border-border px-3 py-2.5 text-sm transition-colors",
         "has-[:focus-visible]:border-ring has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring/50",
         checked && "border-foreground bg-foreground/[0.04] font-medium",
+        disabled && "cursor-not-allowed opacity-70",
         className
       )}
     >
@@ -71,6 +102,7 @@ export function OptionCard({
         name={name}
         value={value}
         checked={checked}
+        disabled={disabled}
         onChange={onChange}
         className="sr-only"
       />
@@ -107,19 +139,22 @@ export function WorkflowDialogFooter({
   submitLabel,
   onCancel,
   destructive = false,
+  disabled = false,
 }: {
   submitting: boolean
   submitLabel: string
   onCancel: () => void
   destructive?: boolean
+  disabled?: boolean
 }) {
+  const recovery = useContext(WorkflowRecoveryContext)
   return (
     <DialogFooter className="rounded-b-[22px]">
       <Button type="button" variant="outline" disabled={submitting} onClick={onCancel}>
         Cancel
       </Button>
-      <Button type="submit" variant={destructive ? "destructive" : "default"} disabled={submitting}>
-        {submitting ? "Saving…" : submitLabel}
+      <Button type="submit" variant={destructive ? "destructive" : "default"} disabled={disabled || submitting || recovery?.blocked || recovery?.busy}>
+        {submitting ? "Saving…" : recovery?.reconciliation ? "Reconcile saved change" : submitLabel}
       </Button>
     </DialogFooter>
   )
@@ -131,11 +166,16 @@ export function FieldError({ message, id }: { message?: string; id?: string }) {
 }
 
 export function WorkflowFormError({ message }: { message: string | null }) {
-  if (!message) return null
+  const recovery = useContext(WorkflowRecoveryContext)
+  if (!message && !recovery) return null
   return (
     <div className="flex items-start gap-2 rounded-[12px] border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">
       <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-      <span>{message}</span>
+      <span>
+        {recovery?.message ?? message}
+        {recovery?.reconciliation && <span className="mt-1 block text-xs font-medium text-foreground">The original values are locked while Sandra reconciles this save. Review the displayed values and submit the saved request again.</span>}
+        {recovery?.blocked && <Button type="button" variant="link" disabled={recovery.busy} onClick={recovery.refresh}>{recovery.busy ? "Refreshing…" : "Refresh"}</Button>}
+      </span>
     </div>
   )
 }
@@ -147,6 +187,7 @@ export function DateTimeField({
   onChange,
   error,
   required = true,
+  disabled = false,
 }: {
   id: string
   label: string
@@ -154,6 +195,7 @@ export function DateTimeField({
   onChange: (value: string) => void
   error?: string
   required?: boolean
+  disabled?: boolean
 }) {
   const errorId = `${id}-error`
   return (
@@ -164,6 +206,7 @@ export function DateTimeField({
         type="datetime-local"
         value={value}
         aria-required={required}
+        disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         aria-invalid={Boolean(error)}
         aria-describedby={error ? errorId : undefined}
@@ -194,7 +237,7 @@ export function centralDateTimeToIso(value: string):
 
 export function useAcquisitionSubmit<T>(
   onSubmit: AcquisitionSubmit<T>,
-  onSuccess: () => void
+  onSuccess: (result: AcquisitionFormSubmitResult) => void
 ) {
   const submittingRef = useRef(false)
   const [submitting, setSubmitting] = useState(false)
@@ -223,7 +266,7 @@ export function useAcquisitionSubmit<T>(
         setFieldErrors(result.fieldErrors || {})
         return false
       }
-      onSuccess()
+      onSuccess(result)
       return true
     } finally {
       submittingRef.current = false

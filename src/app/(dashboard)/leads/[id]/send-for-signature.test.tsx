@@ -11,6 +11,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ESIGN_MERGE_FIELD_NAMES,
+  ESIGN_RESIDENTIAL_FIELD_NAMES,
+  ESIGN_NOVATION_FIELD_NAMES,
   type TemplateOption,
 } from "@/lib/esign/contracts";
 
@@ -452,3 +454,82 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
+
+it("submits all residential terms with street-only defaults and optional additional terms", async () => {
+  const user = userEvent.setup();
+  const api = actions({ ...preflight,
+    templates: [{ ...template, mergeFieldNames: ESIGN_RESIDENTIAL_FIELD_NAMES }],
+    residentialAddress: { street: "123 Main St", city: "Kansas City", state: "MO", zip: "64108" },
+    mergeDefaults: { ...preflight.mergeDefaults, property_address: "123 Main St, Kansas City, MO, 64108" },
+  });
+  render(<SendForSignature propertyId="property-1" initialBlockers={[]} {...api} />);
+  await user.click(screen.getByTestId("send-for-signature-trigger"));
+  expect(await screen.findByLabelText("Property street address")).toHaveValue("123 Main St");
+  expect(screen.getByLabelText("Property city")).toHaveValue("Kansas City");
+  expect(screen.getByLabelText("Additional terms (optional)")).toHaveValue("");
+  await user.type(screen.getByLabelText("Buyer name / entity"), "BMH Buyer LLC");
+  await user.type(screen.getByLabelText("Legal description"), "Internal lot fixture");
+  await user.type(screen.getByLabelText("Earnest money holder"), "Internal escrow fixture");
+  await user.type(screen.getByLabelText("Cash balance"), "$124,000");
+  const buyer = within(screen.getByTestId("esign-signer-1"));
+  await user.type(buyer.getByLabelText("Name"), "Authorized Buyer");
+  await user.type(buyer.getByLabelText("Email"), "buyer@example.com");
+  await user.click(screen.getByRole("checkbox"));
+  await user.click(screen.getByRole("button", { name: "Send for signature" }));
+  await waitFor(() => expect(api.sendAction).toHaveBeenCalledOnce());
+  expect(api.sendAction.mock.calls[0][0].mergeValues).toEqual({ ...preflight.mergeDefaults,
+    buyer_name: "BMH Buyer LLC", property_address: "123 Main St", property_city: "Kansas City", property_state: "MO", property_zip: "64108",
+    legal_description: "Internal lot fixture", earnest_money_holder: "Internal escrow fixture", cash_balance: "$124,000", additional_terms: "" });
+});
+
+it("selects and submits the novation packet's exact fields", async () => {
+  const user = userEvent.setup();
+  const novation = { ...template, id: "template-novation", name: "Novation packet",
+    documentType: "novation_agreement", mergeFieldNames: ESIGN_NOVATION_FIELD_NAMES };
+  const api = actions({ ...preflight, templates: [template, novation],
+    residentialAddress: { street: "123 Main St", city: "Kansas City", state: "MO", zip: "64108" } });
+  render(<SendForSignature propertyId="property-1" initialBlockers={[]} {...api} />);
+  await user.click(screen.getByTestId("send-for-signature-trigger"));
+  await user.selectOptions(screen.getByLabelText("Template"), novation.id);
+  expect(screen.getByLabelText("Seller email")).toHaveValue("seller@example.com");
+  expect(screen.getByLabelText("Property state")).toHaveValue("MO");
+  for (const name of ESIGN_NOVATION_FIELD_NAMES) {
+    const input = document.querySelector<HTMLInputElement>(`[name="${name}"]`);
+    expect(input, name).not.toBeNull();
+    if (input?.value) continue;
+    fireEvent.change(input!, { target: { value: input?.type === "date" ? "2026-09-30" : `${name} fixture` } });
+  }
+  const buyer = within(screen.getByTestId("esign-signer-1"));
+  await user.type(buyer.getByLabelText("Name"), "Authorized Buyer");
+  await user.type(buyer.getByLabelText("Email"), "buyer@example.com");
+  await user.click(screen.getByRole("checkbox"));
+  await user.click(screen.getByRole("button", { name: "Send for signature" }));
+  await waitFor(() => expect(api.sendAction).toHaveBeenCalledOnce());
+  const sent = api.sendAction.mock.calls[0][0];
+  expect(sent.templateId).toBe(novation.id);
+  expect(new Set(Object.keys(sent.mergeValues))).toEqual(new Set(ESIGN_NOVATION_FIELD_NAMES));
+  expect(sent.mergeValues.seller_email).toBe("seller@example.com");
+});
+
+it("requires a separate second seller when the novation template has three roles", async () => {
+  const user = userEvent.setup();
+  const novation: TemplateOption = {
+    ...template,
+    id: "novation-two-sellers",
+    name: "Novation packet, two sellers",
+    documentType: "novation_agreement",
+    signerRoles: [
+      { name: "Seller", order: 0 },
+      { name: "Seller 2", order: 1 },
+      { name: "Buyer", order: 2 },
+    ],
+    mergeFieldNames: ESIGN_NOVATION_FIELD_NAMES,
+  };
+  const api = actions({ ...preflight, templates: [novation] });
+  render(<SendForSignature propertyId="property-1" initialBlockers={[]} {...api} />);
+  await user.click(screen.getByTestId("send-for-signature-trigger"));
+  expect(screen.getByLabelText("Seller names as written in the agreement")).toBeInTheDocument();
+  expect(within(screen.getByTestId("esign-signer-1")).getByLabelText("Name")).toHaveValue("");
+  expect(within(screen.getByTestId("esign-signer-2")).getByLabelText("Name")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "Send for signature" })).toBeDisabled();
+});

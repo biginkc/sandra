@@ -29,6 +29,10 @@
       "schedule": "*/15 * * * *"
     },
     {
+      "path": "/api/cron/sendillo-status-reconciliation",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/cron/calendar-mutation-sweep",
       "schedule": "4-59/5 * * * *"
     },
