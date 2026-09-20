@@ -610,6 +610,27 @@ begin
   -- outreach_dispo already reflects this review's disposition — for an
   -- unapplied row it never did, by design).
   if not v_review.dispo_applied then
+    -- Astra PR review finding (2026-09-20, BLOCKING): the existing
+    -- trigger `trg_properties_supersede_ai_disposition_reviews`
+    -- (20260827110000) fires AFTER UPDATE OF outreach_dispo on
+    -- properties and supersedes every `pending` review for that
+    -- property/org — including this very row, if the property update
+    -- ran first. That would flip this row to 'superseded' with
+    -- superseded_reason set, and the very next statement here trying to
+    -- set it to 'confirmed' would then violate
+    -- ai_disposition_reviews_resolution_check (confirmed requires
+    -- superseded_reason IS NULL). Order matters: resolve THIS review to
+    -- 'confirmed' FIRST, while it's still 'pending' and this is the only
+    -- statement touching it, so when the trigger fires off the property
+    -- update below, its `where review.status = 'pending'` filter no
+    -- longer matches this row at all.
+    update public.ai_disposition_reviews
+    set status = 'confirmed',
+        resolved_at = now(),
+        reviewed_by = auth.uid(),
+        dispo_applied = true
+    where id = v_review.id;
+
     update public.properties
     set outreach_dispo = v_review.disposition,
         needs_human_attention = false,
@@ -617,13 +638,6 @@ begin
         updated_at = now()
     where id = v_review.property_id
       and org_id = v_review.org_id;
-
-    update public.ai_disposition_reviews
-    set status = 'confirmed',
-        resolved_at = now(),
-        reviewed_by = auth.uid(),
-        dispo_applied = true
-    where id = v_review.id;
 
     insert into public.lead_events (
       org_id, property_id, actor_type, actor_id, event_type, payload,
