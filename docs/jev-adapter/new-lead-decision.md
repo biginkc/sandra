@@ -23,6 +23,6 @@ Twelve synthetic/paraphrased evaluation cases cover the four reviewed patterns a
 npx tsx scripts/prepare-jev-new-lead-eval.ts /absolute/path/to/new-file.json
 ```
 
-This script never calls a provider. A separately authorized bounded model run is needed to measure the revised rubric. The old 120-case review is development evidence, not an independent validation set for the new category. Final automatic promotion requires validated thresholds and conflict/consent checks; it is not enabled by this change.
+This script never calls a provider. An authorized bounded run on 2026-09-20 matched all 12 expected outcomes (14,234 input tokens; estimated $0.000598). All five positive cases returned new_lead, while seven negative/exception controls retained their expected outcomes. This is a small development smoke test, not a calibrated accuracy result. The old 120-case review is development evidence, not an independent validation set for the new category. Final automatic promotion requires validated thresholds and conflict/consent checks; it is not enabled by this change.
 
 API reference: https://docs.typesafe.ai/primitives/choice
