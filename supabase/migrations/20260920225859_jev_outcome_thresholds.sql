@@ -99,24 +99,30 @@ create policy jev_outcome_threshold_history_org_select on public.jev_outcome_thr
   for select to authenticated
   using (public.hugo_has_active_org_access(org_id));
 
--- Read is granted to authenticated (scoped down to active-org-membership
--- rows by the RLS policies above). No authenticated write path at all —
--- every mutation goes through fn_set_jev_outcome_threshold below, which
--- performs its own owner-role + active-membership authorization check
--- before writing.
+-- Root PR-review findings (2026-09-20, confirmed with has_table_privilege
+-- against an applied local PG17): every role's privileges on both tables
+-- must be revoked and re-granted EXPLICITLY, one role at a time, in the
+-- same statement group — including service_role, which is NOT covered by
+-- `revoke all ... from public, anon, authenticated` and would otherwise
+-- keep whatever broad default privilege it has as a superuser-adjacent
+-- role in this local/hosted setup (it had implicit INSERT on
+-- jev_outcome_thresholds before this fix, contradicting the "read-only"
+-- comment below). No authenticated write path at all — every mutation
+-- goes through fn_set_jev_outcome_threshold, which performs its own
+-- owner-role + active-membership authorization check before writing.
 revoke all on table public.jev_outcome_thresholds
-  from public, anon, authenticated;
+  from public, anon, authenticated, service_role;
 grant select on table public.jev_outcome_thresholds to authenticated;
-revoke all on table public.jev_outcome_threshold_history
-  from public, anon, authenticated;
-grant select on table public.jev_outcome_threshold_history to authenticated;
-
 -- The classify path runs under service_role (dispatch is invoked from the
 -- Dialpad webhook's service-role client) and only ever needs to read the
--- live threshold, never write it. History is audit-only; service_role has
--- no reason to read or write it directly (dispatch never touches it).
+-- live threshold, never write it.
 grant select on table public.jev_outcome_thresholds to service_role;
-revoke all on table public.jev_outcome_threshold_history from service_role;
+
+revoke all on table public.jev_outcome_threshold_history
+  from public, anon, authenticated, service_role;
+grant select on table public.jev_outcome_threshold_history to authenticated;
+-- History is audit-only; service_role has no reason to read or write it
+-- directly (dispatch never touches it) — intentionally no grant here.
 
 -- ----------------------------------------------------------------------------
 -- fn_set_jev_outcome_threshold — the only writer.
@@ -162,6 +168,18 @@ begin
   if p_min_confidence < 0 or p_min_confidence > 1 then
     raise exception 'INVALID_CONFIDENCE' using errcode = '22023';
   end if;
+
+  -- Root PR-review finding (2026-09-20): normalize BEFORE any comparison
+  -- or storage, not just at the column type. The column is numeric(4,3),
+  -- so a caller-supplied value with more precision (e.g. 0.9555) would
+  -- otherwise be compared against its own future re-round on replay —
+  -- the idempotency check below would see the raw 0.9555 not-equal to
+  -- the stored, already-rounded 0.956 and wrongly raise
+  -- IDEMPOTENCY_CONFLICT on a genuine identical-request replay. Rounding
+  -- once, here, means every later reference to p_min_confidence (the
+  -- idempotency comparison, the insert/update, the returned result) is
+  -- already the exact value that will be stored.
+  p_min_confidence := round(p_min_confidence, 3);
 
   -- Owner-role, active-membership authorization — the actual boundary.
   -- App-side admin-email checks are UX only; this is what actually gates
