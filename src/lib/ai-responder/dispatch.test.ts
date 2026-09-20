@@ -109,6 +109,8 @@ type MockState = {
   config: {
     active: boolean;
     business_hours_only: boolean;
+    classifier_mode?: "shadow" | "automatic";
+    classifier_provider?: "legacy" | "jev";
     escalation_keywords: string[];
     id: string;
     max_turns: number;
@@ -116,6 +118,7 @@ type MockState = {
     model: string;
     system_prompt: string;
   };
+  smsClassificationRuns: Array<{ id: string }>;
   messages: MessageRow[];
   nextMessageId: number;
   nextClaimId: number;
@@ -158,6 +161,7 @@ function createMockState(): MockState {
       system_prompt: "Reply briefly.",
     },
     aiClaims: [],
+    smsClassificationRuns: [],
     contact: {
       first_name: "Sam",
       phone_1: "+18165550001",
@@ -574,6 +578,33 @@ function createMockSupabase(state: MockState) {
     return query;
   }
 
+  function buildSmsClassificationRunsQuery() {
+    const query = {
+      insert() {
+        const row = { id: `run-${state.smsClassificationRuns.length + 1}` };
+        state.smsClassificationRuns.push(row);
+        return {
+          select: () => ({
+            maybeSingle: async () => ({ data: row, error: null }),
+          }),
+        };
+      },
+      eq() {
+        return query;
+      },
+      select() {
+        return query;
+      },
+      maybeSingle() {
+        return Promise.resolve({
+          data: state.smsClassificationRuns.at(-1) ?? null,
+          error: null,
+        });
+      },
+    };
+    return query;
+  }
+
   return {
     from(table: string) {
       if (table === "messages") {
@@ -594,9 +625,29 @@ function createMockSupabase(state: MockState) {
       if (table === "ai_disposition_reviews") {
         return buildAiDispositionReviewsQuery();
       }
+      if (table === "sms_classification_runs") {
+        return buildSmsClassificationRunsQuery();
+      }
       throw new Error(`Unexpected table: ${table}`);
     },
     rpc(name: string, args: Record<string, unknown>) {
+      if (name === "fn_propose_ai_dnc_suppression_review") {
+        // Mirrors fn_propose_ai_dnc_suppression_review's real contract:
+        // marks needs_human_attention, creates a pending review, but
+        // deliberately does NOT write properties.outreach_dispo — the
+        // entire point of the Option B fix this test exists to prove.
+        state.property.needs_human_attention = true;
+        state.aiDispoReviews.push({
+          conversationId: String(args.p_conversation_id),
+          disposition: "dnc",
+          inboundMessageId: String(args.p_source_inbound_message_id),
+          reason: String(args.p_ai_reason),
+        });
+        return Promise.resolve({
+          data: { status: "proposed", reviewId: "review-jev-dnc" },
+          error: null,
+        });
+      }
       if (name !== "fn_apply_ai_disposition_with_review") {
         throw new Error(`Unexpected RPC: ${name}`);
       }
@@ -1440,6 +1491,74 @@ describe("dispatchAiResponse debounce", () => {
       },
     ]);
     expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("jev-driven close_dnc suppresses immediately but defers the outreach_dispo write to human confirmation", async () => {
+    // Regression test for Astra's BLOCKING PR-review finding (2026-09-20,
+    // "Option B" resolution): DNC's suppression effect must happen right
+    // away (halting it would mean continuing to text someone who just
+    // invoked DNC/legal language), but properties.outreach_dispo must NOT
+    // be written until a human confirms via fn_confirm_ai_disposition_review.
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ answers: { outcome: { choice: "dnc" } } }),
+      text: async () => "",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const outcome = await dispatchAiResponse(
+        supabase as never,
+        {
+          contactId: CONTACT_ID,
+          conversationId: CONVERSATION_ID,
+          inboundBody: "I will sue you, stop contacting me",
+          inboundFromPhone: "+18165550001",
+          inboundMessageId: "inbound-jev-dnc",
+          propertyId: PROPERTY_ID,
+        },
+        { anthropic: {} as never },
+      );
+
+      // Jev decided the action entirely — legacy Claude must never be
+      // called for this message (Jarrad's explicit "no legacy call for
+      // automatic-mode orgs" override).
+      expect(vi.mocked(generateAiReply)).not.toHaveBeenCalled();
+
+      // Suppression happens immediately, same as legacy dnc.
+      expect(vi.mocked(applyPhoneLevelOptOut)).toHaveBeenCalledWith(
+        supabase,
+        expect.objectContaining({
+          contactId: CONTACT_ID,
+          fromPhone: "+18165550001",
+          surface: "dnc",
+        }),
+      );
+
+      // The entire point of the fix: outreach_dispo is NOT written yet.
+      expect(state.property.outreach_dispo).toBeNull();
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(state.aiDispoReviews).toEqual([
+        {
+          conversationId: CONVERSATION_ID,
+          disposition: "dnc",
+          inboundMessageId: "inbound-jev-dnc",
+          reason: "model:threat_dnc",
+        },
+      ]);
+      expect(vi.mocked(sendSmsToContact)).not.toHaveBeenCalled();
+      expect(outcome.outcome).not.toBe("sent");
+    } finally {
+      vi.stubGlobal("fetch", originalFetch);
+    }
   });
 
   it("deescalate_close sends the fixed named template without humanizer", async () => {
