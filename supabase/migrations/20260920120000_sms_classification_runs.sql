@@ -323,6 +323,6 @@ comment on column public.ai_responder_configs.classifier_provider is
 comment on column public.ai_responder_configs.classifier_mode is
   'shadow = Jev decision computed + persisted to sms_classification_runs, but legacy decision still drives dispatched effects (default). automatic = Jev decision drives effects. dnc can never reach automatic regardless of this flag — enforced by ai_disposition_reviews_dnc_never_auto_accepted.';
 comment on column public.ai_responder_configs.classifier_fallback_max_consecutive is
-  'After this many consecutive Jev failures/timeouts for one conversation, fall back to the legacy provider for that conversation rather than retrying indefinitely.';
+  'After this many consecutive Jev failures/timeouts for one conversation, fall back to the legacy provider for that conversation rather than retrying indefinitely. NOT YET READ BY ANY CODE as of 2026-09-20 (Fable PR review finding) — dispatch-bridge.ts currently falls back to legacy on every single Jev failure, with no per-conversation counter. This column exists for a future consecutive-failure-budget implementation; do not assume it is live config until that lands.';
 
 commit;

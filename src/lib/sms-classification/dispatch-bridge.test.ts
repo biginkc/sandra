@@ -75,6 +75,33 @@ describe("classifyForDispatch", () => {
     expect(result).toEqual({ kind: "use_legacy", classificationRunId: "run-1" });
   });
 
+  it("returns use_legacy in shadow mode even for a nurture outcome (not jev_nurture)", async () => {
+    // Fable-flagged gap (2026-09-20 PR review): shadow must never act on
+    // ANY Jev result, not just route-shaped ones. The mode gate in
+    // dispatch-bridge.ts runs before resolvePolicyOutcome is even called,
+    // so nurture/no_action are never reachable in shadow mode — this
+    // guards against a future reordering silently reintroducing that bug.
+    const fetch = stubFetch({ answers: { outcome: { choice: "nurture" } } });
+    const result = await classifyForDispatch(
+      stubSupabase({}),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "shadow" },
+      { fetch, typesafeApiKey: "k" },
+    );
+    expect(result).toEqual({ kind: "use_legacy", classificationRunId: "run-1" });
+  });
+
+  it("returns use_legacy in shadow mode even for a no_action outcome (not jev_no_action)", async () => {
+    const fetch = stubFetch({ answers: { outcome: { choice: "unclear" } } });
+    const result = await classifyForDispatch(
+      stubSupabase({}),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "shadow" },
+      { fetch, typesafeApiKey: "k" },
+    );
+    expect(result).toEqual({ kind: "use_legacy", classificationRunId: "run-1" });
+  });
+
   it("returns jev_route in automatic mode for a routable outcome", async () => {
     const fetch = stubFetch({ answers: { outcome: { choice: "dnc" } } });
     const result = await classifyForDispatch(
