@@ -624,6 +624,7 @@ export type Database = {
           conversation_id: string
           created_at: string
           disposition: string
+          dispo_applied: boolean
           id: string
           org_id: string
           property_id: string
@@ -639,6 +640,7 @@ export type Database = {
           conversation_id: string
           created_at?: string
           disposition: string
+          dispo_applied?: boolean
           id?: string
           org_id: string
           property_id: string
@@ -654,6 +656,7 @@ export type Database = {
           conversation_id?: string
           created_at?: string
           disposition?: string
+          dispo_applied?: boolean
           id?: string
           org_id?: string
           property_id?: string
@@ -6570,6 +6573,15 @@ export type Database = {
       // Hand-patched 2026-09-20, same caveat as sms_classification_runs above.
       fn_accept_ai_disposition_review: {
         Args: { p_classification_run_id: string; p_review_id: string }
+        Returns: Json
+      }
+      fn_propose_ai_dnc_suppression_review: {
+        Args: {
+          p_ai_reason: string
+          p_conversation_id: string
+          p_property_id: string
+          p_source_inbound_message_id: string
+        }
         Returns: Json
       }
       jitter_claim_dialer_batch: {

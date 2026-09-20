@@ -317,6 +317,7 @@ export async function dispatchAiResponse(
       contactId: input.contactId,
       conversationId: input.conversationId ?? null,
       inboundMessageId: input.inboundMessageId ?? null,
+      inboundBody: input.inboundBody,
     },
     {
       classifierProvider: (config?.classifier_provider as "legacy" | "jev") ?? "legacy",
@@ -327,16 +328,31 @@ export async function dispatchAiResponse(
 
   if (classification.kind === "jev_nurture") {
     const nurtureResult = await setOutreachDispoNurture(supabase, input.propertyId);
+    if (nurtureResult.ok) {
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: "auto_closed",
+      });
+      return { outcome: "auto_closed", reason: "model:nurture" };
+    }
+    if (nurtureResult.alreadyTerminal) {
+      // Benign, not an error: something more specific than nurture is
+      // already set (possibly by a human while Jev was classifying) —
+      // nurture must never downgrade it. Skip silently, same treatment
+      // as the legacy path's "already_terminal" RPC status.
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: "skipped",
+      });
+      return { outcome: "skipped", reason: "already_terminal" };
+    }
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
-      outcome: nurtureResult.ok ? "auto_closed" : "escalated",
-      errorMessage: nurtureResult.ok ? undefined : nurtureResult.error,
+      outcome: "escalated",
+      errorMessage: nurtureResult.error,
     });
-    if (!nurtureResult.ok) {
-      await markPropertyNeedsAttention(supabase, input.propertyId, "nurture_write_failed");
-      return { outcome: "escalated", reason: "nurture_write_failed" };
-    }
-    return { outcome: "auto_closed", reason: "model:nurture" };
+    await markPropertyNeedsAttention(supabase, input.propertyId, "nurture_write_failed");
+    return { outcome: "escalated", reason: "nurture_write_failed" };
   }
 
   let generated: AiStructuredOutput;
@@ -507,16 +523,31 @@ export async function dispatchAiResponse(
         outcome: "opted_out",
       });
       return { outcome: "opted_out", reason: route.reason };
-    case "close_dnc":
-      const dncResult = await applyResponderDnc(supabase, {
-        propertyId: input.propertyId,
-        contactId: input.contactId,
-        conversationId: input.conversationId ?? null,
-        inboundMessageId: input.inboundMessageId ?? null,
-        inboundFromPhone: input.inboundFromPhone ?? null,
-        orgId: property.org_id,
-        reason: route.reason,
-      });
+    case "close_dnc": {
+      // Jev-driven dnc: suppress now, defer the outreach_dispo write to
+      // human confirmation (Option B, 2026-09-20). Legacy dnc is
+      // completely unchanged — applyResponderDnc still applies
+      // everything immediately, exactly as it does today.
+      const isJevDnc = classification.kind === "jev_route";
+      const dncResult = isJevDnc
+        ? await proposeJevDncSuppression(supabase, {
+            propertyId: input.propertyId,
+            contactId: input.contactId,
+            conversationId: input.conversationId ?? null,
+            inboundMessageId: input.inboundMessageId ?? null,
+            inboundFromPhone: input.inboundFromPhone ?? null,
+            orgId: property.org_id,
+            reason: route.reason,
+          })
+        : await applyResponderDnc(supabase, {
+            propertyId: input.propertyId,
+            contactId: input.contactId,
+            conversationId: input.conversationId ?? null,
+            inboundMessageId: input.inboundMessageId ?? null,
+            inboundFromPhone: input.inboundFromPhone ?? null,
+            orgId: property.org_id,
+            reason: route.reason,
+          });
       const dncOutcome = closeOutcome(dncResult, route.reason);
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
@@ -524,6 +555,7 @@ export async function dispatchAiResponse(
         errorMessage: dispositionClaimError(dncResult),
       });
       return dncOutcome;
+    }
     case "auto_close_wrong_number":
       const wrongNumberResult = await applyWrongNumber(supabase, {
         propertyId: input.propertyId,
@@ -1053,15 +1085,37 @@ async function findExistingAiDispositionReview(
  * concurrency guard, without the human-auth requirement nurture doesn't
  * need.
  */
+/**
+ * Astra PR review finding (2026-09-20): the original version's
+ * optimistic-concurrency check only guarded against a change happening
+ * AFTER its own read — if the property was already DNC/opted_out/a
+ * booked appointment/etc. by the time this function's own SELECT ran
+ * (e.g. a human acted while Jev's classification call was in flight),
+ * it would read that value as the "current" baseline and happily
+ * overwrite it with nurture, clearing `follow_up_at` in the process.
+ *
+ * Fixed by refusing to write at all unless the freshly-read disposition
+ * is null or already `nurture` (idempotent retry) — nurture is the
+ * lowest-priority tag in this system; it must never downgrade anything
+ * more specific that's already there. Mirrors the terminal-state check
+ * `fn_apply_ai_disposition_with_review` already does for its own four
+ * dispositions, applied here for the fifth (nurture has no RPC of its
+ * own since it needs no auth.uid() gate).
+ */
 async function setOutreachDispoNurture(
   supabase: SupabaseClient<Database>,
   propertyId: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true }
+  | { ok: false; alreadyTerminal: true }
+  | { ok: false; alreadyTerminal: false; error: string }
+> {
   try {
     await assertNotTrainingTarget(supabase, { propertyId });
   } catch (error) {
     return {
       ok: false,
+      alreadyTerminal: false,
       error: error instanceof Error ? error.message : "Training eligibility could not be verified.",
     };
   }
@@ -1072,34 +1126,39 @@ async function setOutreachDispoNurture(
     .eq("id", propertyId)
     .maybeSingle();
   if (propErr || !prop) {
-    return { ok: false, error: propErr?.message ?? "Property not found" };
+    return { ok: false, alreadyTerminal: false, error: propErr?.message ?? "Property not found" };
   }
 
-  let updateQuery = supabase
+  if (prop.outreach_dispo !== null && prop.outreach_dispo !== "nurture") {
+    return { ok: false, alreadyTerminal: true };
+  }
+  if (prop.outreach_dispo === "nurture") {
+    return { ok: true }; // idempotent — already in the target state
+  }
+
+  const { error: updateErr, data: updated } = await supabase
     .from("properties")
     .update({
       outreach_dispo: "nurture",
       follow_up_at: null,
       updated_at: new Date().toISOString(),
     })
-    .eq("id", propertyId);
-  updateQuery =
-    prop.outreach_dispo === null
-      ? updateQuery.is("outreach_dispo", null)
-      : updateQuery.eq("outreach_dispo", prop.outreach_dispo);
-  const { error: updateErr, data: updated } = await updateQuery
+    .eq("id", propertyId)
+    .is("outreach_dispo", null) // re-checked at write time, not just read time
     .select("id")
     .maybeSingle();
-  if (updateErr) return { ok: false, error: updateErr.message };
+  if (updateErr) return { ok: false, alreadyTerminal: false, error: updateErr.message };
   if (!updated) {
-    return { ok: false, error: "Disposition changed concurrently" };
+    // Changed between our SELECT and this UPDATE — treat as terminal
+    // rather than retrying, since we don't know what it changed TO.
+    return { ok: false, alreadyTerminal: true };
   }
 
   await recordLeadEvent({
     propertyId,
     actorType: "ai",
     eventType: LEAD_EVENT_TYPES.DISPO_SET,
-    payload: { from: prop.outreach_dispo, to: "nurture", reason: "model:nurture" },
+    payload: { from: null, to: "nurture", reason: "model:nurture" },
   });
   return { ok: true };
 }
@@ -1180,6 +1239,86 @@ async function applyResponderDnc(
     reason: args.reason,
   });
   return result;
+}
+
+/**
+ * Astra PR review finding (2026-09-20, BLOCKING) + Jarrad's "Option B"
+ * resolution: for a Jev-driven dnc decision (never for legacy — that
+ * path is unchanged, `applyResponderDnc` above), suppress the phone
+ * immediately (same `applyPhoneLevelOptOut` call, same as legacy — the
+ * safety-critical part doesn't wait), but do NOT write
+ * `properties.outreach_dispo='dnc'` yet. That write is deferred to a
+ * human via `fn_confirm_ai_disposition_review`
+ * (`20260920120000_sms_classification_runs.sql`'s extension of it) —
+ * the actual disposition/paperwork side of a DNC decision, as opposed
+ * to the immediate stop-texting safety action, is what waits for
+ * confirmation.
+ */
+async function proposeJevDncSuppression(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    contactId: string;
+    conversationId: string | null;
+    inboundMessageId: string | null;
+    inboundFromPhone: string | null;
+    orgId: string;
+    reason: string;
+  },
+): Promise<ResponderDispoResult> {
+  if (!args.conversationId || !args.inboundMessageId) {
+    const reason = "ai_disposition_missing_thread_identity";
+    await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+    reportError(new Error(reason), {
+      tags: { surface: "ai_responder_propose_dnc" },
+      extra: { propertyId: args.propertyId },
+    });
+    return { updated: false, reason: "db_error" };
+  }
+
+  const contact = await loadContactPhone(supabase, args.contactId);
+  await applyPhoneLevelOptOut(supabase, {
+    contactId: args.contactId,
+    fromPhone: args.inboundFromPhone ?? contact.phone ?? "",
+    orgId: args.orgId,
+    source: "ai_responder_threat",
+    sourceDetail: { propertyId: args.propertyId, reason: args.reason } as Json,
+    occurredAt: new Date(),
+    providerId: "ai_responder",
+    surface: "dnc",
+    idempotencyKey: `ai-responder-dnc-proposed:${args.propertyId}:${args.contactId}:${args.reason}`,
+    leadEvent: {
+      propertyId: args.propertyId,
+      actorType: "ai",
+      trigger: "ai_responder",
+    },
+  });
+
+  const { data, error } = await supabase.rpc(
+    "fn_propose_ai_dnc_suppression_review",
+    {
+      p_property_id: args.propertyId,
+      p_conversation_id: args.conversationId,
+      p_source_inbound_message_id: args.inboundMessageId,
+      p_ai_reason: args.reason,
+    },
+  );
+  if (error) {
+    await markPropertyNeedsAttention(supabase, args.propertyId, "dnc_proposal_write_failed");
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_propose_dnc" },
+      extra: { propertyId: args.propertyId, reason: args.reason },
+    });
+    return { updated: false, reason: "db_error" };
+  }
+
+  const status = readAiDispositionRpcStatus(data);
+  if (status === "already_terminal") return { updated: false, reason: "already_terminal" };
+  // "proposed" and "replayed" both mean suppression + a pending review
+  // now exist — the phone is stopped, which is what `updated: true`
+  // signals to the caller. The disposition write itself is intentionally
+  // still pending, not reflected in this boolean.
+  return { updated: true };
 }
 
 async function applyWrongNumber(
@@ -1293,10 +1432,11 @@ async function buildDeescalationBody(
 
 function readAiDispositionRpcStatus(
   value: Json,
-): "applied" | "replayed" | "already_terminal" | null {
+): "applied" | "proposed" | "replayed" | "already_terminal" | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const status = (value as Record<string, Json>).status;
   return status === "applied" ||
+    status === "proposed" ||
     status === "replayed" ||
     status === "already_terminal"
     ? status

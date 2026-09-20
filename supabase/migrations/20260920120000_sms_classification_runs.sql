@@ -325,4 +325,395 @@ comment on column public.ai_responder_configs.classifier_mode is
 comment on column public.ai_responder_configs.classifier_fallback_max_consecutive is
   'After this many consecutive Jev failures/timeouts for one conversation, fall back to the legacy provider for that conversation rather than retrying indefinitely. NOT YET READ BY ANY CODE as of 2026-09-20 (Fable PR review finding) — dispatch-bridge.ts currently falls back to legacy on every single Jev failure, with no per-conversation counter. This column exists for a future consecutive-failure-budget implementation; do not assume it is live config until that lands.';
 
+-- ----------------------------------------------------------------------------
+-- Jev-driven DNC: suppress immediately, defer the disposition write
+--
+-- Astra PR review finding (2026-09-20, BLOCKING): the original version of
+-- this adapter let close_dnc's existing effect function
+-- (applyResponderDnc) run immediately for Jev-driven decisions too —
+-- same as legacy. That means the *disposition write* (properties.
+-- outreach_dispo='dnc') happened before any human saw it, even though
+-- auto-ACCEPT of the review record was correctly blocked. A review row
+-- that documents an already-applied decision is not a gate.
+--
+-- Jarrad's decision (2026-09-20, "Option B"): the phone-suppression
+-- effect (consent_events / applyPhoneLevelOptOut, application-side, TS)
+-- still happens immediately — halting suppression until a human clicks
+-- something would mean continuing to text someone who just invoked
+-- DNC/legal language, which is the worse risk. What waits for a human is
+-- specifically the outreach_dispo='dnc' write and the disposition/
+-- paperwork implications that go with it.
+--
+-- dispo_applied tracks whether THIS ROW'S disposition write has actually
+-- landed on properties.outreach_dispo yet. Every existing/legacy review
+-- path defaults it to true — legacy's fn_apply_ai_disposition_with_review
+-- writes outreach_dispo in the same transaction as creating the review,
+-- unchanged, so for those rows "applied" is simply always true, same as
+-- today. Only the new fn_propose_ai_dnc_suppression_review RPC below ever
+-- creates a row with dispo_applied=false.
+-- ----------------------------------------------------------------------------
+alter table public.ai_disposition_reviews
+  add column if not exists dispo_applied boolean not null default true;
+
+comment on column public.ai_disposition_reviews.dispo_applied is
+  'true (default, matches every existing review path) = properties.outreach_dispo already reflects this row''s disposition. false = only ever set by fn_propose_ai_dnc_suppression_review for a Jev-driven dnc decision — the phone is already suppressed (consent_events, applied by application code before/alongside this RPC), but outreach_dispo has NOT been written yet; fn_confirm_ai_disposition_review applies it at confirm time and flips this to true.';
+
+-- Service-role-only. Creates a pending review for a Jev-driven dnc
+-- decision WITHOUT writing properties.outreach_dispo — that write is
+-- deferred to fn_confirm_ai_disposition_review. Does not touch
+-- consent_events either; phone suppression is applied by the caller
+-- (dispatch.ts, via the existing applyPhoneLevelOptOut) before or
+-- alongside calling this RPC, not by this function.
+create or replace function public.fn_propose_ai_dnc_suppression_review(
+  p_property_id uuid,
+  p_conversation_id uuid,
+  p_source_inbound_message_id uuid,
+  p_ai_reason text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_message record;
+  v_property record;
+  v_existing_review public.ai_disposition_reviews%rowtype;
+  v_pending_review public.ai_disposition_reviews%rowtype;
+  v_review public.ai_disposition_reviews%rowtype;
+begin
+  if coalesce(auth.role(), '') <> 'service_role' then
+    raise exception 'service role required'
+      using errcode = '42501';
+  end if;
+
+  if nullif(btrim(p_ai_reason), '') is null then
+    raise exception 'AI disposition reason is required'
+      using errcode = '22023';
+  end if;
+
+  select m.id, m.org_id, m.property_id, m.conversation_id
+  into v_message
+  from public.messages m
+  where m.id = p_source_inbound_message_id
+    and m.channel = 'sms'
+    and m.direction = 'inbound'
+  for share;
+
+  if not found
+    or v_message.property_id is distinct from p_property_id
+    or v_message.conversation_id is distinct from p_conversation_id
+  then
+    raise exception 'inbound SMS does not match property/conversation'
+      using errcode = '23514';
+  end if;
+
+  select p.org_id, p.outreach_dispo, p.needs_human_attention
+  into v_property
+  from public.properties p
+  where p.id = p_property_id
+    and p.org_id = v_message.org_id
+  for update;
+
+  if not found then
+    raise exception 'property does not match inbound SMS organization'
+      using errcode = '23514';
+  end if;
+
+  select review.*
+  into v_existing_review
+  from public.ai_disposition_reviews review
+  where review.source_inbound_message_id = p_source_inbound_message_id;
+
+  if found then
+    return jsonb_build_object(
+      'status', 'replayed',
+      'reviewId', v_existing_review.id,
+      'reviewStatus', v_existing_review.status
+    );
+  end if;
+
+  if v_property.outreach_dispo = 'dnc' then
+    -- Already dnc (e.g. a prior confirmed review) — nothing left to
+    -- propose.
+    return jsonb_build_object('status', 'already_terminal');
+  end if;
+
+  select review.*
+  into v_pending_review
+  from public.ai_disposition_reviews review
+  where review.org_id = v_message.org_id
+    and review.conversation_id = p_conversation_id
+    and review.status = 'pending'
+  for update;
+
+  if v_pending_review.id is not null then
+    update public.ai_disposition_reviews
+    set status = 'superseded',
+        resolved_at = now(),
+        superseded_reason = 'new_ai_decision'
+    where id = v_pending_review.id;
+
+    insert into public.lead_events (
+      org_id, property_id, actor_type, event_type, payload,
+      source_type, source_id
+    ) values (
+      v_message.org_id,
+      p_property_id,
+      'system',
+      'ai_dispo_review_superseded',
+      jsonb_build_object(
+        'review_id', v_pending_review.id,
+        'proposed_disposition', v_pending_review.disposition,
+        'replacement_disposition', 'dnc',
+        'reason', 'new_ai_decision',
+        'source_inbound_message_id', v_pending_review.source_inbound_message_id
+      ),
+      'ai_disposition_reviews.superseded',
+      v_pending_review.id
+    )
+    on conflict (source_type, source_id) where source_id is not null do nothing;
+  end if;
+
+  -- Mark needs_human_attention so this surfaces for review, WITHOUT
+  -- touching outreach_dispo — that is the entire point of this RPC.
+  update public.properties
+  set needs_human_attention = true,
+      updated_at = now()
+  where id = p_property_id
+    and org_id = v_message.org_id;
+
+  insert into public.ai_disposition_reviews (
+    org_id,
+    property_id,
+    conversation_id,
+    source_inbound_message_id,
+    disposition,
+    ai_reason,
+    dispo_applied
+  ) values (
+    v_message.org_id,
+    p_property_id,
+    p_conversation_id,
+    p_source_inbound_message_id,
+    'dnc',
+    btrim(p_ai_reason),
+    false
+  )
+  returning * into v_review;
+
+  insert into public.lead_events (
+    org_id, property_id, actor_type, event_type, payload,
+    source_type, source_id
+  ) values (
+    v_message.org_id,
+    p_property_id,
+    'ai',
+    'dispo_proposed',
+    jsonb_build_object(
+      'disposition', 'dnc',
+      'review_id', v_review.id,
+      'reason', btrim(p_ai_reason),
+      'source_inbound_message_id', p_source_inbound_message_id,
+      'note', 'suppression already applied by caller; outreach_dispo write deferred to human confirmation'
+    ),
+    'ai_disposition_reviews.proposed',
+    v_review.id
+  );
+
+  return jsonb_build_object(
+    'status', 'proposed',
+    'reviewId', v_review.id,
+    'reviewStatus', v_review.status
+  );
+end;
+$$;
+
+revoke all on function public.fn_propose_ai_dnc_suppression_review(
+  uuid, uuid, uuid, text
+) from public, anon, authenticated;
+grant execute on function public.fn_propose_ai_dnc_suppression_review(
+  uuid, uuid, uuid, text
+) to service_role;
+
+-- Extends fn_confirm_ai_disposition_review (20260827110000) to apply the
+-- deferred outreach_dispo write when dispo_applied=false. Every existing
+-- call site/row has dispo_applied=true, for which this function's
+-- behavior is byte-for-byte identical to the original — the new branch
+-- is unreachable for any pre-existing row shape.
+create or replace function public.fn_confirm_ai_disposition_review(
+  p_review_id uuid
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_review public.ai_disposition_reviews%rowtype;
+  v_outreach_dispo text;
+begin
+  if auth.uid() is null then
+    raise exception 'signed-in user required'
+      using errcode = '42501';
+  end if;
+
+  select review.*
+  into v_review
+  from public.ai_disposition_reviews review
+  where review.id = p_review_id;
+
+  if not found then
+    raise exception 'AI disposition review not found'
+      using errcode = 'P0002';
+  end if;
+
+  if not public.hugo_has_active_org_access(v_review.org_id) then
+    raise exception 'active organization access required'
+      using errcode = '42501';
+  end if;
+
+  select p.outreach_dispo
+  into v_outreach_dispo
+  from public.properties p
+  where p.id = v_review.property_id
+    and p.org_id = v_review.org_id
+  for update;
+
+  if not found then
+    raise exception 'AI disposition review property not found'
+      using errcode = 'P0002';
+  end if;
+
+  select review.*
+  into v_review
+  from public.ai_disposition_reviews review
+  where review.id = p_review_id
+  for update;
+
+  if not found then
+    raise exception 'AI disposition review not found'
+      using errcode = 'P0002';
+  end if;
+
+  if v_review.status <> 'pending' then
+    return jsonb_build_object(
+      'status', v_review.status,
+      'reviewId', v_review.id
+    );
+  end if;
+
+  -- Unapplied proposal (Jev-driven dnc, Option B): outreach_dispo was
+  -- deliberately never written by the propose step. Write it now, as
+  -- part of this human confirmation, instead of running the
+  -- already-applied supersede-on-mismatch check below (which assumes
+  -- outreach_dispo already reflects this review's disposition — for an
+  -- unapplied row it never did, by design).
+  if not v_review.dispo_applied then
+    update public.properties
+    set outreach_dispo = v_review.disposition,
+        needs_human_attention = false,
+        last_ai_escalation_reason = null,
+        updated_at = now()
+    where id = v_review.property_id
+      and org_id = v_review.org_id;
+
+    update public.ai_disposition_reviews
+    set status = 'confirmed',
+        resolved_at = now(),
+        reviewed_by = auth.uid(),
+        dispo_applied = true
+    where id = v_review.id;
+
+    insert into public.lead_events (
+      org_id, property_id, actor_type, actor_id, event_type, payload,
+      source_type, source_id
+    ) values (
+      v_review.org_id,
+      v_review.property_id,
+      'user',
+      auth.uid(),
+      'ai_dispo_review_confirmed',
+      jsonb_build_object(
+        'review_id', v_review.id,
+        'disposition', v_review.disposition,
+        'source_inbound_message_id', v_review.source_inbound_message_id,
+        'note', 'deferred dispo write applied at confirmation'
+      ),
+      'ai_disposition_reviews.confirmed',
+      v_review.id
+    )
+    on conflict (source_type, source_id) where source_id is not null do nothing;
+
+    return jsonb_build_object(
+      'status', 'confirmed',
+      'reviewId', v_review.id
+    );
+  end if;
+
+  if v_outreach_dispo is distinct from v_review.disposition then
+    update public.ai_disposition_reviews
+    set status = 'superseded',
+        resolved_at = now(),
+        superseded_reason = 'property_outcome_changed'
+    where id = v_review.id;
+
+    insert into public.lead_events (
+      org_id, property_id, actor_type, event_type, payload,
+      source_type, source_id
+    ) values (
+      v_review.org_id,
+      v_review.property_id,
+      'system',
+      'ai_dispo_review_superseded',
+      jsonb_build_object(
+        'review_id', v_review.id,
+        'proposed_disposition', v_review.disposition,
+        'replacement_disposition', v_outreach_dispo,
+        'reason', 'property_outcome_changed',
+        'source_inbound_message_id', v_review.source_inbound_message_id
+      ),
+      'ai_disposition_reviews.superseded',
+      v_review.id
+    )
+    on conflict (source_type, source_id) where source_id is not null do nothing;
+
+    return jsonb_build_object(
+      'status', 'superseded',
+      'reviewId', v_review.id
+    );
+  end if;
+
+  update public.ai_disposition_reviews
+  set status = 'confirmed',
+      resolved_at = now(),
+      reviewed_by = auth.uid()
+  where id = v_review.id;
+
+  insert into public.lead_events (
+    org_id, property_id, actor_type, actor_id, event_type, payload,
+    source_type, source_id
+  ) values (
+    v_review.org_id,
+    v_review.property_id,
+    'user',
+    auth.uid(),
+    'ai_dispo_review_confirmed',
+    jsonb_build_object(
+      'review_id', v_review.id,
+      'disposition', v_review.disposition,
+      'source_inbound_message_id', v_review.source_inbound_message_id
+    ),
+    'ai_disposition_reviews.confirmed',
+    v_review.id
+  )
+  on conflict (source_type, source_id) where source_id is not null do nothing;
+
+  return jsonb_build_object(
+    'status', 'confirmed',
+    'reviewId', v_review.id
+  );
+end;
+$$;
+
 commit;

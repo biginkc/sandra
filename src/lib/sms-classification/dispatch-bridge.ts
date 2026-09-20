@@ -23,6 +23,12 @@ export type ClassificationBridgeInput = {
   contactId: string;
   conversationId: string | null;
   inboundMessageId: string | null;
+  /** The current inbound message's text. `buildTwoWayThreadState` excludes
+   *  it (its row already exists in `messages` by dispatch time, same as
+   *  `loadConversation`'s exclusion) — this is appended explicitly so Jev
+   *  actually sees the message it's classifying, not just prior history.
+   *  Astra PR review finding (2026-09-20): this was missing entirely. */
+  inboundBody: string;
 };
 
 /**
@@ -94,12 +100,20 @@ export async function classifyForDispatch(
     return { kind: "use_legacy", classificationRunId: null };
   }
 
-  const thread = await buildTwoWayThreadState(supabase, {
+  const priorThread = await buildTwoWayThreadState(supabase, {
     propertyId: input.propertyId,
     contactId: input.contactId,
     conversationId: input.conversationId,
     excludeMessageId: input.inboundMessageId,
   });
+  // Append the current inbound explicitly, matching loadConversation's
+  // exact pattern in dispatch.ts — buildTwoWayThreadState excludes it by
+  // id, so without this Jev only ever sees prior history, never the
+  // message it's actually supposed to classify.
+  const thread = [
+    ...priorThread,
+    { direction: "inbound" as const, body: input.inboundBody, sentAt: new Date().toISOString() },
+  ];
 
   const state = { propertyId: input.propertyId };
   const stateHash = hashState(thread, state);
@@ -174,6 +188,23 @@ function hashState(
   return h.digest("hex");
 }
 
+/**
+ * Astra PR review finding (2026-09-20): `.upsert()` requires UPDATE
+ * privilege even when no row actually conflicts — Postgres checks
+ * statement shape, not the runtime path. `service_role` only has
+ * SELECT/INSERT on this table (migration:
+ * `revoke all ... grant select, insert on table public.sms_classification_runs
+ * to service_role`), deliberately, since the table is meant to be
+ * immutable audit evidence. Every real call would have failed with a
+ * permissions error and silently fallen back to legacy without ever
+ * persisting a successful classification.
+ *
+ * Fixed: plain INSERT with `on_conflict` + `ignoreDuplicates: true`
+ * (Postgres `ON CONFLICT DO NOTHING`, INSERT-only, no UPDATE required).
+ * On a real duplicate (same logical evaluation key), the insert affects
+ * zero rows and returns no data — fetch the existing row's id separately
+ * in that case rather than trying to get it back from the no-op insert.
+ */
 async function persistRun(
   supabase: SupabaseClient<Database>,
   input: ClassificationBridgeInput,
@@ -181,38 +212,56 @@ async function persistRun(
   stateHash: string,
 ): Promise<string | null> {
   if (!input.conversationId || !input.inboundMessageId) return null;
+  const row = {
+    org_id: input.orgId,
+    property_id: input.propertyId,
+    conversation_id: input.conversationId,
+    source_inbound_message_id: input.inboundMessageId,
+    state_hash: stateHash,
+    schema_version: SCHEMA_VERSION,
+    policy_version: POLICY_VERSION,
+    provider: "jev" as const,
+    model: decision.model || JEV_MODEL,
+    decision: {
+      outcome: decision.outcome,
+      wrongScope: decision.wrongScope,
+      escalationReason: decision.escalationReason,
+      probabilities: decision.probabilities,
+    },
+    resolved_outcome: decision.outcome,
+    usage: decision.usage,
+    latency_ms: decision.latencyMs,
+  };
+
   const { data, error } = await supabase
     .from("sms_classification_runs")
-    .upsert(
-      {
-        org_id: input.orgId,
-        property_id: input.propertyId,
-        conversation_id: input.conversationId,
-        source_inbound_message_id: input.inboundMessageId,
-        state_hash: stateHash,
-        schema_version: SCHEMA_VERSION,
-        policy_version: POLICY_VERSION,
-        provider: "jev",
-        model: decision.model || JEV_MODEL,
-        decision: {
-          outcome: decision.outcome,
-          wrongScope: decision.wrongScope,
-          escalationReason: decision.escalationReason,
-          probabilities: decision.probabilities,
-        },
-        resolved_outcome: decision.outcome,
-        usage: decision.usage,
-        latency_ms: decision.latencyMs,
-      },
-      {
-        onConflict: "source_inbound_message_id,provider,model,schema_version,state_hash",
-        ignoreDuplicates: false,
-      },
-    )
+    .insert(row)
     .select("id")
     .maybeSingle();
-  if (error) throw new Error(error.message);
-  return data?.id ?? null;
+  if (!error && data) return data.id;
+  if (error && !isDuplicateKeyError(error.message)) throw new Error(error.message);
+
+  // Real duplicate (identical logical evaluation key already persisted,
+  // e.g. a dispatch retry) — fetch the existing row rather than treating
+  // this as a failure.
+  const { data: existing, error: lookupErr } = await supabase
+    .from("sms_classification_runs")
+    .select("id")
+    .eq("source_inbound_message_id", input.inboundMessageId)
+    .eq("provider", "jev")
+    .eq("model", row.model)
+    .eq("schema_version", SCHEMA_VERSION)
+    .eq("state_hash", stateHash)
+    .maybeSingle();
+  if (lookupErr) throw new Error(lookupErr.message);
+  return existing?.id ?? null;
+}
+
+function isDuplicateKeyError(message: string): boolean {
+  return (
+    message.includes("idx_sms_classification_runs_logical_key") ||
+    message.includes("duplicate key value violates unique constraint")
+  );
 }
 
 async function persistFailedRun(
