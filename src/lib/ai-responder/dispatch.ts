@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { getConsentState } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
@@ -13,6 +14,7 @@ import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 
 import { listAdminUserIds } from "@/lib/auth/admins";
 import { createNotification } from "@/lib/notifications/dispatch";
+import { classifyForDispatch } from "@/lib/sms-classification/dispatch-bridge";
 
 import { claimAiResponse, completeAiResponseClaim } from "./claims";
 import { classifyAiSkip } from "./classify";
@@ -26,7 +28,11 @@ import { IDENTITY_REPLY_BODY, isIdentityQuestion } from "./identity";
 import { matchEscalationKeyword } from "./keywords";
 import { resolveResponderOutcome, type ResponderRoute } from "./route";
 import { validateAiReplyBody } from "./safety";
-import type { AiMessageMetadata, AiWrongScope } from "./types";
+import type {
+  AiMessageMetadata,
+  AiStructuredOutput,
+  AiWrongScope,
+} from "./types";
 
 /**
  * Consider an inbound SMS for an AI first-touch reply. This is the
@@ -184,7 +190,7 @@ export async function dispatchAiResponse(
   const { data: config } = await supabase
     .from("ai_responder_configs")
     .select(
-      "id, active, model, system_prompt, max_turns, min_confidence, escalation_keywords, business_hours_only",
+      "id, active, model, system_prompt, max_turns, min_confidence, escalation_keywords, business_hours_only, classifier_provider, classifier_mode",
     )
     .eq("org_id", property.org_id)
     .eq("active", true)
@@ -292,65 +298,116 @@ export async function dispatchAiResponse(
   }
 
   // --------------------------------------------------------------------------
-  // 4. Generate via Claude
+  // 4. Classify — Jev (if this org's config selects it) or legacy Claude.
+  //
+  // Jarrad's explicit override (2026-09-20, on top of Fable's reviewed
+  // plan) of the standing "shadow first" posture: when classifyForDispatch
+  // resolves to `jev_route`, legacy Claude is skipped entirely for this
+  // message — not called for comparison. Fable's per-org-canary
+  // requirement (schema default `shadow`, `automatic` requires an
+  // explicit per-org flip) is unchanged; only "keep legacy running during
+  // canary" was overridden. dnc's human-gate is unaffected either way —
+  // DB-enforced regardless of mode (see 20260920120000_sms_classification_runs.sql).
   // --------------------------------------------------------------------------
-  const conversation = await loadConversation(
+  const classification = await classifyForDispatch(
     supabase,
-    input.propertyId,
-    input.contactId,
-    input.conversationId ?? null,
-    input.inboundMessageId ?? null,
+    {
+      orgId: property.org_id,
+      propertyId: input.propertyId,
+      contactId: input.contactId,
+      conversationId: input.conversationId ?? null,
+      inboundMessageId: input.inboundMessageId ?? null,
+    },
+    {
+      classifierProvider: (config?.classifier_provider as "legacy" | "jev") ?? "legacy",
+      classifierMode: (config?.classifier_mode as "shadow" | "automatic") ?? "shadow",
+    },
+    { fetch, typesafeApiKey: process.env.TYPESAFE_API_KEY ?? "" },
   );
-  // Append the current inbound body explicitly. The webhook inserts the
-  // inbound row before dispatching, so loadConversation excludes it by
-  // id — otherwise the model would see the current message twice.
-  conversation.push({ role: "user", content: input.inboundBody });
 
-  let generated;
-  try {
-    generated = await generateAiReply(
-      {
-        model: config!.model,
-        systemPrompt: config!.system_prompt,
-        conversation,
-      },
-      { client: deps.anthropic },
-    );
-  } catch (e) {
-    // Account-level provider failures (dead credits / dead key) are an
-    // operator incident, not a code error: every inbound will fail the
-    // same way until a human fixes the account. Distinct reasons make
-    // the UI say what actually broke, and admins get notified (once per
-    // 24h, not per reply) so a hot campaign can't silently lose its
-    // first-responder for a whole morning (2026-06-12).
-    const providerFailure = classifyProviderFailure(e);
-    const reason =
-      providerFailure === "billing"
-        ? "provider_billing"
-        : providerFailure === "auth"
-          ? "provider_auth"
-          : "generate_error";
-    reportError(e, {
-      tags: { surface: "ai_responder_generate", reason },
-      extra: { propertyId: input.propertyId },
-    });
-    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
-    if (providerFailure) {
-      await notifyAdminsOfProviderFailure(supabase, {
-        orgId: property.org_id,
-        propertyId: input.propertyId,
-        failure: providerFailure,
-      });
-    }
+  if (classification.kind === "jev_nurture") {
+    const nurtureResult = await setOutreachDispoNurture(supabase, input.propertyId);
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
-      outcome: "escalated",
-      errorMessage: reason,
+      outcome: nurtureResult.ok ? "auto_closed" : "escalated",
+      errorMessage: nurtureResult.ok ? undefined : nurtureResult.error,
     });
-    return { outcome: "escalated", reason };
+    if (!nurtureResult.ok) {
+      await markPropertyNeedsAttention(supabase, input.propertyId, "nurture_write_failed");
+      return { outcome: "escalated", reason: "nurture_write_failed" };
+    }
+    return { outcome: "auto_closed", reason: "model:nurture" };
   }
 
-  const route = resolveResponderOutcome(generated);
+  let generated: AiStructuredOutput;
+  let route: ResponderRoute;
+  let jevAutoAccept: { classificationRunId: string } | null = null;
+
+  if (classification.kind === "jev_route") {
+    generated = classification.assembled;
+    route = classification.route;
+    if (classification.eligibleForAutoAccept) {
+      jevAutoAccept = { classificationRunId: classification.classificationRunId };
+    }
+  } else {
+    // use_legacy or jev_no_action — both fall through to the existing
+    // combined Claude classify+generate call, unchanged from today.
+    const conversation = await loadConversation(
+      supabase,
+      input.propertyId,
+      input.contactId,
+      input.conversationId ?? null,
+      input.inboundMessageId ?? null,
+    );
+    // Append the current inbound body explicitly. The webhook inserts the
+    // inbound row before dispatching, so loadConversation excludes it by
+    // id — otherwise the model would see the current message twice.
+    conversation.push({ role: "user", content: input.inboundBody });
+
+    try {
+      generated = await generateAiReply(
+        {
+          model: config!.model,
+          systemPrompt: config!.system_prompt,
+          conversation,
+        },
+        { client: deps.anthropic },
+      );
+    } catch (e) {
+      // Account-level provider failures (dead credits / dead key) are an
+      // operator incident, not a code error: every inbound will fail the
+      // same way until a human fixes the account. Distinct reasons make
+      // the UI say what actually broke, and admins get notified (once per
+      // 24h, not per reply) so a hot campaign can't silently lose its
+      // first-responder for a whole morning (2026-06-12).
+      const providerFailure = classifyProviderFailure(e);
+      const reason =
+        providerFailure === "billing"
+          ? "provider_billing"
+          : providerFailure === "auth"
+            ? "provider_auth"
+            : "generate_error";
+      reportError(e, {
+        tags: { surface: "ai_responder_generate", reason },
+        extra: { propertyId: input.propertyId },
+      });
+      await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+      if (providerFailure) {
+        await notifyAdminsOfProviderFailure(supabase, {
+          orgId: property.org_id,
+          propertyId: input.propertyId,
+          failure: providerFailure,
+        });
+      }
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: "escalated",
+        errorMessage: reason,
+      });
+      return { outcome: "escalated", reason };
+    }
+    route = resolveResponderOutcome(generated);
+  }
   const expectedDisposition: AiReviewDisposition | null =
     route.kind === "opt_out"
       ? "opted_out"
@@ -438,6 +495,13 @@ export async function dispatchAiResponse(
         });
         return outcome;
       }
+      if (jevAutoAccept && input.inboundMessageId) {
+        await maybeAutoAcceptJevReview(
+          supabase,
+          input.inboundMessageId,
+          jevAutoAccept.classificationRunId,
+        );
+      }
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
         outcome: "opted_out",
@@ -472,6 +536,13 @@ export async function dispatchAiResponse(
         reason: route.reason,
       });
       const wrongNumberOutcome = closeOutcome(wrongNumberResult, route.reason);
+      if (jevAutoAccept && wrongNumberResult.updated && input.inboundMessageId) {
+        await maybeAutoAcceptJevReview(
+          supabase,
+          input.inboundMessageId,
+          jevAutoAccept.classificationRunId,
+        );
+      }
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
         outcome: wrongNumberOutcome.outcome,
@@ -487,6 +558,13 @@ export async function dispatchAiResponse(
         reason: route.reason,
       });
       const autoCloseOutcome = closeOutcome(autoCloseResult, route.reason);
+      if (jevAutoAccept && autoCloseResult.updated && input.inboundMessageId) {
+        await maybeAutoAcceptJevReview(
+          supabase,
+          input.inboundMessageId,
+          jevAutoAccept.classificationRunId,
+        );
+      }
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
         outcome: autoCloseOutcome.outcome,
@@ -891,6 +969,44 @@ async function setResponderDispo(
   return { updated: false, reason: "db_error" };
 }
 
+/**
+ * Best-effort: flips a just-created `pending` review row to
+ * `auto_accepted`, linked to the Jev classification run that decided it.
+ * Never called for `dnc` — the caller only sets `jevAutoAccept` when
+ * `eligibleForAutoAccept` was true (dispatch-bridge.ts already excludes
+ * `close_dnc`), and `fn_accept_ai_disposition_review` independently
+ * rejects `dnc` as belt-and-suspenders.
+ *
+ * Deliberately swallows its own errors: a failed auto-accept leaves the
+ * review `pending` for manual confirmation instead, which is a safe
+ * fallback — the disposition effect itself already succeeded by the
+ * time this runs, so failing loudly here would be a worse outcome than
+ * just falling back to the human-review path.
+ */
+async function maybeAutoAcceptJevReview(
+  supabase: SupabaseClient<Database>,
+  inboundMessageId: string,
+  classificationRunId: string,
+): Promise<void> {
+  const { data: review, error: lookupErr } = await supabase
+    .from("ai_disposition_reviews")
+    .select("id, status")
+    .eq("source_inbound_message_id", inboundMessageId)
+    .maybeSingle();
+  if (lookupErr || !review || review.status !== "pending") return;
+
+  const { error } = await supabase.rpc("fn_accept_ai_disposition_review", {
+    p_review_id: review.id,
+    p_classification_run_id: classificationRunId,
+  });
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "sms_classification_auto_accept" },
+      extra: { inboundMessageId, classificationRunId },
+    });
+  }
+}
+
 async function findExistingAiDispositionReview(
   supabase: SupabaseClient<Database>,
   inboundMessageId: string,
@@ -919,6 +1035,73 @@ async function findExistingAiDispositionReview(
     return { ok: true, disposition };
   }
   return { ok: true, disposition: null };
+}
+
+/**
+ * Writes `outreach_dispo = 'nurture'` for a Jev-classified nurture
+ * outcome. Label-only, no reply, no owner assignment — matches the
+ * scope Jarrad approved (2026-09-20): `needs_sequence` (which requires a
+ * human-assigned owner, `src/lib/my-leads/settings.ts:150`) is the
+ * future migration target once real sequence hookup exists, never
+ * written by this adapter.
+ *
+ * Deliberately does NOT reuse `setOutreachDispo`
+ * (`app/(dashboard)/messages/dispo-actions.ts`) — that's a `"use
+ * server"` action requiring a signed-in `auth.uid()`, which this
+ * webhook-driven dispatch pipeline doesn't have. This is the minimal
+ * equivalent write for a service-role caller, same optimistic-
+ * concurrency guard, without the human-auth requirement nurture doesn't
+ * need.
+ */
+async function setOutreachDispoNurture(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await assertNotTrainingTarget(supabase, { propertyId });
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Training eligibility could not be verified.",
+    };
+  }
+
+  const { data: prop, error: propErr } = await supabase
+    .from("properties")
+    .select("id, outreach_dispo")
+    .eq("id", propertyId)
+    .maybeSingle();
+  if (propErr || !prop) {
+    return { ok: false, error: propErr?.message ?? "Property not found" };
+  }
+
+  let updateQuery = supabase
+    .from("properties")
+    .update({
+      outreach_dispo: "nurture",
+      follow_up_at: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", propertyId);
+  updateQuery =
+    prop.outreach_dispo === null
+      ? updateQuery.is("outreach_dispo", null)
+      : updateQuery.eq("outreach_dispo", prop.outreach_dispo);
+  const { error: updateErr, data: updated } = await updateQuery
+    .select("id")
+    .maybeSingle();
+  if (updateErr) return { ok: false, error: updateErr.message };
+  if (!updated) {
+    return { ok: false, error: "Disposition changed concurrently" };
+  }
+
+  await recordLeadEvent({
+    propertyId,
+    actorType: "ai",
+    eventType: LEAD_EVENT_TYPES.DISPO_SET,
+    payload: { from: prop.outreach_dispo, to: "nurture", reason: "model:nurture" },
+  });
+  return { ok: true };
 }
 
 async function applyResponderOptOut(

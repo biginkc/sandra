@@ -614,9 +614,13 @@ export type Database = {
           },
         ]
       }
+      // Hand-patched 2026-09-20: added classification_run_id (same
+      // caveat as the ai_responder_configs block below — replace with a
+      // real generated types run once local Supabase is fixed).
       ai_disposition_reviews: {
         Row: {
           ai_reason: string
+          classification_run_id: string | null
           conversation_id: string
           created_at: string
           disposition: string
@@ -631,6 +635,7 @@ export type Database = {
         }
         Insert: {
           ai_reason: string
+          classification_run_id?: string | null
           conversation_id: string
           created_at?: string
           disposition: string
@@ -645,6 +650,7 @@ export type Database = {
         }
         Update: {
           ai_reason?: string
+          classification_run_id?: string | null
           conversation_id?: string
           created_at?: string
           disposition?: string
@@ -679,12 +685,110 @@ export type Database = {
             referencedRelation: "messages"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "ai_disposition_reviews_classification_run_id_fkey"
+            columns: ["classification_run_id"]
+            isOneToOne: false
+            referencedRelation: "sms_classification_runs"
+            referencedColumns: ["id"]
+          },
         ]
       }
+      sms_classification_runs: {
+        Row: {
+          conversation_id: string
+          created_at: string
+          decision: Json
+          fallback_reason: string | null
+          id: string
+          latency_ms: number | null
+          model: string
+          org_id: string
+          policy_version: string
+          property_id: string
+          provider: string
+          resolved_outcome: string | null
+          schema_version: string
+          source_inbound_message_id: string
+          state_hash: string
+          state_version: number
+          usage: Json | null
+        }
+        Insert: {
+          conversation_id: string
+          created_at?: string
+          decision: Json
+          fallback_reason?: string | null
+          id?: string
+          latency_ms?: number | null
+          model: string
+          org_id: string
+          policy_version: string
+          property_id: string
+          provider: string
+          resolved_outcome?: string | null
+          schema_version: string
+          source_inbound_message_id: string
+          state_hash: string
+          state_version?: number
+          usage?: Json | null
+        }
+        Update: {
+          conversation_id?: string
+          created_at?: string
+          decision?: Json
+          fallback_reason?: string | null
+          id?: string
+          latency_ms?: number | null
+          model?: string
+          org_id?: string
+          policy_version?: string
+          property_id?: string
+          provider?: string
+          resolved_outcome?: string | null
+          schema_version?: string
+          source_inbound_message_id?: string
+          state_hash?: string
+          state_version?: number
+          usage?: Json | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_classification_runs_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sms_classification_runs_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "sms_classification_runs_source_inbound_message_id_fkey"
+            columns: ["source_inbound_message_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      // Hand-patched 2026-09-20 for migration 20260920120000_sms_classification_runs.sql
+      // (classifier_provider/classifier_mode/classifier_fallback_max_consecutive)
+      // — local Supabase couldn't apply the migration to regenerate this
+      // properly (unresolved local Postgres permission issue on this
+      // worktree). MUST be replaced by a real `generate_typescript_types`
+      // run once that's fixed; do not trust this block as authoritative.
       ai_responder_configs: {
         Row: {
           active: boolean
           business_hours_only: boolean
+          classifier_fallback_max_consecutive: number
+          classifier_mode: string
+          classifier_provider: string
           created_at: string
           created_by: string | null
           escalation_keywords: string[]
@@ -701,6 +805,9 @@ export type Database = {
         Insert: {
           active?: boolean
           business_hours_only?: boolean
+          classifier_fallback_max_consecutive?: number
+          classifier_mode?: string
+          classifier_provider?: string
           created_at?: string
           created_by?: string | null
           escalation_keywords?: string[]
@@ -717,6 +824,9 @@ export type Database = {
         Update: {
           active?: boolean
           business_hours_only?: boolean
+          classifier_fallback_max_consecutive?: number
+          classifier_mode?: string
+          classifier_provider?: string
           created_at?: string
           created_by?: string | null
           escalation_keywords?: string[]
@@ -6455,6 +6565,11 @@ export type Database = {
       }
       fn_confirm_ai_disposition_review: {
         Args: { p_review_id: string }
+        Returns: Json
+      }
+      // Hand-patched 2026-09-20, same caveat as sms_classification_runs above.
+      fn_accept_ai_disposition_review: {
+        Args: { p_classification_run_id: string; p_review_id: string }
         Returns: Json
       }
       jitter_claim_dialer_batch: {
