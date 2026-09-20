@@ -199,11 +199,12 @@ function hashState(
  * permissions error and silently fallen back to legacy without ever
  * persisting a successful classification.
  *
- * Fixed: plain INSERT with `on_conflict` + `ignoreDuplicates: true`
- * (Postgres `ON CONFLICT DO NOTHING`, INSERT-only, no UPDATE required).
- * On a real duplicate (same logical evaluation key), the insert affects
- * zero rows and returns no data — fetch the existing row's id separately
- * in that case rather than trying to get it back from the no-op insert.
+ * Fixed: plain `.insert()`, no `upsert`/`on_conflict` option at all —
+ * INSERT-only, no UPDATE required. On a real duplicate (same logical
+ * evaluation key), Postgres raises a genuine unique-violation error
+ * (caught below via `isDuplicateKeyError`), not a silent no-op — fetch
+ * the existing row's id separately in that case rather than expecting
+ * `ON CONFLICT DO NOTHING` semantics we never asked Postgres for.
  */
 async function persistRun(
   supabase: SupabaseClient<Database>,
