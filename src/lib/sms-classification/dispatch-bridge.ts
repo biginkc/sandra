@@ -9,6 +9,7 @@ import type { Database } from "../supabase/types";
 import { buildTwoWayThreadState } from "./context";
 import { resolvePolicyOutcome } from "./policy";
 import { classifyWithJev, JevProviderError } from "./providers/jev-gateway";
+import { loadOrgThresholdMap, resolveThresholdDecision } from "./thresholds";
 import type { SmsClassificationDecision } from "./types";
 
 const SCHEMA_VERSION = JEV_SCHEMA_VERSION;
@@ -69,7 +70,29 @@ export type ClassificationBridgeResult =
       eligibleForAutoAccept: boolean;
     }
   | { kind: "jev_nurture"; classificationRunId: string }
-  | { kind: "jev_no_action"; classificationRunId: string };
+  | { kind: "jev_no_action"; classificationRunId: string }
+  /**
+   * Outcome resolved but is below its org threshold, missing/invalid
+   * confidence, or has no configured threshold — and has no existing
+   * disposition-review infra to fall back on (currently only `nurture`;
+   * `wrong_number`/`not_interested`/`opted_out` stay on `jev_route` with
+   * `eligibleForAutoAccept: false`, which already lands them in the
+   * existing pending-review path; `new_lead` below threshold stays on
+   * the existing `jev_route` escalate path unchanged). The caller must
+   * NOT apply any effect for this outcome — only mark the property for
+   * human attention.
+   */
+  | {
+      kind: "jev_needs_decision";
+      classificationRunId: string;
+      outcome: SmsClassificationDecision["outcome"];
+    }
+  /**
+   * new_lead resolved above its org threshold. The caller must call the
+   * sanctioned promotion primitive (`qualifyProperty`) — never appointment
+   * booking — and must not also route this through `resolveResponderOutcome`.
+   */
+  | { kind: "jev_promote_new_lead"; classificationRunId: string };
 
 /**
  * Runs Jev alongside the caller's already-computed legacy decision
@@ -166,16 +189,67 @@ export async function classifyForDispatch(
   if (resolved.kind === "no_action") {
     return { kind: "jev_no_action", classificationRunId };
   }
+
+  // Per-outcome native-confidence cutoffs (jev_outcome_thresholds) are a
+  // second, independent gate inside `automatic` mode — the org-level
+  // classifier_mode switch above answers "is Jev allowed to drive effects
+  // for this org at all"; this answers "is THIS outcome, at THIS
+  // confidence, above the bar this org configured for it". Loaded fresh
+  // on every classification (no caching) so a threshold edit through
+  // fn_set_jev_outcome_threshold takes effect on the very next inbound
+  // with no deployment.
+  const thresholds = await loadOrgThresholdMap(supabase, input.orgId);
+  const thresholdDecision = resolveThresholdDecision(decision, thresholds);
+
   if (resolved.kind === "nurture") {
-    return { kind: "jev_nurture", classificationRunId };
+    // Unlike wrong_number/not_interested/opted_out below, nurture has no
+    // existing ai_disposition_reviews path to fall back on when it isn't
+    // eligible to auto-apply — it either applies today via
+    // setOutreachDispoNurture, or (new behavior) the caller must leave the
+    // property alone and flag it for a human instead of silently closing
+    // it at a confidence the org hasn't configured to trust.
+    return thresholdDecision.status === "auto_apply"
+      ? { kind: "jev_nurture", classificationRunId }
+      : { kind: "jev_needs_decision", classificationRunId, outcome: decision.outcome };
   }
 
+  if (resolved.assembled.action === "escalate") {
+    // new_lead. Below-threshold/human-gated new_lead is unchanged from
+    // today — it already only ever escalates to human attention via the
+    // existing `jev_route` handling in dispatch.ts (eligibleForAutoAccept
+    // is always false for `escalate`), so there is nothing to newly gate
+    // in that direction. Above-threshold is the net-new capability: the
+    // caller must promote via `qualifyProperty`, never through
+    // `resolveResponderOutcome`/appointment booking.
+    if (thresholdDecision.status === "auto_apply") {
+      return { kind: "jev_promote_new_lead", classificationRunId };
+    }
+    return {
+      kind: "jev_route",
+      route: resolved.route,
+      assembled: resolved.assembled,
+      classificationRunId,
+      eligibleForAutoAccept: false,
+    };
+  }
+
+  // wrong_number / not_interested / opted_out / dnc. dnc's
+  // thresholdDecision is always `human_gated` (resolveThresholdDecision
+  // never auto-applies it), so `eligibleForAutoAccept` stays false for it
+  // exactly as before — this is not a behavior change for dnc, just the
+  // same false arrived at through the threshold engine instead of a
+  // hardcoded action-name check. Below-threshold / missing-confidence for
+  // the other three already lands on the existing pending
+  // ai_disposition_reviews row (fn_apply_ai_disposition_with_review always
+  // creates it; only auto-accept is conditional) — that pending row IS the
+  // Needs-a-decision case for these three outcomes, no new plumbing
+  // required.
   return {
     kind: "jev_route",
     route: resolved.route,
     assembled: resolved.assembled,
     classificationRunId,
-    eligibleForAutoAccept: resolved.assembled.action !== "close_dnc" && resolved.assembled.action !== "escalate",
+    eligibleForAutoAccept: thresholdDecision.status === "auto_apply",
   };
 }
 

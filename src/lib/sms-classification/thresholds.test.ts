@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isThresholdableOutcome,
+  loadOrgThresholdMap,
   resolveThresholdDecision,
   THRESHOLDABLE_OUTCOMES,
   type ThresholdMap,
@@ -158,5 +159,45 @@ describe("resolveThresholdDecision", () => {
     expect(isThresholdableOutcome("dnc")).toBe(false);
     expect(isThresholdableOutcome("unclear")).toBe(false);
     expect(isThresholdableOutcome("bad_number")).toBe(false);
+  });
+});
+
+describe("loadOrgThresholdMap", () => {
+  function stubSupabase(rows: Array<{ outcome: string; min_confidence: number }> | null, error: { message: string } | null = null) {
+    const builder = {
+      select: () => builder,
+      eq: async () => ({ data: rows, error }),
+    };
+    return { from: () => builder } as any;
+  }
+
+  it("builds a map from the org's threshold rows", async () => {
+    const supabase = stubSupabase([
+      { outcome: "new_lead", min_confidence: 0.9 },
+      { outcome: "nurture", min_confidence: 0.95 },
+    ]);
+    const map = await loadOrgThresholdMap(supabase, "org-1");
+    expect(map).toEqual({ new_lead: 0.9, nurture: 0.95 });
+  });
+
+  it("drops non-thresholdable outcome rows defensively (dnc/unclear should never appear, but must not crash if they do)", async () => {
+    const supabase = stubSupabase([
+      { outcome: "dnc", min_confidence: 0.5 },
+      { outcome: "not_interested", min_confidence: 0.95 },
+    ]);
+    const map = await loadOrgThresholdMap(supabase, "org-1");
+    expect(map).toEqual({ not_interested: 0.95 });
+  });
+
+  it("returns an empty map (never throws) on a DB error", async () => {
+    const supabase = stubSupabase(null, { message: "connection reset" });
+    const map = await loadOrgThresholdMap(supabase, "org-1");
+    expect(map).toEqual({});
+  });
+
+  it("returns an empty map when the org has no threshold rows yet", async () => {
+    const supabase = stubSupabase([]);
+    const map = await loadOrgThresholdMap(supabase, "org-1");
+    expect(map).toEqual({});
   });
 });

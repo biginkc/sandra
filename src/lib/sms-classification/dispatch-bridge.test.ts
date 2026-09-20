@@ -8,6 +8,10 @@ function stubSupabase(opts: {
   messages?: unknown[];
   insertResult?: { data: { id: string } | null; error: { message: string } | null };
   existingRunLookup?: { data: { id: string } | null; error: { message: string } | null };
+  /** Rows `loadOrgThresholdMap` would read from jev_outcome_thresholds.
+   *  Defaults to none configured — every outcome resolves human_gated
+   *  unless a test explicitly opts an outcome in. */
+  thresholds?: Array<{ outcome: string; min_confidence: number }>;
 }) {
   const messagesBuilder = {
     select: () => messagesBuilder,
@@ -32,8 +36,17 @@ function stubSupabase(opts: {
     }),
     select: () => runsSelectBuilder,
   };
+  const thresholdsBuilder = {
+    select: () => thresholdsBuilder,
+    eq: async () => ({ data: opts.thresholds ?? [], error: null }),
+  };
   return {
-    from: (table: string) => (table === "messages" ? messagesBuilder : runsBuilder),
+    from: (table: string) =>
+      table === "messages"
+        ? messagesBuilder
+        : table === "jev_outcome_thresholds"
+          ? thresholdsBuilder
+          : runsBuilder,
   } as any;
 }
 
@@ -157,10 +170,12 @@ describe("classifyForDispatch", () => {
     }
   });
 
-  it("marks non-dnc automatic decisions eligible for auto-accept", async () => {
-    const { fn } = stubFetch({ answers: { outcome: { choice: "opted_out" } } });
+  it("marks a non-dnc automatic decision eligible for auto-accept when at/above its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "opted_out", confidence: 0.95 } },
+    });
     const result = await classifyForDispatch(
-      stubSupabase({}),
+      stubSupabase({ thresholds: [{ outcome: "opted_out", min_confidence: 0.95 }] }),
       baseInput,
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
@@ -169,15 +184,117 @@ describe("classifyForDispatch", () => {
     else throw new Error("expected jev_route");
   });
 
-  it("returns jev_nurture even in automatic mode (no AiAction exists for nurture)", async () => {
-    const { fn } = stubFetch({ answers: { outcome: { choice: "nurture" } } });
+  it("marks a non-dnc automatic decision NOT eligible for auto-accept when below its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "opted_out", confidence: 0.8 } },
+    });
     const result = await classifyForDispatch(
-      stubSupabase({}),
+      stubSupabase({ thresholds: [{ outcome: "opted_out", min_confidence: 0.95 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    if (result.kind === "jev_route") expect(result.eligibleForAutoAccept).toBe(false);
+    else throw new Error("expected jev_route");
+  });
+
+  it("marks a non-dnc automatic decision NOT eligible for auto-accept when no threshold is configured for that outcome", async () => {
+    // No thresholds row at all — must never silently default to "always
+    // eligible". This is also the pre-existing pending ai_disposition_reviews
+    // path, so "not eligible" here is a real Needs-a-decision case, not a
+    // dead end.
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "opted_out", confidence: 0.999 } },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    if (result.kind === "jev_route") expect(result.eligibleForAutoAccept).toBe(false);
+    else throw new Error("expected jev_route");
+  });
+
+  it("returns jev_nurture in automatic mode when nurture is at/above its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "nurture", confidence: 0.95 } },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "nurture", min_confidence: 0.95 }] }),
       baseInput,
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
     );
     expect(result).toEqual({ kind: "jev_nurture", classificationRunId: "run-1" });
+  });
+
+  it("returns jev_needs_decision (not jev_nurture) when nurture is below its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "nurture", confidence: 0.5 } },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "nurture", min_confidence: 0.95 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    expect(result).toEqual({
+      kind: "jev_needs_decision",
+      classificationRunId: "run-1",
+      outcome: "nurture",
+    });
+  });
+
+  it("returns jev_needs_decision when nurture has missing native confidence, even with a threshold configured", async () => {
+    const { fn } = stubFetch({ answers: { outcome: { choice: "nurture" } } });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "nurture", min_confidence: 0.95 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    expect(result).toEqual({
+      kind: "jev_needs_decision",
+      classificationRunId: "run-1",
+      outcome: "nurture",
+    });
+  });
+
+  it("returns jev_promote_new_lead when new_lead is at/above its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: {
+        outcome: { choice: "new_lead", confidence: 0.9 },
+        escalation_reason: { choice: "call_request" },
+      },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "new_lead", min_confidence: 0.9 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    expect(result).toEqual({ kind: "jev_promote_new_lead", classificationRunId: "run-1" });
+  });
+
+  it("stays on the existing escalate route (not jev_promote_new_lead) when new_lead is below its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: {
+        outcome: { choice: "new_lead", confidence: 0.6 },
+        escalation_reason: { choice: "call_request" },
+      },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "new_lead", min_confidence: 0.9 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    expect(result.kind).toBe("jev_route");
+    if (result.kind === "jev_route") {
+      expect(result.eligibleForAutoAccept).toBe(false);
+      expect(result.route.kind).toBe("escalate");
+    }
   });
 
   it("returns jev_no_action for bad_number/unclear", async () => {

@@ -2232,6 +2232,98 @@ export type Database = {
           },
         ]
       }
+      jev_outcome_threshold_history: {
+        Row: {
+          changed_at: string
+          changed_by: string | null
+          id: string
+          idempotency_key: string | null
+          new_min_confidence: number
+          org_id: string
+          outcome: string
+          previous_min_confidence: number | null
+          threshold_id: string | null
+          version: number
+        }
+        Insert: {
+          changed_at?: string
+          changed_by?: string | null
+          id?: string
+          idempotency_key?: string | null
+          new_min_confidence: number
+          org_id: string
+          outcome: string
+          previous_min_confidence?: number | null
+          threshold_id?: string | null
+          version: number
+        }
+        Update: {
+          changed_at?: string
+          changed_by?: string | null
+          id?: string
+          idempotency_key?: string | null
+          new_min_confidence?: number
+          org_id?: string
+          outcome?: string
+          previous_min_confidence?: number | null
+          threshold_id?: string | null
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "jev_outcome_threshold_history_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "jev_outcome_threshold_history_threshold_id_fkey"
+            columns: ["threshold_id"]
+            isOneToOne: false
+            referencedRelation: "jev_outcome_thresholds"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      jev_outcome_thresholds: {
+        Row: {
+          id: string
+          min_confidence: number
+          org_id: string
+          outcome: string
+          updated_at: string
+          updated_by: string | null
+          version: number
+        }
+        Insert: {
+          id?: string
+          min_confidence: number
+          org_id: string
+          outcome: string
+          updated_at?: string
+          updated_by?: string | null
+          version?: number
+        }
+        Update: {
+          id?: string
+          min_confidence?: number
+          org_id?: string
+          outcome?: string
+          updated_at?: string
+          updated_by?: string | null
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "jev_outcome_thresholds_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       job_items: {
         Row: {
           contact_id: string | null
@@ -6581,6 +6673,23 @@ export type Database = {
           p_conversation_id: string
           p_property_id: string
           p_source_inbound_message_id: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-20 for migration
+      // 20260920225859_jev_outcome_thresholds.sql — unlike the
+      // sms_classification_runs caveat above, this block IS a verbatim
+      // excerpt of a real `supabase gen types typescript --local` run
+      // against a fully-migrated disposable local Postgres (colima was
+      // resolvable this session); safe to trust as authoritative until
+      // the next full regen supersedes it.
+      fn_set_jev_outcome_threshold: {
+        Args: {
+          p_expected_version: number
+          p_idempotency_key: string
+          p_min_confidence: number
+          p_org_id: string
+          p_outcome: string
         }
         Returns: Json
       }

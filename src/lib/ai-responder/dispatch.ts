@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
+import { qualifyProperty } from "@/lib/leads/qualify";
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { getConsentState } from "@/lib/messaging/consent";
@@ -353,6 +354,58 @@ export async function dispatchAiResponse(
     });
     await markPropertyNeedsAttention(supabase, input.propertyId, "nurture_write_failed");
     return { outcome: "escalated", reason: "nurture_write_failed" };
+  }
+
+  if (classification.kind === "jev_needs_decision") {
+    // Below the org's configured threshold, missing/invalid native
+    // confidence, or no threshold configured at all for an outcome with no
+    // existing pending-review path to fall back on (currently only
+    // `nurture` — see dispatch-bridge.ts). Apply nothing; leave the
+    // property for a human, same treatment as every other escalation path
+    // in this function.
+    const reason = `jev_below_threshold:${classification.outcome}`;
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    await completeAiResponseClaim(supabase, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+    });
+    return { outcome: "escalated", reason };
+  }
+
+  if (classification.kind === "jev_promote_new_lead") {
+    // new_lead at/above the org's configured threshold. Promote through
+    // the same sanctioned primitive the legacy Haiku qualifier and manual
+    // qualify actions use — never appointment booking, never a raw
+    // properties.status write here.
+    const qualifyOutcome = await qualifyProperty(
+      supabase,
+      input.propertyId,
+      "system:jev_auto_promote",
+    );
+    if (qualifyOutcome.status === "qualified" || qualifyOutcome.status === "already_qualified") {
+      await completeAiResponseClaim(supabase, {
+        claimId: responseClaim.claimId,
+        outcome: "auto_closed",
+      });
+      return { outcome: "auto_closed", reason: "model:new_lead_promoted" };
+    }
+    // "failed" (including DNC-locked) or "not_found": never silently drop
+    // a Jev-detected new lead — surface it for a human exactly like the
+    // below-threshold case above, rather than treating a promotion failure
+    // as a skip.
+    const reason = "jev_new_lead_promotion_failed";
+    if (qualifyOutcome.status === "failed") {
+      reportError(new Error(qualifyOutcome.message), {
+        tags: { surface: "ai_responder_jev_new_lead_promotion" },
+        extra: { propertyId: input.propertyId },
+      });
+    }
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    await completeAiResponseClaim(supabase, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+    });
+    return { outcome: "escalated", reason };
   }
 
   let generated: AiStructuredOutput;

@@ -20,6 +20,7 @@ vi.mock("@/lib/events", () => ({
   LEAD_EVENT_TYPES: {
     AI_ESCALATED: "ai_escalated",
     DISPO_SET: "dispo_set",
+    QUALIFIED: "qualified",
   },
   recordLeadEvent,
 }));
@@ -97,6 +98,7 @@ type MockState = {
   }>;
   aiClaims: AiClaimRow[];
   aiClaimInsertError?: boolean;
+  jevOutcomeThresholds?: Array<{ outcome: string; min_confidence: number }>;
   contact: {
     first_name: string | null;
     phone_1: string | null;
@@ -130,6 +132,10 @@ type MockState = {
     org_id: string;
     outreach_dispo: string | null;
     state: string;
+    status?: string;
+    is_dnc_locked?: boolean;
+    qualified_at?: string | null;
+    qualified_by?: string | null;
   };
   threadConversationId: string;
 };
@@ -182,6 +188,10 @@ function createMockState(): MockState {
       org_id: "org-1",
       outreach_dispo: null,
       state: "MO",
+      status: "prospect",
+      is_dnc_locked: false,
+      qualified_at: null,
+      qualified_by: null,
     },
     threadConversationId: CONVERSATION_ID,
   };
@@ -605,6 +615,22 @@ function createMockSupabase(state: MockState) {
     return query;
   }
 
+  function buildJevOutcomeThresholdsQuery() {
+    const query = {
+      select() {
+        return query;
+      },
+      async eq() {
+        // Defaults to no configured thresholds — every outcome resolves
+        // human_gated, matching this suite's existing expectation that
+        // Jev routes never auto-apply without a test opting a threshold
+        // in via `state.jevOutcomeThresholds`.
+        return { data: state.jevOutcomeThresholds ?? [], error: null };
+      },
+    };
+    return query;
+  }
+
   return {
     from(table: string) {
       if (table === "messages") {
@@ -627,6 +653,9 @@ function createMockSupabase(state: MockState) {
       }
       if (table === "sms_classification_runs") {
         return buildSmsClassificationRunsQuery();
+      }
+      if (table === "jev_outcome_thresholds") {
+        return buildJevOutcomeThresholdsQuery();
       }
       throw new Error(`Unexpected table: ${table}`);
     },
@@ -1491,6 +1520,111 @@ describe("dispatchAiResponse debounce", () => {
       },
     ]);
     expect(recordLeadEvent).not.toHaveBeenCalled();
+  });
+
+  it("promotes a Jev new lead through qualifyProperty when at/above the org's configured threshold", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.95 }, escalation_reason: { choice: "call_request" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Yes let's talk tomorrow at 2pm about selling the house",
+        inboundMessageId: "inbound-new-lead-promoted", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      // The actual sanctioned promotion primitive, never a raw status write
+      // and never appointment booking.
+      expect(state.property.status).toBe("new_lead");
+      expect(state.property.qualified_by).toBe("system:jev_auto_promote");
+      expect(state.property.needs_human_attention).toBe(false);
+      expect(generateAiReply).not.toHaveBeenCalled();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("does not promote and instead flags for a human when a Jev new lead is below its configured threshold", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.6 }, escalation_reason: { choice: "call_request" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Maybe call me sometime to talk about it",
+        inboundMessageId: "inbound-new-lead-below-threshold", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "model:call_request" });
+      expect(state.property.status).toBe("prospect");
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(generateAiReply).not.toHaveBeenCalled();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("applies Jev nurture when at/above the org's configured threshold", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.97 } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not right now, maybe check back later",
+        inboundMessageId: "inbound-nurture-above", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+      expect(state.property.outreach_dispo).toBe("nurture");
+      expect(state.property.needs_human_attention).toBe(false);
+      expect(generateAiReply).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("does not apply Jev nurture and instead flags for a human when below the org's configured threshold", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.6 } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not right now",
+        inboundMessageId: "inbound-nurture-below", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "jev_below_threshold:nurture" });
+      expect(state.property.outreach_dispo).toBeNull();
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(generateAiReply).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
   it("routes a Jev new lead to attention without nurture, reply, or booking", async () => {

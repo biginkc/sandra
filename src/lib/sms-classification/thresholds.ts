@@ -1,3 +1,6 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+import type { Database } from "../supabase/types";
 import type { JevOutcome } from "./types";
 
 /**
@@ -110,4 +113,34 @@ export function resolveThresholdDecision(
   return confidence >= minConfidence
     ? { status: "auto_apply", outcome, confidence, minConfidence }
     : { status: "needs_decision", outcome, confidence, minConfidence };
+}
+
+/**
+ * Loads the org's live per-outcome thresholds from `jev_outcome_thresholds`
+ * (20260920225859_jev_outcome_thresholds.sql). Read live at classification
+ * time — no caching — so an edit through `fn_set_jev_outcome_threshold`
+ * takes effect on the very next classification with no deployment.
+ *
+ * A DB error or missing row for an outcome is never silently treated as
+ * "no threshold configured means auto-apply" — `resolveThresholdDecision`
+ * already treats an absent map entry as `human_gated`, which is the safe
+ * default either way.
+ */
+export async function loadOrgThresholdMap(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+): Promise<ThresholdMap> {
+  const { data, error } = await supabase
+    .from("jev_outcome_thresholds")
+    .select("outcome, min_confidence")
+    .eq("org_id", orgId);
+  if (error || !data) return {};
+
+  const map: ThresholdMap = {};
+  for (const row of data) {
+    if (isThresholdableOutcome(row.outcome as JevOutcome)) {
+      map[row.outcome as ThresholdableOutcome] = row.min_confidence;
+    }
+  }
+  return map;
 }
