@@ -15,7 +15,10 @@ import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 
 import { listAdminUserIds } from "@/lib/auth/admins";
 import { createNotification } from "@/lib/notifications/dispatch";
-import { classifyForDispatch } from "@/lib/sms-classification/dispatch-bridge";
+import {
+  classifyForDispatch,
+  type ClassificationBridgeResult,
+} from "@/lib/sms-classification/dispatch-bridge";
 
 import { claimAiResponse, completeAiResponseClaim } from "./claims";
 import { classifyAiSkip } from "./classify";
@@ -240,6 +243,40 @@ export async function dispatchAiResponse(
   });
 
   if (decision.skip) {
+    // Classify/reply-eligibility decoupling (Jev workflow, 2026-09-20):
+    // `decision.skip` governs whether Sandra may SEND an automated reply
+    // (org-wide off, no consent, per-property AI-responder disabled —
+    // a VA-controlled human-takeover kill switch, see
+    // `setAiResponderDisabled` — or the reply-pacing gates: daily
+    // max-turns and outside-business-hours). Jev's own outcomes never
+    // send a reply (Jev has no `send_reply`/`deescalate_close` route —
+    // it only ever escalates, closes, opts out, or requests dnc/nurture)
+    // so classifying and applying ITS effect is safe to decouple from
+    // the reply-pacing gates specifically. It must NOT be decoupled from
+    // consent/org-off/property-disabled — those represent real
+    // suppression and human-takeover signals that must still be
+    // respected, not just reply throttling.
+    const jevClassifyEligibleDespiteSkip =
+      config != null &&
+      config.active === true &&
+      config.classifier_provider === "jev" &&
+      consentState !== "opted_out" &&
+      !property.ai_responder_disabled;
+
+    if (jevClassifyEligibleDespiteSkip) {
+      const outcome = await classifyAndApplyDespiteReplyIneligibility(
+        supabase,
+        input,
+        property,
+        config,
+        currentTurn,
+      );
+      if (outcome) return outcome;
+      // use_legacy or jev_no_action — Jev had nothing actionable to
+      // apply, so the original skip reason (reply-pacing, not a Jev
+      // decision) still stands.
+    }
+
     return { outcome: "skipped", reason: decision.reason };
   }
 
@@ -310,6 +347,142 @@ export async function dispatchAiResponse(
   // canary" was overridden. dnc's human-gate is unaffected either way —
   // DB-enforced regardless of mode (see 20260920120000_sms_classification_runs.sql).
   // --------------------------------------------------------------------------
+  const classificationResult = await classifyAndHandleNonRouteOutcomes(
+    supabase,
+    input,
+    property,
+    config,
+    responseClaim,
+  );
+  if (classificationResult.handled) return classificationResult.outcome;
+  const classification = classificationResult.classification;
+
+
+  return resolveAndApplyRoute(
+    supabase,
+    input,
+    property,
+    { model: config!.model, system_prompt: config!.system_prompt, min_confidence: config!.min_confidence },
+    deps,
+    currentTurn,
+    responseClaim,
+    classification,
+  );
+}
+
+/**
+ * Runs Jev classification and, for the three outcomes that never touch
+ * the reply pipeline (nurture, below-threshold/human-gated "needs a
+ * decision", new_lead promotion), applies the effect and returns the
+ * terminal outcome directly. Returns `handled: false` for
+ * `use_legacy`/`jev_no_action` (nothing to apply here) or a `jev_route`
+ * classification — the caller still resolves/applies that route itself
+ * via `resolveAndApplyRoute`, kept separate because a `jev_route` MAY, in
+ * principle, need `generateAiReply`'s legacy branch (never true for an
+ * actual Jev decision, but the union type doesn't encode that).
+ */
+/**
+ * The decoupled entry point: classification is eligible even though a
+ * reply is not (see the `decision.skip` branch in `dispatchAiResponse`
+ * for exactly which gates this bypasses and why). Takes its own AI
+ * response claim — independent of, and mutually exclusive with, the
+ * claim taken later in the normal (`!decision.skip`) path, since control
+ * never reaches both in the same call. Returns null when classification
+ * had nothing to apply (`use_legacy`/`jev_no_action`) or — should never
+ * happen for an actual Jev decision, defended anyway — a `jev_route`
+ * whose route would have sent a reply.
+ */
+async function classifyAndApplyDespiteReplyIneligibility(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  property: AiDispatchPropertyGateRow,
+  config: {
+    classifier_provider?: string | null;
+    classifier_mode?: string | null;
+    model: string;
+    system_prompt: string;
+    min_confidence: number;
+  },
+  currentTurn: number,
+): Promise<AiDispatchOutcome | null> {
+  const responseClaim = await claimAiResponse(supabase, {
+    orgId: property.org_id,
+    inboundMessageId: input.inboundMessageId,
+    propertyId: input.propertyId,
+    contactId: input.contactId,
+    conversationId: input.conversationId ?? null,
+  });
+  if (!responseClaim.claimed) {
+    return {
+      outcome: "skipped",
+      reason:
+        responseClaim.reason === "already_replied"
+          ? "already_replied"
+          : "already_claimed",
+    };
+  }
+
+  const classificationResult = await classifyAndHandleNonRouteOutcomes(
+    supabase,
+    input,
+    property,
+    config,
+    responseClaim,
+  );
+  if (classificationResult.handled) return classificationResult.outcome;
+  const classification = classificationResult.classification;
+
+  if (classification.kind !== "jev_route") {
+    // use_legacy or jev_no_action — nothing for Jev to apply; the
+    // original reply-pacing skip reason stands (handled by the caller).
+    return null;
+  }
+
+  if (classification.route.kind === "send_reply" || classification.route.kind === "deescalate_close") {
+    // Provably unreachable today — JEV_OUTCOME_TO_ACTION never maps to
+    // an action that resolves to a send-kind route (Jev has no reply
+    // body). Fail loud rather than silently send while reply-ineligible:
+    // "must not replay sends" is a hard requirement, not a best effort.
+    reportError(
+      new Error("Jev route unexpectedly resolved to a send-kind route while reply-ineligible"),
+      {
+        tags: { surface: "ai_responder_jev_decoupled_classify" },
+        extra: { propertyId: input.propertyId, routeKind: classification.route.kind },
+      },
+    );
+    await markPropertyNeedsAttention(supabase, input.propertyId, "jev_unexpected_send_route");
+    await completeAiResponseClaim(supabase, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+    });
+    return { outcome: "escalated", reason: "jev_unexpected_send_route" };
+  }
+
+  return resolveAndApplyRoute(
+    supabase,
+    input,
+    property,
+    config,
+    // deps.anthropic is unreachable here — every remaining route.kind
+    // (escalate/opt_out/close_dnc/auto_close/auto_close_wrong_number)
+    // never calls generateAiReply, only the send-kind cases above do.
+    { anthropic: null as never },
+    currentTurn,
+    responseClaim,
+    classification,
+  );
+}
+
+async function classifyAndHandleNonRouteOutcomes(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  property: AiDispatchPropertyGateRow,
+  config: { classifier_provider?: string | null; classifier_mode?: string | null } | null | undefined,
+  responseClaim: { claimId: string | null },
+): Promise<
+  | { handled: true; outcome: AiDispatchOutcome }
+  | { handled: false; classification: ClassificationBridgeResult }
+> {
   const classification = await classifyForDispatch(
     supabase,
     {
@@ -334,7 +507,7 @@ export async function dispatchAiResponse(
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
       });
-      return { outcome: "auto_closed", reason: "model:nurture" };
+      return { handled: true, outcome: { outcome: "auto_closed", reason: "model:nurture" } };
     }
     if (nurtureResult.alreadyTerminal) {
       // Benign, not an error: something more specific than nurture is
@@ -345,7 +518,7 @@ export async function dispatchAiResponse(
         claimId: responseClaim.claimId,
         outcome: "skipped",
       });
-      return { outcome: "skipped", reason: "already_terminal" };
+      return { handled: true, outcome: { outcome: "skipped", reason: "already_terminal" } };
     }
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
@@ -353,7 +526,7 @@ export async function dispatchAiResponse(
       errorMessage: nurtureResult.error,
     });
     await markPropertyNeedsAttention(supabase, input.propertyId, "nurture_write_failed");
-    return { outcome: "escalated", reason: "nurture_write_failed" };
+    return { handled: true, outcome: { outcome: "escalated", reason: "nurture_write_failed" } };
   }
 
   if (classification.kind === "jev_needs_decision") {
@@ -369,7 +542,7 @@ export async function dispatchAiResponse(
       claimId: responseClaim.claimId,
       outcome: "escalated",
     });
-    return { outcome: "escalated", reason };
+    return { handled: true, outcome: { outcome: "escalated", reason } };
   }
 
   if (classification.kind === "jev_promote_new_lead") {
@@ -387,7 +560,7 @@ export async function dispatchAiResponse(
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
       });
-      return { outcome: "auto_closed", reason: "model:new_lead_promoted" };
+      return { handled: true, outcome: { outcome: "auto_closed", reason: "model:new_lead_promoted" } };
     }
     // "failed" (including DNC-locked) or "not_found": never silently drop
     // a Jev-detected new lead — surface it for a human exactly like the
@@ -405,9 +578,26 @@ export async function dispatchAiResponse(
       claimId: responseClaim.claimId,
       outcome: "escalated",
     });
-    return { outcome: "escalated", reason };
+    return { handled: true, outcome: { outcome: "escalated", reason } };
   }
 
+  return { handled: false, classification };
+}
+
+async function resolveAndApplyRoute(
+  supabase: SupabaseClient<Database>,
+  input: AiDispatchInput,
+  property: AiDispatchPropertyGateRow,
+  config: {
+    model: string;
+    system_prompt: string;
+    min_confidence: number;
+  },
+  deps: { anthropic: AnthropicLike },
+  currentTurn: number,
+  responseClaim: { claimId: string | null },
+  classification: ClassificationBridgeResult,
+): Promise<AiDispatchOutcome> {
   let generated: AiStructuredOutput;
   let route: ResponderRoute;
   let jevAutoAccept: { classificationRunId: string } | null = null;
@@ -720,6 +910,7 @@ export async function dispatchAiResponse(
       return assertNeverRoute(route);
   }
 }
+
 
 async function findExistingAiReplyForInbound(
   supabase: SupabaseClient<Database>,

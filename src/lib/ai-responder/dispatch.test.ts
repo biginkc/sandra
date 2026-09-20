@@ -1577,6 +1577,103 @@ describe("dispatchAiResponse debounce", () => {
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
+  it.each(["max_turns_reached", "outside_business_hours"] as const)(
+    "still classifies and applies a Jev decision when reply-ineligible for reply-pacing reasons (%s)",
+    async (skipReason) => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "not_interested", min_confidence: 0.95 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: skipReason });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "not_interested", confidence: 0.97 } } }),
+      })));
+      try {
+        const result = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "Not interested, please stop",
+          inboundMessageId: `inbound-decoupled-${skipReason}`, propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        // Jev's own decision still applies — never a reply, so
+        // reply-pacing ineligibility does not block it.
+        expect(result.outcome).not.toBe("skipped");
+        expect(state.property.outreach_dispo).toBe("not_interested");
+        expect(generateAiReply).not.toHaveBeenCalled();
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    },
+  );
+
+  it("does not classify (stays fully skipped) when the org's AI responder is not active, even for a jev-classifier org", async () => {
+    const state = createMockState();
+    state.config.active = false;
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_org_wide" });
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not interested",
+        inboundMessageId: "inbound-decoupled-org-disabled", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "skipped", reason: "disabled_org_wide" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("does not classify (stays fully skipped) when the property's AI responder is disabled — human takeover is respected, not just reply pacing", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.property.ai_responder_disabled = true;
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" });
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not interested",
+        inboundMessageId: "inbound-decoupled-property-disabled", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "skipped", reason: "disabled_per_property" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("does not classify (stays fully skipped) when the contact has opted out — suppression is respected, not just reply pacing", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(getConsentState).mockResolvedValue("opted_out" as never);
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "no_consent" });
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not interested",
+        inboundMessageId: "inbound-decoupled-opted-out", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "skipped", reason: "no_consent" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
   it("applies Jev nurture when at/above the org's configured threshold", async () => {
     const state = createMockState();
     state.config.classifier_provider = "jev";
