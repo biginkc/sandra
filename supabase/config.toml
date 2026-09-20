@@ -1,0 +1,8 @@
+project_id = "sandra"
+
+[api]
+port = 54331
+
+[db]
+port = 54329
+major_version = 17
