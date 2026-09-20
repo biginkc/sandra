@@ -83,3 +83,5 @@ Use the in-app browser or visible Chrome for human-feel checks: drawer responsiv
 Use Playwright for repeatable proof: CI gates, auth setup, DB-backed fixtures, URL state, filter counts, regression tests, screenshots/traces on failure, and anything that should keep passing the same way tomorrow.
 
 Human clicks do not disturb terminal/API-side checks such as GitHub Actions, Vercel checks, or `gh pr checks`. Human clicks can interfere only when an agent is actively controlling the same visible Chrome window with browser automation or AppleScript; call that out before taking control.
+
+Jev / TypeSafe documentation: https://docs.typesafe.ai/introduction
