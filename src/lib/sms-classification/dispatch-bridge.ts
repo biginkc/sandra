@@ -1,3 +1,4 @@
+import { JEV_MODEL, JEV_SCHEMA_VERSION, JEV_POLICY_VERSION } from "./questions";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createHash } from "node:crypto";
 
@@ -10,9 +11,8 @@ import { resolvePolicyOutcome } from "./policy";
 import { classifyWithJev, JevProviderError } from "./providers/jev-gateway";
 import type { SmsClassificationDecision } from "./types";
 
-const SCHEMA_VERSION = "1";
-const POLICY_VERSION = "2026-09-20";
-const JEV_MODEL = "jev-latest";
+const SCHEMA_VERSION = JEV_SCHEMA_VERSION;
+const POLICY_VERSION = JEV_POLICY_VERSION;
 
 export type ClassifierProvider = "legacy" | "jev";
 export type ClassifierMode = "shadow" | "automatic";
@@ -175,7 +175,7 @@ export async function classifyForDispatch(
     route: resolved.route,
     assembled: resolved.assembled,
     classificationRunId,
-    eligibleForAutoAccept: resolved.assembled.action !== "close_dnc",
+    eligibleForAutoAccept: resolved.assembled.action !== "close_dnc" && resolved.assembled.action !== "escalate",
   };
 }
 
@@ -225,6 +225,7 @@ async function persistRun(
     model: decision.model || JEV_MODEL,
     decision: {
       outcome: decision.outcome,
+      outcomeConfidence: decision.outcomeConfidence ?? null,
       wrongScope: decision.wrongScope,
       escalationReason: decision.escalationReason,
       probabilities: decision.probabilities,

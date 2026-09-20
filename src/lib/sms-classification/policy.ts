@@ -2,25 +2,8 @@ import type { AiStructuredOutput } from "../ai-responder/types";
 import { resolveResponderOutcome, type ResponderRoute } from "../ai-responder/route";
 import { JEV_OUTCOME_TO_ACTION, type SmsClassificationDecision } from "./types";
 
-/**
- * Resolves a validated `SmsClassificationDecision` (from any provider — Jev
- * or legacy) into a `ResponderRoute`, or a `nurture` effect outside the
- * `AiAction` vocabulary.
- *
- * Jev's approved 7-way taxonomy (`JevOutcome`) only ever maps to 4 of the 7
- * `AiAction`s via `JEV_OUTCOME_TO_ACTION`: `close_not_interested`,
- * `close_wrong_number`, `opt_out`, `close_dnc`. None of Jev's outcomes reach
- * `send_reply`, `escalate`, or `deescalate_close` today — this function
- * intentionally does NOT implement those branches. If Jev's taxonomy is ever
- * extended to cover them, the implementer must apply the Fable-reviewed,
- * binding order from 2026-09-20: decide the action first, generate `body`
- * ONLY when the decided action is `send_reply`, assemble the full
- * `AiStructuredOutput`, THEN call `resolveResponderOutcome` — never call it
- * with a fabricated `send_reply` body (`AiStructuredOutput`'s `send_reply`
- * variant requires a real, non-optional `body: string`,
- * `ai-responder/types.ts:71-76`, and Jev never produces one).
- */
-
+/** Maps classification to effects. New leads require human follow-up until
+ * a promotion threshold is validated; they must never become nurture closes. */
 export type ResolvedPolicyOutcome =
   | { kind: "route"; route: ResponderRoute; assembled: AiStructuredOutput }
   | { kind: "nurture" }
@@ -38,6 +21,17 @@ type ReachableAction = Extract<
 export async function resolvePolicyOutcome(
   decision: SmsClassificationDecision,
 ): Promise<ResolvedPolicyOutcome> {
+  if (decision.outcome === "new_lead") {
+    const assembled: AiStructuredOutput = {
+      action: "escalate",
+      confidence: confidenceFromDecision(decision),
+      sentiment: "positive",
+      escalation_reason: decision.escalationReason === "call_request"
+        ? "call_request" : "hot_lead",
+    };
+    return { kind: "route", assembled, route: resolveResponderOutcome(assembled) };
+  }
+
   if (decision.outcome === "bad_number" || decision.outcome === "unclear") {
     // Neither is classifiable from SMS text alone (bad_number needs
     // delivery/bounce evidence; unclear is a genuine no-signal fallback).
@@ -59,7 +53,7 @@ export async function resolvePolicyOutcome(
   }
 
   const sentiment = "neutral" as const; // Jev doesn't classify sentiment; informational only downstream.
-  const confidence = confidenceFromProbabilities(decision);
+  const confidence = confidenceFromDecision(decision);
 
   let assembled: AiStructuredOutput;
   switch (action) {
@@ -89,16 +83,9 @@ export async function resolvePolicyOutcome(
   return { kind: "route", route: resolveResponderOutcome(assembled), assembled };
 }
 
-/**
- * Jev's Choice response gives per-answer probabilities, not a single
- * confidence scalar the way Claude's tool-use does. Use the winning
- * outcome's own probability as the confidence proxy; fall back to 1 when
- * the provider omitted distributions (tolerated per the gateway's contract
- * tests — missing probabilities isn't a hard failure).
- */
-function confidenceFromProbabilities(decision: SmsClassificationDecision): number {
-  const dist = decision.probabilities.outcome;
-  if (!dist) return 1;
-  const p = dist[decision.outcome];
-  return typeof p === "number" && p >= 0 && p <= 1 ? p : 1;
+/** Never substitute winning probability for native confidence. */
+function confidenceFromDecision(decision: SmsClassificationDecision): number {
+  const value = decision.outcomeConfidence;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+    ? value : 0;
 }

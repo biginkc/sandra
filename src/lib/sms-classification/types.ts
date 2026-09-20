@@ -5,11 +5,12 @@ import type {
 } from "../ai-responder/types";
 
 /**
- * Jev's approved 7-way Choice taxonomy (2026-09-20 live-evaluation session).
+ * Jev outcome taxonomy, extended with the human-reviewed new-lead category.
  * Distinct from `AiAction`: no `body` (Jev never generates reply text),
  * `bad_number` and `unclear` are adapter-only values `AiAction` doesn't have.
  */
 export type JevOutcome =
+  | "new_lead"
   | "nurture"
   | "not_interested"
   | "wrong_number"
@@ -28,6 +29,8 @@ export type JevReplyIntent = "positive" | "negative" | "neutral";
 /** Validated, provider-independent classification result. */
 export type SmsClassificationDecision = {
   outcome: JevOutcome;
+  /** Native TypeSafe confidence; absent/invalid is unknown, never certainty. */
+  outcomeConfidence?: number | null;
   wrongScope: JevWrongScope | null;
   escalationReason: JevEscalationReason | null;
   replyIntent: JevReplyIntent | null;

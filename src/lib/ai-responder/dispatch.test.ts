@@ -1493,6 +1493,32 @@ describe("dispatchAiResponse debounce", () => {
     expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
+  it("routes a Jev new lead to attention without nurture, reply, or booking", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.99 }, escalation_reason: { choice: "call_request" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Call me tomorrow afternoon to discuss selling",
+        inboundMessageId: "inbound-new-lead", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "model:call_request" });
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(state.property.outreach_dispo).toBeNull();
+      expect(state.aiDispoReviews).toEqual([]);
+      expect(generateAiReply).not.toHaveBeenCalled();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
   it("jev-driven close_dnc suppresses immediately but defers the outreach_dispo write to human confirmation", async () => {
     // Regression test for Astra's BLOCKING PR-review finding (2026-09-20,
     // "Option B" resolution): DNC's suppression effect must happen right
