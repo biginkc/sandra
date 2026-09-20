@@ -23,6 +23,16 @@ function baseDecision(
 }
 
 describe("resolvePolicyOutcome", () => {
+  it.each([0, 0.5, 1, null])("keeps new leads out of nurture even at confidence %s", async (confidence) => {
+    const result = await resolvePolicyOutcome(baseDecision({ outcome: "new_lead", outcomeConfidence: confidence }));
+    expect(result).toMatchObject({ kind: "route", route: { kind: "escalate", reason: "model:hot_lead" } });
+  });
+
+  it("preserves the seller call-request reason", async () => {
+    const result = await resolvePolicyOutcome(baseDecision({ outcome: "new_lead", escalationReason: "call_request" }));
+    expect(result).toMatchObject({ route: { kind: "escalate", reason: "model:call_request" } });
+  });
+
   it("routes not_interested to close_not_interested with no body", async () => {
     const result = await resolvePolicyOutcome(baseDecision());
     expect(result.kind).toBe("route");
@@ -93,20 +103,21 @@ describe("resolvePolicyOutcome", () => {
     expect(result).toEqual({ kind: "no_action" });
   });
 
-  it("uses the winning outcome's own probability as confidence", async () => {
+  it("uses native confidence rather than the winning probability", async () => {
     const result = await resolvePolicyOutcome(
       baseDecision({
         outcome: "dnc",
+        outcomeConfidence: 0.42,
         probabilities: { outcome: { dnc: 0.73, not_interested: 0.2 } },
       }),
     );
-    if (result.kind === "route") expect(result.assembled.confidence).toBe(0.73);
+    if (result.kind === "route") expect(result.assembled.confidence).toBe(0.42);
     else throw new Error("expected route");
   });
 
-  it("falls back to confidence 1 when probabilities are missing", async () => {
+  it("uses zero confidence when native confidence is missing", async () => {
     const result = await resolvePolicyOutcome(baseDecision({ outcome: "dnc" }));
-    if (result.kind === "route") expect(result.assembled.confidence).toBe(1);
+    if (result.kind === "route") expect(result.assembled.confidence).toBe(0);
     else throw new Error("expected route");
   });
 });

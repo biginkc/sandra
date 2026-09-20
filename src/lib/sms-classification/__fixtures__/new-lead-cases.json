@@ -1,0 +1,14 @@
+[
+  {"id":"review-C028-pattern","expected":"new_lead","thread":[{"direction":"outbound","body":"Would you like to discuss selling your property?"},{"direction":"inbound","body":"Yes, let's talk about it."}]},
+  {"id":"review-C063-pattern","expected":"new_lead","thread":[{"direction":"outbound","body":"Could we arrange a call to discuss the property?"},{"direction":"inbound","body":"Tomorrow at 2 works for me."}]},
+  {"id":"review-C079-pattern","expected":"new_lead","thread":[{"direction":"outbound","body":"When would you like to talk about selling?"},{"direction":"inbound","body":"After 5 today."}]},
+  {"id":"review-C080-pattern","expected":"new_lead","thread":[{"direction":"outbound","body":"Can we discuss an offer?"},{"direction":"inbound","body":"Give me a call Thursday morning."}]},
+  {"id":"call-without-time","expected":"new_lead","thread":[{"direction":"outbound","body":"Are you interested in an offer for the house?"},{"direction":"inbound","body":"Can you call me about it?"}]},
+  {"id":"outbound-only","expected":"unclear","thread":[{"direction":"outbound","body":"Can we call you tomorrow at 3 about selling?"}]},
+  {"id":"declined-call","expected":"not_interested","thread":[{"direction":"outbound","body":"Could we talk about selling tomorrow?"},{"direction":"inbound","body":"No, I am not selling."}]},
+  {"id":"wrong-contact","expected":"wrong_number","thread":[{"direction":"outbound","body":"Can we discuss selling your house?"},{"direction":"inbound","body":"Wrong person. I never owned that house."}]},
+  {"id":"unrelated-time","expected":"unclear","thread":[{"direction":"outbound","body":"Would you consider an offer?"},{"direction":"inbound","body":"The store opens at 9."}]},
+  {"id":"interest-then-stop","expected":"opted_out","thread":[{"direction":"inbound","body":"Call me at 3 about selling."},{"direction":"inbound","body":"Actually stop texting me. Remove me from your list."}]},
+  {"id":"interest-then-legal","expected":"dnc","thread":[{"direction":"inbound","body":"I might sell."},{"direction":"inbound","body":"My attorney demands you cease all contact. I am on the Do Not Call registry."}]},
+  {"id":"vague-later","expected":"nurture","thread":[{"direction":"outbound","body":"Are you ready to talk about an offer?"},{"direction":"inbound","body":"Maybe someday. Not ready now."}]}
+]

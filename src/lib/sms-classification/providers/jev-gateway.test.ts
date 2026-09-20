@@ -28,6 +28,26 @@ function baseInput() {
 }
 
 describe("classifyWithJev", () => {
+  it("sends the documented question map with the reviewed new-lead rubric", async () => {
+    const f = stubFetch([{ status: 200, body: { answers: { outcome: { choice: "new_lead", confidence: 0.76, probabilities: { new_lead: 0.9 } } } } }]);
+    const result = await classifyWithJev(baseInput(), { fetch: f, apiKey: "k" });
+    const init = vi.mocked(f).mock.calls[0][1];
+    const body = JSON.parse(String(init?.body));
+    expect(Array.isArray(body.questions)).toBe(false);
+    expect(body.model).toBe("jev-1.13.0");
+    expect(body.questions.outcome.type).toBe("choice");
+    expect(body.questions.outcome.instructions).toContain("latest inbound");
+    expect(body.questions.outcome.criteria.new_lead).toContain("An outbound invitation alone");
+    expect(body.questions.outcome.criteria.nurture).toContain("new_lead, not nurture");
+    expect(result).toMatchObject({ outcome: "new_lead", outcomeConfidence: 0.76, schemaVersion: "2" });
+    expect(result.probabilities.outcome.new_lead).toBe(0.9);
+  });
+
+  it.each([undefined, null, -1, 1.01, "0.99", NaN, Infinity])("does not accept invalid confidence %s", async (confidence) => {
+    const f = stubFetch([{ status: 200, body: { answers: { outcome: { choice: "new_lead", confidence } } } }]);
+    expect((await classifyWithJev(baseInput(), { fetch: f, apiKey: "k" })).outcomeConfidence).toBeNull();
+  });
+
   it("parses a valid outcome-only response", async () => {
     const f = stubFetch([
       {
@@ -52,16 +72,15 @@ describe("classifyWithJev", () => {
     });
   });
 
-  it("throws invalid_response when distributions are missing (no probabilities field)", async () => {
+  it("retains unknown confidence when provider distributions and confidence are missing", async () => {
     const f = stubFetch([
       { status: 200, body: { answers: { outcome: { choice: "dnc" } } } },
     ]);
     const result = await classifyWithJev(baseInput(), { fetch: f, apiKey: "k" });
-    // Missing probabilities is tolerated as an empty distribution, not a hard
-    // failure — Jev's documented contract doesn't guarantee probabilities on
-    // every answer. The outcome itself must still be present and valid.
+    // Tolerate an incomplete provider answer without manufacturing certainty.
     expect(result.outcome).toBe("dnc");
     expect(result.probabilities.outcome).toEqual({});
+    expect(result.outcomeConfidence).toBeNull();
   });
 
   it("treats an invalid enum choice as no answer, not a crash-through value", async () => {

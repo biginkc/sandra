@@ -1,3 +1,4 @@
+import { buildQuestions, JEV_MODEL, JEV_SCHEMA_VERSION, OUTCOME_CRITERIA } from "../questions";
 import type {
   JevEscalationReason,
   JevOutcome,
@@ -27,18 +28,9 @@ export type JevClassifyInput = {
 };
 
 const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-const JEV_MODEL = "jev-latest";
-const SCHEMA_VERSION = "1";
+const SCHEMA_VERSION = JEV_SCHEMA_VERSION;
 
-const OUTCOME_VALUES: readonly JevOutcome[] = [
-  "nurture",
-  "not_interested",
-  "wrong_number",
-  "bad_number",
-  "opted_out",
-  "dnc",
-  "unclear",
-];
+const OUTCOME_VALUES = Object.keys(OUTCOME_CRITERIA) as JevOutcome[];
 const WRONG_SCOPE_VALUES: readonly JevWrongScope[] = [
   "this_property",
   "all",
@@ -62,28 +54,7 @@ const REPLY_INTENT_VALUES: readonly JevReplyIntent[] = [
   "neutral",
 ];
 
-function buildQuestions(includeReplyIntent: boolean) {
-  const questions: Array<{ id: string; type: "choice"; options: string[] }> =
-    [
-      { id: "outcome", type: "choice", options: [...OUTCOME_VALUES] },
-      { id: "wrong_scope", type: "choice", options: [...WRONG_SCOPE_VALUES] },
-      {
-        id: "escalation_reason",
-        type: "choice",
-        options: [...ESCALATION_REASON_VALUES],
-      },
-    ];
-  if (includeReplyIntent) {
-    questions.push({
-      id: "reply_intent",
-      type: "choice",
-      options: [...REPLY_INTENT_VALUES],
-    });
-  }
-  return questions;
-}
-
-type JevRawAnswer = { choice: string; probabilities?: Record<string, number> };
+type JevRawAnswer = { choice: string; confidence?: unknown; probabilities?: Record<string, number> };
 type JevRawResponse = {
   answers?: Record<string, JevRawAnswer>;
   model?: string;
@@ -244,6 +215,7 @@ function parseJevResponse(
 
   return {
     outcome: outcome.value,
+    outcomeConfidence: readConfidence(json.answers?.outcome?.confidence),
     wrongScope: wrongScope.value,
     escalationReason: escalationReason.value,
     replyIntent: replyIntent.value,
@@ -269,4 +241,9 @@ function backoffMs(attempt: number): number {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readConfidence(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+    ? value : null;
 }

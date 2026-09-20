@@ -61,6 +61,14 @@ const baseInput = {
 };
 
 describe("classifyForDispatch", () => {
+  it.each(["shadow", "automatic"] as const)("handles new_lead in %s mode without auto-accept", async (mode) => {
+    const { fn } = stubFetch({ answers: { outcome: { choice: "new_lead", confidence: 1 }, escalation_reason: { choice: "call_request" } } });
+    const result = await classifyForDispatch(stubSupabase({}), baseInput,
+      { classifierProvider: "jev", classifierMode: mode }, { fetch: fn, typesafeApiKey: "k" });
+    if (mode === "shadow") expect(result).toEqual({ kind: "use_legacy", classificationRunId: "run-1" });
+    else expect(result).toMatchObject({ kind: "jev_route", eligibleForAutoAccept: false, route: { kind: "escalate", reason: "model:call_request" } });
+  });
+
   beforeEach(() => vi.clearAllMocks());
 
   it("returns use_legacy immediately when provider is legacy, without calling fetch", async () => {
