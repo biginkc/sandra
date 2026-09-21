@@ -283,85 +283,24 @@ describe("getNeedsDecisionQueue — root final-review P1 #3 (classifier_event re
     ]);
   });
 
-  // Root review of 3e4ee3b1 (jev-root-round12-review.md, finding 1):
-  // failure A vs. failure B on the SAME inbound (two retries, each
-  // failing for a DIFFERENT reason) can both still be eligible
-  // simultaneously (the view only excludes promoted/reconciled rows, not
-  // same-inbound duplicates) — Needs-a-decision must be singular per
-  // source_inbound_message_id. The latest attempt by created_at is the
-  // deterministic winner; earlier attempts stay immutable audit rows,
-  // visible in Review Jev, but drop out of this queue.
-  describe("duplicate failure dedup — one actionable row per inbound (round 12, finding 1)", () => {
-    it("collapses two DIFFERENT failure reasons on the SAME inbound to exactly one item — the latest", async () => {
-      mocks.eligibleClassifierEvents = [
-        classificationRunRow({
-          id: "run-fail-early",
-          source_inbound_message_id: "msg-1",
-          fallback_reason: "provider_timeout",
-          created_at: "2026-09-20T00:00:00.000Z",
-        }),
-        classificationRunRow({
-          id: "run-fail-later",
-          source_inbound_message_id: "msg-1",
-          fallback_reason: "invalid_response_schema",
-          created_at: "2026-09-20T00:05:00.000Z",
-        }),
-      ];
-      const { items, error } = await getNeedsDecisionQueue();
-      expect(error).toBeNull();
-      expect(items).toHaveLength(1);
-      expect(items[0]).toMatchObject({ id: "run-fail-later", correctionReason: "invalid_response_schema" });
-    });
-
-    it("picks the latest regardless of array order (three retries, different reasons, out of order)", async () => {
-      mocks.eligibleClassifierEvents = [
-        classificationRunRow({
-          id: "run-fail-middle",
-          source_inbound_message_id: "msg-1",
-          fallback_reason: "provider_timeout",
-          created_at: "2026-09-20T00:05:00.000Z",
-        }),
-        classificationRunRow({
-          id: "run-fail-latest",
-          source_inbound_message_id: "msg-1",
-          fallback_reason: "audit_persist_failed",
-          created_at: "2026-09-20T00:10:00.000Z",
-        }),
-        classificationRunRow({
-          id: "run-fail-earliest",
-          source_inbound_message_id: "msg-1",
-          fallback_reason: "source_message_not_found",
-          created_at: "2026-09-20T00:00:00.000Z",
-        }),
-      ];
-      const { items } = await getNeedsDecisionQueue();
-      expect(items.map((i) => i.id)).toEqual(["run-fail-latest"]);
-    });
-
-    it("keeps failures for DIFFERENT inbounds each as their own item — dedup is per-inbound, not global", async () => {
-      mocks.eligibleClassifierEvents = [
-        classificationRunRow({
-          id: "run-a-early",
-          source_inbound_message_id: "msg-A",
-          fallback_reason: "provider_timeout",
-          created_at: "2026-09-20T00:00:00.000Z",
-        }),
-        classificationRunRow({
-          id: "run-a-later",
-          source_inbound_message_id: "msg-A",
-          fallback_reason: "invalid_response_schema",
-          created_at: "2026-09-20T00:05:00.000Z",
-        }),
-        classificationRunRow({
-          id: "run-b",
-          source_inbound_message_id: "msg-B",
-          fallback_reason: "provider_timeout",
-          created_at: "2026-09-20T00:02:00.000Z",
-        }),
-      ];
-      const { items } = await getNeedsDecisionQueue();
-      expect(items.map((i) => i.id).sort()).toEqual(["run-a-later", "run-b"]);
-    });
+  // Root review of f3ab9e1e (jev-root-round18-prelimit-dedup.md):
+  // per-inbound "latest wins" dedup moved OUT of queries.ts and into the
+  // jev_needs_decision_classifier_events view itself (DISTINCT ON,
+  // applied before the view's own row selection, so >100 retries on one
+  // inbound can never crowd out a distinct newer inbound) — see
+  // 20260921072107_jev_needs_decision_dedup_before_limit.integration.test.ts
+  // for that behavior against real Postgres. queries.ts now trusts the
+  // view already returns at most one row per source_inbound_message_id;
+  // this only proves it maps each returned row straight through, with no
+  // collapsing of its own.
+  it("maps every row the view returns straight through — no app-level dedup left to do", async () => {
+    mocks.eligibleClassifierEvents = [
+      classificationRunRow({ id: "run-a", source_inbound_message_id: "msg-A", created_at: "2026-09-20T00:00:00.000Z" }),
+      classificationRunRow({ id: "run-b", source_inbound_message_id: "msg-B", created_at: "2026-09-20T00:05:00.000Z" }),
+    ];
+    const { items, error } = await getNeedsDecisionQueue();
+    expect(error).toBeNull();
+    expect(items.map((i) => i.id)).toEqual(["run-a", "run-b"]);
   });
 });
 

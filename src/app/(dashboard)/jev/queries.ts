@@ -259,6 +259,16 @@ const NEEDS_DECISION_CLASSIFIER_EVENT_LIMIT = 100;
  * org-scoped RLS this table already had applies unchanged (security_invoker
  * runs the view as the calling role). limit(100) now applies to actually-
  * eligible rows.
+ *
+ * Root review of f3ab9e1e (jev-root-round18-prelimit-dedup.md): the
+ * per-inbound "latest wins" dedup (round 12) used to run HERE, in
+ * application code, AFTER limit(100) — which reintroduced the exact same
+ * starvation shape (>100 eligible retries on ONE inbound could fill the
+ * whole result and hide a distinct newer inbound). The view
+ * (20260921072107_jev_needs_decision_dedup_before_limit.sql) now returns
+ * at most one row per source_inbound_message_id itself (DISTINCT ON,
+ * ordered by created_at desc/id desc), so a straight map is correct —
+ * no application-level dedup step is needed anymore.
  */
 export async function getNeedsDecisionQueue(): Promise<{ items: JevQueueItem[]; error: string | null }> {
   const supabase = await createClient();
@@ -297,29 +307,21 @@ export async function getNeedsDecisionQueue(): Promise<{ items: JevQueueItem[]; 
   const reviews = (reviewsRes.data ?? []).map((row) => mapAiDispositionReview(row as unknown as AiDispositionReviewRow));
   const decisions = (decisionsRes.data ?? []).map((row) => mapJevLeadDecision(row as unknown as JevLeadDecisionRow));
 
-  // Root review of 3e4ee3b1 (jev-root-round12-review.md, finding 1):
-  // Needs-a-decision must be authoritative and singular per
-  // source_inbound_message_id — the view above already guarantees every
-  // candidate here is unpromoted/unreconciled, but TWO different failure
-  // attempts on the SAME inbound (different reasons) can both still be
-  // eligible simultaneously. Among this (already eligible, <=100-row,
-  // bounded) set, the LATEST attempt by created_at is the deterministic
-  // winner; earlier attempts stay immutable, unmodified audit rows —
-  // still fully visible in Review Jev (which reads sms_classification_runs
-  // directly and is untouched by this dedup or the eligibility view).
+  // Root review of 3e4ee3b1 (jev-root-round12-review.md, finding 1) and
+  // f3ab9e1e (jev-root-round18-prelimit-dedup.md): the view is now the
+  // authoritative source of "at most one eligible row per
+  // source_inbound_message_id" (DISTINCT ON, applied before its own
+  // internal limit) — no dedup left to do here. Earlier, superseded
+  // retry attempts stay immutable, unmodified audit rows — still fully
+  // visible in Review Jev (which reads sms_classification_runs directly
+  // and is untouched by this view). Defensive `?? row.id` matches the
+  // type's `source_inbound_message_id?` (shared with Review Jev's own,
+  // narrower select) even though the column is NOT NULL on this view.
   const eligibleEvents = (eligibleEventsRes.data ?? []) as ClassifierEventRow[];
-  const latestEventByMessage = new Map<string, ClassifierEventRow>();
-  for (const row of eligibleEvents) {
-    const key = row.source_inbound_message_id ?? row.id;
-    const existing = latestEventByMessage.get(key);
-    if (!existing || row.created_at > existing.created_at) {
-      latestEventByMessage.set(key, row);
-    }
-  }
-  const dedupedEvents = Array.from(latestEventByMessage.values()).map((row) => mapClassifierEvent(row));
+  const events = eligibleEvents.map((row) => mapClassifierEvent({ ...row, source_inbound_message_id: row.source_inbound_message_id ?? row.id }));
 
   return {
-    items: [...reviews, ...decisions, ...dedupedEvents].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    items: [...reviews, ...decisions, ...events].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     error: null,
   };
 }
