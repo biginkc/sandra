@@ -143,18 +143,34 @@ describe("Astra blocker 1 — Confirm on a below-threshold opted_out review supp
     expect(property.outreach_dispo).toBe("opted_out");
   });
 
-  it("does not clobber a contact already do_not_contact-locked (shared-contact safety, matches the correction path's tolerance)", async () => {
+  it("fails closed on a property whose contact is already do_not_contact-locked, and leaves the lock intact", async () => {
+    // A do_not_contact contact cascade-locks every property that names it
+    // as homeowner (20260815190000) — on insert here, since the contact
+    // is already locked before the property is created. So this is not a
+    // "tolerate and skip suppression" case: the property itself is
+    // is_dnc_locked, and fn_confirm_ai_disposition_review's own write to
+    // properties.outreach_dispo must be rejected by that lock, same as
+    // any other write to a locked property. Fail-closed, not tolerant.
     await db.query("update public.contacts set do_not_contact = true where id = $1", [contactId]);
     const propertyId = await makeProperty("new_lead");
+
+    const property = (await db.query("select is_dnc_locked from public.properties where id = $1", [propertyId])).rows[0];
+    expect(property.is_dnc_locked).toBe(true);
+
     const reviewId = await proposeUnappliedReview(propertyId, "opted_out");
 
-    const result = await confirmReview(reviewId);
-    expect(result.status).toBe("confirmed");
+    await db.query("savepoint before_confirm");
+    await expect(confirmReview(reviewId)).rejects.toThrow(/DNC_LOCKED/);
+    await db.query("rollback to savepoint before_confirm");
+
+    const afterProperty = (await db.query("select is_dnc_locked, outreach_dispo from public.properties where id = $1", [propertyId])).rows[0];
+    expect(afterProperty.is_dnc_locked).toBe(true);
+    expect(afterProperty.outreach_dispo).toBeNull();
+
+    const review = (await db.query("select status from public.ai_disposition_reviews where id = $1", [reviewId])).rows[0];
+    expect(review.status).toBe("pending");
 
     const after = await getContact(contactId);
-    // do_not_contact guard: the suppression UPDATE's WHERE clause skips
-    // an already-do_not_contact contact — sms_opted_out is left as-is,
-    // same tolerance the correction path already had.
     expect(after.do_not_contact).toBe(true);
   });
 
@@ -206,9 +222,19 @@ describe("Astra blocker 2 — a property-write review resolution does not self-s
 
   it("a sibling pending review on the same property is still superseded normally", async () => {
     const propertyId = await makeProperty("prospect");
-    const reviewId = await proposeAppliedReview(propertyId);
+
+    // Both inbound messages happen BEFORE either review is proposed, so
+    // both reviews capture the same (already-final) decision_context_
+    // revision. If the sibling's message arrived AFTER the target review
+    // captured its revision, trg_messages_bump_decision_context_revision
+    // (20260921022936) would legitimately bump the property's revision
+    // and make the target review stale by design — a real "new context
+    // arrived, re-evaluate" case, not the self-supersede bug this test
+    // targets. Ordering messages first isolates the two concerns.
     const siblingConversationId = randomUUID();
     const siblingMessageId = await makeInboundMessage(propertyId, siblingConversationId, "sibling fixture");
+    const reviewId = await proposeAppliedReview(propertyId);
+
     const siblingReviewId = randomUUID();
     await db.query(
       `insert into public.ai_disposition_reviews
@@ -218,13 +244,28 @@ describe("Astra blocker 2 — a property-write review resolution does not self-s
       [siblingReviewId, orgId, propertyId, siblingConversationId, siblingMessageId],
     );
 
-    await correctReview(reviewId, "opted_out");
+    const correction = await correctReview(reviewId, "opted_out");
+    expect(correction.status).toBe("corrected");
 
     const sibling = (await db.query("select status, superseded_reason from public.ai_disposition_reviews where id = $1", [siblingReviewId])).rows[0];
     expect(sibling.status).toBe("superseded");
     expect(sibling.superseded_reason).toBe("property_outcome_changed");
 
-    const resolved = (await db.query("select status from public.ai_disposition_reviews where id = $1", [reviewId])).rows[0];
+    const resolved = (await db.query("select status, corrected_disposition from public.ai_disposition_reviews where id = $1", [reviewId])).rows[0];
     expect(resolved.status).toBe("confirmed");
+    expect(resolved.corrected_disposition).toBe("opted_out");
+
+    const property = (await db.query("select outreach_dispo from public.properties where id = $1", [propertyId])).rows[0];
+    expect(property.outreach_dispo).toBe("opted_out");
+
+    // A later re-correction on the target must still work — proves it was
+    // truly left 'confirmed', not silently flipped to 'superseded'
+    // underneath the returned "corrected" result (the exact STALE_STATE
+    // regression blocker 2 fixes).
+    const second = await correctReview(reviewId, "dnc");
+    expect(second.status).toBe("corrected");
+    const final = (await db.query("select status, corrected_disposition from public.ai_disposition_reviews where id = $1", [reviewId])).rows[0];
+    expect(final.status).toBe("confirmed");
+    expect(final.corrected_disposition).toBe("dnc");
   });
 });
