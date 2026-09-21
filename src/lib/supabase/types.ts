@@ -5662,6 +5662,44 @@ export type Database = {
         }
         Relationships: []
       }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921070948_jev_needs_decision_eligibility_view.sql (fable
+      // re-review of e5d001bb, jev-root-round17-fable2-fixes.md, finding
+      // 2). security_invoker view over sms_classification_runs — same
+      // Row shape as NEEDS_DECISION_CLASSIFIER_EVENT_SELECT's source
+      // columns.
+      jev_needs_decision_classifier_events: {
+        Row: {
+          id: string | null
+          org_id: string | null
+          property_id: string | null
+          conversation_id: string | null
+          source_inbound_message_id: string | null
+          resolved_outcome: string | null
+          fallback_reason: string | null
+          model: string | null
+          schema_version: string | null
+          policy_version: string | null
+          decision: Json | null
+          created_at: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_classification_runs_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "sms_classification_runs_source_inbound_message_id_fkey"
+            columns: ["source_inbound_message_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       leads_board: {
         Row: {
           absentee_flag: boolean | null

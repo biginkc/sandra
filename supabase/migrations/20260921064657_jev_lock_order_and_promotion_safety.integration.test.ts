@@ -161,14 +161,20 @@ describe("fn_promote_classifier_event_to_decision — one pending decision per p
     expect(secondPromoted.status).toBe("promoted");
     expect(secondPromoted.decisionId).not.toBe(firstPromoted.decisionId);
 
+    // Sorted by id, not created_at — two inserts in the same test can
+    // land in the same microsecond when this file runs alongside many
+    // others, making created_at ties non-deterministic; the identity of
+    // which row is superseded vs. pending is what actually matters here.
     const rows = (await db.query(
-      "select id, status, superseded_reason from public.jev_lead_decisions where property_id = $1 order by created_at",
+      "select id, status, superseded_reason from public.jev_lead_decisions where property_id = $1 order by id",
       [propertyId],
     )).rows;
-    expect(rows).toEqual([
-      { id: firstPromoted.decisionId, status: "superseded", superseded_reason: "new_classifier_event_promoted" },
-      { id: secondPromoted.decisionId, status: "pending", superseded_reason: null },
-    ]);
+    expect(rows).toEqual(
+      [
+        { id: firstPromoted.decisionId, status: "superseded", superseded_reason: "new_classifier_event_promoted" },
+        { id: secondPromoted.decisionId, status: "pending", superseded_reason: null },
+      ].sort((a, b) => a.id.localeCompare(b.id)),
+    );
 
     const pendingCount = (await db.query(
       "select count(*)::int as n from public.jev_lead_decisions where property_id = $1 and status = 'pending'",
@@ -259,15 +265,22 @@ describe("fn_promote_classifier_event_to_decision — one pending decision per p
     const promoted = await promote(newRunId);
     expect(promoted.status).toBe("promoted");
 
+    // Order-independent — see the comment on the equivalent assertion
+    // above; identity of superseded vs. pending is what matters, not
+    // created_at tie-break order (two inserts can land in the same
+    // microsecond when this file runs alongside many others).
     const rows = (await db.query(
-      "select id, status, superseded_reason from public.jev_lead_decisions where property_id = $1 order by created_at",
+      "select id, status, superseded_reason from public.jev_lead_decisions where property_id = $1",
       [propertyId],
     )).rows;
-    expect(rows).toEqual([
-      { id: leftoverA, status: "superseded", superseded_reason: "new_classifier_event_promoted" },
-      { id: leftoverB, status: "superseded", superseded_reason: "new_classifier_event_promoted" },
-      { id: promoted.decisionId, status: "pending", superseded_reason: null },
-    ]);
+    expect(rows).toHaveLength(3);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        { id: leftoverA, status: "superseded", superseded_reason: "new_classifier_event_promoted" },
+        { id: leftoverB, status: "superseded", superseded_reason: "new_classifier_event_promoted" },
+        { id: promoted.decisionId, status: "pending", superseded_reason: null },
+      ]),
+    );
 
     const pendingCount = (await db.query(
       "select count(*)::int as n from public.jev_lead_decisions where property_id = $1 and status = 'pending'",

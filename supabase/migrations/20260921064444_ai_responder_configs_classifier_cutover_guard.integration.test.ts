@@ -69,11 +69,16 @@ describe("ai_responder_configs classifier cutover columns are guarded against di
     const userId = await makeMember("member");
     await setActor(db, userId);
 
-    await db.query("savepoint rejected_direct_write");
-    await expect(
-      db.query("update public.ai_responder_configs set classifier_provider = 'jev', classifier_mode = 'automatic' where id = $1", [configId]),
-    ).rejects.toMatchObject({ message: expect.stringContaining("FORBIDDEN") });
-    await db.query("rollback to savepoint rejected_direct_write");
+    // Fable re-review of e5d001bb (jev-root-round17-fable2-fixes.md),
+    // finding 1: superseded by the coherent owner-only RLS model
+    // (20260921070946_ai_responder_configs_owner_only_rls.sql) — the
+    // row is now excluded from the UPDATE's target set by RLS's USING
+    // clause BEFORE this trigger ever runs, so a non-owner gets a
+    // silent 0-row result, not the trigger's FORBIDDEN exception
+    // (which still guards a same-org OWNER's classifier writes as
+    // defense in depth, but RLS is now the primary boundary).
+    const result = await db.query("update public.ai_responder_configs set classifier_provider = 'jev', classifier_mode = 'automatic' where id = $1", [configId]);
+    expect(result.rowCount).toBe(0);
 
     const row = (await db.query("select classifier_provider, classifier_mode from public.ai_responder_configs where id = $1", [configId])).rows[0];
     expect(row).toEqual({ classifier_provider: "legacy", classifier_mode: "shadow" });
@@ -89,14 +94,27 @@ describe("ai_responder_configs classifier cutover columns are guarded against di
     expect(row).toEqual({ classifier_provider: "jev", classifier_mode: "automatic" });
   });
 
-  it("an active ordinary member CAN still update an unrelated column (system_prompt) — app functionality preserved", async () => {
+  // Fable re-review of e5d001bb (jev-root-round17-fable2-fixes.md),
+  // finding 1: superseded by the coherent owner-only RLS model in
+  // 20260921070946_ai_responder_configs_owner_only_rls.sql — an ordinary
+  // member can no longer write ANY column directly (not just the
+  // classifier ones), closing the active=false-then-replace bypass. See
+  // 20260921070946_ai_responder_configs_owner_only_rls.integration.test.ts
+  // for full coverage of that policy.
+  it("an active ordinary member CANNOT update an unrelated column (system_prompt) either, now that direct writes are owner-only", async () => {
     const userId = await makeMember("member");
     await setActor(db, userId);
 
-    await db.query("update public.ai_responder_configs set system_prompt = 'A brand new prompt' where id = $1", [configId]);
+    await db.query("savepoint rejected_unrelated_column");
+    const result = await db.query("update public.ai_responder_configs set system_prompt = 'A brand new prompt' where id = $1", [configId]);
+    // RLS silently affects zero rows rather than raising — the row exists
+    // but isn't visible/writable to this caller under the owner-only
+    // USING clause.
+    expect(result.rowCount).toBe(0);
+    await db.query("rollback to savepoint rejected_unrelated_column");
 
     const row = (await db.query("select system_prompt from public.ai_responder_configs where id = $1", [configId])).rows[0];
-    expect(row.system_prompt).toBe("A brand new prompt");
+    expect(row.system_prompt).toBe("Test system prompt");
   });
 
   it("changing classifier_provider/classifier_mode to the SAME value they already hold is a no-op, not rejected (no actual change)", async () => {

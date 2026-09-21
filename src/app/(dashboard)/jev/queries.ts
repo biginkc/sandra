@@ -241,17 +241,29 @@ const NEEDS_DECISION_CLASSIFIER_EVENT_LIMIT = 100;
  * wrong_number/not_interested/opted_out/dnc live in ai_disposition_reviews
  * (status='pending'); new_lead/nurture live in jev_lead_decisions
  * (status='pending'). classifier_event rows (Jev classify failures/
- * unclear/bad_number, read directly from sms_classification_runs) DO
- * belong here too (root final-review P1 #3: they must have an actionable
- * human-resolution path, not be stranded audit-only) — but only until a
- * human "promotes" them (fn_promote_classifier_event_to_decision), at
- * which point they become a real jev_lead_decisions row and are excluded
- * from this second query (already covered by the first).
+ * unclear/bad_number) DO belong here too (root final-review P1 #3: they
+ * must have an actionable human-resolution path, not be stranded audit-
+ * only) — but only until a human "promotes" them
+ * (fn_promote_classifier_event_to_decision), at which point they become
+ * a real jev_lead_decisions row.
+ *
+ * Fable re-review of e5d001bb (jev-root-round17-fable2-fixes.md), finding
+ * 2: this used to fetch the 100 OLDEST matching sms_classification_runs
+ * rows and filter out already-promoted/-reconciled ones in application
+ * code — since those rows are immutable, once the 100 oldest were ALL
+ * promoted/reconciled, a genuinely newer actionable event could never
+ * reach the limit window (permanently starved). Now reads
+ * jev_needs_decision_classifier_events, a security_invoker view
+ * (20260921070948_jev_needs_decision_eligibility_view.sql) that excludes
+ * promoted/reconciled rows AT THE DATABASE, before the limit — the same
+ * org-scoped RLS this table already had applies unchanged (security_invoker
+ * runs the view as the calling role). limit(100) now applies to actually-
+ * eligible rows.
  */
 export async function getNeedsDecisionQueue(): Promise<{ items: JevQueueItem[]; error: string | null }> {
   const supabase = await createClient();
 
-  const [reviewsRes, decisionsRes, recentEventsRes] = await Promise.all([
+  const [reviewsRes, decisionsRes, eligibleEventsRes] = await Promise.all([
     supabase
       .from("ai_disposition_reviews")
       .select(AI_DISPOSITION_REVIEW_SELECT)
@@ -263,93 +275,41 @@ export async function getNeedsDecisionQueue(): Promise<{ items: JevQueueItem[]; 
       .eq("status", "pending")
       .order("created_at", { ascending: true }),
     supabase
-      .from("sms_classification_runs")
+      .from("jev_needs_decision_classifier_events")
       .select(NEEDS_DECISION_CLASSIFIER_EVENT_SELECT)
-      .eq("provider", "jev")
-      .or("fallback_reason.not.is.null,resolved_outcome.in.(unclear,bad_number)")
       .order("created_at", { ascending: true })
       .limit(NEEDS_DECISION_CLASSIFIER_EVENT_LIMIT),
   ]);
 
   // Query errors must not silently render as an empty queue — surface
   // them so the UI can say "could not load" instead of "nothing to do".
-  if (reviewsRes.error || decisionsRes.error || recentEventsRes.error) {
+  if (reviewsRes.error || decisionsRes.error || eligibleEventsRes.error) {
     return {
       items: [],
       error:
         reviewsRes.error?.message ??
         decisionsRes.error?.message ??
-        recentEventsRes.error?.message ??
+        eligibleEventsRes.error?.message ??
         "Unknown query error",
     };
   }
 
-  const recentEventIds = (recentEventsRes.data ?? []).map((row) => (row as { id: string }).id);
-  // Exclude already-promoted events. PostgREST can't filter "no matching
-  // related row exists" directly, so this is a second small query against
-  // jev_lead_decisions' classification_run_id rather than a fabricated
-  // client-side join.
-  const promotedRunIds = new Set<string>();
-  if (recentEventIds.length > 0) {
-    const { data: promoted, error: promotedError } = await supabase
-      .from("jev_lead_decisions")
-      .select("classification_run_id")
-      .in("classification_run_id", recentEventIds);
-    if (promotedError) {
-      return { items: [], error: promotedError.message };
-    }
-    for (const row of promoted ?? []) promotedRunIds.add(row.classification_run_id);
-  }
-
-  // Root review of 999feefb (jev-root-round11-review.md, finding 1):
-  // persistFailedRun's retry identity is now stable (see dispatch-bridge.ts),
-  // but a retry can still legitimately SUCCEED after an earlier attempt
-  // failed — that earlier failure row is immutable audit evidence (the
-  // table grants INSERT/SELECT only) and stays in Review Jev, but it must
-  // stop being ACTIONABLE here once a real Jev result exists for the same
-  // inbound, or one inbound would show as both a failed human item and an
-  // applied/routable decision simultaneously.
-  const failedEventRows = (recentEventsRes.data ?? []) as ClassifierEventRow[];
-  const failedMessageIds = Array.from(
-    new Set(
-      failedEventRows
-        .filter((row) => row.fallback_reason !== null && row.source_inbound_message_id)
-        .map((row) => row.source_inbound_message_id as string),
-    ),
-  );
-  const reconciledMessageIds = new Set<string>();
-  if (failedMessageIds.length > 0) {
-    const { data: successfulRuns, error: successfulError } = await supabase
-      .from("sms_classification_runs")
-      .select("source_inbound_message_id")
-      .eq("provider", "jev")
-      .is("fallback_reason", null)
-      .in("source_inbound_message_id", failedMessageIds);
-    if (successfulError) {
-      return { items: [], error: successfulError.message };
-    }
-    for (const row of successfulRuns ?? []) reconciledMessageIds.add(row.source_inbound_message_id);
-  }
-
   const reviews = (reviewsRes.data ?? []).map((row) => mapAiDispositionReview(row as unknown as AiDispositionReviewRow));
   const decisions = (decisionsRes.data ?? []).map((row) => mapJevLeadDecision(row as unknown as JevLeadDecisionRow));
-  const unpromotedEvents = failedEventRows
-    .filter((row) => !promotedRunIds.has(row.id))
-    .filter((row) => row.fallback_reason === null || !reconciledMessageIds.has(row.source_inbound_message_id ?? ""));
 
-  // Root review of 3e4ee3b1 (jev-root-round12-review.md, finding 1): the
-  // prior round only reconciled failure->success, leaving failure A vs.
-  // failure B on the same inbound (e.g. two retries that each fail for a
-  // DIFFERENT reason) as two actionable rows — Needs-a-decision must be
-  // authoritative and singular per source_inbound_message_id. Among the
-  // still-unpromoted/unreconciled candidates for one inbound, the LATEST
-  // attempt by created_at is the deterministic winner (it reflects the
-  // most current retry state); earlier attempts are dropped from THIS
-  // queue only — they remain immutable, unmodified audit rows and are
+  // Root review of 3e4ee3b1 (jev-root-round12-review.md, finding 1):
+  // Needs-a-decision must be authoritative and singular per
+  // source_inbound_message_id — the view above already guarantees every
+  // candidate here is unpromoted/unreconciled, but TWO different failure
+  // attempts on the SAME inbound (different reasons) can both still be
+  // eligible simultaneously. Among this (already eligible, <=100-row,
+  // bounded) set, the LATEST attempt by created_at is the deterministic
+  // winner; earlier attempts stay immutable, unmodified audit rows —
   // still fully visible in Review Jev (which reads sms_classification_runs
-  // directly and is untouched by this dedup).
+  // directly and is untouched by this dedup or the eligibility view).
+  const eligibleEvents = (eligibleEventsRes.data ?? []) as ClassifierEventRow[];
   const latestEventByMessage = new Map<string, ClassifierEventRow>();
-  for (const row of unpromotedEvents) {
+  for (const row of eligibleEvents) {
     const key = row.source_inbound_message_id ?? row.id;
     const existing = latestEventByMessage.get(key);
     if (!existing || row.created_at > existing.created_at) {
