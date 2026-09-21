@@ -20,7 +20,7 @@ describe("DashboardMobileNav", () => {
     expect(nav.className).toContain("overflow-x-auto");
 
     const links = screen.getAllByRole("link");
-    expect(links).toHaveLength(12);
+    expect(links).toHaveLength(13);
     for (const link of links) {
       expect(link.className).toContain("shrink-0");
       expect(link.className).toContain("whitespace-nowrap");
