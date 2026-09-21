@@ -174,15 +174,46 @@ export async function classifyForDispatch(
     return { kind: "use_legacy", classificationRunId: null };
   }
 
-  const classificationRunId = await persistRun(supabase, input, decision, stateHash).catch(
-    (persistErr) => {
-      reportError(persistErr, {
-        tags: { surface: "sms_classification_persist" },
-        extra: { propertyId: input.propertyId },
-      });
-      return null;
-    },
-  );
+  // Per-outcome native-confidence cutoffs (jev_outcome_thresholds) are a
+  // second, independent gate inside `automatic` mode — the org-level
+  // classifier_mode switch below answers "is Jev allowed to drive effects
+  // for this org at all"; this answers "is THIS outcome, at THIS
+  // confidence, above the bar this org configured for it". Loaded fresh
+  // on every classification (no caching) so a threshold edit through
+  // fn_set_jev_outcome_threshold takes effect on the very next inbound
+  // with no deployment. Computed BEFORE persisting (even in shadow mode,
+  // where it's never acted on) so the audit row for every outcome —
+  // not just new_lead/nurture's dedicated jev_lead_decisions rows —
+  // carries the actual threshold compared against, for Review Jev.
+  const thresholds = await loadOrgThresholdMap(supabase, input.orgId);
+  const thresholdDecision = resolveThresholdDecision(decision, thresholds);
+  // Record the actual measured confidence whenever it's a valid number —
+  // even when human-gated for a reason unrelated to the confidence value
+  // itself (e.g. no_threshold_configured) — so the audit trail isn't
+  // reported as "no confidence" just because there was nothing to
+  // compare it against. thresholdAtDecision, by contrast, is genuinely
+  // absent (not just unused) whenever thresholdDecision didn't compare
+  // against one.
+  const nativeConfidence =
+    typeof decision.outcomeConfidence === "number" &&
+    Number.isFinite(decision.outcomeConfidence) &&
+    decision.outcomeConfidence >= 0 &&
+    decision.outcomeConfidence <= 1
+      ? decision.outcomeConfidence
+      : null;
+  const thresholdAtDecision =
+    "minConfidence" in thresholdDecision ? thresholdDecision.minConfidence : null;
+
+  const classificationRunId = await persistRun(supabase, input, decision, stateHash, {
+    nativeConfidence,
+    thresholdAtDecision,
+  }).catch((persistErr) => {
+    reportError(persistErr, {
+      tags: { surface: "sms_classification_persist" },
+      extra: { propertyId: input.propertyId },
+    });
+    return null;
+  });
   if (!classificationRunId) {
     // Audit write failed — still allow the decision through if the mode
     // says to use it, but without a run id there is nothing to link an
@@ -206,33 +237,6 @@ export async function classifyForDispatch(
   if (resolved.kind === "no_action") {
     return { kind: "jev_no_action", classificationRunId };
   }
-
-  // Per-outcome native-confidence cutoffs (jev_outcome_thresholds) are a
-  // second, independent gate inside `automatic` mode — the org-level
-  // classifier_mode switch above answers "is Jev allowed to drive effects
-  // for this org at all"; this answers "is THIS outcome, at THIS
-  // confidence, above the bar this org configured for it". Loaded fresh
-  // on every classification (no caching) so a threshold edit through
-  // fn_set_jev_outcome_threshold takes effect on the very next inbound
-  // with no deployment.
-  const thresholds = await loadOrgThresholdMap(supabase, input.orgId);
-  const thresholdDecision = resolveThresholdDecision(decision, thresholds);
-  // Record the actual measured confidence whenever it's a valid number —
-  // even when human-gated for a reason unrelated to the confidence value
-  // itself (e.g. no_threshold_configured) — so the audit trail isn't
-  // reported as "no confidence" just because there was nothing to
-  // compare it against. thresholdAtDecision, by contrast, is genuinely
-  // absent (not just unused) whenever thresholdDecision didn't compare
-  // against one.
-  const nativeConfidence =
-    typeof decision.outcomeConfidence === "number" &&
-    Number.isFinite(decision.outcomeConfidence) &&
-    decision.outcomeConfidence >= 0 &&
-    decision.outcomeConfidence <= 1
-      ? decision.outcomeConfidence
-      : null;
-  const thresholdAtDecision =
-    "minConfidence" in thresholdDecision ? thresholdDecision.minConfidence : null;
 
   if (resolved.kind === "nurture") {
     // Unlike wrong_number/not_interested/opted_out below, nurture has no
@@ -334,6 +338,7 @@ async function persistRun(
   input: ClassificationBridgeInput,
   decision: SmsClassificationDecision,
   stateHash: string,
+  audit: { nativeConfidence: number | null; thresholdAtDecision: number | null },
 ): Promise<string | null> {
   if (!input.conversationId || !input.inboundMessageId) return null;
   const row = {
@@ -352,6 +357,15 @@ async function persistRun(
       wrongScope: decision.wrongScope,
       escalationReason: decision.escalationReason,
       probabilities: decision.probabilities,
+      // Root direct-review finding (2026-09-20): the wrong_number/
+      // not_interested/opted_out/dnc review path had no persisted
+      // threshold context at all (only jev_lead_decisions' own dedicated
+      // columns did) — Review Jev was displaying fabricated nulls
+      // instead of the real recorded value. nativeConfidence here is the
+      // SAME validated value as thresholdAtDecision below — persisted
+      // for every outcome, not just new_lead/nurture.
+      nativeConfidence: audit.nativeConfidence,
+      thresholdAtDecision: audit.thresholdAtDecision,
     },
     resolved_outcome: decision.outcome,
     usage: decision.usage,

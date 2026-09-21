@@ -629,6 +629,8 @@ export type Database = {
           created_at: string
           disposition: string
           dispo_applied: boolean
+          human_reviewed_at: string | null
+          human_reviewed_by: string | null
           id: string
           org_id: string
           property_id: string
@@ -649,6 +651,8 @@ export type Database = {
           created_at?: string
           disposition: string
           dispo_applied?: boolean
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
           id?: string
           org_id: string
           property_id: string
@@ -669,6 +673,8 @@ export type Database = {
           created_at?: string
           disposition?: string
           dispo_applied?: boolean
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
           id?: string
           org_id?: string
           property_id?: string
@@ -2249,6 +2255,8 @@ export type Database = {
           classification_run_id: string
           conversation_id: string
           created_at: string
+          human_reviewed_at: string | null
+          human_reviewed_by: string | null
           id: string
           native_confidence: number | null
           org_id: string
@@ -2267,6 +2275,8 @@ export type Database = {
           classification_run_id: string
           conversation_id: string
           created_at?: string
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
           id?: string
           native_confidence?: number | null
           org_id: string
@@ -2285,6 +2295,8 @@ export type Database = {
           classification_run_id?: string
           conversation_id?: string
           created_at?: string
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
           id?: string
           native_confidence?: number | null
           org_id?: string
@@ -6846,6 +6858,33 @@ export type Database = {
           p_corrected_disposition: string
           p_reason: string
           p_review_id: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921003340_jev_review_taxonomy_and_marking.sql — same
+      // verbatim-excerpt provenance as the functions above.
+      fn_mark_ai_disposition_review_reviewed: {
+        Args: { p_review_id: string }
+        Returns: Json
+      }
+      fn_mark_jev_lead_decision_reviewed: {
+        Args: { p_decision_id: string }
+        Returns: Json
+      }
+      fn_record_ai_disposition_review_correction: {
+        Args: {
+          p_corrected_disposition: string
+          p_reason: string
+          p_review_id: string
+        }
+        Returns: Json
+      }
+      fn_record_jev_lead_decision_correction: {
+        Args: {
+          p_corrected_outcome: string
+          p_decision_id: string
+          p_reason: string
         }
         Returns: Json
       }
