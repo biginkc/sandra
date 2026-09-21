@@ -17,25 +17,40 @@ import type { Database } from "../src/lib/supabase/types";
  *   2. `supabase start` from this worktree root — the local stack this
  *      spec targets (postgres on 127.0.0.1:54329, API on 54331). Do NOT
  *      point this at any other project's stack.
- *   3. In a second terminal:
+ *   3. In a second terminal, from this worktree root:
  *      E2E_AUTH_BYPASS=1 NODE_ENV=development NEXT_PUBLIC_HUGO_SSO=1 \
  *      ADMIN_EMAILS=jev-local-admin@bmhgroupkc.com \
  *      NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54331 \
  *      NEXT_PUBLIC_SUPABASE_ANON_KEY=<local anon key from `supabase status`> \
  *      SUPABASE_SERVICE_ROLE_KEY=<local service key from `supabase status`> \
  *      MESSAGING_PROVIDER=mock ADDRESS_VERIFIER_PROVIDER=mock \
- *      npx next dev -p 58900
+ *      npx next dev -p 3000
+ *      MUST be port 3000 on `localhost` — see the allowedOrigins note
+ *      below, not an arbitrary free port.
  *   4. npx playwright test --config=playwright.jev-local.config.ts
+ *
+ * MUST target http://localhost:3000. next.config.ts's
+ * serverActions.allowedOrigins is ["sandra.bmhgroup.com",
+ * "localhost:3000"] — Next dev's Turbopack HMR WebSocket also validates
+ * against this same origin allowlist, and the client runtime's
+ * interactive-ready signal depends on that socket connecting. Any other
+ * host/port (e.g. 127.0.0.1:58900, used in an earlier round) causes the
+ * HMR handshake to fail (net::ERR_INVALID_HTTP_RESPONSE); the page still
+ * renders correctly (SSR content is real) but React never finishes
+ * attaching event delegation, so every onClick/onChange is silently
+ * inert with zero console/hydration errors — confirmed via a bare
+ * diagnostic spec that logged "[HMR] connected" and a real navigating
+ * click only once run against localhost:3000.
  */
 
-const LOCAL_APP_URL = (process.env.JEV_LOCAL_BASE_URL ?? "http://127.0.0.1:58900").replace(/\/$/, "");
+const LOCAL_APP_URL = (process.env.JEV_LOCAL_BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
 const LOCAL_SUPABASE_URL = "http://127.0.0.1:54331";
 const LOCAL_SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
 
 const appURL = new URL(LOCAL_APP_URL);
-if (appURL.protocol !== "http:" || appURL.hostname !== "127.0.0.1" || appURL.port !== "58900") {
-  throw new Error("Jev decision workflow local acceptance may target only http://127.0.0.1:58900.");
+if (appURL.protocol !== "http:" || appURL.hostname !== "localhost" || appURL.port !== "3000") {
+  throw new Error("Jev decision workflow local acceptance may target only http://localhost:3000 (must match next.config.ts's serverActions.allowedOrigins).");
 }
 
 // Fixed, not time-suffixed: the acceptance owner's locally-run `next dev`
@@ -210,6 +225,18 @@ test.describe.serial("Jev decision workflow — local acceptance", () => {
     await client.query("select set_config('request.jwt.claim.sub', $1, false)", [userId]);
     await client.query(`select public.fn_confirm_jev_lead_decision($1)`, [staleDecisionId]);
     await client.query("set request.jwt.claim.role = 'service_role'");
+    // Genuine desync, not a synthetic error injection: fn_confirm_jev_lead_decision
+    // re-syncs the decision row's own decision_context_revision to match
+    // the property's at confirm time. A further inbound arriving after
+    // that — e.g. the homeowner replying again before this reviewer's
+    // browser ever loads the page — bumps the property's LIVE revision
+    // past what this decision row recorded, which is exactly the
+    // decision_context_revision CAS mismatch the correction RPC checks.
+    await client.query(
+      `insert into messages (id, org_id, property_id, conversation_id, contact_id, channel, direction, body)
+       values (gen_random_uuid(), $1, $2, $3, $4, 'sms', 'inbound', 'actually never mind')`,
+      [ORG_ID, propertyStaleId, staleConvId, staleContactId],
+    );
     await client.query("reset request.jwt.claim.sub");
   });
 
@@ -272,42 +299,70 @@ test.describe.serial("Jev decision workflow — local acceptance", () => {
     await page.goto("/settings/jev-thresholds");
     const row = page.locator('[data-testid="jev-threshold-row-wrong_number"]');
     await expect(row).toBeVisible();
+
+    // Baseline: whatever version this row starts at (app bootstrap seeds
+    // every outcome at v1 by default — don't assume that, read it).
+    const { rows: before } = await client.query(
+      `select version from jev_outcome_thresholds where org_id = $1 and outcome = 'wrong_number'`,
+      [ORG_ID],
+    );
+    const versionBefore: number = before[0]?.version ?? 0;
+
     const input = row.locator('[data-testid="jev-threshold-input-wrong_number"]');
     await input.fill("0.87");
-    await row.locator('[data-testid="jev-threshold-save-wrong_number"]').click();
-    await expect(row).toContainText("v1");
+    const saveButton = row.locator('[data-testid="jev-threshold-save-wrong_number"]');
+    await saveButton.click();
+    // The save runs inside startTransition — clicking only dispatches the
+    // event, it doesn't wait for the async server action + re-render to
+    // land. Wait for the UI's OWN evidence that the save round-tripped:
+    // the version label advancing past its pre-edit value, and the Save
+    // button going back to disabled (dirty=false once row.minConfidence
+    // catches up to the typed value).
+    await expect(row).not.toContainText(
+      versionBefore === 0 ? "not yet configured" : `v${versionBefore}`,
+      { timeout: 10_000 },
+    );
+    await expect(saveButton).toBeDisabled();
     await expect(input).toHaveValue("0.87");
 
-    const { rows } = await client.query(
+    const { rows: after } = await client.query(
       `select min_confidence, version from jev_outcome_thresholds where org_id = $1 and outcome = 'wrong_number'`,
       [ORG_ID],
     );
-    expect(Number(rows[0].min_confidence)).toBeCloseTo(0.87);
-    expect(rows[0].version).toBe(1);
+    expect(Number(after[0].min_confidence)).toBeCloseTo(0.87);
+    expect(after[0].version).toBe(versionBefore + 1);
   });
 
-  test("Stale conflict: confirming an already-resolved decision surfaces a friendly error, not a crash", async ({ page, context }) => {
+  test("Stale conflict: correcting a decision whose property changed underneath it surfaces a friendly error, not a crash", async ({ page, context }) => {
     await context.addCookies(await signInAndGetCookies());
-    // Load Review Jev, where the already-resolved row is visible and
-    // still renders a Confirm action for the "resolved but not yet
-    // human-acted-on" (auto-applied) shape used here — attempting to
-    // confirm/correct it again must fail cleanly with an error message
-    // inline on the card, never an unhandled crash or blank page.
+    // Load Review Jev, where the already-confirmed row still renders a
+    // correction picker (auto-applied/confirmed rows remain correctable
+    // by design — see queue-item-card.tsx's canAct). This row's
+    // decision_context_revision was synced at confirm time, then a
+    // further inbound arrived on the property before this browser ever
+    // loaded the page (beforeAll) — attempting to correct it now must
+    // hit the real decision_context_revision CAS mismatch
+    // (fn_apply_and_record_jev_lead_decision_correction's STALE_STATE
+    // check) and fail cleanly with an inline error, never an unhandled
+    // crash or blank page.
     await page.goto("/jev/review");
     const staleCard = page.locator(`[data-testid="jev-queue-item-${staleDecisionId}"]`);
     await expect(staleCard).toBeVisible();
 
     const correctToggle = staleCard.locator(`[data-testid="jev-correct-toggle-${staleDecisionId}"]`);
-    if (await correctToggle.count()) {
-      await correctToggle.click();
-      await staleCard.locator(`[data-testid="jev-correct-${staleDecisionId}-not_interested"]`).click();
-      await expect(staleCard.locator("text=/could not|already|superseded|failed/i")).toBeVisible();
-    } else {
-      // Card resolved into a read-only state (no correction targets) —
-      // that is itself the friendly, non-crashing handling of the
-      // conflict: no action buttons over an already-decided row.
-      await expect(staleCard).toContainText("Status:");
-    }
+    await expect(correctToggle).toBeVisible();
+    await correctToggle.click();
+    const targetBtn = staleCard.locator(`[data-testid="jev-correct-${staleDecisionId}-not_interested"]`);
+    await expect(targetBtn).toBeVisible();
+    await targetBtn.click();
+    // The RPC raises errcode 40001 ('STALE_STATE'); jev/actions.ts maps
+    // this to the friendly, human-readable copy below rather than
+    // showing the raw error code — verified by direct inspection
+    // (dumping the card's real innerHTML mid-run), not assumed.
+    await expect(staleCard.locator("text=This lead changed since Jev made this decision. Reload and try again.")).toBeVisible();
+    // The correction must NOT have applied — still Nurture, not corrected.
+    await expect(staleCard).not.toContainText("corrected from Nurture to Not interested");
+
     // The page itself must still be intact — not a thrown/500 render.
     await expect(page.locator('[data-testid="jev-review-error"]')).toHaveCount(0);
   });
