@@ -273,6 +273,40 @@ describe("fn_auto_apply_jev_lead_decision — atomic effect + revision guard + a
     expect(decisions.rows[0].n).toBe(0);
   });
 
+  // Root review of 3e4ee3b1 (jev-root-round12-review.md), finding 2: the
+  // prior migration only checked is_training inside the nurture branch,
+  // so a training property could still be auto-promoted through the
+  // new_lead branch. This proves the fixed check rejects new_lead too —
+  // no status mutation, no audit row — with the SAME training-target
+  // error the nurture case above gets.
+  it("new_lead: a training-target property preserves no effect and no audit row (round 12, finding 2 — was previously only checked for nurture)", async () => {
+    const trainingContactId = randomUUID();
+    await db.query(
+      `insert into public.contacts (id, org_id, first_name, phone_1, phone_1_type) values ($1, $2, 'Training Homeowner 2', '+15550004444', 'mobile')`,
+      [trainingContactId, orgId],
+    );
+    // Training seeds are required to start at status='new_lead' — so this
+    // exercises the case that matters: even though the property already
+    // "looks" promoted, the RPC must never treat it as an ordinary
+    // already_qualified new_lead and record a decision for it.
+    const propertyId = await makeProperty({ isTraining: true, status: "new_lead", homeownerContactId: trainingContactId });
+    const conversationId = randomUUID();
+    const inboundId = await makeInboundMessage(propertyId, conversationId, "yes call me");
+    const revision = await currentRevision(propertyId);
+    const runId = await makeClassificationRun({ propertyId, conversationId, sourceInboundMessageId: inboundId, resolvedOutcome: "new_lead" });
+
+    await db.query("savepoint rejected_training_new_lead");
+    await expect(
+      callAutoApply({ propertyId, conversationId, sourceInboundMessageId: inboundId, classificationRunId: runId, outcome: "new_lead", expectedRevision: revision }),
+    ).rejects.toMatchObject({ message: expect.stringContaining("training lead") });
+    await db.query("rollback to savepoint rejected_training_new_lead");
+
+    const property = (await db.query("select status, qualified_by from public.properties where id = $1", [propertyId])).rows[0];
+    expect(property).toMatchObject({ status: "new_lead", qualified_by: null });
+    const decisions = await db.query("select count(*)::int as n from public.jev_lead_decisions where property_id = $1", [propertyId]);
+    expect(decisions.rows[0].n).toBe(0);
+  });
+
   it("replay: calling again with the SAME source_inbound_message_id is idempotent — returns the existing decision, no duplicate row, no re-application", async () => {
     const propertyId = await makeProperty();
     const conversationId = randomUUID();

@@ -278,9 +278,9 @@ export async function dispatchAiResponse(
         currentTurn,
       );
       if (outcome) return outcome;
-      // use_legacy or jev_no_action — Jev had nothing actionable to
-      // apply, so the original skip reason (reply-pacing, not a Jev
-      // decision) still stands.
+      // use_legacy — Jev had nothing actionable to apply (jev_no_action
+      // is now handled and returns non-null above), so the original skip
+      // reason (reply-pacing, not a Jev decision) still stands.
     }
 
     return { outcome: "skipped", reason: decision.reason };
@@ -380,10 +380,11 @@ export async function dispatchAiResponse(
  * Runs Jev classification and, for the three outcomes that never touch
  * the reply pipeline (nurture, below-threshold/human-gated "needs a
  * decision", new_lead promotion), applies the effect and returns the
- * terminal outcome directly. Returns `handled: false` for
- * `use_legacy`/`jev_no_action` (nothing to apply here) or a `jev_route`
- * classification — the caller still resolves/applies that route itself
- * via `resolveAndApplyRoute`, kept separate because a `jev_route` MAY, in
+ * terminal outcome directly. Returns `handled: false` for `use_legacy`
+ * (nothing to apply here — `jev_no_action` is now handled inline and
+ * never reaches this return) or a `jev_route` classification — the
+ * caller still resolves/applies that route itself via
+ * `resolveAndApplyRoute`, kept separate because a `jev_route` MAY, in
  * principle, need `generateAiReply`'s legacy branch (never true for an
  * actual Jev decision, but the union type doesn't encode that).
  */
@@ -394,9 +395,10 @@ export async function dispatchAiResponse(
  * response claim — independent of, and mutually exclusive with, the
  * claim taken later in the normal (`!decision.skip`) path, since control
  * never reaches both in the same call. Returns null when classification
- * had nothing to apply (`use_legacy`/`jev_no_action`) or — should never
- * happen for an actual Jev decision, defended anyway — a `jev_route`
- * whose route would have sent a reply.
+ * had nothing to apply (`use_legacy` — `jev_no_action` is handled inline
+ * and returns a real outcome above, never reaching this return) or —
+ * should never happen for an actual Jev decision, defended anyway — a
+ * `jev_route` whose route would have sent a reply.
  */
 async function classifyAndApplyDespiteReplyIneligibility(
   supabase: SupabaseClient<Database>,
@@ -439,8 +441,9 @@ async function classifyAndApplyDespiteReplyIneligibility(
   const classification = classificationResult.classification;
 
   if (classification.kind !== "jev_route") {
-    // use_legacy or jev_no_action — nothing for Jev to apply; the
-    // original reply-pacing skip reason stands (handled by the caller).
+    // use_legacy — jev_no_action is handled inline above and never
+    // reaches here; nothing for Jev to apply, so the original
+    // reply-pacing skip reason stands (handled by the caller).
     return null;
   }
 
@@ -707,8 +710,10 @@ async function resolveAndApplyRoute(
       jevAutoAccept = { classificationRunId: classification.classificationRunId };
     }
   } else {
-    // use_legacy or jev_no_action — both fall through to the existing
-    // combined Claude classify+generate call, unchanged from today.
+    // use_legacy — jev_no_action is handled inline above (returns
+    // handled: true before reaching resolveAndApplyRoute), so only
+    // use_legacy falls through to the existing combined Claude
+    // classify+generate call, unchanged from today.
     const conversation = await loadConversation(
       supabase,
       input.propertyId,

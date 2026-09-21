@@ -335,11 +335,31 @@ export async function getNeedsDecisionQueue(): Promise<{ items: JevQueueItem[]; 
   const decisions = (decisionsRes.data ?? []).map((row) => mapJevLeadDecision(row as unknown as JevLeadDecisionRow));
   const unpromotedEvents = failedEventRows
     .filter((row) => !promotedRunIds.has(row.id))
-    .filter((row) => row.fallback_reason === null || !reconciledMessageIds.has(row.source_inbound_message_id ?? ""))
-    .map((row) => mapClassifierEvent(row));
+    .filter((row) => row.fallback_reason === null || !reconciledMessageIds.has(row.source_inbound_message_id ?? ""));
+
+  // Root review of 3e4ee3b1 (jev-root-round12-review.md, finding 1): the
+  // prior round only reconciled failure->success, leaving failure A vs.
+  // failure B on the same inbound (e.g. two retries that each fail for a
+  // DIFFERENT reason) as two actionable rows — Needs-a-decision must be
+  // authoritative and singular per source_inbound_message_id. Among the
+  // still-unpromoted/unreconciled candidates for one inbound, the LATEST
+  // attempt by created_at is the deterministic winner (it reflects the
+  // most current retry state); earlier attempts are dropped from THIS
+  // queue only — they remain immutable, unmodified audit rows and are
+  // still fully visible in Review Jev (which reads sms_classification_runs
+  // directly and is untouched by this dedup).
+  const latestEventByMessage = new Map<string, ClassifierEventRow>();
+  for (const row of unpromotedEvents) {
+    const key = row.source_inbound_message_id ?? row.id;
+    const existing = latestEventByMessage.get(key);
+    if (!existing || row.created_at > existing.created_at) {
+      latestEventByMessage.set(key, row);
+    }
+  }
+  const dedupedEvents = Array.from(latestEventByMessage.values()).map((row) => mapClassifierEvent(row));
 
   return {
-    items: [...reviews, ...decisions, ...unpromotedEvents].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    items: [...reviews, ...decisions, ...dedupedEvents].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     error: null,
   };
 }

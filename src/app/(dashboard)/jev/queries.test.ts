@@ -367,6 +367,86 @@ describe("getNeedsDecisionQueue — root final-review P1 #3 (classifier_event re
       expect(items.map((i) => i.id)).toEqual(["run-unclear"]);
     });
   });
+
+  // Root review of 3e4ee3b1 (jev-root-round12-review.md, finding 1):
+  // failure->success reconciliation alone left failure A vs. failure B on
+  // the SAME inbound (two retries, each failing for a DIFFERENT reason)
+  // as two separate actionable rows. Needs-a-decision must be singular
+  // per source_inbound_message_id — the latest attempt by created_at is
+  // the deterministic winner; earlier attempts stay immutable audit rows,
+  // visible in Review Jev, but drop out of this queue.
+  describe("duplicate failure dedup — one actionable row per inbound (round 12, finding 1)", () => {
+    it("collapses two DIFFERENT failure reasons on the SAME inbound to exactly one item — the latest", async () => {
+      mocks.classificationRuns = [
+        classificationRunRow({
+          id: "run-fail-early",
+          source_inbound_message_id: "msg-1",
+          fallback_reason: "provider_timeout",
+          created_at: "2026-09-20T00:00:00.000Z",
+        }),
+        classificationRunRow({
+          id: "run-fail-later",
+          source_inbound_message_id: "msg-1",
+          fallback_reason: "invalid_response_schema",
+          created_at: "2026-09-20T00:05:00.000Z",
+        }),
+      ];
+      const { items, error } = await getNeedsDecisionQueue();
+      expect(error).toBeNull();
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ id: "run-fail-later", correctionReason: "invalid_response_schema" });
+    });
+
+    it("picks the latest regardless of array order (three retries, different reasons, out of order)", async () => {
+      mocks.classificationRuns = [
+        classificationRunRow({
+          id: "run-fail-middle",
+          source_inbound_message_id: "msg-1",
+          fallback_reason: "provider_timeout",
+          created_at: "2026-09-20T00:05:00.000Z",
+        }),
+        classificationRunRow({
+          id: "run-fail-latest",
+          source_inbound_message_id: "msg-1",
+          fallback_reason: "audit_persist_failed",
+          created_at: "2026-09-20T00:10:00.000Z",
+        }),
+        classificationRunRow({
+          id: "run-fail-earliest",
+          source_inbound_message_id: "msg-1",
+          fallback_reason: "source_message_not_found",
+          created_at: "2026-09-20T00:00:00.000Z",
+        }),
+      ];
+      const { items } = await getNeedsDecisionQueue();
+      expect(items.map((i) => i.id)).toEqual(["run-fail-latest"]);
+    });
+
+    it("keeps failures for DIFFERENT inbounds each as their own item — dedup is per-inbound, not global", async () => {
+      mocks.classificationRuns = [
+        classificationRunRow({
+          id: "run-a-early",
+          source_inbound_message_id: "msg-A",
+          fallback_reason: "provider_timeout",
+          created_at: "2026-09-20T00:00:00.000Z",
+        }),
+        classificationRunRow({
+          id: "run-a-later",
+          source_inbound_message_id: "msg-A",
+          fallback_reason: "invalid_response_schema",
+          created_at: "2026-09-20T00:05:00.000Z",
+        }),
+        classificationRunRow({
+          id: "run-b",
+          source_inbound_message_id: "msg-B",
+          fallback_reason: "provider_timeout",
+          created_at: "2026-09-20T00:02:00.000Z",
+        }),
+      ];
+      const { items } = await getNeedsDecisionQueue();
+      expect(items.map((i) => i.id).sort()).toEqual(["run-a-later", "run-b"]);
+    });
+  });
 });
 
 describe("getCorrectionHistory — root final-review P2 (full sequential correction history, not a single slot)", () => {

@@ -8,6 +8,7 @@ import { callAction } from "@/lib/errors/call-action";
 
 import {
   updateAiResponderConfig,
+  updateJevAutomaticClassification,
   type AiResponderConfigRow,
 } from "./actions";
 
@@ -30,6 +31,40 @@ export function AiResponderConfigForm({
     initial.business_hours_only,
   );
   const [pending, startTransition] = useTransition();
+
+  // Root review of 3e4ee3b1 (jev-root-round12-review.md), finding 3: the
+  // one-cutover switch — deliberately its own state, own transition, and
+  // own save action, so it can never be bundled into (or blocked by) an
+  // unrelated edit to the fields above.
+  const jevEnabledInitially =
+    initial.classifier_provider === "jev" && initial.classifier_mode === "automatic";
+  const [jevEnabled, setJevEnabled] = useState(jevEnabledInitially);
+  const [jevSaved, setJevSaved] = useState(jevEnabledInitially);
+  const [jevError, setJevError] = useState<string | null>(null);
+  const [jevPending, startJevTransition] = useTransition();
+
+  const onSaveJevSwitch = () => {
+    setJevError(null);
+    startJevTransition(async () => {
+      const result = await callAction(
+        updateJevAutomaticClassification({
+          configId: initial.id,
+          enabled: jevEnabled,
+        }),
+        {
+          successMessage: jevEnabled
+            ? "Automatic Jev classification enabled"
+            : "Automatic Jev classification disabled",
+          fallbackMessage: "Could not update Jev automatic classification",
+        },
+      );
+      if (result.ok) {
+        setJevSaved(jevEnabled);
+      } else {
+        setJevError(result.error.message);
+      }
+    });
+  };
 
   const onSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -54,7 +89,48 @@ export function AiResponderConfigForm({
   };
 
   return (
-    <form onSubmit={onSave} className="flex max-w-3xl flex-col gap-6">
+    <div className="flex max-w-3xl flex-col gap-6">
+      <section className="flex flex-col gap-3 rounded-md border p-4" data-testid="jev-automatic-switch">
+        <h2 className="font-semibold">Use Jev automatic classification</h2>
+        <p className="text-muted-foreground text-xs">
+          One post-deployment cutover switch, not a gradual rollout. Enabled maps this
+          org to Jev + automatic decisioning (Jev classifies and applies new_lead/nurture
+          outcomes itself); disabled maps back to legacy + shadow (Claude classify+reply,
+          Jev only shadow-logs). Currently:{" "}
+          <span className="font-medium">
+            {jevSaved ? "Jev automatic" : "legacy / shadow"}
+          </span>
+          .
+        </p>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={jevEnabled}
+            onChange={(e) => setJevEnabled(e.target.checked)}
+            className="mt-0.5"
+            data-testid="jev-automatic-toggle"
+          />
+          <span className="font-medium">Enabled</span>
+        </label>
+        {jevError && (
+          <p className="text-destructive text-xs" data-testid="jev-automatic-error">
+            {jevError}
+          </p>
+        )}
+        <div>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={jevPending || jevEnabled === jevSaved}
+            onClick={onSaveJevSwitch}
+            data-testid="jev-automatic-save"
+          >
+            {jevEnabled === jevSaved ? "Saved" : "Save switch"}
+          </Button>
+        </div>
+      </section>
+
+      <form onSubmit={onSave} className="flex flex-col gap-6">
       <section className="flex flex-col gap-4 rounded-md border p-4">
         <h2 className="font-semibold">Status</h2>
         <label className="flex items-start gap-2 text-sm">
@@ -200,6 +276,7 @@ export function AiResponderConfigForm({
           Save
         </Button>
       </div>
-    </form>
+      </form>
+    </div>
   );
 }

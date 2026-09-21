@@ -19,6 +19,12 @@ export type AiResponderConfigRow = {
   reply_delay_max_seconds: number;
   escalation_keywords: string[];
   updated_at: string;
+  /** Root review of 3e4ee3b1 (jev-root-round12-review.md), finding 3: the
+   *  one-cutover switch this settings page now exposes. Schema defaults
+   *  are 'legacy'/'shadow' — nothing auto-decides for a customer until an
+   *  admin flips this on. */
+  classifier_provider: string;
+  classifier_mode: string;
 };
 
 /**
@@ -41,7 +47,7 @@ export async function getAiResponderConfig(): Promise<
     const { data, error } = await supabase
       .from("ai_responder_configs")
       .select(
-        "id, active, model, system_prompt, max_turns, min_confidence, business_hours_only, reply_delay_min_seconds, reply_delay_max_seconds, escalation_keywords, updated_at",
+        "id, active, model, system_prompt, max_turns, min_confidence, business_hours_only, reply_delay_min_seconds, reply_delay_max_seconds, escalation_keywords, updated_at, classifier_provider, classifier_mode",
       )
       .eq("org_id", org.id)
       .eq("active", true)
@@ -160,6 +166,76 @@ export async function updateAiResponderConfig(
     return ok(null);
   } catch (e) {
     reportError(e, { tags: { surface: "update_ai_responder_config" } });
+    return errFromUnknown(e, "AI_CONFIG_UPDATE_FAILED");
+  }
+}
+
+export type UpdateJevAutomaticClassificationInput = {
+  configId: string;
+  enabled: boolean;
+};
+
+/**
+ * Root review of 3e4ee3b1 (jev-root-round12-review.md), finding 3: the
+ * one deliberate cutover switch that flips a live org from the legacy
+ * classify+reply pipeline to automatic Jev decisioning. Deliberately its
+ * own action, separate from updateAiResponderConfig — a single atomic
+ * update of exactly classifier_provider/classifier_mode, so a save on the
+ * unrelated form fields above can never accidentally toggle this, and
+ * this toggle can never partially apply (provider set, mode not, or vice
+ * versa — the two columns are always written together in one query).
+ * Admin-only, same isAdminEmail gate as the rest of this page. Enabling
+ * requires a non-empty server-side TYPESAFE_API_KEY — this is a one-time
+ * post-deployment cutover (root: production already has it configured),
+ * not a toggle meant to be flippable before the key exists.
+ */
+export async function updateJevAutomaticClassification(
+  input: UpdateJevAutomaticClassificationInput,
+): Promise<Result<null>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!isAdminEmail(user?.email)) {
+      return {
+        ok: false,
+        error: {
+          code: "FORBIDDEN",
+          message: "Only admins can change Jev automatic classification.",
+        },
+      };
+    }
+
+    if (input.enabled && !process.env.TYPESAFE_API_KEY?.trim()) {
+      return {
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message:
+            "TYPESAFE_API_KEY is not configured on this environment — cannot enable automatic Jev classification.",
+        },
+      };
+    }
+
+    const { error } = await supabase
+      .from("ai_responder_configs")
+      .update({
+        classifier_provider: input.enabled ? "jev" : "legacy",
+        classifier_mode: input.enabled ? "automatic" : "shadow",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", input.configId);
+    if (error) {
+      return {
+        ok: false,
+        error: { code: "AI_CONFIG_UPDATE_FAILED", message: error.message },
+      };
+    }
+    revalidatePath("/settings/ai-responder");
+    return ok(null);
+  } catch (e) {
+    reportError(e, { tags: { surface: "update_jev_automatic_classification" } });
     return errFromUnknown(e, "AI_CONFIG_UPDATE_FAILED");
   }
 }
