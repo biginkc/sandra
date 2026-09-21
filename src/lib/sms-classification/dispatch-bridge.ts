@@ -546,18 +546,33 @@ function isDuplicateKeyError(message: string): boolean {
   );
 }
 
+/**
+ * Root review of 999feefb (jev-root-round11-review.md, finding 1, P1):
+ * `state_hash: failed:${Date.now()}` made every retry's logical key
+ * (source_inbound_message_id, provider, model, schema_version, state_hash)
+ * unique, so a repeated failure on the same inbound inserted ANOTHER row
+ * instead of reusing one — Needs-a-decision then showed multiple
+ * actionable classifier events for a single inbound. `state_hash` is now
+ * deterministic per (message, reason) — `failed:${fallbackReason}` — so a
+ * retry with the IDENTICAL failure reason collides on the same unique
+ * index `persistRun` already relies on, and is handled the same way:
+ * catch the duplicate-key error and treat it as "this failure is already
+ * recorded," not an error. A retry that fails for a DIFFERENT reason is
+ * still a new, genuinely different logical event (schema_version/
+ * state_hash existing for a "context changed" row) — new row, by design.
+ */
 async function persistFailedRun(
   supabase: SupabaseClient<Database>,
   input: ClassificationBridgeInput,
   fallbackReason: string,
 ): Promise<void> {
   if (!input.conversationId || !input.inboundMessageId) return;
-  await supabase.from("sms_classification_runs").insert({
+  const { error } = await supabase.from("sms_classification_runs").insert({
     org_id: input.orgId,
     property_id: input.propertyId,
     conversation_id: input.conversationId,
     source_inbound_message_id: input.inboundMessageId,
-    state_hash: `failed:${Date.now()}`,
+    state_hash: `failed:${fallbackReason}`,
     schema_version: SCHEMA_VERSION,
     policy_version: POLICY_VERSION,
     provider: "jev",
@@ -565,4 +580,5 @@ async function persistFailedRun(
     decision: {},
     fallback_reason: fallbackReason,
   });
+  if (error && !isDuplicateKeyError(error.message)) throw new Error(error.message);
 }

@@ -179,6 +179,11 @@ type ClassifierEventRow = {
   id: string;
   property_id: string;
   conversation_id: string;
+  /** Only present when the Needs-a-decision query selected it (used to
+   *  reconcile a failed row against a later successful retry on the same
+   *  inbound — root review of 999feefb, jev-root-round11-review.md,
+   *  finding 1). Review Jev's own select omits this column. */
+  source_inbound_message_id?: string;
   resolved_outcome: string | null;
   fallback_reason: string | null;
   model: string;
@@ -227,7 +232,7 @@ function mapClassifierEvent(row: ClassifierEventRow): JevQueueItem {
 }
 
 const NEEDS_DECISION_CLASSIFIER_EVENT_SELECT =
-  "id, property_id, conversation_id, resolved_outcome, fallback_reason, model, schema_version, policy_version, decision, created_at, properties(address, city, state), messages(body)";
+  "id, property_id, conversation_id, source_inbound_message_id, resolved_outcome, fallback_reason, model, schema_version, policy_version, decision, created_at, properties(address, city, state), messages(body)";
 
 const NEEDS_DECISION_CLASSIFIER_EVENT_LIMIT = 100;
 
@@ -296,11 +301,42 @@ export async function getNeedsDecisionQueue(): Promise<{ items: JevQueueItem[]; 
     for (const row of promoted ?? []) promotedRunIds.add(row.classification_run_id);
   }
 
+  // Root review of 999feefb (jev-root-round11-review.md, finding 1):
+  // persistFailedRun's retry identity is now stable (see dispatch-bridge.ts),
+  // but a retry can still legitimately SUCCEED after an earlier attempt
+  // failed — that earlier failure row is immutable audit evidence (the
+  // table grants INSERT/SELECT only) and stays in Review Jev, but it must
+  // stop being ACTIONABLE here once a real Jev result exists for the same
+  // inbound, or one inbound would show as both a failed human item and an
+  // applied/routable decision simultaneously.
+  const failedEventRows = (recentEventsRes.data ?? []) as ClassifierEventRow[];
+  const failedMessageIds = Array.from(
+    new Set(
+      failedEventRows
+        .filter((row) => row.fallback_reason !== null && row.source_inbound_message_id)
+        .map((row) => row.source_inbound_message_id as string),
+    ),
+  );
+  const reconciledMessageIds = new Set<string>();
+  if (failedMessageIds.length > 0) {
+    const { data: successfulRuns, error: successfulError } = await supabase
+      .from("sms_classification_runs")
+      .select("source_inbound_message_id")
+      .eq("provider", "jev")
+      .is("fallback_reason", null)
+      .in("source_inbound_message_id", failedMessageIds);
+    if (successfulError) {
+      return { items: [], error: successfulError.message };
+    }
+    for (const row of successfulRuns ?? []) reconciledMessageIds.add(row.source_inbound_message_id);
+  }
+
   const reviews = (reviewsRes.data ?? []).map((row) => mapAiDispositionReview(row as unknown as AiDispositionReviewRow));
   const decisions = (decisionsRes.data ?? []).map((row) => mapJevLeadDecision(row as unknown as JevLeadDecisionRow));
-  const unpromotedEvents = (recentEventsRes.data ?? [])
-    .filter((row) => !promotedRunIds.has((row as { id: string }).id))
-    .map((row) => mapClassifierEvent(row as unknown as ClassifierEventRow));
+  const unpromotedEvents = failedEventRows
+    .filter((row) => !promotedRunIds.has(row.id))
+    .filter((row) => row.fallback_reason === null || !reconciledMessageIds.has(row.source_inbound_message_id ?? ""))
+    .map((row) => mapClassifierEvent(row));
 
   return {
     items: [...reviews, ...decisions, ...unpromotedEvents].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),

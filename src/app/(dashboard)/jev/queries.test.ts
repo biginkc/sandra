@@ -6,6 +6,12 @@ const mocks = vi.hoisted(() => ({
   classificationRuns: [] as unknown[],
   promotedClassificationRunIds: [] as string[],
   leadEvents: [] as unknown[],
+  /** Root review of 999feefb (jev-root-round11-review.md, finding 1):
+   *  source_inbound_message_ids that have a REAL, non-fallback Jev run —
+   *  what the reconciliation query (`.is("fallback_reason", null)`) would
+   *  return. Used to prove a failed classifier_event is hidden from
+   *  Needs-a-decision once a later retry on the same inbound succeeds. */
+  reconciledSuccessMessageIds: [] as string[],
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -55,15 +61,36 @@ vi.mock("@/lib/supabase/server", () => ({
       }
       if (table === "sms_classification_runs") {
         return {
-          select: () => ({
-            eq: () => ({
-              or: () => ({
-                order: () => ({
-                  limit: () => Promise.resolve({ data: mocks.classificationRuns, error: null }),
+          select: (columns: string) => {
+            // Root review of 999feefb, finding 1: the reconciliation
+            // query selects only source_inbound_message_id and ends in
+            // .is().in(), distinct from the primary classifier_event
+            // fetch's .eq().or().order().limit() chain.
+            if (columns === "source_inbound_message_id") {
+              return {
+                eq: () => ({
+                  is: () => ({
+                    in: (_col: string, ids: string[]) =>
+                      Promise.resolve({
+                        data: mocks.reconciledSuccessMessageIds
+                          .filter((id) => ids.includes(id))
+                          .map((id) => ({ source_inbound_message_id: id })),
+                        error: null,
+                      }),
+                  }),
+                }),
+              };
+            }
+            return {
+              eq: () => ({
+                or: () => ({
+                  order: () => ({
+                    limit: () => Promise.resolve({ data: mocks.classificationRuns, error: null }),
+                  }),
                 }),
               }),
-            }),
-          }),
+            };
+          },
         };
       }
       throw new Error(`Unexpected table: ${table}`);
@@ -79,6 +106,7 @@ beforeEach(() => {
   mocks.classificationRuns = [];
   mocks.promotedClassificationRunIds = [];
   mocks.leadEvents = [];
+  mocks.reconciledSuccessMessageIds = [];
 });
 
 function item(overrides: Partial<JevQueueItem> = {}): JevQueueItem {
@@ -241,6 +269,7 @@ function classificationRunRow(overrides: Partial<Record<string, unknown>> = {}) 
     id: "run-1",
     property_id: "prop-1",
     conversation_id: "conv-1",
+    source_inbound_message_id: "msg-1",
     resolved_outcome: null,
     fallback_reason: "provider_timeout",
     model: "jev-1.13.0",
@@ -285,6 +314,58 @@ describe("getNeedsDecisionQueue — root final-review P1 #3 (classifier_event re
     mocks.promotedClassificationRunIds = ["run-3"];
     const { items } = await getNeedsDecisionQueue();
     expect(items.map((i) => i.id)).toEqual(["run-4"]);
+  });
+
+  // Root review of 999feefb (jev-root-round11-review.md, finding 1):
+  // failure→success retry reconciliation — a failed classifier_event must
+  // stop being actionable once a real Jev result exists for the SAME
+  // inbound, so one inbound never shows as both a failed human item and
+  // an applied/routable decision simultaneously.
+  describe("failure→success retry reconciliation", () => {
+    it("hides a failed classifier_event once a later retry on the SAME inbound produced a real (non-fallback) run", async () => {
+      mocks.classificationRuns = [
+        classificationRunRow({ id: "run-failed", source_inbound_message_id: "msg-1", fallback_reason: "provider_timeout" }),
+      ];
+      mocks.reconciledSuccessMessageIds = ["msg-1"];
+      const { items, error } = await getNeedsDecisionQueue();
+      expect(error).toBeNull();
+      expect(items).toEqual([]);
+    });
+
+    it("still surfaces a failed classifier_event when no successful retry exists yet for that inbound", async () => {
+      mocks.classificationRuns = [
+        classificationRunRow({ id: "run-failed", source_inbound_message_id: "msg-1", fallback_reason: "provider_timeout" }),
+      ];
+      mocks.reconciledSuccessMessageIds = []; // no successful run recorded
+      const { items } = await getNeedsDecisionQueue();
+      expect(items.map((i) => i.id)).toEqual(["run-failed"]);
+    });
+
+    it("only reconciles the failed event whose OWN inbound has a successful retry, not an unrelated one", async () => {
+      mocks.classificationRuns = [
+        classificationRunRow({ id: "run-failed-1", source_inbound_message_id: "msg-1", fallback_reason: "provider_timeout" }),
+        classificationRunRow({ id: "run-failed-2", source_inbound_message_id: "msg-2", fallback_reason: "provider_timeout" }),
+      ];
+      mocks.reconciledSuccessMessageIds = ["msg-1"]; // only msg-1's retry succeeded
+      const { items } = await getNeedsDecisionQueue();
+      expect(items.map((i) => i.id)).toEqual(["run-failed-2"]);
+    });
+
+    it("never reconciles/hides an unclear or bad_number classifier_event (fallback_reason null) — that IS the real Jev result, not a failure awaiting retry", async () => {
+      mocks.classificationRuns = [
+        classificationRunRow({
+          id: "run-unclear",
+          source_inbound_message_id: "msg-1",
+          fallback_reason: null,
+          resolved_outcome: "unclear",
+        }),
+      ];
+      // Even if the reconciliation lookup somehow matched this message id,
+      // only fallback_reason-set rows are ever candidates for hiding.
+      mocks.reconciledSuccessMessageIds = ["msg-1"];
+      const { items } = await getNeedsDecisionQueue();
+      expect(items.map((i) => i.id)).toEqual(["run-unclear"]);
+    });
   });
 });
 

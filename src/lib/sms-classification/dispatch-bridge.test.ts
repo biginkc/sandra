@@ -27,7 +27,14 @@ function stubSupabase(opts: {
    *  to a fixed timestamp so tests that don't care still exercise a
    *  real value. */
   sourceMessageCreatedAt?: string | null;
+  /** Root review of 999feefb (jev-root-round11-review.md, finding 1):
+   *  results for persistFailedRun's plain (non-.select()) insert calls,
+   *  consumed in order — one entry per call, `{ error: null }` once
+   *  exhausted. Lets a test simulate "second identical failure hits the
+   *  real unique-index duplicate-key error" without a real Postgres. */
+  failedRunInsertResults?: Array<{ error: { message: string } | null }>;
 }) {
+  const failedRunInsertCalls: Array<Record<string, unknown>> = [];
   let messagesLteCutoff: string | undefined;
   const messagesBuilder = {
     select: () => messagesBuilder,
@@ -57,11 +64,22 @@ function stubSupabase(opts: {
       opts.existingRunLookup ?? { data: { id: "run-1" }, error: null },
   };
   const runsBuilder = {
-    insert: () => ({
+    insert: (row: Record<string, unknown>) => ({
+      // persistRun chains .select().maybeSingle() after insert().
       select: () => ({
         maybeSingle: async () =>
           opts.insertResult ?? { data: { id: "run-1" }, error: null },
       }),
+      // persistFailedRun awaits the insert() result directly, with no
+      // .select() chained — needs its own thenable, distinct from
+      // persistRun's insertResult (a failed-run insert never asks for
+      // the row id back).
+      then: (resolve: (r: { data: null; error: { message: string } | null }) => void) => {
+        failedRunInsertCalls.push(row);
+        const result =
+          opts.failedRunInsertResults?.[failedRunInsertCalls.length - 1] ?? { error: null };
+        resolve({ data: null, error: result.error });
+      },
     }),
     select: () => runsSelectBuilder,
   };
@@ -95,6 +113,9 @@ function stubSupabase(opts: {
           : table === "properties"
             ? propertiesBuilder
             : runsBuilder,
+    // Test-only escape hatch (not part of the real Supabase client) — the
+    // rows persistFailedRun actually tried to insert, in call order.
+    __failedRunInsertCalls: failedRunInsertCalls,
   } as any;
 }
 
@@ -659,6 +680,54 @@ describe("classifyForDispatch", () => {
       );
       expect(result).toEqual({ kind: "jev_automatic_failed", classificationRunId: null, reason: "source_message_not_found" });
       expect(fn).not.toHaveBeenCalled();
+    });
+  });
+
+  // Root review of 999feefb (jev-root-round11-review.md, finding 1): failed-
+  // run retry identity must be deterministic, and a failure row must not
+  // collide with a later successful retry's own audit row. No provider
+  // calls — the "failure" is the fake fetch mock itself failing/succeeding.
+  describe("persistFailedRun — stable retry identity (finding 1)", () => {
+    it("uses a state_hash keyed on the failure reason, not the current time — identical on every retry", async () => {
+      const supabase = stubSupabase({});
+      const { fn } = stubFetch({}, false); // HTTP failure every call
+      await classifyForDispatch(supabase, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn, typesafeApiKey: "k" });
+      await classifyForDispatch(supabase, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn, typesafeApiKey: "k" });
+      const calls = (supabase as any).__failedRunInsertCalls as Array<{ state_hash: string }>;
+      expect(calls).toHaveLength(2);
+      expect(calls[0].state_hash).toBe(calls[1].state_hash);
+      expect(calls[0].state_hash).not.toMatch(/^failed:\d+$/); // not time-based
+    });
+
+    it("repeated identical failure: the second attempt's genuine unique-index collision is swallowed, not thrown or reported as a crash", async () => {
+      const supabase = stubSupabase({
+        failedRunInsertResults: [
+          { error: null },
+          { error: { message: 'duplicate key value violates unique constraint "idx_sms_classification_runs_logical_key"' } },
+        ],
+      });
+      const { fn } = stubFetch({}, false);
+      const first = await classifyForDispatch(supabase, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn, typesafeApiKey: "k" });
+      const second = await classifyForDispatch(supabase, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn, typesafeApiKey: "k" });
+      // Both retries still resolve to the same clean escalation kind — the
+      // duplicate-key error never surfaces as an unhandled rejection or a
+      // different (e.g. use_legacy) result.
+      expect(first).toMatchObject({ kind: "jev_automatic_failed" });
+      expect(second).toMatchObject({ kind: "jev_automatic_failed" });
+    });
+
+    it("a genuinely different failure reason on a retry is a new logical row (different state_hash), by design", async () => {
+      const supabase = stubSupabase({ propertiesRevision: null }); // forces missing_revision_baseline
+      const fn1 = vi.fn();
+      await classifyForDispatch(supabase, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn1 as unknown as typeof fetch, typesafeApiKey: "k" });
+      const { fn: fn2 } = stubFetch({}, false); // HTTP failure this time
+      const supabase2 = stubSupabase({ failedRunInsertResults: [{ error: null }] });
+      // Reuse the SAME message id but a different failure mode to prove
+      // the state_hash differs — inspect each stub's own captured calls.
+      await classifyForDispatch(supabase2, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn2, typesafeApiKey: "k" });
+      const revisionFailureHash = ((supabase as any).__failedRunInsertCalls as Array<{ state_hash: string }>)[0].state_hash;
+      const httpFailureHash = ((supabase2 as any).__failedRunInsertCalls as Array<{ state_hash: string }>)[0].state_hash;
+      expect(revisionFailureHash).not.toBe(httpFailureHash);
     });
   });
 });
