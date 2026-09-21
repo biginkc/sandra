@@ -6902,25 +6902,16 @@ export type Database = {
         Args: { p_decision_id: string }
         Returns: Json
       }
-      // Hand-inserted 2026-09-21 for the same migration —
-      // fn_begin_* RPCs added to close the TOCTOU gap: the caller must use
-      // the propertyId these return (never a client-supplied one) before
-      // calling fn_record_*_correction.
-      fn_begin_ai_disposition_review_correction: {
-        Args: {
-          p_corrected_disposition: string
-          p_review_id: string
-        }
-        Returns: Json
-      }
-      fn_begin_jev_lead_decision_correction: {
-        Args: {
-          p_corrected_outcome: string
-          p_decision_id: string
-        }
-        Returns: Json
-      }
-      fn_record_ai_disposition_review_correction: {
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921020527_jev_correction_atomic_apply.sql — root review of
+      // 02b0ad73 (jev-root-correction-race.md) found the prior
+      // fn_begin_*/fn_record_* split was NOT atomic (a PostgREST RPC
+      // releases its lock the instant it returns; the separate sanctioned
+      // TS op ran in its own transaction with a fresh-read CAS that
+      // couldn't see what fn_begin_* had observed). Replaced by a single
+      // atomic validate+write+audit RPC per source; fn_begin_*/
+      // fn_record_* are dropped, not left in place unused.
+      fn_apply_and_record_ai_disposition_review_correction: {
         Args: {
           p_corrected_disposition: string
           p_reason: string
@@ -6928,7 +6919,7 @@ export type Database = {
         }
         Returns: Json
       }
-      fn_record_jev_lead_decision_correction: {
+      fn_apply_and_record_jev_lead_decision_correction: {
         Args: {
           p_corrected_outcome: string
           p_decision_id: string

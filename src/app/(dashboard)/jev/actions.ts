@@ -2,10 +2,11 @@
 
 import { revalidatePath } from "next/cache";
 
-import { setOutreachDispo } from "@/app/(dashboard)/messages/dispo-actions";
+import { recordConsentEvent } from "@/lib/messaging/consent";
+import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
-import { qualifyProperty } from "@/lib/leads/qualify";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { createClient } from "@/lib/supabase/server";
 
 import { getCorrectionHistory, getNeedsDecisionQueue, type CorrectionHistoryEntry, type JevQueueItem } from "./queries";
@@ -229,26 +230,32 @@ function friendlyCorrectionError(message: string): string {
  * whether the row is still pending or already resolved, and more than
  * once on the same row. wrong_number/not_interested/nurture (and
  * new_lead for a jev_lead_decision row) write directly via a guarded SQL
- * RPC. new_lead on an ai_disposition_review row, and opted_out/dnc on
- * either source, are applied through the EXISTING sanctioned promotion/
- * suppression operations first (qualifyProperty / setOutreachDispo —
- * same code every other promotion/suppression in the app uses, so the
- * same guards and TCPA side effects apply here), then recorded in the
- * audit trail. Never unsuppresses on a positive correction — the
- * restricted direct-SQL targets never touch consent_events, and the
- * sanctioned operations only ever ADD suppression, never remove it.
+ * RPC — always atomic, never had a race.
  *
- * No propertyId parameter: the caller never supplies one. For the
- * sanctioned-operation path, fn_begin_*_correction locks the review/
- * decision row, re-validates it hasn't gone stale since Jev decided
- * (root final-review P1 #2), and returns the property id FROM THAT
- * LOCKED ROW — that is the only id qualifyProperty/setOutreachDispo ever
- * see here, closing the wrong-id/TOCTOU gap a caller-supplied id would
- * open. fn_record_*_correction then re-verifies the ACTUAL resulting
- * property state before recording, so a failed or short-circuited
- * sanctioned op can never be recorded as a successful correction, and a
- * record-RPC failure is reported as a real failure, not silently
- * swallowed as success ("truthful success only after audit is durable").
+ * new_lead on an ai_disposition_review row, and opted_out/dnc on either
+ * source, used to go through a separate "begin" RPC, then the sanctioned
+ * TS operation (qualifyProperty/setOutreachDispo) in its OWN request,
+ * then a "record" RPC. Root review of an earlier round (02b0ad73,
+ * jev-root-correction-race.md, 2026-09-20) found that sequence was NOT
+ * atomic: a PostgREST RPC releases its row lock the instant it returns,
+ * so a concurrent human write landing between "begin" and the sanctioned
+ * op's OWN fresh-read CAS guard could be silently overwritten — the
+ * "record" step's after-the-fact check cannot undo a write that already
+ * happened. Fixed by folding validate+write+audit into ONE RPC, ONE
+ * transaction (fn_apply_and_record_*_correction,
+ * 20260921020527_jev_correction_atomic_apply.sql) — the property
+ * UPDATE's WHERE clause is now the actual concurrency enforcement,
+ * checked by Postgres against the live row at write time, not by this
+ * function reading state once and hoping nothing changes before it acts
+ * on it. No propertyId parameter — the caller never supplies one; the
+ * RPC derives it from the locked review/decision row itself.
+ *
+ * Secondary, already-best-effort concerns setOutreachDispo used to
+ * handle (consent_events history row, sequence pause, page
+ * revalidation) run here AFTER the atomic RPC commits — same ordering
+ * setOutreachDispo itself already used for these same steps. Never
+ * unsuppresses on a positive correction — the atomic RPC only ever ADDS
+ * suppression (contacts.sms_opted_out), never clears it.
  */
 export async function correctJevQueueItem(
   source: JevQueueSource,
@@ -292,81 +299,101 @@ export async function correctJevQueueItem(
       return ok({ status: result.status, resolvedOutcome });
     }
 
-    // new_lead (ai_disposition_review only) / opted_out / dnc: lock and
-    // validate the row first, deriving the authoritative property id —
-    // never a caller-supplied one — before running the sanctioned op.
-    const beginRpcName = source === "ai_disposition_review" ? "fn_begin_ai_disposition_review_correction" : "fn_begin_jev_lead_decision_correction";
-    const beginArgs =
+    // new_lead (ai_disposition_review only) / opted_out / dnc: one atomic
+    // validate+write+audit RPC — no separate sanctioned-op round trip.
+    const rpcName =
       source === "ai_disposition_review"
-        ? { p_review_id: id, p_corrected_disposition: correctedOutcome }
-        : { p_decision_id: id, p_corrected_outcome: correctedOutcome };
-    const { data: beginData, error: beginError } = await supabase.rpc(beginRpcName, beginArgs);
-    if (beginError) {
-      return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: friendlyCorrectionError(beginError.message) } };
-    }
-    const beginResult = beginData as { propertyId?: string } | null;
-    const authoritativePropertyId = beginResult?.propertyId;
-    if (!authoritativePropertyId) {
-      return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: "Unexpected response" } };
-    }
-
-    if (correctedOutcome === "new_lead") {
-      const qualifyOutcome = await qualifyProperty(supabase, authoritativePropertyId, user.id);
-      if (qualifyOutcome.status === "failed") {
-        const message = qualifyOutcome.message.includes("DNC_LOCKED")
-          ? "This property is permanently locked and cannot be promoted."
-          : qualifyOutcome.message;
-        return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message } };
-      }
-      if (qualifyOutcome.status === "not_found") {
-        return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: "Property not found." } };
-      }
-      // "qualified" or "already_qualified" (idempotent replay) both mean
-      // the property is now (or already was) new_lead — proceed to
-      // record, which re-verifies this against the property row itself
-      // rather than trusting this status string.
-    } else {
-      // opted_out or dnc.
-      const dispoResult = await setOutreachDispo(authoritativePropertyId, correctedOutcome);
-      if (!dispoResult.ok) {
-        return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: dispoResult.error } };
-      }
-    }
-
-    const recordRpcName = source === "ai_disposition_review" ? "fn_record_ai_disposition_review_correction" : "fn_record_jev_lead_decision_correction";
-    const recordArgs =
+        ? "fn_apply_and_record_ai_disposition_review_correction"
+        : "fn_apply_and_record_jev_lead_decision_correction";
+    const args =
       source === "ai_disposition_review"
         ? { p_review_id: id, p_corrected_disposition: correctedOutcome, p_reason: reason ?? "" }
         : { p_decision_id: id, p_corrected_outcome: correctedOutcome, p_reason: reason ?? "" };
-    const { data: recordData, error: recordError } = await supabase.rpc(recordRpcName, recordArgs);
-    if (recordError) {
-      // The sanctioned operation already succeeded — the property is
-      // correctly updated — but the audit record failed. Report this
-      // as a genuine failure: an unrecorded correction is not a
-      // successful one (root final-review P1 #2: "truthful success only
-      // after audit is durable"). The operator must retry; retrying is
-      // safe because fn_record_*_correction re-verifies the actual
-      // property state rather than trusting a prior claim.
-      reportError(new Error(recordError.message), {
-        tags: { surface: "jev_correction_record_after_sanctioned_op" },
-        extra: { source, id, correctedOutcome },
-      });
-      revalidatePath("/jev/needs-decision");
-      revalidatePath("/jev/review");
-      return {
-        ok: false,
-        error: {
-          code: "JEV_CORRECTION_RECORD_FAILED",
-          message: "The correction was applied to the property, but recording it failed. Try again to record it.",
-        },
-      };
+    const { data, error } = await supabase.rpc(rpcName, args);
+    if (error) {
+      return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: friendlyCorrectionError(error.message) } };
     }
-    const recordResult = recordData as { status?: string } | null;
+    const result = data as
+      | { status?: string; correctedDisposition?: string; resolvedOutcome?: string; propertyId?: string; homeownerContactId?: string | null }
+      | null;
+    const resolvedOutcome = result?.correctedDisposition ?? result?.resolvedOutcome;
+    if (!result?.status || !resolvedOutcome) {
+      return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: "Unexpected response" } };
+    }
+
+    // Best-effort secondary bookkeeping — the disposition/promotion write
+    // and its audit row already committed atomically above; nothing below
+    // can undo or falsify that.
+    if (result.status === "corrected" && (correctedOutcome === "opted_out" || correctedOutcome === "dnc") && result.propertyId) {
+      await applyCorrectionSuppressionFollowUps({
+        propertyId: result.propertyId,
+        homeownerContactId: result.homeownerContactId ?? null,
+        dispo: correctedOutcome,
+        actorId: user.id,
+      });
+    }
+
     revalidatePath("/jev/needs-decision");
     revalidatePath("/jev/review");
-    return ok({ status: recordResult?.status ?? "corrected", resolvedOutcome: correctedOutcome });
+    return ok({ status: result.status, resolvedOutcome });
   } catch (e) {
     reportError(e, { tags: { surface: "jev_correct_queue_item" }, extra: { source, id, correctedOutcome } });
     return errFromUnknown(e, "JEV_CORRECTION_FAILED");
+  }
+}
+
+/**
+ * Same best-effort secondary steps `setOutreachDispo` already performs
+ * after its own core write commits: a `consent_events` history row and
+ * pausing sequences for the contact. The core suppression enforcement
+ * (properties.outreach_dispo, checked by `shouldSuppressAutomatedSend`,
+ * and contacts.sms_opted_out) already happened atomically inside
+ * fn_apply_and_record_*_correction — nothing here is safety-critical.
+ */
+async function applyCorrectionSuppressionFollowUps(args: {
+  propertyId: string;
+  homeownerContactId: string | null;
+  dispo: "opted_out" | "dnc";
+  actorId: string;
+}): Promise<void> {
+  if (!args.homeownerContactId) return;
+  const supabase = await createClient();
+  try {
+    const consentOutcome = await recordConsentEvent(supabase, {
+      contactId: args.homeownerContactId,
+      channel: "sms",
+      eventType: "opt_out",
+      source: "jev_correction",
+      sourceDetail: { propertyId: args.propertyId, dispo: args.dispo },
+    });
+    if (consentOutcome.inserted) {
+      await recordLeadEvent({
+        propertyId: args.propertyId,
+        eventType: LEAD_EVENT_TYPES.OPTED_OUT,
+        actorType: "user",
+        actorId: args.actorId,
+        payload: { channel: "sms", trigger: "jev_correction" },
+        sourceType: "consent_events.opt_out",
+        sourceId: consentOutcome.id,
+      });
+    }
+  } catch (error) {
+    reportError(error, {
+      tags: { surface: "jev_correction_consent_after_commit" },
+      extra: { propertyId: args.propertyId, contactId: args.homeownerContactId, dispo: args.dispo },
+    });
+  }
+  try {
+    await pauseContactEnrollments(supabase, {
+      contactId: args.homeownerContactId,
+      reason: "consent_revoked",
+      permanent: true,
+      actor: { actorType: "user", actorId: args.actorId },
+    });
+  } catch (error) {
+    reportError(error, {
+      tags: { surface: "jev_correction_sequence_pause_after_commit" },
+      extra: { propertyId: args.propertyId, contactId: args.homeownerContactId, dispo: args.dispo },
+    });
   }
 }
