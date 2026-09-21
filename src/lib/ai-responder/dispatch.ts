@@ -511,6 +511,7 @@ async function classifyAndHandleNonRouteOutcomes(
         outcome: "nurture",
         nativeConfidence: classification.nativeConfidence,
         thresholdAtDecision: classification.thresholdAtDecision,
+        thresholdVersion: classification.thresholdVersion,
       });
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
@@ -555,6 +556,7 @@ async function classifyAndHandleNonRouteOutcomes(
         outcome: "nurture",
         nativeConfidence: classification.nativeConfidence,
         thresholdAtDecision: classification.thresholdAtDecision,
+        thresholdVersion: classification.thresholdVersion,
       });
     }
     await markPropertyNeedsAttention(supabase, input.propertyId, reason);
@@ -584,6 +586,7 @@ async function classifyAndHandleNonRouteOutcomes(
         outcome: "new_lead",
         nativeConfidence: classification.nativeConfidence,
         thresholdAtDecision: classification.thresholdAtDecision,
+        thresholdVersion: classification.thresholdVersion,
       });
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
@@ -767,6 +770,7 @@ async function resolveAndApplyRoute(
           outcome: "new_lead",
           nativeConfidence: classification.nativeConfidence,
           thresholdAtDecision: classification.thresholdAtDecision,
+          thresholdVersion: classification.thresholdVersion,
         });
       }
       await markPropertyNeedsAttention(
@@ -780,15 +784,24 @@ async function resolveAndApplyRoute(
       });
       return { outcome: "escalated", reason: route.reason };
     case "opt_out":
-      const optOutResult = await applyResponderOptOut(supabase, {
-        propertyId: input.propertyId,
-        contactId: input.contactId,
-        conversationId: input.conversationId ?? null,
-        inboundMessageId: input.inboundMessageId ?? null,
-        inboundFromPhone: input.inboundFromPhone ?? null,
-        orgId: property.org_id,
-        reason: route.reason,
-      });
+      const isJevBelowThresholdOptOut = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
+      const optOutResult = isJevBelowThresholdOptOut
+        ? await proposeDeferredJevDisposition(supabase, {
+            propertyId: input.propertyId,
+            conversationId: input.conversationId ?? null,
+            inboundMessageId: input.inboundMessageId ?? null,
+            dispo: "opted_out",
+            reason: route.reason,
+          })
+        : await applyResponderOptOut(supabase, {
+            propertyId: input.propertyId,
+            contactId: input.contactId,
+            conversationId: input.conversationId ?? null,
+            inboundMessageId: input.inboundMessageId ?? null,
+            inboundFromPhone: input.inboundFromPhone ?? null,
+            orgId: property.org_id,
+            reason: route.reason,
+          });
       if (!optOutResult.updated) {
         const outcome = closeOutcome(optOutResult, route.reason);
         await completeAiResponseClaim(supabase, {
@@ -844,16 +857,25 @@ async function resolveAndApplyRoute(
       return dncOutcome;
     }
     case "auto_close_wrong_number":
-      const wrongNumberResult = await applyWrongNumber(supabase, {
-        propertyId: input.propertyId,
-        contactId: input.contactId,
-        conversationId: input.conversationId ?? null,
-        inboundMessageId: input.inboundMessageId ?? null,
-        inboundFromPhone: input.inboundFromPhone ?? null,
-        orgId: property.org_id,
-        scope: route.scope,
-        reason: route.reason,
-      });
+      const isJevBelowThresholdWrongNumber = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
+      const wrongNumberResult = isJevBelowThresholdWrongNumber
+        ? await proposeDeferredJevDisposition(supabase, {
+            propertyId: input.propertyId,
+            conversationId: input.conversationId ?? null,
+            inboundMessageId: input.inboundMessageId ?? null,
+            dispo: "wrong_number",
+            reason: route.reason,
+          })
+        : await applyWrongNumber(supabase, {
+            propertyId: input.propertyId,
+            contactId: input.contactId,
+            conversationId: input.conversationId ?? null,
+            inboundMessageId: input.inboundMessageId ?? null,
+            inboundFromPhone: input.inboundFromPhone ?? null,
+            orgId: property.org_id,
+            scope: route.scope,
+            reason: route.reason,
+          });
       const wrongNumberOutcome = closeOutcome(wrongNumberResult, route.reason);
       if (jevAutoAccept && wrongNumberResult.updated && input.inboundMessageId) {
         await maybeAutoAcceptJevReview(
@@ -869,13 +891,22 @@ async function resolveAndApplyRoute(
       });
       return wrongNumberOutcome;
     case "auto_close":
-      const autoCloseResult = await setResponderDispo(supabase, {
-        propertyId: input.propertyId,
-        conversationId: input.conversationId ?? null,
-        inboundMessageId: input.inboundMessageId ?? null,
-        dispo: route.dispo,
-        reason: route.reason,
-      });
+      const isJevBelowThresholdAutoClose = classification.kind === "jev_route" && !classification.eligibleForAutoAccept;
+      const autoCloseResult = isJevBelowThresholdAutoClose
+        ? await proposeDeferredJevDisposition(supabase, {
+            propertyId: input.propertyId,
+            conversationId: input.conversationId ?? null,
+            inboundMessageId: input.inboundMessageId ?? null,
+            dispo: route.dispo,
+            reason: route.reason,
+          })
+        : await setResponderDispo(supabase, {
+            propertyId: input.propertyId,
+            conversationId: input.conversationId ?? null,
+            inboundMessageId: input.inboundMessageId ?? null,
+            dispo: route.dispo,
+            reason: route.reason,
+          });
       const autoCloseOutcome = closeOutcome(autoCloseResult, route.reason);
       if (jevAutoAccept && autoCloseResult.updated && input.inboundMessageId) {
         await maybeAutoAcceptJevReview(
@@ -1321,6 +1352,7 @@ async function proposeJevLeadDecision(
     outcome: "new_lead" | "nurture";
     nativeConfidence: number | null;
     thresholdAtDecision: number | null;
+    thresholdVersion: number | null;
   },
 ): Promise<void> {
   if (!args.conversationId || !args.inboundMessageId) return;
@@ -1332,6 +1364,7 @@ async function proposeJevLeadDecision(
     p_outcome: args.outcome,
     p_native_confidence: args.nativeConfidence,
     p_threshold_at_decision: args.thresholdAtDecision,
+    p_threshold_version: args.thresholdVersion,
   });
   if (error) {
     reportError(new Error(error.message), {
@@ -1358,6 +1391,7 @@ async function autoApplyJevLeadDecision(
     outcome: "new_lead" | "nurture";
     nativeConfidence: number | null;
     thresholdAtDecision: number | null;
+    thresholdVersion: number | null;
   },
 ): Promise<void> {
   if (!args.conversationId || !args.inboundMessageId) return;
@@ -1369,6 +1403,7 @@ async function autoApplyJevLeadDecision(
     p_outcome: args.outcome,
     p_native_confidence: args.nativeConfidence,
     p_threshold_at_decision: args.thresholdAtDecision,
+    p_threshold_version: args.thresholdVersion,
   });
   if (error) {
     reportError(new Error(error.message), {
@@ -1681,6 +1716,70 @@ async function proposeJevDncSuppression(
   // now exist — the phone is stopped, which is what `updated: true`
   // signals to the caller. The disposition write itself is intentionally
   // still pending, not reflected in this boolean.
+  return { updated: true };
+}
+
+/**
+ * Root final-review finding (P1, jev-root-final-review.md, 2026-09-20):
+ * `fn_apply_ai_disposition_with_review` (called by `setResponderDispo`)
+ * writes `properties.outreach_dispo` IMMEDIATELY even for a below-
+ * threshold Jev decision — only the auto-accept step was ever skipped.
+ * "Below threshold routes to Needs a decision" must mean the property is
+ * UNCHANGED until a human confirms, not merely unacknowledged. This
+ * calls `fn_propose_deferred_ai_disposition_review`
+ * (20260921005946_jev_deferred_disposition_proposal.sql) instead, which
+ * creates the pending review with `dispo_applied=false` and never
+ * touches `outreach_dispo`. Unlike dnc's Option B, this applies ZERO
+ * suppression side effect either — a below-threshold Jev inference of
+ * wrong_number/not_interested/opted_out is a model guess, not the
+ * deterministic STOP-keyword path, so callers of this function must
+ * skip their own `applyPhoneLevelOptOut` calls entirely rather than
+ * routing them through here.
+ */
+async function proposeDeferredJevDisposition(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    conversationId: string | null;
+    inboundMessageId: string | null;
+    dispo: "wrong_number" | "not_interested" | "opted_out";
+    reason: string;
+  },
+): Promise<ResponderDispoResult> {
+  if (!args.conversationId || !args.inboundMessageId) {
+    const reason = "ai_disposition_missing_thread_identity";
+    await markPropertyNeedsAttention(supabase, args.propertyId, reason);
+    reportError(new Error(reason), {
+      tags: { surface: "ai_responder_propose_deferred_dispo" },
+      extra: { propertyId: args.propertyId, dispo: args.dispo },
+    });
+    return { updated: false, reason: "db_error" };
+  }
+
+  const { data, error } = await supabase.rpc(
+    "fn_propose_deferred_ai_disposition_review",
+    {
+      p_property_id: args.propertyId,
+      p_conversation_id: args.conversationId,
+      p_source_inbound_message_id: args.inboundMessageId,
+      p_disposition: args.dispo,
+      p_ai_reason: args.reason,
+    },
+  );
+  if (error) {
+    await markPropertyNeedsAttention(supabase, args.propertyId, "disposition_proposal_write_failed");
+    reportError(new Error(error.message), {
+      tags: { surface: "ai_responder_propose_deferred_dispo" },
+      extra: { propertyId: args.propertyId, dispo: args.dispo, reason: args.reason },
+    });
+    return { updated: false, reason: "db_error" };
+  }
+
+  const status = readAiDispositionRpcStatus(data);
+  if (status === "already_terminal") return { updated: false, reason: "already_terminal" };
+  // "proposed" and "replayed" both mean a pending review now exists —
+  // same convention as proposeJevDncSuppression's `updated: true`. The
+  // outreach_dispo write itself is intentionally still pending.
   return { updated: true };
 }
 

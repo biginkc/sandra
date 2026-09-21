@@ -74,12 +74,19 @@ export type ClassificationBridgeResult =
        *  the real numbers, not just a generic attention flag. */
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
+      /** The threshold SETTINGS ROW'S version actually used at decision
+       *  time — null exactly when thresholdAtDecision is null (root
+       *  final-review P2: the version, not just the numeric cutoff, must
+       *  be recorded, since two different settings versions can share the
+       *  same number). */
+      thresholdVersion: number | null;
     }
   | {
       kind: "jev_nurture";
       classificationRunId: string;
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
+      thresholdVersion: number | null;
     }
   | { kind: "jev_no_action"; classificationRunId: string }
   /**
@@ -98,6 +105,7 @@ export type ClassificationBridgeResult =
       outcome: SmsClassificationDecision["outcome"];
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
+      thresholdVersion: number | null;
     }
   /**
    * new_lead resolved above its org threshold. The caller must call the
@@ -109,6 +117,7 @@ export type ClassificationBridgeResult =
       classificationRunId: string;
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
+      thresholdVersion: number | null;
     };
 
 /**
@@ -203,10 +212,13 @@ export async function classifyForDispatch(
       : null;
   const thresholdAtDecision =
     "minConfidence" in thresholdDecision ? thresholdDecision.minConfidence : null;
+  const thresholdVersion =
+    "thresholdVersion" in thresholdDecision ? thresholdDecision.thresholdVersion : null;
 
   const classificationRunId = await persistRun(supabase, input, decision, stateHash, {
     nativeConfidence,
     thresholdAtDecision,
+    thresholdVersion,
   }).catch((persistErr) => {
     reportError(persistErr, {
       tags: { surface: "sms_classification_persist" },
@@ -246,13 +258,14 @@ export async function classifyForDispatch(
     // property alone and flag it for a human instead of silently closing
     // it at a confidence the org hasn't configured to trust.
     return thresholdDecision.status === "auto_apply"
-      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, thresholdAtDecision }
+      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, thresholdAtDecision, thresholdVersion }
       : {
           kind: "jev_needs_decision",
           classificationRunId,
           outcome: decision.outcome,
           nativeConfidence,
           thresholdAtDecision,
+          thresholdVersion,
         };
   }
 
@@ -271,6 +284,7 @@ export async function classifyForDispatch(
         classificationRunId,
         nativeConfidence,
         thresholdAtDecision,
+        thresholdVersion,
       };
     }
     return {
@@ -281,6 +295,7 @@ export async function classifyForDispatch(
       eligibleForAutoAccept: false,
       nativeConfidence,
       thresholdAtDecision,
+      thresholdVersion,
     };
   }
 
@@ -300,6 +315,7 @@ export async function classifyForDispatch(
     route: resolved.route,
     nativeConfidence,
     thresholdAtDecision,
+    thresholdVersion,
     assembled: resolved.assembled,
     classificationRunId,
     eligibleForAutoAccept: thresholdDecision.status === "auto_apply",
@@ -338,7 +354,7 @@ async function persistRun(
   input: ClassificationBridgeInput,
   decision: SmsClassificationDecision,
   stateHash: string,
-  audit: { nativeConfidence: number | null; thresholdAtDecision: number | null },
+  audit: { nativeConfidence: number | null; thresholdAtDecision: number | null; thresholdVersion: number | null },
 ): Promise<string | null> {
   if (!input.conversationId || !input.inboundMessageId) return null;
   const row = {
@@ -366,6 +382,9 @@ async function persistRun(
       // for every outcome, not just new_lead/nurture.
       nativeConfidence: audit.nativeConfidence,
       thresholdAtDecision: audit.thresholdAtDecision,
+      // Root final-review P2: the threshold SETTINGS ROW's version, not
+      // just the numeric cutoff — two versions can share the same number.
+      thresholdVersion: audit.thresholdVersion,
     },
     resolved_outcome: decision.outcome,
     usage: decision.usage,

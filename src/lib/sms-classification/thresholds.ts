@@ -31,8 +31,12 @@ export function isThresholdableOutcome(
   return THRESHOLDABLE_OUTCOMES.has(outcome as ThresholdableOutcome);
 }
 
-/** Per-org, per-outcome cutoffs as loaded from `jev_outcome_thresholds`. */
-export type ThresholdMap = Partial<Record<ThresholdableOutcome, number>>;
+/** Per-org, per-outcome cutoffs as loaded from `jev_outcome_thresholds` —
+ *  carries the settings row's own `version` alongside the numeric cutoff
+ *  (root final-review P2, jev-root-final-review.md, 2026-09-20: the
+ *  version actually used at decision time must be recorded, not just the
+ *  numeric value, since two versions can share the same number). */
+export type ThresholdMap = Partial<Record<ThresholdableOutcome, { minConfidence: number; version: number }>>;
 
 export type ThresholdDecision =
   | {
@@ -40,12 +44,14 @@ export type ThresholdDecision =
       outcome: ThresholdableOutcome;
       confidence: number;
       minConfidence: number;
+      thresholdVersion: number;
     }
   | {
       status: "needs_decision";
       outcome: ThresholdableOutcome;
       confidence: number;
       minConfidence: number;
+      thresholdVersion: number;
     }
   | {
       status: "human_gated";
@@ -102,17 +108,18 @@ export function resolveThresholdDecision(
     return { status: "human_gated", reason: "invalid_confidence", outcome };
   }
 
-  const minConfidence = thresholds[outcome];
-  if (minConfidence === undefined || minConfidence === null) {
+  const configured = thresholds[outcome];
+  if (configured === undefined || configured === null) {
     // No configured cutoff for this org/outcome. Never default to 0 (which
     // would auto-apply everything) or 1 (which would silently block
     // everything) — surface this as its own human-gated reason instead.
     return { status: "human_gated", reason: "no_threshold_configured", outcome };
   }
+  const { minConfidence, version: thresholdVersion } = configured;
 
   return confidence >= minConfidence
-    ? { status: "auto_apply", outcome, confidence, minConfidence }
-    : { status: "needs_decision", outcome, confidence, minConfidence };
+    ? { status: "auto_apply", outcome, confidence, minConfidence, thresholdVersion }
+    : { status: "needs_decision", outcome, confidence, minConfidence, thresholdVersion };
 }
 
 /**
@@ -132,14 +139,14 @@ export async function loadOrgThresholdMap(
 ): Promise<ThresholdMap> {
   const { data, error } = await supabase
     .from("jev_outcome_thresholds")
-    .select("outcome, min_confidence")
+    .select("outcome, min_confidence, version")
     .eq("org_id", orgId);
   if (error || !data) return {};
 
   const map: ThresholdMap = {};
   for (const row of data) {
     if (isThresholdableOutcome(row.outcome as JevOutcome)) {
-      map[row.outcome as ThresholdableOutcome] = row.min_confidence;
+      map[row.outcome as ThresholdableOutcome] = { minConfidence: row.min_confidence, version: row.version };
     }
   }
   return map;

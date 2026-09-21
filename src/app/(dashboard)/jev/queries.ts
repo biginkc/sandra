@@ -17,6 +17,10 @@ export type JevQueueItem = {
   correctedOutcome: string | null;
   nativeConfidence: number | null;
   thresholdAtDecision: number | null;
+  /** The threshold SETTINGS ROW's version actually used at decision time
+   *  — root final-review P2: recorded separately from the numeric
+   *  cutoff, since two settings versions can share the same number. */
+  thresholdVersion: number | null;
   evidenceBody: string | null;
   createdAt: string;
   resolvedAt: string | null;
@@ -46,21 +50,24 @@ function formatAddress(properties: PropertyEmbed): string | null {
   return [properties.address, properties.city, properties.state].filter(Boolean).join(", ") || null;
 }
 
-function readDecisionAudit(decision: unknown): { nativeConfidence: number | null; thresholdAtDecision: number | null } {
+function readDecisionAudit(
+  decision: unknown,
+): { nativeConfidence: number | null; thresholdAtDecision: number | null; thresholdVersion: number | null } {
   if (!decision || typeof decision !== "object" || Array.isArray(decision)) {
-    return { nativeConfidence: null, thresholdAtDecision: null };
+    return { nativeConfidence: null, thresholdAtDecision: null, thresholdVersion: null };
   }
   const obj = decision as Record<string, unknown>;
   const nativeConfidence = typeof obj.nativeConfidence === "number" ? obj.nativeConfidence : null;
   const thresholdAtDecision = typeof obj.thresholdAtDecision === "number" ? obj.thresholdAtDecision : null;
-  return { nativeConfidence, thresholdAtDecision };
+  const thresholdVersion = typeof obj.thresholdVersion === "number" ? obj.thresholdVersion : null;
+  return { nativeConfidence, thresholdAtDecision, thresholdVersion };
 }
 
 const AI_DISPOSITION_REVIEW_SELECT =
   "id, property_id, conversation_id, disposition, status, corrected_disposition, corrected_at, corrected_by, correction_reason, dispo_applied, resolved_at, reviewed_by, human_reviewed_at, source_inbound_message_id, model:sms_classification_runs!classification_run_id(model, schema_version, policy_version, decision), created_at, properties(address, city, state), messages(body)";
 
 const JEV_LEAD_DECISION_SELECT =
-  "id, property_id, conversation_id, proposed_outcome, status, resolved_outcome, resolved_at, resolved_by, resolution_reason, human_reviewed_at, native_confidence, threshold_at_decision, source_inbound_message_id, model:sms_classification_runs!classification_run_id(model, schema_version, policy_version), created_at, properties(address, city, state), messages(body)";
+  "id, property_id, conversation_id, proposed_outcome, status, resolved_outcome, resolved_at, resolved_by, resolution_reason, human_reviewed_at, native_confidence, threshold_at_decision, threshold_version, source_inbound_message_id, model:sms_classification_runs!classification_run_id(model, schema_version, policy_version), created_at, properties(address, city, state), messages(body)";
 
 type AiDispositionReviewRow = {
   id: string;
@@ -100,6 +107,7 @@ function mapAiDispositionReview(row: AiDispositionReviewRow): JevQueueItem {
     correctedOutcome: row.corrected_disposition,
     nativeConfidence: audit.nativeConfidence,
     thresholdAtDecision: audit.thresholdAtDecision,
+    thresholdVersion: audit.thresholdVersion,
     evidenceBody: row.messages?.body ?? null,
     createdAt: row.created_at,
     resolvedAt: row.corrected_at ?? row.resolved_at,
@@ -128,6 +136,7 @@ type JevLeadDecisionRow = {
   human_reviewed_at: string | null;
   native_confidence: number | null;
   threshold_at_decision: number | null;
+  threshold_version: number | null;
   source_inbound_message_id: string;
   model: { model: string; schema_version: string; policy_version: string } | null;
   created_at: string;
@@ -150,6 +159,7 @@ function mapJevLeadDecision(row: JevLeadDecisionRow): JevQueueItem {
     correctedOutcome: row.status === "corrected" ? row.resolved_outcome : null,
     nativeConfidence: row.native_confidence,
     thresholdAtDecision: row.threshold_at_decision,
+    thresholdVersion: row.threshold_version,
     evidenceBody: row.messages?.body ?? null,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at,
@@ -194,13 +204,20 @@ function mapClassifierEvent(row: ClassifierEventRow): JevQueueItem {
     correctedOutcome: null,
     nativeConfidence: audit.nativeConfidence,
     thresholdAtDecision: null,
+    thresholdVersion: null,
     evidenceBody: row.messages?.body ?? null,
     createdAt: row.created_at,
     resolvedAt: null,
     resolvedBy: null,
     correctionReason: row.fallback_reason,
     humanReviewedAt: null,
-    actionable: false,
+    // Root final-review P1 #3: actionable via promotion
+    // (fn_promote_classifier_event_to_decision) — this row's `id` IS the
+    // classification_run_id (this select reads sms_classification_runs
+    // directly), which promoteClassifierEventToDecision takes. Never
+    // directly correctable (correctionTargets stays empty) — it must
+    // become a real jev_lead_decisions row first.
+    actionable: true,
     applicationState: row.fallback_reason ? "failed" : "not_applied",
     model: row.model,
     schemaVersion: row.schema_version,
@@ -209,18 +226,27 @@ function mapClassifierEvent(row: ClassifierEventRow): JevQueueItem {
   };
 }
 
+const NEEDS_DECISION_CLASSIFIER_EVENT_SELECT =
+  "id, property_id, conversation_id, resolved_outcome, fallback_reason, model, schema_version, policy_version, decision, created_at, properties(address, city, state), messages(body)";
+
+const NEEDS_DECISION_CLASSIFIER_EVENT_LIMIT = 100;
+
 /**
- * Pending items only — the Needs-a-decision queue. Below-threshold/
- * human-gated wrong_number/not_interested/opted_out/dnc live in
- * ai_disposition_reviews (status='pending'); new_lead/nurture live in
- * jev_lead_decisions (status='pending'). classifier_event rows (failures/
- * unclear) never reach this queue — there is no property state at risk
- * and no decision to choose between; they are audit-only, in Review Jev.
+ * Pending items — the Needs-a-decision queue. Below-threshold/human-gated
+ * wrong_number/not_interested/opted_out/dnc live in ai_disposition_reviews
+ * (status='pending'); new_lead/nurture live in jev_lead_decisions
+ * (status='pending'). classifier_event rows (Jev classify failures/
+ * unclear/bad_number, read directly from sms_classification_runs) DO
+ * belong here too (root final-review P1 #3: they must have an actionable
+ * human-resolution path, not be stranded audit-only) — but only until a
+ * human "promotes" them (fn_promote_classifier_event_to_decision), at
+ * which point they become a real jev_lead_decisions row and are excluded
+ * from this second query (already covered by the first).
  */
 export async function getNeedsDecisionQueue(): Promise<{ items: JevQueueItem[]; error: string | null }> {
   const supabase = await createClient();
 
-  const [reviewsRes, decisionsRes] = await Promise.all([
+  const [reviewsRes, decisionsRes, recentEventsRes] = await Promise.all([
     supabase
       .from("ai_disposition_reviews")
       .select(AI_DISPOSITION_REVIEW_SELECT)
@@ -231,22 +257,53 @@ export async function getNeedsDecisionQueue(): Promise<{ items: JevQueueItem[]; 
       .select(JEV_LEAD_DECISION_SELECT)
       .eq("status", "pending")
       .order("created_at", { ascending: true }),
+    supabase
+      .from("sms_classification_runs")
+      .select(NEEDS_DECISION_CLASSIFIER_EVENT_SELECT)
+      .eq("provider", "jev")
+      .or("fallback_reason.not.is.null,resolved_outcome.in.(unclear,bad_number)")
+      .order("created_at", { ascending: true })
+      .limit(NEEDS_DECISION_CLASSIFIER_EVENT_LIMIT),
   ]);
 
   // Query errors must not silently render as an empty queue — surface
   // them so the UI can say "could not load" instead of "nothing to do".
-  if (reviewsRes.error || decisionsRes.error) {
+  if (reviewsRes.error || decisionsRes.error || recentEventsRes.error) {
     return {
       items: [],
-      error: reviewsRes.error?.message ?? decisionsRes.error?.message ?? "Unknown query error",
+      error:
+        reviewsRes.error?.message ??
+        decisionsRes.error?.message ??
+        recentEventsRes.error?.message ??
+        "Unknown query error",
     };
+  }
+
+  const recentEventIds = (recentEventsRes.data ?? []).map((row) => (row as { id: string }).id);
+  // Exclude already-promoted events. PostgREST can't filter "no matching
+  // related row exists" directly, so this is a second small query against
+  // jev_lead_decisions' classification_run_id rather than a fabricated
+  // client-side join.
+  const promotedRunIds = new Set<string>();
+  if (recentEventIds.length > 0) {
+    const { data: promoted, error: promotedError } = await supabase
+      .from("jev_lead_decisions")
+      .select("classification_run_id")
+      .in("classification_run_id", recentEventIds);
+    if (promotedError) {
+      return { items: [], error: promotedError.message };
+    }
+    for (const row of promoted ?? []) promotedRunIds.add(row.classification_run_id);
   }
 
   const reviews = (reviewsRes.data ?? []).map((row) => mapAiDispositionReview(row as unknown as AiDispositionReviewRow));
   const decisions = (decisionsRes.data ?? []).map((row) => mapJevLeadDecision(row as unknown as JevLeadDecisionRow));
+  const unpromotedEvents = (recentEventsRes.data ?? [])
+    .filter((row) => !promotedRunIds.has((row as { id: string }).id))
+    .map((row) => mapClassifierEvent(row as unknown as ClassifierEventRow));
 
   return {
-    items: [...reviews, ...decisions].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    items: [...reviews, ...decisions, ...unpromotedEvents].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     error: null,
   };
 }
@@ -337,6 +394,81 @@ export async function getReviewJevData(page = 0): Promise<ReviewJevData> {
     (eventsRes.data?.length ?? 0) === REVIEW_PAGE_SIZE;
 
   return { items, summary: summarize(items), hasMore, error: null };
+}
+
+export type CorrectionHistoryEntry = {
+  id: string;
+  correctedOutcome: string | null;
+  previousOutcome: string | null;
+  proposedOutcome: string | null;
+  reason: string | null;
+  actorId: string | null;
+  createdAt: string;
+};
+
+const CORRECTION_EVENT_TYPE: Record<"ai_disposition_review" | "jev_lead_decision", string> = {
+  ai_disposition_review: "ai_disposition_review_corrected",
+  jev_lead_decision: "jev_lead_decision_corrected",
+};
+
+/**
+ * Root final-review P2: "existing lead_events okay if reliable and
+ * queried, not just reconstructable in theory" — every correction on a
+ * review/decision row already inserts its own `lead_events` row (WITHOUT
+ * the source_type/source_id idempotency key, deliberately, so a SECOND
+ * correction on the same row gets its own event instead of being
+ * deduplicated away). This actually queries that ledger and returns the
+ * full immutable sequence, oldest first — not merely the single most
+ * recent correction the review/decision row's own columns can show.
+ */
+export async function getCorrectionHistory(
+  propertyId: string,
+  source: "ai_disposition_review" | "jev_lead_decision",
+  id: string,
+): Promise<{ entries: CorrectionHistoryEntry[]; error: string | null }> {
+  const supabase = await createClient();
+  const idKey = source === "ai_disposition_review" ? "review_id" : "decision_id";
+  const { data, error } = await supabase
+    .from("lead_events")
+    .select("id, payload, actor_id, created_at")
+    .eq("property_id", propertyId)
+    .eq("event_type", CORRECTION_EVENT_TYPE[source])
+    .order("created_at", { ascending: true });
+  if (error) return { entries: [], error: error.message };
+
+  const entries = (data ?? [])
+    .filter((row) => {
+      const payload = row.payload as Record<string, unknown> | null;
+      return payload && String(payload[idKey]) === id;
+    })
+    .map((row) => {
+      const payload = row.payload as Record<string, unknown>;
+      return {
+        id: row.id,
+        correctedOutcome:
+          typeof payload.corrected_disposition === "string"
+            ? payload.corrected_disposition
+            : typeof payload.corrected_outcome === "string"
+              ? payload.corrected_outcome
+              : null,
+        previousOutcome:
+          typeof payload.previous_corrected_disposition === "string"
+            ? payload.previous_corrected_disposition
+            : typeof payload.previous_resolved_outcome === "string"
+              ? payload.previous_resolved_outcome
+              : null,
+        proposedOutcome:
+          typeof payload.original_disposition === "string"
+            ? payload.original_disposition
+            : typeof payload.proposed_outcome === "string"
+              ? payload.proposed_outcome
+              : null,
+        reason: typeof payload.reason === "string" ? payload.reason : null,
+        actorId: row.actor_id,
+        createdAt: row.created_at,
+      };
+    });
+  return { entries, error: null };
 }
 
 export function summarize(items: JevQueueItem[]): ReviewJevSummary {

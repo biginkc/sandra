@@ -98,7 +98,7 @@ type MockState = {
   }>;
   aiClaims: AiClaimRow[];
   aiClaimInsertError?: boolean;
-  jevOutcomeThresholds?: Array<{ outcome: string; min_confidence: number }>;
+  jevOutcomeThresholds?: Array<{ outcome: string; min_confidence: number; version?: number }>;
   jevLeadDecisionCalls: Array<{ rpc: string; args: Record<string, unknown> }>;
   contact: {
     first_name: string | null;
@@ -626,8 +626,12 @@ function createMockSupabase(state: MockState) {
         // Defaults to no configured thresholds — every outcome resolves
         // human_gated, matching this suite's existing expectation that
         // Jev routes never auto-apply without a test opting a threshold
-        // in via `state.jevOutcomeThresholds`.
-        return { data: state.jevOutcomeThresholds ?? [], error: null };
+        // in via `state.jevOutcomeThresholds`. `version` defaults to 1
+        // when a test omits it.
+        return {
+          data: (state.jevOutcomeThresholds ?? []).map((t) => ({ ...t, version: t.version ?? 1 })),
+          error: null,
+        };
       },
     };
     return query;
@@ -666,6 +670,24 @@ function createMockSupabase(state: MockState) {
         state.jevLeadDecisionCalls.push({ rpc: name, args });
         return Promise.resolve({
           data: { status: name === "fn_propose_jev_lead_decision" ? "proposed" : "confirmed", decisionId: "decision-1" },
+          error: null,
+        });
+      }
+      if (name === "fn_propose_deferred_ai_disposition_review") {
+        // Root final-review P1 #1: mirrors the real RPC's contract — marks
+        // needs_human_attention and creates a pending review, but never
+        // touches properties.outreach_dispo. This is the RPC dispatch.ts
+        // must call for a below-threshold Jev wrong_number/not_interested/
+        // opted_out decision instead of fn_apply_ai_disposition_with_review.
+        state.property.needs_human_attention = true;
+        state.aiDispoReviews.push({
+          conversationId: String(args.p_conversation_id),
+          disposition: String(args.p_disposition),
+          inboundMessageId: String(args.p_source_inbound_message_id),
+          reason: String(args.p_ai_reason),
+        });
+        return Promise.resolve({
+          data: { status: "proposed", reviewId: "review-jev-deferred" },
           error: null,
         });
       }
@@ -1535,7 +1557,7 @@ describe("dispatchAiResponse debounce", () => {
     const state = createMockState();
     state.config.classifier_provider = "jev";
     state.config.classifier_mode = "automatic";
-    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9 }];
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9, version: 4 }];
     const supabase = createMockSupabase(state);
     installSendMock(state);
     const originalFetch = globalThis.fetch;
@@ -1559,10 +1581,12 @@ describe("dispatchAiResponse debounce", () => {
       expect(sendSmsToContact).not.toHaveBeenCalled();
       // Recorded in the Review Jev audit trail as an already-applied
       // (system, no human) decision — not just the promotion itself.
+      // Root final-review P2: the threshold settings row's own version is
+      // recorded, not just the numeric cutoff.
       expect(state.jevLeadDecisionCalls).toEqual([
         expect.objectContaining({
           rpc: "fn_auto_apply_jev_lead_decision",
-          args: expect.objectContaining({ p_outcome: "new_lead", p_native_confidence: 0.95 }),
+          args: expect.objectContaining({ p_outcome: "new_lead", p_native_confidence: 0.95, p_threshold_version: 4 }),
         }),
       ]);
     } finally { vi.stubGlobal("fetch", originalFetch); }
@@ -1632,6 +1656,77 @@ describe("dispatchAiResponse debounce", () => {
       } finally { vi.stubGlobal("fetch", originalFetch); }
     },
   );
+
+  describe("Jev below-threshold wrong_number/not_interested/opted_out — root final-review P1 #1", () => {
+    it.each([
+      { choice: "opted_out", expectedDispo: "opted_out" },
+      { choice: "not_interested", expectedDispo: "not_interested" },
+      { choice: "wrong_number", expectedDispo: "wrong_number" },
+    ] as const)(
+      "leaves properties.outreach_dispo UNCHANGED and creates only a pending review for a below-threshold Jev $choice decision",
+      async ({ choice, expectedDispo }) => {
+        const state = createMockState();
+        state.config.classifier_provider = "jev";
+        state.config.classifier_mode = "automatic";
+        state.jevOutcomeThresholds = [{ outcome: choice, min_confidence: 0.95 }];
+        const supabase = createMockSupabase(state);
+        installSendMock(state);
+        const originalFetch = globalThis.fetch;
+        vi.stubGlobal("fetch", vi.fn(async () => ({
+          ok: true, status: 200,
+          json: async () => ({ answers: { outcome: { choice, confidence: 0.5 } } }),
+        })));
+        try {
+          const result = await dispatchAiResponse(supabase as never, {
+            contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+            inboundBody: "whatever the reply is",
+            inboundMessageId: `inbound-below-threshold-${choice}`, propertyId: PROPERTY_ID,
+          }, { anthropic: {} as never });
+          // The property's disposition state must be untouched — the
+          // whole point of the fix. Merely "pending review exists" is
+          // NOT sufficient proof; this asserts the actual column.
+          expect(state.property.outreach_dispo).toBeNull();
+          expect(state.property.needs_human_attention).toBe(true);
+          expect(state.aiDispoReviews).toEqual([
+            expect.objectContaining({ disposition: expectedDispo }),
+          ]);
+          // Below threshold means never auto-accepted and never sent —
+          // held for a human either way.
+          expect(result.outcome).not.toBe("sent");
+          expect(generateAiReply).not.toHaveBeenCalled();
+          expect(sendSmsToContact).not.toHaveBeenCalled();
+          // No suppression side effect either — a below-threshold Jev
+          // inference is a model guess, not the deterministic STOP path
+          // (unlike dnc's own Option B, which suppresses immediately).
+          expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
+        } finally { vi.stubGlobal("fetch", originalFetch); }
+      },
+    );
+
+    it("applies wrong_number/not_interested/opted_out immediately (unchanged legacy behavior) when AT/ABOVE the org's configured threshold", async () => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "opted_out", min_confidence: 0.5 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "opted_out", confidence: 0.99 } } }),
+      })));
+      try {
+        const result = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "STOP texting me",
+          inboundMessageId: "inbound-above-threshold-opted-out", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
+        expect(state.property.outreach_dispo).toBe("opted_out");
+        expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    });
+  });
 
   it("does not classify (stays fully skipped) when the org's AI responder is not active, even for a jev-classifier org", async () => {
     const state = createMockState();

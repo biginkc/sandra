@@ -9,11 +9,11 @@ import {
 } from "./thresholds";
 
 const THRESHOLDS: ThresholdMap = {
-  new_lead: 0.9,
-  wrong_number: 0.9,
-  not_interested: 0.95,
-  nurture: 0.95,
-  opted_out: 0.95,
+  new_lead: { minConfidence: 0.9, version: 1 },
+  wrong_number: { minConfidence: 0.9, version: 1 },
+  not_interested: { minConfidence: 0.95, version: 2 },
+  nurture: { minConfidence: 0.95, version: 1 },
+  opted_out: { minConfidence: 0.95, version: 1 },
 };
 
 describe("resolveThresholdDecision", () => {
@@ -27,6 +27,7 @@ describe("resolveThresholdDecision", () => {
       outcome: "not_interested",
       confidence: 0.95,
       minConfidence: 0.95,
+      thresholdVersion: 2,
     });
   });
 
@@ -40,6 +41,7 @@ describe("resolveThresholdDecision", () => {
       outcome: "not_interested",
       confidence: 0.949999,
       minConfidence: 0.95,
+      thresholdVersion: 2,
     });
   });
 
@@ -146,6 +148,7 @@ describe("resolveThresholdDecision", () => {
       outcome: "new_lead",
       confidence: 0,
       minConfidence: 0.9,
+      thresholdVersion: 1,
     });
   });
 
@@ -163,7 +166,10 @@ describe("resolveThresholdDecision", () => {
 });
 
 describe("loadOrgThresholdMap", () => {
-  function stubSupabase(rows: Array<{ outcome: string; min_confidence: number }> | null, error: { message: string } | null = null) {
+  function stubSupabase(
+    rows: Array<{ outcome: string; min_confidence: number; version: number }> | null,
+    error: { message: string } | null = null,
+  ) {
     const builder = {
       select: () => builder,
       eq: async () => ({ data: rows, error }),
@@ -171,22 +177,25 @@ describe("loadOrgThresholdMap", () => {
     return { from: () => builder } as any;
   }
 
-  it("builds a map from the org's threshold rows", async () => {
+  it("builds a map from the org's threshold rows, carrying each row's version", async () => {
     const supabase = stubSupabase([
-      { outcome: "new_lead", min_confidence: 0.9 },
-      { outcome: "nurture", min_confidence: 0.95 },
+      { outcome: "new_lead", min_confidence: 0.9, version: 3 },
+      { outcome: "nurture", min_confidence: 0.95, version: 1 },
     ]);
     const map = await loadOrgThresholdMap(supabase, "org-1");
-    expect(map).toEqual({ new_lead: 0.9, nurture: 0.95 });
+    expect(map).toEqual({
+      new_lead: { minConfidence: 0.9, version: 3 },
+      nurture: { minConfidence: 0.95, version: 1 },
+    });
   });
 
   it("drops non-thresholdable outcome rows defensively (dnc/unclear should never appear, but must not crash if they do)", async () => {
     const supabase = stubSupabase([
-      { outcome: "dnc", min_confidence: 0.5 },
-      { outcome: "not_interested", min_confidence: 0.95 },
+      { outcome: "dnc", min_confidence: 0.5, version: 1 },
+      { outcome: "not_interested", min_confidence: 0.95, version: 2 },
     ]);
     const map = await loadOrgThresholdMap(supabase, "org-1");
-    expect(map).toEqual({ not_interested: 0.95 });
+    expect(map).toEqual({ not_interested: { minConfidence: 0.95, version: 2 } });
   });
 
   it("returns an empty map (never throws) on a DB error", async () => {

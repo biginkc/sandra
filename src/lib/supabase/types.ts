@@ -2270,6 +2270,7 @@ export type Database = {
           status: string
           superseded_reason: string | null
           threshold_at_decision: number | null
+          threshold_version: number | null
         }
         Insert: {
           classification_run_id: string
@@ -2290,6 +2291,7 @@ export type Database = {
           status?: string
           superseded_reason?: string | null
           threshold_at_decision?: number | null
+          threshold_version?: number | null
         }
         Update: {
           classification_run_id?: string
@@ -2310,6 +2312,7 @@ export type Database = {
           status?: string
           superseded_reason?: string | null
           threshold_at_decision?: number | null
+          threshold_version?: number | null
         }
         Relationships: [
           {
@@ -6786,6 +6789,20 @@ export type Database = {
         }
         Returns: Json
       }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921005946_jev_deferred_disposition_proposal.sql — extends
+      // dnc's Option-B deferred-write pattern above to
+      // wrong_number/not_interested/opted_out (root final-review P1 #1).
+      fn_propose_deferred_ai_disposition_review: {
+        Args: {
+          p_ai_reason: string
+          p_conversation_id: string
+          p_disposition: string
+          p_property_id: string
+          p_source_inbound_message_id: string
+        }
+        Returns: Json
+      }
       // Hand-inserted 2026-09-20 for migration
       // 20260920225859_jev_outcome_thresholds.sql — unlike the
       // sms_classification_runs caveat above, this block IS a verbatim
@@ -6806,6 +6823,9 @@ export type Database = {
       // Hand-inserted 2026-09-20 for migration
       // 20260920235450_jev_lead_decisions.sql — same verbatim-excerpt
       // provenance as fn_set_jev_outcome_threshold above.
+      // Hand-patched 2026-09-21 for migration
+      // 20260921013636_jev_lead_decision_threshold_version.sql — added
+      // p_threshold_version (root final-review P2).
       fn_propose_jev_lead_decision: {
         Args: {
           p_classification_run_id: string
@@ -6819,6 +6839,7 @@ export type Database = {
           p_property_id: string
           p_source_inbound_message_id: string
           p_threshold_at_decision: number | null
+          p_threshold_version: number | null
         }
         Returns: Json
       }
@@ -6835,11 +6856,20 @@ export type Database = {
           p_property_id: string
           p_source_inbound_message_id: string
           p_threshold_at_decision: number | null
+          p_threshold_version: number | null
         }
         Returns: Json
       }
       fn_confirm_jev_lead_decision: {
         Args: { p_decision_id: string }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921012632_jev_classifier_event_resolution.sql (root
+      // final-review P1 #3: give classifier_event rows an actionable
+      // human-resolution path).
+      fn_promote_classifier_event_to_decision: {
+        Args: { p_classification_run_id: string }
         Returns: Json
       }
       fn_correct_jev_lead_decision: {
@@ -6870,6 +6900,24 @@ export type Database = {
       }
       fn_mark_jev_lead_decision_reviewed: {
         Args: { p_decision_id: string }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for the same migration —
+      // fn_begin_* RPCs added to close the TOCTOU gap: the caller must use
+      // the propertyId these return (never a client-supplied one) before
+      // calling fn_record_*_correction.
+      fn_begin_ai_disposition_review_correction: {
+        Args: {
+          p_corrected_disposition: string
+          p_review_id: string
+        }
+        Returns: Json
+      }
+      fn_begin_jev_lead_decision_correction: {
+        Args: {
+          p_corrected_outcome: string
+          p_decision_id: string
+        }
         Returns: Json
       }
       fn_record_ai_disposition_review_correction: {

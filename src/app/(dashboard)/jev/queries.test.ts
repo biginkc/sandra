@@ -1,6 +1,85 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { summarize, type JevQueueItem } from "./queries";
+const mocks = vi.hoisted(() => ({
+  aiDispositionReviews: [] as unknown[],
+  jevLeadDecisions: [] as unknown[],
+  classificationRuns: [] as unknown[],
+  promotedClassificationRunIds: [] as string[],
+  leadEvents: [] as unknown[],
+}));
+
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: async () => ({
+    from: (table: string) => {
+      if (table === "lead_events") {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                order: () => Promise.resolve({ data: mocks.leadEvents, error: null }),
+              }),
+            }),
+          }),
+        };
+      }
+      if (table === "ai_disposition_reviews") {
+        return {
+          select: () => ({
+            eq: () => ({
+              order: () => Promise.resolve({ data: mocks.aiDispositionReviews, error: null }),
+            }),
+          }),
+        };
+      }
+      if (table === "jev_lead_decisions") {
+        return {
+          select: (columns: string) => {
+            if (columns === "classification_run_id") {
+              return {
+                in: (_col: string, ids: string[]) =>
+                  Promise.resolve({
+                    data: mocks.promotedClassificationRunIds
+                      .filter((id) => ids.includes(id))
+                      .map((id) => ({ classification_run_id: id })),
+                    error: null,
+                  }),
+              };
+            }
+            return {
+              eq: () => ({
+                order: () => Promise.resolve({ data: mocks.jevLeadDecisions, error: null }),
+              }),
+            };
+          },
+        };
+      }
+      if (table === "sms_classification_runs") {
+        return {
+          select: () => ({
+            eq: () => ({
+              or: () => ({
+                order: () => ({
+                  limit: () => Promise.resolve({ data: mocks.classificationRuns, error: null }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    },
+  }),
+}));
+
+import { getCorrectionHistory, getNeedsDecisionQueue, summarize, type JevQueueItem } from "./queries";
+
+beforeEach(() => {
+  mocks.aiDispositionReviews = [];
+  mocks.jevLeadDecisions = [];
+  mocks.classificationRuns = [];
+  mocks.promotedClassificationRunIds = [];
+  mocks.leadEvents = [];
+});
 
 function item(overrides: Partial<JevQueueItem> = {}): JevQueueItem {
   return {
@@ -15,6 +94,7 @@ function item(overrides: Partial<JevQueueItem> = {}): JevQueueItem {
     correctedOutcome: null,
     nativeConfidence: 0.97,
     thresholdAtDecision: 0.95,
+    thresholdVersion: 1,
     evidenceBody: "not interested",
     createdAt: "2026-09-20T00:00:00.000Z",
     resolvedAt: "2026-09-20T00:05:00.000Z",
@@ -153,5 +233,108 @@ describe("summarize", () => {
       failedOrHeld: 1,
     });
     expect(summary.reviewedAgreement).toEqual({ not_interested: { agreed: 1, corrected: 1 } });
+  });
+});
+
+function classificationRunRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "run-1",
+    property_id: "prop-1",
+    conversation_id: "conv-1",
+    resolved_outcome: null,
+    fallback_reason: "provider_timeout",
+    model: "jev-1.13.0",
+    schema_version: "2",
+    policy_version: "2026-09-20-new-lead-review",
+    decision: {},
+    created_at: "2026-09-20T00:00:00.000Z",
+    properties: { address: "123 Main St", city: "Austin", state: "TX" },
+    messages: { body: null },
+    ...overrides,
+  };
+}
+
+describe("getNeedsDecisionQueue — root final-review P1 #3 (classifier_event resolution path)", () => {
+  it("surfaces an unpromoted classifier_event (classify failure/unclear) as an actionable item", async () => {
+    mocks.classificationRuns = [classificationRunRow()];
+    const { items, error } = await getNeedsDecisionQueue();
+    expect(error).toBeNull();
+    expect(items).toEqual([
+      expect.objectContaining({
+        id: "run-1",
+        source: "classifier_event",
+        actionable: true,
+        correctionTargets: [],
+      }),
+    ]);
+  });
+
+  it("excludes a classifier_event that has already been promoted to a real jev_lead_decisions row", async () => {
+    mocks.classificationRuns = [classificationRunRow({ id: "run-2" })];
+    mocks.promotedClassificationRunIds = ["run-2"];
+    const { items, error } = await getNeedsDecisionQueue();
+    expect(error).toBeNull();
+    expect(items).toEqual([]);
+  });
+
+  it("surfaces multiple classifier_events, only excluding the ones already promoted", async () => {
+    mocks.classificationRuns = [
+      classificationRunRow({ id: "run-3", created_at: "2026-09-20T00:00:00.000Z" }),
+      classificationRunRow({ id: "run-4", created_at: "2026-09-20T00:01:00.000Z" }),
+    ];
+    mocks.promotedClassificationRunIds = ["run-3"];
+    const { items } = await getNeedsDecisionQueue();
+    expect(items.map((i) => i.id)).toEqual(["run-4"]);
+  });
+});
+
+describe("getCorrectionHistory — root final-review P2 (full sequential correction history, not a single slot)", () => {
+  it("returns every correction event for the row, oldest first, not just the most recent", async () => {
+    mocks.leadEvents = [
+      {
+        id: "event-1",
+        payload: { review_id: "review-1", corrected_disposition: "nurture", reason: "first guess" },
+        actor_id: "user-1",
+        created_at: "2026-09-20T00:00:00.000Z",
+      },
+      {
+        id: "event-2",
+        payload: { review_id: "review-1", corrected_disposition: "not_interested", reason: "changed mind" },
+        actor_id: "user-2",
+        created_at: "2026-09-20T01:00:00.000Z",
+      },
+    ];
+    const { entries, error } = await getCorrectionHistory("prop-1", "ai_disposition_review", "review-1");
+    expect(error).toBeNull();
+    expect(entries).toEqual([
+      expect.objectContaining({ id: "event-1", correctedOutcome: "nurture", reason: "first guess", actorId: "user-1" }),
+      expect.objectContaining({ id: "event-2", correctedOutcome: "not_interested", reason: "changed mind", actorId: "user-2" }),
+    ]);
+  });
+
+  it("only returns events matching THIS review/decision id, not other rows' correction events", async () => {
+    mocks.leadEvents = [
+      { id: "event-1", payload: { review_id: "review-OTHER", corrected_disposition: "nurture" }, actor_id: null, created_at: "2026-09-20T00:00:00.000Z" },
+      { id: "event-2", payload: { review_id: "review-1", corrected_disposition: "opted_out" }, actor_id: null, created_at: "2026-09-20T01:00:00.000Z" },
+    ];
+    const { entries } = await getCorrectionHistory("prop-1", "ai_disposition_review", "review-1");
+    expect(entries.map((e) => e.id)).toEqual(["event-2"]);
+  });
+
+  it("reads decision_id (not review_id) for a jev_lead_decision source", async () => {
+    mocks.leadEvents = [
+      { id: "event-1", payload: { decision_id: "decision-1", corrected_outcome: "opted_out", reason: "phone said stop" }, actor_id: "user-1", created_at: "2026-09-20T00:00:00.000Z" },
+    ];
+    const { entries } = await getCorrectionHistory("prop-1", "jev_lead_decision", "decision-1");
+    expect(entries).toEqual([
+      expect.objectContaining({ correctedOutcome: "opted_out", reason: "phone said stop" }),
+    ]);
+  });
+
+  it("returns an empty list (never throws) when there are no corrections yet", async () => {
+    mocks.leadEvents = [];
+    const { entries, error } = await getCorrectionHistory("prop-1", "ai_disposition_review", "review-1");
+    expect(error).toBeNull();
+    expect(entries).toEqual([]);
   });
 });

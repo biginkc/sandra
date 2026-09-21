@@ -6,8 +6,15 @@ import { useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 import { callAction } from "@/lib/errors/call-action";
 
-import { confirmJevQueueItem, correctJevQueueItem, markJevQueueItemReviewed, type JevQueueSource } from "./actions";
-import type { JevQueueItem } from "./queries";
+import {
+  confirmJevQueueItem,
+  correctJevQueueItem,
+  fetchCorrectionHistory,
+  markJevQueueItemReviewed,
+  promoteClassifierEventToDecision,
+  type JevQueueSource,
+} from "./actions";
+import type { CorrectionHistoryEntry, JevQueueItem } from "./queries";
 
 const OUTCOME_LABELS: Record<string, string> = {
   new_lead: "New lead",
@@ -58,6 +65,9 @@ export function QueueItemCard({
   const [pending, startTransition] = useTransition();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<CorrectionHistoryEntry[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   // auto_accepted / system-confirmed rows are reviewable and correctable
   // (root direct-review finding, 2026-09-20) — canAct must not exclude
@@ -65,8 +75,13 @@ export function QueueItemCard({
   // act on: superseded because a newer decision or human action already
   // replaced this one, classifier_event because no decision was ever made.
   const canAct = item.actionable && item.status !== "superseded";
-  const needsMarkReviewed = canAct && isAutoAppliedUnactedOn(item);
-  const needsConfirm = canAct && item.status === "pending" && item.source !== "classifier_event";
+  const isClassifierEvent = item.source === "classifier_event";
+  const needsMarkReviewed = canAct && !isClassifierEvent && isAutoAppliedUnactedOn(item);
+  const needsConfirm = canAct && item.status === "pending" && !isClassifierEvent;
+  // Root final-review P1 #3: a classifier_event has no review/decision row
+  // to confirm/correct — it must first be "promoted" into a real,
+  // pending jev_lead_decisions row before any outcome can be chosen.
+  const needsPromote = canAct && isClassifierEvent;
 
   const confirm = () => {
     setError(null);
@@ -92,11 +107,43 @@ export function QueueItemCard({
     });
   };
 
+  const toggleHistory = () => {
+    if (historyOpen) {
+      setHistoryOpen(false);
+      return;
+    }
+    setHistoryOpen(true);
+    if (history !== null || item.source === "classifier_event") return;
+    setHistoryLoading(true);
+    startTransition(async () => {
+      const result = await fetchCorrectionHistory(
+        item.propertyId,
+        item.source as "ai_disposition_review" | "jev_lead_decision",
+        item.id,
+      );
+      setHistoryLoading(false);
+      if (result.ok) setHistory(result.data.entries);
+      else setError(result.error.message);
+    });
+  };
+
+  const promote = () => {
+    setError(null);
+    startTransition(async () => {
+      const result = await callAction(promoteClassifierEventToDecision(item.id), {
+        successMessage: "Ready to resolve — choose the actual outcome below",
+        fallbackMessage: "Could not start resolution",
+      });
+      if (result.ok) onResolved?.(result.data);
+      else setError(result.error.message);
+    });
+  };
+
   const correct = (target: string) => {
     setError(null);
     startTransition(async () => {
       const result = await callAction(
-        correctJevQueueItem(item.source as JevQueueSource, item.id, item.propertyId, target, null),
+        correctJevQueueItem(item.source as JevQueueSource, item.id, target, null),
         {
           successMessage: `Corrected to ${label(target)}`,
           fallbackMessage: "Could not correct",
@@ -130,7 +177,13 @@ export function QueueItemCard({
           <p className="text-xs text-muted-foreground">
             Jev proposed: <span className="font-medium">{label(item.proposedOutcome)}</span>
             {item.nativeConfidence !== null && <> · confidence {formatPercent(item.nativeConfidence)}</>}
-            {item.thresholdAtDecision !== null && <> (threshold {formatPercent(item.thresholdAtDecision)})</>}
+            {item.thresholdAtDecision !== null && (
+              <>
+                {" "}
+                (threshold {formatPercent(item.thresholdAtDecision)}
+                {item.thresholdVersion !== null && <> v{item.thresholdVersion}</>})
+              </>
+            )}
           </p>
           {(item.model || item.schemaVersion || item.policyVersion) && (
             <p className="text-[11px] text-muted-foreground">
@@ -139,10 +192,16 @@ export function QueueItemCard({
               {item.policyVersion && <> · rubric {item.policyVersion}</>}
             </p>
           )}
-          {item.evidenceBody && (
+          {item.evidenceBody ? (
             <blockquote className="mt-1 border-l-2 pl-2 text-xs italic text-muted-foreground">
               &ldquo;{item.evidenceBody}&rdquo;
             </blockquote>
+          ) : (
+            <p className="mt-1 text-xs italic text-muted-foreground" data-testid={`jev-missing-evidence-${item.id}`}>
+              No message evidence available
+              {item.correctionReason ? `: ${item.correctionReason}` : isClassifierEvent ? ": Jev's answer was unclear" : "."}
+              {" — a human outcome is still required."}
+            </p>
           )}
           <p className="mt-1 text-xs text-muted-foreground">
             Status: {item.status}
@@ -150,14 +209,44 @@ export function QueueItemCard({
             {item.humanReviewedAt && item.resolvedBy === null && " (marked reviewed by a human)"}
           </p>
           {item.correctedOutcome && (
-            <p className="text-xs text-muted-foreground" data-testid={`jev-correction-history-${item.id}`}>
-              Corrected from {label(item.proposedOutcome)} to {label(item.correctedOutcome)}
+            <p className="text-xs text-muted-foreground">
+              Currently: corrected from {label(item.proposedOutcome)} to {label(item.correctedOutcome)}
               {item.correctionReason && `: "${item.correctionReason}"`}
               {item.resolvedAt && ` (${new Date(item.resolvedAt).toLocaleString()})`}
             </p>
           )}
           {item.correctionReason && !item.correctedOutcome && (
             <p className="text-xs text-muted-foreground">Note: {item.correctionReason}</p>
+          )}
+          {item.source !== "classifier_event" && (
+            <>
+              <button
+                type="button"
+                className="mt-1 text-xs text-primary underline"
+                onClick={toggleHistory}
+                data-testid={`jev-correction-history-toggle-${item.id}`}
+              >
+                {historyOpen ? "Hide" : "Show"} correction history
+              </button>
+              {historyOpen && (
+                <div className="mt-1" data-testid={`jev-correction-history-${item.id}`}>
+                  {historyLoading ? (
+                    <p className="text-xs text-muted-foreground">Loading…</p>
+                  ) : history && history.length > 0 ? (
+                    <ol className="list-inside list-decimal space-y-0.5 text-xs text-muted-foreground">
+                      {history.map((entry) => (
+                        <li key={entry.id}>
+                          {entry.correctedOutcome ? label(entry.correctedOutcome) : "unknown"}
+                          {entry.reason && ` — "${entry.reason}"`} ({new Date(entry.createdAt).toLocaleString()})
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">No corrections recorded.</p>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
         {canAct && (
@@ -177,6 +266,11 @@ export function QueueItemCard({
                   data-testid={`jev-mark-reviewed-${item.id}`}
                 >
                   Mark reviewed
+                </Button>
+              )}
+              {needsPromote && (
+                <Button type="button" size="sm" disabled={pending} onClick={promote} data-testid={`jev-promote-${item.id}`}>
+                  Resolve
                 </Button>
               )}
               {item.correctionTargets.length > 0 && (

@@ -10,8 +10,10 @@ function stubSupabase(opts: {
   existingRunLookup?: { data: { id: string } | null; error: { message: string } | null };
   /** Rows `loadOrgThresholdMap` would read from jev_outcome_thresholds.
    *  Defaults to none configured — every outcome resolves human_gated
-   *  unless a test explicitly opts an outcome in. */
-  thresholds?: Array<{ outcome: string; min_confidence: number }>;
+   *  unless a test explicitly opts an outcome in. `version` defaults to 1
+   *  when omitted — most tests only care about the confidence comparison,
+   *  not which settings version was live. */
+  thresholds?: Array<{ outcome: string; min_confidence: number; version?: number }>;
 }) {
   const messagesBuilder = {
     select: () => messagesBuilder,
@@ -38,7 +40,10 @@ function stubSupabase(opts: {
   };
   const thresholdsBuilder = {
     select: () => thresholdsBuilder,
-    eq: async () => ({ data: opts.thresholds ?? [], error: null }),
+    eq: async () => ({
+      data: (opts.thresholds ?? []).map((t) => ({ ...t, version: t.version ?? 1 })),
+      error: null,
+    }),
   };
   return {
     from: (table: string) =>
@@ -193,6 +198,21 @@ describe("classifyForDispatch", () => {
     else throw new Error("expected jev_route");
   });
 
+  it("persists the threshold settings row's own version (root final-review P2) — not just the numeric cutoff — alongside the decision", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "opted_out", confidence: 0.95 } },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "opted_out", min_confidence: 0.95, version: 7 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    if (result.kind !== "jev_route") throw new Error("expected jev_route");
+    expect(result.thresholdAtDecision).toBe(0.95);
+    expect(result.thresholdVersion).toBe(7);
+  });
+
   it("marks a non-dnc automatic decision NOT eligible for auto-accept when below its configured threshold", async () => {
     const { fn } = stubFetch({
       answers: { outcome: { choice: "opted_out", confidence: 0.8 } },
@@ -240,6 +260,7 @@ describe("classifyForDispatch", () => {
       classificationRunId: "run-1",
       nativeConfidence: 0.95,
       thresholdAtDecision: 0.95,
+      thresholdVersion: 1,
     });
   });
 
@@ -259,6 +280,7 @@ describe("classifyForDispatch", () => {
       outcome: "nurture",
       nativeConfidence: 0.5,
       thresholdAtDecision: 0.95,
+      thresholdVersion: 1,
     });
   });
 
@@ -276,6 +298,7 @@ describe("classifyForDispatch", () => {
       outcome: "nurture",
       nativeConfidence: null,
       thresholdAtDecision: null,
+      thresholdVersion: null,
     });
   });
 
@@ -297,6 +320,7 @@ describe("classifyForDispatch", () => {
       classificationRunId: "run-1",
       nativeConfidence: 0.9,
       thresholdAtDecision: 0.9,
+      thresholdVersion: 1,
     });
   });
 

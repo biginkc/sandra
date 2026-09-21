@@ -8,6 +8,42 @@ import { reportError } from "@/lib/errors/report";
 import { qualifyProperty } from "@/lib/leads/qualify";
 import { createClient } from "@/lib/supabase/server";
 
+import { getCorrectionHistory, getNeedsDecisionQueue, type CorrectionHistoryEntry, type JevQueueItem } from "./queries";
+
+/**
+ * Root final-review finding (P1 #3, jev-root-final-review.md,
+ * 2026-09-20): the Needs-a-decision list fetched once at page load with
+ * no subscription/refetch — a fresh below-threshold decision arriving
+ * while the page stayed open was invisible until a manual reload. The
+ * client polls this action periodically; it's a thin, cacheable wrapper
+ * around the same server-only query the page itself uses at SSR time.
+ */
+export async function refetchNeedsDecisionQueue(): Promise<{ items: JevQueueItem[]; error: string | null }> {
+  return getNeedsDecisionQueue();
+}
+
+/**
+ * Root final-review P2: exposes the full, immutable, sequential
+ * correction history for one review/decision row (queried from
+ * lead_events, not merely the single current-value slot the row's own
+ * columns can show). classifier_event has no correction history — it's
+ * never a valid source here.
+ */
+export async function fetchCorrectionHistory(
+  propertyId: string,
+  source: "ai_disposition_review" | "jev_lead_decision",
+  id: string,
+): Promise<Result<{ entries: CorrectionHistoryEntry[] }>> {
+  try {
+    const { entries, error } = await getCorrectionHistory(propertyId, source, id);
+    if (error) return { ok: false, error: { code: "JEV_HISTORY_FAILED", message: error } };
+    return ok({ entries });
+  } catch (e) {
+    reportError(e, { tags: { surface: "jev_fetch_correction_history" }, extra: { source, id } });
+    return errFromUnknown(e, "JEV_HISTORY_FAILED");
+  }
+}
+
 export type JevQueueSource = "ai_disposition_review" | "jev_lead_decision" | "classifier_event";
 
 const FULL_TAXONOMY = ["new_lead", "wrong_number", "not_interested", "nurture", "opted_out", "dnc"] as const;
@@ -132,6 +168,48 @@ export async function markJevQueueItemReviewed(
   }
 }
 
+/**
+ * Root final-review finding (P1 #3, jev-root-final-review.md,
+ * 2026-09-20): a classifier_event row (Jev classify failure/unclear/
+ * bad_number, read directly from sms_classification_runs) had no
+ * actionable resolution path — it just sat read-only in Review Jev
+ * forever. This "promotes" it into a real, pending jev_lead_decisions
+ * row (fn_promote_classifier_event_to_decision,
+ * 20260921012632_jev_classifier_event_resolution.sql); from that point
+ * on it is an ordinary Needs-a-decision item, resolvable via
+ * confirmJevQueueItem/correctJevQueueItem with zero further changes.
+ * Idempotent — promoting the same event twice returns the existing
+ * decision rather than creating a duplicate.
+ */
+export async function promoteClassifierEventToDecision(
+  classificationRunId: string,
+): Promise<Result<{ status: string; decisionId: string }>> {
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+
+    const { data, error } = await supabase.rpc("fn_promote_classifier_event_to_decision", {
+      p_classification_run_id: classificationRunId,
+    });
+    if (error) {
+      return { ok: false, error: { code: "JEV_PROMOTE_FAILED", message: error.message } };
+    }
+    const result = data as { status?: string; decisionId?: string } | null;
+    if (!result?.status || !result.decisionId) {
+      return { ok: false, error: { code: "JEV_PROMOTE_FAILED", message: "Unexpected response" } };
+    }
+    revalidatePath("/jev/needs-decision");
+    revalidatePath("/jev/review");
+    return ok({ status: result.status, decisionId: result.decisionId });
+  } catch (e) {
+    reportError(e, { tags: { surface: "jev_promote_classifier_event" }, extra: { classificationRunId } });
+    return errFromUnknown(e, "JEV_PROMOTE_FAILED");
+  }
+}
+
 const CORRECTION_ERROR_MESSAGES: Record<string, string> = {
   STALE_STATE: "This lead changed since Jev made this decision. Reload and try again.",
   DNC_LOCKED: "This property is permanently locked and cannot be promoted.",
@@ -159,11 +237,22 @@ function friendlyCorrectionError(message: string): string {
  * audit trail. Never unsuppresses on a positive correction — the
  * restricted direct-SQL targets never touch consent_events, and the
  * sanctioned operations only ever ADD suppression, never remove it.
+ *
+ * No propertyId parameter: the caller never supplies one. For the
+ * sanctioned-operation path, fn_begin_*_correction locks the review/
+ * decision row, re-validates it hasn't gone stale since Jev decided
+ * (root final-review P1 #2), and returns the property id FROM THAT
+ * LOCKED ROW — that is the only id qualifyProperty/setOutreachDispo ever
+ * see here, closing the wrong-id/TOCTOU gap a caller-supplied id would
+ * open. fn_record_*_correction then re-verifies the ACTUAL resulting
+ * property state before recording, so a failed or short-circuited
+ * sanctioned op can never be recorded as a successful correction, and a
+ * record-RPC failure is reported as a real failure, not silently
+ * swallowed as success ("truthful success only after audit is durable").
  */
 export async function correctJevQueueItem(
   source: JevQueueSource,
   id: string,
-  propertyId: string,
   correctedOutcome: string,
   reason: string | null,
 ): Promise<Result<{ status: string; resolvedOutcome: string }>> {
@@ -203,10 +292,26 @@ export async function correctJevQueueItem(
       return ok({ status: result.status, resolvedOutcome });
     }
 
-    // new_lead (ai_disposition_review only) / opted_out / dnc: apply via
-    // the sanctioned operation first, then record.
+    // new_lead (ai_disposition_review only) / opted_out / dnc: lock and
+    // validate the row first, deriving the authoritative property id —
+    // never a caller-supplied one — before running the sanctioned op.
+    const beginRpcName = source === "ai_disposition_review" ? "fn_begin_ai_disposition_review_correction" : "fn_begin_jev_lead_decision_correction";
+    const beginArgs =
+      source === "ai_disposition_review"
+        ? { p_review_id: id, p_corrected_disposition: correctedOutcome }
+        : { p_decision_id: id, p_corrected_outcome: correctedOutcome };
+    const { data: beginData, error: beginError } = await supabase.rpc(beginRpcName, beginArgs);
+    if (beginError) {
+      return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: friendlyCorrectionError(beginError.message) } };
+    }
+    const beginResult = beginData as { propertyId?: string } | null;
+    const authoritativePropertyId = beginResult?.propertyId;
+    if (!authoritativePropertyId) {
+      return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: "Unexpected response" } };
+    }
+
     if (correctedOutcome === "new_lead") {
-      const qualifyOutcome = await qualifyProperty(supabase, propertyId, user.id);
+      const qualifyOutcome = await qualifyProperty(supabase, authoritativePropertyId, user.id);
       if (qualifyOutcome.status === "failed") {
         const message = qualifyOutcome.message.includes("DNC_LOCKED")
           ? "This property is permanently locked and cannot be promoted."
@@ -217,10 +322,12 @@ export async function correctJevQueueItem(
         return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: "Property not found." } };
       }
       // "qualified" or "already_qualified" (idempotent replay) both mean
-      // the property is now (or already was) new_lead — proceed to record.
+      // the property is now (or already was) new_lead — proceed to
+      // record, which re-verifies this against the property row itself
+      // rather than trusting this status string.
     } else {
       // opted_out or dnc.
-      const dispoResult = await setOutreachDispo(propertyId, correctedOutcome);
+      const dispoResult = await setOutreachDispo(authoritativePropertyId, correctedOutcome);
       if (!dispoResult.ok) {
         return { ok: false, error: { code: "JEV_CORRECTION_FAILED", message: dispoResult.error } };
       }
@@ -234,15 +341,25 @@ export async function correctJevQueueItem(
     const { data: recordData, error: recordError } = await supabase.rpc(recordRpcName, recordArgs);
     if (recordError) {
       // The sanctioned operation already succeeded — the property is
-      // correctly updated. Only the audit record failed; log it but
-      // don't tell the operator the correction itself failed.
+      // correctly updated — but the audit record failed. Report this
+      // as a genuine failure: an unrecorded correction is not a
+      // successful one (root final-review P1 #2: "truthful success only
+      // after audit is durable"). The operator must retry; retrying is
+      // safe because fn_record_*_correction re-verifies the actual
+      // property state rather than trusting a prior claim.
       reportError(new Error(recordError.message), {
         tags: { surface: "jev_correction_record_after_sanctioned_op" },
         extra: { source, id, correctedOutcome },
       });
       revalidatePath("/jev/needs-decision");
       revalidatePath("/jev/review");
-      return ok({ status: "corrected", resolvedOutcome: correctedOutcome });
+      return {
+        ok: false,
+        error: {
+          code: "JEV_CORRECTION_RECORD_FAILED",
+          message: "The correction was applied to the property, but recording it failed. Try again to record it.",
+        },
+      };
     }
     const recordResult = recordData as { status?: string } | null;
     revalidatePath("/jev/needs-decision");
