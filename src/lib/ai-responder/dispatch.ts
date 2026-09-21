@@ -503,6 +503,15 @@ async function classifyAndHandleNonRouteOutcomes(
   if (classification.kind === "jev_nurture") {
     const nurtureResult = await setOutreachDispoNurture(supabase, input.propertyId);
     if (nurtureResult.ok) {
+      await autoApplyJevLeadDecision(supabase, {
+        propertyId: input.propertyId,
+        conversationId: input.conversationId,
+        inboundMessageId: input.inboundMessageId,
+        classificationRunId: classification.classificationRunId,
+        outcome: "nurture",
+        nativeConfidence: classification.nativeConfidence,
+        thresholdAtDecision: classification.thresholdAtDecision,
+      });
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
@@ -537,6 +546,17 @@ async function classifyAndHandleNonRouteOutcomes(
     // property for a human, same treatment as every other escalation path
     // in this function.
     const reason = `jev_below_threshold:${classification.outcome}`;
+    if (classification.outcome === "nurture") {
+      await proposeJevLeadDecision(supabase, {
+        propertyId: input.propertyId,
+        conversationId: input.conversationId,
+        inboundMessageId: input.inboundMessageId,
+        classificationRunId: classification.classificationRunId,
+        outcome: "nurture",
+        nativeConfidence: classification.nativeConfidence,
+        thresholdAtDecision: classification.thresholdAtDecision,
+      });
+    }
     await markPropertyNeedsAttention(supabase, input.propertyId, reason);
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
@@ -556,6 +576,15 @@ async function classifyAndHandleNonRouteOutcomes(
       "system:jev_auto_promote",
     );
     if (qualifyOutcome.status === "qualified" || qualifyOutcome.status === "already_qualified") {
+      await autoApplyJevLeadDecision(supabase, {
+        propertyId: input.propertyId,
+        conversationId: input.conversationId,
+        inboundMessageId: input.inboundMessageId,
+        classificationRunId: classification.classificationRunId,
+        outcome: "new_lead",
+        nativeConfidence: classification.nativeConfidence,
+        thresholdAtDecision: classification.thresholdAtDecision,
+      });
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
@@ -725,6 +754,21 @@ async function resolveAndApplyRoute(
 
   switch (route.kind) {
     case "escalate":
+      // A Jev-classified new_lead below its org threshold also gets a
+      // real jev_lead_decisions row (Needs-a-decision queue), not just
+      // the generic attention flag — legacy Claude's own "needs_review"
+      // escalate reasons have no Jev decision to record and skip this.
+      if (classification.kind === "jev_route" && input.inboundMessageId) {
+        await proposeJevLeadDecision(supabase, {
+          propertyId: input.propertyId,
+          conversationId: input.conversationId,
+          inboundMessageId: input.inboundMessageId,
+          classificationRunId: classification.classificationRunId,
+          outcome: "new_lead",
+          nativeConfidence: classification.nativeConfidence,
+          thresholdAtDecision: classification.thresholdAtDecision,
+        });
+      }
       await markPropertyNeedsAttention(
         supabase,
         input.propertyId,
@@ -1259,6 +1303,81 @@ async function setResponderDispo(
  * time this runs, so failing loudly here would be a worse outcome than
  * just falling back to the human-review path.
  */
+/**
+ * Records a below-threshold/human-gated new_lead or nurture decision in
+ * jev_lead_decisions (the Needs-a-decision queue for these two outcomes
+ * — see 20260920235450_jev_lead_decisions.sql). Best-effort: the caller's
+ * own markPropertyNeedsAttention already surfaces this on the property
+ * regardless, so a failed insert here is logged, not escalated as a
+ * bigger failure.
+ */
+async function proposeJevLeadDecision(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    conversationId: string | null | undefined;
+    inboundMessageId: string | null | undefined;
+    classificationRunId: string;
+    outcome: "new_lead" | "nurture";
+    nativeConfidence: number | null;
+    thresholdAtDecision: number | null;
+  },
+): Promise<void> {
+  if (!args.conversationId || !args.inboundMessageId) return;
+  const { error } = await supabase.rpc("fn_propose_jev_lead_decision", {
+    p_property_id: args.propertyId,
+    p_conversation_id: args.conversationId,
+    p_source_inbound_message_id: args.inboundMessageId,
+    p_classification_run_id: args.classificationRunId,
+    p_outcome: args.outcome,
+    p_native_confidence: args.nativeConfidence,
+    p_threshold_at_decision: args.thresholdAtDecision,
+  });
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "jev_lead_decision_propose" },
+      extra: { propertyId: args.propertyId, outcome: args.outcome },
+    });
+  }
+}
+
+/**
+ * Records an already-applied (auto-accepted) new_lead or nurture
+ * decision, for the Review Jev audit view. Called AFTER the real effect
+ * (qualifyProperty / setOutreachDispoNurture) already succeeded — same
+ * "effect first, record second" ordering as maybeAutoAcceptJevReview.
+ * Best-effort for the same reason: the effect already landed.
+ */
+async function autoApplyJevLeadDecision(
+  supabase: SupabaseClient<Database>,
+  args: {
+    propertyId: string;
+    conversationId: string | null | undefined;
+    inboundMessageId: string | null | undefined;
+    classificationRunId: string;
+    outcome: "new_lead" | "nurture";
+    nativeConfidence: number | null;
+    thresholdAtDecision: number | null;
+  },
+): Promise<void> {
+  if (!args.conversationId || !args.inboundMessageId) return;
+  const { error } = await supabase.rpc("fn_auto_apply_jev_lead_decision", {
+    p_property_id: args.propertyId,
+    p_conversation_id: args.conversationId,
+    p_source_inbound_message_id: args.inboundMessageId,
+    p_classification_run_id: args.classificationRunId,
+    p_outcome: args.outcome,
+    p_native_confidence: args.nativeConfidence,
+    p_threshold_at_decision: args.thresholdAtDecision,
+  });
+  if (error) {
+    reportError(new Error(error.message), {
+      tags: { surface: "jev_lead_decision_auto_apply" },
+      extra: { propertyId: args.propertyId, outcome: args.outcome },
+    });
+  }
+}
+
 async function maybeAutoAcceptJevReview(
   supabase: SupabaseClient<Database>,
   inboundMessageId: string,

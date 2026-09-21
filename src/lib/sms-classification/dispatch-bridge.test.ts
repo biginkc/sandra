@@ -79,7 +79,16 @@ describe("classifyForDispatch", () => {
     const result = await classifyForDispatch(stubSupabase({}), baseInput,
       { classifierProvider: "jev", classifierMode: mode }, { fetch: fn, typesafeApiKey: "k" });
     if (mode === "shadow") expect(result).toEqual({ kind: "use_legacy", classificationRunId: "run-1" });
-    else expect(result).toMatchObject({ kind: "jev_route", eligibleForAutoAccept: false, route: { kind: "escalate", reason: "model:call_request" } });
+    else {
+      expect(result).toMatchObject({ kind: "jev_route", eligibleForAutoAccept: false, route: { kind: "escalate", reason: "model:call_request" } });
+      // No threshold configured for new_lead in this org — still records
+      // the real measured confidence, not null, even though there was
+      // nothing to compare it against (thresholdAtDecision stays null).
+      if (result.kind === "jev_route") {
+        expect(result.nativeConfidence).toBe(1);
+        expect(result.thresholdAtDecision).toBeNull();
+      }
+    }
   });
 
   beforeEach(() => vi.clearAllMocks());
@@ -226,7 +235,12 @@ describe("classifyForDispatch", () => {
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
     );
-    expect(result).toEqual({ kind: "jev_nurture", classificationRunId: "run-1" });
+    expect(result).toEqual({
+      kind: "jev_nurture",
+      classificationRunId: "run-1",
+      nativeConfidence: 0.95,
+      thresholdAtDecision: 0.95,
+    });
   });
 
   it("returns jev_needs_decision (not jev_nurture) when nurture is below its configured threshold", async () => {
@@ -243,6 +257,8 @@ describe("classifyForDispatch", () => {
       kind: "jev_needs_decision",
       classificationRunId: "run-1",
       outcome: "nurture",
+      nativeConfidence: 0.5,
+      thresholdAtDecision: 0.95,
     });
   });
 
@@ -258,6 +274,8 @@ describe("classifyForDispatch", () => {
       kind: "jev_needs_decision",
       classificationRunId: "run-1",
       outcome: "nurture",
+      nativeConfidence: null,
+      thresholdAtDecision: null,
     });
   });
 
@@ -274,7 +292,12 @@ describe("classifyForDispatch", () => {
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
     );
-    expect(result).toEqual({ kind: "jev_promote_new_lead", classificationRunId: "run-1" });
+    expect(result).toEqual({
+      kind: "jev_promote_new_lead",
+      classificationRunId: "run-1",
+      nativeConfidence: 0.9,
+      thresholdAtDecision: 0.9,
+    });
   });
 
   it("stays on the existing escalate route (not jev_promote_new_lead) when new_lead is below its configured threshold", async () => {

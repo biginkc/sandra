@@ -68,8 +68,19 @@ export type ClassificationBridgeResult =
       /** dnc always stays pending regardless of mode — see the DB
        *  constraint in 20260920120000_sms_classification_runs.sql. */
       eligibleForAutoAccept: boolean;
+      /** Native confidence + the threshold compared against it (null when
+       *  not thresholdable, e.g. dnc). Carried through so a below-threshold
+       *  new_lead escalate can still be recorded in jev_lead_decisions with
+       *  the real numbers, not just a generic attention flag. */
+      nativeConfidence: number | null;
+      thresholdAtDecision: number | null;
     }
-  | { kind: "jev_nurture"; classificationRunId: string }
+  | {
+      kind: "jev_nurture";
+      classificationRunId: string;
+      nativeConfidence: number | null;
+      thresholdAtDecision: number | null;
+    }
   | { kind: "jev_no_action"; classificationRunId: string }
   /**
    * Outcome resolved but is below its org threshold, missing/invalid
@@ -77,22 +88,28 @@ export type ClassificationBridgeResult =
    * disposition-review infra to fall back on (currently only `nurture`;
    * `wrong_number`/`not_interested`/`opted_out` stay on `jev_route` with
    * `eligibleForAutoAccept: false`, which already lands them in the
-   * existing pending-review path; `new_lead` below threshold stays on
-   * the existing `jev_route` escalate path unchanged). The caller must
-   * NOT apply any effect for this outcome — only mark the property for
-   * human attention.
+   * existing pending-review path). The caller must NOT apply any effect
+   * for this outcome — only propose a `jev_lead_decisions` row (nurture)
+   * or mark the property for human attention.
    */
   | {
       kind: "jev_needs_decision";
       classificationRunId: string;
       outcome: SmsClassificationDecision["outcome"];
+      nativeConfidence: number | null;
+      thresholdAtDecision: number | null;
     }
   /**
    * new_lead resolved above its org threshold. The caller must call the
    * sanctioned promotion primitive (`qualifyProperty`) — never appointment
    * booking — and must not also route this through `resolveResponderOutcome`.
    */
-  | { kind: "jev_promote_new_lead"; classificationRunId: string };
+  | {
+      kind: "jev_promote_new_lead";
+      classificationRunId: string;
+      nativeConfidence: number | null;
+      thresholdAtDecision: number | null;
+    };
 
 /**
  * Runs Jev alongside the caller's already-computed legacy decision
@@ -200,6 +217,22 @@ export async function classifyForDispatch(
   // with no deployment.
   const thresholds = await loadOrgThresholdMap(supabase, input.orgId);
   const thresholdDecision = resolveThresholdDecision(decision, thresholds);
+  // Record the actual measured confidence whenever it's a valid number —
+  // even when human-gated for a reason unrelated to the confidence value
+  // itself (e.g. no_threshold_configured) — so the audit trail isn't
+  // reported as "no confidence" just because there was nothing to
+  // compare it against. thresholdAtDecision, by contrast, is genuinely
+  // absent (not just unused) whenever thresholdDecision didn't compare
+  // against one.
+  const nativeConfidence =
+    typeof decision.outcomeConfidence === "number" &&
+    Number.isFinite(decision.outcomeConfidence) &&
+    decision.outcomeConfidence >= 0 &&
+    decision.outcomeConfidence <= 1
+      ? decision.outcomeConfidence
+      : null;
+  const thresholdAtDecision =
+    "minConfidence" in thresholdDecision ? thresholdDecision.minConfidence : null;
 
   if (resolved.kind === "nurture") {
     // Unlike wrong_number/not_interested/opted_out below, nurture has no
@@ -209,20 +242,32 @@ export async function classifyForDispatch(
     // property alone and flag it for a human instead of silently closing
     // it at a confidence the org hasn't configured to trust.
     return thresholdDecision.status === "auto_apply"
-      ? { kind: "jev_nurture", classificationRunId }
-      : { kind: "jev_needs_decision", classificationRunId, outcome: decision.outcome };
+      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, thresholdAtDecision }
+      : {
+          kind: "jev_needs_decision",
+          classificationRunId,
+          outcome: decision.outcome,
+          nativeConfidence,
+          thresholdAtDecision,
+        };
   }
 
   if (resolved.assembled.action === "escalate") {
-    // new_lead. Below-threshold/human-gated new_lead is unchanged from
-    // today — it already only ever escalates to human attention via the
-    // existing `jev_route` handling in dispatch.ts (eligibleForAutoAccept
-    // is always false for `escalate`), so there is nothing to newly gate
-    // in that direction. Above-threshold is the net-new capability: the
-    // caller must promote via `qualifyProperty`, never through
-    // `resolveResponderOutcome`/appointment booking.
+    // new_lead. Above-threshold is the net-new capability: the caller
+    // must promote via `qualifyProperty`, never through
+    // `resolveResponderOutcome`/appointment booking. Below-threshold
+    // still escalates via the existing `jev_route` handling in
+    // dispatch.ts (eligibleForAutoAccept is always false for `escalate`),
+    // but now carries nativeConfidence/thresholdAtDecision so the caller
+    // can also propose a real jev_lead_decisions row instead of only a
+    // generic attention flag.
     if (thresholdDecision.status === "auto_apply") {
-      return { kind: "jev_promote_new_lead", classificationRunId };
+      return {
+        kind: "jev_promote_new_lead",
+        classificationRunId,
+        nativeConfidence,
+        thresholdAtDecision,
+      };
     }
     return {
       kind: "jev_route",
@@ -230,6 +275,8 @@ export async function classifyForDispatch(
       assembled: resolved.assembled,
       classificationRunId,
       eligibleForAutoAccept: false,
+      nativeConfidence,
+      thresholdAtDecision,
     };
   }
 
@@ -247,6 +294,8 @@ export async function classifyForDispatch(
   return {
     kind: "jev_route",
     route: resolved.route,
+    nativeConfidence,
+    thresholdAtDecision,
     assembled: resolved.assembled,
     classificationRunId,
     eligibleForAutoAccept: thresholdDecision.status === "auto_apply",

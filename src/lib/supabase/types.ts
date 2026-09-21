@@ -6786,11 +6786,15 @@ export type Database = {
         Args: {
           p_classification_run_id: string
           p_conversation_id: string
-          p_native_confidence: number
+          // Hand-widened from the generator's plain `number`: the SQL
+          // parameters accept NULL (e.g. missing/invalid native
+          // confidence, or dnc/unclear having no threshold at all), and
+          // dispatch.ts genuinely needs to pass null in those cases.
+          p_native_confidence: number | null
           p_outcome: string
           p_property_id: string
           p_source_inbound_message_id: string
-          p_threshold_at_decision: number
+          p_threshold_at_decision: number | null
         }
         Returns: Json
       }
@@ -6798,11 +6802,15 @@ export type Database = {
         Args: {
           p_classification_run_id: string
           p_conversation_id: string
-          p_native_confidence: number
+          // Hand-widened from the generator's plain `number`: the SQL
+          // parameters accept NULL (e.g. missing/invalid native
+          // confidence, or dnc/unclear having no threshold at all), and
+          // dispatch.ts genuinely needs to pass null in those cases.
+          p_native_confidence: number | null
           p_outcome: string
           p_property_id: string
           p_source_inbound_message_id: string
-          p_threshold_at_decision: number
+          p_threshold_at_decision: number | null
         }
         Returns: Json
       }

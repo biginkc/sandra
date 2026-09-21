@@ -99,6 +99,7 @@ type MockState = {
   aiClaims: AiClaimRow[];
   aiClaimInsertError?: boolean;
   jevOutcomeThresholds?: Array<{ outcome: string; min_confidence: number }>;
+  jevLeadDecisionCalls: Array<{ rpc: string; args: Record<string, unknown> }>;
   contact: {
     first_name: string | null;
     phone_1: string | null;
@@ -167,6 +168,7 @@ function createMockState(): MockState {
       system_prompt: "Reply briefly.",
     },
     aiClaims: [],
+    jevLeadDecisionCalls: [],
     smsClassificationRuns: [],
     contact: {
       first_name: "Sam",
@@ -660,6 +662,13 @@ function createMockSupabase(state: MockState) {
       throw new Error(`Unexpected table: ${table}`);
     },
     rpc(name: string, args: Record<string, unknown>) {
+      if (name === "fn_propose_jev_lead_decision" || name === "fn_auto_apply_jev_lead_decision") {
+        state.jevLeadDecisionCalls.push({ rpc: name, args });
+        return Promise.resolve({
+          data: { status: name === "fn_propose_jev_lead_decision" ? "proposed" : "confirmed", decisionId: "decision-1" },
+          error: null,
+        });
+      }
       if (name === "fn_propose_ai_dnc_suppression_review") {
         // Mirrors fn_propose_ai_dnc_suppression_review's real contract:
         // marks needs_human_attention, creates a pending review, but
@@ -1548,6 +1557,14 @@ describe("dispatchAiResponse debounce", () => {
       expect(state.property.needs_human_attention).toBe(false);
       expect(generateAiReply).not.toHaveBeenCalled();
       expect(sendSmsToContact).not.toHaveBeenCalled();
+      // Recorded in the Review Jev audit trail as an already-applied
+      // (system, no human) decision — not just the promotion itself.
+      expect(state.jevLeadDecisionCalls).toEqual([
+        expect.objectContaining({
+          rpc: "fn_auto_apply_jev_lead_decision",
+          args: expect.objectContaining({ p_outcome: "new_lead", p_native_confidence: 0.95 }),
+        }),
+      ]);
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
@@ -1574,6 +1591,14 @@ describe("dispatchAiResponse debounce", () => {
       expect(state.property.needs_human_attention).toBe(true);
       expect(generateAiReply).not.toHaveBeenCalled();
       expect(sendSmsToContact).not.toHaveBeenCalled();
+      // Below-threshold new_lead gets a real Needs-a-decision queue row,
+      // not just the generic attention flag.
+      expect(state.jevLeadDecisionCalls).toEqual([
+        expect.objectContaining({
+          rpc: "fn_propose_jev_lead_decision",
+          args: expect.objectContaining({ p_outcome: "new_lead", p_native_confidence: 0.6 }),
+        }),
+      ]);
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
@@ -1696,6 +1721,12 @@ describe("dispatchAiResponse debounce", () => {
       expect(state.property.outreach_dispo).toBe("nurture");
       expect(state.property.needs_human_attention).toBe(false);
       expect(generateAiReply).not.toHaveBeenCalled();
+      expect(state.jevLeadDecisionCalls).toEqual([
+        expect.objectContaining({
+          rpc: "fn_auto_apply_jev_lead_decision",
+          args: expect.objectContaining({ p_outcome: "nurture", p_native_confidence: 0.97 }),
+        }),
+      ]);
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
@@ -1721,6 +1752,12 @@ describe("dispatchAiResponse debounce", () => {
       expect(state.property.outreach_dispo).toBeNull();
       expect(state.property.needs_human_attention).toBe(true);
       expect(generateAiReply).not.toHaveBeenCalled();
+      expect(state.jevLeadDecisionCalls).toEqual([
+        expect.objectContaining({
+          rpc: "fn_propose_jev_lead_decision",
+          args: expect.objectContaining({ p_outcome: "nurture", p_native_confidence: 0.6 }),
+        }),
+      ]);
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
@@ -1747,6 +1784,14 @@ describe("dispatchAiResponse debounce", () => {
       expect(state.aiDispoReviews).toEqual([]);
       expect(generateAiReply).not.toHaveBeenCalled();
       expect(sendSmsToContact).not.toHaveBeenCalled();
+      // No threshold configured at all still gets a real queue row (not
+      // silently defaulted to auto-apply, not silently dropped either).
+      expect(state.jevLeadDecisionCalls).toEqual([
+        expect.objectContaining({
+          rpc: "fn_propose_jev_lead_decision",
+          args: expect.objectContaining({ p_outcome: "new_lead", p_native_confidence: 0.99 }),
+        }),
+      ]);
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
