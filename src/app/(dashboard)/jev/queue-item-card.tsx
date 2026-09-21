@@ -77,7 +77,20 @@ export function QueueItemCard({
   const canAct = item.actionable && item.status !== "superseded";
   const isClassifierEvent = item.source === "classifier_event";
   const needsMarkReviewed = canAct && !isClassifierEvent && isAutoAppliedUnactedOn(item);
-  const needsConfirm = canAct && item.status === "pending" && !isClassifierEvent;
+  // Fable review of 9cd4ec2b (jev-root-round15-fable-fixes.md), finding
+  // 3: a PROMOTED classifier event (proposed_outcome 'unclear'/
+  // 'bad_number' — a placeholder, never a real Jev decision) is not
+  // confirmable: fn_confirm_jev_lead_decision only accepts 'new_lead'/
+  // 'nurture' and would otherwise trip a raw DB constraint error. The
+  // human must choose an actual supported outcome via the correction
+  // picker below (always available — correctionTargets is the full
+  // taxonomy for every jev_lead_decision row).
+  const needsConfirm =
+    canAct &&
+    item.status === "pending" &&
+    !isClassifierEvent &&
+    item.proposedOutcome !== "unclear" &&
+    item.proposedOutcome !== "bad_number";
   // Root final-review P1 #3: a classifier_event has no review/decision row
   // to confirm/correct — it must first be "promoted" into a real,
   // pending jev_lead_decisions row before any outcome can be chosen.

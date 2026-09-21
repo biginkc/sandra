@@ -101,7 +101,16 @@ describe("fn_update_jev_automatic_classification — owner-only authorization (r
   });
 
   it("active owner: disabling atomically sets provider='legacy' and mode='shadow'", async () => {
+    // Fable review of 9cd4ec2b (jev-root-round15-fable-fixes.md), finding
+    // 2: trg_ai_responder_configs_classifier_cutover_guard now guards
+    // these two columns even for this test's own raw seed write — bypass
+    // it the same way the RPC's own internal write does (service_role),
+    // since this is trusted fixture setup, not the authorization path
+    // under test.
+    await db.query("set local role service_role");
+    await db.query("select set_config('request.jwt.claim.role', 'service_role', true)");
     await db.query("update public.ai_responder_configs set classifier_provider = 'jev', classifier_mode = 'automatic' where id = $1", [configId]);
+    await db.query("reset role");
     const userId = await makeMember({ role: "owner" });
     const result = await callUpdate(userId, { configId, enabled: false });
     expect(result).toEqual({ id: configId, classifierProvider: "legacy", classifierMode: "shadow" });
