@@ -6885,6 +6885,13 @@ export type Database = {
         }
         Returns: Json
       }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921060906_jev_automatic_classification_active_access_rpc.sql
+      // (root review of edbd7bfe, jev-root-round13-review.md, finding 1).
+      fn_update_jev_automatic_classification: {
+        Args: { p_config_id: string; p_enabled: boolean }
+        Returns: Json
+      }
       fn_confirm_jev_lead_decision: {
         Args: { p_decision_id: string }
         Returns: Json

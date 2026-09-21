@@ -94,10 +94,12 @@ export function AiResponderConfigForm({
         <h2 className="font-semibold">Use Jev automatic classification</h2>
         <p className="text-muted-foreground text-xs">
           One post-deployment cutover switch, not a gradual rollout. Enabled maps this
-          org to Jev + automatic decisioning (Jev classifies and applies new_lead/nurture
-          outcomes itself); disabled maps back to legacy + shadow (Claude classify+reply,
-          Jev only shadow-logs). Currently:{" "}
-          <span className="font-medium">
+          org to Jev + automatic decisioning: Jev classifies every inbound and applies
+          any above-threshold outcome itself (new_lead, wrong_number, not_interested,
+          nurture, opted_out) — DNC and unclear stay human-gated either way. Disabled
+          maps back to legacy + shadow (Claude classify+reply, Jev only shadow-logs).
+          Currently:{" "}
+          <span className="font-medium" data-testid="jev-automatic-current-state">
             {jevSaved ? "Jev automatic" : "legacy / shadow"}
           </span>
           .

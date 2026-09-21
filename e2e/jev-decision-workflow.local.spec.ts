@@ -24,7 +24,13 @@ import type { Database } from "../src/lib/supabase/types";
  *      NEXT_PUBLIC_SUPABASE_ANON_KEY=<local anon key from `supabase status`> \
  *      SUPABASE_SERVICE_ROLE_KEY=<local service key from `supabase status`> \
  *      MESSAGING_PROVIDER=mock ADDRESS_VERIFIER_PROVIDER=mock \
+ *      TYPESAFE_API_KEY=fake-typesafe-key-for-local-acceptance-only \
  *      npx next dev -p 3000
+ *      TYPESAFE_API_KEY only needs to be non-empty — the settings-switch
+ *      scenario below (root review of edbd7bfe, jev-root-round13-review.md,
+ *      finding 3) checks it's configured before allowing "enabled", but
+ *      never triggers a real classify call, so this fake value is never
+ *      actually sent to TypeSafe or any provider.
  *      MUST be port 3000 on `localhost` — see the allowedOrigins note
  *      below, not an arbitrary free port.
  *   4. npx playwright test --config=playwright.jev-local.config.ts
@@ -125,29 +131,43 @@ test.describe.serial("Jev decision workflow — local acceptance", () => {
     // synthetic local admin against a disposable stack the contract
     // doesn't cover, so it uses a different mechanism entirely rather
     // than adding a second call site for the guarded ones.
-    // Delete the membership first (FINAL_OWNER_GUARD blocks deleting an
-    // org's last owner membership, not the user row itself) so a leftover
-    // user from a prior run's afterAll failure never blocks this insert.
-    await client.query(
-      `delete from memberships where org_id = $1 and user_id in (select id from auth.users where email = $2)`,
-      [ORG_ID, ADMIN_EMAIL],
-    ).catch(() => {});
-    await client.query(`delete from auth.users where email = $1`, [ADMIN_EMAIL]);
-    userId = crypto.randomUUID();
-    await client.query(
-      `insert into auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at, confirmation_token, recovery_token, email_change_token_new, email_change)
-       values ($1, '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', $2, crypt($3, gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, now(), now(), '', '', '', '')`,
-      [userId, ADMIN_EMAIL, ADMIN_PASSWORD],
-    );
-    await client.query(
-      `insert into auth.identities (id, user_id, provider_id, identity_data, provider, last_sign_in_at, created_at, updated_at)
-       values (gen_random_uuid(), $1::uuid, $1::text, jsonb_build_object('sub', $1::text, 'email', $2::text), 'email', now(), now(), now())`,
-      [userId, ADMIN_EMAIL],
-    );
+    //
+    // Root review of edbd7bfe (jev-root-round13-review.md), finding 3:
+    // this admin is the SOLE member of the fixed, shared ORG_ID, so it is
+    // always the org's final owner — deleting it (the previous
+    // delete-then-recreate approach) always trips FINAL_OWNER_GUARD via
+    // the auth.users -> memberships cascade, and the surrounding
+    // membership-delete's `.catch(() => {})` only hid that the row never
+    // actually went away. Provision once, reuse thereafter: select an
+    // existing user by email, or create it if this is truly the first
+    // run. Never delete the final owner.
+    const { rows: existingAdmin } = await client.query(`select id from auth.users where email = $1`, [ADMIN_EMAIL]);
+    if (existingAdmin.length > 0) {
+      userId = existingAdmin[0].id;
+      await client.query(
+        `update auth.users set encrypted_password = crypt($2, gen_salt('bf')), updated_at = now() where id = $1`,
+        [userId, ADMIN_PASSWORD],
+      );
+    } else {
+      userId = crypto.randomUUID();
+      await client.query(
+        `insert into auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at, confirmation_token, recovery_token, email_change_token_new, email_change)
+         values ($1, '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', $2, crypt($3, gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, now(), now(), '', '', '', '')`,
+        [userId, ADMIN_EMAIL, ADMIN_PASSWORD],
+      );
+      await client.query(
+        `insert into auth.identities (id, user_id, provider_id, identity_data, provider, last_sign_in_at, created_at, updated_at)
+         values (gen_random_uuid(), $1::uuid, $1::text, jsonb_build_object('sub', $1::text, 'email', $2::text), 'email', now(), now(), now())`,
+        [userId, ADMIN_EMAIL],
+      );
+    }
 
     await client.query(`insert into organizations (id, name) values ($1, 'Jev Local Acceptance Org') on conflict (id) do nothing`, [ORG_ID]);
     await client.query(
-      `insert into memberships (org_id, user_id, role, access_status) values ($1, $2, 'owner', 'active') on conflict do nothing`,
+      `insert into memberships (org_id, user_id, role, access_status, deletion_prepared_at, access_expires_at)
+       values ($1, $2, 'owner', 'active', null, null)
+       on conflict (user_id, org_id) do update
+         set role = 'owner', access_status = 'active', deletion_prepared_at = null, access_expires_at = null`,
       [ORG_ID, userId],
     );
 
@@ -238,6 +258,18 @@ test.describe.serial("Jev decision workflow — local acceptance", () => {
       [ORG_ID, propertyStaleId, staleConvId, staleContactId],
     );
     await client.query("reset request.jwt.claim.sub");
+
+    // Root review of edbd7bfe (jev-root-round13-review.md), finding 3:
+    // settings-switch scenario's baseline. ai_responder_configs has one
+    // persistent row per org (not a per-run fixture this spec creates or
+    // deletes) — provision once, update it, never delete/recreate, so
+    // FINAL_OWNER_GUARD (a memberships-only guard) never enters into it
+    // and repeated runs stay idempotent regardless of which state a
+    // prior run's enable/disable left it in.
+    await client.query(
+      `update ai_responder_configs set classifier_provider = 'legacy', classifier_mode = 'shadow' where org_id = $1`,
+      [ORG_ID],
+    );
   });
 
   test.afterAll(async () => {
@@ -249,17 +281,13 @@ test.describe.serial("Jev decision workflow — local acceptance", () => {
       await client.query(`delete from properties where id in ($1, $2)`, [propertyNurtureId, propertyStaleId]);
     }
     await client.query(`delete from contacts where org_id = $1`, [ORG_ID]);
-    if (userId) {
-      // Best-effort: FINAL_OWNER_GUARD blocks deleting an org's last
-      // owner membership (this fixture's user is the only member of the
-      // shared, fixed SANDRA_ORG_ID in a from-scratch local stack), which
-      // in turn can block the user row. A fresh `supabase db reset
-      // --local` between runs is what actually resets this, same as
-      // every other fixture table here — leftover rows are harmless.
-      await client.query(`delete from memberships where org_id = $1 and user_id = $2`, [ORG_ID, userId]).catch(() => {});
-      await client.query(`delete from auth.identities where user_id = $1`, [userId]).catch(() => {});
-      await client.query(`delete from auth.users where id = $1`, [userId]).catch(() => {});
-    }
+    // Root review of edbd7bfe (jev-root-round13-review.md), finding 3:
+    // deliberately NOT deleting the admin user/membership here anymore —
+    // it's the org's final owner, so that delete always trips
+    // FINAL_OWNER_GUARD (previously hidden behind a `.catch(() => {})`
+    // that left the row in place anyway). beforeAll now reuses this same
+    // identity across runs instead of recreating it, so leaving it here
+    // is correct, not merely "harmless leftover."
     await client.end();
   });
 
@@ -300,16 +328,25 @@ test.describe.serial("Jev decision workflow — local acceptance", () => {
     const row = page.locator('[data-testid="jev-threshold-row-wrong_number"]');
     await expect(row).toBeVisible();
 
-    // Baseline: whatever version this row starts at (app bootstrap seeds
-    // every outcome at v1 by default — don't assume that, read it).
+    // Baseline: whatever version/value this row starts at (app bootstrap
+    // seeds every outcome at v1 by default — don't assume that, read it).
+    // Root review of edbd7bfe (jev-root-round13-review.md), finding 3:
+    // this test must itself be safe to run twice consecutively without a
+    // database reset — a hardcoded target value would be a no-op (Save
+    // button never becomes dirty) on a run immediately following one
+    // that already landed on that same value. Alternate between two
+    // distinct targets based on the CURRENT value so every run always
+    // produces a real diff.
     const { rows: before } = await client.query(
-      `select version from jev_outcome_thresholds where org_id = $1 and outcome = 'wrong_number'`,
+      `select version, min_confidence from jev_outcome_thresholds where org_id = $1 and outcome = 'wrong_number'`,
       [ORG_ID],
     );
     const versionBefore: number = before[0]?.version ?? 0;
+    const minConfidenceBefore: number | null = before[0] ? Number(before[0].min_confidence) : null;
+    const target = minConfidenceBefore !== null && Math.abs(minConfidenceBefore - 0.87) < 0.001 ? "0.86" : "0.87";
 
     const input = row.locator('[data-testid="jev-threshold-input-wrong_number"]');
-    await input.fill("0.87");
+    await input.fill(target);
     const saveButton = row.locator('[data-testid="jev-threshold-save-wrong_number"]');
     await saveButton.click();
     // The save runs inside startTransition — clicking only dispatches the
@@ -323,13 +360,13 @@ test.describe.serial("Jev decision workflow — local acceptance", () => {
       { timeout: 10_000 },
     );
     await expect(saveButton).toBeDisabled();
-    await expect(input).toHaveValue("0.87");
+    await expect(input).toHaveValue(target);
 
     const { rows: after } = await client.query(
       `select min_confidence, version from jev_outcome_thresholds where org_id = $1 and outcome = 'wrong_number'`,
       [ORG_ID],
     );
-    expect(Number(after[0].min_confidence)).toBeCloseTo(0.87);
+    expect(Number(after[0].min_confidence)).toBeCloseTo(Number(target));
     expect(after[0].version).toBe(versionBefore + 1);
   });
 
@@ -365,5 +402,50 @@ test.describe.serial("Jev decision workflow — local acceptance", () => {
 
     // The page itself must still be intact — not a thrown/500 render.
     await expect(page.locator('[data-testid="jev-review-error"]')).toHaveCount(0);
+  });
+
+  // Root review of edbd7bfe (jev-root-round13-review.md), finding 3: real
+  // browser proof of the one-cutover switch — initial legacy/shadow,
+  // enable -> persisted jev/automatic + saved UI, disable -> persisted
+  // back to legacy/shadow. Ends in the SAME legacy/shadow state it
+  // started in, so this test (and the whole file) is safe to run twice
+  // consecutively without a database reset.
+  test("Settings: the Jev automatic classification switch persists enable/disable through the real RPC", async ({ page, context }) => {
+    await context.addCookies(await signInAndGetCookies());
+    await page.goto("/settings/ai-responder");
+
+    // Root review of edbd7bfe (jev-root-round13-review.md), finding 3 —
+    // must target the dynamic state span specifically, not the whole
+    // switch section: the section's own static heading ("Use Jev
+    // automatic classification") already contains the substring "Jev
+    // automatic" regardless of actual save state, which would make a
+    // broader toContainText assertion pass instantly (a false positive
+    // that races ahead of the real async save).
+    const currentState = page.locator('[data-testid="jev-automatic-current-state"]');
+    await expect(currentState).toHaveText("legacy / shadow");
+    const toggle = page.locator('[data-testid="jev-automatic-toggle"]');
+    await expect(toggle).not.toBeChecked();
+
+    await toggle.check();
+    await page.locator('[data-testid="jev-automatic-save"]').click();
+    await expect(currentState).toHaveText("Jev automatic", { timeout: 10_000 });
+    await expect(page.locator('[data-testid="jev-automatic-save"]')).toBeDisabled();
+
+    const { rows: enabledRows } = await client.query(
+      `select classifier_provider, classifier_mode from ai_responder_configs where org_id = $1`,
+      [ORG_ID],
+    );
+    expect(enabledRows[0]).toEqual({ classifier_provider: "jev", classifier_mode: "automatic" });
+
+    await toggle.uncheck();
+    await page.locator('[data-testid="jev-automatic-save"]').click();
+    await expect(currentState).toHaveText("legacy / shadow", { timeout: 10_000 });
+    await expect(page.locator('[data-testid="jev-automatic-save"]')).toBeDisabled();
+
+    const { rows: disabledRows } = await client.query(
+      `select classifier_provider, classifier_mode from ai_responder_configs where org_id = $1`,
+      [ORG_ID],
+    );
+    expect(disabledRows[0]).toEqual({ classifier_provider: "legacy", classifier_mode: "shadow" });
   });
 });
