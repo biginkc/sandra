@@ -2232,6 +2232,92 @@ export type Database = {
           },
         ]
       }
+      jev_lead_decisions: {
+        Row: {
+          classification_run_id: string
+          conversation_id: string
+          created_at: string
+          id: string
+          native_confidence: number | null
+          org_id: string
+          property_id: string
+          proposed_outcome: string
+          resolution_reason: string | null
+          resolved_at: string | null
+          resolved_by: string | null
+          resolved_outcome: string | null
+          source_inbound_message_id: string
+          status: string
+          superseded_reason: string | null
+          threshold_at_decision: number | null
+        }
+        Insert: {
+          classification_run_id: string
+          conversation_id: string
+          created_at?: string
+          id?: string
+          native_confidence?: number | null
+          org_id: string
+          property_id: string
+          proposed_outcome: string
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          resolved_outcome?: string | null
+          source_inbound_message_id: string
+          status?: string
+          superseded_reason?: string | null
+          threshold_at_decision?: number | null
+        }
+        Update: {
+          classification_run_id?: string
+          conversation_id?: string
+          created_at?: string
+          id?: string
+          native_confidence?: number | null
+          org_id?: string
+          property_id?: string
+          proposed_outcome?: string
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          resolved_outcome?: string | null
+          source_inbound_message_id?: string
+          status?: string
+          superseded_reason?: string | null
+          threshold_at_decision?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "jev_lead_decisions_classification_run_id_fkey"
+            columns: ["classification_run_id"]
+            isOneToOne: false
+            referencedRelation: "sms_classification_runs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "jev_lead_decisions_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "jev_lead_decisions_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "jev_lead_decisions_source_inbound_message_id_fkey"
+            columns: ["source_inbound_message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       jev_outcome_threshold_history: {
         Row: {
           changed_at: string
@@ -6690,6 +6776,45 @@ export type Database = {
           p_min_confidence: number
           p_org_id: string
           p_outcome: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-20 for migration
+      // 20260920235450_jev_lead_decisions.sql — same verbatim-excerpt
+      // provenance as fn_set_jev_outcome_threshold above.
+      fn_propose_jev_lead_decision: {
+        Args: {
+          p_classification_run_id: string
+          p_conversation_id: string
+          p_native_confidence: number
+          p_outcome: string
+          p_property_id: string
+          p_source_inbound_message_id: string
+          p_threshold_at_decision: number
+        }
+        Returns: Json
+      }
+      fn_auto_apply_jev_lead_decision: {
+        Args: {
+          p_classification_run_id: string
+          p_conversation_id: string
+          p_native_confidence: number
+          p_outcome: string
+          p_property_id: string
+          p_source_inbound_message_id: string
+          p_threshold_at_decision: number
+        }
+        Returns: Json
+      }
+      fn_confirm_jev_lead_decision: {
+        Args: { p_decision_id: string }
+        Returns: Json
+      }
+      fn_correct_jev_lead_decision: {
+        Args: {
+          p_corrected_outcome: string
+          p_decision_id: string
+          p_reason: string
         }
         Returns: Json
       }
