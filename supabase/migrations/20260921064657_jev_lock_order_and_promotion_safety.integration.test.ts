@@ -190,6 +190,105 @@ describe("fn_promote_classifier_event_to_decision — one pending decision per p
     const count = (await db.query("select count(*)::int as n from public.jev_lead_decisions where property_id = $1", [propertyId])).rows[0].n;
     expect(count).toBe(1);
   });
+
+  // Root review of 57236716 (jev-root-round16-promotion-revision.md),
+  // finding 1: the promoted row's decision_context_revision must be the
+  // EXACT value the property lock observed — not a default (e.g. 0) and
+  // not left to a separate, unrelated trigger.
+  it("captures the locked property's CURRENT decision_context_revision into the promoted row exactly", async () => {
+    const propertyId = await makeProperty();
+    const conversationId = randomUUID();
+    // Bump the revision away from its starting value first, so a
+    // default/stale (e.g. 0) capture would be visibly wrong, not
+    // coincidentally correct.
+    await makeInboundMessage(propertyId, conversationId, "first inbound bumps the revision");
+    const { rows: beforeRows } = await db.query(
+      "select decision_context_revision from public.properties where id = $1",
+      [propertyId],
+    );
+    const expectedRevision = Number(beforeRows[0].decision_context_revision);
+    expect(expectedRevision).toBeGreaterThan(0);
+
+    const messageId = await makeInboundMessage(propertyId, conversationId, "unclear reply");
+    const runId = await makeClassificationRun({ propertyId, conversationId, sourceInboundMessageId: messageId, resolvedOutcome: "unclear" });
+    const promoted = await promote(runId);
+
+    const { rows: decisionRows } = await db.query(
+      "select decision_context_revision from public.jev_lead_decisions where id = $1",
+      [promoted.decisionId],
+    );
+    // The second makeInboundMessage call above ALSO bumped the revision
+    // (real thread activity) — the promoted row must match the property
+    // AS OF the lock, i.e. the CURRENT value, not the earlier snapshot.
+    const { rows: afterRows } = await db.query(
+      "select decision_context_revision from public.properties where id = $1",
+      [propertyId],
+    );
+    expect(Number(decisionRows[0].decision_context_revision)).toBe(Number(afterRows[0].decision_context_revision));
+    expect(Number(decisionRows[0].decision_context_revision)).toBeGreaterThan(expectedRevision);
+  });
+
+  // Root review of 57236716, finding 2: the repair only superseded ONE
+  // pre-existing pending row — reproduces the exact pre-existing-bug
+  // leftover state (two pending rows already on one property, inserted
+  // directly, bypassing the RPC) and proves the fix supersedes BOTH
+  // before promoting the third.
+  it("supersedes ALL pre-existing pending rows for the property, not just one, leaving exactly one pending afterward", async () => {
+    const propertyId = await makeProperty();
+    const conversationId = randomUUID();
+
+    async function insertLeftoverPendingDecision(body: string): Promise<string> {
+      const messageId = await makeInboundMessage(propertyId, conversationId, body);
+      const runId = await makeClassificationRun({ propertyId, conversationId, sourceInboundMessageId: messageId, resolvedOutcome: "unclear" });
+      const decisionId = randomUUID();
+      await db.query(
+        `insert into public.jev_lead_decisions (id, org_id, property_id, conversation_id, source_inbound_message_id, classification_run_id, proposed_outcome, status)
+         values ($1, $2, $3, $4, $5, $6, 'unclear', 'pending')`,
+        [decisionId, orgId, propertyId, conversationId, messageId, runId],
+      );
+      return decisionId;
+    }
+
+    // Two leftover pending rows, simulating what the OLD single-row
+    // repair would have left behind.
+    const leftoverA = await insertLeftoverPendingDecision("leftover pending A");
+    const leftoverB = await insertLeftoverPendingDecision("leftover pending B");
+
+    const newMessageId = await makeInboundMessage(propertyId, conversationId, "the actual new classifier event");
+    const newRunId = await makeClassificationRun({ propertyId, conversationId, sourceInboundMessageId: newMessageId, resolvedOutcome: "bad_number" });
+    const promoted = await promote(newRunId);
+    expect(promoted.status).toBe("promoted");
+
+    const rows = (await db.query(
+      "select id, status, superseded_reason from public.jev_lead_decisions where property_id = $1 order by created_at",
+      [propertyId],
+    )).rows;
+    expect(rows).toEqual([
+      { id: leftoverA, status: "superseded", superseded_reason: "new_classifier_event_promoted" },
+      { id: leftoverB, status: "superseded", superseded_reason: "new_classifier_event_promoted" },
+      { id: promoted.decisionId, status: "pending", superseded_reason: null },
+    ]);
+
+    const pendingCount = (await db.query(
+      "select count(*)::int as n from public.jev_lead_decisions where property_id = $1 and status = 'pending'",
+      [propertyId],
+    )).rows[0].n;
+    expect(pendingCount).toBe(1);
+  });
+
+  it("same-source idempotency is preserved: re-promoting an already-pending inbound never supersedes its OWN row", async () => {
+    const propertyId = await makeProperty();
+    const conversationId = randomUUID();
+    const messageId = await makeInboundMessage(propertyId, conversationId);
+    const runId = await makeClassificationRun({ propertyId, conversationId, sourceInboundMessageId: messageId, resolvedOutcome: "unclear" });
+
+    const first = await promote(runId);
+    const second = await promote(runId);
+    expect(second).toEqual({ status: "already_promoted", decisionId: first.decisionId });
+
+    const row = (await db.query("select status, superseded_reason from public.jev_lead_decisions where id = $1", [first.decisionId])).rows[0];
+    expect(row).toEqual({ status: "pending", superseded_reason: null });
+  });
 });
 
 describe("lock order alignment — confirm and correct never deadlock on the same property+decision (finding 5)", () => {
