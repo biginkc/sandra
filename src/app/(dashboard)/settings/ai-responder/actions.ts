@@ -185,14 +185,15 @@ export type UpdateJevAutomaticClassificationInput = {
  * this toggle can never partially apply (provider set, mode not, or vice
  * versa — the two columns are always written together in one query).
  * Admin-only, same isAdminEmail gate as the rest of this page — but (root
- * review of edbd7bfe, jev-root-round13-review.md, finding 1) that's UX
- * only. The actual authorization boundary is
- * fn_update_jev_automatic_classification: it resolves the config's org
- * from the DB itself (never a caller-supplied org), requires CURRENT
- * active membership (hugo_has_active_org_access — active/non-expired/
- * non-deletion-prepared, not the older any-row-in-memberships RLS
- * policy this table still carries), and fails closed rather than
- * silently no-op'ing on a missing/cross-org/stale config id. Enabling
+ * review of edbd7bfe, jev-root-round13-review.md, finding 1; tightened
+ * further by cba0c85d, jev-root-round14-review.md) that's UX only. The
+ * actual authorization boundary is fn_update_jev_automatic_classification:
+ * it resolves the config's org from the DB itself (never a caller-
+ * supplied org), requires the caller be an active, non-expired, non-
+ * deletion-prepared OWNER of that org specifically (an ordinary active
+ * member is NOT enough — round 14 closed a gap where any active member
+ * could flip this administrative org setting), and fails closed rather
+ * than silently no-op'ing on a missing/cross-org/stale config id. Enabling
  * requires a non-empty server-side TYPESAFE_API_KEY — this is a one-time
  * post-deployment cutover (root: production already has it configured),
  * not a toggle meant to be flippable before the key exists.
@@ -232,7 +233,7 @@ export async function updateJevAutomaticClassification(
     });
     if (error) {
       const message = error.message.includes("FORBIDDEN")
-        ? "You don't have active access to this organization, or this config no longer exists."
+        ? "Only an active org owner can change this, or this config no longer exists."
         : error.message;
       return {
         ok: false,
