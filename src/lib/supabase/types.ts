@@ -622,6 +622,10 @@ export type Database = {
           ai_reason: string
           classification_run_id: string | null
           conversation_id: string
+          corrected_at: string | null
+          corrected_by: string | null
+          corrected_disposition: string | null
+          correction_reason: string | null
           created_at: string
           disposition: string
           dispo_applied: boolean
@@ -638,6 +642,10 @@ export type Database = {
           ai_reason: string
           classification_run_id?: string | null
           conversation_id: string
+          corrected_at?: string | null
+          corrected_by?: string | null
+          corrected_disposition?: string | null
+          correction_reason?: string | null
           created_at?: string
           disposition: string
           dispo_applied?: boolean
@@ -654,6 +662,10 @@ export type Database = {
           ai_reason?: string
           classification_run_id?: string | null
           conversation_id?: string
+          corrected_at?: string | null
+          corrected_by?: string | null
+          corrected_disposition?: string | null
+          correction_reason?: string | null
           created_at?: string
           disposition?: string
           dispo_applied?: boolean
@@ -6823,6 +6835,17 @@ export type Database = {
           p_corrected_outcome: string
           p_decision_id: string
           p_reason: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921001640_jev_ai_disposition_review_correction.sql — same
+      // verbatim-excerpt provenance as the jev_lead_decisions functions above.
+      fn_correct_ai_disposition_review: {
+        Args: {
+          p_corrected_disposition: string
+          p_reason: string
+          p_review_id: string
         }
         Returns: Json
       }

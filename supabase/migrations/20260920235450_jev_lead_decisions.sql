@@ -425,8 +425,6 @@ declare
   v_actor uuid := auth.uid();
   v_decision public.jev_lead_decisions%rowtype;
   v_property record;
-  v_current_severity integer;
-  v_next_severity integer;
 begin
   if v_actor is null then
     raise exception 'AUTHENTICATION_REQUIRED' using errcode = '42501';
@@ -500,28 +498,16 @@ begin
       where id = v_decision.property_id and org_id = v_decision.org_id;
     end if;
   else
-    -- Terminal-priority guard, same ordering fn_apply_ai_disposition_with_review
-    -- uses for its four outreach_dispo outcomes (20260827110000) — a
-    -- correction must not downgrade a more specific existing disposition
-    -- (e.g. correcting a "needs a decision: nurture" item to
-    -- not_interested must not clobber a dnc/opted_out that landed via a
-    -- separate later message in the meantime).
+    -- No severity ordering among wrong_number/not_interested/nurture here
+    -- — unlike fn_apply_ai_disposition_with_review's AUTOMATED severity
+    -- guard, a human correction has no such ladder among these three
+    -- lateral alternatives; the human reviewing this is the authority.
+    -- The staleness pre-check above already guarantees outreach_dispo is
+    -- either null or exactly this decision's own resolved_outcome by
+    -- this point, so dnc/opted_out can never appear here — this `in`
+    -- check is defense-in-depth, not the primary guard.
     if v_property.outreach_dispo is distinct from p_corrected_outcome then
       if v_property.outreach_dispo in ('opted_out', 'dnc', 'bad_number', 'callback_requested', 'booked_appointment') then
-        raise exception 'STALE_STATE' using errcode = '40001';
-      end if;
-      v_current_severity := case v_property.outreach_dispo
-        when 'not_interested' then 1
-        when 'wrong_number' then 2
-        when 'nurture' then 0
-        else 0
-      end;
-      v_next_severity := case p_corrected_outcome
-        when 'nurture' then 0
-        when 'not_interested' then 1
-        when 'wrong_number' then 2
-      end;
-      if v_next_severity < v_current_severity then
         raise exception 'STALE_STATE' using errcode = '40001';
       end if;
       update public.properties
