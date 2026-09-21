@@ -3156,6 +3156,9 @@ export type Database = {
           county_id: string | null
           created_at: string
           deleted_at: string | null
+          // Hand-inserted 2026-09-21 for migration
+          // 20260921022936_jev_decision_context_revision.sql.
+          decision_context_revision: number
           distress_flags: string[]
           equity_estimate: number | null
           equity_pct: number | null
@@ -3221,6 +3224,7 @@ export type Database = {
           county_id?: string | null
           created_at?: string
           deleted_at?: string | null
+          decision_context_revision?: number
           distress_flags?: string[]
           equity_estimate?: number | null
           equity_pct?: number | null
@@ -3286,6 +3290,7 @@ export type Database = {
           county_id?: string | null
           created_at?: string
           deleted_at?: string | null
+          decision_context_revision?: number
           distress_flags?: string[]
           equity_estimate?: number | null
           equity_pct?: number | null
@@ -6761,11 +6766,15 @@ export type Database = {
           verification_state: string
         }[]
       }
+      // Hand-patched 2026-09-21 for migration
+      // 20260921025446_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
       fn_apply_ai_disposition_with_review: {
         Args: {
           p_ai_reason: string
           p_conversation_id: string
           p_disposition: string
+          p_expected_revision: number | null
           p_property_id: string
           p_source_inbound_message_id: string
         }
@@ -6780,10 +6789,14 @@ export type Database = {
         Args: { p_classification_run_id: string; p_review_id: string }
         Returns: Json
       }
+      // Hand-patched 2026-09-21 for migration
+      // 20260921025446_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
       fn_propose_ai_dnc_suppression_review: {
         Args: {
           p_ai_reason: string
           p_conversation_id: string
+          p_expected_revision: number
           p_property_id: string
           p_source_inbound_message_id: string
         }
@@ -6793,11 +6806,15 @@ export type Database = {
       // 20260921005946_jev_deferred_disposition_proposal.sql — extends
       // dnc's Option-B deferred-write pattern above to
       // wrong_number/not_interested/opted_out (root final-review P1 #1).
+      // Hand-patched 2026-09-21 for migration
+      // 20260921025446_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
       fn_propose_deferred_ai_disposition_review: {
         Args: {
           p_ai_reason: string
           p_conversation_id: string
           p_disposition: string
+          p_expected_revision: number
           p_property_id: string
           p_source_inbound_message_id: string
         }
@@ -6826,10 +6843,14 @@ export type Database = {
       // Hand-patched 2026-09-21 for migration
       // 20260921013636_jev_lead_decision_threshold_version.sql — added
       // p_threshold_version (root final-review P2).
+      // Hand-patched 2026-09-21 for migration
+      // 20260921025446_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
       fn_propose_jev_lead_decision: {
         Args: {
           p_classification_run_id: string
           p_conversation_id: string
+          p_expected_revision: number
           // Hand-widened from the generator's plain `number`: the SQL
           // parameters accept NULL (e.g. missing/invalid native
           // confidence, or dnc/unclear having no threshold at all), and
@@ -6843,10 +6864,14 @@ export type Database = {
         }
         Returns: Json
       }
+      // Hand-patched 2026-09-21 for migration
+      // 20260921025446_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
       fn_auto_apply_jev_lead_decision: {
         Args: {
           p_classification_run_id: string
           p_conversation_id: string
+          p_expected_revision: number
           // Hand-widened from the generator's plain `number`: the SQL
           // parameters accept NULL (e.g. missing/invalid native
           // confidence, or dnc/unclear having no threshold at all), and

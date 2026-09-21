@@ -84,7 +84,15 @@ type ResponderDispoResult =
   | { updated: true }
   | {
       updated: false;
-      reason: "already_terminal" | "db_error" | "replayed_other_disposition";
+      reason:
+        | "already_terminal"
+        | "db_error"
+        | "replayed_other_disposition"
+        // Root review of 8361775a, jev-root-revision-review.md, 2026-09-20:
+        // properties.decision_context_revision moved between the evaluation
+        // read and this write — the RPC refused to apply a possibly-stale
+        // model result.
+        | "stale_context";
     };
 
 type AiReviewDisposition =
@@ -501,7 +509,11 @@ async function classifyAndHandleNonRouteOutcomes(
   );
 
   if (classification.kind === "jev_nurture") {
-    const nurtureResult = await setOutreachDispoNurture(supabase, input.propertyId);
+    const nurtureResult = await setOutreachDispoNurture(
+      supabase,
+      input.propertyId,
+      classification.evaluationRevision,
+    );
     if (nurtureResult.ok) {
       await autoApplyJevLeadDecision(supabase, {
         propertyId: input.propertyId,
@@ -512,6 +524,7 @@ async function classifyAndHandleNonRouteOutcomes(
         nativeConfidence: classification.nativeConfidence,
         thresholdAtDecision: classification.thresholdAtDecision,
         thresholdVersion: classification.thresholdVersion,
+        expectedRevision: classification.evaluationRevision,
       });
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
@@ -557,6 +570,7 @@ async function classifyAndHandleNonRouteOutcomes(
         nativeConfidence: classification.nativeConfidence,
         thresholdAtDecision: classification.thresholdAtDecision,
         thresholdVersion: classification.thresholdVersion,
+        expectedRevision: classification.evaluationRevision,
       });
     }
     await markPropertyNeedsAttention(supabase, input.propertyId, reason);
@@ -576,6 +590,7 @@ async function classifyAndHandleNonRouteOutcomes(
       supabase,
       input.propertyId,
       "system:jev_auto_promote",
+      classification.evaluationRevision,
     );
     if (qualifyOutcome.status === "qualified" || qualifyOutcome.status === "already_qualified") {
       await autoApplyJevLeadDecision(supabase, {
@@ -587,6 +602,7 @@ async function classifyAndHandleNonRouteOutcomes(
         nativeConfidence: classification.nativeConfidence,
         thresholdAtDecision: classification.thresholdAtDecision,
         thresholdVersion: classification.thresholdVersion,
+        expectedRevision: classification.evaluationRevision,
       });
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
@@ -633,6 +649,11 @@ async function resolveAndApplyRoute(
   let generated: AiStructuredOutput;
   let route: ResponderRoute;
   let jevAutoAccept: { classificationRunId: string } | null = null;
+  // Root review of 8361775a, jev-root-revision-review.md, 2026-09-20:
+  // revision read before the Jev HTTP call started. undefined for legacy
+  // (non-jev_route) classifications, which skip the check entirely.
+  const jevRevision =
+    classification.kind === "jev_route" ? classification.evaluationRevision : undefined;
 
   if (classification.kind === "jev_route") {
     generated = classification.assembled;
@@ -771,6 +792,7 @@ async function resolveAndApplyRoute(
           nativeConfidence: classification.nativeConfidence,
           thresholdAtDecision: classification.thresholdAtDecision,
           thresholdVersion: classification.thresholdVersion,
+          expectedRevision: jevRevision!,
         });
       }
       await markPropertyNeedsAttention(
@@ -792,6 +814,7 @@ async function resolveAndApplyRoute(
             inboundMessageId: input.inboundMessageId ?? null,
             dispo: "opted_out",
             reason: route.reason,
+            expectedRevision: jevRevision!,
           })
         : await applyResponderOptOut(supabase, {
             propertyId: input.propertyId,
@@ -801,6 +824,7 @@ async function resolveAndApplyRoute(
             inboundFromPhone: input.inboundFromPhone ?? null,
             orgId: property.org_id,
             reason: route.reason,
+            expectedRevision: jevRevision,
           });
       if (!optOutResult.updated) {
         const outcome = closeOutcome(optOutResult, route.reason);
@@ -838,6 +862,7 @@ async function resolveAndApplyRoute(
             inboundFromPhone: input.inboundFromPhone ?? null,
             orgId: property.org_id,
             reason: route.reason,
+            expectedRevision: jevRevision!,
           })
         : await applyResponderDnc(supabase, {
             propertyId: input.propertyId,
@@ -865,6 +890,7 @@ async function resolveAndApplyRoute(
             inboundMessageId: input.inboundMessageId ?? null,
             dispo: "wrong_number",
             reason: route.reason,
+            expectedRevision: jevRevision!,
           })
         : await applyWrongNumber(supabase, {
             propertyId: input.propertyId,
@@ -875,6 +901,7 @@ async function resolveAndApplyRoute(
             orgId: property.org_id,
             scope: route.scope,
             reason: route.reason,
+            expectedRevision: jevRevision,
           });
       const wrongNumberOutcome = closeOutcome(wrongNumberResult, route.reason);
       if (jevAutoAccept && wrongNumberResult.updated && input.inboundMessageId) {
@@ -899,6 +926,7 @@ async function resolveAndApplyRoute(
             inboundMessageId: input.inboundMessageId ?? null,
             dispo: route.dispo,
             reason: route.reason,
+            expectedRevision: jevRevision!,
           })
         : await setResponderDispo(supabase, {
             propertyId: input.propertyId,
@@ -906,6 +934,7 @@ async function resolveAndApplyRoute(
             inboundMessageId: input.inboundMessageId ?? null,
             dispo: route.dispo,
             reason: route.reason,
+            expectedRevision: jevRevision,
           });
       const autoCloseOutcome = closeOutcome(autoCloseResult, route.reason);
       if (jevAutoAccept && autoCloseResult.updated && input.inboundMessageId) {
@@ -1242,6 +1271,10 @@ async function setResponderDispo(
     inboundMessageId: string | null;
     dispo: "wrong_number" | "not_interested" | "opted_out" | "dnc";
     reason: string;
+    // Jev-eligible-auto-accept calls only (root review of 8361775a,
+    // jev-root-revision-review.md, 2026-09-20): revision read before the
+    // Jev HTTP call started. Legacy callers omit this.
+    expectedRevision?: number;
   },
 ): Promise<ResponderDispoResult> {
   if (!args.conversationId || !args.inboundMessageId) {
@@ -1264,9 +1297,14 @@ async function setResponderDispo(
         p_source_inbound_message_id: args.inboundMessageId,
         p_disposition: args.dispo,
         p_ai_reason: args.reason,
+        p_expected_revision: args.expectedRevision ?? null,
       },
     );
     if (error) {
+      if (error.message.includes("STALE_DECISION_CONTEXT")) {
+        await markPropertyNeedsAttention(supabase, args.propertyId, "jev_stale_decision_context");
+        return { updated: false, reason: "stale_context" };
+      }
       failureMessage = error.message;
       continue;
     }
@@ -1353,6 +1391,7 @@ async function proposeJevLeadDecision(
     nativeConfidence: number | null;
     thresholdAtDecision: number | null;
     thresholdVersion: number | null;
+    expectedRevision: number;
   },
 ): Promise<void> {
   if (!args.conversationId || !args.inboundMessageId) return;
@@ -1365,6 +1404,7 @@ async function proposeJevLeadDecision(
     p_native_confidence: args.nativeConfidence,
     p_threshold_at_decision: args.thresholdAtDecision,
     p_threshold_version: args.thresholdVersion,
+    p_expected_revision: args.expectedRevision,
   });
   if (error) {
     reportError(new Error(error.message), {
@@ -1392,6 +1432,7 @@ async function autoApplyJevLeadDecision(
     nativeConfidence: number | null;
     thresholdAtDecision: number | null;
     thresholdVersion: number | null;
+    expectedRevision: number;
   },
 ): Promise<void> {
   if (!args.conversationId || !args.inboundMessageId) return;
@@ -1404,6 +1445,7 @@ async function autoApplyJevLeadDecision(
     p_native_confidence: args.nativeConfidence,
     p_threshold_at_decision: args.thresholdAtDecision,
     p_threshold_version: args.thresholdVersion,
+    p_expected_revision: args.expectedRevision,
   });
   if (error) {
     reportError(new Error(error.message), {
@@ -1503,6 +1545,11 @@ async function findExistingAiDispositionReview(
 async function setOutreachDispoNurture(
   supabase: SupabaseClient<Database>,
   propertyId: string,
+  // Root review of 8361775a, jev-root-revision-review.md, 2026-09-20: revision
+  // read before the Jev HTTP call started. When provided, the write below is
+  // re-checked against it and treated as "changed underneath us" (same as any
+  // other race) rather than silently applying a stale model result.
+  expectedRevision?: number,
 ): Promise<
   | { ok: true }
   | { ok: false; alreadyTerminal: true }
@@ -1534,7 +1581,7 @@ async function setOutreachDispoNurture(
     return { ok: true }; // idempotent — already in the target state
   }
 
-  const { error: updateErr, data: updated } = await supabase
+  let updateQuery = supabase
     .from("properties")
     .update({
       outreach_dispo: "nurture",
@@ -1542,13 +1589,17 @@ async function setOutreachDispoNurture(
       updated_at: new Date().toISOString(),
     })
     .eq("id", propertyId)
-    .is("outreach_dispo", null) // re-checked at write time, not just read time
-    .select("id")
-    .maybeSingle();
+    .is("outreach_dispo", null); // re-checked at write time, not just read time
+  if (expectedRevision !== undefined) {
+    updateQuery = updateQuery.eq("decision_context_revision", expectedRevision);
+  }
+  const { error: updateErr, data: updated } = await updateQuery.select("id").maybeSingle();
   if (updateErr) return { ok: false, alreadyTerminal: false, error: updateErr.message };
   if (!updated) {
-    // Changed between our SELECT and this UPDATE — treat as terminal
-    // rather than retrying, since we don't know what it changed TO.
+    // Changed between our SELECT and this UPDATE (outreach_dispo, or —
+    // when expectedRevision is set — decision_context_revision) — treat
+    // as terminal rather than retrying, since we don't know what it
+    // changed TO.
     return { ok: false, alreadyTerminal: true };
   }
 
@@ -1571,6 +1622,7 @@ async function applyResponderOptOut(
     inboundFromPhone: string | null;
     orgId: string;
     reason: string;
+    expectedRevision?: number;
   },
 ): Promise<ResponderDispoResult> {
   const contact = await loadContactPhone(supabase, args.contactId);
@@ -1596,6 +1648,7 @@ async function applyResponderOptOut(
     inboundMessageId: args.inboundMessageId,
     dispo: "opted_out",
     reason: args.reason,
+    expectedRevision: args.expectedRevision,
   });
   return result;
 }
@@ -1610,6 +1663,7 @@ async function applyResponderDnc(
     inboundFromPhone: string | null;
     orgId: string;
     reason: string;
+    expectedRevision?: number;
   },
 ): Promise<ResponderDispoResult> {
   const contact = await loadContactPhone(supabase, args.contactId);
@@ -1635,6 +1689,7 @@ async function applyResponderDnc(
     inboundMessageId: args.inboundMessageId,
     dispo: "dnc",
     reason: args.reason,
+    expectedRevision: args.expectedRevision,
   });
   return result;
 }
@@ -1662,6 +1717,7 @@ async function proposeJevDncSuppression(
     inboundFromPhone: string | null;
     orgId: string;
     reason: string;
+    expectedRevision: number;
   },
 ): Promise<ResponderDispoResult> {
   if (!args.conversationId || !args.inboundMessageId) {
@@ -1699,9 +1755,16 @@ async function proposeJevDncSuppression(
       p_conversation_id: args.conversationId,
       p_source_inbound_message_id: args.inboundMessageId,
       p_ai_reason: args.reason,
+      p_expected_revision: args.expectedRevision,
     },
   );
   if (error) {
+    if (error.message.includes("STALE_DECISION_CONTEXT")) {
+      // Phone is already suppressed above (safety-critical, unconditional);
+      // only the paperwork/review-record side is gated on revision.
+      await markPropertyNeedsAttention(supabase, args.propertyId, "jev_stale_decision_context");
+      return { updated: false, reason: "stale_context" };
+    }
     await markPropertyNeedsAttention(supabase, args.propertyId, "dnc_proposal_write_failed");
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_propose_dnc" },
@@ -1744,6 +1807,7 @@ async function proposeDeferredJevDisposition(
     inboundMessageId: string | null;
     dispo: "wrong_number" | "not_interested" | "opted_out";
     reason: string;
+    expectedRevision: number;
   },
 ): Promise<ResponderDispoResult> {
   if (!args.conversationId || !args.inboundMessageId) {
@@ -1764,9 +1828,14 @@ async function proposeDeferredJevDisposition(
       p_source_inbound_message_id: args.inboundMessageId,
       p_disposition: args.dispo,
       p_ai_reason: args.reason,
+      p_expected_revision: args.expectedRevision,
     },
   );
   if (error) {
+    if (error.message.includes("STALE_DECISION_CONTEXT")) {
+      await markPropertyNeedsAttention(supabase, args.propertyId, "jev_stale_decision_context");
+      return { updated: false, reason: "stale_context" };
+    }
     await markPropertyNeedsAttention(supabase, args.propertyId, "disposition_proposal_write_failed");
     reportError(new Error(error.message), {
       tags: { surface: "ai_responder_propose_deferred_dispo" },
@@ -1794,6 +1863,7 @@ async function applyWrongNumber(
     orgId: string;
     scope: AiWrongScope;
     reason: string;
+    expectedRevision?: number;
   },
 ): Promise<ResponderDispoResult> {
   const result = await setResponderDispo(supabase, {
@@ -1802,6 +1872,7 @@ async function applyWrongNumber(
     inboundMessageId: args.inboundMessageId,
     dispo: "wrong_number",
     reason: args.reason,
+    expectedRevision: args.expectedRevision,
   });
   if (args.scope !== "all") return result;
   if (!result.updated) return result;

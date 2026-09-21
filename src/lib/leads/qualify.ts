@@ -26,6 +26,13 @@ export async function qualifyProperty(
   supabase: SupabaseClient<Database>,
   propertyId: string,
   qualifiedBy: string | null,
+  // Jev auto-promote only (root review of 8361775a, jev-root-revision-review.md,
+  // 2026-09-20): when provided, the write is re-checked against the revision
+  // captured before the model evaluated the message, so newer activity
+  // between evaluation and this write fails the promotion closed instead of
+  // silently applying a now-stale model result. Omitted by every other
+  // caller (manual qualify, legacy paths), which are unaffected.
+  expectedRevision?: number,
 ): Promise<QualifyOutcome> {
   const { data: current, error: lookupErr } = await supabase
     .from("properties")
@@ -40,7 +47,7 @@ export async function qualifyProperty(
   if (current.status !== "prospect") return { status: "already_qualified" };
 
   const nowIso = new Date().toISOString();
-  const { data, error } = await supabase
+  let query = supabase
     .from("properties")
     .update({
       status: "new_lead",
@@ -50,9 +57,11 @@ export async function qualifyProperty(
     })
     .eq("id", propertyId)
     .eq("status", "prospect")
-    .eq("is_dnc_locked", false)
-    .select("id")
-    .maybeSingle();
+    .eq("is_dnc_locked", false);
+  if (expectedRevision !== undefined) {
+    query = query.eq("decision_context_revision", expectedRevision);
+  }
+  const { data, error } = await query.select("id").maybeSingle();
 
   if (error) return { status: "failed", message: error.message };
   if (!data) {

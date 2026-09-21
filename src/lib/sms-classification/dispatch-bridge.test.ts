@@ -14,6 +14,14 @@ function stubSupabase(opts: {
    *  when omitted — most tests only care about the confidence comparison,
    *  not which settings version was live. */
   thresholds?: Array<{ outcome: string; min_confidence: number; version?: number }>;
+  /** properties.decision_context_revision, as `readDecisionContextRevision`
+   *  (dispatch-bridge.ts) would read it. A function lets a test mutate a
+   *  shared counter between setup and read — see the delayed-provider race
+   *  test below, which proves the read happens BEFORE the (delayed) Jev
+   *  call, not after. `null` simulates an unreadable/missing property row
+   *  (fail-closed path). Defaults to 7 — an arbitrary non-zero value so
+   *  tests that don't care about it still exercise a real number. */
+  propertiesRevision?: number | null | (() => number | null);
 }) {
   const messagesBuilder = {
     select: () => messagesBuilder,
@@ -45,13 +53,29 @@ function stubSupabase(opts: {
       error: null,
     }),
   };
+  const propertiesRevisionResolver =
+    typeof opts.propertiesRevision === "function"
+      ? opts.propertiesRevision
+      : () => (opts.propertiesRevision === undefined ? 7 : opts.propertiesRevision);
+  const propertiesBuilder = {
+    select: () => propertiesBuilder,
+    eq: () => propertiesBuilder,
+    maybeSingle: async () => {
+      const revision = propertiesRevisionResolver();
+      return revision === null
+        ? { data: null, error: null }
+        : { data: { decision_context_revision: revision }, error: null };
+    },
+  };
   return {
     from: (table: string) =>
       table === "messages"
         ? messagesBuilder
         : table === "jev_outcome_thresholds"
           ? thresholdsBuilder
-          : runsBuilder,
+          : table === "properties"
+            ? propertiesBuilder
+            : runsBuilder,
   } as any;
 }
 
@@ -261,6 +285,7 @@ describe("classifyForDispatch", () => {
       nativeConfidence: 0.95,
       thresholdAtDecision: 0.95,
       thresholdVersion: 1,
+      evaluationRevision: 7,
     });
   });
 
@@ -281,6 +306,7 @@ describe("classifyForDispatch", () => {
       nativeConfidence: 0.5,
       thresholdAtDecision: 0.95,
       thresholdVersion: 1,
+      evaluationRevision: 7,
     });
   });
 
@@ -299,6 +325,7 @@ describe("classifyForDispatch", () => {
       nativeConfidence: null,
       thresholdAtDecision: null,
       thresholdVersion: null,
+      evaluationRevision: 7,
     });
   });
 
@@ -321,6 +348,7 @@ describe("classifyForDispatch", () => {
       nativeConfidence: 0.9,
       thresholdAtDecision: 0.9,
       thresholdVersion: 1,
+      evaluationRevision: 7,
     });
   });
 
@@ -413,5 +441,86 @@ describe("classifyForDispatch", () => {
       { fetch: fn, typesafeApiKey: "k" },
     );
     expect(result).toEqual({ kind: "use_legacy", classificationRunId: null });
+  });
+
+  // Root review of 8361775a (jev-root-revision-review.md, 2026-09-20), gap 2:
+  // revision capture must happen BEFORE evaluation starts, not be a fresh
+  // re-read blessed at decision-row insert time (which could land AFTER
+  // model latency or a newer inbound message). These tests use a fake
+  // delayed Jev provider (no real/paid provider call) racing a simulated
+  // concurrent DB mutation during that delay.
+  describe("evaluationRevision — captured before the Jev call, not after", () => {
+    it("captures properties.decision_context_revision before the (delayed) fetch call starts, not the value current when fetch resolves", async () => {
+      let currentDbRevision = 5;
+      const supabase = stubSupabase({ propertiesRevision: () => currentDbRevision });
+
+      const fn = vi.fn(async (_url: string, _init: RequestInit) => {
+        // Simulate a newer inbound message (or any other bump-worthy
+        // activity) arriving in the property WHILE the Jev HTTP call is
+        // still in flight — i.e. after evaluationRevision was already
+        // captured, but before the response comes back.
+        currentDbRevision = 6;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ answers: { outcome: { choice: "not_interested" } } }),
+          text: async () => "",
+        };
+      }) as unknown as typeof fetch;
+
+      const result = await classifyForDispatch(
+        supabase,
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn, typesafeApiKey: "k" },
+      );
+
+      // The race actually happened (DB moved on during the call) — proves
+      // this test would have caught a "re-read at the end" regression.
+      expect(currentDbRevision).toBe(6);
+      expect(result.kind).toBe("jev_route");
+      if (result.kind === "jev_route") {
+        // ...yet the captured evaluationRevision is the PRE-call snapshot,
+        // not the post-call value — the whole point of capturing before
+        // evaluation instead of at decision-row insert time.
+        expect(result.evaluationRevision).toBe(5);
+      }
+    });
+
+    it("fails closed to use_legacy when the property's revision can't be read, without calling Jev", async () => {
+      const supabase = stubSupabase({ propertiesRevision: null });
+      const fn = vi.fn();
+      const result = await classifyForDispatch(
+        supabase,
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn as unknown as typeof fetch, typesafeApiKey: "k" },
+      );
+      expect(result).toEqual({ kind: "use_legacy", classificationRunId: null });
+      expect(fn).not.toHaveBeenCalled();
+    });
+
+    it("threads the same pre-call evaluationRevision through jev_nurture and jev_needs_decision outcomes", async () => {
+      const nurture = await classifyForDispatch(
+        stubSupabase({ propertiesRevision: 42, thresholds: [{ outcome: "nurture", min_confidence: 0.5 }] }),
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: stubFetch({ answers: { outcome: { choice: "nurture", confidence: 0.9 } } }).fn, typesafeApiKey: "k" },
+      );
+      expect(nurture.kind).toBe("jev_nurture");
+      if (nurture.kind === "jev_nurture") expect(nurture.evaluationRevision).toBe(42);
+
+      const belowThresholdNurture = await classifyForDispatch(
+        stubSupabase({ propertiesRevision: 42, thresholds: [{ outcome: "nurture", min_confidence: 0.9 }] }),
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: stubFetch({ answers: { outcome: { choice: "nurture", confidence: 0.1 } } }).fn, typesafeApiKey: "k" },
+      );
+      expect(belowThresholdNurture.kind).toBe("jev_needs_decision");
+      if (belowThresholdNurture.kind === "jev_needs_decision") {
+        expect(belowThresholdNurture.evaluationRevision).toBe(42);
+      }
+    });
   });
 });

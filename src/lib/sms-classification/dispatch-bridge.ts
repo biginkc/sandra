@@ -80,6 +80,16 @@ export type ClassificationBridgeResult =
        *  be recorded, since two different settings versions can share the
        *  same number). */
       thresholdVersion: number | null;
+      /** properties.decision_context_revision read BEFORE the Jev HTTP
+       *  call started (root review of 8361775a,
+       *  jev-root-revision-review.md, 2026-09-20: capturing revision at
+       *  decision-ROW-creation time, after model latency, can bless a
+       *  classification computed against context that's already gone
+       *  stale by the time the row exists). The caller passes this to
+       *  every propose/apply RPC, which enforces it against the row it's
+       *  locking — a mismatch means something decision-relevant happened
+       *  WHILE Jev was evaluating, not merely since a prior decision. */
+      evaluationRevision: number;
     }
   | {
       kind: "jev_nurture";
@@ -87,6 +97,7 @@ export type ClassificationBridgeResult =
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
+      evaluationRevision: number;
     }
   | { kind: "jev_no_action"; classificationRunId: string }
   /**
@@ -106,6 +117,7 @@ export type ClassificationBridgeResult =
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
+      evaluationRevision: number;
     }
   /**
    * new_lead resolved above its org threshold. The caller must call the
@@ -118,6 +130,7 @@ export type ClassificationBridgeResult =
       nativeConfidence: number | null;
       thresholdAtDecision: number | null;
       thresholdVersion: number | null;
+      evaluationRevision: number;
     };
 
 /**
@@ -146,6 +159,19 @@ export async function classifyForDispatch(
   },
 ): Promise<ClassificationBridgeResult> {
   if (config.classifierProvider !== "jev") {
+    return { kind: "use_legacy", classificationRunId: null };
+  }
+
+  // Root review of 8361775a (jev-root-revision-review.md, 2026-09-20):
+  // captured BEFORE the context read and the Jev HTTP call — both of
+  // which have real latency — so it reflects the property's state at
+  // the instant evaluation STARTS, not whatever it happens to be by the
+  // time a decision row gets created afterward. Every propose/apply RPC
+  // enforces this exact value against the row it locks.
+  const evaluationRevision = await readDecisionContextRevision(supabase, input.propertyId);
+  if (evaluationRevision === null) {
+    // Can't establish a decision-time baseline at all — fail closed to
+    // legacy rather than proceed without one.
     return { kind: "use_legacy", classificationRunId: null };
   }
 
@@ -219,6 +245,7 @@ export async function classifyForDispatch(
     nativeConfidence,
     thresholdAtDecision,
     thresholdVersion,
+    evaluationRevision,
   }).catch((persistErr) => {
     reportError(persistErr, {
       tags: { surface: "sms_classification_persist" },
@@ -258,7 +285,7 @@ export async function classifyForDispatch(
     // property alone and flag it for a human instead of silently closing
     // it at a confidence the org hasn't configured to trust.
     return thresholdDecision.status === "auto_apply"
-      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, thresholdAtDecision, thresholdVersion }
+      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, thresholdAtDecision, thresholdVersion, evaluationRevision }
       : {
           kind: "jev_needs_decision",
           classificationRunId,
@@ -266,6 +293,7 @@ export async function classifyForDispatch(
           nativeConfidence,
           thresholdAtDecision,
           thresholdVersion,
+          evaluationRevision,
         };
   }
 
@@ -285,6 +313,7 @@ export async function classifyForDispatch(
         nativeConfidence,
         thresholdAtDecision,
         thresholdVersion,
+        evaluationRevision,
       };
     }
     return {
@@ -296,6 +325,7 @@ export async function classifyForDispatch(
       nativeConfidence,
       thresholdAtDecision,
       thresholdVersion,
+      evaluationRevision,
     };
   }
 
@@ -316,10 +346,24 @@ export async function classifyForDispatch(
     nativeConfidence,
     thresholdAtDecision,
     thresholdVersion,
+    evaluationRevision,
     assembled: resolved.assembled,
     classificationRunId,
     eligibleForAutoAccept: thresholdDecision.status === "auto_apply",
   };
+}
+
+async function readDecisionContextRevision(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+): Promise<number | null> {
+  const { data, error } = await supabase
+    .from("properties")
+    .select("decision_context_revision")
+    .eq("id", propertyId)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data.decision_context_revision;
 }
 
 function hashState(
@@ -354,7 +398,12 @@ async function persistRun(
   input: ClassificationBridgeInput,
   decision: SmsClassificationDecision,
   stateHash: string,
-  audit: { nativeConfidence: number | null; thresholdAtDecision: number | null; thresholdVersion: number | null },
+  audit: {
+    nativeConfidence: number | null;
+    thresholdAtDecision: number | null;
+    thresholdVersion: number | null;
+    evaluationRevision: number;
+  },
 ): Promise<string | null> {
   if (!input.conversationId || !input.inboundMessageId) return null;
   const row = {
@@ -385,6 +434,10 @@ async function persistRun(
       // Root final-review P2: the threshold SETTINGS ROW's version, not
       // just the numeric cutoff — two versions can share the same number.
       thresholdVersion: audit.thresholdVersion,
+      // Root review of 8361775a: the revision captured BEFORE evaluation
+      // started, for audit — distinct from whatever the property's
+      // revision happens to be by the time this run row lands.
+      evaluationRevision: audit.evaluationRevision,
     },
     resolved_outcome: decision.outcome,
     usage: decision.usage,

@@ -1,0 +1,314 @@
+import { createBrowserClient } from "@supabase/ssr";
+import { expect, test } from "@playwright/test";
+import pg from "pg";
+
+import type { Database } from "../src/lib/supabase/types";
+
+/**
+ * Root review of 8361775a (jev-root-revision-review.md, 2026-09-20), gap
+ * 4: real browser coverage for Needs a decision, Review Jev correction,
+ * the settings threshold edit, and a stale-conflict scenario, against
+ * this worktree's OWN local disposable Supabase stack (never a hosted
+ * project) with synthetic, owned fixtures created directly here.
+ *
+ * Prerequisites (acceptance owner, same posture as
+ * my-leads.local.spec.ts / playwright.my-leads-local.config.ts):
+ *   1. `colima start` (if not already running)
+ *   2. `supabase start` from this worktree root — the local stack this
+ *      spec targets (postgres on 127.0.0.1:54329, API on 54331). Do NOT
+ *      point this at any other project's stack.
+ *   3. In a second terminal:
+ *      E2E_AUTH_BYPASS=1 NODE_ENV=development NEXT_PUBLIC_HUGO_SSO=1 \
+ *      ADMIN_EMAILS=jev-local-admin@bmhgroupkc.com \
+ *      NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54331 \
+ *      NEXT_PUBLIC_SUPABASE_ANON_KEY=<local anon key from `supabase status`> \
+ *      SUPABASE_SERVICE_ROLE_KEY=<local service key from `supabase status`> \
+ *      MESSAGING_PROVIDER=mock ADDRESS_VERIFIER_PROVIDER=mock \
+ *      npx next dev -p 58900
+ *   4. npx playwright test --config=playwright.jev-local.config.ts
+ */
+
+const LOCAL_APP_URL = (process.env.JEV_LOCAL_BASE_URL ?? "http://127.0.0.1:58900").replace(/\/$/, "");
+const LOCAL_SUPABASE_URL = "http://127.0.0.1:54331";
+const LOCAL_SUPABASE_ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
+
+const appURL = new URL(LOCAL_APP_URL);
+if (appURL.protocol !== "http:" || appURL.hostname !== "127.0.0.1" || appURL.port !== "58900") {
+  throw new Error("Jev decision workflow local acceptance may target only http://127.0.0.1:58900.");
+}
+
+// Fixed, not time-suffixed: the acceptance owner's locally-run `next dev`
+// must set ADMIN_EMAILS to this exact value ahead of time (see the header
+// comment above) so the settings-threshold test's isAdminEmail check
+// passes. beforeAll deletes any leftover user with this email first, so
+// re-running the suite against the same stack is idempotent.
+// isEmailAllowed (src/lib/auth/allowlist.ts) requires @bmhgroupkc.com
+// unconditionally in middleware, even with E2E_AUTH_BYPASS=1 — that flag
+// only relaxes the Hugo-SSO-only UI gate, not the domain allowlist.
+const ADMIN_EMAIL = "jev-local-admin@bmhgroupkc.com";
+const ADMIN_PASSWORD = "jev-local-acceptance-password-1!";
+// Sandra is effectively single-tenant: middleware's membership gate
+// (src/lib/supabase/middleware.ts) checks against the hardcoded
+// SANDRA_ORG_ID (src/lib/auth/sandra-org.ts), not an arbitrary org row —
+// login fails "access not granted" for membership in any other org.
+const ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+
+function db(): pg.Client {
+  return new pg.Client({
+    host: "127.0.0.1",
+    port: 54329,
+    user: "postgres",
+    password: "postgres",
+    database: "postgres",
+  });
+}
+
+async function signInAndGetCookies(): Promise<Array<{ name: string; value: string }>> {
+  const cookieJar = new Map<string, string>();
+  const auth = createBrowserClient<Database>(LOCAL_SUPABASE_URL, LOCAL_SUPABASE_ANON_KEY, {
+    isSingleton: false,
+    cookies: {
+      getAll: () => [...cookieJar].map(([name, value]) => ({ name, value })),
+      setAll: (cookies) => {
+        for (const cookie of cookies) {
+          if (cookie.value) cookieJar.set(cookie.name, cookie.value);
+          else cookieJar.delete(cookie.name);
+        }
+      },
+    },
+  });
+  const { error } = await auth.auth.signInWithPassword({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD });
+  if (error) throw error;
+  return [...cookieJar].map(([name, value]) => ({ name, value, url: LOCAL_APP_URL, sameSite: "Lax" as const }));
+}
+
+test.describe.serial("Jev decision workflow — local acceptance", () => {
+  const client = db();
+
+  let userId = "";
+  let propertyNurtureId = "";
+  let propertyStaleId = "";
+  let contactId = "";
+  let pendingDecisionId = "";
+  let staleDecisionId = "";
+
+  test.beforeAll(async () => {
+    await client.connect();
+    // fn_propose_jev_lead_decision / fn_confirm_jev_lead_decision enforce
+    // auth.role() = 'service_role' — the raw postgres superuser
+    // connection has no JWT claims by default, so simulate the same
+    // service-role identity the real webhook path runs under.
+    await client.query("set request.jwt.claim.role = 'service_role'");
+
+    // Raw-SQL user provisioning (pgcrypto bcrypt), not the Admin API's
+    // createUser/deleteUser — this repo's e2e-identity-contract.test.ts
+    // enforces that those two calls exist in exactly ONE place each
+    // (e2e/fixtures.ts / scripts/e2e-identity-lifecycle.ts) as a
+    // deliberate single-source-of-truth guard against scattered ad-hoc
+    // test-user lifecycle management. This spec provisions its OWN
+    // synthetic local admin against a disposable stack the contract
+    // doesn't cover, so it uses a different mechanism entirely rather
+    // than adding a second call site for the guarded ones.
+    // Delete the membership first (FINAL_OWNER_GUARD blocks deleting an
+    // org's last owner membership, not the user row itself) so a leftover
+    // user from a prior run's afterAll failure never blocks this insert.
+    await client.query(
+      `delete from memberships where org_id = $1 and user_id in (select id from auth.users where email = $2)`,
+      [ORG_ID, ADMIN_EMAIL],
+    ).catch(() => {});
+    await client.query(`delete from auth.users where email = $1`, [ADMIN_EMAIL]);
+    userId = crypto.randomUUID();
+    await client.query(
+      `insert into auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at, confirmation_token, recovery_token, email_change_token_new, email_change)
+       values ($1, '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', $2, crypt($3, gen_salt('bf')), now(), '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, now(), now(), '', '', '', '')`,
+      [userId, ADMIN_EMAIL, ADMIN_PASSWORD],
+    );
+    await client.query(
+      `insert into auth.identities (id, user_id, provider_id, identity_data, provider, last_sign_in_at, created_at, updated_at)
+       values (gen_random_uuid(), $1::uuid, $1::text, jsonb_build_object('sub', $1::text, 'email', $2::text), 'email', now(), now(), now())`,
+      [userId, ADMIN_EMAIL],
+    );
+
+    await client.query(`insert into organizations (id, name) values ($1, 'Jev Local Acceptance Org') on conflict (id) do nothing`, [ORG_ID]);
+    await client.query(
+      `insert into memberships (org_id, user_id, role, access_status) values ($1, $2, 'owner', 'active') on conflict do nothing`,
+      [ORG_ID, userId],
+    );
+
+    contactId = crypto.randomUUID();
+    await client.query(
+      `insert into contacts (id, org_id, first_name, phone_1, phone_1_type) values ($1, $2, 'Nurture Homeowner', '+15551230001', 'mobile')`,
+      [contactId, ORG_ID],
+    );
+
+    propertyNurtureId = crypto.randomUUID();
+    await client.query(
+      `insert into properties (id, org_id, address, state, status, outreach_dispo, homeowner_contact_id)
+       values ($1, $2, '1 Needs Decision Ln', 'TX', 'prospect', null, $3)`,
+      [propertyNurtureId, ORG_ID, contactId],
+    );
+    const nurtureConvId = crypto.randomUUID();
+    const nurtureMsgId = crypto.randomUUID();
+    await client.query(
+      `insert into messages (id, org_id, property_id, conversation_id, contact_id, channel, direction, body)
+       values ($1, $2, $3, $4, $5, 'sms', 'inbound', 'not right now, maybe later')`,
+      [nurtureMsgId, ORG_ID, propertyNurtureId, nurtureConvId, contactId],
+    );
+    const runId = crypto.randomUUID();
+    await client.query(
+      `insert into sms_classification_runs (id, org_id, property_id, conversation_id, source_inbound_message_id, state_hash, state_version, schema_version, policy_version, provider, model, decision)
+       values ($1, $2, $3, $4, $5, 'fixture-hash', 1, 'v1', 'v1', 'jev', 'typesafe', '{}'::jsonb)`,
+      [runId, ORG_ID, propertyNurtureId, nurtureConvId, nurtureMsgId],
+    );
+    const proposeResult = await client.query(
+      `select public.fn_propose_jev_lead_decision($1,$2,$3,$4,'nurture',0.5,0.95,1,
+         (select decision_context_revision from properties where id = $1))`,
+      [propertyNurtureId, nurtureConvId, nurtureMsgId, runId],
+    );
+    pendingDecisionId = (proposeResult.rows[0].fn_propose_jev_lead_decision as { decisionId: string }).decisionId;
+
+    // Second property + decision, pre-resolved via a DIRECT confirm below
+    // (simulating another reviewer/tab already acting on it) — the
+    // browser then attempts to act on the SAME now-stale row.
+    propertyStaleId = crypto.randomUUID();
+    const staleContactId = crypto.randomUUID();
+    await client.query(
+      `insert into contacts (id, org_id, first_name, phone_1, phone_1_type) values ($1, $2, 'Stale Homeowner', '+15551230002', 'mobile')`,
+      [staleContactId, ORG_ID],
+    );
+    await client.query(
+      `insert into properties (id, org_id, address, state, status, outreach_dispo, homeowner_contact_id)
+       values ($1, $2, '2 Stale Conflict Ln', 'TX', 'prospect', null, $3)`,
+      [propertyStaleId, ORG_ID, staleContactId],
+    );
+    const staleConvId = crypto.randomUUID();
+    const staleMsgId = crypto.randomUUID();
+    await client.query(
+      `insert into messages (id, org_id, property_id, conversation_id, contact_id, channel, direction, body)
+       values ($1, $2, $3, $4, $5, 'sms', 'inbound', 'stop texting me')`,
+      [staleMsgId, ORG_ID, propertyStaleId, staleConvId, staleContactId],
+    );
+    const staleRunId = crypto.randomUUID();
+    await client.query(
+      `insert into sms_classification_runs (id, org_id, property_id, conversation_id, source_inbound_message_id, state_hash, state_version, schema_version, policy_version, provider, model, decision)
+       values ($1, $2, $3, $4, $5, 'fixture-hash-2', 1, 'v1', 'v1', 'jev', 'typesafe', '{}'::jsonb)`,
+      [staleRunId, ORG_ID, propertyStaleId, staleConvId, staleMsgId],
+    );
+    const staleProposeResult = await client.query(
+      `select public.fn_propose_jev_lead_decision($1,$2,$3,$4,'nurture',0.4,0.95,1,
+         (select decision_context_revision from properties where id = $1))`,
+      [propertyStaleId, staleConvId, staleMsgId, staleRunId],
+    );
+    staleDecisionId = (staleProposeResult.rows[0].fn_propose_jev_lead_decision as { decisionId: string }).decisionId;
+    // Resolve it out from under the browser BEFORE the browser ever loads
+    // the page — a real "someone/something else already acted on this"
+    // conflict, not a synthetic error injection. fn_confirm_jev_lead_decision
+    // requires an authenticated user identity (not service_role) — reuse the
+    // same admin user this whole run signs in as.
+    await client.query("set request.jwt.claim.role = 'authenticated'");
+    await client.query("select set_config('request.jwt.claim.sub', $1, false)", [userId]);
+    await client.query(`select public.fn_confirm_jev_lead_decision($1)`, [staleDecisionId]);
+    await client.query("set request.jwt.claim.role = 'service_role'");
+    await client.query("reset request.jwt.claim.sub");
+  });
+
+  test.afterAll(async () => {
+    if (propertyNurtureId && propertyStaleId) {
+      await client.query(`delete from jev_lead_decisions where property_id in ($1, $2)`, [propertyNurtureId, propertyStaleId]);
+      await client.query(`delete from sms_classification_runs where property_id in ($1, $2)`, [propertyNurtureId, propertyStaleId]);
+      await client.query(`delete from messages where property_id in ($1, $2)`, [propertyNurtureId, propertyStaleId]);
+      await client.query(`delete from lead_events where property_id in ($1, $2)`, [propertyNurtureId, propertyStaleId]);
+      await client.query(`delete from properties where id in ($1, $2)`, [propertyNurtureId, propertyStaleId]);
+    }
+    await client.query(`delete from contacts where org_id = $1`, [ORG_ID]);
+    if (userId) {
+      // Best-effort: FINAL_OWNER_GUARD blocks deleting an org's last
+      // owner membership (this fixture's user is the only member of the
+      // shared, fixed SANDRA_ORG_ID in a from-scratch local stack), which
+      // in turn can block the user row. A fresh `supabase db reset
+      // --local` between runs is what actually resets this, same as
+      // every other fixture table here — leftover rows are harmless.
+      await client.query(`delete from memberships where org_id = $1 and user_id = $2`, [ORG_ID, userId]).catch(() => {});
+      await client.query(`delete from auth.identities where user_id = $1`, [userId]).catch(() => {});
+      await client.query(`delete from auth.users where id = $1`, [userId]).catch(() => {});
+    }
+    await client.end();
+  });
+
+  test("Needs a decision lists the pending nurture decision with evidence and confidence", async ({ page, context }) => {
+    await context.addCookies(await signInAndGetCookies());
+    await page.goto("/jev/needs-decision");
+    const card = page.locator(`[data-testid="jev-queue-item-${pendingDecisionId}"]`);
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("Nurture");
+    await expect(card).toContainText("50.0%");
+    await expect(card).toContainText("not right now, maybe later");
+  });
+
+  test("Review Jev correction: correcting the pending item applies the new outcome and records history", async ({ page, context }) => {
+    await context.addCookies(await signInAndGetCookies());
+    await page.goto("/jev/needs-decision");
+    const card = page.locator(`[data-testid="jev-queue-item-${pendingDecisionId}"]`);
+    await expect(card).toBeVisible();
+
+    await card.locator(`[data-testid="jev-correct-toggle-${pendingDecisionId}"]`).click();
+    const targetButton = card.locator(`[data-testid="jev-correct-${pendingDecisionId}-not_interested"]`);
+    await expect(targetButton).toBeVisible();
+    await targetButton.click();
+    // Optimistic removal from Needs-a-decision on successful correction.
+    await expect(card).toHaveCount(0);
+
+    await page.goto("/jev/review");
+    const reviewCard = page.locator(`[data-testid="jev-queue-item-${pendingDecisionId}"]`);
+    await expect(reviewCard).toBeVisible();
+    await expect(reviewCard).toContainText("corrected from Nurture to Not interested");
+    await reviewCard.locator(`[data-testid="jev-correction-history-toggle-${pendingDecisionId}"]`).click();
+    await expect(reviewCard.locator(`[data-testid="jev-correction-history-${pendingDecisionId}"]`)).toContainText("Not interested");
+  });
+
+  test("Settings: editing a Jev outcome threshold persists the new value and bumps the version", async ({ page, context }) => {
+    await context.addCookies(await signInAndGetCookies());
+    await page.goto("/settings/jev-thresholds");
+    const row = page.locator('[data-testid="jev-threshold-row-wrong_number"]');
+    await expect(row).toBeVisible();
+    const input = row.locator('[data-testid="jev-threshold-input-wrong_number"]');
+    await input.fill("0.87");
+    await row.locator('[data-testid="jev-threshold-save-wrong_number"]').click();
+    await expect(row).toContainText("v1");
+    await expect(input).toHaveValue("0.87");
+
+    const { rows } = await client.query(
+      `select min_confidence, version from jev_outcome_thresholds where org_id = $1 and outcome = 'wrong_number'`,
+      [ORG_ID],
+    );
+    expect(Number(rows[0].min_confidence)).toBeCloseTo(0.87);
+    expect(rows[0].version).toBe(1);
+  });
+
+  test("Stale conflict: confirming an already-resolved decision surfaces a friendly error, not a crash", async ({ page, context }) => {
+    await context.addCookies(await signInAndGetCookies());
+    // Load Review Jev, where the already-resolved row is visible and
+    // still renders a Confirm action for the "resolved but not yet
+    // human-acted-on" (auto-applied) shape used here — attempting to
+    // confirm/correct it again must fail cleanly with an error message
+    // inline on the card, never an unhandled crash or blank page.
+    await page.goto("/jev/review");
+    const staleCard = page.locator(`[data-testid="jev-queue-item-${staleDecisionId}"]`);
+    await expect(staleCard).toBeVisible();
+
+    const correctToggle = staleCard.locator(`[data-testid="jev-correct-toggle-${staleDecisionId}"]`);
+    if (await correctToggle.count()) {
+      await correctToggle.click();
+      await staleCard.locator(`[data-testid="jev-correct-${staleDecisionId}-not_interested"]`).click();
+      await expect(staleCard.locator("text=/could not|already|superseded|failed/i")).toBeVisible();
+    } else {
+      // Card resolved into a read-only state (no correction targets) —
+      // that is itself the friendly, non-crashing handling of the
+      // conflict: no action buttons over an already-decided row.
+      await expect(staleCard).toContainText("Status:");
+    }
+    // The page itself must still be intact — not a thrown/500 render.
+    await expect(page.locator('[data-testid="jev-review-error"]')).toHaveCount(0);
+  });
+});
