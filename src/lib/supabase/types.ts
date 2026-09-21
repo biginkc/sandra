@@ -6830,9 +6830,13 @@ export type Database = {
       // Hand-patched 2026-09-21 for migration
       // 20260921025446_jev_decision_context_gaps.sql — added
       // p_expected_revision (root review of 8361775a, gap 2).
+      // Hand-patched 2026-09-21 for migration
+      // 20260921081409_jev_deferred_review_classification_run_id.sql —
+      // added p_classification_run_id (Astra production blocker 3).
       fn_propose_ai_dnc_suppression_review: {
         Args: {
           p_ai_reason: string
+          p_classification_run_id: string
           p_conversation_id: string
           p_expected_revision: number
           p_property_id: string
@@ -6847,9 +6851,13 @@ export type Database = {
       // Hand-patched 2026-09-21 for migration
       // 20260921025446_jev_decision_context_gaps.sql — added
       // p_expected_revision (root review of 8361775a, gap 2).
+      // Hand-patched 2026-09-21 for migration
+      // 20260921081409_jev_deferred_review_classification_run_id.sql —
+      // added p_classification_run_id (Astra production blocker 3).
       fn_propose_deferred_ai_disposition_review: {
         Args: {
           p_ai_reason: string
+          p_classification_run_id: string
           p_conversation_id: string
           p_disposition: string
           p_expected_revision: number

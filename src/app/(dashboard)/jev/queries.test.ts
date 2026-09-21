@@ -13,6 +13,11 @@ const mocks = vi.hoisted(() => ({
    *  whatever the eligibility filter would leave), not the raw
    *  sms_classification_runs table plus a client-side filter. */
   eligibleClassifierEvents: [] as unknown[],
+  /** Astra production blocker 4: records every `.eq(column, value)` call
+   *  made against the `ai_disposition_reviews` query builder, so a test
+   *  can assert the `model.provider = 'jev'` legacy-exclusion filter is
+   *  actually applied, not merely that the code compiles. */
+  aiDispositionReviewEqCalls: [] as [string, unknown][],
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -30,11 +35,26 @@ vi.mock("@/lib/supabase/server", () => ({
         };
       }
       if (table === "ai_disposition_reviews") {
+        // Astra production blocker 4: getNeedsDecisionQueue/getReviewJevData
+        // now chain `.eq("status", ...)` (needs-decision only) then
+        // `.eq("model.provider", "jev")` before order/range — mock both
+        // eq() calls regardless of which query built the chain.
         return {
           select: () => ({
-            eq: () => ({
-              order: () => Promise.resolve({ data: mocks.aiDispositionReviews, error: null }),
-            }),
+            eq: (col: string, val: unknown) => {
+              mocks.aiDispositionReviewEqCalls.push([col, val]);
+              return {
+                eq: (col2: string, val2: unknown) => {
+                  mocks.aiDispositionReviewEqCalls.push([col2, val2]);
+                  return {
+                    order: () => Promise.resolve({ data: mocks.aiDispositionReviews, error: null }),
+                  };
+                },
+                order: () => ({
+                  range: () => Promise.resolve({ data: mocks.aiDispositionReviews, error: null }),
+                }),
+              };
+            },
           }),
         };
       }
@@ -83,6 +103,7 @@ beforeEach(() => {
   mocks.classificationRuns = [];
   mocks.leadEvents = [];
   mocks.eligibleClassifierEvents = [];
+  mocks.aiDispositionReviewEqCalls = [];
 });
 
 function item(overrides: Partial<JevQueueItem> = {}): JevQueueItem {
@@ -301,6 +322,18 @@ describe("getNeedsDecisionQueue — root final-review P1 #3 (classifier_event re
     const { items, error } = await getNeedsDecisionQueue();
     expect(error).toBeNull();
     expect(items.map((i) => i.id)).toEqual(["run-a", "run-b"]);
+  });
+
+  // Astra production blocker 4: a legacy (pre-Jev) ai_disposition_reviews
+  // row has classification_run_id null, so it never verifiably links to
+  // a Jev-produced sms_classification_runs row. The fix moved exclusion
+  // into the query itself (an inner join plus a provider filter) rather
+  // than trusting application code to know which rows are legacy — this
+  // asserts the actual filter is present, not just that mapping code
+  // looks right on rows the mock happens to hand it.
+  it("filters the ai_disposition_reviews query to Jev-backed rows only (model.provider = 'jev')", async () => {
+    await getNeedsDecisionQueue();
+    expect(mocks.aiDispositionReviewEqCalls).toContainEqual(["model.provider", "jev"]);
   });
 });
 

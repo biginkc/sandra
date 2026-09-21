@@ -862,6 +862,7 @@ async function resolveAndApplyRoute(
             propertyId: input.propertyId,
             conversationId: input.conversationId ?? null,
             inboundMessageId: input.inboundMessageId ?? null,
+            classificationRunId: classification.classificationRunId,
             dispo: "opted_out",
             reason: route.reason,
             expectedRevision: jevRevision!,
@@ -911,6 +912,7 @@ async function resolveAndApplyRoute(
             inboundMessageId: input.inboundMessageId ?? null,
             inboundFromPhone: input.inboundFromPhone ?? null,
             orgId: property.org_id,
+            classificationRunId: classification.classificationRunId,
             reason: route.reason,
             expectedRevision: jevRevision!,
           })
@@ -938,6 +940,7 @@ async function resolveAndApplyRoute(
             propertyId: input.propertyId,
             conversationId: input.conversationId ?? null,
             inboundMessageId: input.inboundMessageId ?? null,
+            classificationRunId: classification.classificationRunId,
             dispo: "wrong_number",
             reason: route.reason,
             expectedRevision: jevRevision!,
@@ -974,6 +977,7 @@ async function resolveAndApplyRoute(
             propertyId: input.propertyId,
             conversationId: input.conversationId ?? null,
             inboundMessageId: input.inboundMessageId ?? null,
+            classificationRunId: classification.classificationRunId,
             dispo: route.dispo,
             reason: route.reason,
             expectedRevision: jevRevision!,
@@ -1731,6 +1735,7 @@ async function proposeJevDncSuppression(
     inboundMessageId: string | null;
     inboundFromPhone: string | null;
     orgId: string;
+    classificationRunId: string;
     reason: string;
     expectedRevision: number;
   },
@@ -1769,6 +1774,7 @@ async function proposeJevDncSuppression(
       p_property_id: args.propertyId,
       p_conversation_id: args.conversationId,
       p_source_inbound_message_id: args.inboundMessageId,
+      p_classification_run_id: args.classificationRunId,
       p_ai_reason: args.reason,
       p_expected_revision: args.expectedRevision,
     },
@@ -1820,6 +1826,7 @@ async function proposeDeferredJevDisposition(
     propertyId: string;
     conversationId: string | null;
     inboundMessageId: string | null;
+    classificationRunId: string;
     dispo: "wrong_number" | "not_interested" | "opted_out";
     reason: string;
     expectedRevision: number;
@@ -1841,6 +1848,7 @@ async function proposeDeferredJevDisposition(
       p_property_id: args.propertyId,
       p_conversation_id: args.conversationId,
       p_source_inbound_message_id: args.inboundMessageId,
+      p_classification_run_id: args.classificationRunId,
       p_disposition: args.dispo,
       p_ai_reason: args.reason,
       p_expected_revision: args.expectedRevision,

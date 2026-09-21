@@ -63,8 +63,17 @@ function readDecisionAudit(
   return { nativeConfidence, thresholdAtDecision, thresholdVersion };
 }
 
+// Astra production blocker 4 (2026-09-21): a legacy (pre-Jev) Claude
+// ai_disposition_reviews row has classification_run_id null. The plain
+// (left-join) embed below used to let those rows through with model:
+// null, and every caller then labeled/counted them as Jev decisions.
+// `!inner` makes the join required — a row with no classification_run_id
+// is dropped entirely — and the added `provider` filter (`.eq("model.
+// provider", "jev")` at each call site) further excludes any row whose
+// linked run isn't actually Jev-produced. Verifiable Jev-backed rows
+// (classification_run_id set, provider = 'jev') are unaffected.
 const AI_DISPOSITION_REVIEW_SELECT =
-  "id, property_id, conversation_id, disposition, status, corrected_disposition, corrected_at, corrected_by, correction_reason, dispo_applied, resolved_at, reviewed_by, human_reviewed_at, source_inbound_message_id, model:sms_classification_runs!classification_run_id(model, schema_version, policy_version, decision), created_at, properties(address, city, state), messages(body)";
+  "id, property_id, conversation_id, disposition, status, corrected_disposition, corrected_at, corrected_by, correction_reason, dispo_applied, resolved_at, reviewed_by, human_reviewed_at, source_inbound_message_id, model:sms_classification_runs!classification_run_id!inner(model, schema_version, policy_version, decision, provider), created_at, properties(address, city, state), messages(body)";
 
 const JEV_LEAD_DECISION_SELECT =
   "id, property_id, conversation_id, proposed_outcome, status, resolved_outcome, resolved_at, resolved_by, resolution_reason, human_reviewed_at, native_confidence, threshold_at_decision, threshold_version, source_inbound_message_id, model:sms_classification_runs!classification_run_id(model, schema_version, policy_version), created_at, properties(address, city, state), messages(body)";
@@ -84,7 +93,7 @@ type AiDispositionReviewRow = {
   reviewed_by: string | null;
   human_reviewed_at: string | null;
   source_inbound_message_id: string;
-  model: { model: string; schema_version: string; policy_version: string; decision: unknown } | null;
+  model: { model: string; schema_version: string; policy_version: string; decision: unknown; provider: string } | null;
   created_at: string;
   properties: PropertyEmbed;
   messages: MessageEmbed;
@@ -278,6 +287,7 @@ export async function getNeedsDecisionQueue(): Promise<{ items: JevQueueItem[]; 
       .from("ai_disposition_reviews")
       .select(AI_DISPOSITION_REVIEW_SELECT)
       .eq("status", "pending")
+      .eq("model.provider", "jev")
       .order("created_at", { ascending: true }),
     supabase
       .from("jev_lead_decisions")
@@ -369,6 +379,7 @@ export async function getReviewJevData(page = 0): Promise<ReviewJevData> {
     supabase
       .from("ai_disposition_reviews")
       .select(AI_DISPOSITION_REVIEW_SELECT)
+      .eq("model.provider", "jev")
       .order("created_at", { ascending: false })
       .range(from, to),
     supabase
