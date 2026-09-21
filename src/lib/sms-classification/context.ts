@@ -26,6 +26,16 @@ export async function buildTwoWayThreadState(
     contactId: string;
     conversationId: string | null;
     excludeMessageId: string | null;
+    /** Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 3):
+     *  excluding the current inbound BY ID stops it appearing twice, but
+     *  does nothing to stop a DIFFERENT message — inbound or outbound —
+     *  that arrives on this same thread WHILE Jev is still evaluating
+     *  (context build + HTTP latency) from leaking into "prior" context
+     *  purely because the query happened to run after it landed. Passing
+     *  the source inbound message's OWN stored `created_at` restricts
+     *  the query to that instant, so later activity genuinely cannot
+     *  contaminate an earlier evaluation regardless of query timing. */
+    sourceCreatedAt: string | null;
   },
 ): Promise<JevThreadMessage[]> {
   let query = supabase
@@ -38,6 +48,7 @@ export async function buildTwoWayThreadState(
     ? query.eq("conversation_id", args.conversationId)
     : query.eq("contact_id", args.contactId);
   if (args.excludeMessageId) query = query.neq("id", args.excludeMessageId);
+  if (args.sourceCreatedAt) query = query.lte("created_at", args.sourceCreatedAt);
 
   const { data } = await query;
   const rows = (data ?? []).slice().reverse(); // chronological, oldest first

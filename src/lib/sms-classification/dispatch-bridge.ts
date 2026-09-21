@@ -101,6 +101,19 @@ export type ClassificationBridgeResult =
     }
   | { kind: "jev_no_action"; classificationRunId: string }
   /**
+   * Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 2):
+   * automatic-mode-only. Jev's HTTP call failed, no decision-time
+   * revision baseline could be established, the source message's
+   * identity couldn't be verified, or the audit row failed to persist —
+   * in `automatic` mode this must never silently degrade to the legacy
+   * classifier (that would apply an outcome below/without any trusted
+   * Jev decision, violating the human-decision gate). The caller must
+   * create a durable, human-actionable item and apply nothing. Never
+   * returned for `shadow`/`legacy` provider, which already always defer
+   * to legacy regardless — see the `use_legacy` cases above.
+   */
+  | { kind: "jev_automatic_failed"; classificationRunId: string | null; reason: string }
+  /**
    * Outcome resolved but is below its org threshold, missing/invalid
    * confidence, or has no configured threshold — and has no existing
    * disposition-review infra to fall back on (currently only `nurture`;
@@ -170,8 +183,34 @@ export async function classifyForDispatch(
   // enforces this exact value against the row it locks.
   const evaluationRevision = await readDecisionContextRevision(supabase, input.propertyId);
   if (evaluationRevision === null) {
-    // Can't establish a decision-time baseline at all — fail closed to
-    // legacy rather than proceed without one.
+    // Can't establish a decision-time baseline at all — fail closed.
+    // Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 2):
+    // in automatic mode this must NOT fall through to the legacy
+    // classifier (that would apply a below/no-trust decision, violating
+    // the human-decision gate) — it must create a durable human item
+    // instead. shadow/legacy-provider callers already always defer to
+    // legacy regardless, so use_legacy is still correct for them.
+    if (config.classifierMode === "automatic") {
+      await persistFailedRun(supabase, input, "missing_revision_baseline").catch(() => {});
+      return { kind: "jev_automatic_failed", classificationRunId: null, reason: "missing_revision_baseline" };
+    }
+    return { kind: "use_legacy", classificationRunId: null };
+  }
+
+  // Root review of dbbb12e6, finding 3: the SOURCE message's own stored
+  // `created_at` — not the moment this function happens to run — anchors
+  // both the context-window cutoff and this message's own `sentAt`. This
+  // also doubles as an identity check: if the message row this call was
+  // handed doesn't actually exist as inbound on this property, fail
+  // closed rather than evaluate against an unverifiable claim.
+  const sourceCreatedAt = input.inboundMessageId
+    ? await readSourceMessageCreatedAt(supabase, input.inboundMessageId, input.propertyId)
+    : null;
+  if (input.inboundMessageId && sourceCreatedAt === null) {
+    if (config.classifierMode === "automatic") {
+      await persistFailedRun(supabase, input, "source_message_not_found").catch(() => {});
+      return { kind: "jev_automatic_failed", classificationRunId: null, reason: "source_message_not_found" };
+    }
     return { kind: "use_legacy", classificationRunId: null };
   }
 
@@ -180,14 +219,17 @@ export async function classifyForDispatch(
     contactId: input.contactId,
     conversationId: input.conversationId,
     excludeMessageId: input.inboundMessageId,
+    sourceCreatedAt,
   });
   // Append the current inbound explicitly, matching loadConversation's
   // exact pattern in dispatch.ts — buildTwoWayThreadState excludes it by
   // id, so without this Jev only ever sees prior history, never the
-  // message it's actually supposed to classify.
+  // message it's actually supposed to classify. sentAt is the message's
+  // OWN stored timestamp (not "now") — stable across a retry, and never
+  // drifts later than the cutoff just applied above it.
   const thread = [
     ...priorThread,
-    { direction: "inbound" as const, body: input.inboundBody, sentAt: new Date().toISOString() },
+    { direction: "inbound" as const, body: input.inboundBody, sentAt: sourceCreatedAt ?? new Date().toISOString() },
   ];
 
   const state = { propertyId: input.propertyId };
@@ -206,6 +248,9 @@ export async function classifyForDispatch(
       extra: { propertyId: input.propertyId },
     });
     await persistFailedRun(supabase, input, kind).catch(() => {});
+    if (config.classifierMode === "automatic") {
+      return { kind: "jev_automatic_failed", classificationRunId: null, reason: kind };
+    }
     return { kind: "use_legacy", classificationRunId: null };
   }
 
@@ -254,10 +299,13 @@ export async function classifyForDispatch(
     return null;
   });
   if (!classificationRunId) {
-    // Audit write failed — still allow the decision through if the mode
-    // says to use it, but without a run id there is nothing to link an
-    // auto-accept to, so eligibleForAutoAccept below is always false in
-    // that case.
+    // Audit write failed. Root review of dbbb12e6, finding 2: in
+    // automatic mode a Jev decision that couldn't even be durably
+    // recorded must not be applied via the legacy classifier either —
+    // there is no audit trail for it and no linkable run id.
+    if (config.classifierMode === "automatic") {
+      return { kind: "jev_automatic_failed", classificationRunId: null, reason: "audit_persist_failed" };
+    }
     return { kind: "use_legacy", classificationRunId: null };
   }
 
@@ -364,6 +412,29 @@ async function readDecisionContextRevision(
     .maybeSingle();
   if (error || !data) return null;
   return data.decision_context_revision;
+}
+
+/**
+ * Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 3): the
+ * SOURCE message's own stored `created_at`, verified to actually be an
+ * inbound SMS on this property (an identity check, not just a lookup —
+ * a retry with the same input must resolve to the same stable
+ * timestamp, never silently accept a mismatched or missing row).
+ */
+async function readSourceMessageCreatedAt(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+  propertyId: string,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("created_at")
+    .eq("id", messageId)
+    .eq("property_id", propertyId)
+    .eq("direction", "inbound")
+    .maybeSingle();
+  if (error || !data) return null;
+  return data.created_at;
 }
 
 function hashState(

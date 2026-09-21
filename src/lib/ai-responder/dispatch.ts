@@ -1,8 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { reportError } from "@/lib/errors/report";
-import { qualifyProperty } from "@/lib/leads/qualify";
-import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { applyPhoneLevelOptOut } from "@/lib/messaging/opt-out-phone";
 import { getConsentState } from "@/lib/messaging/consent";
 import { checkQuietHours } from "@/lib/messaging/quiet-hours";
@@ -509,30 +507,40 @@ async function classifyAndHandleNonRouteOutcomes(
   );
 
   if (classification.kind === "jev_nurture") {
-    const nurtureResult = await setOutreachDispoNurture(
-      supabase,
-      input.propertyId,
-      classification.evaluationRevision,
-    );
-    if (nurtureResult.ok) {
-      await autoApplyJevLeadDecision(supabase, {
-        propertyId: input.propertyId,
-        conversationId: input.conversationId,
-        inboundMessageId: input.inboundMessageId,
-        classificationRunId: classification.classificationRunId,
-        outcome: "nurture",
-        nativeConfidence: classification.nativeConfidence,
-        thresholdAtDecision: classification.thresholdAtDecision,
-        thresholdVersion: classification.thresholdVersion,
-        expectedRevision: classification.evaluationRevision,
-      });
+    // Root review of dbbb12e6, finding 1: effect + revision guard +
+    // audit insert now happen atomically inside ONE RPC call — see
+    // applyJevLeadDecisionAtomically's doc comment.
+    const applyResult = await applyJevLeadDecisionAtomically(supabase, {
+      propertyId: input.propertyId,
+      conversationId: input.conversationId,
+      inboundMessageId: input.inboundMessageId,
+      classificationRunId: classification.classificationRunId,
+      outcome: "nurture",
+      nativeConfidence: classification.nativeConfidence,
+      thresholdAtDecision: classification.thresholdAtDecision,
+      thresholdVersion: classification.thresholdVersion,
+      expectedRevision: classification.evaluationRevision,
+    });
+    if (
+      applyResult.status === "applied" ||
+      applyResult.status === "already_nurture" ||
+      applyResult.status === "replayed"
+    ) {
+      if (applyResult.status === "applied") {
+        await recordLeadEvent({
+          propertyId: input.propertyId,
+          actorType: "ai",
+          eventType: LEAD_EVENT_TYPES.DISPO_SET,
+          payload: { from: null, to: "nurture", reason: "model:nurture" },
+        });
+      }
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:nurture" } };
     }
-    if (nurtureResult.alreadyTerminal) {
+    if (applyResult.status === "already_terminal") {
       // Benign, not an error: something more specific than nurture is
       // already set (possibly by a human while Jev was classifying) —
       // nurture must never downgrade it. Skip silently, same treatment
@@ -543,13 +551,14 @@ async function classifyAndHandleNonRouteOutcomes(
       });
       return { handled: true, outcome: { outcome: "skipped", reason: "already_terminal" } };
     }
+    const reason = applyResult.status === "stale_decision_context" ? "jev_stale_decision_context" : "nurture_write_failed";
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
       outcome: "escalated",
-      errorMessage: nurtureResult.error,
+      errorMessage: applyResult.status,
     });
-    await markPropertyNeedsAttention(supabase, input.propertyId, "nurture_write_failed");
-    return { handled: true, outcome: { outcome: "escalated", reason: "nurture_write_failed" } };
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    return { handled: true, outcome: { outcome: "escalated", reason } };
   }
 
   if (classification.kind === "jev_needs_decision") {
@@ -582,45 +591,81 @@ async function classifyAndHandleNonRouteOutcomes(
   }
 
   if (classification.kind === "jev_promote_new_lead") {
-    // new_lead at/above the org's configured threshold. Promote through
-    // the same sanctioned primitive the legacy Haiku qualifier and manual
-    // qualify actions use — never appointment booking, never a raw
-    // properties.status write here.
-    const qualifyOutcome = await qualifyProperty(
-      supabase,
-      input.propertyId,
-      "system:jev_auto_promote",
-      classification.evaluationRevision,
-    );
-    if (qualifyOutcome.status === "qualified" || qualifyOutcome.status === "already_qualified") {
-      await autoApplyJevLeadDecision(supabase, {
-        propertyId: input.propertyId,
-        conversationId: input.conversationId,
-        inboundMessageId: input.inboundMessageId,
-        classificationRunId: classification.classificationRunId,
-        outcome: "new_lead",
-        nativeConfidence: classification.nativeConfidence,
-        thresholdAtDecision: classification.thresholdAtDecision,
-        thresholdVersion: classification.thresholdVersion,
-        expectedRevision: classification.evaluationRevision,
-      });
+    // new_lead at/above the org's configured threshold. Promote via the
+    // atomic RPC (root review of dbbb12e6, finding 1) — never appointment
+    // booking, never a raw properties.status write here. qualifyProperty
+    // (the shared primitive the legacy Haiku qualifier and manual qualify
+    // actions still use) is not called from this path anymore — its
+    // effect is replicated inside fn_auto_apply_jev_lead_decision so it
+    // can be atomic with the revision guard and the audit insert.
+    const applyResult = await applyJevLeadDecisionAtomically(supabase, {
+      propertyId: input.propertyId,
+      conversationId: input.conversationId,
+      inboundMessageId: input.inboundMessageId,
+      classificationRunId: classification.classificationRunId,
+      outcome: "new_lead",
+      nativeConfidence: classification.nativeConfidence,
+      thresholdAtDecision: classification.thresholdAtDecision,
+      thresholdVersion: classification.thresholdVersion,
+      expectedRevision: classification.evaluationRevision,
+    });
+    if (
+      applyResult.status === "applied" ||
+      applyResult.status === "already_qualified" ||
+      applyResult.status === "replayed"
+    ) {
+      if (applyResult.status === "applied") {
+        await recordLeadEvent({
+          propertyId: input.propertyId,
+          actorType: "system",
+          eventType: LEAD_EVENT_TYPES.QUALIFIED,
+          payload: { from: "prospect", to: "new_lead" },
+        });
+      }
       await completeAiResponseClaim(supabase, {
         claimId: responseClaim.claimId,
         outcome: "auto_closed",
       });
       return { handled: true, outcome: { outcome: "auto_closed", reason: "model:new_lead_promoted" } };
     }
-    // "failed" (including DNC-locked) or "not_found": never silently drop
-    // a Jev-detected new lead — surface it for a human exactly like the
-    // below-threshold case above, rather than treating a promotion failure
-    // as a skip.
+    // dnc_locked / not_found / stale_decision_context / training_blocked /
+    // error: never silently drop a Jev-detected new lead — surface it for
+    // a human exactly like the below-threshold case above, rather than
+    // treating a promotion failure as a skip.
     const reason = "jev_new_lead_promotion_failed";
-    if (qualifyOutcome.status === "failed") {
-      reportError(new Error(qualifyOutcome.message), {
-        tags: { surface: "ai_responder_jev_new_lead_promotion" },
-        extra: { propertyId: input.propertyId },
-      });
-    }
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    await completeAiResponseClaim(supabase, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+      errorMessage: applyResult.status,
+    });
+    return { handled: true, outcome: { outcome: "escalated", reason } };
+  }
+
+  // Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 2):
+  // jev_no_action (Jev genuinely classified but landed on unclear/
+  // bad_number — this kind is only ever reached in automatic mode;
+  // shadow mode already returned use_legacy above resolvePolicyOutcome)
+  // and jev_automatic_failed (HTTP failure/missing revision baseline/
+  // unverifiable source message/audit-persist failure, automatic mode
+  // only) must both create a durable, human-actionable item and stop
+  // right here — falling through to `resolveAndApplyRoute` would run the
+  // LEGACY classify+reply pipeline and apply an outcome with no trusted
+  // Jev decision behind it, the exact human-decision-gate violation root
+  // flagged. Deterministic STOP is unaffected — it's handled entirely
+  // upstream of classification, in inbound.ts's matchesStopKeyword.
+  if (classification.kind === "jev_no_action") {
+    const reason = "jev_unclear_no_action";
+    await markPropertyNeedsAttention(supabase, input.propertyId, reason);
+    await completeAiResponseClaim(supabase, {
+      claimId: responseClaim.claimId,
+      outcome: "escalated",
+    });
+    return { handled: true, outcome: { outcome: "escalated", reason } };
+  }
+
+  if (classification.kind === "jev_automatic_failed") {
+    const reason = `jev_automatic_failed:${classification.reason}`;
     await markPropertyNeedsAttention(supabase, input.propertyId, reason);
     await completeAiResponseClaim(supabase, {
       claimId: responseClaim.claimId,
@@ -1415,13 +1460,24 @@ async function proposeJevLeadDecision(
 }
 
 /**
- * Records an already-applied (auto-accepted) new_lead or nurture
- * decision, for the Review Jev audit view. Called AFTER the real effect
- * (qualifyProperty / setOutreachDispoNurture) already succeeded — same
- * "effect first, record second" ordering as maybeAutoAcceptJevReview.
- * Best-effort for the same reason: the effect already landed.
+ * Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 1, P1):
+ * the effect (nurture's outreach_dispo write / new_lead's status write),
+ * the decision_context_revision guard, and the jev_lead_decisions audit
+ * insert now happen atomically inside `fn_auto_apply_jev_lead_decision`
+ * itself — one RPC, one transaction. The prior design called
+ * qualifyProperty/setOutreachDispoNurture (a separate write, which
+ * itself bumped decision_context_revision) and THEN this RPC with the
+ * PRE-write revision, so the RPC's own staleness check rejected every
+ * normal successful apply. qualifyProperty/setOutreachDispoNurture are
+ * unchanged and still used by every non-Jev-automatic-apply caller
+ * (manual qualify, the legacy Haiku qualifier, deferred/below-threshold
+ * Jev dispositions) — this call site alone no longer uses them.
  */
-async function autoApplyJevLeadDecision(
+type JevAutoApplyResult =
+  | { status: "applied" | "already_nurture" | "already_qualified" | "replayed"; decisionId: string }
+  | { status: "already_terminal" | "dnc_locked" | "not_found" | "stale_decision_context" | "training_blocked" | "error" };
+
+async function applyJevLeadDecisionAtomically(
   supabase: SupabaseClient<Database>,
   args: {
     propertyId: string;
@@ -1434,9 +1490,9 @@ async function autoApplyJevLeadDecision(
     thresholdVersion: number | null;
     expectedRevision: number;
   },
-): Promise<void> {
-  if (!args.conversationId || !args.inboundMessageId) return;
-  const { error } = await supabase.rpc("fn_auto_apply_jev_lead_decision", {
+): Promise<JevAutoApplyResult> {
+  if (!args.conversationId || !args.inboundMessageId) return { status: "error" };
+  const { data, error } = await supabase.rpc("fn_auto_apply_jev_lead_decision", {
     p_property_id: args.propertyId,
     p_conversation_id: args.conversationId,
     p_source_inbound_message_id: args.inboundMessageId,
@@ -1448,11 +1504,35 @@ async function autoApplyJevLeadDecision(
     p_expected_revision: args.expectedRevision,
   });
   if (error) {
+    if (error.message.includes("STALE_DECISION_CONTEXT")) return { status: "stale_decision_context" };
+    if (error.message.includes("training lead")) return { status: "training_blocked" };
     reportError(new Error(error.message), {
       tags: { surface: "jev_lead_decision_auto_apply" },
       extra: { propertyId: args.propertyId, outcome: args.outcome },
     });
+    return { status: "error" };
   }
+  const result = data as { status: string; decisionId?: string };
+  if (
+    result.status === "applied" ||
+    result.status === "already_nurture" ||
+    result.status === "already_qualified" ||
+    result.status === "replayed"
+  ) {
+    return { status: result.status, decisionId: result.decisionId ?? "" };
+  }
+  if (
+    result.status === "already_terminal" ||
+    result.status === "dnc_locked" ||
+    result.status === "not_found"
+  ) {
+    return { status: result.status };
+  }
+  reportError(new Error(`unexpected fn_auto_apply_jev_lead_decision status: ${result.status}`), {
+    tags: { surface: "jev_lead_decision_auto_apply" },
+    extra: { propertyId: args.propertyId, outcome: args.outcome },
+  });
+  return { status: "error" };
 }
 
 async function maybeAutoAcceptJevReview(
@@ -1542,76 +1622,6 @@ async function findExistingAiDispositionReview(
  * dispositions, applied here for the fifth (nurture has no RPC of its
  * own since it needs no auth.uid() gate).
  */
-async function setOutreachDispoNurture(
-  supabase: SupabaseClient<Database>,
-  propertyId: string,
-  // Root review of 8361775a, jev-root-revision-review.md, 2026-09-20: revision
-  // read before the Jev HTTP call started. When provided, the write below is
-  // re-checked against it and treated as "changed underneath us" (same as any
-  // other race) rather than silently applying a stale model result.
-  expectedRevision?: number,
-): Promise<
-  | { ok: true }
-  | { ok: false; alreadyTerminal: true }
-  | { ok: false; alreadyTerminal: false; error: string }
-> {
-  try {
-    await assertNotTrainingTarget(supabase, { propertyId });
-  } catch (error) {
-    return {
-      ok: false,
-      alreadyTerminal: false,
-      error: error instanceof Error ? error.message : "Training eligibility could not be verified.",
-    };
-  }
-
-  const { data: prop, error: propErr } = await supabase
-    .from("properties")
-    .select("id, outreach_dispo")
-    .eq("id", propertyId)
-    .maybeSingle();
-  if (propErr || !prop) {
-    return { ok: false, alreadyTerminal: false, error: propErr?.message ?? "Property not found" };
-  }
-
-  if (prop.outreach_dispo !== null && prop.outreach_dispo !== "nurture") {
-    return { ok: false, alreadyTerminal: true };
-  }
-  if (prop.outreach_dispo === "nurture") {
-    return { ok: true }; // idempotent — already in the target state
-  }
-
-  let updateQuery = supabase
-    .from("properties")
-    .update({
-      outreach_dispo: "nurture",
-      follow_up_at: null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", propertyId)
-    .is("outreach_dispo", null); // re-checked at write time, not just read time
-  if (expectedRevision !== undefined) {
-    updateQuery = updateQuery.eq("decision_context_revision", expectedRevision);
-  }
-  const { error: updateErr, data: updated } = await updateQuery.select("id").maybeSingle();
-  if (updateErr) return { ok: false, alreadyTerminal: false, error: updateErr.message };
-  if (!updated) {
-    // Changed between our SELECT and this UPDATE (outreach_dispo, or —
-    // when expectedRevision is set — decision_context_revision) — treat
-    // as terminal rather than retrying, since we don't know what it
-    // changed TO.
-    return { ok: false, alreadyTerminal: true };
-  }
-
-  await recordLeadEvent({
-    propertyId,
-    actorType: "ai",
-    eventType: LEAD_EVENT_TYPES.DISPO_SET,
-    payload: { from: null, to: "nurture", reason: "model:nurture" },
-  });
-  return { ok: true };
-}
-
 async function applyResponderOptOut(
   supabase: SupabaseClient<Database>,
   args: {

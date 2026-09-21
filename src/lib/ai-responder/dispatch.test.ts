@@ -207,6 +207,7 @@ function createMockSupabase(state: MockState) {
       eq: Map<string, unknown>;
       in: Map<string, unknown[]>;
       neq: Map<string, unknown>;
+      lte: Map<string, unknown>;
     },
   ): boolean {
     for (const [field, value] of filters.eq) {
@@ -217,6 +218,13 @@ function createMockSupabase(state: MockState) {
 
     for (const [field, value] of filters.neq) {
       if (row[field as keyof MessageRow] === value) {
+        return false;
+      }
+    }
+
+    for (const [field, value] of filters.lte) {
+      const cell = row[field as keyof MessageRow];
+      if (typeof cell !== "string" || typeof value !== "string" || !(cell <= value)) {
         return false;
       }
     }
@@ -252,6 +260,7 @@ function createMockSupabase(state: MockState) {
       eq: new Map<string, unknown>(),
       in: new Map<string, unknown[]>(),
       neq: new Map<string, unknown>(),
+      lte: new Map<string, unknown>(),
     };
     let limitCount: number | null = null;
     let orderBy: { ascending: boolean; field: keyof MessageRow } | null = null;
@@ -313,6 +322,10 @@ function createMockSupabase(state: MockState) {
       },
       neq(field: string, value: unknown) {
         filters.neq.set(field, value);
+        return query;
+      },
+      lte(field: string, value: unknown) {
+        filters.lte.set(field, value);
         return query;
       },
       limit(value: number) {
@@ -666,12 +679,42 @@ function createMockSupabase(state: MockState) {
       throw new Error(`Unexpected table: ${table}`);
     },
     rpc(name: string, args: Record<string, unknown>) {
-      if (name === "fn_propose_jev_lead_decision" || name === "fn_auto_apply_jev_lead_decision") {
+      if (name === "fn_propose_jev_lead_decision") {
         state.jevLeadDecisionCalls.push({ rpc: name, args });
-        return Promise.resolve({
-          data: { status: name === "fn_propose_jev_lead_decision" ? "proposed" : "confirmed", decisionId: "decision-1" },
-          error: null,
-        });
+        return Promise.resolve({ data: { status: "proposed", decisionId: "decision-1" }, error: null });
+      }
+      if (name === "fn_auto_apply_jev_lead_decision") {
+        // Root review of dbbb12e6, finding 1: the real RPC now performs
+        // the property effect (nurture's outreach_dispo write / new_lead's
+        // status write) atomically with the revision check and the audit
+        // insert — this mock replicates that same effect so the tests'
+        // state.property assertions still reflect what actually happens,
+        // rather than relying on a SEPARATE qualifyProperty/
+        // setOutreachDispoNurture mutation dispatch.ts no longer makes.
+        state.jevLeadDecisionCalls.push({ rpc: name, args });
+        const outcome = args.p_outcome as string;
+        let status = "applied";
+        if (outcome === "nurture") {
+          if (state.property.outreach_dispo === "nurture") {
+            status = "already_nurture";
+          } else if (state.property.outreach_dispo !== null) {
+            return Promise.resolve({ data: { status: "already_terminal" }, error: null });
+          } else {
+            state.property.outreach_dispo = "nurture";
+          }
+        } else if (outcome === "new_lead") {
+          if (state.property.is_dnc_locked) {
+            return Promise.resolve({ data: { status: "dnc_locked" }, error: null });
+          }
+          if (state.property.status !== undefined && state.property.status !== "prospect") {
+            status = "already_qualified";
+          } else {
+            state.property.status = "new_lead";
+            state.property.qualified_at = new Date().toISOString();
+            state.property.qualified_by = "system:jev_auto_promote";
+          }
+        }
+        return Promise.resolve({ data: { status, decisionId: "decision-1" }, error: null });
       }
       if (name === "fn_propose_deferred_ai_disposition_review") {
         // Root final-review P1 #1: mirrors the real RPC's contract — marks
@@ -775,6 +818,32 @@ function createMockSupabase(state: MockState) {
       });
     },
   };
+}
+
+/**
+ * Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 3):
+ * classifyForDispatch now verifies the current inbound message's own
+ * row (identity check + context-cutoff timestamp) before evaluating —
+ * these Jev-automatic-mode tests need a real matching `messages` row to
+ * exist, which they didn't require before this fix.
+ */
+function seedInboundMessage(
+  state: MockState,
+  args: { id: string; body: string; propertyId?: string; contactId?: string; conversationId?: string },
+): void {
+  state.messages.push({
+    id: args.id,
+    body: args.body,
+    channel: "sms",
+    contact_id: args.contactId ?? CONTACT_ID,
+    conversation_id: args.conversationId ?? CONVERSATION_ID,
+    created_at: new Date().toISOString(),
+    direction: "inbound",
+    metadata: null,
+    property_id: args.propertyId ?? PROPERTY_ID,
+    sent_at: null,
+    status: "received",
+  });
 }
 
 function installSendMock(state: MockState) {
@@ -1560,6 +1629,7 @@ describe("dispatchAiResponse debounce", () => {
     state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9, version: 4 }];
     const supabase = createMockSupabase(state);
     installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-new-lead-promoted", body: "Yes let's talk tomorrow at 2pm about selling the house" });
     const originalFetch = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, status: 200,
@@ -1599,6 +1669,7 @@ describe("dispatchAiResponse debounce", () => {
     state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9 }];
     const supabase = createMockSupabase(state);
     installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-new-lead-below-threshold", body: "Maybe call me sometime to talk about it" });
     const originalFetch = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, status: 200,
@@ -1635,6 +1706,7 @@ describe("dispatchAiResponse debounce", () => {
       state.jevOutcomeThresholds = [{ outcome: "not_interested", min_confidence: 0.95 }];
       const supabase = createMockSupabase(state);
       installSendMock(state);
+      seedInboundMessage(state, { id: `inbound-decoupled-${skipReason}`, body: "Not interested, please stop" });
       vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: skipReason });
       const originalFetch = globalThis.fetch;
       vi.stubGlobal("fetch", vi.fn(async () => ({
@@ -1671,6 +1743,7 @@ describe("dispatchAiResponse debounce", () => {
         state.jevOutcomeThresholds = [{ outcome: choice, min_confidence: 0.95 }];
         const supabase = createMockSupabase(state);
         installSendMock(state);
+        seedInboundMessage(state, { id: `inbound-below-threshold-${choice}`, body: "whatever the reply is" });
         const originalFetch = globalThis.fetch;
         vi.stubGlobal("fetch", vi.fn(async () => ({
           ok: true, status: 200,
@@ -1710,6 +1783,7 @@ describe("dispatchAiResponse debounce", () => {
       state.jevOutcomeThresholds = [{ outcome: "opted_out", min_confidence: 0.5 }];
       const supabase = createMockSupabase(state);
       installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-above-threshold-opted-out", body: "STOP texting me" });
       const originalFetch = globalThis.fetch;
       vi.stubGlobal("fetch", vi.fn(async () => ({
         ok: true, status: 200,
@@ -1801,6 +1875,7 @@ describe("dispatchAiResponse debounce", () => {
     state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
     const supabase = createMockSupabase(state);
     installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-nurture-above", body: "Not right now, maybe check back later" });
     const originalFetch = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, status: 200,
@@ -1832,6 +1907,7 @@ describe("dispatchAiResponse debounce", () => {
     state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
     const supabase = createMockSupabase(state);
     installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-nurture-below", body: "Not right now" });
     const originalFetch = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, status: 200,
@@ -1862,6 +1938,7 @@ describe("dispatchAiResponse debounce", () => {
     state.config.classifier_mode = "automatic";
     const supabase = createMockSupabase(state);
     installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-new-lead", body: "Call me tomorrow afternoon to discuss selling" });
     const originalFetch = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, status: 200,
@@ -1901,6 +1978,7 @@ describe("dispatchAiResponse debounce", () => {
     state.config.classifier_mode = "automatic";
     const supabase = createMockSupabase(state);
     installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-jev-dnc", body: "I will sue you, stop contacting me" });
 
     const originalFetch = globalThis.fetch;
     const fetchMock = vi.fn(async () => ({
@@ -1956,6 +2034,71 @@ describe("dispatchAiResponse debounce", () => {
     } finally {
       vi.stubGlobal("fetch", originalFetch);
     }
+  });
+
+  // Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 1):
+  // dispatch coverage for the atomic RPC's non-success statuses — must
+  // escalate cleanly, never silently report auto_closed with no real
+  // effect and no audit row.
+  it("escalates (does not auto_close) when the atomic new_lead apply reports dnc_locked", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.property.is_dnc_locked = true;
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-new-lead-dnc-locked", body: "Yes let's talk" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.99 }, escalation_reason: { choice: "call_request" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Yes let's talk",
+        inboundMessageId: "inbound-new-lead-dnc-locked", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "jev_new_lead_promotion_failed" });
+      expect(state.property.status).not.toBe("new_lead");
+      expect(state.property.needs_human_attention).toBe(true);
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("escalates with a distinct reason (does not auto_close) when the atomic nurture apply reports stale_decision_context", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-nurture-stale", body: "Not right now" });
+    // Simulate the RPC's own STALE_DECISION_CONTEXT rejection directly —
+    // proves dispatch.ts's error-message branch (not just the happy-path
+    // status field), matching how the real Postgres error surfaces.
+    const originalRpc = supabase.rpc.bind(supabase);
+    vi.spyOn(supabase, "rpc").mockImplementation((name: string, args: Record<string, unknown>) => {
+      if (name === "fn_auto_apply_jev_lead_decision") {
+        return Promise.resolve({ data: null, error: { message: "STALE_DECISION_CONTEXT" } }) as never;
+      }
+      return originalRpc(name, args as never) as never;
+    });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.99 } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not right now",
+        inboundMessageId: "inbound-nurture-stale", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "jev_stale_decision_context" });
+      expect(state.property.outreach_dispo).toBeNull();
+      expect(state.property.needs_human_attention).toBe(true);
+    } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
   it("deescalate_close sends the fixed named template without humanizer", async () => {

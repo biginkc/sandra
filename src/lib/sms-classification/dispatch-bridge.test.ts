@@ -22,15 +22,34 @@ function stubSupabase(opts: {
    *  (fail-closed path). Defaults to 7 — an arbitrary non-zero value so
    *  tests that don't care about it still exercise a real number. */
   propertiesRevision?: number | null | (() => number | null);
+  /** readSourceMessageCreatedAt's single-row lookup. `null` simulates a
+   *  missing/mismatched source message (identity check fails). Defaults
+   *  to a fixed timestamp so tests that don't care still exercise a
+   *  real value. */
+  sourceMessageCreatedAt?: string | null;
 }) {
+  let messagesLteCutoff: string | undefined;
   const messagesBuilder = {
     select: () => messagesBuilder,
     eq: () => messagesBuilder,
     order: () => messagesBuilder,
     limit: () => messagesBuilder,
     neq: () => messagesBuilder,
-    then: (resolve: (r: { data: unknown[] }) => void) =>
-      resolve({ data: opts.messages ?? [] }),
+    lte: (_col: string, val: string) => {
+      messagesLteCutoff = val;
+      return messagesBuilder;
+    },
+    maybeSingle: async () => {
+      const createdAt = opts.sourceMessageCreatedAt === undefined ? "2026-09-21T00:00:00.000Z" : opts.sourceMessageCreatedAt;
+      return createdAt === null ? { data: null, error: null } : { data: { created_at: createdAt }, error: null };
+    },
+    then: (resolve: (r: { data: unknown[] }) => void) => {
+      const rows = opts.messages ?? [];
+      const filtered = messagesLteCutoff
+        ? rows.filter((r) => (r as { created_at?: string }).created_at !== undefined && (r as { created_at: string }).created_at <= messagesLteCutoff!)
+        : rows;
+      resolve({ data: filtered });
+    },
   };
   const runsSelectBuilder = {
     eq: () => runsSelectBuilder,
@@ -383,7 +402,7 @@ describe("classifyForDispatch", () => {
     expect(result).toEqual({ kind: "jev_no_action", classificationRunId: "run-1" });
   });
 
-  it("falls back to use_legacy when Jev's HTTP call fails, without throwing", async () => {
+  it("in automatic mode, an HTTP failure fails closed to jev_automatic_failed, not use_legacy", async () => {
     const { fn } = stubFetch({}, false);
     const result = await classifyForDispatch(
       stubSupabase({}),
@@ -391,10 +410,21 @@ describe("classifyForDispatch", () => {
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
     );
+    expect(result).toMatchObject({ kind: "jev_automatic_failed", classificationRunId: null });
+  });
+
+  it("in shadow mode, an HTTP failure still returns use_legacy, without throwing", async () => {
+    const { fn } = stubFetch({}, false);
+    const result = await classifyForDispatch(
+      stubSupabase({}),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "shadow" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
     expect(result).toEqual({ kind: "use_legacy", classificationRunId: null });
   });
 
-  it("falls back to use_legacy when the audit insert fails for a non-duplicate reason", async () => {
+  it("in automatic mode, an audit-insert failure fails closed to jev_automatic_failed, not use_legacy", async () => {
     const { fn } = stubFetch({ answers: { outcome: { choice: "dnc" } } });
     const supabase = stubSupabase({
       insertResult: { data: null, error: { message: "db down" } },
@@ -405,7 +435,7 @@ describe("classifyForDispatch", () => {
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
     );
-    expect(result).toEqual({ kind: "use_legacy", classificationRunId: null });
+    expect(result).toEqual({ kind: "jev_automatic_failed", classificationRunId: null, reason: "audit_persist_failed" });
   });
 
   it("recovers the existing row id on a duplicate-key insert instead of failing", async () => {
@@ -432,12 +462,27 @@ describe("classifyForDispatch", () => {
     }
   });
 
-  it("returns use_legacy without calling Jev when conversationId/inboundMessageId are missing", async () => {
+  it("in automatic mode, fails closed to jev_automatic_failed (not use_legacy) when the audit row can't be persisted (missing conversationId/inboundMessageId)", async () => {
+    // Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 2):
+    // an audit write failure in automatic mode must not silently degrade
+    // to the legacy classifier — there'd be no trusted Jev decision and
+    // no audit trail linking one.
     const { fn } = stubFetch({ answers: { outcome: { choice: "dnc" } } });
     const result = await classifyForDispatch(
       stubSupabase({}),
       { ...baseInput, conversationId: null, inboundMessageId: null },
       { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    expect(result).toEqual({ kind: "jev_automatic_failed", classificationRunId: null, reason: "audit_persist_failed" });
+  });
+
+  it("in shadow mode, the same missing-ids audit failure still returns use_legacy", async () => {
+    const { fn } = stubFetch({ answers: { outcome: { choice: "dnc" } } });
+    const result = await classifyForDispatch(
+      stubSupabase({}),
+      { ...baseInput, conversationId: null, inboundMessageId: null },
+      { classifierProvider: "jev", classifierMode: "shadow" },
       { fetch: fn, typesafeApiKey: "k" },
     );
     expect(result).toEqual({ kind: "use_legacy", classificationRunId: null });
@@ -488,13 +533,26 @@ describe("classifyForDispatch", () => {
       }
     });
 
-    it("fails closed to use_legacy when the property's revision can't be read, without calling Jev", async () => {
+    it("in automatic mode, fails closed to jev_automatic_failed (not use_legacy) when the property's revision can't be read, without calling Jev", async () => {
       const supabase = stubSupabase({ propertiesRevision: null });
       const fn = vi.fn();
       const result = await classifyForDispatch(
         supabase,
         baseInput,
         { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn as unknown as typeof fetch, typesafeApiKey: "k" },
+      );
+      expect(result).toEqual({ kind: "jev_automatic_failed", classificationRunId: null, reason: "missing_revision_baseline" });
+      expect(fn).not.toHaveBeenCalled();
+    });
+
+    it("in shadow mode, the same missing-revision case still returns use_legacy without calling Jev", async () => {
+      const supabase = stubSupabase({ propertiesRevision: null });
+      const fn = vi.fn();
+      const result = await classifyForDispatch(
+        supabase,
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "shadow" },
         { fetch: fn as unknown as typeof fetch, typesafeApiKey: "k" },
       );
       expect(result).toEqual({ kind: "use_legacy", classificationRunId: null });
@@ -521,6 +579,86 @@ describe("classifyForDispatch", () => {
       if (belowThresholdNurture.kind === "jev_needs_decision") {
         expect(belowThresholdNurture.evaluationRevision).toBe(42);
       }
+    });
+  });
+
+  // Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 3): a
+  // fake delayed provider (no real/paid provider call) proving that a
+  // message arriving mid-evaluation cannot leak into the thread Jev
+  // actually sees — the context cutoff is resolved from the SOURCE
+  // message's own stored created_at BEFORE the (delayed) HTTP call, not
+  // "now" and not merely by excluding the current message's id.
+  describe("context cutoff — later activity cannot leak into an earlier evaluation", () => {
+    it("excludes a message whose created_at is after the source message's own created_at from the thread sent to a delayed fake provider", async () => {
+      const calls: any[] = [];
+      const fn = vi.fn(async (_url: string, init: RequestInit) => {
+        calls.push(init);
+        // Simulate real latency: by the time this resolves, a NEWER
+        // message than the one being evaluated has already been
+        // "written" (irrelevant here — the query that builds the thread
+        // already ran and was cut off before this call started; this
+        // delay just proves the call genuinely takes time, matching the
+        // evaluationRevision race test's own pattern).
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ answers: { outcome: { choice: "not_interested" } } }),
+          text: async () => "",
+        };
+      }) as unknown as typeof fetch;
+
+      const sourceCreatedAt = "2026-09-21T00:05:00.000Z";
+      const result = await classifyForDispatch(
+        stubSupabase({
+          sourceMessageCreatedAt: sourceCreatedAt,
+          messages: [
+            { direction: "outbound", body: "kept: before", created_at: "2026-09-21T00:00:00.000Z" },
+            // After the source message's own created_at — must never
+            // appear, regardless of when the (mocked, delayed) query
+            // actually executes relative to it.
+            { direction: "inbound", body: "excluded: arrived mid-evaluation", created_at: "2026-09-21T00:10:00.000Z" },
+          ],
+        }),
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn, typesafeApiKey: "k" },
+      );
+
+      expect(result.kind).toBe("jev_route");
+      const sentBody = JSON.parse(String(calls[0].body));
+      const threadBodies = sentBody.state.thread.map((m: { body: string }) => m.body);
+      expect(threadBodies).toContain("kept: before");
+      expect(threadBodies).not.toContain("excluded: arrived mid-evaluation");
+    });
+
+    it("uses the source message's own stored created_at as its sentAt, not the time evaluation happened to run", async () => {
+      const { fn, calls } = stubFetch({ answers: { outcome: { choice: "not_interested" } } });
+      const sourceCreatedAt = "2020-01-01T00:00:00.000Z"; // deliberately far in the past
+      await classifyForDispatch(
+        stubSupabase({ sourceMessageCreatedAt: sourceCreatedAt, messages: [] }),
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn, typesafeApiKey: "k" },
+      );
+      const sentBody = JSON.parse(String(calls()[0].body));
+      expect(sentBody.state.thread.at(-1)).toMatchObject({
+        direction: "inbound",
+        body: baseInput.inboundBody,
+        sentAt: sourceCreatedAt,
+      });
+    });
+
+    it("fails closed to jev_automatic_failed in automatic mode when the source message can't be verified (identity check)", async () => {
+      const fn = vi.fn();
+      const result = await classifyForDispatch(
+        stubSupabase({ sourceMessageCreatedAt: null }),
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn as unknown as typeof fetch, typesafeApiKey: "k" },
+      );
+      expect(result).toEqual({ kind: "jev_automatic_failed", classificationRunId: null, reason: "source_message_not_found" });
+      expect(fn).not.toHaveBeenCalled();
     });
   });
 });
