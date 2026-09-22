@@ -131,7 +131,8 @@ type KanbanProps = {
   initialLeads: Lead[];
   initialTotals: Record<PropertyStatus, number>;
   initialBaselineTotals: Record<PropertyStatus, number>;
-  initialUrgencyCounts: Record<UrgencyFilter, number>;
+  initialUrgencyCounts: Record<UrgencyFilter, number> | null;
+  initialWarning?: string | null;
   initialNextCursors: Partial<Record<PropertyStatus, LeadBoardCursor>>;
   initialHasMore: Partial<Record<PropertyStatus, boolean>>;
   initialSnapshotGenerations: Partial<Record<PropertyStatus, string>>;
@@ -157,6 +158,7 @@ export function Kanban({
   initialTotals,
   initialBaselineTotals,
   initialUrgencyCounts,
+  initialWarning = null,
   initialNextCursors,
   initialHasMore,
   initialSnapshotGenerations,
@@ -181,6 +183,9 @@ export function Kanban({
   const [totals, setTotals] = useState(initialTotals);
   const [baselineTotals, setBaselineTotals] = useState(initialBaselineTotals);
   const [urgencyCounts, setUrgencyCounts] = useState(initialUrgencyCounts);
+  const [boardWarning, setBoardWarning] = useState<string | null>(
+    initialWarning,
+  );
   const [nextCursors, setNextCursors] = useState(initialNextCursors);
   const [hasMore, setHasMore] = useState(initialHasMore);
   const [snapshotGenerations, setSnapshotGenerations] = useState(
@@ -350,7 +355,8 @@ export function Kanban({
     setLeads(data.leads as Lead[]);
     setTotals(data.totals);
     if (data.baselineTotals) setBaselineTotals(data.baselineTotals);
-    if (data.urgencyCounts) setUrgencyCounts(data.urgencyCounts);
+    setUrgencyCounts(data.urgencyCounts);
+    setBoardWarning(data.warning ?? null);
     setNextCursors(data.nextCursors);
     setHasMore(data.hasMore);
     setSnapshotGenerations(data.snapshotGenerations);
@@ -861,10 +867,20 @@ export function Kanban({
                 : "border-border bg-background text-foreground hover:bg-muted"
             }`}
           >
-            {label} {urgencyCounts[value]}
+            {label} {urgencyCounts?.[value] ?? "—"}
           </button>
         ))}
       </div>
+
+      {boardWarning ? (
+        <div
+          className="border-amber-500/30 bg-amber-500/5 text-muted-foreground rounded-xl border px-4 py-3 text-sm"
+          role="status"
+          aria-live="polite"
+        >
+          {boardWarning}
+        </div>
+      ) : null}
 
       {loadError ? (
         <div
