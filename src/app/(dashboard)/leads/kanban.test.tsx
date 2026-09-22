@@ -217,6 +217,25 @@ describe("Leads Kanban foundation", () => {
     expect(screen.queryByTestId("contract-status-badge")).not.toBeInTheDocument();
   });
 
+  it("keeps cards usable and labels urgency counts unknown after a summary timeout", () => {
+    render(
+      <Kanban
+        {...baseProps}
+        initialLeads={[makeLead()]}
+        initialUrgencyCounts={null}
+        initialWarning="Urgency counts are temporarily unavailable; lead results are still available."
+      />,
+    );
+
+    expect(screen.getByText("123 Main St")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Urgency counts are temporarily unavailable; lead results are still available.",
+    );
+    expect(screen.getByRole("button", { name: "All —" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Overdue —" })).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("replaces the latest-contract badge map on a board refresh", async () => {
     const user = userEvent.setup();
     loadLeadBoardAction.mockResolvedValueOnce({

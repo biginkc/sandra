@@ -350,6 +350,8 @@ describe("fetchLeadBoardData", () => {
 
     expect(data.totals.new_lead).toBe(37);
     expect(data.snapshotGenerations.new_lead).toBe("generation-a");
+    expect(data.urgencyCounts).toBeNull();
+    expect(data.warning).toBeUndefined();
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({
       name: "get_leads_board_page",
@@ -365,6 +367,134 @@ describe("fetchLeadBoardData", () => {
         p_limit: LEADS_COLUMN_PAGE_SIZE + 1,
       }),
     });
+  });
+
+  it("keeps page rows, totals, and cursors usable when urgency counts time out", async () => {
+    const rows = Array.from({ length: LEADS_COLUMN_PAGE_SIZE + 1 }, (_, index) => ({
+      id: `11111111-1111-4111-8111-${String(index + 1).padStart(12, "0")}`,
+      address: `${index + 1} Main St`,
+      city: "Kansas City",
+      state: "MO",
+      zip: "64111",
+      market: "Jackson County MO",
+      status: "new_lead",
+      is_vacant: false,
+      cass_status: "verified",
+      absentee_flag: false,
+      assigned_user_id: null,
+      motivation_level: null,
+      outreach_dispo: null,
+      has_unread: false,
+      next_task_id: null,
+      next_task_title: null,
+      next_task_due_at: index === LEADS_COLUMN_PAGE_SIZE - 1
+        ? "2026-08-15T05:00:00.000Z"
+        : null,
+      homeowner: null,
+      homeowner_sms_opted_out: false,
+      homeowner_sms_opted_out_at: null,
+    }));
+    const calls: RpcCall[] = [];
+    const client = {
+      async rpc(name: string, args: Record<string, unknown>) {
+        calls.push({ name, args });
+        if (name === "get_leads_board_page") {
+          return {
+            data: args.p_status === "new_lead"
+              ? [{ rows, total_count: 42, snapshot_generation: "generation-timeout" }]
+              : [{ rows: [], total_count: 0, snapshot_generation: "generation-empty" }],
+            error: null,
+          };
+        }
+        if (name === "get_leads_board_urgency_counts") {
+          return { data: null, error: { message: "canceling statement due to statement timeout" } };
+        }
+        if (name === "get_leads_board_stage_counts") {
+          return { data: [{ status: "new_lead", total_count: 42 }], error: null };
+        }
+        throw new Error(`Unexpected RPC: ${name}`);
+      },
+      from() {
+        return {
+          select() {
+            return {
+              async in() {
+                return { data: [], error: null };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as SupabaseClient<Database>;
+
+    const data = await fetchLeadBoardData(client, { ...filters, urgency: "all" }, {
+      currentUserId: "11111111-1111-4111-8111-111111111111",
+      assigneeId: null,
+      unassigned: false,
+      dayStart: "2026-08-15T05:00:00.000Z",
+      dayEnd: "2026-08-16T05:00:00.000Z",
+    });
+
+    expect(data.leads).toHaveLength(LEADS_COLUMN_PAGE_SIZE);
+    expect(data.totals.new_lead).toBe(42);
+    expect(data.hasMore.new_lead).toBe(true);
+    expect(data.nextCursors.new_lead).toEqual({
+      dueAt: "2026-08-15T05:00:00.000Z",
+      id: rows[LEADS_COLUMN_PAGE_SIZE - 1].id,
+    });
+    expect(data.urgencyCounts).toBeNull();
+    expect(data.warning).toBe(
+      "Urgency counts are temporarily unavailable; lead results are still available.",
+    );
+    expect(calls.filter((call) => call.name === "get_leads_board_page")).toHaveLength(8);
+  });
+
+  it("keeps required page failures fatal even when urgency counts are optional", async () => {
+    const client = {
+      async rpc(name: string) {
+        if (name === "get_leads_board_page") {
+          return { data: null, error: { message: "statement timeout" } };
+        }
+        return { data: [], error: null };
+      },
+    } as unknown as SupabaseClient<Database>;
+
+    await expect(
+      fetchLeadBoardData(client, filters, {
+        currentUserId: "11111111-1111-4111-8111-111111111111",
+        assigneeId: null,
+        unassigned: false,
+        dayStart: "2026-08-15T05:00:00.000Z",
+        dayEnd: "2026-08-16T05:00:00.000Z",
+      }),
+    ).rejects.toThrow("Lead page failed for new_lead: statement timeout");
+  });
+
+  it("does not turn an empty urgency summary response into false zero counts", async () => {
+    const client = {
+      async rpc(name: string) {
+        if (name === "get_leads_board_page") {
+          return { data: [{ rows: [], total_count: 0, snapshot_generation: "generation-empty" }], error: null };
+        }
+        if (name === "get_leads_board_urgency_counts") {
+          return { data: [], error: null };
+        }
+        return { data: [], error: null };
+      },
+    } as unknown as SupabaseClient<Database>;
+
+    const data = await fetchLeadBoardData(client, filters, {
+      currentUserId: "11111111-1111-4111-8111-111111111111",
+      assigneeId: null,
+      unassigned: false,
+      dayStart: "2026-08-15T05:00:00.000Z",
+      dayEnd: "2026-08-16T05:00:00.000Z",
+    });
+
+    expect(data.urgencyCounts).toBeNull();
+    expect(data.warning).toBe(
+      "Urgency counts are temporarily unavailable; lead results are still available.",
+    );
   });
 
   it("keeps the existing active-unassigned queue out of terminal columns", async () => {

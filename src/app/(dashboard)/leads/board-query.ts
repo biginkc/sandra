@@ -4,6 +4,7 @@ import { STATUS_ORDER } from "./board-config";
 import type { InboundAttentionFilter, InboundOwnershipFilter } from "./inbound-filters";
 import type { PropertyStatus } from "./actions";
 import type { Database } from "@/lib/supabase/types";
+import { reportError } from "@/lib/errors/report";
 import {
   createPipelineSignalLoader,
   loadPipelineSignals,
@@ -73,6 +74,8 @@ export type LeadBoardData = {
   customTags: Record<string, CustomTag[]>;
   lastMessageByPropertyId: Record<string, LastMessage>;
   latestContractByPropertyId: Record<string, ContractStatusRecord>;
+  /** Non-blocking degradation notice for optional board facets. */
+  warning?: string;
 };
 
 export type LeadBoardQueryContext = {
@@ -158,13 +161,49 @@ async function fetchUrgencyCounts(
   });
   if (error) throw new Error(`Lead urgency counts failed: ${error.message}`);
   const counts = data?.[0];
-  return {
-    all: Number(counts?.all_count ?? 0),
-    overdue: Number(counts?.overdue_count ?? 0),
-    today: Number(counts?.today_count ?? 0),
-    scheduled: Number(counts?.scheduled_count ?? 0),
-    none: Number(counts?.no_action_count ?? 0),
+  if (!counts) throw new Error("Lead urgency counts returned no rows");
+  const countValue = (value: unknown, label: string): number => {
+    if (value === null || value === undefined) {
+      throw new Error(`Lead urgency counts missing ${label}`);
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      throw new Error(`Lead urgency counts returned invalid ${label}`);
+    }
+    return numeric;
   };
+  return {
+    all: countValue(counts.all_count, "all_count"),
+    overdue: countValue(counts.overdue_count, "overdue_count"),
+    today: countValue(counts.today_count, "today_count"),
+    scheduled: countValue(counts.scheduled_count, "scheduled_count"),
+    none: countValue(counts.no_action_count, "no_action_count"),
+  };
+}
+
+const URGENCY_COUNTS_WARNING =
+  "Urgency counts are temporarily unavailable; lead results are still available.";
+
+type OptionalUrgencyCounts = {
+  counts: Record<UrgencyFilter, number> | null;
+  warning?: string;
+};
+
+async function fetchOptionalUrgencyCounts(
+  supabase: SupabaseClient<Database>,
+  filters: LeadBoardFilters,
+  context: LeadBoardQueryContext,
+): Promise<OptionalUrgencyCounts> {
+  try {
+    return {
+      counts: await fetchUrgencyCounts(supabase, filters, context),
+    };
+  } catch (error) {
+    // Urgency counts are an optional summary. Preserve the page result while
+    // keeping the failure observable and making the missing values explicit.
+    reportError(error, { tags: { surface: "leads_board_urgency_counts" } });
+    return { counts: null, warning: URGENCY_COUNTS_WARNING };
+  }
 }
 
 async function fetchBaselineStageTotals(
@@ -347,14 +386,17 @@ export async function fetchLeadBoardData(
   const includeFacets = statuses.length === STATUS_ORDER.length;
   const resolvedPipelineSignalLoader =
     pipelineSignalLoader ?? createPipelineSignalLoader(supabase);
-  const [decorations, urgencyCounts, baselineTotals] = await Promise.all([
+  const urgencyResultPromise: Promise<OptionalUrgencyCounts> = includeFacets
+    ? fetchOptionalUrgencyCounts(supabase, filters, context)
+    : Promise.resolve({ counts: null });
+  const [decorations, urgencyResult, baselineTotals] = await Promise.all([
     fetchCardDecorations(
       supabase,
       leads,
       context.orgIds ?? [],
       resolvedPipelineSignalLoader,
     ),
-    includeFacets ? fetchUrgencyCounts(supabase, filters, context) : Promise.resolve(null),
+    urgencyResultPromise,
     includeFacets ? fetchBaselineStageTotals(supabase) : Promise.resolve(null),
   ]);
   return {
@@ -364,11 +406,12 @@ export async function fetchLeadBoardData(
     })),
     totals,
     baselineTotals,
-    urgencyCounts,
+    urgencyCounts: urgencyResult.counts,
     nextCursors,
     hasMore,
     snapshotGenerations,
     unreadPropertyIds: leads.filter((lead) => lead.has_unread).map((lead) => lead.id),
     ...decorations,
+    ...(urgencyResult.warning ? { warning: urgencyResult.warning } : {}),
   };
 }

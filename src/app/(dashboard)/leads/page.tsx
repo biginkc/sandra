@@ -213,15 +213,8 @@ export default async function LeadsPage({
           initialLeads={board.leads}
           initialTotals={board.totals}
           initialBaselineTotals={board.baselineTotals ?? board.totals}
-          initialUrgencyCounts={
-            board.urgencyCounts ?? {
-              all: totalLeads,
-              overdue: 0,
-              today: 0,
-              scheduled: 0,
-              none: 0,
-            }
-          }
+          initialUrgencyCounts={board.urgencyCounts}
+          initialWarning={board.warning}
           initialNextCursors={board.nextCursors}
           initialHasMore={board.hasMore}
           initialSnapshotGenerations={board.snapshotGenerations}
