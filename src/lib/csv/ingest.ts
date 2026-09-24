@@ -930,14 +930,9 @@ async function persistAssignsContactBlocks(
       phone: normalizePhone(phone.value ?? ""),
       type: lineTypeFromVendorLabel(phone.type),
     }));
-    // Contact 1 runs through the regular homeowner mapping above. Do not
-    // count its unknown phones twice; positions 2–8 are represented only by
-    // this relation path.
-    if (position !== 1) {
-      droppedUnlabeledPhones += phoneCandidates.filter(
-        (phone) => !!phone.phone && phone.type === "unknown",
-      ).length;
-    }
+    droppedUnlabeledPhones += phoneCandidates.filter(
+      (phone) => !!phone.phone && phone.type === "unknown",
+    ).length;
     const typed = phoneCandidates.filter(
       (phone): phone is { phone: string; type: Exclude<PhoneLineType, "unknown"> } =>
         !!phone.phone && phone.type !== "unknown",

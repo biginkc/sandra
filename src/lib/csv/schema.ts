@@ -125,6 +125,14 @@ export const AGENT_FIELDS: readonly TargetField[] = [
  */
 export const SOURCE_ADAPTER_FIELDS: readonly TargetField[] = [
   {
+    id: "assigns_source_id",
+    label: "Assigns source record ID",
+    section: "source",
+    type: "text",
+    required: true,
+    helpText: "Required stable Assigns record identifier used for replay-safe contact persistence.",
+  },
+  {
     id: "assigns_contact_blocks",
     label: "Assigns contact blocks (all 8)",
     section: "source",

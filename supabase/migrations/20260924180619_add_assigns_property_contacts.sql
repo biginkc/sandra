@@ -43,8 +43,8 @@ declare
   v_phone_3 text := nullif(p_contact->>'phone_3', '');
   v_email text := nullif(lower(p_contact->>'email'), '');
 begin
-  if p_source_identity = '' then
-    raise exception 'Assigns source identity is required';
+  if p_source_identity !~ '^[^:]+:[1-8]:[0-9a-f]{8}$' then
+    raise exception 'Assigns source identity is invalid';
   end if;
   if p_source_position not between 1 and 8 then
     raise exception 'Assigns source position must be between 1 and 8';
@@ -89,6 +89,25 @@ begin
     from public.contacts
     where org_id = p_org_id and lower(email) = v_email
     order by created_at asc
+    limit 1;
+  end if;
+
+  -- Match the existing name-only identity constraint before inserting. This
+  -- mirrors the importer’s legacy name-only dedup path and avoids a duplicate
+  -- key failure when the same unphoned person appears on another property.
+  if v_contact_id is null
+    and v_phone_1 is null and v_phone_2 is null and v_phone_3 is null
+    and v_email is null
+    and nullif(p_contact->>'first_name', '') is not null
+    and nullif(p_contact->>'last_name', '') is not null then
+    select id into v_contact_id
+    from public.contacts
+    where org_id = p_org_id
+      and contact_type = 'person'
+      and phone_1 is null
+      and email is null
+      and lower(first_name) = lower(p_contact->>'first_name')
+      and lower(last_name) = lower(p_contact->>'last_name')
     limit 1;
   end if;
 

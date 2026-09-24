@@ -3,12 +3,14 @@
  *
  * A record contains one property and as many as eight separately enriched
  * contacts. The adapter does not select, rank, filter, or collapse contacts:
- * it emits standard property/contact-1 fields for Sandra's legacy views and
- * two lossless JSON envelopes consumed by ingest.ts for the full relation.
+ * it emits property fields and two lossless JSON envelopes consumed by
+ * ingest.ts for the full relation. No contact is silently selected as the
+ * property homeowner or campaign recipient.
  */
 import type { TransformResult, VendorPreset } from "./types";
 
 const SIGNATURE_HEADERS = [
+  "Id",
   "PropertyAddress",
   "AddressHash",
   "Contact1Name",
@@ -25,13 +27,6 @@ function value(row: SourceRow, key: string): string {
   return (row[key] ?? "").trim();
 }
 
-function nameParts(name: string): { first: string; last: string } {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return { first: "", last: "" };
-  if (parts.length === 1) return { first: parts[0], last: "" };
-  return { first: parts[0], last: parts.slice(1).join(" ") };
-}
-
 function contactPhoneTypeForSandra(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (normalized === "mobile") return "mobile";
@@ -40,6 +35,24 @@ function contactPhoneTypeForSandra(value: string): string {
   // "unknown" is the importer vocabulary and makes the row reviewable
   // without inventing a line-type classification.
   return "unknown";
+}
+
+function stableBlockFingerprint(block: {
+  name: string;
+  type: string;
+  phones: readonly Record<string, string>[];
+  usedAlternateSource: string;
+}): string {
+  // FNV-1a: a deterministic in-browser identity component, not a security
+  // primitive. It distinguishes changed source blocks while vendor Id +
+  // position provides the stable record namespace.
+  let hash = 0x811c9dc5;
+  const input = JSON.stringify(block);
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function contactBlock(row: SourceRow, position: number) {
@@ -53,13 +66,16 @@ function contactBlock(row: SourceRow, position: number) {
     litigator: value(row, `${prefix}Phone_${slot}_Litigator`),
     email: value(row, `${prefix}Email_${slot}`),
   }));
+  const name = value(row, `${prefix}Name`);
+  const type = value(row, `${prefix}Type`);
+  const usedAlternateSource = value(row, `${prefix}UsedAlternateSource`);
   return {
-    sourceIdentity: `${value(row, "Id")}:${position}`,
+    sourceIdentity: `${value(row, "Id")}:${position}:${stableBlockFingerprint({ name, type, phones, usedAlternateSource })}`,
     position,
-    name: value(row, `${prefix}Name`),
-    type: value(row, `${prefix}Type`),
+    name,
+    type,
     phones,
-    usedAlternateSource: value(row, `${prefix}UsedAlternateSource`),
+    usedAlternateSource,
   };
 }
 
@@ -106,22 +122,12 @@ export const assignsPreset: VendorPreset = {
       "Beds",
       "Baths",
       "Square Feet",
-      "Homeowner First Name",
-      "Homeowner Last Name",
-      "Homeowner Phone 1",
-      "Homeowner Phone 1 Type",
-      "Homeowner Phone 2",
-      "Homeowner Phone 2 Type",
-      "Homeowner Phone 3",
-      "Homeowner Phone 3 Type",
-      "Homeowner Email",
+      "Assigns Source Record ID",
       "Assigns Contact Blocks",
       "Assigns Source Row",
     ];
 
     const transformed = rows.map((row) => {
-      const contact1 = contactBlock(row, 1);
-      const name = nameParts(contact1.name);
       const contactBlocks = CONTACT_POSITIONS.map((position) => contactBlock(row, position));
       return {
         Address: value(row, "PropertyAddress"),
@@ -134,15 +140,7 @@ export const assignsPreset: VendorPreset = {
         Beds: value(row, "Beds"),
         Baths: value(row, "Baths"),
         "Square Feet": value(row, "SquareFootage"),
-        "Homeowner First Name": name.first,
-        "Homeowner Last Name": name.last,
-        "Homeowner Phone 1": contact1.phones[0].value,
-        "Homeowner Phone 1 Type": contact1.phones[0].type,
-        "Homeowner Phone 2": contact1.phones[1].value,
-        "Homeowner Phone 2 Type": contact1.phones[1].type,
-        "Homeowner Phone 3": contact1.phones[2].value,
-        "Homeowner Phone 3 Type": contact1.phones[2].type,
-        "Homeowner Email": contact1.phones.map((phone) => phone.email).find(Boolean) ?? "",
+        "Assigns Source Record ID": value(row, "Id"),
         "Assigns Contact Blocks": JSON.stringify(contactBlocks),
         // This is the lossless mapping ledger destination for every original
         // column, including non-operational property fields and all contact

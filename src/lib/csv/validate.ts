@@ -188,6 +188,10 @@ export function validateRow(
     const value = normalized[field.id];
 
     if (field.required && value == null) {
+      // Adapter-specific required fields are mandatory only once that
+      // adapter owns the mapping. Generic CSV imports must not be forced to
+      // provide an Assigns vendor identifier.
+      if (field.section === "source" && !mapping[field.id]) continue;
       if (
         suppressRequiredRootCause &&
         (field.id === "address" || field.id === "state")

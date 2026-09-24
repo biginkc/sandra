@@ -5,6 +5,7 @@ import { validateRow } from "../validate";
 import { assignsPreset } from "./assigns";
 
 const headers = [
+  "Id",
   "PropertyAddress", "PropertyCity", "PropertyState", "PropertyPostalCode",
   "AddressHash", "Contact1Name", "Contact1Type", "Contact1Phone_1",
   "Contact1Phone_1_Type", "Contact1Phone_1_DNC", "Contact1Email_1",
@@ -14,6 +15,7 @@ const headers = [
 ];
 
 const row = {
+  Id: "vendor-record-1",
   PropertyAddress: "123 Main St",
   PropertyCity: "Kansas City",
   PropertyState: "MO",
@@ -61,5 +63,16 @@ describe("Assigns preset", () => {
     const mapping = autodetectMapping(transformed.headers);
     expect(Object.values(mapping).filter(Boolean)).toHaveLength(transformed.headers.length);
     expect(validateRow(transformed.rows[0], mapping, 0).errors).toEqual([]);
+  });
+
+  it("makes a missing vendor record ID fail preflight instead of fabricating an identity", () => {
+    const withoutId = { ...row, Id: "" };
+    const transformed = assignsPreset.transform([withoutId], headers);
+    const mapping = autodetectMapping(transformed.headers);
+    expect(validateRow(transformed.rows[0], mapping, 0).errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ fieldId: "assigns_source_id", rule: "required" }),
+      ]),
+    );
   });
 });
