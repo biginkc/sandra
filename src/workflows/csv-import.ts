@@ -880,9 +880,11 @@ async function triggerCassStep(args: {
 }
 
 /**
- * STEP 3b — Bulk-record opt_in_marketing_written for every homeowner contact
- * linked to a succeeded row in this import. Fires only when the operator
- * checked the SMS consent attestation box on the confirm screen.
+ * STEP 3b — Bulk-record opt_in_marketing_written for every campaign-eligible
+ * contact linked to a succeeded row in this import. This includes each
+ * Assigns source contact; legacy imports retain their homeowner relationship.
+ * Fires only when the operator checked the SMS consent attestation box on the
+ * confirm screen.
  *
  * The database RPC validates immutable job provenance, rechecks compliance,
  * and inserts each job/contact attestation once across workflow retries.

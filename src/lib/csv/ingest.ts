@@ -807,6 +807,7 @@ async function ingestRow(
       n,
       outcome.propertyId,
       orgId,
+      jobId,
     );
     return {
       propertyId: outcome.propertyId,
@@ -878,6 +879,7 @@ async function ingestRow(
     n,
     outcome.propertyId,
     orgId,
+    jobId,
   );
   return {
     propertyId: outcome.propertyId,
@@ -909,6 +911,7 @@ async function persistAssignsContactBlocks(
   n: Readonly<Record<string, unknown>>,
   propertyId: string,
   orgId: string,
+  jobId: string,
 ): Promise<{ droppedUnlabeledPhones: number }> {
   const blocks = parseAssignsContactBlocks(n.assigns_contact_blocks);
   let droppedUnlabeledPhones = 0;
@@ -946,7 +949,7 @@ async function persistAssignsContactBlocks(
     if (!name.first_name && !name.last_name && !email && typed.length === 0) {
       continue;
     }
-    const { error } = await supabase.rpc("upsert_assigns_property_contact", {
+    const { data: contactId, error } = await supabase.rpc("upsert_assigns_property_contact", {
       p_property_id: propertyId,
       p_org_id: orgId,
       p_source_identity: sourceIdentity,
@@ -965,6 +968,25 @@ async function persistAssignsContactBlocks(
       } as Json,
     });
     if (error) throw new Error(`Assigns property contact upsert: ${error.message}`);
+    if (!contactId) throw new Error("Assigns property contact upsert returned no contact");
+    const { error: outcomeError } = await supabase
+      .from("csv_import_contact_outcomes")
+      .upsert(
+        {
+          job_id: jobId,
+          property_id: propertyId,
+          contact_id: contactId,
+          org_id: orgId,
+          source_identity: sourceIdentity,
+        },
+        {
+          onConflict: "job_id,property_id,contact_id,source_identity",
+          ignoreDuplicates: true,
+        },
+      );
+    if (outcomeError) {
+      throw new Error(`Assigns contact outcome checkpoint: ${outcomeError.message}`);
+    }
   }
   return { droppedUnlabeledPhones };
 }

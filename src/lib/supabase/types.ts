@@ -1887,6 +1887,62 @@ export type Database = {
           },
         ]
       }
+      csv_import_contact_outcomes: {
+        Row: {
+          contact_id: string
+          created_at: string
+          job_id: string
+          org_id: string
+          property_id: string
+          source_identity: string
+        }
+        Insert: {
+          contact_id: string
+          created_at?: string
+          job_id: string
+          org_id: string
+          property_id: string
+          source_identity: string
+        }
+        Update: {
+          contact_id?: string
+          created_at?: string
+          job_id?: string
+          org_id?: string
+          property_id?: string
+          source_identity?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "csv_import_contact_outcomes_job_org_fkey"
+            columns: ["job_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "csv_import_contact_outcomes_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "csv_import_contact_outcomes_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "csv_import_contact_outcomes_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       csv_import_row_outcomes: {
         Row: {
           created_at: string
