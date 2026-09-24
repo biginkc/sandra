@@ -414,6 +414,19 @@ export async function createExactCohortList(
       successfulPropertyIds,
       "selection",
     );
+    const nonProspectExclusions = eligibility.exclusions.filter(
+      (exclusion) => exclusion.reason === "not_found_or_not_prospect",
+    );
+    if (nonProspectExclusions.length > 0) {
+      return {
+        ok: false,
+        error: {
+          code: "COHORT_NOT_CURRENT_PROSPECTS",
+          message:
+            "The successful skip-trace cohort no longer resolves entirely to live prospects; no list was written.",
+        },
+      };
+    }
     if (eligibility.eligibleIds.length === 0) {
       return {
         ok: false,
@@ -651,6 +664,7 @@ async function readSuccessfulSkipTracePropertyIds(
       .eq("job_id", jobId)
       .eq("status", "success")
       .not("property_id", "is", null)
+      .order("id", { ascending: true })
       .range(from, from + EXACT_COHORT_WRITE_CHUNK - 1);
     if (error) throw error;
     for (const row of data ?? []) {

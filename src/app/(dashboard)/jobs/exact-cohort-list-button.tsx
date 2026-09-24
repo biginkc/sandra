@@ -48,7 +48,6 @@ export function ExactCohortListButton({
       const result = await callAction(
         createExactCohortList({ jobId, name: trimmed }),
         {
-          successMessage: `Exact cohort list "${trimmed}" is ready`,
           fallbackMessage: "Could not create the exact cohort list",
         },
       );
@@ -81,10 +80,11 @@ export function ExactCohortListButton({
           <DialogHeader>
             <DialogTitle>Create exact cohort list</DialogTitle>
             <DialogDescription>
-              This will reuse or create a named list for exactly {" "}
-              {propertyCount.toLocaleString()} persisted job properties. Sandra
-              re-checks organization ownership, live records, and DNC locks
-              immediately before writing. It does not send messages.
+              This will reuse or create a named list from up to {" "}
+              {propertyCount.toLocaleString()} persisted job properties. Failed
+              trace rows are left out; Sandra re-checks organization ownership,
+              live prospect records, and DNC locks immediately before writing.
+              It does not send messages.
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-1.5">

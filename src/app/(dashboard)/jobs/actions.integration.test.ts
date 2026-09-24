@@ -813,6 +813,34 @@ describe("createExactCohortList (integration)", () => {
     expect(error).toBeNull();
     expect(memberships?.map((row) => row.property_id)).toEqual([succeeded]);
   });
+
+  it("refuses to silently shrink a successful trace cohort that is no longer all prospects", async () => {
+    const prospect = await seedProperty("8 Still Prospect St");
+    const promoted = await seedProperty("9 Already Lead St");
+    const { error: promoteError } = await testClient
+      .from("properties")
+      .update({ status: "lead" })
+      .eq("id", promoted);
+    expect(promoteError).toBeNull();
+    const jobId = await seedJob({
+      type: "skip_trace",
+      status: "completed",
+      propertyIds: [prospect, promoted],
+    });
+    await seedJobItems(jobId, [
+      { propertyId: prospect, status: "success" },
+      { propertyId: promoted, status: "success" },
+    ]);
+
+    const result = await createExactCohortList({
+      jobId,
+      name: "Would silently lose lead",
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "COHORT_NOT_CURRENT_PROSPECTS" },
+    });
+  });
 });
 
 describe("retryFailedCassItems scale", () => {

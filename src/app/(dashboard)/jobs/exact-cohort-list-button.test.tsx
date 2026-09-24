@@ -47,7 +47,7 @@ describe("<ExactCohortListButton />", () => {
 
     await user.click(screen.getByRole("button", { name: "Create exact cohort list" }));
     expect(
-      screen.getByText(/exactly 4,717 persisted job properties/),
+      screen.getByText(/from up to 4,717 persisted job properties/),
     ).toBeVisible();
 
     const input = screen.getByLabelText("List name");
