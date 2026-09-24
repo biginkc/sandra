@@ -26,6 +26,10 @@ import type { Json } from "@/lib/supabase/types";
 import { REVIEWED_DATASET_VERSION } from "@/lib/csv/dataset-contract";
 import { buildReviewContractSha256 } from "@/lib/csv/dataset";
 import { IMPORT_SERVICE_PRICING } from "@/lib/csv/import-pricing";
+import {
+  isStaleRunningCsvImport,
+  isTerminalCsvImportRetryStatus,
+} from "@/lib/csv/csv-import-retry";
 
 import type { WizardSource } from "./wizard";
 
@@ -1122,8 +1126,6 @@ type CsvImportRetryJob = {
   worker_heartbeat_at?: string | null;
 };
 
-const CSV_IMPORT_STALE_AFTER_MS = 5 * 60 * 1000;
-
 async function availabilityForCsvImportRetry(
   job: CsvImportRetryJob,
 ): Promise<CsvImportRetryAvailability> {
@@ -1133,11 +1135,7 @@ async function availabilityForCsvImportRetry(
       message: "Only CSV import jobs can use this retry.",
     };
   }
-  const staleRunning =
-    job.status === "running" &&
-    (!job.worker_heartbeat_at ||
-      Date.now() - new Date(job.worker_heartbeat_at).getTime() >
-        CSV_IMPORT_STALE_AFTER_MS);
+  const staleRunning = isStaleRunningCsvImport(job);
   if (["queued", "running"].includes(job.status) && !staleRunning) {
     return {
       state: "in_flight",
@@ -1145,12 +1143,7 @@ async function availabilityForCsvImportRetry(
     };
   }
   if (
-    (![
-      "failed",
-      "partial",
-      "partially_completed",
-    ].includes(job.status) &&
-      !staleRunning) ||
+    (!isTerminalCsvImportRetryStatus(job.status) && !staleRunning) ||
     ["validation", "authorization"].includes(job.error_class ?? "")
   ) {
     return {

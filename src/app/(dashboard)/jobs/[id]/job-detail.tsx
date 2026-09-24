@@ -22,6 +22,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import {
+  isStaleRunningCsvImport,
+  isTerminalCsvImportRetryStatus,
+} from "@/lib/csv/csv-import-retry";
 import type { Database } from "@/lib/supabase/types";
 import {
   JOB_STATUS_LABELS,
@@ -198,7 +202,8 @@ export function JobDetail({
   const isCsvRetryable =
     csvRetryAvailable &&
     job.type === "csv_import" &&
-    ["failed", "partial", "partially_completed"].includes(job.status) &&
+    (isTerminalCsvImportRetryStatus(job.status) ||
+      isStaleRunningCsvImport(job)) &&
     !["validation", "authorization"].includes(job.error_class ?? "");
 
   return (
