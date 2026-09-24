@@ -44,6 +44,7 @@ import type {
 } from "../wizard";
 
 const SOURCE_LABELS: Record<WizardSource, string> = {
+  assigns: "Assigns",
   dealmachine: "DealMachine",
   zillow: "Zillow",
   propstream: "PropStream",
