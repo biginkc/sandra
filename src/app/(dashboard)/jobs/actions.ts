@@ -24,7 +24,7 @@ import type { Json } from "@/lib/supabase/types";
 import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
 
 const JOB_ITEM_PAGE_SIZE = 500;
-const EXACT_COHORT_JOB_TYPES = new Set(["cass_dsf2_ncoa", "skip_trace"]);
+const EXACT_COHORT_JOB_TYPES = new Set(["skip_trace"]);
 const EXACT_COHORT_TERMINAL_STATUSES = new Set([
   "completed",
   "partial",
@@ -248,7 +248,7 @@ export async function recoverCassForImport(
 
 /**
  * Materialize the exact property cohort recorded by a completed enrichment
- * job into a reusable list. The list is deliberately job-scoped: reusing a
+ * skip-trace job into a reusable list. The list is deliberately job-scoped: reusing a
  * user-created list with unrelated memberships would turn an exact cohort
  * into a broad audience, so a name collision is rejected unless the existing
  * row carries this action's source-job marker.
@@ -332,7 +332,7 @@ export async function createExactCohortList(
         ok: false,
         error: {
           code: "JOB_WRONG_TYPE",
-          message: "Only CASS verification and skip-trace jobs can create an exact cohort list.",
+          message: "Only completed skip-trace jobs can create an exact cohort list.",
         },
       };
     }
@@ -346,13 +346,32 @@ export async function createExactCohortList(
       };
     }
 
-    const propertyIds = readExactCohortPropertyIds(job.input_params);
-    if (propertyIds.length === 0) {
+    const requestedPropertyIds = readExactCohortPropertyIds(job.input_params);
+    if (requestedPropertyIds.length === 0) {
       return {
         ok: false,
         error: {
           code: "JOB_NO_PROPERTIES",
           message: "The source job has no persisted property IDs.",
+        },
+      };
+    }
+
+    // A partial trace must never place provider failures into a campaign list.
+    // `success` covers both matched and confirmed no-match trace results; both
+    // are completed trace attempts, while `error`/`skipped` require separate
+    // recovery rather than silent inclusion.
+    const successfulPropertyIds = await readSuccessfulSkipTracePropertyIds(
+      supabase,
+      job.id,
+      new Set(requestedPropertyIds),
+    );
+    if (successfulPropertyIds.length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_NO_SUCCESSFUL_PROPERTIES",
+          message: "This skip-trace job has no successful property results to place in a campaign list.",
         },
       };
     }
@@ -366,7 +385,7 @@ export async function createExactCohortList(
       .select("id")
       .eq("org_id", job.org_id)
       .is("deleted_at", null)
-      .in("id", propertyIds);
+      .in("id", successfulPropertyIds);
     if (ownershipError) {
       return {
         ok: false,
@@ -377,7 +396,7 @@ export async function createExactCohortList(
       };
     }
     const ownedIds = new Set((ownedProperties ?? []).map((row) => row.id));
-    if (ownedIds.size !== propertyIds.length) {
+    if (ownedIds.size !== successfulPropertyIds.length) {
       return {
         ok: false,
         error: {
@@ -392,7 +411,7 @@ export async function createExactCohortList(
     // is safe to reuse as a campaign filter without carrying DNC-locked rows.
     const eligibility = await resolveProspectEligibility(
       supabase,
-      propertyIds,
+      successfulPropertyIds,
       "selection",
     );
     if (eligibility.eligibleIds.length === 0) {
@@ -617,6 +636,31 @@ function readExactCohortPropertyIds(inputParams: Json | null): string[] {
       ),
     ),
   );
+}
+
+async function readSuccessfulSkipTracePropertyIds(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  jobId: string,
+  requestedPropertyIds: Set<string>,
+): Promise<string[]> {
+  const ids = new Set<string>();
+  for (let from = 0; ; from += EXACT_COHORT_WRITE_CHUNK) {
+    const { data, error } = await supabase
+      .from("job_items")
+      .select("property_id")
+      .eq("job_id", jobId)
+      .eq("status", "success")
+      .not("property_id", "is", null)
+      .range(from, from + EXACT_COHORT_WRITE_CHUNK - 1);
+    if (error) throw error;
+    for (const row of data ?? []) {
+      if (row.property_id && requestedPropertyIds.has(row.property_id)) {
+        ids.add(row.property_id);
+      }
+    }
+    if (!data || data.length < EXACT_COHORT_WRITE_CHUNK) break;
+  }
+  return [...ids];
 }
 
 /**

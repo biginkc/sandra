@@ -595,14 +595,7 @@ function CassPanel({ job }: { job: Job }) {
       </CardContent>
       {canPrepareSkipTrace ? (
         <CardContent className="border-t pt-4">
-          <div className="flex flex-wrap gap-2">
-            <CassSkipTraceButton propertyIds={propertyIds} />
-            <ExactCohortListButton
-              jobId={job.id}
-              defaultName={defaultExactCohortListName(job)}
-              propertyCount={propertyIds.length}
-            />
-          </div>
+          <CassSkipTraceButton propertyIds={propertyIds} />
         </CardContent>
       ) : null}
     </Card>
@@ -704,7 +697,7 @@ function readJobPropertyIds(job: Job): string[] {
 function defaultExactCohortListName(job: Job): string {
   const title = job.title?.trim();
   if (title) return title.slice(0, 80);
-  return job.type === "cass_dsf2_ncoa" ? "CASS exact cohort" : "Skip-trace exact cohort";
+  return "Skip-trace exact cohort";
 }
 
 function BulkSmsPanel({

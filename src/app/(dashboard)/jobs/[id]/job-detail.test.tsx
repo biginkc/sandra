@@ -422,8 +422,8 @@ describe("<JobDetail /> CASS recovery", () => {
       }),
     ).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "Create exact cohort list" }),
-    ).toBeVisible();
+      screen.queryByRole("button", { name: "Create exact cohort list" }),
+    ).not.toBeInTheDocument();
   });
 
   it("offers the exact-list control for a terminal skip-trace job only when IDs are persisted", () => {

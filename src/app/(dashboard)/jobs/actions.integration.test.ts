@@ -677,7 +677,7 @@ describe("createExactCohortList (integration)", () => {
     currentUserId = owner.user_id;
   });
 
-  it("writes only live non-DNC members from the persisted job cohort", async () => {
+  it("writes only successful, live non-DNC members from the persisted skip-trace cohort", async () => {
     const p1 = await seedProperty("1 Exact Cohort St");
     const p2 = await seedProperty("2 Exact Cohort St");
     const p3 = await seedProperty("3 Exact Cohort St");
@@ -687,21 +687,26 @@ describe("createExactCohortList (integration)", () => {
       .eq("id", p3);
     expect(dncError).toBeNull();
     const jobId = await seedJob({
-      type: "cass_dsf2_ncoa",
-      status: "completed",
+      type: "skip_trace",
+      status: "partial",
       propertyIds: [p1, p2, p3],
     });
+    await seedJobItems(jobId, [
+      { propertyId: p1, status: "success" },
+      { propertyId: p2, status: "success" },
+      { propertyId: p3, status: "success" },
+    ]);
 
     const result = await createExactCohortList({
       jobId,
-      name: "Exact CASS Cohort",
+      name: "Exact skip-trace Cohort",
     });
 
     expect(result).toEqual({
       ok: true,
       data: {
         listId: expect.any(String),
-        name: "Exact CASS Cohort",
+        name: "Exact skip-trace Cohort",
         memberCount: 2,
         dncExcludedCount: 1,
         sourceJobId: jobId,
@@ -734,6 +739,7 @@ describe("createExactCohortList (integration)", () => {
       status: "completed",
       propertyIds: [p1],
     });
+    await seedJobItems(jobId, [{ propertyId: p1, status: "success" }]);
 
     const result = await createExactCohortList({
       jobId,
@@ -748,7 +754,7 @@ describe("createExactCohortList (integration)", () => {
   it("does not materialize a running or unsupported job", async () => {
     const p1 = await seedProperty("5 Exact Cohort St");
     const running = await seedJob({
-      type: "cass_dsf2_ncoa",
+      type: "skip_trace",
       status: "running",
       propertyIds: [p1],
     });
@@ -775,6 +781,37 @@ describe("createExactCohortList (integration)", () => {
       ok: false,
       error: { code: "JOB_WRONG_TYPE" },
     });
+  });
+
+  it("excludes failed trace rows instead of silently putting them in the campaign list", async () => {
+    const succeeded = await seedProperty("6 Successful Trace St");
+    const failed = await seedProperty("7 Failed Trace St");
+    const jobId = await seedJob({
+      type: "skip_trace",
+      status: "partial",
+      propertyIds: [succeeded, failed],
+    });
+    await seedJobItems(jobId, [
+      { propertyId: succeeded, status: "success" },
+      { propertyId: failed, status: "error", errorClass: "provider" },
+    ]);
+
+    const result = await createExactCohortList({
+      jobId,
+      name: "Successful trace outputs only",
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      data: { memberCount: 1 },
+    });
+    if (!result.ok) return;
+
+    const { data: memberships, error } = await testClient
+      .from("property_lists")
+      .select("property_id")
+      .eq("list_id", result.data.listId);
+    expect(error).toBeNull();
+    expect(memberships?.map((row) => row.property_id)).toEqual([succeeded]);
   });
 });
 

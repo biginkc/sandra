@@ -26,7 +26,7 @@ type Props = {
 };
 
 /**
- * Creates a reusable, exact list from a terminal enrichment job. The server
+ * Creates a reusable, exact list from a terminal skip-trace job. The server
  * action re-checks ownership and DNC state; this control never launches
  * skip-trace or queues campaign messages.
  */
