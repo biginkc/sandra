@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -22,6 +23,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { callAction } from "@/lib/errors/call-action";
 import {
   isStaleRunningCsvImport,
   isTerminalCsvImportRetryStatus,
@@ -36,6 +38,7 @@ import {
 import { RetrySkipTraceButton } from "../retry-skip-trace-button";
 import { RetryPromoteLeadsButton } from "../retry-promote-leads-button";
 import { RetryCsvImportButton } from "../retry-csv-import-button";
+import { recoverCassForImport } from "../actions";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 type JobItem = Database["public"]["Tables"]["job_items"]["Row"];
@@ -429,7 +432,33 @@ function PromoteLeadsPanel({ job }: { job: Job }) {
         />
         <DetailRow label="Failed" value={counts.failed.toLocaleString()} />
       </CardContent>
+      {(job.status === "completed" || job.status === "partial") && (
+        <CardContent className="border-t pt-4">
+          <RecoverCassButton importJobId={job.id} />
+        </CardContent>
+      )}
     </Card>
+  );
+}
+
+function RecoverCassButton({ importJobId }: { importJobId: string }) {
+  const [pending, startTransition] = useTransition();
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={pending}
+      onClick={() => {
+        startTransition(async () => {
+          await callAction(recoverCassForImport(importJobId), {
+            successMessage: "CASS recovery job created. Open it from Linked jobs to review and start.",
+            fallbackMessage: "Could not create the CASS recovery job",
+          });
+        });
+      }}
+    >
+      {pending ? "Creating CASS job…" : "Recover CASS verification"}
+    </Button>
   );
 }
 

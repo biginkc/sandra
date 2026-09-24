@@ -8,6 +8,7 @@ import {
   claimAuthorizedCassJobStart,
   createCassChildJob,
   failAuthorizedCassJobStart,
+  selectCassEligibleProperties,
 } from "@/lib/enrichment/cass-job";
 import { cassBulkWorkflow } from "@/workflows/cass-bulk";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
@@ -171,6 +172,48 @@ export async function startQueuedCassJob(
       extra: { jobId },
     });
     return errFromUnknown(e, "START_QUEUED_CASS_FAILED");
+  }
+}
+
+/** Create the missing CASS child for one completed import's exact ledger. */
+export async function recoverCassForImport(
+  importJobId: string,
+): Promise<Result<{ total: number; childJobId: string }>> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!isAdminEmail(user?.email)) {
+      return { ok: false, error: { code: "FORBIDDEN", message: "Admin access is required." } };
+    }
+    const { data: parent, error } = await supabase
+      .from("jobs")
+      .select("id, org_id, type, status, related_import_id, created_by")
+      .eq("id", importJobId)
+      .maybeSingle();
+    if (error || !parent) {
+      return { ok: false, error: { code: "JOB_NOT_FOUND", message: error?.message ?? "Import job not found." } };
+    }
+    if (parent.type !== "csv_import" || !["completed", "partial"].includes(parent.status)) {
+      return { ok: false, error: { code: "IMPORT_NOT_TERMINAL", message: "CASS recovery requires a completed CSV import." } };
+    }
+    const propertyIds = await selectCassEligibleProperties(supabase, parent.id, parent.org_id);
+    if (propertyIds.length === 0) {
+      return { ok: false, error: { code: "NO_CASS_ELIGIBLE_PROPERTIES", message: "No unverified properties remain in this import." } };
+    }
+    const child = await createCassChildJob(supabase, {
+      parentJobId: parent.id,
+      relatedImportId: parent.related_import_id,
+      createdBy: parent.created_by,
+      orgId: parent.org_id,
+      propertyIds,
+      autoStart: false,
+      blockedReason: "Import recovery awaiting CASS cost approval",
+      requestKey: `import-recovery:${parent.id}`,
+    });
+    return ok({ total: propertyIds.length, childJobId: child.jobId });
+  } catch (e) {
+    reportError(e, { tags: { surface: "recover_cass_for_import" }, extra: { importJobId } });
+    return errFromUnknown(e, "RECOVER_CASS_FOR_IMPORT_FAILED");
   }
 }
 
