@@ -38,6 +38,7 @@ import {
 import { RetrySkipTraceButton } from "../retry-skip-trace-button";
 import { RetryPromoteLeadsButton } from "../retry-promote-leads-button";
 import { RetryCsvImportButton } from "../retry-csv-import-button";
+import { CassSkipTraceButton } from "../cass-skip-trace-button";
 import { recoverCassForImport } from "../actions";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
@@ -560,6 +561,22 @@ function CsvUpdatePanel({ job }: { job: Job }) {
 function CassPanel({ job }: { job: Job }) {
   const summary =
     (job.result_summary as Record<string, number | null> | null) ?? {};
+  const propertyIdsRaw =
+    (job.input_params as { property_ids?: unknown } | null)?.property_ids ??
+    null;
+  const propertyIds = Array.from(
+    new Set(
+      Array.isArray(propertyIdsRaw)
+        ? propertyIdsRaw.filter(
+            (id): id is string => typeof id === "string" && id.length > 0,
+          )
+        : [],
+    ),
+  );
+  const canPrepareSkipTrace =
+    job.type === "cass_dsf2_ncoa" &&
+    propertyIds.length > 0 &&
+    ["completed", "partial", "partially_completed"].includes(job.status);
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -586,6 +603,11 @@ function CassPanel({ job }: { job: Job }) {
           value={`${summary.manualReconciliation ?? 0}`}
         />
       </CardContent>
+      {canPrepareSkipTrace ? (
+        <CardContent className="border-t pt-4">
+          <CassSkipTraceButton propertyIds={propertyIds} />
+        </CardContent>
+      ) : null}
     </Card>
   );
 }

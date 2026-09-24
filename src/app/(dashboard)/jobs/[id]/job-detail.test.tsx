@@ -359,6 +359,69 @@ describe("<JobDetail /> CASS recovery", () => {
       "3",
     );
   });
+
+  it("offers skip-trace preflight only after a CASS job is terminal and preserves its exact input IDs", () => {
+    const propertyIds = ["property-1", "property-2"];
+    const { rerender } = render(
+      <JobDetail
+        job={makeJob({
+          type: "cass_dsf2_ncoa",
+          status: "running",
+          input_params: { property_ids: propertyIds },
+        })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", {
+        name: "Prepare exact cohort for skip-trace",
+      }),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <JobDetail
+        job={makeJob({
+          type: "cass_refresh",
+          status: "completed",
+          input_params: { property_ids: propertyIds },
+        })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", {
+        name: "Prepare exact cohort for skip-trace",
+      }),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <JobDetail
+        job={makeJob({
+          type: "cass_dsf2_ncoa",
+          status: "completed",
+          input_params: { property_ids: propertyIds },
+        })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: "Prepare exact cohort for skip-trace",
+      }),
+    ).toBeVisible();
+  });
 });
 
 describe("<JobDetail /> skip-trace metrics", () => {
