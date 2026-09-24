@@ -633,7 +633,10 @@ async function ingestRow(
   // authoritative stored DNC lock. A re-import need not repeat the DNC flag.
   let homeownerContactId: string | null = null;
   let homeownerDetails: HomeownerDetailsInsert | null = null;
-  if (hasHomeownerFields(n)) {
+  // Assigns owns a multi-contact relation. Do not silently nominate Contact 1
+  // as the homeowner: the user must select an intended recipient before a
+  // future launch. Every block is persisted through the atomic RPC below.
+  if (hasHomeownerFields(n) && !n.assigns_contact_blocks) {
     // A DNC-flagged row must be able to match an existing contact via a
     // phone that compactTypedPhones() just dropped (a DNC label normalizes
     // to 'unknown' and is never written to a slot) — otherwise a row whose
@@ -804,7 +807,6 @@ async function ingestRow(
       n,
       outcome.propertyId,
       orgId,
-      homeownerContactId,
     );
     return {
       propertyId: outcome.propertyId,
@@ -876,7 +878,6 @@ async function ingestRow(
     n,
     outcome.propertyId,
     orgId,
-    homeownerContactId,
   );
   return {
     propertyId: outcome.propertyId,
@@ -908,12 +909,12 @@ async function persistAssignsContactBlocks(
   n: Readonly<Record<string, unknown>>,
   propertyId: string,
   orgId: string,
-  primaryContactId: string | null,
 ): Promise<{ droppedUnlabeledPhones: number }> {
   const blocks = parseAssignsContactBlocks(n.assigns_contact_blocks);
   let droppedUnlabeledPhones = 0;
   for (const block of blocks) {
     const position = block.position;
+    const sourceIdentity = block.sourceIdentity;
     if (
       typeof position !== "number" ||
       !Number.isInteger(position) ||
@@ -921,6 +922,9 @@ async function persistAssignsContactBlocks(
       position > 8
     ) {
       throw new Error("Assigns contact block has an invalid position");
+    }
+    if (!sourceIdentity) {
+      throw new Error("Assigns contact block has no source identity");
     }
     const phoneCandidates = (block.phones ?? []).map((phone) => ({
       phone: normalizePhone(phone.value ?? ""),
@@ -947,50 +951,24 @@ async function persistAssignsContactBlocks(
     if (!name.first_name && !name.last_name && !email && typed.length === 0) {
       continue;
     }
-    // A completed source-position relation is the durable identity on
-    // retry/re-import. It prevents name-only contacts from multiplying and
-    // keeps a source block stable even if another block shares a phone.
-    const { data: prior, error: priorError } = await supabase
-      .from("property_contacts")
-      .select("contact_id")
-      .eq("property_id", propertyId)
-      .eq("relationship", "assigns_contact")
-      .eq("source_position", position)
-      .maybeSingle();
-    if (priorError) throw new Error(`Assigns property contact lookup: ${priorError.message}`);
-    const contactId = prior?.contact_id ?? (
-      position === 1 && primaryContactId
-        ? primaryContactId
-        : await upsertContact(
-            supabase,
-            {
-              contact_type: "person",
-              ...name,
-              phone_1: typed[0]?.phone ?? null,
-              phone_1_type: typed[0]?.type ?? "unknown",
-              phone_2: typed[1]?.phone ?? null,
-              phone_2_type: typed[1]?.type ?? "unknown",
-              phone_3: typed[2]?.phone ?? null,
-              phone_3_type: typed[2]?.type ?? "unknown",
-              email,
-            },
-            typed.map((phone) => phone.phone),
-            orgId,
-          )
-    );
-    const { error } = await supabase
-      .from("property_contacts")
-      .upsert(
-        {
-          property_id: propertyId,
-          contact_id: contactId,
-          org_id: orgId,
-          relationship: "assigns_contact",
-          source_position: position,
-          source_attributes: block as Json,
-        },
-        { onConflict: "property_id,relationship,source_position" },
-      );
+    const { error } = await supabase.rpc("upsert_assigns_property_contact", {
+      p_property_id: propertyId,
+      p_org_id: orgId,
+      p_source_identity: sourceIdentity,
+      p_source_position: position,
+      p_source_attributes: block as Json,
+      p_contact: {
+        contact_type: "person",
+        ...name,
+        phone_1: typed[0]?.phone ?? null,
+        phone_1_type: typed[0]?.type ?? "unknown",
+        phone_2: typed[1]?.phone ?? null,
+        phone_2_type: typed[1]?.type ?? "unknown",
+        phone_3: typed[2]?.phone ?? null,
+        phone_3_type: typed[2]?.type ?? "unknown",
+        email,
+      } as Json,
+    });
     if (error) throw new Error(`Assigns property contact upsert: ${error.message}`);
   }
   return { droppedUnlabeledPhones };

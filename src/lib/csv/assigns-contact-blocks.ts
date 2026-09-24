@@ -12,6 +12,7 @@ export type AssignsPhone = {
 };
 
 export type AssignsContactBlock = {
+  sourceIdentity?: string;
   position?: number;
   name?: string;
   type?: string;

@@ -3169,6 +3169,7 @@ export type Database = {
           contact_id: string
           org_id: string
           relationship: string
+          source_identity: string
           source_position: number
           source_attributes: Json
           created_at: string
@@ -3179,6 +3180,7 @@ export type Database = {
           contact_id: string
           org_id: string
           relationship?: string
+          source_identity: string
           source_position: number
           source_attributes?: Json
           created_at?: string
@@ -3189,6 +3191,7 @@ export type Database = {
           contact_id?: string
           org_id?: string
           relationship?: string
+          source_identity?: string
           source_position?: number
           source_attributes?: Json
           updated_at?: string
@@ -6854,6 +6857,17 @@ export type Database = {
           original_outcome: string
           property_id: string
         }[]
+      }
+      upsert_assigns_property_contact: {
+        Args: {
+          p_contact: Json
+          p_org_id: string
+          p_property_id: string
+          p_source_attributes: Json
+          p_source_identity: string
+          p_source_position: number
+        }
+        Returns: string
       }
       capture_sendillo_sms_health_snapshot: {
         Args: { p_captured_at?: string }

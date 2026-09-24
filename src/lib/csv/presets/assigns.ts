@@ -54,6 +54,7 @@ function contactBlock(row: SourceRow, position: number) {
     email: value(row, `${prefix}Email_${slot}`),
   }));
   return {
+    sourceIdentity: `${value(row, "Id")}:${position}`,
     position,
     name: value(row, `${prefix}Name`),
     type: value(row, `${prefix}Type`),
