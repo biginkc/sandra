@@ -1,9 +1,11 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import { start } from "workflow/api";
 
 import { isAdminEmail } from "@/lib/auth/allowlist";
+import { getCallerMemberships } from "@/lib/auth/memberships";
 import {
   claimAuthorizedCassJobStart,
   createCassChildJob,
@@ -17,9 +19,24 @@ import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { preflightSkipTrace } from "@/lib/skip-trace/actions";
+import { resolveProspectEligibility } from "@/lib/prospects/eligibility";
+import type { Json } from "@/lib/supabase/types";
 import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
 
 const JOB_ITEM_PAGE_SIZE = 500;
+const EXACT_COHORT_JOB_TYPES = new Set(["skip_trace"]);
+const EXACT_COHORT_TERMINAL_STATUSES = new Set([
+  "completed",
+  "partial",
+  "partially_completed",
+]);
+const EXACT_COHORT_LIST_MARKER_PREFIX = "Sandra exact cohort source job: ";
+const EXACT_COHORT_WRITE_CHUNK = 500;
+
+export type CreateExactCohortListInput = {
+  jobId: string;
+  name: string;
+};
 
 async function readFailedJobItems(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -227,6 +244,475 @@ export async function recoverCassForImport(
     reportError(e, { tags: { surface: "recover_cass_for_import" }, extra: { importJobId } });
     return errFromUnknown(e, "RECOVER_CASS_FOR_IMPORT_FAILED");
   }
+}
+
+/**
+ * Materialize the exact property cohort recorded by a completed enrichment
+ * skip-trace job into a reusable list. The list is deliberately job-scoped: reusing a
+ * user-created list with unrelated memberships would turn an exact cohort
+ * into a broad audience, so a name collision is rejected unless the existing
+ * row carries this action's source-job marker.
+ *
+ * This action only writes list metadata and property memberships. It never
+ * queues skip trace, builds campaign recipients, or sends messages.
+ */
+export async function createExactCohortList(
+  input: CreateExactCohortListInput,
+): Promise<
+  Result<{
+    listId: string;
+    name: string;
+    memberCount: number;
+    dncExcludedCount: number;
+    traceExcludedCount: number;
+    sourceJobId: string;
+  }>
+> {
+  const name = input.name.trim();
+  if (!name) {
+    return {
+      ok: false,
+      error: { code: "VALIDATION", message: "List name is required." },
+    };
+  }
+  if (name.length > 80) {
+    return {
+      ok: false,
+      error: {
+        code: "VALIDATION",
+        message: `Name is ${name.length} characters — cap is 80.`,
+      },
+    };
+  }
+  if (!input.jobId.trim()) {
+    return {
+      ok: false,
+      error: { code: "VALIDATION", message: "Source job is required." },
+    };
+  }
+
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return {
+        ok: false,
+        error: { code: "NOT_AUTHENTICATED", message: "Not authenticated." },
+      };
+    }
+
+    const { data: job, error: jobError } = await supabase
+      .from("jobs")
+      .select("id, org_id, type, status, input_params, related_import_id")
+      .eq("id", input.jobId)
+      .maybeSingle();
+    if (jobError || !job) {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_NOT_FOUND",
+          message: jobError?.message ?? "Source job not found.",
+        },
+      };
+    }
+
+    const memberships = await getCallerMemberships();
+    if (!memberships.some((membership) => membership.org_id === job.org_id)) {
+      return {
+        ok: false,
+        error: {
+          code: "FORBIDDEN",
+          message: "You do not have access to the source job's organization.",
+        },
+      };
+    }
+    if (!EXACT_COHORT_JOB_TYPES.has(job.type)) {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_WRONG_TYPE",
+          message: "Only completed skip-trace jobs can create an exact cohort list.",
+        },
+      };
+    }
+    if (!EXACT_COHORT_TERMINAL_STATUSES.has(job.status)) {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_NOT_TERMINAL",
+          message: `The source job is ${job.status}; wait until it is complete before creating a list.`,
+        },
+      };
+    }
+
+    const requestedPropertyIds = readExactCohortPropertyIds(job.input_params);
+    if (requestedPropertyIds.length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_NO_PROPERTIES",
+          message: "The source job has no persisted property IDs.",
+        },
+      };
+    }
+
+    // A partial trace must never place provider failures into a campaign list.
+    // `success` covers both matched and confirmed no-match trace results; both
+    // are completed trace attempts, while `error`/`skipped` require separate
+    // recovery rather than silent inclusion.
+    const successfulPropertyIds = await readSuccessfulSkipTracePropertyIds(
+      supabase,
+      job.id,
+      new Set(requestedPropertyIds),
+    );
+    if (successfulPropertyIds.length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "JOB_NO_SUCCESSFUL_PROPERTIES",
+          message: "This skip-trace job has no successful property results to place in a campaign list.",
+        },
+      };
+    }
+
+    // Check ownership and soft-deletion before the shared DNC resolver. A
+    // forged or stale job payload must not cause memberships to be written
+    // across organizations, nor should a partially missing cohort be silently
+    // turned into a smaller list.
+    const ownedIds = new Set<string>();
+    for (
+      let offset = 0;
+      offset < successfulPropertyIds.length;
+      offset += EXACT_COHORT_WRITE_CHUNK
+    ) {
+      const { data: ownedProperties, error: ownershipError } = await supabase
+        .from("properties")
+        .select("id")
+        .eq("org_id", job.org_id)
+        .is("deleted_at", null)
+        .in(
+          "id",
+          successfulPropertyIds.slice(
+            offset,
+            offset + EXACT_COHORT_WRITE_CHUNK,
+          ),
+        );
+      if (ownershipError) {
+        return {
+          ok: false,
+          error: {
+            code: "COHORT_OWNERSHIP_CHECK_FAILED",
+            message: ownershipError.message,
+          },
+        };
+      }
+      for (const property of ownedProperties ?? []) ownedIds.add(property.id);
+    }
+    if (ownedIds.size !== successfulPropertyIds.length) {
+      return {
+        ok: false,
+        error: {
+          code: "COHORT_OWNERSHIP_FAILED",
+          message:
+            "The source job no longer resolves to the same live properties in this organization; no list was written.",
+        },
+      };
+    }
+
+    // DNC is evaluated immediately before the list write. The resulting list
+    // is safe to reuse as a campaign filter without carrying DNC-locked rows.
+    const eligibility = await resolveProspectEligibility(
+      supabase,
+      successfulPropertyIds,
+      "selection",
+    );
+    const nonProspectExclusions = eligibility.exclusions.filter(
+      (exclusion) => exclusion.reason === "not_found_or_not_prospect",
+    );
+    if (nonProspectExclusions.length > 0) {
+      return {
+        ok: false,
+        error: {
+          code: "COHORT_NOT_CURRENT_PROSPECTS",
+          message:
+            "The successful skip-trace cohort no longer resolves entirely to live prospects; no list was written.",
+        },
+      };
+    }
+    if (eligibility.eligibleIds.length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "NO_ELIGIBLE_PROPERTIES",
+          message: "No live, non-DNC properties remain in this exact cohort.",
+        },
+      };
+    }
+
+    const marker = `${EXACT_COHORT_LIST_MARKER_PREFIX}${job.id}`;
+    const { data: listRows, error: listLookupError } = await supabase
+      .from("lists")
+      .select("id, name, description, archived_at, system_managed")
+      .eq("org_id", job.org_id);
+    if (listLookupError) {
+      return {
+        ok: false,
+        error: {
+          code: "LIST_LOOKUP_FAILED",
+          message: listLookupError.message,
+        },
+      };
+    }
+    const existing = (listRows ?? []).find(
+      (row) => row.name.trim().toLowerCase() === name.toLowerCase(),
+    );
+    if (existing?.system_managed) {
+      return {
+        ok: false,
+        error: {
+          code: "SYSTEM_MANAGED_LIST",
+          message: "System-managed lists cannot be used for an exact cohort.",
+        },
+      };
+    }
+    if (existing && existing.description !== marker) {
+      return {
+        ok: false,
+        error: {
+          code: "LIST_NAME_COLLISION",
+          message:
+            `A list named "${name}" already exists for a different cohort. Choose a new exact-cohort name.`,
+        },
+      };
+    }
+
+    // Keep the marker exact so a user-created list cannot accidentally look
+    // like an action-owned exact cohort and then be broadened or rewritten.
+    const listDescription = marker;
+    let listId = existing?.id ?? null;
+    if (!listId) {
+      const { data: created, error: createError } = await supabase
+        .from("lists")
+        .insert({
+          org_id: job.org_id,
+          name,
+          description: listDescription,
+          created_by: user.id,
+        })
+        .select("id")
+        .single();
+      if (createError || !created) {
+        return {
+          ok: false,
+          error: {
+            code: "LIST_CREATE_FAILED",
+            message: createError?.message ?? "Could not create exact cohort list.",
+          },
+        };
+      }
+      listId = created.id;
+    } else if (existing && existing.archived_at) {
+      const { error: restoreError } = await supabase
+        .from("lists")
+        .update({ archived_at: null, description: listDescription })
+        .eq("id", listId)
+        .eq("org_id", job.org_id);
+      if (restoreError) {
+        return {
+          ok: false,
+          error: { code: "LIST_UPDATE_FAILED", message: restoreError.message },
+        };
+      }
+    }
+
+    let currentMemberships: string[];
+    try {
+      currentMemberships = await readListMembershipPropertyIds(
+        supabase,
+        job.org_id,
+        listId,
+      );
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: "LIST_MEMBERSHIP_LOOKUP_FAILED",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+
+    const eligibleIds = new Set(eligibility.eligibleIds);
+    const staleIds = currentMemberships.filter(
+      (propertyId) => !eligibleIds.has(propertyId),
+    );
+    for (let offset = 0; offset < staleIds.length; offset += EXACT_COHORT_WRITE_CHUNK) {
+      const { error: deleteError } = await supabase
+        .from("property_lists")
+        .delete()
+        .eq("org_id", job.org_id)
+        .eq("list_id", listId)
+        .in("property_id", staleIds.slice(offset, offset + EXACT_COHORT_WRITE_CHUNK));
+      if (deleteError) {
+        return {
+          ok: false,
+          error: {
+            code: "LIST_MEMBERSHIP_WRITE_FAILED",
+            message: deleteError.message,
+          },
+        };
+      }
+    }
+
+    const now = new Date().toISOString();
+    for (
+      let offset = 0;
+      offset < eligibility.eligibleIds.length;
+      offset += EXACT_COHORT_WRITE_CHUNK
+    ) {
+      const rows = eligibility.eligibleIds
+        .slice(offset, offset + EXACT_COHORT_WRITE_CHUNK)
+        .map((propertyId) => ({
+          org_id: job.org_id,
+          property_id: propertyId,
+          list_id: listId,
+          last_added_at: now,
+          last_added_by: user.id,
+          ...(job.related_import_id
+            ? { last_source_import_id: job.related_import_id }
+            : {}),
+        }));
+      const { error: upsertError } = await supabase
+        .from("property_lists")
+        .upsert(rows, {
+          onConflict: "property_id,list_id",
+          ignoreDuplicates: false,
+        });
+      if (upsertError) {
+        return {
+          ok: false,
+          error: {
+            code: "LIST_MEMBERSHIP_WRITE_FAILED",
+            message: upsertError.message,
+          },
+        };
+      }
+    }
+
+    let verifiedMemberships: string[];
+    try {
+      verifiedMemberships = await readListMembershipPropertyIds(
+        supabase,
+        job.org_id,
+        listId,
+      );
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: "LIST_MEMBERSHIP_VERIFY_FAILED",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+    const verifiedIds = new Set(verifiedMemberships);
+    if (
+      verifiedIds.size !== eligibleIds.size ||
+      [...eligibleIds].some((propertyId) => !verifiedIds.has(propertyId))
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "LIST_MEMBERSHIP_VERIFY_FAILED",
+          message: "Exact cohort list membership could not be verified.",
+        },
+      };
+    }
+
+    revalidatePath("/lists");
+    revalidatePath("/campaigns");
+    revalidatePath(`/jobs/${job.id}`);
+    return ok({
+      listId,
+      name,
+      memberCount: eligibleIds.size,
+      dncExcludedCount: eligibility.dncLockedCount,
+      traceExcludedCount:
+        requestedPropertyIds.length - successfulPropertyIds.length,
+      sourceJobId: job.id,
+    });
+  } catch (e) {
+    reportError(e, {
+      tags: { surface: "create_exact_cohort_list" },
+      extra: { jobId: input.jobId },
+    });
+    return errFromUnknown(e, "CREATE_EXACT_COHORT_LIST_FAILED");
+  }
+}
+
+function readExactCohortPropertyIds(inputParams: Json | null): string[] {
+  if (!inputParams || typeof inputParams !== "object" || Array.isArray(inputParams)) {
+    return [];
+  }
+  const raw = (inputParams as Record<string, unknown>).property_ids;
+  if (!Array.isArray(raw)) return [];
+  return Array.from(
+    new Set(
+      raw.filter(
+        (propertyId): propertyId is string =>
+          typeof propertyId === "string" && propertyId.trim().length > 0,
+      ),
+    ),
+  );
+}
+
+async function readSuccessfulSkipTracePropertyIds(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  jobId: string,
+  requestedPropertyIds: Set<string>,
+): Promise<string[]> {
+  const ids = new Set<string>();
+  for (let from = 0; ; from += EXACT_COHORT_WRITE_CHUNK) {
+    const { data, error } = await supabase
+      .from("job_items")
+      .select("property_id")
+      .eq("job_id", jobId)
+      .eq("status", "success")
+      .not("property_id", "is", null)
+      .order("id", { ascending: true })
+      .range(from, from + EXACT_COHORT_WRITE_CHUNK - 1);
+    if (error) throw error;
+    for (const row of data ?? []) {
+      if (row.property_id && requestedPropertyIds.has(row.property_id)) {
+        ids.add(row.property_id);
+      }
+    }
+    if (!data || data.length < EXACT_COHORT_WRITE_CHUNK) break;
+  }
+  return [...ids];
+}
+
+async function readListMembershipPropertyIds(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  orgId: string,
+  listId: string,
+): Promise<string[]> {
+  const ids: string[] = [];
+  for (let from = 0; ; from += EXACT_COHORT_WRITE_CHUNK) {
+    const { data, error } = await supabase
+      .from("property_lists")
+      .select("property_id")
+      .eq("org_id", orgId)
+      .eq("list_id", listId)
+      .order("property_id", { ascending: true })
+      .range(from, from + EXACT_COHORT_WRITE_CHUNK - 1);
+    if (error) throw new Error(error.message);
+    ids.push(...(data ?? []).map((row) => row.property_id));
+    if (!data || data.length < EXACT_COHORT_WRITE_CHUNK) break;
+  }
+  return ids;
 }
 
 /**

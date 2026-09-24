@@ -38,7 +38,11 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(
     }) as never,
 );
 
-import { retryFailedCassItems, retryFailedSkipTraceItems } from "./actions";
+import {
+  createExactCohortList,
+  retryFailedCassItems,
+  retryFailedSkipTraceItems,
+} from "./actions";
 
 async function getOrgId(): Promise<string> {
   return getCanonicalTestOrgId(testClient);
@@ -652,6 +656,225 @@ describe("retryFailedSkipTraceItems (integration)", () => {
       if (!result.ok) return;
       expect(result.data.total).toBe(1);
     });
+  });
+});
+
+describe("createExactCohortList (integration)", () => {
+  beforeEach(async () => {
+    await resetTenantTables(testClient);
+    const orgId = await getOrgId();
+    const { data: owner, error: ownerError } = await testClient
+      .from("memberships")
+      .select("user_id")
+      .eq("org_id", orgId)
+      .eq("role", "owner")
+      .limit(1)
+      .single();
+    if (ownerError || !owner) {
+      throw ownerError ?? new Error("test owner missing");
+    }
+    currentEmail = "jarrad@bmhgroupkc.com";
+    currentUserId = owner.user_id;
+  });
+
+  it("writes only successful, live non-DNC members from the persisted skip-trace cohort", async () => {
+    const p1 = await seedProperty("1 Exact Cohort St");
+    const p2 = await seedProperty("2 Exact Cohort St");
+    const p3 = await seedProperty("3 Exact Cohort St");
+    const { error: dncError } = await testClient
+      .from("properties")
+      .update({ is_dnc_locked: true })
+      .eq("id", p3);
+    expect(dncError).toBeNull();
+    const jobId = await seedJob({
+      type: "skip_trace",
+      status: "partial",
+      propertyIds: [p1, p2, p3],
+    });
+    await seedJobItems(jobId, [
+      { propertyId: p1, status: "success" },
+      { propertyId: p2, status: "success" },
+      { propertyId: p3, status: "success" },
+    ]);
+
+    const result = await createExactCohortList({
+      jobId,
+      name: "Exact skip-trace Cohort",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        listId: expect.any(String),
+        name: "Exact skip-trace Cohort",
+        memberCount: 2,
+        dncExcludedCount: 1,
+        traceExcludedCount: 0,
+        sourceJobId: jobId,
+      },
+    });
+    if (!result.ok) return;
+
+    const { data: memberships, error: membershipsError } = await testClient
+      .from("property_lists")
+      .select("property_id")
+      .eq("list_id", result.data.listId);
+    expect(membershipsError).toBeNull();
+    expect(new Set((memberships ?? []).map((row) => row.property_id))).toEqual(
+      new Set([p1, p2]),
+    );
+  });
+
+  it("rejects an ordinary same-name list instead of broadening it", async () => {
+    const p1 = await seedProperty("4 Exact Cohort St");
+    const orgId = await getOrgId();
+    const { data: existing, error: listError } = await testClient
+      .from("lists")
+      .insert({ org_id: orgId, name: "Already Used" })
+      .select("id")
+      .single();
+    expect(listError).toBeNull();
+    expect(existing?.id).toBeTruthy();
+    const jobId = await seedJob({
+      type: "skip_trace",
+      status: "completed",
+      propertyIds: [p1],
+    });
+    await seedJobItems(jobId, [{ propertyId: p1, status: "success" }]);
+
+    const result = await createExactCohortList({
+      jobId,
+      name: "Already Used",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("LIST_NAME_COLLISION");
+  });
+
+  it("does not materialize a running or unsupported job", async () => {
+    const p1 = await seedProperty("5 Exact Cohort St");
+    const running = await seedJob({
+      type: "skip_trace",
+      status: "running",
+      propertyIds: [p1],
+    });
+    const unsupported = await seedJob({
+      type: "csv_import",
+      status: "completed",
+      propertyIds: [p1],
+    });
+
+    const runningResult = await createExactCohortList({
+      jobId: running,
+      name: "Running Cohort",
+    });
+    const unsupportedResult = await createExactCohortList({
+      jobId: unsupported,
+      name: "Unsupported Cohort",
+    });
+
+    expect(runningResult).toMatchObject({
+      ok: false,
+      error: { code: "JOB_NOT_TERMINAL" },
+    });
+    expect(unsupportedResult).toMatchObject({
+      ok: false,
+      error: { code: "JOB_WRONG_TYPE" },
+    });
+  });
+
+  it("excludes failed trace rows instead of silently putting them in the campaign list", async () => {
+    const succeeded = await seedProperty("6 Successful Trace St");
+    const failed = await seedProperty("7 Failed Trace St");
+    const jobId = await seedJob({
+      type: "skip_trace",
+      status: "partial",
+      propertyIds: [succeeded, failed],
+    });
+    await seedJobItems(jobId, [
+      { propertyId: succeeded, status: "success" },
+      { propertyId: failed, status: "error", errorClass: "provider" },
+    ]);
+
+    const result = await createExactCohortList({
+      jobId,
+      name: "Successful trace outputs only",
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      data: { memberCount: 1 },
+    });
+    if (!result.ok) return;
+
+    const { data: memberships, error } = await testClient
+      .from("property_lists")
+      .select("property_id")
+      .eq("list_id", result.data.listId);
+    expect(error).toBeNull();
+    expect(memberships?.map((row) => row.property_id)).toEqual([succeeded]);
+  });
+
+  it("refuses to silently shrink a successful trace cohort that is no longer all prospects", async () => {
+    const prospect = await seedProperty("8 Still Prospect St");
+    const promoted = await seedProperty("9 Already Lead St");
+    const { error: promoteError } = await testClient
+      .from("properties")
+      .update({ status: "lead" })
+      .eq("id", promoted);
+    expect(promoteError).toBeNull();
+    const jobId = await seedJob({
+      type: "skip_trace",
+      status: "completed",
+      propertyIds: [prospect, promoted],
+    });
+    await seedJobItems(jobId, [
+      { propertyId: prospect, status: "success" },
+      { propertyId: promoted, status: "success" },
+    ]);
+
+    const result = await createExactCohortList({
+      jobId,
+      name: "Would silently lose lead",
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "COHORT_NOT_CURRENT_PROSPECTS" },
+    });
+  });
+
+  it("materializes and verifies all 1,001 successful trace properties across paged reads", async () => {
+    const propertyIds = await seedProperties(1_001, "Paged exact trace");
+    const jobId = await seedJob({
+      type: "skip_trace",
+      status: "completed",
+      propertyIds,
+    });
+    await seedJobItems(
+      jobId,
+      propertyIds.map((propertyId) => ({ propertyId, status: "success" as const })),
+    );
+
+    const result = await createExactCohortList({
+      jobId,
+      name: "Paged successful trace cohort",
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        memberCount: 1_001,
+        dncExcludedCount: 0,
+        traceExcludedCount: 0,
+      },
+    });
+    if (!result.ok) return;
+
+    const { count, error } = await testClient
+      .from("property_lists")
+      .select("*", { count: "exact", head: true })
+      .eq("list_id", result.data.listId);
+    expect(error).toBeNull();
+    expect(count).toBe(1_001);
   });
 });
 
