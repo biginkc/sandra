@@ -8,6 +8,9 @@ import type {
 } from "../types";
 
 const ENDPOINT = "https://us-street.api.smartystreets.com/street-address";
+// Must stay well below the stale-worker sweep (15 minutes) so a worker never
+// loses its claim while waiting indefinitely on a provider response.
+const REQUEST_TIMEOUT_MS = 30_000;
 
 type SmartyCandidate = {
   input_index: number;
@@ -76,6 +79,8 @@ export class SmartyStreetsVerifier implements AddressVerifier {
     ]);
 
     let response: Response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
       response = await fetch(url, {
         method: "POST",
@@ -84,12 +89,15 @@ export class SmartyStreetsVerifier implements AddressVerifier {
           "Host": "us-street.api.smartystreets.com",
         },
         body,
+        signal: controller.signal,
       });
     } catch (e) {
       throw new ProviderError(
         e instanceof Error ? e.message : String(e),
         "smartystreets",
       );
+    } finally {
+      clearTimeout(timeout);
     }
 
     if (!response.ok) {
