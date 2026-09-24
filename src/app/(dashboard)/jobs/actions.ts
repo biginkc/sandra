@@ -208,8 +208,20 @@ export async function recoverCassForImport(
       propertyIds,
       autoStart: false,
       blockedReason: "Import recovery awaiting CASS cost approval",
-      requestKey: `import-recovery:${parent.id}`,
+      // The authorization receipt accepts UUID request keys. Reusing the
+      // parent import ID makes double-clicks idempotent and matches the
+      // normal CSV-import CASS child path.
+      requestKey: parent.id,
     });
+    if (!child.created && !["queued", "running"].includes(child.status)) {
+      return {
+        ok: false,
+        error: {
+          code: "CASS_RECOVERY_ALREADY_TERMINAL",
+          message: `The existing CASS recovery job is ${child.status}. Open it from Linked jobs and use its explicit retry or review path.`,
+        },
+      };
+    }
     return ok({ total: propertyIds.length, childJobId: child.jobId });
   } catch (e) {
     reportError(e, { tags: { surface: "recover_cass_for_import" }, extra: { importJobId } });

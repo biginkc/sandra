@@ -78,11 +78,10 @@ export class SmartyStreetsVerifier implements AddressVerifier {
       },
     ]);
 
-    let response: Response;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      response = await fetch(url, {
+      const response = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -91,26 +90,29 @@ export class SmartyStreetsVerifier implements AddressVerifier {
         body,
         signal: controller.signal,
       });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new ProviderError(
+          `SmartyStreets ${response.status}: ${text || response.statusText}`,
+          "smartystreets",
+          { status: response.status },
+        );
+      }
+
+      const candidates = (await response.json()) as SmartyCandidate[];
+      return parseSmartyResponse(candidates);
     } catch (e) {
+      if (e instanceof ProviderError) throw e;
       throw new ProviderError(
         e instanceof Error ? e.message : String(e),
         "smartystreets",
       );
     } finally {
+      // Keep the deadline armed through body consumption: fetch resolves once
+      // headers arrive, while a stalled body can otherwise pin a job claim.
       clearTimeout(timeout);
     }
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new ProviderError(
-        `SmartyStreets ${response.status}: ${text || response.statusText}`,
-        "smartystreets",
-        { status: response.status },
-      );
-    }
-
-    const candidates = (await response.json()) as SmartyCandidate[];
-    return parseSmartyResponse(candidates);
   }
 }
 
