@@ -1119,7 +1119,10 @@ type CsvImportRetryJob = {
   error_class: string | null;
   retry_count: number;
   max_retries: number;
+  worker_heartbeat_at?: string | null;
 };
+
+const CSV_IMPORT_STALE_AFTER_MS = 5 * 60 * 1000;
 
 async function availabilityForCsvImportRetry(
   job: CsvImportRetryJob,
@@ -1130,14 +1133,24 @@ async function availabilityForCsvImportRetry(
       message: "Only CSV import jobs can use this retry.",
     };
   }
-  if (["queued", "running"].includes(job.status)) {
+  const staleRunning =
+    job.status === "running" &&
+    (!job.worker_heartbeat_at ||
+      Date.now() - new Date(job.worker_heartbeat_at).getTime() >
+        CSV_IMPORT_STALE_AFTER_MS);
+  if (["queued", "running"].includes(job.status) && !staleRunning) {
     return {
       state: "in_flight",
       message: "This import is already being processed.",
     };
   }
   if (
-    !["failed", "partial", "partially_completed"].includes(job.status) ||
+    (![
+      "failed",
+      "partial",
+      "partially_completed",
+    ].includes(job.status) &&
+      !staleRunning) ||
     ["validation", "authorization"].includes(job.error_class ?? "")
   ) {
     return {
@@ -1210,7 +1223,7 @@ export async function getCsvImportRetryAvailability(
     const { data: job, error } = await supabase
       .from("jobs")
       .select(
-        "id, org_id, type, status, error_class, retry_count, max_retries",
+        "id, org_id, type, status, error_class, retry_count, max_retries, worker_heartbeat_at",
       )
       .eq("id", jobId)
       .single();
@@ -1342,7 +1355,7 @@ export async function retryCsvImportJob(
       const { data: latestJob, error: latestJobError } = await supabase
         .from("jobs")
         .select(
-          "id, org_id, type, status, error_class, retry_count, max_retries",
+          "id, org_id, type, status, error_class, retry_count, max_retries, worker_heartbeat_at",
         )
         .eq("id", jobId)
         .single();
