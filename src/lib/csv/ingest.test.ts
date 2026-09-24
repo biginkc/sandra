@@ -56,6 +56,9 @@ function makeBuilder(record: CallRecord): Record<string, unknown> {
       onFulfilled: (v: Response) => unknown,
       onRejected?: (r: unknown) => unknown,
     ) {
+      if (record.table === "csv_import_contact_outcomes") {
+        return Promise.resolve({ data: null, error: null }).then(onFulfilled, onRejected);
+      }
       const resp = responseQueue.shift();
       if (!resp) {
         return Promise.reject(
@@ -437,6 +440,15 @@ describe("processIngestChunk → Assigns multi-contact identity", () => {
     expect(relations).toHaveLength(2);
     expect(relations.map((call) => (call.insertPayload as Record<string, unknown>).p_source_identity))
       .toEqual(["vendor-record-1:1", "vendor-record-1:2"]);
+    const contactOutcomes = calls.filter(
+      (call) => call.table === "csv_import_contact_outcomes",
+    );
+    expect(contactOutcomes).toHaveLength(2);
+    expect(
+      contactOutcomes.map(
+        (call) => (call.insertPayload as Record<string, unknown>).source_identity,
+      ),
+    ).toEqual(["vendor-record-1:1", "vendor-record-1:2"]);
     expect(result.droppedUnlabeledPhones).toBe(1);
   });
 });

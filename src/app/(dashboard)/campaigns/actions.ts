@@ -2,7 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 
-import { bulkQueueSms, getAllMatchingProspectIds } from "@/app/(dashboard)/properties/actions";
+import {
+  bulkQueueSms,
+  getAllMatchingProspectIds,
+} from "@/app/(dashboard)/properties/actions";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { computeConsentState } from "@/lib/messaging/consent";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
@@ -164,11 +167,7 @@ type CampaignPauseRpcClient = {
   }>;
 };
 
-const ACTIVE_BULK_SMS_JOB_STATUSES = [
-  "queued",
-  "running",
-  "finalizing",
-];
+const ACTIVE_BULK_SMS_JOB_STATUSES = ["queued", "running", "finalizing"];
 
 type SyncedBulkSmsJobPace = {
   id: string;
@@ -265,7 +264,10 @@ async function restoreActiveBulkSmsJobInputs(
     if (error) {
       return {
         ok: false,
-        error: { code: "CAMPAIGN_JOB_PACE_RESTORE_FAILED", message: error.message },
+        error: {
+          code: "CAMPAIGN_JOB_PACE_RESTORE_FAILED",
+          message: error.message,
+        },
       };
     }
   }
@@ -395,9 +397,7 @@ function normalizePaceSeconds(
   return ok(validation.paceSeconds);
 }
 
-function parseAudienceSnapshot(
-  snapshot: Json | null,
-): Result<{
+function parseAudienceSnapshot(snapshot: Json | null): Result<{
   search: string | null;
   blockStack: FilterBlock[];
 }> {
@@ -504,9 +504,7 @@ function invalidAudienceResult(): Result<never> {
   };
 }
 
-function stateConflictResult(
-  message: string,
-): Result<never> {
+function stateConflictResult(message: string): Result<never> {
   return {
     ok: false,
     error: {
@@ -640,7 +638,8 @@ async function runCadenceRpc(
   rpcClient?: CampaignCadenceRpcClient,
 ): Promise<Result<CampaignCadenceChangeResult>> {
   const rpc =
-    rpcClient ?? ((await createClient()) as unknown as CampaignCadenceRpcClient);
+    rpcClient ??
+    ((await createClient()) as unknown as CampaignCadenceRpcClient);
   const { data, error } = await rpc.rpc(fn, {
     p_campaign_id: campaignId,
     p_pace_seconds: paceSeconds,
@@ -1066,13 +1065,15 @@ export async function createCampaign(
       let stampedSenderMismatch = false;
       let stampedSender: string | null = null;
       if ((revivedMessageCount ?? 0) > 0 && !lockedSender) {
-        const { count: matchingStampedSenderCount, error: matchingSenderError } =
-          await supabase
-            .from("messages")
-            .select("id", { count: "exact", head: true })
-            .eq("campaign_id", archivedCandidate.id)
-            .eq("direction", "outbound")
-            .eq("from_address", delivery.senderNumber);
+        const {
+          count: matchingStampedSenderCount,
+          error: matchingSenderError,
+        } = await supabase
+          .from("messages")
+          .select("id", { count: "exact", head: true })
+          .eq("campaign_id", archivedCandidate.id)
+          .eq("direction", "outbound")
+          .eq("from_address", delivery.senderNumber);
         if (matchingSenderError) {
           return {
             ok: false,
@@ -1260,9 +1261,7 @@ async function settleCampaignAfterDeliveryPersistFailure(
     .in("status", ["active", "launching"]);
 }
 
-async function loadCampaign(
-  campaignId: string,
-): Promise<Result<CampaignRow>> {
+async function loadCampaign(campaignId: string): Promise<Result<CampaignRow>> {
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("campaigns")
@@ -1288,41 +1287,6 @@ async function loadCampaign(
   return ok(data);
 }
 
-async function listFrozenRecipientPropertyIds(
-  campaignId: string,
-): Promise<Result<string[]>> {
-  const supabase = await createClient();
-  const propertyIds: string[] = [];
-
-  for (let from = 0; ; from += RECIPIENT_PAGE) {
-    const { data, error } = await supabase
-      .from("campaign_recipients")
-      .select("property_id")
-      .eq("campaign_id", campaignId)
-      .order("property_id", { ascending: true })
-      .range(from, from + RECIPIENT_PAGE - 1);
-
-    if (error) {
-      return {
-        ok: false,
-        error: {
-          code: "CAMPAIGN_RECIPIENTS_LOOKUP_FAILED",
-          message: error.message,
-        },
-      };
-    }
-
-    const page = (data ?? [])
-      .map((row) => row.property_id)
-      .filter((value): value is string => typeof value === "string");
-
-    propertyIds.push(...page);
-    if (page.length < RECIPIENT_PAGE) break;
-  }
-
-  return ok(propertyIds);
-}
-
 async function listFrozenRecipientSeedRows(
   campaignId: string,
 ): Promise<Result<CampaignRecipientSeedRow[]>> {
@@ -1335,6 +1299,7 @@ async function listFrozenRecipientSeedRows(
       .select("property_id, contact_id")
       .eq("campaign_id", campaignId)
       .order("property_id", { ascending: true })
+      .order("contact_id", { ascending: true })
       .range(from, from + RECIPIENT_PAGE - 1);
 
     if (error) {
@@ -1352,8 +1317,9 @@ async function listFrozenRecipientSeedRows(
         propertyId: row.property_id,
         contactId: row.contact_id ?? null,
       }))
-      .filter((row): row is CampaignRecipientSeedRow =>
-        typeof row.propertyId === "string",
+      .filter(
+        (row): row is CampaignRecipientSeedRow =>
+          typeof row.propertyId === "string",
       );
 
     rows.push(...page);
@@ -1373,7 +1339,8 @@ async function resolvePreviewRecipientRows(
 
   const snapshotResult = parseAudienceSnapshot(campaign.audience_snapshot);
   if (!snapshotResult.ok) return snapshotResult;
-  if (!hasEffectiveAudience(snapshotResult.data)) return invalidAudienceResult();
+  if (!hasEffectiveAudience(snapshotResult.data))
+    return invalidAudienceResult();
 
   const idsResult = await getAllMatchingProspectIds({
     search: snapshotResult.data.search,
@@ -1394,13 +1361,18 @@ async function fetchContactsForPreview(
     const chunk = contactIds.slice(i, i + PROPERTY_CHUNK);
     const { data, error } = await supabase
       .from("contacts")
-      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type")
+      .select(
+        "id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type",
+      )
       .in("id", chunk);
 
     if (error) {
       return {
         ok: false,
-        error: { code: "CAMPAIGN_CONTACT_LOOKUP_FAILED", message: error.message },
+        error: {
+          code: "CAMPAIGN_CONTACT_LOOKUP_FAILED",
+          message: error.message,
+        },
       };
     }
     for (const row of data ?? []) {
@@ -1437,7 +1409,10 @@ async function fetchPriorOutboundPropertySet(
     if (error) {
       return {
         ok: false,
-        error: { code: "CAMPAIGN_PRIOR_MESSAGE_LOOKUP_FAILED", message: error.message },
+        error: {
+          code: "CAMPAIGN_PRIOR_MESSAGE_LOOKUP_FAILED",
+          message: error.message,
+        },
       };
     }
     for (const row of data ?? []) {
@@ -1452,7 +1427,10 @@ async function fetchOptedOutContactSet(
   contactIds: string[],
 ): Promise<Result<Set<string>>> {
   const supabase = await createClient();
-  const eventsByContact = new Map<string, { event_type: string; occurred_at: string }[]>();
+  const eventsByContact = new Map<
+    string,
+    { event_type: string; occurred_at: string }[]
+  >();
 
   for (let i = 0; i < contactIds.length; i += PROPERTY_CHUNK) {
     const chunk = contactIds.slice(i, i + PROPERTY_CHUNK);
@@ -1465,7 +1443,10 @@ async function fetchOptedOutContactSet(
     if (error) {
       return {
         ok: false,
-        error: { code: "CAMPAIGN_CONSENT_LOOKUP_FAILED", message: error.message },
+        error: {
+          code: "CAMPAIGN_CONSENT_LOOKUP_FAILED",
+          message: error.message,
+        },
       };
     }
     for (const row of data ?? []) {
@@ -1493,7 +1474,8 @@ async function fetchRecipientSeedRows(
   propertyIds: string[],
 ): Promise<Result<CampaignRecipientSeedRow[]>> {
   const supabase = await createClient();
-  const rows: CampaignRecipientSeedRow[] = [];
+  const homeownerByProperty = new Map<string, string | null>();
+  const assignsContactsByProperty = new Map<string, Set<string>>();
 
   for (let i = 0; i < propertyIds.length; i += PROPERTY_CHUNK) {
     const chunk = propertyIds.slice(i, i + PROPERTY_CHUNK);
@@ -1512,14 +1494,52 @@ async function fetchRecipientSeedRows(
       };
     }
 
-    rows.push(
-      ...((data ?? []).map((row) => ({
-        propertyId: row.id,
-        contactId: row.homeowner_contact_id ?? null,
-      })) satisfies CampaignRecipientSeedRow[]),
-    );
+    for (const row of data ?? []) {
+      homeownerByProperty.set(row.id, row.homeowner_contact_id ?? null);
+    }
+
+    // Assigns explicitly provides independent source contacts. Preserve every
+    // one as a recipient rather than guessing which contact is the homeowner.
+    for (let from = 0; ; from += RECIPIENT_PAGE) {
+      const { data: relationRows, error: relationError } = await supabase
+        .from("property_contacts")
+        .select("property_id, contact_id, source_identity")
+        .in("property_id", chunk)
+        .eq("relationship", "assigns_contact")
+        .order("property_id", { ascending: true })
+        .order("contact_id", { ascending: true })
+        .order("source_identity", { ascending: true })
+        .range(from, from + RECIPIENT_PAGE - 1);
+      if (relationError) {
+        return {
+          ok: false,
+          error: {
+            code: "CAMPAIGN_RECIPIENTS_FETCH_FAILED",
+            message: relationError.message,
+          },
+        };
+      }
+      for (const relation of relationRows ?? []) {
+        const contacts =
+          assignsContactsByProperty.get(relation.property_id) ??
+          new Set<string>();
+        contacts.add(relation.contact_id);
+        assignsContactsByProperty.set(relation.property_id, contacts);
+      }
+      if ((relationRows ?? []).length < RECIPIENT_PAGE) break;
+    }
   }
 
+  const rows: CampaignRecipientSeedRow[] = [];
+  for (const [propertyId, homeownerContactId] of homeownerByProperty) {
+    const assignsContacts = assignsContactsByProperty.get(propertyId);
+    if (assignsContacts?.size) {
+      for (const contactId of assignsContacts)
+        rows.push({ propertyId, contactId });
+    } else {
+      rows.push({ propertyId, contactId: homeownerContactId });
+    }
+  }
   return ok(rows);
 }
 
@@ -1538,7 +1558,7 @@ async function persistFrozenRecipients(
         contact_id: row.contactId,
       })),
       {
-        onConflict: "campaign_id,property_id",
+        onConflict: "campaign_id,property_id,contact_id",
         ignoreDuplicates: true,
       },
     );
@@ -1557,7 +1577,9 @@ async function persistFrozenRecipients(
   return ok(null);
 }
 
-async function countCampaignMessages(campaignId: string): Promise<Result<number>> {
+async function countCampaignMessages(
+  campaignId: string,
+): Promise<Result<number>> {
   const supabase = await createClient();
   const { count, error } = await supabase
     .from("messages")
@@ -1672,7 +1694,9 @@ export async function unarchiveCampaign(id: string): Promise<Result<null>> {
   }
 }
 
-async function markCampaignCompleted(campaignId: string): Promise<Result<null>> {
+async function markCampaignCompleted(
+  campaignId: string,
+): Promise<Result<null>> {
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("campaigns")
@@ -1734,7 +1758,7 @@ async function buildAlreadyLaunchedResult(
   campaignId: string,
   messageCount: number,
 ): Promise<Result<LaunchCampaignResult>> {
-  const frozenResult = await listFrozenRecipientPropertyIds(campaignId);
+  const frozenResult = await listFrozenRecipientSeedRows(campaignId);
   if (!frozenResult.ok) return frozenResult;
 
   if (messageCount > 0 && frozenResult.data.length === 0) {
@@ -1778,7 +1802,8 @@ export async function previewCampaignLaunch(
         ok: false,
         error: {
           code: "CAMPAIGN_PAUSED",
-          message: "Paused campaigns cannot build or send more queued messages until resumed.",
+          message:
+            "Paused campaigns cannot build or send more queued messages until resumed.",
         },
       };
     }
@@ -1814,9 +1839,9 @@ export async function previewCampaignLaunch(
     const contacts = contactsResult.data;
     const successfulPriorContacts = priorSuccessfulResult.data;
     const priorFailedAttempts = priorFailedResult.data;
-    const priorFailedWithoutSuccessCount = Array.from(priorFailedAttempts).filter(
-      (propertyId) => !successfulPriorContacts.has(propertyId),
-    ).length;
+    const priorFailedWithoutSuccessCount = Array.from(
+      priorFailedAttempts,
+    ).filter((propertyId) => !successfulPriorContacts.has(propertyId)).length;
     const optedOutContacts = optedOutResult.data;
 
     let estimatedQueueableCount = 0;
@@ -1827,7 +1852,10 @@ export async function previewCampaignLaunch(
     let optedOutCount = 0;
 
     for (const row of rows) {
-      if (campaign.skip_if_contacted && successfulPriorContacts.has(row.propertyId)) {
+      if (
+        campaign.skip_if_contacted &&
+        successfulPriorContacts.has(row.propertyId)
+      ) {
         successfulPriorContactCount += 1;
         continue;
       }
@@ -1912,7 +1940,8 @@ export async function launchCampaign(
         ok: false,
         error: {
           code: "CAMPAIGN_PAUSED",
-          message: "Resume the campaign before launching or continuing queue setup.",
+          message:
+            "Resume the campaign before launching or continuing queue setup.",
         },
       };
     }
@@ -1950,17 +1979,23 @@ export async function launchCampaign(
       return invalidAudienceResult();
     }
 
-    const claimResult = await claimCampaignLaunch(campaignId, launchClaimStatuses);
+    const claimResult = await claimCampaignLaunch(
+      campaignId,
+      launchClaimStatuses,
+    );
     if (!claimResult.ok) return claimResult;
     if (!claimResult.data) {
       return buildAlreadyLaunchedResult(campaignId, messageCount);
     }
 
-    const frozenResult = await listFrozenRecipientPropertyIds(campaignId);
+    const frozenResult = await listFrozenRecipientSeedRows(campaignId);
     if (!frozenResult.ok) return frozenResult;
 
-    let propertyIds = frozenResult.data;
-    if (propertyIds.length === 0) {
+    let recipientRows = frozenResult.data;
+    let propertyIds = Array.from(
+      new Set(recipientRows.map((row) => row.propertyId)),
+    );
+    if (recipientRows.length === 0) {
       const idsResult = await getAllMatchingProspectIds({
         search: snapshotResult.data.search,
         blockStack: snapshotResult.data.blockStack,
@@ -1996,7 +2031,10 @@ export async function launchCampaign(
       );
       if (!insertResult.ok) return insertResult;
 
-      propertyIds = recipientsResult.data.map((row) => row.propertyId);
+      recipientRows = recipientsResult.data;
+      propertyIds = Array.from(
+        new Set(recipientRows.map((row) => row.propertyId)),
+      );
     }
 
     const launchOptsResult = parseLaunchOpts(campaign);
@@ -2023,12 +2061,15 @@ export async function launchCampaign(
     }
 
     return ok({
-      recipientCount: propertyIds.length,
+      recipientCount: recipientRows.length,
       ...queueResult.data,
       alreadyLaunched: false,
     });
   } catch (e) {
-    reportError(e, { tags: { surface: "launch_campaign" }, extra: { campaignId } });
+    reportError(e, {
+      tags: { surface: "launch_campaign" },
+      extra: { campaignId },
+    });
     return errFromUnknown(e, "CAMPAIGN_LAUNCH_FAILED");
   }
 }

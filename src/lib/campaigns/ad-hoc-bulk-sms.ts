@@ -98,7 +98,7 @@ async function persistRecipients(
         contact_id: row.homeowner_contact_id,
       })),
       {
-        onConflict: "campaign_id,property_id",
+        onConflict: "campaign_id,property_id,contact_id",
         ignoreDuplicates: true,
       },
     );

@@ -213,22 +213,32 @@ export async function queueSmsBatch(
 
   const propertyMap = new Map(allProperties.map((p) => [p.id, p]));
 
-  const frozenContactByProperty = new Map<string, string | null>();
+  const frozenRecipients: { propertyId: string; contactId: string | null }[] =
+    [];
   for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
     const chunk = args.propertyIds.slice(i, i + CHUNK);
-    const { data, error } = await client
-      .from("campaign_recipients")
-      .select("property_id, contact_id")
-      .eq("campaign_id", opts.campaignId)
-      .in("property_id", chunk);
-    if (error) {
-      throw new Error(`bulk sms campaign recipients fetch: ${error.message}`);
-    }
-    data?.forEach((row) => {
-      if (row.property_id) {
-        frozenContactByProperty.set(row.property_id, row.contact_id ?? null);
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await client
+        .from("campaign_recipients")
+        .select("property_id, contact_id")
+        .eq("campaign_id", opts.campaignId)
+        .in("property_id", chunk)
+        .order("property_id", { ascending: true })
+        .order("contact_id", { ascending: true })
+        .range(from, from + 999);
+      if (error) {
+        throw new Error(`bulk sms campaign recipients fetch: ${error.message}`);
       }
-    });
+      data?.forEach((row) => {
+        if (row.property_id) {
+          frozenRecipients.push({
+            propertyId: row.property_id,
+            contactId: row.contact_id ?? null,
+          });
+        }
+      });
+      if ((data ?? []).length < 1000) break;
+    }
   }
 
   const frozenContactAvailability = new Map<string, SmsPhoneAvailability>();
@@ -237,16 +247,18 @@ export async function queueSmsBatch(
   const frozenContactSmsOptedOut = new Map<string, boolean>();
   const frozenContactIds = Array.from(
     new Set(
-      Array.from(frozenContactByProperty.values()).filter(
-        (value): value is string => typeof value === "string",
-      ),
+      frozenRecipients
+        .map((row) => row.contactId)
+        .filter((value): value is string => typeof value === "string"),
     ),
   );
   for (let i = 0; i < frozenContactIds.length; i += CHUNK) {
     const chunk = frozenContactIds.slice(i, i + CHUNK);
     const { data, error } = await client
       .from("contacts")
-      .select("id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out")
+      .select(
+        "id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out",
+      )
       .in("id", chunk);
     if (error) {
       throw new Error(`bulk sms frozen contacts fetch: ${error.message}`);
@@ -268,9 +280,10 @@ export async function queueSmsBatch(
     });
   }
   const destinationPhonesByOrg = new Map<string, string[]>();
-  for (const property of allProperties) {
-    if (!property.org_id) continue;
-    const contactId = frozenContactByProperty.get(property.id);
+  for (const recipient of frozenRecipients) {
+    const property = propertyMap.get(recipient.propertyId);
+    if (!property?.org_id) continue;
+    const contactId = recipient.contactId;
     if (!contactId) continue;
     const destinationPhone = frozenContactDestinationPhone.get(contactId);
     if (!destinationPhone) continue;
@@ -289,18 +302,28 @@ export async function queueSmsBatch(
   const alreadyQueuedForCampaign = new Set<string>();
   for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
     const chunk = args.propertyIds.slice(i, i + CHUNK);
-    const { data, error } = await client
-      .from("messages")
-      .select("property_id")
-      .eq("campaign_id", opts.campaignId)
-      .eq("direction", "outbound")
-      .in("property_id", chunk);
-    if (error) {
-      throw new Error(`bulk sms campaign duplicate check: ${error.message}`);
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await client
+        .from("messages")
+        .select("property_id, contact_id")
+        .eq("campaign_id", opts.campaignId)
+        .eq("direction", "outbound")
+        .in("property_id", chunk)
+        .order("property_id", { ascending: true })
+        .order("contact_id", { ascending: true })
+        .range(from, from + 999);
+      if (error) {
+        throw new Error(`bulk sms campaign duplicate check: ${error.message}`);
+      }
+      data?.forEach((row) => {
+        if (row.property_id) {
+          alreadyQueuedForCampaign.add(
+            `${row.property_id}:${row.contact_id ?? ""}`,
+          );
+        }
+      });
+      if ((data ?? []).length < 1000) break;
     }
-    data?.forEach((row) => {
-      if (row.property_id) alreadyQueuedForCampaign.add(row.property_id);
-    });
   }
 
   // Prefetch successfully contacted property IDs in batched queries so
@@ -311,29 +334,35 @@ export async function queueSmsBatch(
   if (opts.skipIfContacted) {
     for (let i = 0; i < args.propertyIds.length; i += CHUNK) {
       const chunk = args.propertyIds.slice(i, i + CHUNK);
-      const { data, error } = await client
-        .from("messages")
-        .select("property_id")
-        .in("property_id", chunk)
-        .eq("direction", "outbound")
-        .in("status", CONTACTED_MESSAGE_STATUSES);
-      if (error) {
-        throw new Error(`bulk sms prior contact lookup: ${error.message}`);
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await client
+          .from("messages")
+          .select("property_id")
+          .in("property_id", chunk)
+          .eq("direction", "outbound")
+          .in("status", CONTACTED_MESSAGE_STATUSES)
+          .order("property_id", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, from + 999);
+        if (error) {
+          throw new Error(`bulk sms prior contact lookup: ${error.message}`);
+        }
+        data?.forEach((r) => {
+          if (r.property_id) contactedSet.add(r.property_id);
+        });
+        if ((data ?? []).length < 1000) break;
       }
-      data?.forEach((r) => {
-        if (r.property_id) contactedSet.add(r.property_id);
-      });
     }
   }
 
-  for (const propertyId of args.propertyIds) {
+  for (const recipient of frozenRecipients) {
+    const { propertyId, contactId } = recipient;
     const property = propertyMap.get(propertyId);
     if (!property) {
       state.skipped++;
       continue;
     }
 
-    const contactId = frozenContactByProperty.get(propertyId);
     if (!contactId) {
       state.skipped++;
       continue;
@@ -359,7 +388,7 @@ export async function queueSmsBatch(
       continue;
     }
 
-    if (alreadyQueuedForCampaign.has(propertyId)) {
+    if (alreadyQueuedForCampaign.has(`${propertyId}:${contactId}`)) {
       let nextOffsetMs = state.cumulativeOffsetMs;
       if (state.dayBucketCount > 0) {
         nextOffsetMs = state.cumulativeOffsetMs + paceSeconds * 1000;
@@ -392,11 +421,7 @@ export async function queueSmsBatch(
       continue;
     }
 
-    const consentState = await getConsentState(
-      client,
-      contactId,
-      "sms",
-    );
+    const consentState = await getConsentState(client, contactId, "sms");
     if (
       shouldSuppressAutomatedSend({
         outreachDispo: property.outreach_dispo,
@@ -435,13 +460,10 @@ export async function queueSmsBatch(
         state.skipped++;
         continue;
       }
-      const vars = await loadTemplateVars(
-        client,
-        {
-          propertyId,
-          contactId,
-        },
-      );
+      const vars = await loadTemplateVars(client, {
+        propertyId,
+        contactId,
+      });
       body = renderTemplate(template.content, vars);
     }
 
@@ -465,8 +487,7 @@ export async function queueSmsBatch(
     // consecutive scheduled_for values within ±jitterPct of pace.
     let nextOffsetMs = state.cumulativeOffsetMs;
     if (state.dayBucketCount > 0) {
-      const jitterMs =
-        (Math.random() * 2 - 1) * paceSeconds * 1000 * jitterPct;
+      const jitterMs = (Math.random() * 2 - 1) * paceSeconds * 1000 * jitterPct;
       nextOffsetMs = state.cumulativeOffsetMs + paceSeconds * 1000 + jitterMs;
     }
     const scheduledFor = new Date(state.dayBucketStartMs + nextOffsetMs);

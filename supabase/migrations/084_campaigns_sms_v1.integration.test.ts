@@ -263,8 +263,40 @@ describe("Migration 084 — campaigns SMS v1 backbone", () => {
     expect(firstOutbound.error).toBeNull();
     expect(duplicateOutbound.error?.code).toBe("23505");
     expect(duplicateOutbound.error?.message).toContain(
-      "idx_messages_campaign_property_unique",
+      "idx_messages_campaign_property_contact_unique",
     );
+  });
+
+  it("allows separately frozen contacts for the same campaign property", async () => {
+    const firstContactId = await insertContact();
+    const secondContactId = await insertContact();
+    const propertyId = await insertProperty(BMH_ORG_ID, firstContactId);
+    const campaignId = await insertCampaign();
+
+    const firstRecipient = await insertCampaignRecipient({
+      campaignId,
+      propertyId,
+      contactId: firstContactId,
+    });
+    const secondRecipient = await serviceClient.from("campaign_recipients").insert({
+      campaign_id: campaignId,
+      property_id: propertyId,
+      contact_id: secondContactId,
+    } as never);
+    const secondMessage = await serviceClient.from("messages").insert({
+      org_id: BMH_ORG_ID,
+      channel: "sms",
+      direction: "outbound",
+      status: "queued",
+      body: "Second contact blast send",
+      campaign_id: campaignId,
+      property_id: propertyId,
+      contact_id: secondContactId,
+    } as never);
+
+    expect(firstRecipient).toBeTruthy();
+    expect(secondRecipient.error).toBeNull();
+    expect(secondMessage.error).toBeNull();
   });
 
   it("preserves campaign history when messages reference it and only SET NULLs attributed outbound links", async () => {

@@ -21,29 +21,28 @@ vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => testClient,
 }));
 vi.mock("next/server", async () => {
-  const actual = await vi.importActual<typeof import("next/server")>(
-    "next/server",
-  );
+  const actual =
+    await vi.importActual<typeof import("next/server")>("next/server");
   return { ...actual, after: () => {} };
 });
 
 let currentUserId: string | null = null;
 let currentEmail: string | null = null;
-vi.spyOn(testClient.auth, "getUser").mockImplementation(async () =>
-  ({
-    data: {
-      user:
-        currentUserId && currentEmail
-          ? ({ id: currentUserId, email: currentEmail } as never)
-          : null,
-    },
-    error: null,
-  }) as never,
+vi.spyOn(testClient.auth, "getUser").mockImplementation(
+  async () =>
+    ({
+      data: {
+        user:
+          currentUserId && currentEmail
+            ? ({ id: currentUserId, email: currentEmail } as never)
+            : null,
+      },
+      error: null,
+    }) as never,
 );
 
 const SAFE_NOW = new Date("2026-06-14T18:00:00Z");
 const createdAuthUsers: string[] = [];
-
 
 import {
   archiveCampaign,
@@ -133,7 +132,8 @@ async function seedTaggedLead(args: {
       property_id: property.id,
       tag_id: args.tagId,
     });
-    if (tagError) throw new Error(`property tag seed failed: ${tagError.message}`);
+    if (tagError)
+      throw new Error(`property tag seed failed: ${tagError.message}`);
   }
 
   return { propertyId: property.id, contactId: contact.id };
@@ -302,7 +302,9 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
 
     const { data: settings } = await testClient
       .from("campaign_delivery_settings")
-      .select("org_id, provider, sender_number, from_address, provider_campaign_id")
+      .select(
+        "org_id, provider, sender_number, from_address, provider_campaign_id",
+      )
       .eq("campaign_id", result.data.id)
       .single();
 
@@ -887,16 +889,18 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
     expect(created.ok).toBe(true);
     if (!created.ok) return;
 
-    const { error: lockedMessageError } = await testClient.from("messages").insert({
-      org_id: orgId,
-      channel: "sms",
-      direction: "outbound",
-      status: "sent",
-      campaign_id: created.data.id,
-      from_address: MOCK_SENDER_PRIMARY,
-      to_address: "+18165550774",
-      body: "locked sender sent",
-    });
+    const { error: lockedMessageError } = await testClient
+      .from("messages")
+      .insert({
+        org_id: orgId,
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        campaign_id: created.data.id,
+        from_address: MOCK_SENDER_PRIMARY,
+        to_address: "+18165550774",
+        body: "locked sender sent",
+      });
     expect(lockedMessageError).toBeNull();
 
     const decoyCampaignId = await seedCampaign({
@@ -904,7 +908,9 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       name: "DB Sender Swap Decoy",
       audienceSnapshot: {
         search: null,
-        blockStack: [{ id: "vacancy-db-swap-decoy", kind: "vacancy", tri: "yes" }],
+        blockStack: [
+          { id: "vacancy-db-swap-decoy", kind: "vacancy", tri: "yes" },
+        ],
       },
       senderNumber: null,
     });
@@ -920,20 +926,24 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       name: "DB Sender Swap Backfill",
       audienceSnapshot: {
         search: null,
-        blockStack: [{ id: "vacancy-db-swap-backfill", kind: "vacancy", tri: "yes" }],
+        blockStack: [
+          { id: "vacancy-db-swap-backfill", kind: "vacancy", tri: "yes" },
+        ],
       },
       senderNumber: null,
     });
-    const { error: backfillMessageError } = await testClient.from("messages").insert({
-      org_id: orgId,
-      channel: "sms",
-      direction: "outbound",
-      status: "sent",
-      campaign_id: backfillCampaignId,
-      from_address: MOCK_SENDER_PRIMARY,
-      to_address: "+18165550773",
-      body: "backfill stamped sender",
-    });
+    const { error: backfillMessageError } = await testClient
+      .from("messages")
+      .insert({
+        org_id: orgId,
+        channel: "sms",
+        direction: "outbound",
+        status: "sent",
+        campaign_id: backfillCampaignId,
+        from_address: MOCK_SENDER_PRIMARY,
+        to_address: "+18165550773",
+        body: "backfill stamped sender",
+      });
     expect(backfillMessageError).toBeNull();
 
     const { error: wrongInsertError } = await testClient
@@ -971,7 +981,9 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       name: "DB Sender Repoint Source",
       audienceSnapshot: {
         search: null,
-        blockStack: [{ id: "vacancy-db-repoint-source", kind: "vacancy", tri: "yes" }],
+        blockStack: [
+          { id: "vacancy-db-repoint-source", kind: "vacancy", tri: "yes" },
+        ],
       },
       senderNumber: null,
     });
@@ -991,7 +1003,9 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       name: "DB Sender Repoint Locked Wrong",
       audienceSnapshot: {
         search: null,
-        blockStack: [{ id: "vacancy-db-repoint-wrong", kind: "vacancy", tri: "yes" }],
+        blockStack: [
+          { id: "vacancy-db-repoint-wrong", kind: "vacancy", tri: "yes" },
+        ],
       },
       senderNumber: null,
     });
@@ -1020,7 +1034,9 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       name: "DB Sender Repoint Locked Matching",
       audienceSnapshot: {
         search: null,
-        blockStack: [{ id: "vacancy-db-repoint-match", kind: "vacancy", tri: "yes" }],
+        blockStack: [
+          { id: "vacancy-db-repoint-match", kind: "vacancy", tri: "yes" },
+        ],
       },
       senderNumber: null,
     });
@@ -1070,7 +1086,9 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       paceSeconds: 18,
       audience: {
         search: null,
-        blockStack: [{ id: "vacancy-canonical-lock", kind: "vacancy", tri: "yes" }],
+        blockStack: [
+          { id: "vacancy-canonical-lock", kind: "vacancy", tri: "yes" },
+        ],
       },
     });
     expect(created.ok).toBe(true);
@@ -1101,7 +1119,9 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       paceSeconds: 18,
       audience: {
         search: null,
-        blockStack: [{ id: "vacancy-canonical-lock-2", kind: "vacancy", tri: "yes" }],
+        blockStack: [
+          { id: "vacancy-canonical-lock-2", kind: "vacancy", tri: "yes" },
+        ],
       },
     });
 
@@ -1177,7 +1197,8 @@ describe("createCampaign / archiveCampaign / unarchiveCampaign (integration)", (
       ok: false,
       error: {
         code: "CAMPAIGN_STATE_CONFLICT",
-        message: "Wait for the launch to finish before archiving this campaign.",
+        message:
+          "Wait for the launch to finish before archiving this campaign.",
       },
     });
 
@@ -1289,13 +1310,17 @@ describe("launchCampaign (integration)", () => {
     expect(sortIds(queuedRows?.map((row) => row.property_id))).toEqual(
       sortIds([first.propertyId, second.propertyId]),
     );
-    expect(queuedRows?.every((row) => row.body === "Campaign hello")).toBe(true);
+    expect(queuedRows?.every((row) => row.body === "Campaign hello")).toBe(
+      true,
+    );
     expect(queuedRows?.every((row) => row.status === "queued")).toBe(true);
     // Every queued row sends from the campaign's stored Delivery sender.
     expect(
       queuedRows?.every((row) => row.from_address === MOCK_SENDER_PRIMARY),
     ).toBe(true);
-    expect(queuedRows?.every((row) => row.campaign_id === campaignId)).toBe(true);
+    expect(queuedRows?.every((row) => row.campaign_id === campaignId)).toBe(
+      true,
+    );
     expect(new Date(queuedRows![0].scheduled_for!).getTime()).toBe(
       SAFE_NOW.getTime(),
     );
@@ -1310,10 +1335,12 @@ describe("launchCampaign (integration)", () => {
       .single();
     expect(campaignAfterLaunch?.status).toBe("completed");
 
-    const { error: retagError } = await testClient.from("property_tags").insert({
-      property_id: later.propertyId,
-      tag_id: tagId,
-    });
+    const { error: retagError } = await testClient
+      .from("property_tags")
+      .insert({
+        property_id: later.propertyId,
+        tag_id: tagId,
+      });
     expect(retagError).toBeNull();
 
     const secondLaunch = await launchCampaign(campaignId);
@@ -1334,6 +1361,109 @@ describe("launchCampaign (integration)", () => {
       .select("*", { count: "exact", head: true })
       .eq("campaign_id", campaignId);
     expect(messagesAfterRelaunch).toBe(2);
+  });
+
+  it("queues every frozen Assigns contact for one property without selecting a guessed homeowner", async () => {
+    const orgId = await getOrgId();
+    const email = uniqueCampaignEmail("campaign-assigns-multi-contact");
+    currentUserId = await createAuthUser(email);
+    currentEmail = email;
+
+    const tagId = await seedTag(orgId, "Assigns Campaign");
+    const first = await seedTaggedLead({
+      orgId,
+      tagId,
+      address: "1 Assigns Contact Way",
+      phone: "+18165551071",
+    });
+    const { data: secondContact, error: secondContactError } = await testClient
+      .from("contacts")
+      .insert({
+        org_id: orgId,
+        contact_type: "person",
+        first_name: "Second",
+        last_name: "Assigns",
+        phone_1: "+18165551072",
+        phone_1_type: "mobile",
+      })
+      .select("id")
+      .single();
+    expect(secondContactError).toBeNull();
+    expect(secondContact?.id).toBeTruthy();
+    if (!secondContact?.id) return;
+
+    const { error: relationError } = await testClient
+      .from("property_contacts")
+      .insert([
+        {
+          property_id: first.propertyId,
+          contact_id: first.contactId,
+          org_id: orgId,
+          relationship: "assigns_contact",
+          source_identity: "row-one:1:deadbeef",
+          source_position: 1,
+          source_attributes: {},
+        },
+        {
+          property_id: first.propertyId,
+          contact_id: secondContact.id,
+          org_id: orgId,
+          relationship: "assigns_contact",
+          source_identity: "row-one:2:cafebabe",
+          source_position: 2,
+          source_attributes: {},
+        },
+      ]);
+    expect(relationError).toBeNull();
+
+    const campaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: {
+        search: null,
+        blockStack: [
+          {
+            id: "tag-assigns",
+            kind: "tag",
+            combinator: "any",
+            values: [tagId],
+          },
+        ],
+      },
+      body: "Assigns campaign hello",
+    });
+
+    const launch = await launchCampaign(campaignId);
+    expect(launch.ok).toBe(true);
+    if (!launch.ok) return;
+    expect(launch.data.recipientCount).toBe(2);
+    expect(launch.data.succeeded).toBe(2);
+
+    const { data: recipients } = await testClient
+      .from("campaign_recipients")
+      .select("property_id, contact_id")
+      .eq("campaign_id", campaignId);
+    expect(recipients).toHaveLength(2);
+    expect(new Set(recipients?.map((row) => row.contact_id))).toEqual(
+      new Set([first.contactId, secondContact.id]),
+    );
+
+    const { data: messages } = await testClient
+      .from("messages")
+      .select("property_id, contact_id")
+      .eq("campaign_id", campaignId);
+    expect(messages).toHaveLength(2);
+    expect(new Set(messages?.map((row) => row.property_id))).toEqual(
+      new Set([first.propertyId]),
+    );
+    expect(new Set(messages?.map((row) => row.contact_id))).toEqual(
+      new Set([first.contactId, secondContact.id]),
+    );
+
+    const relaunch = await launchCampaign(campaignId);
+    expect(relaunch.ok).toBe(true);
+    if (!relaunch.ok) return;
+    expect(relaunch.data.alreadyLaunched).toBe(true);
+    expect(relaunch.data.recipientCount).toBe(2);
   });
 
   it("rejects launch with CAMPAIGN_SENDER_REQUIRED when the campaign has no stored sender", async () => {
@@ -1435,10 +1565,14 @@ describe("launchCampaign (integration)", () => {
         result.ok,
     );
     expect(
-      successfulLaunches.filter((result) => result.data.alreadyLaunched === false),
+      successfulLaunches.filter(
+        (result) => result.data.alreadyLaunched === false,
+      ),
     ).toHaveLength(1);
     expect(
-      successfulLaunches.filter((result) => result.data.alreadyLaunched === true),
+      successfulLaunches.filter(
+        (result) => result.data.alreadyLaunched === true,
+      ),
     ).toHaveLength(1);
 
     const { data: recipients } = await testClient
@@ -1458,7 +1592,9 @@ describe("launchCampaign (integration)", () => {
     expect(sortIds(queuedRows?.map((row) => row.property_id))).toEqual(
       sortIds([first.propertyId, second.propertyId]),
     );
-    expect(queuedRows?.every((row) => row.campaign_id === campaignId)).toBe(true);
+    expect(queuedRows?.every((row) => row.campaign_id === campaignId)).toBe(
+      true,
+    );
   });
 
   it("allows relaunch when a launching campaign has zero stamped messages", async () => {
@@ -1630,8 +1766,9 @@ describe("launchCampaign (integration)", () => {
       .select("input_params")
       .eq("id", jobId)
       .single();
-    const opts = (jobRow?.input_params as { opts?: { campaignId?: string | null } })
-      .opts;
+    const opts = (
+      jobRow?.input_params as { opts?: { campaignId?: string | null } }
+    ).opts;
     expect(opts?.campaignId).toBe(campaignId);
 
     const workflowResult = await bulkSmsWorkflow({ jobId });
@@ -1655,7 +1792,9 @@ describe("launchCampaign (integration)", () => {
       .select("campaign_id, status")
       .eq("campaign_id", campaignId)
       .limit(5);
-    expect(sampleRows?.every((row) => row.campaign_id === campaignId)).toBe(true);
+    expect(sampleRows?.every((row) => row.campaign_id === campaignId)).toBe(
+      true,
+    );
     expect(sampleRows?.every((row) => row.status === "queued")).toBe(true);
 
     const { data: campaignAfterWorkflow } = await testClient

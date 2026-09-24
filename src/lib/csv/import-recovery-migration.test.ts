@@ -9,6 +9,14 @@ const migration = readFileSync(
   "utf8",
 );
 
+const multiContactMigration = readFileSync(
+  new URL(
+    "../../../supabase/migrations/20260924192336_enable_multi_contact_campaign_recipients.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
+
 describe("CSV recovery safety migration", () => {
   it("stores immutable authoritative retry provenance", () => {
     expect(migration).toContain(
@@ -77,5 +85,20 @@ describe("CSV recovery safety migration", () => {
       "count(*) filter (where ji.status = 'success')",
     );
     expect(migration).toContain("count(*) filter (where ji.status = 'error')");
+  });
+
+  it("binds Assigns consent to contacts actually imported by the attested job", () => {
+    expect(multiContactMigration).toContain(
+      "create table public.csv_import_contact_outcomes",
+    );
+    expect(multiContactMigration).toContain(
+      "primary key (job_id, property_id, contact_id, source_identity)",
+    );
+    expect(multiContactMigration).toMatch(
+      /from public\.csv_import_contact_outcomes pc[\s\S]+pc\.job_id = p_job_id/i,
+    );
+    expect(multiContactMigration).not.toMatch(
+      /from public\.property_contacts pc[\s\S]+pc\.relationship = 'assigns_contact'/i,
+    );
   });
 });
