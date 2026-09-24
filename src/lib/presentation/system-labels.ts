@@ -1,4 +1,5 @@
 export const LEAD_SOURCE_LABELS: Readonly<Record<string, string>> = {
+  assigns: "Assigns",
   dealmachine: "DealMachine",
   zillow: "Zillow",
   propstream: "PropStream",
