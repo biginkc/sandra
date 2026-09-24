@@ -709,6 +709,7 @@ describe("createExactCohortList (integration)", () => {
         name: "Exact skip-trace Cohort",
         memberCount: 2,
         dncExcludedCount: 1,
+        traceExcludedCount: 0,
         sourceJobId: jobId,
       },
     });
@@ -840,6 +841,40 @@ describe("createExactCohortList (integration)", () => {
       ok: false,
       error: { code: "COHORT_NOT_CURRENT_PROSPECTS" },
     });
+  });
+
+  it("materializes and verifies all 1,001 successful trace properties across paged reads", async () => {
+    const propertyIds = await seedProperties(1_001, "Paged exact trace");
+    const jobId = await seedJob({
+      type: "skip_trace",
+      status: "completed",
+      propertyIds,
+    });
+    await seedJobItems(
+      jobId,
+      propertyIds.map((propertyId) => ({ propertyId, status: "success" as const })),
+    );
+
+    const result = await createExactCohortList({
+      jobId,
+      name: "Paged successful trace cohort",
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        memberCount: 1_001,
+        dncExcludedCount: 0,
+        traceExcludedCount: 0,
+      },
+    });
+    if (!result.ok) return;
+
+    const { count, error } = await testClient
+      .from("property_lists")
+      .select("*", { count: "exact", head: true })
+      .eq("list_id", result.data.listId);
+    expect(error).toBeNull();
+    expect(count).toBe(1_001);
   });
 });
 

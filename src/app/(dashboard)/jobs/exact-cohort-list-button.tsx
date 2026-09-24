@@ -54,9 +54,14 @@ export function ExactCohortListButton({
       if (!result.ok) return;
 
       const excluded = result.data.dncExcludedCount;
+      const traceExcluded = result.data.traceExcludedCount;
       toast.success(
         `${result.data.memberCount.toLocaleString()} properties saved${
           excluded > 0 ? ` · ${excluded.toLocaleString()} DNC exclusions` : ""
+        }${
+          traceExcluded > 0
+            ? ` · ${traceExcluded.toLocaleString()} trace rows excluded`
+            : ""
         }. Use this list in the campaign audience filter.`,
       );
       setOpen(false);

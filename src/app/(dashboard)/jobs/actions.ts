@@ -264,6 +264,7 @@ export async function createExactCohortList(
     name: string;
     memberCount: number;
     dncExcludedCount: number;
+    traceExcludedCount: number;
     sourceJobId: string;
   }>
 > {
@@ -380,22 +381,35 @@ export async function createExactCohortList(
     // forged or stale job payload must not cause memberships to be written
     // across organizations, nor should a partially missing cohort be silently
     // turned into a smaller list.
-    const { data: ownedProperties, error: ownershipError } = await supabase
-      .from("properties")
-      .select("id")
-      .eq("org_id", job.org_id)
-      .is("deleted_at", null)
-      .in("id", successfulPropertyIds);
-    if (ownershipError) {
-      return {
-        ok: false,
-        error: {
-          code: "COHORT_OWNERSHIP_CHECK_FAILED",
-          message: ownershipError.message,
-        },
-      };
+    const ownedIds = new Set<string>();
+    for (
+      let offset = 0;
+      offset < successfulPropertyIds.length;
+      offset += EXACT_COHORT_WRITE_CHUNK
+    ) {
+      const { data: ownedProperties, error: ownershipError } = await supabase
+        .from("properties")
+        .select("id")
+        .eq("org_id", job.org_id)
+        .is("deleted_at", null)
+        .in(
+          "id",
+          successfulPropertyIds.slice(
+            offset,
+            offset + EXACT_COHORT_WRITE_CHUNK,
+          ),
+        );
+      if (ownershipError) {
+        return {
+          ok: false,
+          error: {
+            code: "COHORT_OWNERSHIP_CHECK_FAILED",
+            message: ownershipError.message,
+          },
+        };
+      }
+      for (const property of ownedProperties ?? []) ownedIds.add(property.id);
     }
-    const ownedIds = new Set((ownedProperties ?? []).map((row) => row.id));
     if (ownedIds.size !== successfulPropertyIds.length) {
       return {
         ok: false,
@@ -513,26 +527,27 @@ export async function createExactCohortList(
       }
     }
 
-    const { data: currentMemberships, error: membershipLookupError } =
-      await supabase
-        .from("property_lists")
-        .select("property_id")
-        .eq("org_id", job.org_id)
-        .eq("list_id", listId);
-    if (membershipLookupError) {
+    let currentMemberships: string[];
+    try {
+      currentMemberships = await readListMembershipPropertyIds(
+        supabase,
+        job.org_id,
+        listId,
+      );
+    } catch (error) {
       return {
         ok: false,
         error: {
           code: "LIST_MEMBERSHIP_LOOKUP_FAILED",
-          message: membershipLookupError.message,
+          message: error instanceof Error ? error.message : String(error),
         },
       };
     }
 
     const eligibleIds = new Set(eligibility.eligibleIds);
-    const staleIds = (currentMemberships ?? [])
-      .map((row) => row.property_id)
-      .filter((propertyId) => !eligibleIds.has(propertyId));
+    const staleIds = currentMemberships.filter(
+      (propertyId) => !eligibleIds.has(propertyId),
+    );
     for (let offset = 0; offset < staleIds.length; offset += EXACT_COHORT_WRITE_CHUNK) {
       const { error: deleteError } = await supabase
         .from("property_lists")
@@ -586,23 +601,23 @@ export async function createExactCohortList(
       }
     }
 
-    const { data: verifiedMemberships, error: verifyError } = await supabase
-      .from("property_lists")
-      .select("property_id")
-      .eq("org_id", job.org_id)
-      .eq("list_id", listId);
-    if (verifyError) {
+    let verifiedMemberships: string[];
+    try {
+      verifiedMemberships = await readListMembershipPropertyIds(
+        supabase,
+        job.org_id,
+        listId,
+      );
+    } catch (error) {
       return {
         ok: false,
         error: {
           code: "LIST_MEMBERSHIP_VERIFY_FAILED",
-          message: verifyError.message,
+          message: error instanceof Error ? error.message : String(error),
         },
       };
     }
-    const verifiedIds = new Set(
-      (verifiedMemberships ?? []).map((row) => row.property_id),
-    );
+    const verifiedIds = new Set(verifiedMemberships);
     if (
       verifiedIds.size !== eligibleIds.size ||
       [...eligibleIds].some((propertyId) => !verifiedIds.has(propertyId))
@@ -624,6 +639,8 @@ export async function createExactCohortList(
       name,
       memberCount: eligibleIds.size,
       dncExcludedCount: eligibility.dncLockedCount,
+      traceExcludedCount:
+        requestedPropertyIds.length - successfulPropertyIds.length,
       sourceJobId: job.id,
     });
   } catch (e) {
@@ -675,6 +692,27 @@ async function readSuccessfulSkipTracePropertyIds(
     if (!data || data.length < EXACT_COHORT_WRITE_CHUNK) break;
   }
   return [...ids];
+}
+
+async function readListMembershipPropertyIds(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  orgId: string,
+  listId: string,
+): Promise<string[]> {
+  const ids: string[] = [];
+  for (let from = 0; ; from += EXACT_COHORT_WRITE_CHUNK) {
+    const { data, error } = await supabase
+      .from("property_lists")
+      .select("property_id")
+      .eq("org_id", orgId)
+      .eq("list_id", listId)
+      .order("property_id", { ascending: true })
+      .range(from, from + EXACT_COHORT_WRITE_CHUNK - 1);
+    if (error) throw new Error(error.message);
+    ids.push(...(data ?? []).map((row) => row.property_id));
+    if (!data || data.length < EXACT_COHORT_WRITE_CHUNK) break;
+  }
+  return ids;
 }
 
 /**

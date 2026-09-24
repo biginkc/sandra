@@ -33,6 +33,7 @@ describe("<ExactCohortListButton />", () => {
         name: "CASS verify 4717 properties",
         memberCount: 4_700,
         dncExcludedCount: 17,
+        traceExcludedCount: 0,
         sourceJobId: "job-1",
       },
     });
