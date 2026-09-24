@@ -24,7 +24,8 @@ export type VendorPresetId =
   | "reisift"
   | "bmh_outreach"
   | "permits"
-  | "cnam";
+  | "cnam"
+  | "assigns";
 
 export type DetectionResult = {
   id: VendorPresetId;

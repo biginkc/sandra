@@ -1,7 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
-import { asLineType, type PhoneLineType } from "@/lib/messaging/line-type";
+import {
+  asLineType,
+  lineTypeFromVendorLabel,
+  type PhoneLineType,
+} from "@/lib/messaging/line-type";
 import type { Database, Json } from "@/lib/supabase/types";
 import { resolveFips } from "./fips";
 import {
@@ -12,6 +16,7 @@ import {
   normalizeAddress,
   normalizeDisplayAddress,
   normalizeName,
+  normalizePhone,
 } from "./normalize";
 import { validateRow, type Mapping, type RowData } from "./validate";
 
@@ -791,6 +796,7 @@ async function ingestRow(
     if (!outcome.complianceLocked && homeownerDetails) {
       await upsertHomeownerDetails(supabase, homeownerDetails);
     }
+    await persistAssignsContactBlocks(supabase, n, outcome.propertyId, orgId);
     return {
       propertyId: outcome.propertyId,
       wasDuplicate: outcome.originalOutcome === "duplicate",
@@ -856,12 +862,124 @@ async function ingestRow(
   if (!outcome.complianceLocked && homeownerDetails) {
     await upsertHomeownerDetails(supabase, homeownerDetails);
   }
+  await persistAssignsContactBlocks(supabase, n, outcome.propertyId, orgId);
   return {
     propertyId: outcome.propertyId,
     wasDuplicate: outcome.originalOutcome === "duplicate",
     complianceLocked: outcome.complianceLocked,
     droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
   };
+}
+
+type AssignsPhone = {
+  value?: string;
+  type?: string;
+  activityScore?: string;
+  dnc?: string;
+  litigator?: string;
+  email?: string;
+};
+
+type AssignsContactBlock = {
+  position?: number;
+  name?: string;
+  type?: string;
+  phones?: AssignsPhone[];
+  usedAlternateSource?: string;
+};
+
+function parseAssignsBlocks(value: unknown): AssignsContactBlock[] {
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed as AssignsContactBlock[] : [];
+  } catch {
+    throw new Error("Assigns contact blocks could not be parsed");
+  }
+}
+
+function splitAssignsName(name: string | undefined): {
+  first_name: string | null;
+  last_name: string | null;
+} {
+  const parts = (name ?? "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { first_name: null, last_name: null };
+  return {
+    first_name: normalizeName(parts[0]),
+    last_name: normalizeName(parts.slice(1).join(" ")),
+  };
+}
+
+/**
+ * Preserve every Assigns contact block. The source's DNC and litigation
+ * columns remain vendor metadata: this adapter never turns them into an app
+ * suppression flag or removes a contact, per the operator's instruction.
+ */
+async function persistAssignsContactBlocks(
+  supabase: SupabaseClient<Database>,
+  n: Readonly<Record<string, unknown>>,
+  propertyId: string,
+  orgId: string,
+): Promise<void> {
+  const blocks = parseAssignsBlocks(n.assigns_contact_blocks);
+  for (const block of blocks) {
+    const position = block.position;
+    if (
+      typeof position !== "number" ||
+      !Number.isInteger(position) ||
+      position < 1 ||
+      position > 8
+    ) {
+      throw new Error("Assigns contact block has an invalid position");
+    }
+    const phoneCandidates = (block.phones ?? []).map((phone) => ({
+      phone: normalizePhone(phone.value ?? ""),
+      type: lineTypeFromVendorLabel(phone.type),
+    }));
+    const typed = phoneCandidates.filter(
+      (phone): phone is { phone: string; type: Exclude<PhoneLineType, "unknown"> } =>
+        !!phone.phone && phone.type !== "unknown",
+    ).slice(0, 3);
+    const name = splitAssignsName(block.name);
+    const email = (block.phones ?? [])
+      .map((phone) => phone.email?.trim().toLowerCase() ?? "")
+      .find(Boolean) ?? null;
+    // Empty blocks are still retained losslessly in the reviewed dataset but
+    // cannot form a contact relation without an identity.
+    if (!name.first_name && !name.last_name && !email && typed.length === 0) {
+      continue;
+    }
+    const contactId = await upsertContact(
+      supabase,
+      {
+        contact_type: "person",
+        ...name,
+        phone_1: typed[0]?.phone ?? null,
+        phone_1_type: typed[0]?.type ?? "unknown",
+        phone_2: typed[1]?.phone ?? null,
+        phone_2_type: typed[1]?.type ?? "unknown",
+        phone_3: typed[2]?.phone ?? null,
+        phone_3_type: typed[2]?.type ?? "unknown",
+        email,
+      },
+      typed.map((phone) => phone.phone),
+      orgId,
+    );
+    const { error } = await supabase
+      .from("property_contacts")
+      .upsert(
+        {
+          property_id: propertyId,
+          contact_id: contactId,
+          org_id: orgId,
+          relationship: "assigns_contact",
+          source_position: position,
+          source_attributes: block as Json,
+        },
+        { onConflict: "property_id,relationship,source_position" },
+      );
+    if (error) throw new Error(`Assigns property contact upsert: ${error.message}`);
+  }
 }
 
 async function checkpointPropertyOutcome(

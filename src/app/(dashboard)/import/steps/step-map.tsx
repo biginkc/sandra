@@ -30,6 +30,7 @@ import {
   AGENT_FIELDS,
   HOMEOWNER_FIELDS,
   PROPERTY_FIELDS,
+  SOURCE_ADAPTER_FIELDS,
   type TargetField,
 } from "@/lib/csv/schema";
 import { cn } from "@/lib/utils";
@@ -100,6 +101,15 @@ export function StepMap({ state, dispatch }: Props) {
         state={state}
         dispatch={dispatch}
       />
+      {SOURCE_ADAPTER_FIELDS.some((field) => state.mapping[field.id]) && (
+        <SectionCard
+          title="Source adapter"
+          description="Lossless source-specific fields. These are set by the recognized adapter and retain data that does not fit Sandra's standard columns."
+          fields={SOURCE_ADAPTER_FIELDS}
+          state={state}
+          dispatch={dispatch}
+        />
+      )}
     </div>
   );
 }

@@ -3163,6 +3163,60 @@ export type Database = {
           },
         ]
       }
+      property_contacts: {
+        Row: {
+          property_id: string
+          contact_id: string
+          org_id: string
+          relationship: string
+          source_position: number
+          source_attributes: Json
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          property_id: string
+          contact_id: string
+          org_id: string
+          relationship?: string
+          source_position: number
+          source_attributes?: Json
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          property_id?: string
+          contact_id?: string
+          org_id?: string
+          relationship?: string
+          source_position?: number
+          source_attributes?: Json
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "property_contacts_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "property_contacts_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "property_contacts_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       property_lists: {
         Row: {
           first_added_at: string
