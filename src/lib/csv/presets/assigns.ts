@@ -46,7 +46,8 @@ function contactBlock(row: SourceRow, position: number) {
   const prefix = `Contact${position}`;
   const phones = PHONE_SLOTS.map((slot) => ({
     value: value(row, `${prefix}Phone_${slot}`),
-    type: value(row, `${prefix}Phone_${slot}_Type`),
+    type: contactPhoneTypeForSandra(value(row, `${prefix}Phone_${slot}_Type`)),
+    sourceType: value(row, `${prefix}Phone_${slot}_Type`),
     activityScore: value(row, `${prefix}Phone_${slot}_ActivityScore`),
     dnc: value(row, `${prefix}Phone_${slot}_DNC`),
     litigator: value(row, `${prefix}Phone_${slot}_Litigator`),
@@ -135,11 +136,11 @@ export const assignsPreset: VendorPreset = {
         "Homeowner First Name": name.first,
         "Homeowner Last Name": name.last,
         "Homeowner Phone 1": contact1.phones[0].value,
-        "Homeowner Phone 1 Type": contactPhoneTypeForSandra(contact1.phones[0].type),
+        "Homeowner Phone 1 Type": contact1.phones[0].type,
         "Homeowner Phone 2": contact1.phones[1].value,
-        "Homeowner Phone 2 Type": contactPhoneTypeForSandra(contact1.phones[1].type),
+        "Homeowner Phone 2 Type": contact1.phones[1].type,
         "Homeowner Phone 3": contact1.phones[2].value,
-        "Homeowner Phone 3 Type": contactPhoneTypeForSandra(contact1.phones[2].type),
+        "Homeowner Phone 3 Type": contact1.phones[2].type,
         "Homeowner Email": contact1.phones.map((phone) => phone.email).find(Boolean) ?? "",
         "Assigns Contact Blocks": JSON.stringify(contactBlocks),
         // This is the lossless mapping ledger destination for every original

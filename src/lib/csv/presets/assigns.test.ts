@@ -46,7 +46,8 @@ describe("Assigns preset", () => {
     expect(contacts).toHaveLength(8);
     expect(contacts[1].phones[0]).toMatchObject({
       value: "8165551002",
-      type: "Residential",
+      type: "landline",
+      sourceType: "Residential",
       activityScore: "87",
       litigator: "FALSE",
     });

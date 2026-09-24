@@ -19,6 +19,9 @@ import {
   normalizePhone,
 } from "./normalize";
 import { validateRow, type Mapping, type RowData } from "./validate";
+import {
+  parseAssignsContactBlocks,
+} from "./assigns-contact-blocks";
 
 type PropertyInsert = Database["public"]["Tables"]["properties"]["Insert"];
 type ContactInsert = Database["public"]["Tables"]["contacts"]["Insert"];
@@ -796,12 +799,18 @@ async function ingestRow(
     if (!outcome.complianceLocked && homeownerDetails) {
       await upsertHomeownerDetails(supabase, homeownerDetails);
     }
-    await persistAssignsContactBlocks(supabase, n, outcome.propertyId, orgId);
+    const assigns = await persistAssignsContactBlocks(
+      supabase,
+      n,
+      outcome.propertyId,
+      orgId,
+      homeownerContactId,
+    );
     return {
       propertyId: outcome.propertyId,
       wasDuplicate: outcome.originalOutcome === "duplicate",
       complianceLocked: outcome.complianceLocked,
-      droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
+      droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped + assigns.droppedUnlabeledPhones,
     };
   }
 
@@ -862,40 +871,19 @@ async function ingestRow(
   if (!outcome.complianceLocked && homeownerDetails) {
     await upsertHomeownerDetails(supabase, homeownerDetails);
   }
-  await persistAssignsContactBlocks(supabase, n, outcome.propertyId, orgId);
+  const assigns = await persistAssignsContactBlocks(
+    supabase,
+    n,
+    outcome.propertyId,
+    orgId,
+    homeownerContactId,
+  );
   return {
     propertyId: outcome.propertyId,
     wasDuplicate: outcome.originalOutcome === "duplicate",
     complianceLocked: outcome.complianceLocked,
-    droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
+    droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped + assigns.droppedUnlabeledPhones,
   };
-}
-
-type AssignsPhone = {
-  value?: string;
-  type?: string;
-  activityScore?: string;
-  dnc?: string;
-  litigator?: string;
-  email?: string;
-};
-
-type AssignsContactBlock = {
-  position?: number;
-  name?: string;
-  type?: string;
-  phones?: AssignsPhone[];
-  usedAlternateSource?: string;
-};
-
-function parseAssignsBlocks(value: unknown): AssignsContactBlock[] {
-  if (typeof value !== "string" || !value.trim()) return [];
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed as AssignsContactBlock[] : [];
-  } catch {
-    throw new Error("Assigns contact blocks could not be parsed");
-  }
 }
 
 function splitAssignsName(name: string | undefined): {
@@ -920,8 +908,10 @@ async function persistAssignsContactBlocks(
   n: Readonly<Record<string, unknown>>,
   propertyId: string,
   orgId: string,
-): Promise<void> {
-  const blocks = parseAssignsBlocks(n.assigns_contact_blocks);
+  primaryContactId: string | null,
+): Promise<{ droppedUnlabeledPhones: number }> {
+  const blocks = parseAssignsContactBlocks(n.assigns_contact_blocks);
+  let droppedUnlabeledPhones = 0;
   for (const block of blocks) {
     const position = block.position;
     if (
@@ -936,6 +926,14 @@ async function persistAssignsContactBlocks(
       phone: normalizePhone(phone.value ?? ""),
       type: lineTypeFromVendorLabel(phone.type),
     }));
+    // Contact 1 runs through the regular homeowner mapping above. Do not
+    // count its unknown phones twice; positions 2–8 are represented only by
+    // this relation path.
+    if (position !== 1) {
+      droppedUnlabeledPhones += phoneCandidates.filter(
+        (phone) => !!phone.phone && phone.type === "unknown",
+      ).length;
+    }
     const typed = phoneCandidates.filter(
       (phone): phone is { phone: string; type: Exclude<PhoneLineType, "unknown"> } =>
         !!phone.phone && phone.type !== "unknown",
@@ -949,21 +947,36 @@ async function persistAssignsContactBlocks(
     if (!name.first_name && !name.last_name && !email && typed.length === 0) {
       continue;
     }
-    const contactId = await upsertContact(
-      supabase,
-      {
-        contact_type: "person",
-        ...name,
-        phone_1: typed[0]?.phone ?? null,
-        phone_1_type: typed[0]?.type ?? "unknown",
-        phone_2: typed[1]?.phone ?? null,
-        phone_2_type: typed[1]?.type ?? "unknown",
-        phone_3: typed[2]?.phone ?? null,
-        phone_3_type: typed[2]?.type ?? "unknown",
-        email,
-      },
-      typed.map((phone) => phone.phone),
-      orgId,
+    // A completed source-position relation is the durable identity on
+    // retry/re-import. It prevents name-only contacts from multiplying and
+    // keeps a source block stable even if another block shares a phone.
+    const { data: prior, error: priorError } = await supabase
+      .from("property_contacts")
+      .select("contact_id")
+      .eq("property_id", propertyId)
+      .eq("relationship", "assigns_contact")
+      .eq("source_position", position)
+      .maybeSingle();
+    if (priorError) throw new Error(`Assigns property contact lookup: ${priorError.message}`);
+    const contactId = prior?.contact_id ?? (
+      position === 1 && primaryContactId
+        ? primaryContactId
+        : await upsertContact(
+            supabase,
+            {
+              contact_type: "person",
+              ...name,
+              phone_1: typed[0]?.phone ?? null,
+              phone_1_type: typed[0]?.type ?? "unknown",
+              phone_2: typed[1]?.phone ?? null,
+              phone_2_type: typed[1]?.type ?? "unknown",
+              phone_3: typed[2]?.phone ?? null,
+              phone_3_type: typed[2]?.type ?? "unknown",
+              email,
+            },
+            typed.map((phone) => phone.phone),
+            orgId,
+          )
     );
     const { error } = await supabase
       .from("property_contacts")
@@ -980,6 +993,7 @@ async function persistAssignsContactBlocks(
       );
     if (error) throw new Error(`Assigns property contact upsert: ${error.message}`);
   }
+  return { droppedUnlabeledPhones };
 }
 
 async function checkpointPropertyOutcome(
