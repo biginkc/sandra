@@ -421,6 +421,47 @@ describe("<JobDetail /> CASS recovery", () => {
         name: "Prepare exact cohort for skip-trace",
       }),
     ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Create exact cohort list" }),
+    ).toBeVisible();
+  });
+
+  it("offers the exact-list control for a terminal skip-trace job only when IDs are persisted", () => {
+    const { rerender } = render(
+      <JobDetail
+        job={makeJob({
+          type: "skip_trace",
+          status: "running",
+          input_params: { property_ids: ["property-1"] },
+        })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Create exact cohort list" }),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <JobDetail
+        job={makeJob({
+          type: "skip_trace",
+          status: "completed",
+          input_params: { property_ids: ["property-1"] },
+        })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Create exact cohort list" }),
+    ).toBeVisible();
   });
 });
 

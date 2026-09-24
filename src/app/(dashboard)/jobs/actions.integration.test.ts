@@ -38,7 +38,11 @@ vi.spyOn(testClient.auth, "getUser").mockImplementation(
     }) as never,
 );
 
-import { retryFailedCassItems, retryFailedSkipTraceItems } from "./actions";
+import {
+  createExactCohortList,
+  retryFailedCassItems,
+  retryFailedSkipTraceItems,
+} from "./actions";
 
 async function getOrgId(): Promise<string> {
   return getCanonicalTestOrgId(testClient);
@@ -651,6 +655,125 @@ describe("retryFailedSkipTraceItems (integration)", () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.data.total).toBe(1);
+    });
+  });
+});
+
+describe("createExactCohortList (integration)", () => {
+  beforeEach(async () => {
+    await resetTenantTables(testClient);
+    const orgId = await getOrgId();
+    const { data: owner, error: ownerError } = await testClient
+      .from("memberships")
+      .select("user_id")
+      .eq("org_id", orgId)
+      .eq("role", "owner")
+      .limit(1)
+      .single();
+    if (ownerError || !owner) {
+      throw ownerError ?? new Error("test owner missing");
+    }
+    currentEmail = "jarrad@bmhgroupkc.com";
+    currentUserId = owner.user_id;
+  });
+
+  it("writes only live non-DNC members from the persisted job cohort", async () => {
+    const p1 = await seedProperty("1 Exact Cohort St");
+    const p2 = await seedProperty("2 Exact Cohort St");
+    const p3 = await seedProperty("3 Exact Cohort St");
+    const { error: dncError } = await testClient
+      .from("properties")
+      .update({ is_dnc_locked: true })
+      .eq("id", p3);
+    expect(dncError).toBeNull();
+    const jobId = await seedJob({
+      type: "cass_dsf2_ncoa",
+      status: "completed",
+      propertyIds: [p1, p2, p3],
+    });
+
+    const result = await createExactCohortList({
+      jobId,
+      name: "Exact CASS Cohort",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        listId: expect.any(String),
+        name: "Exact CASS Cohort",
+        memberCount: 2,
+        dncExcludedCount: 1,
+        sourceJobId: jobId,
+      },
+    });
+    if (!result.ok) return;
+
+    const { data: memberships, error: membershipsError } = await testClient
+      .from("property_lists")
+      .select("property_id")
+      .eq("list_id", result.data.listId);
+    expect(membershipsError).toBeNull();
+    expect(new Set((memberships ?? []).map((row) => row.property_id))).toEqual(
+      new Set([p1, p2]),
+    );
+  });
+
+  it("rejects an ordinary same-name list instead of broadening it", async () => {
+    const p1 = await seedProperty("4 Exact Cohort St");
+    const orgId = await getOrgId();
+    const { data: existing, error: listError } = await testClient
+      .from("lists")
+      .insert({ org_id: orgId, name: "Already Used" })
+      .select("id")
+      .single();
+    expect(listError).toBeNull();
+    expect(existing?.id).toBeTruthy();
+    const jobId = await seedJob({
+      type: "skip_trace",
+      status: "completed",
+      propertyIds: [p1],
+    });
+
+    const result = await createExactCohortList({
+      jobId,
+      name: "Already Used",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("LIST_NAME_COLLISION");
+  });
+
+  it("does not materialize a running or unsupported job", async () => {
+    const p1 = await seedProperty("5 Exact Cohort St");
+    const running = await seedJob({
+      type: "cass_dsf2_ncoa",
+      status: "running",
+      propertyIds: [p1],
+    });
+    const unsupported = await seedJob({
+      type: "csv_import",
+      status: "completed",
+      propertyIds: [p1],
+    });
+
+    const runningResult = await createExactCohortList({
+      jobId: running,
+      name: "Running Cohort",
+    });
+    const unsupportedResult = await createExactCohortList({
+      jobId: unsupported,
+      name: "Unsupported Cohort",
+    });
+
+    expect(runningResult).toMatchObject({
+      ok: false,
+      error: { code: "JOB_NOT_TERMINAL" },
+    });
+    expect(unsupportedResult).toMatchObject({
+      ok: false,
+      error: { code: "JOB_WRONG_TYPE" },
     });
   });
 });

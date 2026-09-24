@@ -39,6 +39,7 @@ import { RetrySkipTraceButton } from "../retry-skip-trace-button";
 import { RetryPromoteLeadsButton } from "../retry-promote-leads-button";
 import { RetryCsvImportButton } from "../retry-csv-import-button";
 import { CassSkipTraceButton } from "../cass-skip-trace-button";
+import { ExactCohortListButton } from "../exact-cohort-list-button";
 import { recoverCassForImport } from "../actions";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
@@ -561,18 +562,7 @@ function CsvUpdatePanel({ job }: { job: Job }) {
 function CassPanel({ job }: { job: Job }) {
   const summary =
     (job.result_summary as Record<string, number | null> | null) ?? {};
-  const propertyIdsRaw =
-    (job.input_params as { property_ids?: unknown } | null)?.property_ids ??
-    null;
-  const propertyIds = Array.from(
-    new Set(
-      Array.isArray(propertyIdsRaw)
-        ? propertyIdsRaw.filter(
-            (id): id is string => typeof id === "string" && id.length > 0,
-          )
-        : [],
-    ),
-  );
+  const propertyIds = readJobPropertyIds(job);
   const canPrepareSkipTrace =
     job.type === "cass_dsf2_ncoa" &&
     propertyIds.length > 0 &&
@@ -605,7 +595,14 @@ function CassPanel({ job }: { job: Job }) {
       </CardContent>
       {canPrepareSkipTrace ? (
         <CardContent className="border-t pt-4">
-          <CassSkipTraceButton propertyIds={propertyIds} />
+          <div className="flex flex-wrap gap-2">
+            <CassSkipTraceButton propertyIds={propertyIds} />
+            <ExactCohortListButton
+              jobId={job.id}
+              defaultName={defaultExactCohortListName(job)}
+              propertyCount={propertyIds.length}
+            />
+          </div>
         </CardContent>
       ) : null}
     </Card>
@@ -615,6 +612,10 @@ function CassPanel({ job }: { job: Job }) {
 function SkipTracePanel({ job }: { job: Job }) {
   const summary = (job.result_summary as Record<string, unknown> | null) ?? {};
   const params = (job.input_params as Record<string, unknown> | null) ?? {};
+  const propertyIds = readJobPropertyIds(job);
+  const canCreateExactList =
+    propertyIds.length > 0 &&
+    ["completed", "partial", "partially_completed"].includes(job.status);
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -673,8 +674,37 @@ function SkipTracePanel({ job }: { job: Job }) {
           />
         )}
       </CardContent>
+      {canCreateExactList ? (
+        <CardContent className="border-t pt-4">
+          <ExactCohortListButton
+            jobId={job.id}
+            defaultName={defaultExactCohortListName(job)}
+            propertyCount={propertyIds.length}
+          />
+        </CardContent>
+      ) : null}
     </Card>
   );
+}
+
+function readJobPropertyIds(job: Job): string[] {
+  const raw = (job.input_params as { property_ids?: unknown } | null)
+    ?.property_ids;
+  return Array.from(
+    new Set(
+      Array.isArray(raw)
+        ? raw.filter(
+            (id): id is string => typeof id === "string" && id.trim().length > 0,
+          )
+        : [],
+    ),
+  );
+}
+
+function defaultExactCohortListName(job: Job): string {
+  const title = job.title?.trim();
+  if (title) return title.slice(0, 80);
+  return job.type === "cass_dsf2_ncoa" ? "CASS exact cohort" : "Skip-trace exact cohort";
 }
 
 function BulkSmsPanel({
