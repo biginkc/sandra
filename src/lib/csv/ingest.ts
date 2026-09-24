@@ -1,7 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
-import { asLineType, type PhoneLineType } from "@/lib/messaging/line-type";
+import {
+  asLineType,
+  lineTypeFromVendorLabel,
+  type PhoneLineType,
+} from "@/lib/messaging/line-type";
 import type { Database, Json } from "@/lib/supabase/types";
 import { resolveFips } from "./fips";
 import {
@@ -12,8 +16,12 @@ import {
   normalizeAddress,
   normalizeDisplayAddress,
   normalizeName,
+  normalizePhone,
 } from "./normalize";
 import { validateRow, type Mapping, type RowData } from "./validate";
+import {
+  parseAssignsContactBlocks,
+} from "./assigns-contact-blocks";
 
 type PropertyInsert = Database["public"]["Tables"]["properties"]["Insert"];
 type ContactInsert = Database["public"]["Tables"]["contacts"]["Insert"];
@@ -625,7 +633,10 @@ async function ingestRow(
   // authoritative stored DNC lock. A re-import need not repeat the DNC flag.
   let homeownerContactId: string | null = null;
   let homeownerDetails: HomeownerDetailsInsert | null = null;
-  if (hasHomeownerFields(n)) {
+  // Assigns owns a multi-contact relation. Do not silently nominate Contact 1
+  // as the homeowner: the user must select an intended recipient before a
+  // future launch. Every block is persisted through the atomic RPC below.
+  if (hasHomeownerFields(n) && !n.assigns_contact_blocks) {
     // A DNC-flagged row must be able to match an existing contact via a
     // phone that compactTypedPhones() just dropped (a DNC label normalizes
     // to 'unknown' and is never written to a slot) — otherwise a row whose
@@ -791,11 +802,17 @@ async function ingestRow(
     if (!outcome.complianceLocked && homeownerDetails) {
       await upsertHomeownerDetails(supabase, homeownerDetails);
     }
+    const assigns = await persistAssignsContactBlocks(
+      supabase,
+      n,
+      outcome.propertyId,
+      orgId,
+    );
     return {
       propertyId: outcome.propertyId,
       wasDuplicate: outcome.originalOutcome === "duplicate",
       complianceLocked: outcome.complianceLocked,
-      droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
+      droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped + assigns.droppedUnlabeledPhones,
     };
   }
 
@@ -856,12 +873,100 @@ async function ingestRow(
   if (!outcome.complianceLocked && homeownerDetails) {
     await upsertHomeownerDetails(supabase, homeownerDetails);
   }
+  const assigns = await persistAssignsContactBlocks(
+    supabase,
+    n,
+    outcome.propertyId,
+    orgId,
+  );
   return {
     propertyId: outcome.propertyId,
     wasDuplicate: outcome.originalOutcome === "duplicate",
     complianceLocked: outcome.complianceLocked,
-    droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped,
+    droppedUnlabeledPhones: phoneSlots.dropped + agentPhoneDropped + assigns.droppedUnlabeledPhones,
   };
+}
+
+function splitAssignsName(name: string | undefined): {
+  first_name: string | null;
+  last_name: string | null;
+} {
+  const parts = (name ?? "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { first_name: null, last_name: null };
+  return {
+    first_name: normalizeName(parts[0]),
+    last_name: normalizeName(parts.slice(1).join(" ")),
+  };
+}
+
+/**
+ * Preserve every Assigns contact block. The source's DNC and litigation
+ * columns remain vendor metadata: this adapter never turns them into an app
+ * suppression flag or removes a contact, per the operator's instruction.
+ */
+async function persistAssignsContactBlocks(
+  supabase: SupabaseClient<Database>,
+  n: Readonly<Record<string, unknown>>,
+  propertyId: string,
+  orgId: string,
+): Promise<{ droppedUnlabeledPhones: number }> {
+  const blocks = parseAssignsContactBlocks(n.assigns_contact_blocks);
+  let droppedUnlabeledPhones = 0;
+  for (const block of blocks) {
+    const position = block.position;
+    const sourceIdentity = block.sourceIdentity;
+    if (
+      typeof position !== "number" ||
+      !Number.isInteger(position) ||
+      position < 1 ||
+      position > 8
+    ) {
+      throw new Error("Assigns contact block has an invalid position");
+    }
+    if (!sourceIdentity) {
+      throw new Error("Assigns contact block has no source identity");
+    }
+    const phoneCandidates = (block.phones ?? []).map((phone) => ({
+      phone: normalizePhone(phone.value ?? ""),
+      type: lineTypeFromVendorLabel(phone.type),
+    }));
+    droppedUnlabeledPhones += phoneCandidates.filter(
+      (phone) => !!phone.phone && phone.type === "unknown",
+    ).length;
+    const typed = phoneCandidates.filter(
+      (phone): phone is { phone: string; type: Exclude<PhoneLineType, "unknown"> } =>
+        !!phone.phone && phone.type !== "unknown",
+    ).slice(0, 3);
+    const name = splitAssignsName(block.name);
+    const email = (block.phones ?? [])
+      .map((phone) => phone.email?.trim().toLowerCase() ?? "")
+      .find(Boolean) ?? null;
+    // Empty blocks are still retained losslessly in the reviewed dataset but
+    // cannot form a contact relation without an identity.
+    if (!name.first_name && !name.last_name && !email && typed.length === 0) {
+      continue;
+    }
+    const { error } = await supabase.rpc("upsert_assigns_property_contact", {
+      p_property_id: propertyId,
+      p_org_id: orgId,
+      p_source_identity: sourceIdentity,
+      p_source_position: position,
+      p_source_attributes: block as Json,
+      p_contact: {
+        contact_type: "person",
+        ...name,
+        phone_1: typed[0]?.phone ?? null,
+        phone_1_type: typed[0]?.type ?? "unknown",
+        phone_2: typed[1]?.phone ?? null,
+        phone_2_type: typed[1]?.type ?? "unknown",
+        phone_3: typed[2]?.phone ?? null,
+        phone_3_type: typed[2]?.type ?? "unknown",
+        email,
+      } as Json,
+    });
+    if (error) throw new Error(`Assigns property contact upsert: ${error.message}`);
+  }
+  return { droppedUnlabeledPhones };
 }
 
 async function checkpointPropertyOutcome(

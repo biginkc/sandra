@@ -1,6 +1,10 @@
 import { asLineType, type PhoneLineType } from "@/lib/messaging/line-type";
 
 import { validateRow, type Mapping, type RowData } from "./validate";
+import {
+  applyAssignsPhoneTypes,
+  unknownAssignsPhones,
+} from "./assigns-contact-blocks";
 
 /**
  * Pre-ingest line-type classification helpers, shared by the CSV-import
@@ -66,6 +70,11 @@ export function collectUnlabeledPhones(
     }
     const agent = agentPhoneAndType(validated.normalized);
     if (agent.phone && agent.type === "unknown") numbers.add(agent.phone);
+    for (const phone of unknownAssignsPhones(
+      validated.normalized.assigns_contact_blocks,
+    )) {
+      numbers.add(phone);
+    }
   }
   return [...numbers];
 }
@@ -125,6 +134,19 @@ export function applyLineTypes(
         patched = patched ?? { ...row };
         patched[header] = found;
         labeledSlots++;
+      }
+    }
+    const assignsBlocks = validated.normalized.assigns_contact_blocks;
+    if (typeof assignsBlocks === "string" && assignsBlocks) {
+      const applied = applyAssignsPhoneTypes(assignsBlocks, classified);
+      if (applied.labeledSlots > 0) {
+        const header = outMapping.assigns_contact_blocks;
+        if (!header) {
+          throw new Error("Assigns contact blocks must remain mapped during classification");
+        }
+        patched = patched ?? { ...row };
+        patched[header] = applied.value;
+        labeledSlots += applied.labeledSlots;
       }
     }
     return patched ?? row;

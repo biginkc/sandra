@@ -20,7 +20,7 @@ export function lineTypeFromVendorLabel(
 ): PhoneLineType {
   const v = (label ?? "").trim().toLowerCase().replace(/\s+/g, "");
   if (v === "mobile" || v === "cell" || v === "wireless") return "mobile";
-  if (v === "landline") return "landline";
+  if (v === "landline" || v === "residential") return "landline";
   return "unknown";
 }
 

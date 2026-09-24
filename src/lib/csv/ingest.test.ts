@@ -141,8 +141,18 @@ function makeSupabase() {
           p_source_row_index?: number;
           p_existing_property_id?: string | null;
           p_existing_patch?: Record<string, unknown>;
+          p_source_identity?: string;
         },
       ) => {
+        if (name === "upsert_assigns_property_contact") {
+          calls.push({
+            table: "property_contacts",
+            op: "upsert",
+            insertPayload: args,
+            filters: [],
+          });
+          return { data: "assigns-contact", error: null };
+        }
         if (name !== "checkpoint_csv_import_property_outcome") {
           throw new Error(`ingest.test: unexpected RPC ${name}`);
         }
@@ -370,6 +380,64 @@ describe("processIngestChunk → ingestRow countyId thread-through (phase 02 D-0
     const payload = propertyInsert!.insertPayload as Record<string, unknown>;
     expect(payload.market).toBe("Johnson County KS");
     expect(payload.county_id).toBeNull();
+  });
+});
+
+describe("processIngestChunk → Assigns multi-contact identity", () => {
+  it("persists each source block atomically without selecting Contact 1 as the homeowner", async () => {
+    const blocks = [
+      {
+        sourceIdentity: "vendor-record-1:1",
+        position: 1,
+        name: "Alice Owner",
+        phones: [{ value: "8165550001", type: "mobile" }],
+      },
+      {
+        sourceIdentity: "vendor-record-1:2",
+        position: 2,
+        name: "ACME",
+        phones: [{ value: "8165550002", type: "unknown", sourceType: "OtherPhone" }],
+      },
+    ];
+    responseQueue = [
+      { data: null, error: null }, // address dedup miss
+      { data: { id: "prop-assigns" }, error: null }, // property checkpoint
+      { data: null, error: null }, // job item
+      { data: null, error: null }, // progress
+    ];
+    const result = await processIngestChunk(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      makeSupabase() as any,
+      {
+        jobId: "job-assigns",
+        csvImportId: "import-assigns",
+        orgId: "org-1",
+        source: "assigns",
+        market: "Johnson County MO",
+        countyId: null,
+        mapping: {
+          address: "Address",
+          state: "State",
+          assigns_contact_blocks: "Assigns Contact Blocks",
+        },
+        rows: [{
+          Address: "123 Main St",
+          State: "MO",
+          "Assigns Contact Blocks": JSON.stringify(blocks),
+        }],
+        offset: 0,
+        autoTagIds: [],
+        listId: null,
+        userId: null,
+      },
+    );
+    const property = calls.find((call) => call.table === "properties" && call.op === "insert");
+    expect((property?.insertPayload as Record<string, unknown>).homeowner_contact_id).toBeNull();
+    const relations = calls.filter((call) => call.table === "property_contacts");
+    expect(relations).toHaveLength(2);
+    expect(relations.map((call) => (call.insertPayload as Record<string, unknown>).p_source_identity))
+      .toEqual(["vendor-record-1:1", "vendor-record-1:2"]);
+    expect(result.droppedUnlabeledPhones).toBe(1);
   });
 });
 

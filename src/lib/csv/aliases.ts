@@ -14,6 +14,10 @@
 import { ALL_FIELDS } from "./schema";
 
 export const HEADER_ALIASES: Record<string, string> = {
+  // ---------- Source-specific adapter payloads ----------
+  "assigns contact blocks": "assigns_contact_blocks",
+  "assigns source record id": "assigns_source_id",
+  "assigns source row": "assigns_source_row",
   // ---------- Property: address ----------
   "address": "address",
   "street address": "address",

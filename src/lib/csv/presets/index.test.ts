@@ -20,9 +20,9 @@ const TITLEPRO_HEADERS = [
 ];
 
 describe("PRESETS registry", () => {
-  it("exposes all 6 vendor presets", () => {
+  it("exposes all 7 vendor presets", () => {
     expect(PRESETS.map((p) => p.id).sort()).toEqual(
-      ["bmh_outreach", "cnam", "permits", "propstream", "reisift", "titlepro"].sort(),
+      ["assigns", "bmh_outreach", "cnam", "permits", "propstream", "reisift", "titlepro"].sort(),
     );
   });
   it("each preset has a unique id", () => {

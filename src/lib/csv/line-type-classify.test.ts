@@ -47,6 +47,25 @@ describe("collectUnlabeledPhones", () => {
     expect(numbers.sort()).toEqual(["+18165550002", "+19135550003"]);
   });
 
+  it("includes unknown phones in every Assigns contact block", () => {
+    const assignsRows = [{
+      Address: "123 Main St",
+      State: "MO",
+      "Assigns Contact Blocks": JSON.stringify([
+        { position: 1, phones: [{ value: "816-555-0001", type: "mobile" }] },
+        { position: 2, phones: [{ value: "816-555-0002", type: "unknown", sourceType: "OtherPhone" }] },
+      ]),
+    }];
+    const assignsMapping: Mapping = {
+      address: "Address",
+      state: "State",
+      assigns_contact_blocks: "Assigns Contact Blocks",
+    };
+    expect(collectUnlabeledPhones(assignsRows, assignsMapping)).toEqual([
+      "+18165550002",
+    ]);
+  });
+
   it("does not collect phones whose vendor line-type labels normalize cleanly", () => {
     const vendorRows = [
       {
@@ -103,6 +122,33 @@ describe("applyLineTypes", () => {
     const v0 = validateRow(applied.rows[0], applied.mapping, 0);
     expect(v0.normalized.homeowner_phone_2_type ?? null).toBeNull();
     expect(applied.labeledSlots).toBe(0);
+  });
+
+  it("writes a classified Assigns secondary contact back into its source envelope", () => {
+    const assignsRows = [{
+      Address: "123 Main St",
+      State: "MO",
+      "Assigns Contact Blocks": JSON.stringify([
+        { position: 2, phones: [{ value: "816-555-0002", type: "unknown", sourceType: "OtherPhone" }] },
+      ]),
+    }];
+    const assignsMapping: Mapping = {
+      address: "Address",
+      state: "State",
+      assigns_contact_blocks: "Assigns Contact Blocks",
+    };
+    const applied = applyLineTypes(
+      assignsRows,
+      assignsMapping,
+      new Map([["+18165550002", "mobile"] as const]),
+    );
+    const blocks = JSON.parse(applied.rows[0]["Assigns Contact Blocks"] ?? "[]");
+    expect(blocks[0].phones[0]).toMatchObject({
+      value: "816-555-0002",
+      type: "mobile",
+      sourceType: "OtherPhone",
+    });
+    expect(applied.labeledSlots).toBe(1);
   });
 });
 

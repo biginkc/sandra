@@ -12,7 +12,7 @@ import { LEAD_SOURCES } from "@/lib/leads/sources";
  * validation rules in `validate.ts`.
  */
 
-export type FieldSection = "property" | "homeowner" | "agent";
+export type FieldSection = "property" | "homeowner" | "agent" | "source";
 
 export type FieldType =
   | "text"
@@ -118,10 +118,41 @@ export const AGENT_FIELDS: readonly TargetField[] = [
   { id: "agent_license_number", label: "License Number", section: "agent", type: "text" },
 ];
 
+/**
+ * Source-adapter fields are intentionally not generic CSV destinations. They
+ * are populated only by a tested adapter and preserve a vendor's wide shape
+ * without pretending that every source has Sandra's one-homeowner layout.
+ */
+export const SOURCE_ADAPTER_FIELDS: readonly TargetField[] = [
+  {
+    id: "assigns_source_id",
+    label: "Assigns source record ID",
+    section: "source",
+    type: "text",
+    required: true,
+    helpText: "Required stable Assigns record identifier used for replay-safe contact persistence.",
+  },
+  {
+    id: "assigns_contact_blocks",
+    label: "Assigns contact blocks (all 8)",
+    section: "source",
+    type: "text",
+    helpText: "Adapter-owned lossless representation of every Assigns contact, phone, email, and metadata field.",
+  },
+  {
+    id: "assigns_source_row",
+    label: "Assigns source row (raw)",
+    section: "source",
+    type: "text",
+    helpText: "Adapter-owned lossless record of all original Assigns columns.",
+  },
+];
+
 export const ALL_FIELDS: readonly TargetField[] = [
   ...PROPERTY_FIELDS,
   ...HOMEOWNER_FIELDS,
   ...AGENT_FIELDS,
+  ...SOURCE_ADAPTER_FIELDS,
 ];
 
 export function getField(id: string): TargetField | undefined {

@@ -3163,6 +3163,63 @@ export type Database = {
           },
         ]
       }
+      property_contacts: {
+        Row: {
+          property_id: string
+          contact_id: string
+          org_id: string
+          relationship: string
+          source_identity: string
+          source_position: number
+          source_attributes: Json
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          property_id: string
+          contact_id: string
+          org_id: string
+          relationship?: string
+          source_identity: string
+          source_position: number
+          source_attributes?: Json
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          property_id?: string
+          contact_id?: string
+          org_id?: string
+          relationship?: string
+          source_identity?: string
+          source_position?: number
+          source_attributes?: Json
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "property_contacts_property_id_fkey"
+            columns: ["property_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "property_contacts_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "property_contacts_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       property_lists: {
         Row: {
           first_added_at: string
@@ -6800,6 +6857,17 @@ export type Database = {
           original_outcome: string
           property_id: string
         }[]
+      }
+      upsert_assigns_property_contact: {
+        Args: {
+          p_contact: Json
+          p_org_id: string
+          p_property_id: string
+          p_source_attributes: Json
+          p_source_identity: string
+          p_source_position: number
+        }
+        Returns: string
       }
       capture_sendillo_sms_health_snapshot: {
         Args: { p_captured_at?: string }
