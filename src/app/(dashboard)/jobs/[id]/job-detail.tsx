@@ -432,11 +432,6 @@ function PromoteLeadsPanel({ job }: { job: Job }) {
         />
         <DetailRow label="Failed" value={counts.failed.toLocaleString()} />
       </CardContent>
-      {(job.status === "completed" || job.status === "partial") && (
-        <CardContent className="border-t pt-4">
-          <RecoverCassButton importJobId={job.id} />
-        </CardContent>
-      )}
     </Card>
   );
 }
@@ -531,6 +526,11 @@ function CsvImportPanel({
           </>
         )}
       </CardContent>
+      {(job.status === "completed" || job.status === "partial") && (
+        <CardContent className="border-t pt-4">
+          <RecoverCassButton importJobId={job.id} />
+        </CardContent>
+      )}
     </Card>
   );
 }

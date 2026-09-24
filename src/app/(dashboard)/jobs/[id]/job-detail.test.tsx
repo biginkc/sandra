@@ -297,6 +297,36 @@ describe("<JobDetail /> Promote to Leads results", () => {
 });
 
 describe("<JobDetail /> CASS recovery", () => {
+  it("offers recovery on a terminal CSV import, never on an unrelated promotion job", () => {
+    const { rerender } = render(
+      <JobDetail
+        job={makeJob({ type: "promote_leads", status: "completed" })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Recover CASS verification" }),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <JobDetail
+        job={makeJob({ type: "csv_import", status: "completed" })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Recover CASS verification" }),
+    ).toBeVisible();
+  });
+
   it("separates retryable saved-output failures from outcomes needing review", () => {
     render(
       <JobDetail
