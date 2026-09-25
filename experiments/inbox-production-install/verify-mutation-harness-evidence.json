@@ -16,7 +16,7 @@
     {
       "case": "index_recreated_different_columns",
       "drift_caught": true,
-      "drift_error": "  live=    createindexsummary_orderoninbox_bridge.summariesorg_id,target_kind",
+      "drift_error": "  live=    CREATE INDEX summary_order ON inbox_bridge.summaries USING btree (org_id, target_kind)",
       "restored_pass": true
     },
     {
@@ -28,7 +28,7 @@
     {
       "case": "trigger_retimed",
       "drift_caught": true,
-      "drift_error": "  live def=CREATE TRIGGER zzz_inbox_guard_inbound_revision_insert AFTER INSERT ON public.messages FOR EACH ROW EXECUTE FUNCTION inbox_guard_inbound_revision()",
+      "drift_error": "  live=    CREATE TRIGGER zzz_inbox_guard_inbound_revision_insert AFTER INSERT ON public.messages FOR EACH ROW EXECUTE FUNCTION inbox_guard_inbound_revision()",
       "restored_pass": true
     },
     {
@@ -40,19 +40,19 @@
     {
       "case": "weakened_check_constraint",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Constraint definition drift on inbox_parent.work: expected fragment not found live (exact match required): 'CHECK (ack>=0 AND ack<=generation)' (live remaining=[{'def': 'CHECK ((ack >= 0))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': \"CHECK ((stream = ANY (ARRAY['messages'::text, 'reviews'::text])))\", 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((claim_token IS NULL) = (lease_until IS NULL)))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((scan_generation IS NULL) = (stream IS NULL)))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'CHECK (((scan_generation IS NULL) OR ((scan_generation > ack) AND (scan_generation <= generation))))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False}, {'def': 'PRIMARY KEY (org_id, kind, entity_id)', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': True}])",
+      "drift_error": "  live remaining=[{'def': 'CHECK ((ack >= 0))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': 'CHECK (((claim_token IS NULL) = (lease_until IS NULL)))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': 'CHECK (((scan_generation IS NULL) = (stream IS NULL)))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': 'CHECK (((scan_generation IS NULL) OR ((scan_generation > ack) AND (scan_generation <= generation))))', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': 'PRIMARY KEY (org_id, kind, entity_id)', 'table': 'inbox_parent.work', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': \"CHECK ((stream = ANY (ARRAY['messages'::text, 'reviews'::text])))\", 'table': 'inbox_parent.work', 'valid': True, 'noinherit': False, 'triggers_ok': True}]",
       "restored_pass": true
     },
     {
       "case": "fk_on_delete_added",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Constraint definition drift on inbox_bridge.cursors: expected fragment not found live (exact match required): 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id)' (live remaining=[{'def': 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id) ON DELETE CASCADE', 'table': 'inbox_bridge.cursors', 'valid': True, 'noinherit': True}])",
+      "drift_error": "  live remaining=[{'def': 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id) ON DELETE CASCADE', 'table': 'inbox_bridge.cursors', 'valid': True, 'noinherit': True, 'triggers_ok': True}]",
       "restored_pass": true
     },
     {
       "case": "not_valid_readd",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Constraint not validated on public.messages: 'CHECK (inbox_inbound_revision >= 0)' is installed NOT VALID (convalidated=False); legacy-violating rows could be hiding behind it",
+      "drift_error": "  live remaining=[{'def': 'FOREIGN KEY (attributed_outbound_message_id) REFERENCES messages(id) ON DELETE SET NULL', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE RESTRICT', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': \"CHECK ((channel = ANY (ARRAY['sms'::text, 'email'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': 'FOREIGN KEY (contact_id) REFERENCES contacts(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': \"CHECK ((direction = ANY (ARRAY['outbound'::text, 'inbound'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': 'FOREIGN KEY (inbound_intent_id) REFERENCES sms_inbound_intents(id) ON DELETE SET NULL', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'CHECK ((inbox_inbound_revision >= 0)) NOT VALID', 'table': 'public.messages', 'valid': False, 'noinherit': False, 'triggers_ok': True}, {'def': 'FOREIGN KEY (org_id) REFERENCES organizations(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'PRIMARY KEY (id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': 'FOREIGN KEY (property_id) REFERENCES properties(id)', 'table': 'public.messages', 'valid': True, 'noinherit': True, 'triggers_ok': True}, {'def': \"CHECK ((provider = ANY (ARRAY['dialpad'::text, 'twilio'::text, 'resend'::text, 'sendgrid'::text, 'internal'::text, 'mock'::text, 'sendillo'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': \"CHECK ((status = ANY (ARRAY['pending'::text, 'queued'::text, 'paused'::text, 'sent'::text, 'delivered'::text, 'failed'::text, 'received'::text, 'bounced'::text])))\", 'table': 'public.messages', 'valid': True, 'noinherit': False, 'triggers_ok': True}]",
       "restored_pass": true
     },
     {
@@ -64,7 +64,7 @@
     {
       "case": "function_volatility_changed",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Volatility drift on inbox_bridge.matching: expected='s' live='v'",
+      "drift_error": "$function$",
       "restored_pass": true
     },
     {
@@ -86,21 +86,147 @@
       "restored_pass": true
     },
     {
+      "case": "composite_attribute_dropped",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column set drift on inbox_bridge.cursor_context: expected=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id'] live=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id']",
+      "restored_pass": true
+    },
+    {
+      "case": "composite_attribute_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column set drift on inbox_bridge.cursor_context: expected=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id'] live=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id', 'zz_harness_extra']",
+      "restored_pass": true
+    },
+    {
+      "case": "composite_attribute_type_changed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column type drift inbox_bridge.cursor_context.revoked: expected 'boolean' live 'integer'",
+      "restored_pass": true
+    },
+    {
+      "case": "composite_attribute_renamed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column set drift on inbox_bridge.cursor_context: expected=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id'] live=['access_epoch', 'created_at', 'cursor_at', 'cursor_kind_renamed', 'cursor_target', 'expires_at', 'filter', 'generation', 'handles', 'id', 'org_id', 'revoked', 'session_id', 'targets', 'user_id']",
+      "restored_pass": true
+    },
+    {
+      "case": "composite_attribute_collation_changed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Column collation drift inbox_bridge.cursor_context.cursor_kind: expected the type's default collation, live has an explicit non-default COLLATE",
+      "restored_pass": true
+    },
+    {
       "case": "function_overload_added",
       "drift_caught": true,
-      "drift_error": "RuntimeError: Conflicting overload(s) installed for inbox_read.detail: ['o uuid, c uuid', 'o uuid, c uuid, extra text']",
+      "drift_error": "RuntimeError: Conflicting overload(s) installed for inbox_read.detail: 2 rows",
       "restored_pass": true
     },
     {
       "case": "search_path_public",
       "drift_caught": true,
-      "drift_error": "RuntimeError: search_path drift on inbox_bridge.authorize: expected empty search_path, live='search_path=public'",
+      "drift_error": "END $function$",
+      "restored_pass": true
+    },
+    {
+      "case": "function_strict_drift",
+      "drift_caught": true,
+      "drift_error": "$function$",
+      "restored_pass": true
+    },
+    {
+      "case": "check_constraint_arithmetic_regrouping",
+      "drift_caught": true,
+      "drift_error": "  live remaining=[{'def': \"CHECK (((jsonb_typeof(handles) = 'array'::text) AND (jsonb_array_length(handles) = GREATEST(1, (jsonb_array_length(targets) + (99 / 100)))))) NOT VALID\", 'table': 'inbox_bridge.worksets', 'valid': False, 'noinherit': False, 'triggers_ok': True}]",
+      "restored_pass": true
+    },
+    {
+      "case": "function_session_replication_role_bypass",
+      "drift_caught": true,
+      "drift_error": "END $function$",
+      "restored_pass": true
+    },
+    {
+      "case": "function_owner_changed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Function OWNER drift inbox_bridge.matching: expected owner='postgres' live='supabase_admin' (for a SECURITY DEFINER function the owner is the execution principal)",
+      "restored_pass": true
+    },
+    {
+      "case": "function_arg_default_changed",
+      "drift_caught": true,
+      "drift_error": "END $function$",
+      "restored_pass": true
+    },
+    {
+      "case": "function_return_type_changed",
+      "drift_caught": true,
+      "drift_error": "END $function$",
+      "restored_pass": true
+    },
+    {
+      "case": "check_constraint_string_literal_case",
+      "drift_caught": true,
+      "drift_error": "  live remaining=[{'def': 'CHECK (((claim_token IS NULL) = (lease_until IS NULL)))', 'table': 'inbox_backfill.jobs', 'valid': True, 'noinherit': False, 'triggers_ok': True}, {'def': \"CHECK ((stream = ANY (ARRAY['messages'::text, 'reviews'::text, 'threads'::text, 'DONE'::text]))) NOT VALID\", 'table': 'inbox_backfill.jobs', 'valid': False, 'noinherit': False, 'triggers_ok': True}]",
+      "restored_pass": true
+    },
+    {
+      "case": "index_predicate_string_literal_case",
+      "drift_caught": true,
+      "drift_error": "  live=    CREATE INDEX backfill_available ON inbox_backfill.jobs USING btree (available_at, org_id) WHERE (stream <> 'DONE'::text)",
+      "restored_pass": true
+    },
+    {
+      "case": "function_grant_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Function GRANT drift public.inbox_counts_v2: expected EXECUTE granted to=['authenticated'] live=['anon', 'authenticated']",
+      "restored_pass": true
+    },
+    {
+      "case": "trigger_arg_case_changed",
+      "drift_caught": true,
+      "drift_error": "  live=    CREATE TRIGGER zzzzz_inbox_parent AFTER INSERT OR DELETE OR UPDATE ON public.properties FOR EACH ROW EXECUTE FUNCTION inbox_parent.capture_parent('PROPERTY')",
+      "restored_pass": true
+    },
+    {
+      "case": "fk_enforcement_trigger_disabled",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Constraint enforcement disabled on inbox_bridge.cursors: 'FOREIGN KEY (scope_id) REFERENCES inbox_bridge.worksets(id)' is present and validated but its internal enforcement trigger(s) are disabled (tgenabled<>'O') -- writes are no longer actually checked against it",
+      "restored_pass": true
+    },
+    {
+      "case": "table_owner_changed",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Table OWNER drift public.inbox_inbound_heads: expected owner='postgres' live='authenticated' (a table's OWNER bypasses RLS entirely, regardless of any policy)",
+      "restored_pass": true
+    },
+    {
+      "case": "table_acl_grant_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Table ACL drift public.inbox_inbound_heads: expected=['postgres=arwdDxtm/postgres'] live=['anon=r/postgres', 'postgres=arwdDxtm/postgres'] (raw aclitem text, so a WITH GRANT OPTION change -- a '*' suffix on a privilege letter -- is included)",
+      "restored_pass": true
+    },
+    {
+      "case": "table_set_unlogged",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Table persistence drift public.inbox_inbound_heads: expected permanent ('p'), live='u' -- an UNLOGGED table is crash-truncatable (silent data loss on the next crash/restart)",
+      "restored_pass": true
+    },
+    {
+      "case": "table_rewrite_rule_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Unexpected rewrite rule(s) on public.inbox_inbound_heads: ['zz_harness_rule'] (a rule can silently suppress or redirect writes to this table)",
+      "restored_pass": true
+    },
+    {
+      "case": "table_policy_and_extra_trigger_added",
+      "drift_caught": true,
+      "drift_error": "RuntimeError: Unexpected RLS POLICY on public.inbox_inbound_heads: [{'cmd': '*', 'name': 'zz_harness_policy', 'roles': ['authenticated'], 'using': 'true', 'withcheck': None, 'permissive': True}] (this candidate declares no CREATE POLICY anywhere -- every owned table relies on RLS-with-no-policies plus owner-bypass for its SECURITY DEFINER API functions, so ANY policy here is unreviewed)",
       "restored_pass": true
     },
     {
       "case": "index_packet_injection_ignored",
       "drift_caught": true,
-      "drift_error": "  live=    createindexsummary_orderoninbox_bridge.summariesorg_id,target_kind",
+      "drift_error": "  live=    CREATE INDEX summary_order ON inbox_bridge.summaries USING btree (org_id, target_kind)",
       "restored_pass": true
     }
   ],
