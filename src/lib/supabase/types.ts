@@ -622,9 +622,15 @@ export type Database = {
           ai_reason: string
           classification_run_id: string | null
           conversation_id: string
+          corrected_at: string | null
+          corrected_by: string | null
+          corrected_disposition: string | null
+          correction_reason: string | null
           created_at: string
           disposition: string
           dispo_applied: boolean
+          human_reviewed_at: string | null
+          human_reviewed_by: string | null
           id: string
           org_id: string
           property_id: string
@@ -638,9 +644,15 @@ export type Database = {
           ai_reason: string
           classification_run_id?: string | null
           conversation_id: string
+          corrected_at?: string | null
+          corrected_by?: string | null
+          corrected_disposition?: string | null
+          correction_reason?: string | null
           created_at?: string
           disposition: string
           dispo_applied?: boolean
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
           id?: string
           org_id: string
           property_id: string
@@ -654,9 +666,15 @@ export type Database = {
           ai_reason?: string
           classification_run_id?: string | null
           conversation_id?: string
+          corrected_at?: string | null
+          corrected_by?: string | null
+          corrected_disposition?: string | null
+          correction_reason?: string | null
           created_at?: string
           disposition?: string
           dispo_applied?: boolean
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
           id?: string
           org_id?: string
           property_id?: string
@@ -2288,6 +2306,193 @@ export type Database = {
           },
         ]
       }
+      jev_lead_decisions: {
+        Row: {
+          classification_run_id: string
+          conversation_id: string
+          created_at: string
+          human_reviewed_at: string | null
+          human_reviewed_by: string | null
+          id: string
+          native_confidence: number | null
+          org_id: string
+          property_id: string
+          proposed_outcome: string
+          resolution_reason: string | null
+          resolved_at: string | null
+          resolved_by: string | null
+          resolved_outcome: string | null
+          source_inbound_message_id: string
+          status: string
+          superseded_reason: string | null
+          threshold_at_decision: number | null
+          threshold_version: number | null
+        }
+        Insert: {
+          classification_run_id: string
+          conversation_id: string
+          created_at?: string
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
+          id?: string
+          native_confidence?: number | null
+          org_id: string
+          property_id: string
+          proposed_outcome: string
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          resolved_outcome?: string | null
+          source_inbound_message_id: string
+          status?: string
+          superseded_reason?: string | null
+          threshold_at_decision?: number | null
+          threshold_version?: number | null
+        }
+        Update: {
+          classification_run_id?: string
+          conversation_id?: string
+          created_at?: string
+          human_reviewed_at?: string | null
+          human_reviewed_by?: string | null
+          id?: string
+          native_confidence?: number | null
+          org_id?: string
+          property_id?: string
+          proposed_outcome?: string
+          resolution_reason?: string | null
+          resolved_at?: string | null
+          resolved_by?: string | null
+          resolved_outcome?: string | null
+          source_inbound_message_id?: string
+          status?: string
+          superseded_reason?: string | null
+          threshold_at_decision?: number | null
+          threshold_version?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "jev_lead_decisions_classification_run_id_fkey"
+            columns: ["classification_run_id"]
+            isOneToOne: false
+            referencedRelation: "sms_classification_runs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "jev_lead_decisions_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "jev_lead_decisions_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "jev_lead_decisions_source_inbound_message_id_fkey"
+            columns: ["source_inbound_message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      jev_outcome_threshold_history: {
+        Row: {
+          changed_at: string
+          changed_by: string | null
+          id: string
+          idempotency_key: string | null
+          new_min_confidence: number
+          org_id: string
+          outcome: string
+          previous_min_confidence: number | null
+          threshold_id: string | null
+          version: number
+        }
+        Insert: {
+          changed_at?: string
+          changed_by?: string | null
+          id?: string
+          idempotency_key?: string | null
+          new_min_confidence: number
+          org_id: string
+          outcome: string
+          previous_min_confidence?: number | null
+          threshold_id?: string | null
+          version: number
+        }
+        Update: {
+          changed_at?: string
+          changed_by?: string | null
+          id?: string
+          idempotency_key?: string | null
+          new_min_confidence?: number
+          org_id?: string
+          outcome?: string
+          previous_min_confidence?: number | null
+          threshold_id?: string | null
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "jev_outcome_threshold_history_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "jev_outcome_threshold_history_threshold_id_fkey"
+            columns: ["threshold_id"]
+            isOneToOne: false
+            referencedRelation: "jev_outcome_thresholds"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      jev_outcome_thresholds: {
+        Row: {
+          id: string
+          min_confidence: number
+          org_id: string
+          outcome: string
+          updated_at: string
+          updated_by: string | null
+          version: number
+        }
+        Insert: {
+          id?: string
+          min_confidence: number
+          org_id: string
+          outcome: string
+          updated_at?: string
+          updated_by?: string | null
+          version?: number
+        }
+        Update: {
+          id?: string
+          min_confidence?: number
+          org_id?: string
+          outcome?: string
+          updated_at?: string
+          updated_by?: string | null
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "jev_outcome_thresholds_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       job_items: {
         Row: {
           contact_id: string | null
@@ -3007,6 +3212,9 @@ export type Database = {
           county_id: string | null
           created_at: string
           deleted_at: string | null
+          // Hand-inserted 2026-09-21 for migration
+          // 20260921022936_jev_decision_context_revision.sql.
+          decision_context_revision: number
           distress_flags: string[]
           equity_estimate: number | null
           equity_pct: number | null
@@ -3072,6 +3280,7 @@ export type Database = {
           county_id?: string | null
           created_at?: string
           deleted_at?: string | null
+          decision_context_revision?: number
           distress_flags?: string[]
           equity_estimate?: number | null
           equity_pct?: number | null
@@ -3137,6 +3346,7 @@ export type Database = {
           county_id?: string | null
           created_at?: string
           deleted_at?: string | null
+          decision_context_revision?: number
           distress_flags?: string[]
           equity_estimate?: number | null
           equity_pct?: number | null
@@ -5565,6 +5775,44 @@ export type Database = {
         }
         Relationships: []
       }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921070948_jev_needs_decision_eligibility_view.sql (fable
+      // re-review of e5d001bb, jev-root-round17-fable2-fixes.md, finding
+      // 2). security_invoker view over sms_classification_runs — same
+      // Row shape as NEEDS_DECISION_CLASSIFIER_EVENT_SELECT's source
+      // columns.
+      jev_needs_decision_classifier_events: {
+        Row: {
+          id: string | null
+          org_id: string | null
+          property_id: string | null
+          conversation_id: string | null
+          source_inbound_message_id: string | null
+          resolved_outcome: string | null
+          fallback_reason: string | null
+          model: string | null
+          schema_version: string | null
+          policy_version: string | null
+          decision: Json | null
+          created_at: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sms_classification_runs_property_org_fkey"
+            columns: ["property_id", "org_id"]
+            isOneToOne: false
+            referencedRelation: "properties"
+            referencedColumns: ["id", "org_id"]
+          },
+          {
+            foreignKeyName: "sms_classification_runs_source_inbound_message_id_fkey"
+            columns: ["source_inbound_message_id"]
+            isOneToOne: false
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       leads_board: {
         Row: {
           absentee_flag: boolean | null
@@ -6669,11 +6917,15 @@ export type Database = {
           verification_state: string
         }[]
       }
+      // Hand-patched 2026-09-21 for migration
+      // 20260921025446_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
       fn_apply_ai_disposition_with_review: {
         Args: {
           p_ai_reason: string
           p_conversation_id: string
           p_disposition: string
+          p_expected_revision: number | null
           p_property_id: string
           p_source_inbound_message_id: string
         }
@@ -6688,12 +6940,181 @@ export type Database = {
         Args: { p_classification_run_id: string; p_review_id: string }
         Returns: Json
       }
+      // Hand-patched 2026-09-21 for migration
+      // 20260921025446_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
+      // Hand-patched 2026-09-21 for migration
+      // 20260921081409_jev_deferred_review_classification_run_id.sql —
+      // added p_classification_run_id (Astra production blocker 3).
       fn_propose_ai_dnc_suppression_review: {
         Args: {
           p_ai_reason: string
+          p_classification_run_id: string
           p_conversation_id: string
+          p_expected_revision: number
           p_property_id: string
           p_source_inbound_message_id: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921005946_jev_deferred_disposition_proposal.sql — extends
+      // dnc's Option-B deferred-write pattern above to
+      // wrong_number/not_interested/opted_out (root final-review P1 #1).
+      // Hand-patched 2026-09-21 for migration
+      // 20260921025446_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
+      // Hand-patched 2026-09-21 for migration
+      // 20260921081409_jev_deferred_review_classification_run_id.sql —
+      // added p_classification_run_id (Astra production blocker 3).
+      fn_propose_deferred_ai_disposition_review: {
+        Args: {
+          p_ai_reason: string
+          p_classification_run_id: string
+          p_conversation_id: string
+          p_disposition: string
+          p_expected_revision: number
+          p_property_id: string
+          p_source_inbound_message_id: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-20 for migration
+      // 20260920225859_jev_outcome_thresholds.sql — unlike the
+      // sms_classification_runs caveat above, this block IS a verbatim
+      // excerpt of a real `supabase gen types typescript --local` run
+      // against a fully-migrated disposable local Postgres (colima was
+      // resolvable this session); safe to trust as authoritative until
+      // the next full regen supersedes it.
+      fn_set_jev_outcome_threshold: {
+        Args: {
+          p_expected_version: number
+          p_idempotency_key: string
+          p_min_confidence: number
+          p_org_id: string
+          p_outcome: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-20 for migration
+      // 20260920235450_jev_lead_decisions.sql — same verbatim-excerpt
+      // provenance as fn_set_jev_outcome_threshold above.
+      // Hand-patched 2026-09-21 for migration
+      // 20260921013636_jev_lead_decision_threshold_version.sql — added
+      // p_threshold_version (root final-review P2).
+      // Hand-patched 2026-09-21 for migration
+      // 20260921025446_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
+      fn_propose_jev_lead_decision: {
+        Args: {
+          p_classification_run_id: string
+          p_conversation_id: string
+          p_expected_revision: number
+          // Hand-widened from the generator's plain `number`: the SQL
+          // parameters accept NULL (e.g. missing/invalid native
+          // confidence, or dnc/unclear having no threshold at all), and
+          // dispatch.ts genuinely needs to pass null in those cases.
+          p_native_confidence: number | null
+          p_outcome: string
+          p_property_id: string
+          p_source_inbound_message_id: string
+          p_threshold_at_decision: number | null
+          p_threshold_version: number | null
+        }
+        Returns: Json
+      }
+      // Hand-patched 2026-09-21 for migration
+      // 20260921025446_jev_decision_context_gaps.sql — added
+      // p_expected_revision (root review of 8361775a, gap 2).
+      fn_auto_apply_jev_lead_decision: {
+        Args: {
+          p_classification_run_id: string
+          p_conversation_id: string
+          p_expected_revision: number
+          // Hand-widened from the generator's plain `number`: the SQL
+          // parameters accept NULL (e.g. missing/invalid native
+          // confidence, or dnc/unclear having no threshold at all), and
+          // dispatch.ts genuinely needs to pass null in those cases.
+          p_native_confidence: number | null
+          p_outcome: string
+          p_property_id: string
+          p_source_inbound_message_id: string
+          p_threshold_at_decision: number | null
+          p_threshold_version: number | null
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921060906_jev_automatic_classification_active_access_rpc.sql
+      // (root review of edbd7bfe, jev-root-round13-review.md, finding 1).
+      fn_update_jev_automatic_classification: {
+        Args: { p_config_id: string; p_enabled: boolean }
+        Returns: Json
+      }
+      fn_confirm_jev_lead_decision: {
+        Args: { p_decision_id: string }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921012632_jev_classifier_event_resolution.sql (root
+      // final-review P1 #3: give classifier_event rows an actionable
+      // human-resolution path).
+      fn_promote_classifier_event_to_decision: {
+        Args: { p_classification_run_id: string }
+        Returns: Json
+      }
+      fn_correct_jev_lead_decision: {
+        Args: {
+          p_corrected_outcome: string
+          p_decision_id: string
+          p_reason: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921001640_jev_ai_disposition_review_correction.sql — same
+      // verbatim-excerpt provenance as the jev_lead_decisions functions above.
+      fn_correct_ai_disposition_review: {
+        Args: {
+          p_corrected_disposition: string
+          p_reason: string
+          p_review_id: string
+        }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921003340_jev_review_taxonomy_and_marking.sql — same
+      // verbatim-excerpt provenance as the functions above.
+      fn_mark_ai_disposition_review_reviewed: {
+        Args: { p_review_id: string }
+        Returns: Json
+      }
+      fn_mark_jev_lead_decision_reviewed: {
+        Args: { p_decision_id: string }
+        Returns: Json
+      }
+      // Hand-inserted 2026-09-21 for migration
+      // 20260921020527_jev_correction_atomic_apply.sql — root review of
+      // 02b0ad73 (jev-root-correction-race.md) found the prior
+      // fn_begin_*/fn_record_* split was NOT atomic (a PostgREST RPC
+      // releases its lock the instant it returns; the separate sanctioned
+      // TS op ran in its own transaction with a fresh-read CAS that
+      // couldn't see what fn_begin_* had observed). Replaced by a single
+      // atomic validate+write+audit RPC per source; fn_begin_*/
+      // fn_record_* are dropped, not left in place unused.
+      fn_apply_and_record_ai_disposition_review_correction: {
+        Args: {
+          p_corrected_disposition: string
+          p_reason: string
+          p_review_id: string
+        }
+        Returns: Json
+      }
+      fn_apply_and_record_jev_lead_decision_correction: {
+        Args: {
+          p_corrected_outcome: string
+          p_decision_id: string
+          p_reason: string
         }
         Returns: Json
       }

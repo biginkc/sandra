@@ -8,15 +8,55 @@ function stubSupabase(opts: {
   messages?: unknown[];
   insertResult?: { data: { id: string } | null; error: { message: string } | null };
   existingRunLookup?: { data: { id: string } | null; error: { message: string } | null };
+  /** Rows `loadOrgThresholdMap` would read from jev_outcome_thresholds.
+   *  Defaults to none configured — every outcome resolves human_gated
+   *  unless a test explicitly opts an outcome in. `version` defaults to 1
+   *  when omitted — most tests only care about the confidence comparison,
+   *  not which settings version was live. */
+  thresholds?: Array<{ outcome: string; min_confidence: number; version?: number }>;
+  /** properties.decision_context_revision, as `readDecisionContextRevision`
+   *  (dispatch-bridge.ts) would read it. A function lets a test mutate a
+   *  shared counter between setup and read — see the delayed-provider race
+   *  test below, which proves the read happens BEFORE the (delayed) Jev
+   *  call, not after. `null` simulates an unreadable/missing property row
+   *  (fail-closed path). Defaults to 7 — an arbitrary non-zero value so
+   *  tests that don't care about it still exercise a real number. */
+  propertiesRevision?: number | null | (() => number | null);
+  /** readSourceMessageCreatedAt's single-row lookup. `null` simulates a
+   *  missing/mismatched source message (identity check fails). Defaults
+   *  to a fixed timestamp so tests that don't care still exercise a
+   *  real value. */
+  sourceMessageCreatedAt?: string | null;
+  /** Root review of 999feefb (jev-root-round11-review.md, finding 1):
+   *  results for persistFailedRun's plain (non-.select()) insert calls,
+   *  consumed in order — one entry per call, `{ error: null }` once
+   *  exhausted. Lets a test simulate "second identical failure hits the
+   *  real unique-index duplicate-key error" without a real Postgres. */
+  failedRunInsertResults?: Array<{ error: { message: string } | null }>;
 }) {
+  const failedRunInsertCalls: Array<Record<string, unknown>> = [];
+  let messagesLteCutoff: string | undefined;
   const messagesBuilder = {
     select: () => messagesBuilder,
     eq: () => messagesBuilder,
     order: () => messagesBuilder,
     limit: () => messagesBuilder,
     neq: () => messagesBuilder,
-    then: (resolve: (r: { data: unknown[] }) => void) =>
-      resolve({ data: opts.messages ?? [] }),
+    lte: (_col: string, val: string) => {
+      messagesLteCutoff = val;
+      return messagesBuilder;
+    },
+    maybeSingle: async () => {
+      const createdAt = opts.sourceMessageCreatedAt === undefined ? "2026-09-21T00:00:00.000Z" : opts.sourceMessageCreatedAt;
+      return createdAt === null ? { data: null, error: null } : { data: { created_at: createdAt }, error: null };
+    },
+    then: (resolve: (r: { data: unknown[] }) => void) => {
+      const rows = opts.messages ?? [];
+      const filtered = messagesLteCutoff
+        ? rows.filter((r) => (r as { created_at?: string }).created_at !== undefined && (r as { created_at: string }).created_at <= messagesLteCutoff!)
+        : rows;
+      resolve({ data: filtered });
+    },
   };
   const runsSelectBuilder = {
     eq: () => runsSelectBuilder,
@@ -24,16 +64,58 @@ function stubSupabase(opts: {
       opts.existingRunLookup ?? { data: { id: "run-1" }, error: null },
   };
   const runsBuilder = {
-    insert: () => ({
+    insert: (row: Record<string, unknown>) => ({
+      // persistRun chains .select().maybeSingle() after insert().
       select: () => ({
         maybeSingle: async () =>
           opts.insertResult ?? { data: { id: "run-1" }, error: null },
       }),
+      // persistFailedRun awaits the insert() result directly, with no
+      // .select() chained — needs its own thenable, distinct from
+      // persistRun's insertResult (a failed-run insert never asks for
+      // the row id back).
+      then: (resolve: (r: { data: null; error: { message: string } | null }) => void) => {
+        failedRunInsertCalls.push(row);
+        const result =
+          opts.failedRunInsertResults?.[failedRunInsertCalls.length - 1] ?? { error: null };
+        resolve({ data: null, error: result.error });
+      },
     }),
     select: () => runsSelectBuilder,
   };
+  const thresholdsBuilder = {
+    select: () => thresholdsBuilder,
+    eq: async () => ({
+      data: (opts.thresholds ?? []).map((t) => ({ ...t, version: t.version ?? 1 })),
+      error: null,
+    }),
+  };
+  const propertiesRevisionResolver =
+    typeof opts.propertiesRevision === "function"
+      ? opts.propertiesRevision
+      : () => (opts.propertiesRevision === undefined ? 7 : opts.propertiesRevision);
+  const propertiesBuilder = {
+    select: () => propertiesBuilder,
+    eq: () => propertiesBuilder,
+    maybeSingle: async () => {
+      const revision = propertiesRevisionResolver();
+      return revision === null
+        ? { data: null, error: null }
+        : { data: { decision_context_revision: revision }, error: null };
+    },
+  };
   return {
-    from: (table: string) => (table === "messages" ? messagesBuilder : runsBuilder),
+    from: (table: string) =>
+      table === "messages"
+        ? messagesBuilder
+        : table === "jev_outcome_thresholds"
+          ? thresholdsBuilder
+          : table === "properties"
+            ? propertiesBuilder
+            : runsBuilder,
+    // Test-only escape hatch (not part of the real Supabase client) — the
+    // rows persistFailedRun actually tried to insert, in call order.
+    __failedRunInsertCalls: failedRunInsertCalls,
   } as any;
 }
 
@@ -66,7 +148,16 @@ describe("classifyForDispatch", () => {
     const result = await classifyForDispatch(stubSupabase({}), baseInput,
       { classifierProvider: "jev", classifierMode: mode }, { fetch: fn, typesafeApiKey: "k" });
     if (mode === "shadow") expect(result).toEqual({ kind: "use_legacy", classificationRunId: "run-1" });
-    else expect(result).toMatchObject({ kind: "jev_route", eligibleForAutoAccept: false, route: { kind: "escalate", reason: "model:call_request" } });
+    else {
+      expect(result).toMatchObject({ kind: "jev_route", eligibleForAutoAccept: false, route: { kind: "escalate", reason: "model:call_request" } });
+      // No threshold configured for new_lead in this org — still records
+      // the real measured confidence, not null, even though there was
+      // nothing to compare it against (thresholdAtDecision stays null).
+      if (result.kind === "jev_route") {
+        expect(result.nativeConfidence).toBe(1);
+        expect(result.thresholdAtDecision).toBeNull();
+      }
+    }
   });
 
   beforeEach(() => vi.clearAllMocks());
@@ -157,10 +248,12 @@ describe("classifyForDispatch", () => {
     }
   });
 
-  it("marks non-dnc automatic decisions eligible for auto-accept", async () => {
-    const { fn } = stubFetch({ answers: { outcome: { choice: "opted_out" } } });
+  it("marks a non-dnc automatic decision eligible for auto-accept when at/above its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "opted_out", confidence: 0.95 } },
+    });
     const result = await classifyForDispatch(
-      stubSupabase({}),
+      stubSupabase({ thresholds: [{ outcome: "opted_out", min_confidence: 0.95 }] }),
       baseInput,
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
@@ -169,15 +262,154 @@ describe("classifyForDispatch", () => {
     else throw new Error("expected jev_route");
   });
 
-  it("returns jev_nurture even in automatic mode (no AiAction exists for nurture)", async () => {
-    const { fn } = stubFetch({ answers: { outcome: { choice: "nurture" } } });
+  it("persists the threshold settings row's own version (root final-review P2) — not just the numeric cutoff — alongside the decision", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "opted_out", confidence: 0.95 } },
+    });
     const result = await classifyForDispatch(
-      stubSupabase({}),
+      stubSupabase({ thresholds: [{ outcome: "opted_out", min_confidence: 0.95, version: 7 }] }),
       baseInput,
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
     );
-    expect(result).toEqual({ kind: "jev_nurture", classificationRunId: "run-1" });
+    if (result.kind !== "jev_route") throw new Error("expected jev_route");
+    expect(result.thresholdAtDecision).toBe(0.95);
+    expect(result.thresholdVersion).toBe(7);
+  });
+
+  it("marks a non-dnc automatic decision NOT eligible for auto-accept when below its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "opted_out", confidence: 0.8 } },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "opted_out", min_confidence: 0.95 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    if (result.kind === "jev_route") expect(result.eligibleForAutoAccept).toBe(false);
+    else throw new Error("expected jev_route");
+  });
+
+  it("marks a non-dnc automatic decision NOT eligible for auto-accept when no threshold is configured for that outcome", async () => {
+    // No thresholds row at all — must never silently default to "always
+    // eligible". This is also the pre-existing pending ai_disposition_reviews
+    // path, so "not eligible" here is a real Needs-a-decision case, not a
+    // dead end.
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "opted_out", confidence: 0.999 } },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    if (result.kind === "jev_route") expect(result.eligibleForAutoAccept).toBe(false);
+    else throw new Error("expected jev_route");
+  });
+
+  it("returns jev_nurture in automatic mode when nurture is at/above its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "nurture", confidence: 0.95 } },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "nurture", min_confidence: 0.95 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    expect(result).toEqual({
+      kind: "jev_nurture",
+      classificationRunId: "run-1",
+      nativeConfidence: 0.95,
+      thresholdAtDecision: 0.95,
+      thresholdVersion: 1,
+      evaluationRevision: 7,
+    });
+  });
+
+  it("returns jev_needs_decision (not jev_nurture) when nurture is below its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: { outcome: { choice: "nurture", confidence: 0.5 } },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "nurture", min_confidence: 0.95 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    expect(result).toEqual({
+      kind: "jev_needs_decision",
+      classificationRunId: "run-1",
+      outcome: "nurture",
+      nativeConfidence: 0.5,
+      thresholdAtDecision: 0.95,
+      thresholdVersion: 1,
+      evaluationRevision: 7,
+    });
+  });
+
+  it("returns jev_needs_decision when nurture has missing native confidence, even with a threshold configured", async () => {
+    const { fn } = stubFetch({ answers: { outcome: { choice: "nurture" } } });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "nurture", min_confidence: 0.95 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    expect(result).toEqual({
+      kind: "jev_needs_decision",
+      classificationRunId: "run-1",
+      outcome: "nurture",
+      nativeConfidence: null,
+      thresholdAtDecision: null,
+      thresholdVersion: null,
+      evaluationRevision: 7,
+    });
+  });
+
+  it("returns jev_promote_new_lead when new_lead is at/above its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: {
+        outcome: { choice: "new_lead", confidence: 0.9 },
+        escalation_reason: { choice: "call_request" },
+      },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "new_lead", min_confidence: 0.9 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    expect(result).toEqual({
+      kind: "jev_promote_new_lead",
+      classificationRunId: "run-1",
+      nativeConfidence: 0.9,
+      thresholdAtDecision: 0.9,
+      thresholdVersion: 1,
+      evaluationRevision: 7,
+    });
+  });
+
+  it("stays on the existing escalate route (not jev_promote_new_lead) when new_lead is below its configured threshold", async () => {
+    const { fn } = stubFetch({
+      answers: {
+        outcome: { choice: "new_lead", confidence: 0.6 },
+        escalation_reason: { choice: "call_request" },
+      },
+    });
+    const result = await classifyForDispatch(
+      stubSupabase({ thresholds: [{ outcome: "new_lead", min_confidence: 0.9 }] }),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "automatic" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
+    expect(result.kind).toBe("jev_route");
+    if (result.kind === "jev_route") {
+      expect(result.eligibleForAutoAccept).toBe(false);
+      expect(result.route.kind).toBe("escalate");
+    }
   });
 
   it("returns jev_no_action for bad_number/unclear", async () => {
@@ -191,7 +423,7 @@ describe("classifyForDispatch", () => {
     expect(result).toEqual({ kind: "jev_no_action", classificationRunId: "run-1" });
   });
 
-  it("falls back to use_legacy when Jev's HTTP call fails, without throwing", async () => {
+  it("in automatic mode, an HTTP failure fails closed to jev_automatic_failed, not use_legacy", async () => {
     const { fn } = stubFetch({}, false);
     const result = await classifyForDispatch(
       stubSupabase({}),
@@ -199,10 +431,21 @@ describe("classifyForDispatch", () => {
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
     );
+    expect(result).toMatchObject({ kind: "jev_automatic_failed", classificationRunId: null });
+  });
+
+  it("in shadow mode, an HTTP failure still returns use_legacy, without throwing", async () => {
+    const { fn } = stubFetch({}, false);
+    const result = await classifyForDispatch(
+      stubSupabase({}),
+      baseInput,
+      { classifierProvider: "jev", classifierMode: "shadow" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
     expect(result).toEqual({ kind: "use_legacy", classificationRunId: null });
   });
 
-  it("falls back to use_legacy when the audit insert fails for a non-duplicate reason", async () => {
+  it("in automatic mode, an audit-insert failure fails closed to jev_automatic_failed, not use_legacy", async () => {
     const { fn } = stubFetch({ answers: { outcome: { choice: "dnc" } } });
     const supabase = stubSupabase({
       insertResult: { data: null, error: { message: "db down" } },
@@ -213,7 +456,7 @@ describe("classifyForDispatch", () => {
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
     );
-    expect(result).toEqual({ kind: "use_legacy", classificationRunId: null });
+    expect(result).toEqual({ kind: "jev_automatic_failed", classificationRunId: null, reason: "audit_persist_failed" });
   });
 
   it("recovers the existing row id on a duplicate-key insert instead of failing", async () => {
@@ -240,7 +483,11 @@ describe("classifyForDispatch", () => {
     }
   });
 
-  it("returns use_legacy without calling Jev when conversationId/inboundMessageId are missing", async () => {
+  it("in automatic mode, fails closed to jev_automatic_failed (not use_legacy) when the audit row can't be persisted (missing conversationId/inboundMessageId)", async () => {
+    // Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 2):
+    // an audit write failure in automatic mode must not silently degrade
+    // to the legacy classifier — there'd be no trusted Jev decision and
+    // no audit trail linking one.
     const { fn } = stubFetch({ answers: { outcome: { choice: "dnc" } } });
     const result = await classifyForDispatch(
       stubSupabase({}),
@@ -248,6 +495,239 @@ describe("classifyForDispatch", () => {
       { classifierProvider: "jev", classifierMode: "automatic" },
       { fetch: fn, typesafeApiKey: "k" },
     );
+    expect(result).toEqual({ kind: "jev_automatic_failed", classificationRunId: null, reason: "audit_persist_failed" });
+  });
+
+  it("in shadow mode, the same missing-ids audit failure still returns use_legacy", async () => {
+    const { fn } = stubFetch({ answers: { outcome: { choice: "dnc" } } });
+    const result = await classifyForDispatch(
+      stubSupabase({}),
+      { ...baseInput, conversationId: null, inboundMessageId: null },
+      { classifierProvider: "jev", classifierMode: "shadow" },
+      { fetch: fn, typesafeApiKey: "k" },
+    );
     expect(result).toEqual({ kind: "use_legacy", classificationRunId: null });
+  });
+
+  // Root review of 8361775a (jev-root-revision-review.md, 2026-09-20), gap 2:
+  // revision capture must happen BEFORE evaluation starts, not be a fresh
+  // re-read blessed at decision-row insert time (which could land AFTER
+  // model latency or a newer inbound message). These tests use a fake
+  // delayed Jev provider (no real/paid provider call) racing a simulated
+  // concurrent DB mutation during that delay.
+  describe("evaluationRevision — captured before the Jev call, not after", () => {
+    it("captures properties.decision_context_revision before the (delayed) fetch call starts, not the value current when fetch resolves", async () => {
+      let currentDbRevision = 5;
+      const supabase = stubSupabase({ propertiesRevision: () => currentDbRevision });
+
+      const fn = vi.fn(async (_url: string, _init: RequestInit) => {
+        // Simulate a newer inbound message (or any other bump-worthy
+        // activity) arriving in the property WHILE the Jev HTTP call is
+        // still in flight — i.e. after evaluationRevision was already
+        // captured, but before the response comes back.
+        currentDbRevision = 6;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ answers: { outcome: { choice: "not_interested" } } }),
+          text: async () => "",
+        };
+      }) as unknown as typeof fetch;
+
+      const result = await classifyForDispatch(
+        supabase,
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn, typesafeApiKey: "k" },
+      );
+
+      // The race actually happened (DB moved on during the call) — proves
+      // this test would have caught a "re-read at the end" regression.
+      expect(currentDbRevision).toBe(6);
+      expect(result.kind).toBe("jev_route");
+      if (result.kind === "jev_route") {
+        // ...yet the captured evaluationRevision is the PRE-call snapshot,
+        // not the post-call value — the whole point of capturing before
+        // evaluation instead of at decision-row insert time.
+        expect(result.evaluationRevision).toBe(5);
+      }
+    });
+
+    it("in automatic mode, fails closed to jev_automatic_failed (not use_legacy) when the property's revision can't be read, without calling Jev", async () => {
+      const supabase = stubSupabase({ propertiesRevision: null });
+      const fn = vi.fn();
+      const result = await classifyForDispatch(
+        supabase,
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn as unknown as typeof fetch, typesafeApiKey: "k" },
+      );
+      expect(result).toEqual({ kind: "jev_automatic_failed", classificationRunId: null, reason: "missing_revision_baseline" });
+      expect(fn).not.toHaveBeenCalled();
+    });
+
+    it("in shadow mode, the same missing-revision case still returns use_legacy without calling Jev", async () => {
+      const supabase = stubSupabase({ propertiesRevision: null });
+      const fn = vi.fn();
+      const result = await classifyForDispatch(
+        supabase,
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "shadow" },
+        { fetch: fn as unknown as typeof fetch, typesafeApiKey: "k" },
+      );
+      expect(result).toEqual({ kind: "use_legacy", classificationRunId: null });
+      expect(fn).not.toHaveBeenCalled();
+    });
+
+    it("threads the same pre-call evaluationRevision through jev_nurture and jev_needs_decision outcomes", async () => {
+      const nurture = await classifyForDispatch(
+        stubSupabase({ propertiesRevision: 42, thresholds: [{ outcome: "nurture", min_confidence: 0.5 }] }),
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: stubFetch({ answers: { outcome: { choice: "nurture", confidence: 0.9 } } }).fn, typesafeApiKey: "k" },
+      );
+      expect(nurture.kind).toBe("jev_nurture");
+      if (nurture.kind === "jev_nurture") expect(nurture.evaluationRevision).toBe(42);
+
+      const belowThresholdNurture = await classifyForDispatch(
+        stubSupabase({ propertiesRevision: 42, thresholds: [{ outcome: "nurture", min_confidence: 0.9 }] }),
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: stubFetch({ answers: { outcome: { choice: "nurture", confidence: 0.1 } } }).fn, typesafeApiKey: "k" },
+      );
+      expect(belowThresholdNurture.kind).toBe("jev_needs_decision");
+      if (belowThresholdNurture.kind === "jev_needs_decision") {
+        expect(belowThresholdNurture.evaluationRevision).toBe(42);
+      }
+    });
+  });
+
+  // Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 3): a
+  // fake delayed provider (no real/paid provider call) proving that a
+  // message arriving mid-evaluation cannot leak into the thread Jev
+  // actually sees — the context cutoff is resolved from the SOURCE
+  // message's own stored created_at BEFORE the (delayed) HTTP call, not
+  // "now" and not merely by excluding the current message's id.
+  describe("context cutoff — later activity cannot leak into an earlier evaluation", () => {
+    it("excludes a message whose created_at is after the source message's own created_at from the thread sent to a delayed fake provider", async () => {
+      const calls: any[] = [];
+      const fn = vi.fn(async (_url: string, init: RequestInit) => {
+        calls.push(init);
+        // Simulate real latency: by the time this resolves, a NEWER
+        // message than the one being evaluated has already been
+        // "written" (irrelevant here — the query that builds the thread
+        // already ran and was cut off before this call started; this
+        // delay just proves the call genuinely takes time, matching the
+        // evaluationRevision race test's own pattern).
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ answers: { outcome: { choice: "not_interested" } } }),
+          text: async () => "",
+        };
+      }) as unknown as typeof fetch;
+
+      const sourceCreatedAt = "2026-09-21T00:05:00.000Z";
+      const result = await classifyForDispatch(
+        stubSupabase({
+          sourceMessageCreatedAt: sourceCreatedAt,
+          messages: [
+            { direction: "outbound", body: "kept: before", created_at: "2026-09-21T00:00:00.000Z" },
+            // After the source message's own created_at — must never
+            // appear, regardless of when the (mocked, delayed) query
+            // actually executes relative to it.
+            { direction: "inbound", body: "excluded: arrived mid-evaluation", created_at: "2026-09-21T00:10:00.000Z" },
+          ],
+        }),
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn, typesafeApiKey: "k" },
+      );
+
+      expect(result.kind).toBe("jev_route");
+      const sentBody = JSON.parse(String(calls[0].body));
+      const threadBodies = sentBody.state.thread.map((m: { body: string }) => m.body);
+      expect(threadBodies).toContain("kept: before");
+      expect(threadBodies).not.toContain("excluded: arrived mid-evaluation");
+    });
+
+    it("uses the source message's own stored created_at as its sentAt, not the time evaluation happened to run", async () => {
+      const { fn, calls } = stubFetch({ answers: { outcome: { choice: "not_interested" } } });
+      const sourceCreatedAt = "2020-01-01T00:00:00.000Z"; // deliberately far in the past
+      await classifyForDispatch(
+        stubSupabase({ sourceMessageCreatedAt: sourceCreatedAt, messages: [] }),
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn, typesafeApiKey: "k" },
+      );
+      const sentBody = JSON.parse(String(calls()[0].body));
+      expect(sentBody.state.thread.at(-1)).toMatchObject({
+        direction: "inbound",
+        body: baseInput.inboundBody,
+        sentAt: sourceCreatedAt,
+      });
+    });
+
+    it("fails closed to jev_automatic_failed in automatic mode when the source message can't be verified (identity check)", async () => {
+      const fn = vi.fn();
+      const result = await classifyForDispatch(
+        stubSupabase({ sourceMessageCreatedAt: null }),
+        baseInput,
+        { classifierProvider: "jev", classifierMode: "automatic" },
+        { fetch: fn as unknown as typeof fetch, typesafeApiKey: "k" },
+      );
+      expect(result).toEqual({ kind: "jev_automatic_failed", classificationRunId: null, reason: "source_message_not_found" });
+      expect(fn).not.toHaveBeenCalled();
+    });
+  });
+
+  // Root review of 999feefb (jev-root-round11-review.md, finding 1): failed-
+  // run retry identity must be deterministic, and a failure row must not
+  // collide with a later successful retry's own audit row. No provider
+  // calls — the "failure" is the fake fetch mock itself failing/succeeding.
+  describe("persistFailedRun — stable retry identity (finding 1)", () => {
+    it("uses a state_hash keyed on the failure reason, not the current time — identical on every retry", async () => {
+      const supabase = stubSupabase({});
+      const { fn } = stubFetch({}, false); // HTTP failure every call
+      await classifyForDispatch(supabase, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn, typesafeApiKey: "k" });
+      await classifyForDispatch(supabase, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn, typesafeApiKey: "k" });
+      const calls = (supabase as any).__failedRunInsertCalls as Array<{ state_hash: string }>;
+      expect(calls).toHaveLength(2);
+      expect(calls[0].state_hash).toBe(calls[1].state_hash);
+      expect(calls[0].state_hash).not.toMatch(/^failed:\d+$/); // not time-based
+    });
+
+    it("repeated identical failure: the second attempt's genuine unique-index collision is swallowed, not thrown or reported as a crash", async () => {
+      const supabase = stubSupabase({
+        failedRunInsertResults: [
+          { error: null },
+          { error: { message: 'duplicate key value violates unique constraint "idx_sms_classification_runs_logical_key"' } },
+        ],
+      });
+      const { fn } = stubFetch({}, false);
+      const first = await classifyForDispatch(supabase, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn, typesafeApiKey: "k" });
+      const second = await classifyForDispatch(supabase, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn, typesafeApiKey: "k" });
+      // Both retries still resolve to the same clean escalation kind — the
+      // duplicate-key error never surfaces as an unhandled rejection or a
+      // different (e.g. use_legacy) result.
+      expect(first).toMatchObject({ kind: "jev_automatic_failed" });
+      expect(second).toMatchObject({ kind: "jev_automatic_failed" });
+    });
+
+    it("a genuinely different failure reason on a retry is a new logical row (different state_hash), by design", async () => {
+      const supabase = stubSupabase({ propertiesRevision: null }); // forces missing_revision_baseline
+      const fn1 = vi.fn();
+      await classifyForDispatch(supabase, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn1 as unknown as typeof fetch, typesafeApiKey: "k" });
+      const { fn: fn2 } = stubFetch({}, false); // HTTP failure this time
+      const supabase2 = stubSupabase({ failedRunInsertResults: [{ error: null }] });
+      // Reuse the SAME message id but a different failure mode to prove
+      // the state_hash differs — inspect each stub's own captured calls.
+      await classifyForDispatch(supabase2, baseInput, { classifierProvider: "jev", classifierMode: "automatic" }, { fetch: fn2, typesafeApiKey: "k" });
+      const revisionFailureHash = ((supabase as any).__failedRunInsertCalls as Array<{ state_hash: string }>)[0].state_hash;
+      const httpFailureHash = ((supabase2 as any).__failedRunInsertCalls as Array<{ state_hash: string }>)[0].state_hash;
+      expect(revisionFailureHash).not.toBe(httpFailureHash);
+    });
   });
 });

@@ -20,6 +20,7 @@ vi.mock("@/lib/events", () => ({
   LEAD_EVENT_TYPES: {
     AI_ESCALATED: "ai_escalated",
     DISPO_SET: "dispo_set",
+    QUALIFIED: "qualified",
   },
   recordLeadEvent,
 }));
@@ -97,6 +98,8 @@ type MockState = {
   }>;
   aiClaims: AiClaimRow[];
   aiClaimInsertError?: boolean;
+  jevOutcomeThresholds?: Array<{ outcome: string; min_confidence: number; version?: number }>;
+  jevLeadDecisionCalls: Array<{ rpc: string; args: Record<string, unknown> }>;
   contact: {
     first_name: string | null;
     phone_1: string | null;
@@ -130,6 +133,10 @@ type MockState = {
     org_id: string;
     outreach_dispo: string | null;
     state: string;
+    status?: string;
+    is_dnc_locked?: boolean;
+    qualified_at?: string | null;
+    qualified_by?: string | null;
   };
   threadConversationId: string;
 };
@@ -161,6 +168,7 @@ function createMockState(): MockState {
       system_prompt: "Reply briefly.",
     },
     aiClaims: [],
+    jevLeadDecisionCalls: [],
     smsClassificationRuns: [],
     contact: {
       first_name: "Sam",
@@ -182,6 +190,10 @@ function createMockState(): MockState {
       org_id: "org-1",
       outreach_dispo: null,
       state: "MO",
+      status: "prospect",
+      is_dnc_locked: false,
+      qualified_at: null,
+      qualified_by: null,
     },
     threadConversationId: CONVERSATION_ID,
   };
@@ -195,6 +207,7 @@ function createMockSupabase(state: MockState) {
       eq: Map<string, unknown>;
       in: Map<string, unknown[]>;
       neq: Map<string, unknown>;
+      lte: Map<string, unknown>;
     },
   ): boolean {
     for (const [field, value] of filters.eq) {
@@ -205,6 +218,13 @@ function createMockSupabase(state: MockState) {
 
     for (const [field, value] of filters.neq) {
       if (row[field as keyof MessageRow] === value) {
+        return false;
+      }
+    }
+
+    for (const [field, value] of filters.lte) {
+      const cell = row[field as keyof MessageRow];
+      if (typeof cell !== "string" || typeof value !== "string" || !(cell <= value)) {
         return false;
       }
     }
@@ -240,6 +260,7 @@ function createMockSupabase(state: MockState) {
       eq: new Map<string, unknown>(),
       in: new Map<string, unknown[]>(),
       neq: new Map<string, unknown>(),
+      lte: new Map<string, unknown>(),
     };
     let limitCount: number | null = null;
     let orderBy: { ascending: boolean; field: keyof MessageRow } | null = null;
@@ -301,6 +322,10 @@ function createMockSupabase(state: MockState) {
       },
       neq(field: string, value: unknown) {
         filters.neq.set(field, value);
+        return query;
+      },
+      lte(field: string, value: unknown) {
+        filters.lte.set(field, value);
         return query;
       },
       limit(value: number) {
@@ -605,6 +630,26 @@ function createMockSupabase(state: MockState) {
     return query;
   }
 
+  function buildJevOutcomeThresholdsQuery() {
+    const query = {
+      select() {
+        return query;
+      },
+      async eq() {
+        // Defaults to no configured thresholds — every outcome resolves
+        // human_gated, matching this suite's existing expectation that
+        // Jev routes never auto-apply without a test opting a threshold
+        // in via `state.jevOutcomeThresholds`. `version` defaults to 1
+        // when a test omits it.
+        return {
+          data: (state.jevOutcomeThresholds ?? []).map((t) => ({ ...t, version: t.version ?? 1 })),
+          error: null,
+        };
+      },
+    };
+    return query;
+  }
+
   return {
     from(table: string) {
       if (table === "messages") {
@@ -628,9 +673,67 @@ function createMockSupabase(state: MockState) {
       if (table === "sms_classification_runs") {
         return buildSmsClassificationRunsQuery();
       }
+      if (table === "jev_outcome_thresholds") {
+        return buildJevOutcomeThresholdsQuery();
+      }
       throw new Error(`Unexpected table: ${table}`);
     },
     rpc(name: string, args: Record<string, unknown>) {
+      if (name === "fn_propose_jev_lead_decision") {
+        state.jevLeadDecisionCalls.push({ rpc: name, args });
+        return Promise.resolve({ data: { status: "proposed", decisionId: "decision-1" }, error: null });
+      }
+      if (name === "fn_auto_apply_jev_lead_decision") {
+        // Root review of dbbb12e6, finding 1: the real RPC now performs
+        // the property effect (nurture's outreach_dispo write / new_lead's
+        // status write) atomically with the revision check and the audit
+        // insert — this mock replicates that same effect so the tests'
+        // state.property assertions still reflect what actually happens,
+        // rather than relying on a SEPARATE qualifyProperty/
+        // setOutreachDispoNurture mutation dispatch.ts no longer makes.
+        state.jevLeadDecisionCalls.push({ rpc: name, args });
+        const outcome = args.p_outcome as string;
+        let status = "applied";
+        if (outcome === "nurture") {
+          if (state.property.outreach_dispo === "nurture") {
+            status = "already_nurture";
+          } else if (state.property.outreach_dispo !== null) {
+            return Promise.resolve({ data: { status: "already_terminal" }, error: null });
+          } else {
+            state.property.outreach_dispo = "nurture";
+          }
+        } else if (outcome === "new_lead") {
+          if (state.property.is_dnc_locked) {
+            return Promise.resolve({ data: { status: "dnc_locked" }, error: null });
+          }
+          if (state.property.status !== undefined && state.property.status !== "prospect") {
+            status = "already_qualified";
+          } else {
+            state.property.status = "new_lead";
+            state.property.qualified_at = new Date().toISOString();
+            state.property.qualified_by = "system:jev_auto_promote";
+          }
+        }
+        return Promise.resolve({ data: { status, decisionId: "decision-1" }, error: null });
+      }
+      if (name === "fn_propose_deferred_ai_disposition_review") {
+        // Root final-review P1 #1: mirrors the real RPC's contract — marks
+        // needs_human_attention and creates a pending review, but never
+        // touches properties.outreach_dispo. This is the RPC dispatch.ts
+        // must call for a below-threshold Jev wrong_number/not_interested/
+        // opted_out decision instead of fn_apply_ai_disposition_with_review.
+        state.property.needs_human_attention = true;
+        state.aiDispoReviews.push({
+          conversationId: String(args.p_conversation_id),
+          disposition: String(args.p_disposition),
+          inboundMessageId: String(args.p_source_inbound_message_id),
+          reason: String(args.p_ai_reason),
+        });
+        return Promise.resolve({
+          data: { status: "proposed", reviewId: "review-jev-deferred" },
+          error: null,
+        });
+      }
       if (name === "fn_propose_ai_dnc_suppression_review") {
         // Mirrors fn_propose_ai_dnc_suppression_review's real contract:
         // marks needs_human_attention, creates a pending review, but
@@ -715,6 +818,32 @@ function createMockSupabase(state: MockState) {
       });
     },
   };
+}
+
+/**
+ * Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 3):
+ * classifyForDispatch now verifies the current inbound message's own
+ * row (identity check + context-cutoff timestamp) before evaluating —
+ * these Jev-automatic-mode tests need a real matching `messages` row to
+ * exist, which they didn't require before this fix.
+ */
+function seedInboundMessage(
+  state: MockState,
+  args: { id: string; body: string; propertyId?: string; contactId?: string; conversationId?: string },
+): void {
+  state.messages.push({
+    id: args.id,
+    body: args.body,
+    channel: "sms",
+    contact_id: args.contactId ?? CONTACT_ID,
+    conversation_id: args.conversationId ?? CONVERSATION_ID,
+    created_at: new Date().toISOString(),
+    direction: "inbound",
+    metadata: null,
+    property_id: args.propertyId ?? PROPERTY_ID,
+    sent_at: null,
+    status: "received",
+  });
 }
 
 function installSendMock(state: MockState) {
@@ -1493,12 +1622,323 @@ describe("dispatchAiResponse debounce", () => {
     expect(recordLeadEvent).not.toHaveBeenCalled();
   });
 
+  it("promotes a Jev new lead through qualifyProperty when at/above the org's configured threshold", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9, version: 4 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-new-lead-promoted", body: "Yes let's talk tomorrow at 2pm about selling the house" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.95 }, escalation_reason: { choice: "call_request" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Yes let's talk tomorrow at 2pm about selling the house",
+        inboundMessageId: "inbound-new-lead-promoted", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:new_lead_promoted" });
+      // The actual sanctioned promotion primitive, never a raw status write
+      // and never appointment booking.
+      expect(state.property.status).toBe("new_lead");
+      expect(state.property.qualified_by).toBe("system:jev_auto_promote");
+      expect(state.property.needs_human_attention).toBe(false);
+      expect(generateAiReply).not.toHaveBeenCalled();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      // Recorded in the Review Jev audit trail as an already-applied
+      // (system, no human) decision — not just the promotion itself.
+      // Root final-review P2: the threshold settings row's own version is
+      // recorded, not just the numeric cutoff.
+      expect(state.jevLeadDecisionCalls).toEqual([
+        expect.objectContaining({
+          rpc: "fn_auto_apply_jev_lead_decision",
+          args: expect.objectContaining({ p_outcome: "new_lead", p_native_confidence: 0.95, p_threshold_version: 4 }),
+        }),
+      ]);
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("does not promote and instead flags for a human when a Jev new lead is below its configured threshold", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-new-lead-below-threshold", body: "Maybe call me sometime to talk about it" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.6 }, escalation_reason: { choice: "call_request" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Maybe call me sometime to talk about it",
+        inboundMessageId: "inbound-new-lead-below-threshold", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "model:call_request" });
+      expect(state.property.status).toBe("prospect");
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(generateAiReply).not.toHaveBeenCalled();
+      expect(sendSmsToContact).not.toHaveBeenCalled();
+      // Below-threshold new_lead gets a real Needs-a-decision queue row,
+      // not just the generic attention flag.
+      expect(state.jevLeadDecisionCalls).toEqual([
+        expect.objectContaining({
+          rpc: "fn_propose_jev_lead_decision",
+          args: expect.objectContaining({ p_outcome: "new_lead", p_native_confidence: 0.6 }),
+        }),
+      ]);
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it.each(["max_turns_reached", "outside_business_hours"] as const)(
+    "still classifies and applies a Jev decision when reply-ineligible for reply-pacing reasons (%s)",
+    async (skipReason) => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "not_interested", min_confidence: 0.95 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: `inbound-decoupled-${skipReason}`, body: "Not interested, please stop" });
+      vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: skipReason });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "not_interested", confidence: 0.97 } } }),
+      })));
+      try {
+        const result = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "Not interested, please stop",
+          inboundMessageId: `inbound-decoupled-${skipReason}`, propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        // Jev's own decision still applies — never a reply, so
+        // reply-pacing ineligibility does not block it.
+        expect(result.outcome).not.toBe("skipped");
+        expect(state.property.outreach_dispo).toBe("not_interested");
+        expect(generateAiReply).not.toHaveBeenCalled();
+        expect(sendSmsToContact).not.toHaveBeenCalled();
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    },
+  );
+
+  describe("Jev below-threshold wrong_number/not_interested/opted_out — root final-review P1 #1", () => {
+    it.each([
+      { choice: "opted_out", expectedDispo: "opted_out" },
+      { choice: "not_interested", expectedDispo: "not_interested" },
+      { choice: "wrong_number", expectedDispo: "wrong_number" },
+    ] as const)(
+      "leaves properties.outreach_dispo UNCHANGED and creates only a pending review for a below-threshold Jev $choice decision",
+      async ({ choice, expectedDispo }) => {
+        const state = createMockState();
+        state.config.classifier_provider = "jev";
+        state.config.classifier_mode = "automatic";
+        state.jevOutcomeThresholds = [{ outcome: choice, min_confidence: 0.95 }];
+        const supabase = createMockSupabase(state);
+        installSendMock(state);
+        seedInboundMessage(state, { id: `inbound-below-threshold-${choice}`, body: "whatever the reply is" });
+        const originalFetch = globalThis.fetch;
+        vi.stubGlobal("fetch", vi.fn(async () => ({
+          ok: true, status: 200,
+          json: async () => ({ answers: { outcome: { choice, confidence: 0.5 } } }),
+        })));
+        try {
+          const result = await dispatchAiResponse(supabase as never, {
+            contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+            inboundBody: "whatever the reply is",
+            inboundMessageId: `inbound-below-threshold-${choice}`, propertyId: PROPERTY_ID,
+          }, { anthropic: {} as never });
+          // The property's disposition state must be untouched — the
+          // whole point of the fix. Merely "pending review exists" is
+          // NOT sufficient proof; this asserts the actual column.
+          expect(state.property.outreach_dispo).toBeNull();
+          expect(state.property.needs_human_attention).toBe(true);
+          expect(state.aiDispoReviews).toEqual([
+            expect.objectContaining({ disposition: expectedDispo }),
+          ]);
+          // Below threshold means never auto-accepted and never sent —
+          // held for a human either way.
+          expect(result.outcome).not.toBe("sent");
+          expect(generateAiReply).not.toHaveBeenCalled();
+          expect(sendSmsToContact).not.toHaveBeenCalled();
+          // No suppression side effect either — a below-threshold Jev
+          // inference is a model guess, not the deterministic STOP path
+          // (unlike dnc's own Option B, which suppresses immediately).
+          expect(applyPhoneLevelOptOut).not.toHaveBeenCalled();
+        } finally { vi.stubGlobal("fetch", originalFetch); }
+      },
+    );
+
+    it("applies wrong_number/not_interested/opted_out immediately (unchanged legacy behavior) when AT/ABOVE the org's configured threshold", async () => {
+      const state = createMockState();
+      state.config.classifier_provider = "jev";
+      state.config.classifier_mode = "automatic";
+      state.jevOutcomeThresholds = [{ outcome: "opted_out", min_confidence: 0.5 }];
+      const supabase = createMockSupabase(state);
+      installSendMock(state);
+      seedInboundMessage(state, { id: "inbound-above-threshold-opted-out", body: "STOP texting me" });
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal("fetch", vi.fn(async () => ({
+        ok: true, status: 200,
+        json: async () => ({ answers: { outcome: { choice: "opted_out", confidence: 0.99 } } }),
+      })));
+      try {
+        const result = await dispatchAiResponse(supabase as never, {
+          contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+          inboundBody: "STOP texting me",
+          inboundMessageId: "inbound-above-threshold-opted-out", propertyId: PROPERTY_ID,
+        }, { anthropic: {} as never });
+        expect(result).toEqual({ outcome: "opted_out", reason: "model:opt_out" });
+        expect(state.property.outreach_dispo).toBe("opted_out");
+        expect(applyPhoneLevelOptOut).toHaveBeenCalledTimes(1);
+      } finally { vi.stubGlobal("fetch", originalFetch); }
+    });
+  });
+
+  it("does not classify (stays fully skipped) when the org's AI responder is not active, even for a jev-classifier org", async () => {
+    const state = createMockState();
+    state.config.active = false;
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_org_wide" });
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not interested",
+        inboundMessageId: "inbound-decoupled-org-disabled", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "skipped", reason: "disabled_org_wide" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("does not classify (stays fully skipped) when the property's AI responder is disabled — human takeover is respected, not just reply pacing", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.property.ai_responder_disabled = true;
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "disabled_per_property" });
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not interested",
+        inboundMessageId: "inbound-decoupled-property-disabled", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "skipped", reason: "disabled_per_property" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("does not classify (stays fully skipped) when the contact has opted out — suppression is respected, not just reply pacing", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    vi.mocked(getConsentState).mockResolvedValue("opted_out" as never);
+    vi.mocked(classifyAiSkip).mockReturnValue({ skip: true, reason: "no_consent" });
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not interested",
+        inboundMessageId: "inbound-decoupled-opted-out", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "skipped", reason: "no_consent" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("applies Jev nurture when at/above the org's configured threshold", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-nurture-above", body: "Not right now, maybe check back later" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.97 } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not right now, maybe check back later",
+        inboundMessageId: "inbound-nurture-above", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "auto_closed", reason: "model:nurture" });
+      expect(state.property.outreach_dispo).toBe("nurture");
+      expect(state.property.needs_human_attention).toBe(false);
+      expect(generateAiReply).not.toHaveBeenCalled();
+      expect(state.jevLeadDecisionCalls).toEqual([
+        expect.objectContaining({
+          rpc: "fn_auto_apply_jev_lead_decision",
+          args: expect.objectContaining({ p_outcome: "nurture", p_native_confidence: 0.97 }),
+        }),
+      ]);
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("does not apply Jev nurture and instead flags for a human when below the org's configured threshold", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-nurture-below", body: "Not right now" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.6 } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not right now",
+        inboundMessageId: "inbound-nurture-below", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "jev_below_threshold:nurture" });
+      expect(state.property.outreach_dispo).toBeNull();
+      expect(state.property.needs_human_attention).toBe(true);
+      expect(generateAiReply).not.toHaveBeenCalled();
+      expect(state.jevLeadDecisionCalls).toEqual([
+        expect.objectContaining({
+          rpc: "fn_propose_jev_lead_decision",
+          args: expect.objectContaining({ p_outcome: "nurture", p_native_confidence: 0.6 }),
+        }),
+      ]);
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
   it("routes a Jev new lead to attention without nurture, reply, or booking", async () => {
     const state = createMockState();
     state.config.classifier_provider = "jev";
     state.config.classifier_mode = "automatic";
     const supabase = createMockSupabase(state);
     installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-new-lead", body: "Call me tomorrow afternoon to discuss selling" });
     const originalFetch = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, status: 200,
@@ -1516,6 +1956,14 @@ describe("dispatchAiResponse debounce", () => {
       expect(state.aiDispoReviews).toEqual([]);
       expect(generateAiReply).not.toHaveBeenCalled();
       expect(sendSmsToContact).not.toHaveBeenCalled();
+      // No threshold configured at all still gets a real queue row (not
+      // silently defaulted to auto-apply, not silently dropped either).
+      expect(state.jevLeadDecisionCalls).toEqual([
+        expect.objectContaining({
+          rpc: "fn_propose_jev_lead_decision",
+          args: expect.objectContaining({ p_outcome: "new_lead", p_native_confidence: 0.99 }),
+        }),
+      ]);
     } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
@@ -1530,6 +1978,7 @@ describe("dispatchAiResponse debounce", () => {
     state.config.classifier_mode = "automatic";
     const supabase = createMockSupabase(state);
     installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-jev-dnc", body: "I will sue you, stop contacting me" });
 
     const originalFetch = globalThis.fetch;
     const fetchMock = vi.fn(async () => ({
@@ -1585,6 +2034,71 @@ describe("dispatchAiResponse debounce", () => {
     } finally {
       vi.stubGlobal("fetch", originalFetch);
     }
+  });
+
+  // Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 1):
+  // dispatch coverage for the atomic RPC's non-success statuses — must
+  // escalate cleanly, never silently report auto_closed with no real
+  // effect and no audit row.
+  it("escalates (does not auto_close) when the atomic new_lead apply reports dnc_locked", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.property.is_dnc_locked = true;
+    state.jevOutcomeThresholds = [{ outcome: "new_lead", min_confidence: 0.9 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-new-lead-dnc-locked", body: "Yes let's talk" });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "new_lead", confidence: 0.99 }, escalation_reason: { choice: "call_request" } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Yes let's talk",
+        inboundMessageId: "inbound-new-lead-dnc-locked", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "jev_new_lead_promotion_failed" });
+      expect(state.property.status).not.toBe("new_lead");
+      expect(state.property.needs_human_attention).toBe(true);
+    } finally { vi.stubGlobal("fetch", originalFetch); }
+  });
+
+  it("escalates with a distinct reason (does not auto_close) when the atomic nurture apply reports stale_decision_context", async () => {
+    const state = createMockState();
+    state.config.classifier_provider = "jev";
+    state.config.classifier_mode = "automatic";
+    state.jevOutcomeThresholds = [{ outcome: "nurture", min_confidence: 0.95 }];
+    const supabase = createMockSupabase(state);
+    installSendMock(state);
+    seedInboundMessage(state, { id: "inbound-nurture-stale", body: "Not right now" });
+    // Simulate the RPC's own STALE_DECISION_CONTEXT rejection directly —
+    // proves dispatch.ts's error-message branch (not just the happy-path
+    // status field), matching how the real Postgres error surfaces.
+    const originalRpc = supabase.rpc.bind(supabase);
+    vi.spyOn(supabase, "rpc").mockImplementation((name: string, args: Record<string, unknown>) => {
+      if (name === "fn_auto_apply_jev_lead_decision") {
+        return Promise.resolve({ data: null, error: { message: "STALE_DECISION_CONTEXT" } }) as never;
+      }
+      return originalRpc(name, args as never) as never;
+    });
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ answers: { outcome: { choice: "nurture", confidence: 0.99 } } }),
+    })));
+    try {
+      const result = await dispatchAiResponse(supabase as never, {
+        contactId: CONTACT_ID, conversationId: CONVERSATION_ID,
+        inboundBody: "Not right now",
+        inboundMessageId: "inbound-nurture-stale", propertyId: PROPERTY_ID,
+      }, { anthropic: {} as never });
+      expect(result).toEqual({ outcome: "escalated", reason: "jev_stale_decision_context" });
+      expect(state.property.outreach_dispo).toBeNull();
+      expect(state.property.needs_human_attention).toBe(true);
+    } finally { vi.stubGlobal("fetch", originalFetch); }
   });
 
   it("deescalate_close sends the fixed named template without humanizer", async () => {
