@@ -1,5 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { createHash } from "node:crypto";
+import Papa from "papaparse";
 
+import { parseAssignsContactBlocks } from "./assigns-contact-blocks";
 import { normalizePhone } from "./normalize";
 import type { Database, Json } from "@/lib/supabase/types";
 
@@ -54,7 +57,7 @@ async function inBatches<T>(
  */
 export async function recoverAssignsUnknownPhones(
   supabase: SupabaseClient<Database>,
-  input: { jobId: string; orgId: string },
+  input: { jobId: string; orgId: string; storagePath: string; datasetSha256: string },
 ): Promise<AssignsPhoneRecoverySummary> {
   const summary: AssignsPhoneRecoverySummary = {
     scannedContacts: 0,
@@ -66,31 +69,57 @@ export async function recoverAssignsUnknownPhones(
     invalid: 0,
   };
   const submitted = new Set<string>();
+  const { data: blob, error: downloadError } = await supabase.storage
+    .from("csv-imports")
+    .download(input.storagePath);
+  if (downloadError || !blob) {
+    throw new Error(`download reviewed Assigns dataset: ${downloadError?.message ?? "no file"}`);
+  }
+  const text = await blob.text();
+  if (createHash("sha256").update(text).digest("hex") !== input.datasetSha256) {
+    throw new Error("reviewed Assigns dataset checksum mismatch");
+  }
+  const parsed = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: false });
+  if (parsed.errors.length > 0) {
+    throw new Error(`reviewed Assigns dataset parse failed: ${parsed.errors[0]?.message ?? "unknown error"}`);
+  }
+  const rows = parsed.data;
 
   for (let offset = 0; ; offset += PAGE_SIZE) {
     const { data: outcomes, error: outcomesError } = await supabase
-      .from("csv_import_contact_outcomes")
-      .select("property_id, contact_id, source_identity")
+      .from("csv_import_row_outcomes")
+      .select("property_id, source_row_index")
       .eq("job_id", input.jobId)
       .eq("org_id", input.orgId)
-      .order("property_id", { ascending: true })
-      .order("contact_id", { ascending: true })
-      .order("source_identity", { ascending: true })
+      .order("source_row_index", { ascending: true })
       .range(offset, offset + PAGE_SIZE - 1);
-    if (outcomesError) throw new Error(`read Assigns contact outcomes: ${outcomesError.message}`);
+    if (outcomesError) throw new Error(`read import property outcomes: ${outcomesError.message}`);
     if (!outcomes?.length) break;
 
-    // An outcome page contains at most 500 exact source identities. Query in
-    // small identity batches, not just by property: a property can have eight
-    // contacts and PostgREST's default row cap would otherwise silently omit
-    // relations from a large property page.
+    const sourceByKey = new Map<string, string[]>();
+    for (const outcome of outcomes) {
+      const row = rows[outcome.source_row_index];
+      if (!row) throw new Error(`reviewed dataset has no source row ${outcome.source_row_index}`);
+      const blocks = parseAssignsContactBlocks(row["Assigns Contact Blocks"]);
+      for (const block of blocks) {
+        if (!block.sourceIdentity) continue;
+        const phones = sourceUnknownPhonesForRecovery({ phones: block.phones ?? [] });
+        if (phones.length > 0) {
+          sourceByKey.set(`${outcome.property_id}:${block.sourceIdentity}`, phones);
+        }
+      }
+    }
+
+    // Query exact source identities in small batches. Unlike the newer
+    // contact-outcome ledger, the row ledger existed when this import began;
+    // replaying the reviewed source file keeps the fallback exact to this job.
     const relations: Array<{
       property_id: string;
       contact_id: string;
       source_identity: string;
       source_attributes: Json;
     }> = [];
-    const identities = outcomes.map((outcome) => outcome.source_identity);
+    const identities = [...new Set([...sourceByKey.keys()].map((key) => key.split(":").slice(1).join(":")))];
     for (let start = 0; start < identities.length; start += 100) {
       const { data, error: relationsError } = await supabase
         .from("property_contacts")
@@ -104,23 +133,29 @@ export async function recoverAssignsUnknownPhones(
 
     const relationByKey = new Map(
       (relations ?? []).map((relation) => [
-        `${relation.property_id}:${relation.contact_id}:${relation.source_identity}`,
+        `${relation.property_id}:${relation.source_identity}`,
         relation,
       ]),
     );
     const candidates: Array<{ contactId: string; phone: string }> = [];
     for (const outcome of outcomes) {
-      const relation = relationByKey.get(
-        `${outcome.property_id}:${outcome.contact_id}:${outcome.source_identity}`,
-      );
-      if (!relation) continue;
-      summary.scannedContacts++;
-      for (const phone of sourceUnknownPhonesForRecovery(relation.source_attributes)) {
-        summary.sourceUnknownPhones++;
-        const key = `${outcome.contact_id}:${phone}`;
-        if (submitted.has(key)) continue;
-        submitted.add(key);
-        candidates.push({ contactId: outcome.contact_id, phone });
+      const row = rows[outcome.source_row_index];
+      const blocks = parseAssignsContactBlocks(row?.["Assigns Contact Blocks"]);
+      for (const block of blocks) {
+        if (!block.sourceIdentity) continue;
+        const relation = relationByKey.get(
+          `${outcome.property_id}:${block.sourceIdentity}`,
+        );
+        const phones = sourceByKey.get(`${outcome.property_id}:${block.sourceIdentity}`);
+        if (!relation || !phones) continue;
+        summary.scannedContacts++;
+        for (const phone of phones) {
+          summary.sourceUnknownPhones++;
+          const key = `${relation.contact_id}:${phone}`;
+          if (submitted.has(key)) continue;
+          submitted.add(key);
+          candidates.push({ contactId: relation.contact_id, phone });
+        }
       }
     }
 
