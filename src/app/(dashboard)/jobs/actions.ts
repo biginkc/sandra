@@ -334,6 +334,7 @@ export async function createExactCohortList(
     excludedCount: number;
     memberCount: number;
     dncExcludedCount: number;
+    complianceLockedExcludedCount: number;
     traceExcludedCount: number;
     sourceJobId: string;
   }>
@@ -430,10 +431,8 @@ export async function createExactCohortList(
         },
       };
     }
-    const sourcePropertyIds =
-      job.type === "csv_import"
-        ? await readCsvImportCohortPropertyIds(supabase, job.id)
-        : await readSuccessfulSkipTracePropertyIds(
+    const csvImportCohort = job.type === "csv_import" ? await readCsvImportCohortPropertyIds(supabase, job.id) : null;
+    const sourcePropertyIds = csvImportCohort?.propertyIds ?? await readSuccessfulSkipTracePropertyIds(
             supabase,
             job.id,
             new Set(requestedSkipTracePropertyIds),
@@ -510,8 +509,9 @@ export async function createExactCohortList(
         ok: false,
         error: {
           code: "COHORT_NOT_CURRENT_PROSPECTS",
-          message:
-            "The successful skip-trace cohort no longer resolves entirely to live prospects; no list was written.",
+          message: job.type === "csv_import"
+            ? "The successful CSV import cohort no longer resolves entirely to live prospects; no list was written."
+            : "The successful skip-trace cohort no longer resolves entirely to live prospects; no list was written.",
         },
       };
     }
@@ -716,6 +716,7 @@ export async function createExactCohortList(
       excludedCount: sourcePropertyIds.length - eligibleIds.size,
       memberCount: eligibleIds.size,
       dncExcludedCount: eligibility.dncLockedCount,
+      complianceLockedExcludedCount: csvImportCohort?.complianceLockedCount ?? 0,
       traceExcludedCount:
         job.type === "skip_trace"
           ? requestedSkipTracePropertyIds.length - sourcePropertyIds.length
@@ -779,12 +780,13 @@ async function readSuccessfulSkipTracePropertyIds(
 async function readCsvImportCohortPropertyIds(
   supabase: Awaited<ReturnType<typeof createClient>>,
   jobId: string,
-): Promise<string[]> {
+): Promise<{ propertyIds: string[]; complianceLockedCount: number }> {
   const ids = new Set<string>();
+  let complianceLockedCount = 0;
   for (let from = 0; ; from += EXACT_COHORT_WRITE_CHUNK) {
     const { data, error } = await supabase
       .from("job_items")
-      .select("property_id")
+      .select("property_id, compliance_locked")
       .eq("job_id", jobId)
       .in("status", ["success", "skipped"])
       .not("property_id", "is", null)
@@ -792,11 +794,12 @@ async function readCsvImportCohortPropertyIds(
       .range(from, from + EXACT_COHORT_WRITE_CHUNK - 1);
     if (error) throw error;
     for (const row of data ?? []) {
-      if (row.property_id) ids.add(row.property_id);
+      if (row.compliance_locked) complianceLockedCount += 1;
+      else if (row.property_id) ids.add(row.property_id);
     }
     if (!data || data.length < EXACT_COHORT_WRITE_CHUNK) break;
   }
-  return [...ids];
+  return { propertyIds: [...ids], complianceLockedCount };
 }
 
 async function readListMembershipPropertyIds(

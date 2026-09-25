@@ -132,6 +132,7 @@ async function seedJobItems(
     propertyId: string;
     status: "success" | "error" | "skipped";
     errorClass?: string;
+    complianceLocked?: boolean;
   }[],
 ): Promise<void> {
   if (items.length === 0) return;
@@ -142,6 +143,7 @@ async function seedJobItems(
       status: i.status,
       error_class: i.errorClass ?? null,
       error_message: i.status === "error" ? "boom" : null,
+      compliance_locked: i.complianceLocked ?? false,
     }));
     const { error } = await testClient.from("job_items").insert(rows);
     if (error) throw error;
@@ -832,6 +834,15 @@ describe("createExactCohortList (integration)", () => {
     );
   });
 
+  it("excludes compliance-locked CSV checkpoints and reports that exclusion", async () => {
+    const eligible = await seedProperty("CSV eligible cohort St");
+    const locked = await seedProperty("CSV locked cohort St");
+    const jobId = await seedJob({ type: "csv_import", status: "completed", propertyIds: [eligible, locked] });
+    await seedJobItems(jobId, [{ propertyId: eligible, status: "success" }, { propertyId: locked, status: "skipped", complianceLocked: true }]);
+    const result = await createExactCohortList({ jobId, name: "CSV unlocked exact cohort" });
+    expect(result).toMatchObject({ ok: true, data: { requestedCount: 1, memberCount: 1, complianceLockedExcludedCount: 1 } });
+  });
+
   it("excludes failed trace rows instead of silently putting them in the campaign list", async () => {
     const succeeded = await seedProperty("6 Successful Trace St");
     const failed = await seedProperty("7 Failed Trace St");
@@ -889,6 +900,16 @@ describe("createExactCohortList (integration)", () => {
       ok: false,
       error: { code: "COHORT_NOT_CURRENT_PROSPECTS" },
     });
+  });
+
+  it("uses CSV-import wording when the current-prospect gate fails closed", async () => {
+    const promoted = await seedProperty("CSV Already Lead St");
+    const { error: promoteError } = await testClient.from("properties").update({ status: "new_lead" }).eq("id", promoted);
+    expect(promoteError).toBeNull();
+    const jobId = await seedJob({ type: "csv_import", status: "completed", propertyIds: [promoted] });
+    await seedJobItems(jobId, [{ propertyId: promoted, status: "success" }]);
+    const result = await createExactCohortList({ jobId, name: "CSV stale prospect cohort" });
+    expect(result).toMatchObject({ ok: false, error: { code: "COHORT_NOT_CURRENT_PROSPECTS", message: expect.stringContaining("CSV import cohort") } });
   });
 
   it("materializes and verifies all 1,001 successful trace properties across paged reads", async () => {

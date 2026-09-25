@@ -772,7 +772,7 @@ describe("sendSmsToContact (integration)", () => {
 
     const { data: row } = await supabase
       .from("messages")
-      .select("status, direction, external_id, sent_at, conversation_id, campaign_id")
+      .select("status, direction, external_id, sent_at, conversation_id, campaign_id, to_address")
       .eq("id", outcome.messageId)
       .single();
     expect(row?.status).toBe("queued");
@@ -781,6 +781,7 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.sent_at).toBeNull();
     expect(row?.conversation_id).toBeTruthy();
     expect(row?.campaign_id).toBeNull();
+    expect(outcome.toAddress).toBe(row?.to_address);
   });
 
   it("stamps campaign_id on an immediate send when campaignId is provided", async () => {

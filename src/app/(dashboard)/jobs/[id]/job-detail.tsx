@@ -513,6 +513,7 @@ function CsvImportPanel({
   const canCreateExactList = ["completed", "partial", "partially_completed"].includes(
     job.status,
   );
+  const canRecoverImport = ["completed", "partial"].includes(job.status);
 
   return (
     <Card>
@@ -553,15 +554,14 @@ function CsvImportPanel({
           </>
         )}
       </CardContent>
-      {canCreateExactList && (
+      {(canCreateExactList || canRecoverImport) && (
         <CardContent className="flex flex-wrap gap-2 border-t pt-4">
-          <RecoverCassButton importJobId={job.id} />
-          {isAssignsImport && <RecoverAssignsPhonesButton importJobId={job.id} />}
+          {canRecoverImport && <RecoverCassButton importJobId={job.id} />}
+          {canRecoverImport && isAssignsImport && <RecoverAssignsPhonesButton importJobId={job.id} />}
           {canCreateExactList && (
             <ExactCohortListButton
               jobId={job.id}
               defaultName={defaultExactCohortListName(job)}
-              propertyCount={job.processed_items ?? job.total_items ?? 0}
             />
           )}
         </CardContent>

@@ -541,7 +541,8 @@ export async function queueSmsBatch(
     });
 
     if (outcome.status === "queued" || outcome.status === "paused") {
-      if (destinationPhone) alreadyQueuedPhonesForCampaign.add(destinationPhone);
+      const queuedDestinationPhone = outcome.toAddress ?? destinationPhone;
+      if (queuedDestinationPhone) alreadyQueuedPhonesForCampaign.add(queuedDestinationPhone);
       state.succeeded++;
       state.cumulativeOffsetMs = nextOffsetMs;
       state.dayBucketCount += 1;

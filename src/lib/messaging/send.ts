@@ -298,8 +298,8 @@ async function loadRepSmsIdempotencyRow(
 
 export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
-  | { status: "queued"; messageId: string }
-  | { status: "paused"; messageId: string }
+  | { status: "queued"; messageId: string; toAddress?: string }
+  | { status: "paused"; messageId: string; toAddress?: string }
   | {
       status: "blocked_provider_off";
       reason: string;
@@ -1331,7 +1331,7 @@ async function queueForLater(
       error: error?.message ?? "failed to insert queued message",
     };
   }
-  return { status: queuedStatus, messageId: queued.id };
+  return { status: queuedStatus, messageId: queued.id, toAddress: normalizedToPhone };
 }
 
 /**
