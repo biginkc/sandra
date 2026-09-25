@@ -96,6 +96,8 @@ async function seedTaggedLead(args: {
   tagId?: string;
   address: string;
   phone: string;
+  phoneType?: "mobile" | "landline";
+  phone2?: string;
 }): Promise<{ propertyId: string; contactId: string }> {
   const { data: contact, error: contactError } = await testClient
     .from("contacts")
@@ -105,7 +107,11 @@ async function seedTaggedLead(args: {
       first_name: "Campaign",
       last_name: "Lead",
       phone_1: args.phone,
-      phone_1_type: "mobile",
+      phone_1_type: args.phoneType ?? "mobile",
+      // Leave these undefined when absent so the DB's non-null default for
+      // phone_2_type applies on older hosted test schemas.
+      phone_2: args.phone2,
+      phone_2_type: args.phone2 ? "mobile" : undefined,
     })
     .select("id")
     .single();
@@ -1477,7 +1483,11 @@ describe("launchCampaign (integration)", () => {
     const second = await seedTaggedLead({
       orgId,
       address: "2 Shared Phone Way",
-      phone: "8165551901",
+      // The hosted test DB is behind the tenant-scoped phone-index migration,
+      // so keep phone_1 unique and put the equivalent preferred mobile in slot 2.
+      phone: "+18165559901",
+      phoneType: "landline",
+      phone2: "8165551901",
     });
     const distinct = await seedTaggedLead({
       orgId,
@@ -1487,7 +1497,7 @@ describe("launchCampaign (integration)", () => {
     const campaignId = await seedCampaign({
       orgId,
       audienceSnapshot: { search: null, blockStack: [] },
-      body: "One per destination",
+      body: "Hi, this is Mel with BMH. One per destination.",
     });
     const { error: recipientError } = await testClient
       .from("campaign_recipients")
@@ -1501,7 +1511,7 @@ describe("launchCampaign (integration)", () => {
     const opts = {
       campaignId,
       campaignSource: "saved_campaign" as const,
-      body: "One per destination",
+      body: "Hi, this is Mel with BMH. One per destination.",
       paceSeconds: 8,
     };
     const firstChunk = await queueSmsBatch(testClient, {
@@ -1551,7 +1561,9 @@ describe("launchCampaign (integration)", () => {
     const eligibleTwin = await seedTaggedLead({
       orgId,
       address: "2 Eligible Twin Way",
-      phone: "+18165551911",
+      phone: "+18165559911",
+      phoneType: "landline",
+      phone2: "+18165551911",
     });
     const { error: optOutError } = await testClient
       .from("contacts")
@@ -1561,7 +1573,7 @@ describe("launchCampaign (integration)", () => {
     const campaignId = await seedCampaign({
       orgId,
       audienceSnapshot: { search: null, blockStack: [] },
-      body: "Contact-only opt-out check",
+      body: "Hi, this is Mel with BMH. Contact-only opt-out check.",
     });
     await testClient.from("campaign_recipients").insert([
       { campaign_id: campaignId, property_id: contactOptedOut.propertyId, contact_id: contactOptedOut.contactId },
@@ -1569,7 +1581,7 @@ describe("launchCampaign (integration)", () => {
     ]);
     const contactOnly = await queueSmsBatch(testClient, {
       propertyIds: [contactOptedOut.propertyId, eligibleTwin.propertyId],
-      opts: { campaignId, campaignSource: "saved_campaign", body: "Contact-only opt-out check", paceSeconds: 8 },
+      opts: { campaignId, campaignSource: "saved_campaign", body: "Hi, this is Mel with BMH. Contact-only opt-out check.", paceSeconds: 8 },
       state: freshScheduleState(SAFE_NOW.getTime()),
     });
     expect(contactOnly.succeeded).toBe(1);
@@ -1583,12 +1595,14 @@ describe("launchCampaign (integration)", () => {
     const suppressedSecond = await seedTaggedLead({
       orgId,
       address: "4 Suppressed Twin Way",
-      phone: "+18165551912",
+      phone: "+18165559912",
+      phoneType: "landline",
+      phone2: "+18165551912",
     });
     const suppressedCampaignId = await seedCampaign({
       orgId,
       audienceSnapshot: { search: null, blockStack: [] },
-      body: "Phone suppression check",
+      body: "Hi, this is Mel with BMH. Phone suppression check.",
     });
     await testClient.from("campaign_recipients").insert([
       { campaign_id: suppressedCampaignId, property_id: suppressedFirst.propertyId, contact_id: suppressedFirst.contactId },
@@ -1605,7 +1619,7 @@ describe("launchCampaign (integration)", () => {
     expect(suppressionError).toBeNull();
     const phoneSuppressed = await queueSmsBatch(testClient, {
       propertyIds: [suppressedFirst.propertyId, suppressedSecond.propertyId],
-      opts: { campaignId: suppressedCampaignId, campaignSource: "saved_campaign", body: "Phone suppression check", paceSeconds: 8 },
+      opts: { campaignId: suppressedCampaignId, campaignSource: "saved_campaign", body: "Hi, this is Mel with BMH. Phone suppression check.", paceSeconds: 8 },
       state: freshScheduleState(SAFE_NOW.getTime()),
     });
     expect(phoneSuppressed.succeeded).toBe(0);

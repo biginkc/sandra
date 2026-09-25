@@ -21,6 +21,12 @@ vi.mock("workflow/api", () => ({
 vi.mock("next/server", () => ({
   after: vi.fn(),
 }));
+// Server actions call this after committing. There is no Next static-generation
+// store in this database integration runner, so make the test about its durable
+// cohort rows rather than that framework invariant.
+vi.mock("next/cache", () => ({
+  revalidatePath: vi.fn(),
+}));
 
 process.env.ADMIN_EMAILS = "jarrad@bmhgroupkc.com";
 
