@@ -31,6 +31,9 @@ describe("<ExactCohortListButton />", () => {
       data: {
         listId: "list-1",
         name: "CASS verify 4717 properties",
+        requestedCount: 4_717,
+        eligibleCount: 4_700,
+        excludedCount: 17,
         memberCount: 4_700,
         dncExcludedCount: 17,
         traceExcludedCount: 0,

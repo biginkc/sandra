@@ -297,6 +297,34 @@ describe("<JobDetail /> Promote to Leads results", () => {
 });
 
 describe("<JobDetail /> CASS recovery", () => {
+  it("offers an exact cohort list only for terminal CSV imports", () => {
+    const { rerender } = render(
+      <JobDetail
+        job={makeJob({ type: "csv_import", status: "running" })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Create exact cohort list" })).toBeNull();
+
+    rerender(
+      <JobDetail
+        job={makeJob({
+          type: "csv_import",
+          status: "completed",
+          input_params: { source: "Assigns", market: "Jackson County" },
+        })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Create exact cohort list" })).toBeVisible();
+  });
+
   it("offers recovery on a terminal CSV import, never on an unrelated promotion job", () => {
     const { rerender } = render(
       <JobDetail

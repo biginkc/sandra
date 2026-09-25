@@ -707,6 +707,9 @@ describe("createExactCohortList (integration)", () => {
       data: {
         listId: expect.any(String),
         name: "Exact skip-trace Cohort",
+        requestedCount: 3,
+        eligibleCount: 2,
+        excludedCount: 1,
         memberCount: 2,
         dncExcludedCount: 1,
         traceExcludedCount: 0,
@@ -752,16 +755,16 @@ describe("createExactCohortList (integration)", () => {
     expect(result.error.code).toBe("LIST_NAME_COLLISION");
   });
 
-  it("does not materialize a running or unsupported job", async () => {
+  it("does not materialize a non-terminal source job", async () => {
     const p1 = await seedProperty("5 Exact Cohort St");
     const running = await seedJob({
       type: "skip_trace",
       status: "running",
       propertyIds: [p1],
     });
-    const unsupported = await seedJob({
+    const csvNonTerminal = await seedJob({
       type: "csv_import",
-      status: "completed",
+      status: "running",
       propertyIds: [p1],
     });
 
@@ -769,19 +772,58 @@ describe("createExactCohortList (integration)", () => {
       jobId: running,
       name: "Running Cohort",
     });
-    const unsupportedResult = await createExactCohortList({
-      jobId: unsupported,
-      name: "Unsupported Cohort",
+    const csvNonTerminalResult = await createExactCohortList({
+      jobId: csvNonTerminal,
+      name: "CSV running Cohort",
     });
 
     expect(runningResult).toMatchObject({
       ok: false,
       error: { code: "JOB_NOT_TERMINAL" },
     });
-    expect(unsupportedResult).toMatchObject({
+    expect(csvNonTerminalResult).toMatchObject({
       ok: false,
-      error: { code: "JOB_WRONG_TYPE" },
+      error: { code: "JOB_NOT_TERMINAL" },
     });
+  });
+
+  it("materializes inserted and duplicate CSV-import outcomes, never error checkpoints", async () => {
+    const inserted = await seedProperty("CSV inserted cohort St");
+    const duplicate = await seedProperty("CSV duplicate cohort St");
+    const errored = await seedProperty("CSV error cohort St");
+    const jobId = await seedJob({
+      type: "csv_import",
+      status: "completed",
+      // CSV membership is checkpoint-derived, never payload-derived.
+      propertyIds: [errored],
+      inputParams: { property_ids: [errored] },
+    });
+    await seedJobItems(jobId, [
+      { propertyId: inserted, status: "success" },
+      { propertyId: duplicate, status: "skipped" },
+      { propertyId: errored, status: "error", errorClass: "database" },
+    ]);
+
+    const result = await createExactCohortList({ jobId, name: "CSV exact cohort" });
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        requestedCount: 2,
+        eligibleCount: 2,
+        excludedCount: 0,
+        memberCount: 2,
+        traceExcludedCount: 0,
+      },
+    });
+    if (!result.ok) return;
+    const { data: memberships, error } = await testClient
+      .from("property_lists")
+      .select("property_id")
+      .eq("list_id", result.data.listId);
+    expect(error).toBeNull();
+    expect(new Set(memberships?.map((row) => row.property_id))).toEqual(
+      new Set([inserted, duplicate]),
+    );
   });
 
   it("excludes failed trace rows instead of silently putting them in the campaign list", async () => {

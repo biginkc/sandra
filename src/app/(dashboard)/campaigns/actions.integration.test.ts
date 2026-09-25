@@ -52,6 +52,7 @@ import {
 } from "./actions";
 
 import { bulkSmsWorkflow } from "@/workflows/bulk-sms";
+import { freshScheduleState, queueSmsBatch } from "@/lib/messaging/bulk-queue";
 
 function sortIds(ids?: Array<string | null | undefined>): string[] {
   return (ids ?? [])
@@ -1464,6 +1465,151 @@ describe("launchCampaign (integration)", () => {
     if (!relaunch.ok) return;
     expect(relaunch.data.alreadyLaunched).toBe(true);
     expect(relaunch.data.recipientCount).toBe(2);
+  });
+
+  it("queues at most one outbound message per normalized phone across chunks and replays", async () => {
+    const orgId = await getOrgId();
+    const first = await seedTaggedLead({
+      orgId,
+      address: "1 Shared Phone Way",
+      phone: "+18165551901",
+    });
+    const second = await seedTaggedLead({
+      orgId,
+      address: "2 Shared Phone Way",
+      phone: "8165551901",
+    });
+    const distinct = await seedTaggedLead({
+      orgId,
+      address: "3 Distinct Phone Way",
+      phone: "+18165551902",
+    });
+    const campaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: { search: null, blockStack: [] },
+      body: "One per destination",
+    });
+    const { error: recipientError } = await testClient
+      .from("campaign_recipients")
+      .insert([
+        { campaign_id: campaignId, property_id: first.propertyId, contact_id: first.contactId },
+        { campaign_id: campaignId, property_id: second.propertyId, contact_id: second.contactId },
+        { campaign_id: campaignId, property_id: distinct.propertyId, contact_id: distinct.contactId },
+      ]);
+    expect(recipientError).toBeNull();
+
+    const opts = {
+      campaignId,
+      campaignSource: "saved_campaign" as const,
+      body: "One per destination",
+      paceSeconds: 8,
+    };
+    const firstChunk = await queueSmsBatch(testClient, {
+      propertyIds: [first.propertyId],
+      opts,
+      state: freshScheduleState(SAFE_NOW.getTime()),
+    });
+    expect(firstChunk.succeeded).toBe(1);
+
+    const secondChunk = await queueSmsBatch(testClient, {
+      propertyIds: [second.propertyId, distinct.propertyId],
+      opts,
+      state: firstChunk,
+    });
+    expect(secondChunk.succeeded).toBe(2);
+    expect(secondChunk.skipped).toBe(1);
+
+    const { data: messagesBeforeReplay } = await testClient
+      .from("messages")
+      .select("to_address")
+      .eq("campaign_id", campaignId)
+      .eq("direction", "outbound");
+    expect(messagesBeforeReplay).toHaveLength(2);
+    expect(new Set(messagesBeforeReplay?.map((row) => row.to_address))).toEqual(
+      new Set(["+18165551901", "+18165551902"]),
+    );
+
+    await queueSmsBatch(testClient, {
+      propertyIds: [first.propertyId, second.propertyId, distinct.propertyId],
+      opts,
+      state: secondChunk,
+    });
+    const { count: afterReplay } = await testClient
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("campaign_id", campaignId);
+    expect(afterReplay).toBe(2);
+  });
+
+  it("lets an eligible twin through after contact-only opt-out, while phone suppression blocks every twin", async () => {
+    const orgId = await getOrgId();
+    const contactOptedOut = await seedTaggedLead({
+      orgId,
+      address: "1 Contact Opt Out Way",
+      phone: "+18165551911",
+    });
+    const eligibleTwin = await seedTaggedLead({
+      orgId,
+      address: "2 Eligible Twin Way",
+      phone: "+18165551911",
+    });
+    const { error: optOutError } = await testClient
+      .from("contacts")
+      .update({ sms_opted_out: true })
+      .eq("id", contactOptedOut.contactId);
+    expect(optOutError).toBeNull();
+    const campaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: { search: null, blockStack: [] },
+      body: "Contact-only opt-out check",
+    });
+    await testClient.from("campaign_recipients").insert([
+      { campaign_id: campaignId, property_id: contactOptedOut.propertyId, contact_id: contactOptedOut.contactId },
+      { campaign_id: campaignId, property_id: eligibleTwin.propertyId, contact_id: eligibleTwin.contactId },
+    ]);
+    const contactOnly = await queueSmsBatch(testClient, {
+      propertyIds: [contactOptedOut.propertyId, eligibleTwin.propertyId],
+      opts: { campaignId, campaignSource: "saved_campaign", body: "Contact-only opt-out check", paceSeconds: 8 },
+      state: freshScheduleState(SAFE_NOW.getTime()),
+    });
+    expect(contactOnly.succeeded).toBe(1);
+    expect(contactOnly.skipped).toBe(1);
+
+    const suppressedFirst = await seedTaggedLead({
+      orgId,
+      address: "3 Suppressed Twin Way",
+      phone: "+18165551912",
+    });
+    const suppressedSecond = await seedTaggedLead({
+      orgId,
+      address: "4 Suppressed Twin Way",
+      phone: "+18165551912",
+    });
+    const suppressedCampaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: { search: null, blockStack: [] },
+      body: "Phone suppression check",
+    });
+    await testClient.from("campaign_recipients").insert([
+      { campaign_id: suppressedCampaignId, property_id: suppressedFirst.propertyId, contact_id: suppressedFirst.contactId },
+      { campaign_id: suppressedCampaignId, property_id: suppressedSecond.propertyId, contact_id: suppressedSecond.contactId },
+    ]);
+    const { error: suppressionError } = await testClient
+      .from("sms_phone_suppressions")
+      .insert({
+        org_id: orgId,
+        phone_e164: "+18165551912",
+        channel: "sms",
+        source: "integration_test",
+      });
+    expect(suppressionError).toBeNull();
+    const phoneSuppressed = await queueSmsBatch(testClient, {
+      propertyIds: [suppressedFirst.propertyId, suppressedSecond.propertyId],
+      opts: { campaignId: suppressedCampaignId, campaignSource: "saved_campaign", body: "Phone suppression check", paceSeconds: 8 },
+      state: freshScheduleState(SAFE_NOW.getTime()),
+    });
+    expect(phoneSuppressed.succeeded).toBe(0);
+    expect(phoneSuppressed.skipped).toBe(2);
   });
 
   it("rejects launch with CAMPAIGN_SENDER_REQUIRED when the campaign has no stored sender", async () => {

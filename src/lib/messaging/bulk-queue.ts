@@ -326,6 +326,35 @@ export async function queueSmsBatch(
     }
   }
 
+  // Messages are queued in workflow chunks, so property/contact replay keys
+  // alone cannot prevent one destination phone from receiving several messages
+  // in the same campaign. Read the campaign-wide phone set for just this
+  // batch's normalized destinations; the same key is written by sendSmsToContact.
+  const alreadyQueuedPhonesForCampaign = new Set<string>();
+  const batchDestinationPhones = Array.from(
+    new Set(frozenContactDestinationPhone.values()),
+  );
+  for (let i = 0; i < batchDestinationPhones.length; i += CHUNK) {
+    const chunk = batchDestinationPhones.slice(i, i + CHUNK);
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await client
+        .from("messages")
+        .select("to_address")
+        .eq("campaign_id", opts.campaignId)
+        .eq("direction", "outbound")
+        .in("to_address", chunk)
+        .order("id", { ascending: true })
+        .range(from, from + 999);
+      if (error) {
+        throw new Error(`bulk sms campaign phone duplicate check: ${error.message}`);
+      }
+      data?.forEach((row) => {
+        if (row.to_address) alreadyQueuedPhonesForCampaign.add(row.to_address);
+      });
+      if ((data ?? []).length < 1000) break;
+    }
+  }
+
   // Prefetch successfully contacted property IDs in batched queries so
   // the per-property loop doesn't fire N individual round-trips. Failed
   // prior attempts are not real contacts; they should not suppress a
@@ -472,6 +501,14 @@ export async function queueSmsBatch(
       continue;
     }
 
+    // Deliberately after every eligibility, suppression, line-type, consent,
+    // and body gate: an ineligible contact must not consume a phone that an
+    // eligible property/contact row may still use.
+    if (destinationPhone && alreadyQueuedPhonesForCampaign.has(destinationPhone)) {
+      state.skipped++;
+      continue;
+    }
+
     // No volume caps client-side — credits at the provider are the only
     // cap (Jarrad's standing rule). The queue is one continuous paced
     // ramp from the anchor; quiet hours + consent re-check at release.
@@ -504,6 +541,7 @@ export async function queueSmsBatch(
     });
 
     if (outcome.status === "queued" || outcome.status === "paused") {
+      if (destinationPhone) alreadyQueuedPhonesForCampaign.add(destinationPhone);
       state.succeeded++;
       state.cumulativeOffsetMs = nextOffsetMs;
       state.dayBucketCount += 1;

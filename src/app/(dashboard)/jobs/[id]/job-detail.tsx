@@ -510,6 +510,9 @@ function CsvImportPanel({
   const isAssignsImport = isRecord(params.preset) && params.preset.id === "assigns";
   const mapping = (params.mapping as Record<string, string | null>) ?? {};
   const mappedCount = Object.values(mapping).filter(Boolean).length;
+  const canCreateExactList = ["completed", "partial", "partially_completed"].includes(
+    job.status,
+  );
 
   return (
     <Card>
@@ -550,10 +553,17 @@ function CsvImportPanel({
           </>
         )}
       </CardContent>
-      {(job.status === "completed" || job.status === "partial") && (
+      {canCreateExactList && (
         <CardContent className="flex flex-wrap gap-2 border-t pt-4">
           <RecoverCassButton importJobId={job.id} />
           {isAssignsImport && <RecoverAssignsPhonesButton importJobId={job.id} />}
+          {canCreateExactList && (
+            <ExactCohortListButton
+              jobId={job.id}
+              defaultName={defaultExactCohortListName(job)}
+              propertyCount={job.processed_items ?? job.total_items ?? 0}
+            />
+          )}
         </CardContent>
       )}
     </Card>
@@ -720,6 +730,13 @@ function readJobPropertyIds(job: Job): string[] {
 function defaultExactCohortListName(job: Job): string {
   const title = job.title?.trim();
   if (title) return title.slice(0, 80);
+  if (job.type === "csv_import") {
+    const params = (job.input_params as Record<string, unknown> | null) ?? {};
+    const source = typeof params.source === "string" ? params.source.trim() : "CSV import";
+    const market = typeof params.market === "string" ? params.market.trim() : "";
+    const date = job.completed_at ?? job.created_at;
+    return `${source}${market ? ` ${market}` : ""} ${date.slice(0, 10)} exact cohort`.slice(0, 80);
+  }
   return "Skip-trace exact cohort";
 }
 
