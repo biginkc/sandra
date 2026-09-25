@@ -283,14 +283,26 @@ export async function recoverAssignsPhonesForImport(
     if (job.type !== "csv_import" || !["completed", "partial"].includes(job.status)) {
       return { ok: false, error: { code: "IMPORT_NOT_TERMINAL", message: "Phone recovery requires a completed CSV import." } };
     }
-    const preset = (job.input_params as { preset?: { id?: unknown } } | null)?.preset?.id;
+    const params = (job.input_params as {
+      preset?: { id?: unknown };
+      storagePath?: unknown;
+      datasetSha256?: unknown;
+    } | null) ?? {};
+    const preset = params.preset?.id;
     if (preset !== "assigns") {
       return { ok: false, error: { code: "NOT_ASSIGNS_IMPORT", message: "This recovery only supports Assigns imports." } };
+    }
+    const storagePath = typeof params.storagePath === "string" ? params.storagePath : null;
+    const datasetSha256 = typeof params.datasetSha256 === "string" ? params.datasetSha256 : null;
+    if (!storagePath || !datasetSha256 || !storagePath.startsWith(`${job.org_id}/`) || !/^[a-f0-9]{64}$/.test(datasetSha256)) {
+      return { ok: false, error: { code: "IMPORT_PROVENANCE_INVALID", message: "The reviewed dataset provenance is incomplete." } };
     }
 
     const result = await recoverAssignsUnknownPhones(createAdminClient(), {
       jobId: job.id,
       orgId: job.org_id,
+      storagePath,
+      datasetSha256,
     });
     revalidatePath(`/jobs/${job.id}`);
     revalidatePath("/properties");
