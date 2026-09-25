@@ -1551,6 +1551,68 @@ describe("launchCampaign (integration)", () => {
     expect(afterReplay).toBe(2);
   });
 
+  it("uses the insert-time destination guard when a contact changes phones after bulk prefetch", async () => {
+    const orgId = await getOrgId();
+    const first = await seedTaggedLead({
+      orgId,
+      address: "1 Insert Guard Way",
+      phone: "+18165551921",
+    });
+    const changing = await seedTaggedLead({
+      orgId,
+      address: "2 Insert Guard Way",
+      phone: "+18165551922",
+    });
+    const campaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: { search: null, blockStack: [] },
+      body: "Hi, this is Mel with BMH. Insert-time guard.",
+    });
+    const { error: recipientError } = await testClient
+      .from("campaign_recipients")
+      .insert([
+        { campaign_id: campaignId, property_id: first.propertyId, contact_id: first.contactId },
+        { campaign_id: campaignId, property_id: changing.propertyId, contact_id: changing.contactId },
+      ]);
+    expect(recipientError).toBeNull();
+
+    const state = await queueSmsBatch(testClient, {
+      propertyIds: [first.propertyId, changing.propertyId],
+      opts: {
+        campaignId,
+        campaignSource: "saved_campaign",
+        body: "Hi, this is Mel with BMH. Insert-time guard.",
+        paceSeconds: 8,
+      },
+      state: freshScheduleState(SAFE_NOW.getTime()),
+      testHooks: {
+        beforeSend: async ({ contactId }) => {
+          if (contactId !== changing.contactId) return;
+          const { error } = await testClient
+            .from("contacts")
+            .update({
+              phone_1_type: "landline",
+              phone_2: "+18165551921",
+              phone_2_type: "mobile",
+            })
+            .eq("id", changing.contactId);
+          expect(error).toBeNull();
+        },
+      },
+    });
+
+    expect(state.succeeded).toBe(1);
+    expect(state.skipped).toBe(1);
+    expect(state.cumulativeOffsetMs).toBe(0);
+    const { data: rows } = await testClient
+      .from("messages")
+      .select("property_id, to_address")
+      .eq("campaign_id", campaignId)
+      .eq("direction", "outbound");
+    expect(rows).toHaveLength(1);
+    expect(rows?.[0]?.to_address).toBe("+18165551921");
+  });
+
   it("lets an eligible twin through after contact-only opt-out, while phone suppression blocks every twin", async () => {
     const orgId = await getOrgId();
     const contactOptedOut = await seedTaggedLead({

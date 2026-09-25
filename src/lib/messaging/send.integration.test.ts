@@ -852,6 +852,71 @@ describe("sendSmsToContact (integration)", () => {
     expect(row?.campaign_id).toBe(campaign!.id);
   });
 
+  it("skips a bulk-campaign queue when the resolved destination already has an outbound row", async () => {
+    const phone = "+18165552222";
+    const first = await seed({ phone, withConsent: false });
+    // Keep phone_1 unique while resolving the same preferred mobile from
+    // phone_2, matching the production multi-contact campaign case.
+    const second = await seed({
+      phone: "+18165558888",
+      phone1Type: "landline",
+      phone2: phone,
+      phone2Type: "mobile",
+      withConsent: false,
+    });
+    const { data: campaign } = await supabase
+      .from("campaigns")
+      .insert({
+        org_id: "00000000-0000-0000-0000-000000000bbb",
+        name: `Destination Dedupe ${crypto.randomUUID()}`,
+      })
+      .select("id")
+      .single();
+    expect(campaign?.id).toBeTruthy();
+    if (!campaign?.id) return;
+
+    const existing = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId: first.contactId,
+      propertyId: first.propertyId,
+      body: "Existing campaign message Mel with BMH.",
+      queueOnly: true,
+      campaignId: campaign.id,
+      dedupeCampaignDestination: true,
+    });
+    expect(existing.status).toBe("queued");
+    if (existing.status !== "queued") return;
+
+    const replay = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId: first.contactId,
+      propertyId: first.propertyId,
+      body: "Existing campaign message Mel with BMH.",
+      queueOnly: true,
+      campaignId: campaign.id,
+      dedupeCampaignDestination: true,
+    });
+    expect(replay).toMatchObject({ status: "queued", messageId: existing.messageId });
+
+    const duplicate = await sendSmsToContact(supabase, {
+      origin: "automated",
+      contactId: second.contactId,
+      propertyId: second.propertyId,
+      body: "Duplicate destination message Mel with BMH.",
+      queueOnly: true,
+      campaignId: campaign.id,
+      dedupeCampaignDestination: true,
+    });
+    expect(duplicate).toEqual({ status: "skipped_duplicate_destination" });
+
+    const { count } = await supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("campaign_id", campaign.id)
+      .eq("direction", "outbound");
+    expect(count).toBe(1);
+  });
+
   it("holds queue-only campaign messages when the campaign is paused", async () => {
     const { contactId, propertyId } = await seed({ withConsent: false });
     const scheduledFor = new Date("2026-06-30T18:05:00.000Z");

@@ -14,8 +14,16 @@ import { shouldSuppressAutomatedSend } from "../src/lib/messaging/suppression";
 
 const CHUNK = 250;
 const PAGE = 1_000;
+// Keep synchronized with CONTACTED_MESSAGE_STATUSES in bulk-queue.ts.
+const CONTACTED_MESSAGE_STATUSES = ["sent", "delivered"] as const;
 
-type Options = { listId: string; jobId: string; orgId: string; includeUnknown: boolean };
+type Options = {
+  listId: string;
+  jobId: string;
+  orgId: string;
+  includeUnknown: boolean;
+  skipIfContacted: boolean;
+};
 type Recipient = { propertyId: string; contactId: string | null };
 type Contact = SmsPhoneContact & {
   id: string;
@@ -25,7 +33,7 @@ type Contact = SmsPhoneContact & {
 
 function usage(): never {
   throw new Error(
-    "Usage: tsx scripts/campaign-audience-preview.ts (--list-id <uuid> | --job-id <csv-import-job-uuid>) --org-id <uuid> [--include-unknown]",
+    "Usage: tsx scripts/campaign-audience-preview.ts (--list-id <uuid> | --job-id <csv-import-job-uuid>) --org-id <uuid> [--include-unknown] [--skip-if-contacted]",
   );
 }
 
@@ -34,16 +42,18 @@ function parseOptions(argv: string[]): Options {
   let jobId = "";
   let orgId = "";
   let includeUnknown = false;
+  let skipIfContacted = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--list-id") listId = argv[++i] ?? "";
     else if (arg === "--job-id") jobId = argv[++i] ?? "";
     else if (arg === "--org-id") orgId = argv[++i] ?? "";
     else if (arg === "--include-unknown") includeUnknown = true;
+    else if (arg === "--skip-if-contacted") skipIfContacted = true;
     else usage();
   }
   if ((!listId && !jobId) || (listId && jobId) || !orgId) usage();
-  return { listId, jobId, orgId, includeUnknown };
+  return { listId, jobId, orgId, includeUnknown, skipIfContacted };
 }
 
 async function main() {
@@ -130,12 +140,50 @@ async function main() {
 
   const consentEventsByContact = new Map<string, Array<{ event_type: string; occurred_at: string }>>();
   for (let i = 0; i < contactIds.length; i += CHUNK) {
-    const { data, error } = await supabase.from("consent_events").select("contact_id, event_type, occurred_at").eq("channel", "sms").in("contact_id", contactIds.slice(i, i + CHUNK));
-    if (error) throw new Error(`consent read: ${error.message}`);
-    for (const event of data ?? []) { const events = consentEventsByContact.get(event.contact_id) ?? []; events.push(event); consentEventsByContact.set(event.contact_id, events); }
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabase
+        .from("consent_events")
+        .select("contact_id, event_type, occurred_at")
+        .eq("channel", "sms")
+        .in("contact_id", contactIds.slice(i, i + CHUNK))
+        .order("contact_id", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (error) throw new Error(`consent read: ${error.message}`);
+      for (const event of data ?? []) {
+        const events = consentEventsByContact.get(event.contact_id) ?? [];
+        events.push(event);
+        consentEventsByContact.set(event.contact_id, events);
+      }
+      if ((data ?? []).length < PAGE) break;
+    }
   }
 
-  const destinationRows: Array<{ phone: string; contact: Contact; outreachDispo: string | null }> = [];
+  const contactedPropertyIds = new Set<string>();
+  if (opts.skipIfContacted) {
+    const livePropertyIds = Array.from(liveProperties.keys());
+    for (let i = 0; i < livePropertyIds.length; i += CHUNK) {
+      const propertyChunk = livePropertyIds.slice(i, i + CHUNK);
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await supabase
+          .from("messages")
+          .select("property_id")
+          .in("property_id", propertyChunk)
+          .eq("direction", "outbound")
+          .in("status", CONTACTED_MESSAGE_STATUSES)
+          .order("property_id", { ascending: true })
+          .order("id", { ascending: true })
+          .range(from, from + PAGE - 1);
+        if (error) throw new Error(`prior contact read: ${error.message}`);
+        data?.forEach((row) => {
+          if (row.property_id) contactedPropertyIds.add(row.property_id);
+        });
+        if ((data ?? []).length < PAGE) break;
+      }
+    }
+  }
+
+  const destinationRows: Array<{ propertyId: string; phone: string; contact: Contact; outreachDispo: string | null }> = [];
   for (const recipient of recipients) {
     if (!recipient.contactId) continue;
     const contact = contacts.get(recipient.contactId);
@@ -144,9 +192,12 @@ async function main() {
     if (!contact || !property || !destination) continue;
     if (destination.lineType !== "mobile" && !(opts.includeUnknown && destination.lineType === "unknown")) continue;
     const phone = normalizePhone(destination.phone);
-    if (phone) destinationRows.push({ phone, contact, outreachDispo: property.outreach_dispo });
+    if (phone) destinationRows.push({ propertyId: recipient.propertyId, phone, contact, outreachDispo: property.outreach_dispo });
   }
-  const eligibleRows = destinationRows.filter(({ contact, outreachDispo }) => !shouldSuppressAutomatedSend({ outreachDispo, consentState: computeConsentState(consentEventsByContact.get(contact.id) ?? []), doNotContact: contact.do_not_contact, smsOptedOut: contact.sms_opted_out }));
+  const eligibleRows = destinationRows.filter(({ propertyId, contact, outreachDispo }) =>
+    (!opts.skipIfContacted || !contactedPropertyIds.has(propertyId)) &&
+    !shouldSuppressAutomatedSend({ outreachDispo, consentState: computeConsentState(consentEventsByContact.get(contact.id) ?? []), doNotContact: contact.do_not_contact, smsOptedOut: contact.sms_opted_out }),
+  );
   const eligiblePhones = new Set(eligibleRows.map((row) => row.phone));
   const suppressed = await loadSuppressedSmsPhoneSet(supabase, eligiblePhones, opts.orgId);
   const afterSuppression = new Set([...eligiblePhones].filter((phone) => !suppressed.has(phone)));
@@ -159,7 +210,7 @@ async function main() {
   console.log(`mobile destination rows${opts.includeUnknown ? " (including unknown when selected)" : ""}: ${destinationRows.length}`);
   console.log(`destination rows after automated suppression gates: ${eligibleRows.length}`);
   console.log(`unique after automated suppression gates: ${eligiblePhones.size}`);
-  console.log(`unique after org phone suppression (final audience): ${afterSuppression.size}`);
+  console.log(`final audience (skipIfContacted=${opts.skipIfContacted}): ${afterSuppression.size}`);
 }
 
 main().catch((error) => {

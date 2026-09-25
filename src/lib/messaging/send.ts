@@ -300,6 +300,8 @@ export type SendSmsOutcome =
   | { status: "sent"; messageId: string; externalId: string }
   | { status: "queued"; messageId: string; toAddress?: string }
   | { status: "paused"; messageId: string; toAddress?: string }
+  /** A bulk-campaign destination is already represented by an outbound row. */
+  | { status: "skipped_duplicate_destination" }
   | {
       status: "blocked_provider_off";
       reason: string;
@@ -473,6 +475,12 @@ export type SendSmsInput = {
   scheduledFor?: Date | null;
   metadata?: Json | null;
   campaignId?: string | null;
+  /**
+   * Bulk campaigns opt into a final destination check immediately before the
+   * queued row is written. Other callers intentionally retain their current
+   * property/contact-only semantics.
+   */
+  dedupeCampaignDestination?: boolean;
   /**
    * Reply/automation paths must be sender-sticky: prior inbound business
    * number, then campaign Delivery snapshot. Cold sequence first-touches opt
@@ -1289,6 +1297,54 @@ async function queueForLater(
   }
   const queuedStatus = campaignPause.paused ? "paused" : "queued";
   const scheduledFor = input.scheduledFor?.toISOString() ?? null;
+
+  // The campaign/property/contact unique index is the first replay fence.
+  // Keep this before destination de-dupe: repeating the exact recipient must
+  // preserve its existing queued/paused result rather than become a skip.
+  if (input.dedupeCampaignDestination && input.campaignId) {
+    const { data: existingRecipient, error: existingRecipientError } = await supabase
+      .from("messages")
+      .select("id, status, to_address")
+      .eq("campaign_id", input.campaignId)
+      .eq("direction", "outbound")
+      .eq("property_id", input.propertyId)
+      .eq("contact_id", input.contactId)
+      .maybeSingle();
+    if (existingRecipientError) {
+      return { status: "db_error", error: existingRecipientError.message };
+    }
+    if (existingRecipient) {
+      if (existingRecipient.status === "paused") {
+        return {
+          status: "paused",
+          messageId: existingRecipient.id,
+          toAddress: existingRecipient.to_address ?? undefined,
+        };
+      }
+      return {
+        status: "queued",
+        messageId: existingRecipient.id,
+        toAddress: existingRecipient.to_address ?? undefined,
+      };
+    }
+
+    // Re-read against the resolved destination, not bulk-queue's earlier
+    // frozen contact snapshot. A contact can change phones while a batch is
+    // being prepared, so only this value is safe to use for the final guard.
+    const { data: existingDestination, error: existingDestinationError } = await supabase
+      .from("messages")
+      .select("id")
+      .eq("campaign_id", input.campaignId)
+      .eq("direction", "outbound")
+      .eq("to_address", normalizedToPhone)
+      .limit(1)
+      .maybeSingle();
+    if (existingDestinationError) {
+      return { status: "db_error", error: existingDestinationError.message };
+    }
+    if (existingDestination) return { status: "skipped_duplicate_destination" };
+  }
+
   // Stamp send provenance onto the row itself — `releaseQueuedMessage`
   // can't infer it later (a bulk campaign row and a manually-queued
   // composer row look identical by then), so it must be captured here at
