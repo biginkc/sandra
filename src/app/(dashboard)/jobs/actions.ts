@@ -25,7 +25,7 @@ import type { Json } from "@/lib/supabase/types";
 import { skipTraceSubmitWorkflow } from "@/workflows/skip-trace-submit";
 
 const JOB_ITEM_PAGE_SIZE = 500;
-const EXACT_COHORT_JOB_TYPES = new Set(["skip_trace"]);
+const EXACT_COHORT_JOB_TYPES = new Set(["skip_trace", "csv_import"]);
 const EXACT_COHORT_TERMINAL_STATUSES = new Set([
   "completed",
   "partial",
@@ -329,8 +329,12 @@ export async function createExactCohortList(
   Result<{
     listId: string;
     name: string;
+    requestedCount: number;
+    eligibleCount: number;
+    excludedCount: number;
     memberCount: number;
     dncExcludedCount: number;
+    complianceLockedExcludedCount: number;
     traceExcludedCount: number;
     sourceJobId: string;
   }>
@@ -400,7 +404,7 @@ export async function createExactCohortList(
         ok: false,
         error: {
           code: "JOB_WRONG_TYPE",
-          message: "Only completed skip-trace jobs can create an exact cohort list.",
+          message: "Only completed skip-trace or CSV import jobs can create an exact cohort list.",
         },
       };
     }
@@ -414,8 +418,11 @@ export async function createExactCohortList(
       };
     }
 
-    const requestedPropertyIds = readExactCohortPropertyIds(job.input_params);
-    if (requestedPropertyIds.length === 0) {
+    const requestedSkipTracePropertyIds =
+      job.type === "skip_trace"
+        ? readExactCohortPropertyIds(job.input_params)
+        : [];
+    if (job.type === "skip_trace" && requestedSkipTracePropertyIds.length === 0) {
       return {
         ok: false,
         error: {
@@ -424,22 +431,21 @@ export async function createExactCohortList(
         },
       };
     }
-
-    // A partial trace must never place provider failures into a campaign list.
-    // `success` covers both matched and confirmed no-match trace results; both
-    // are completed trace attempts, while `error`/`skipped` require separate
-    // recovery rather than silent inclusion.
-    const successfulPropertyIds = await readSuccessfulSkipTracePropertyIds(
-      supabase,
-      job.id,
-      new Set(requestedPropertyIds),
-    );
-    if (successfulPropertyIds.length === 0) {
+    const csvImportCohort = job.type === "csv_import" ? await readCsvImportCohortPropertyIds(supabase, job.id) : null;
+    const sourcePropertyIds = csvImportCohort?.propertyIds ?? await readSuccessfulSkipTracePropertyIds(
+            supabase,
+            job.id,
+            new Set(requestedSkipTracePropertyIds),
+          );
+    if (sourcePropertyIds.length === 0) {
       return {
         ok: false,
         error: {
           code: "JOB_NO_SUCCESSFUL_PROPERTIES",
-          message: "This skip-trace job has no successful property results to place in a campaign list.",
+          message:
+            job.type === "csv_import"
+              ? "This CSV import has no inserted or duplicate property results to place in a campaign list."
+              : "This skip-trace job has no successful property results to place in a campaign list.",
         },
       };
     }
@@ -451,7 +457,7 @@ export async function createExactCohortList(
     const ownedIds = new Set<string>();
     for (
       let offset = 0;
-      offset < successfulPropertyIds.length;
+      offset < sourcePropertyIds.length;
       offset += EXACT_COHORT_WRITE_CHUNK
     ) {
       const { data: ownedProperties, error: ownershipError } = await supabase
@@ -461,7 +467,7 @@ export async function createExactCohortList(
         .is("deleted_at", null)
         .in(
           "id",
-          successfulPropertyIds.slice(
+          sourcePropertyIds.slice(
             offset,
             offset + EXACT_COHORT_WRITE_CHUNK,
           ),
@@ -477,7 +483,7 @@ export async function createExactCohortList(
       }
       for (const property of ownedProperties ?? []) ownedIds.add(property.id);
     }
-    if (ownedIds.size !== successfulPropertyIds.length) {
+    if (ownedIds.size !== sourcePropertyIds.length) {
       return {
         ok: false,
         error: {
@@ -492,7 +498,7 @@ export async function createExactCohortList(
     // is safe to reuse as a campaign filter without carrying DNC-locked rows.
     const eligibility = await resolveProspectEligibility(
       supabase,
-      successfulPropertyIds,
+      sourcePropertyIds,
       "selection",
     );
     const nonProspectExclusions = eligibility.exclusions.filter(
@@ -503,8 +509,9 @@ export async function createExactCohortList(
         ok: false,
         error: {
           code: "COHORT_NOT_CURRENT_PROSPECTS",
-          message:
-            "The successful skip-trace cohort no longer resolves entirely to live prospects; no list was written.",
+          message: job.type === "csv_import"
+            ? "The successful CSV import cohort no longer resolves entirely to live prospects; no list was written."
+            : "The successful skip-trace cohort no longer resolves entirely to live prospects; no list was written.",
         },
       };
     }
@@ -704,10 +711,16 @@ export async function createExactCohortList(
     return ok({
       listId,
       name,
+      requestedCount: sourcePropertyIds.length,
+      eligibleCount: eligibleIds.size,
+      excludedCount: sourcePropertyIds.length - eligibleIds.size,
       memberCount: eligibleIds.size,
       dncExcludedCount: eligibility.dncLockedCount,
+      complianceLockedExcludedCount: csvImportCohort?.complianceLockedCount ?? 0,
       traceExcludedCount:
-        requestedPropertyIds.length - successfulPropertyIds.length,
+        job.type === "skip_trace"
+          ? requestedSkipTracePropertyIds.length - sourcePropertyIds.length
+          : 0,
       sourceJobId: job.id,
     });
   } catch (e) {
@@ -759,6 +772,34 @@ async function readSuccessfulSkipTracePropertyIds(
     if (!data || data.length < EXACT_COHORT_WRITE_CHUNK) break;
   }
   return [...ids];
+}
+
+/** CSV checkpoints persist both inserted (`success`) and duplicate (`skipped`)
+ * outcomes with their resolved property IDs. Error checkpoints are deliberately
+ * excluded even when an earlier durable step happened to resolve a property. */
+async function readCsvImportCohortPropertyIds(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  jobId: string,
+): Promise<{ propertyIds: string[]; complianceLockedCount: number }> {
+  const ids = new Set<string>();
+  let complianceLockedCount = 0;
+  for (let from = 0; ; from += EXACT_COHORT_WRITE_CHUNK) {
+    const { data, error } = await supabase
+      .from("job_items")
+      .select("property_id, compliance_locked")
+      .eq("job_id", jobId)
+      .in("status", ["success", "skipped"])
+      .not("property_id", "is", null)
+      .order("id", { ascending: true })
+      .range(from, from + EXACT_COHORT_WRITE_CHUNK - 1);
+    if (error) throw error;
+    for (const row of data ?? []) {
+      if (row.compliance_locked) complianceLockedCount += 1;
+      else if (row.property_id) ids.add(row.property_id);
+    }
+    if (!data || data.length < EXACT_COHORT_WRITE_CHUNK) break;
+  }
+  return { propertyIds: [...ids], complianceLockedCount };
 }
 
 async function readListMembershipPropertyIds(

@@ -1,4 +1,5 @@
 import { act, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { routerRefresh } = vi.hoisted(() => ({ routerRefresh: vi.fn() }));
@@ -297,6 +298,34 @@ describe("<JobDetail /> Promote to Leads results", () => {
 });
 
 describe("<JobDetail /> CASS recovery", () => {
+  it("offers an exact cohort list only for terminal CSV imports", () => {
+    const { rerender } = render(
+      <JobDetail
+        job={makeJob({ type: "csv_import", status: "running" })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Create exact cohort list" })).toBeNull();
+
+    rerender(
+      <JobDetail
+        job={makeJob({
+          type: "csv_import",
+          status: "completed",
+          input_params: { source: "Assigns", market: "Jackson County" },
+        })}
+        items={[]}
+        parent={null}
+        childJobs={[]}
+        csvImport={null}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Create exact cohort list" })).toBeVisible();
+  });
+
   it("offers recovery on a terminal CSV import, never on an unrelated promotion job", () => {
     const { rerender } = render(
       <JobDetail
@@ -325,6 +354,20 @@ describe("<JobDetail /> CASS recovery", () => {
     expect(
       screen.getByRole("button", { name: "Recover CASS verification" }),
     ).toBeVisible();
+  });
+
+  it("does not claim processed CSV rows are persisted properties in the exact-list dialog", async () => {
+    const user = userEvent.setup();
+    render(<JobDetail job={makeJob({ type: "csv_import", status: "completed", processed_items: 999 })} items={[]} parent={null} childJobs={[]} csvImport={null} />);
+    await user.click(screen.getByRole("button", { name: "Create exact cohort list" }));
+    expect(screen.getByText(/successful and duplicate persisted CSV import records/i)).toBeVisible();
+    expect(screen.queryByText(/999 persisted job properties/i)).toBeNull();
+  });
+
+  it("does not offer CSV recovery controls for partially completed imports", () => {
+    render(<JobDetail job={makeJob({ type: "csv_import", status: "partially_completed" })} items={[]} parent={null} childJobs={[]} csvImport={null} />);
+    expect(screen.queryByRole("button", { name: "Recover CASS verification" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Create exact cohort list" })).toBeVisible();
   });
 
   it("separates retryable saved-output failures from outcomes needing review", () => {

@@ -22,7 +22,7 @@ import { createExactCohortList } from "./actions";
 type Props = {
   jobId: string;
   defaultName: string;
-  propertyCount: number;
+  propertyCount?: number;
 };
 
 /**
@@ -54,11 +54,12 @@ export function ExactCohortListButton({
       if (!result.ok) return;
 
       const excluded = result.data.dncExcludedCount;
+      const complianceLockedExcluded = result.data.complianceLockedExcludedCount;
       const traceExcluded = result.data.traceExcludedCount;
       toast.success(
         `${result.data.memberCount.toLocaleString()} properties saved${
           excluded > 0 ? ` · ${excluded.toLocaleString()} DNC exclusions` : ""
-        }${
+        }${complianceLockedExcluded > 0 ? ` · ${complianceLockedExcluded.toLocaleString()} compliance-locked import rows excluded` : ""}${
           traceExcluded > 0
             ? ` · ${traceExcluded.toLocaleString()} trace rows excluded`
             : ""
@@ -85,9 +86,7 @@ export function ExactCohortListButton({
           <DialogHeader>
             <DialogTitle>Create exact cohort list</DialogTitle>
             <DialogDescription>
-              This will reuse or create a named list from up to {" "}
-              {propertyCount.toLocaleString()} persisted job properties. Failed
-              trace rows are left out; Sandra re-checks organization ownership,
+              {propertyCount === undefined ? "This will reuse or create a named list from the successful and duplicate persisted CSV import records." : `This will reuse or create a named list from up to ${propertyCount.toLocaleString()} persisted job properties. Failed trace rows are left out;`} {" "}Sandra re-checks organization ownership,
               live prospect records, and DNC locks immediately before writing.
               It does not send messages.
             </DialogDescription>

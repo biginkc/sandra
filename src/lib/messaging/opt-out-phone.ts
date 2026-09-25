@@ -6,6 +6,22 @@ import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { recordConsentEvent } from "@/lib/messaging/consent";
 import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
 import type { Database, Json } from "@/lib/supabase/types";
+import { loadSuppressedSmsPhoneSet as readSuppressedSmsPhoneSet } from "./phone-suppression-read";
+
+export async function loadSuppressedSmsPhoneSet(
+  supabase: SupabaseClient<Database>,
+  rawPhones: Iterable<string | null | undefined>,
+  orgId: string | null | undefined,
+): Promise<Set<string>> {
+  try {
+    return await readSuppressedSmsPhoneSet(supabase, rawPhones, orgId);
+  } catch (error) {
+    reportError(error, {
+      tags: { surface: "sms_phone_suppression_bulk_lookup" },
+    });
+    throw error;
+  }
+}
 
 export type ApplyPhoneLevelOptOutInput = {
   contactId: string | null;
@@ -264,37 +280,6 @@ export async function isSmsPhoneSuppressed(
     throw new Error(`isSmsPhoneSuppressed: ${error.message}`);
   }
   return (data ?? []).length > 0;
-}
-
-export async function loadSuppressedSmsPhoneSet(
-  supabase: SupabaseClient<Database>,
-  rawPhones: Iterable<string | null | undefined>,
-  orgId: string | null | undefined,
-): Promise<Set<string>> {
-  if (!orgId) return new Set<string>();
-  const phones = Array.from(
-    new Set(
-      Array.from(rawPhones)
-        .map((phone) => normalizePhone(phone ?? ""))
-        .filter((phone): phone is string => typeof phone === "string"),
-    ),
-  );
-  if (phones.length === 0) return new Set<string>();
-
-  const { data, error } = await supabase
-    .from("sms_phone_suppressions")
-    .select("phone_e164")
-    .eq("org_id", orgId)
-    .eq("channel", "sms")
-    .in("phone_e164", phones);
-  if (error) {
-    reportError(new Error(error.message), {
-      tags: { surface: "sms_phone_suppression_bulk_lookup" },
-      extra: { count: phones.length },
-    });
-    throw new Error(`loadSuppressedSmsPhoneSet: ${error.message}`);
-  }
-  return new Set((data ?? []).map((row) => row.phone_e164));
 }
 
 async function loadAllContactIdsByPhone(

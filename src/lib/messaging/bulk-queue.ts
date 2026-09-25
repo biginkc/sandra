@@ -79,6 +79,11 @@ export type ResolvedBulkSmsQueueOpts = BulkSmsQueueBaseOpts & {
   campaignSource?: "ad_hoc_bulk_sms" | "saved_campaign";
 };
 
+/** Test-only seam for changes that land after the batch snapshot is read. */
+export type QueueSmsBatchTestHooks = {
+  beforeSend?: (recipient: { propertyId: string; contactId: string }) => Promise<void> | void;
+};
+
 /**
  * Pacing state threaded across chunks so a workflow-chunked run
  * schedules identically to one long loop. Counters ride along so the
@@ -127,6 +132,7 @@ export async function queueSmsBatch(
     propertyIds: string[];
     opts: ResolvedBulkSmsQueueOpts;
     state: BulkSmsScheduleState;
+    testHooks?: QueueSmsBatchTestHooks;
   },
 ): Promise<BulkSmsScheduleState> {
   const { opts, state } = args;
@@ -491,6 +497,7 @@ export async function queueSmsBatch(
       nextOffsetMs = state.cumulativeOffsetMs + paceSeconds * 1000 + jitterMs;
     }
     const scheduledFor = new Date(state.dayBucketStartMs + nextOffsetMs);
+    await args.testHooks?.beforeSend?.({ propertyId, contactId });
     const outcome = await sendSmsToContact(client, {
       origin: "automated",
       contactId,
@@ -498,6 +505,7 @@ export async function queueSmsBatch(
       body,
       from: senderNumber,
       campaignId: opts.campaignId,
+      dedupeCampaignDestination: true,
       queueOnly: true,
       scheduledFor,
       requiresOpeningIdentity: opts.templateCategory === "Opener - Homeowner",
@@ -509,6 +517,7 @@ export async function queueSmsBatch(
       state.dayBucketCount += 1;
     } else if (
       outcome.status === "blocked_no_phone" ||
+      outcome.status === "skipped_duplicate_destination" ||
       outcome.status === "blocked_landline" ||
       outcome.status === "blocked_terminal_dispo" ||
       outcome.status === "contact_not_found" ||
