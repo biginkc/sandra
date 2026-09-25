@@ -40,7 +40,7 @@ import { RetryPromoteLeadsButton } from "../retry-promote-leads-button";
 import { RetryCsvImportButton } from "../retry-csv-import-button";
 import { CassSkipTraceButton } from "../cass-skip-trace-button";
 import { ExactCohortListButton } from "../exact-cohort-list-button";
-import { recoverCassForImport } from "../actions";
+import { recoverAssignsPhonesForImport, recoverCassForImport } from "../actions";
 
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 type JobItem = Database["public"]["Tables"]["job_items"]["Row"];
@@ -459,6 +459,27 @@ function RecoverCassButton({ importJobId }: { importJobId: string }) {
   );
 }
 
+function RecoverAssignsPhonesButton({ importJobId }: { importJobId: string }) {
+  const [pending, startTransition] = useTransition();
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={pending}
+      onClick={() => {
+        startTransition(async () => {
+          await callAction(recoverAssignsPhonesForImport(importJobId), {
+            successMessage: "Assigns phone recovery completed. Refresh Prospects to use the restored numbers.",
+            fallbackMessage: "Could not recover the Assigns phone numbers",
+          });
+        });
+      }}
+    >
+      {pending ? "Recovering phones…" : "Recover Assigns phone numbers"}
+    </Button>
+  );
+}
+
 function promotionCounts(summary: Job["result_summary"]): {
   promoted: number;
   alreadyLead: number;
@@ -486,6 +507,7 @@ function CsvImportPanel({
   csvImport: CsvImport | null;
 }) {
   const params = (job.input_params as Record<string, unknown> | null) ?? {};
+  const isAssignsImport = isRecord(params.preset) && params.preset.id === "assigns";
   const mapping = (params.mapping as Record<string, string | null>) ?? {};
   const mappedCount = Object.values(mapping).filter(Boolean).length;
 
@@ -529,8 +551,9 @@ function CsvImportPanel({
         )}
       </CardContent>
       {(job.status === "completed" || job.status === "partial") && (
-        <CardContent className="border-t pt-4">
+        <CardContent className="flex flex-wrap gap-2 border-t pt-4">
           <RecoverCassButton importJobId={job.id} />
+          {isAssignsImport && <RecoverAssignsPhonesButton importJobId={job.id} />}
         </CardContent>
       )}
     </Card>

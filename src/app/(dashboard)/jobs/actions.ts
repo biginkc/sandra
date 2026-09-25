@@ -18,6 +18,7 @@ import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvents } from "@/lib/events";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { recoverAssignsUnknownPhones } from "@/lib/csv/recover-assigns-phones";
 import { preflightSkipTrace } from "@/lib/skip-trace/actions";
 import { resolveProspectEligibility } from "@/lib/prospects/eligibility";
 import type { Json } from "@/lib/supabase/types";
@@ -243,6 +244,60 @@ export async function recoverCassForImport(
   } catch (e) {
     reportError(e, { tags: { surface: "recover_cass_for_import" }, extra: { importJobId } });
     return errFromUnknown(e, "RECOVER_CASS_FOR_IMPORT_FAILED");
+  }
+}
+
+/**
+ * Restore phone slots that the Assigns importer left in its immutable source
+ * envelope because the vendor did not supply a recognized line type. This is
+ * intentionally an exact-import recovery: no alternate properties, no trace
+ * request, and no interpretation or mutation of source DNC metadata.
+ */
+export async function recoverAssignsPhonesForImport(
+  importJobId: string,
+): Promise<
+  Result<{
+    scannedContacts: number;
+    sourceUnknownPhones: number;
+    added: number;
+    alreadyPresent: number;
+    noOpenSlot: number;
+    unavailable: number;
+    invalid: number;
+  }>
+> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!isAdminEmail(user?.email)) {
+      return { ok: false, error: { code: "FORBIDDEN", message: "Admin access is required." } };
+    }
+    const { data: job, error } = await supabase
+      .from("jobs")
+      .select("id, org_id, type, status, input_params")
+      .eq("id", importJobId)
+      .maybeSingle();
+    if (error || !job) {
+      return { ok: false, error: { code: "JOB_NOT_FOUND", message: error?.message ?? "Import job not found." } };
+    }
+    if (job.type !== "csv_import" || !["completed", "partial"].includes(job.status)) {
+      return { ok: false, error: { code: "IMPORT_NOT_TERMINAL", message: "Phone recovery requires a completed CSV import." } };
+    }
+    const preset = (job.input_params as { preset?: { id?: unknown } } | null)?.preset?.id;
+    if (preset !== "assigns") {
+      return { ok: false, error: { code: "NOT_ASSIGNS_IMPORT", message: "This recovery only supports Assigns imports." } };
+    }
+
+    const result = await recoverAssignsUnknownPhones(createAdminClient(), {
+      jobId: job.id,
+      orgId: job.org_id,
+    });
+    revalidatePath(`/jobs/${job.id}`);
+    revalidatePath("/properties");
+    return ok(result);
+  } catch (e) {
+    reportError(e, { tags: { surface: "recover_assigns_phones" }, extra: { importJobId } });
+    return errFromUnknown(e, "RECOVER_ASSIGNS_PHONES_FAILED");
   }
 }
 
