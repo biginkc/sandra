@@ -53,6 +53,7 @@ import {
 
 import { bulkSmsWorkflow } from "@/workflows/bulk-sms";
 import { freshScheduleState, queueSmsBatch } from "@/lib/messaging/bulk-queue";
+import { sendSmsToContact } from "@/lib/messaging/send";
 
 function sortIds(ids?: Array<string | null | undefined>): string[] {
   return (ids ?? [])
@@ -1573,11 +1574,25 @@ describe("launchCampaign (integration)", () => {
       .insert([
         { campaign_id: campaignId, property_id: first.propertyId, contact_id: first.contactId },
         { campaign_id: campaignId, property_id: changing.propertyId, contact_id: changing.contactId },
-      ]);
+    ]);
     expect(recipientError).toBeNull();
 
+    const existing = await sendSmsToContact(testClient, {
+      origin: "automated",
+      contactId: first.contactId,
+      propertyId: first.propertyId,
+      body: "Hi, this is Mel with BMH. Insert-time guard.",
+      from: MOCK_SENDER_PRIMARY,
+      campaignId,
+      dedupeCampaignDestination: true,
+      queueOnly: true,
+    });
+    expect(existing.status).toBe("queued");
+
+    let threadCountAfterBeforeSend: number | null = null;
+
     const state = await queueSmsBatch(testClient, {
-      propertyIds: [first.propertyId, changing.propertyId],
+      propertyIds: [changing.propertyId],
       opts: {
         campaignId,
         campaignSource: "saved_campaign",
@@ -1594,14 +1609,21 @@ describe("launchCampaign (integration)", () => {
               phone_1_type: "landline",
               phone_2: "+18165551921",
               phone_2_type: "mobile",
-            })
+          })
             .eq("id", changing.contactId);
           expect(error).toBeNull();
+          const { count, error: threadError } = await testClient
+            .from("message_threads")
+            .select("*", { count: "exact", head: true })
+            .eq("contact_id", changing.contactId)
+            .eq("property_id", changing.propertyId);
+          expect(threadError).toBeNull();
+          threadCountAfterBeforeSend = count;
         },
       },
     });
 
-    expect(state.succeeded).toBe(1);
+    expect(state.succeeded).toBe(0);
     expect(state.skipped).toBe(1);
     expect(state.cumulativeOffsetMs).toBe(0);
     const { data: rows } = await testClient
@@ -1611,6 +1633,121 @@ describe("launchCampaign (integration)", () => {
       .eq("direction", "outbound");
     expect(rows).toHaveLength(1);
     expect(rows?.[0]?.to_address).toBe("+18165551921");
+
+    const { count: changingThreadCount, error: changingThreadError } = await testClient
+      .from("message_threads")
+      .select("*", { count: "exact", head: true })
+      .eq("contact_id", changing.contactId)
+      .eq("property_id", changing.propertyId);
+    expect(changingThreadError).toBeNull();
+    expect(threadCountAfterBeforeSend).not.toBeNull();
+    expect(changingThreadCount).toBe(threadCountAfterBeforeSend);
+  });
+
+  it("queues to a newly resolved destination when bulk prefetch saw an already-used phone", async () => {
+    const orgId = await getOrgId();
+    const existing = await seedTaggedLead({
+      orgId,
+      address: "1 Reverse Guard Way",
+      phone: "+18165551931",
+    });
+    const changing = await seedTaggedLead({
+      orgId,
+      address: "2 Reverse Guard Way",
+      phone: "+18165559931",
+      phoneType: "landline",
+      phone2: "+18165551931",
+    });
+    const campaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: { search: null, blockStack: [] },
+      body: "Hi, this is Mel with BMH. Reverse insert-time guard.",
+    });
+    const { error: recipientError } = await testClient
+      .from("campaign_recipients")
+      .insert({
+        campaign_id: campaignId,
+        property_id: changing.propertyId,
+        contact_id: changing.contactId,
+      });
+    expect(recipientError).toBeNull();
+
+    const { error: existingMessageError } = await testClient.from("messages").insert({
+      org_id: orgId,
+      channel: "sms",
+      direction: "outbound",
+      status: "queued",
+      provider: "mock",
+      campaign_id: campaignId,
+      contact_id: existing.contactId,
+      property_id: existing.propertyId,
+      from_address: MOCK_SENDER_PRIMARY,
+      to_address: "+18165551931",
+      body: "Existing destination row",
+    });
+    expect(existingMessageError).toBeNull();
+
+    const state = await queueSmsBatch(testClient, {
+      propertyIds: [changing.propertyId],
+      opts: {
+        campaignId,
+        campaignSource: "saved_campaign",
+        body: "Hi, this is Mel with BMH. Reverse insert-time guard.",
+        paceSeconds: 8,
+      },
+      state: freshScheduleState(SAFE_NOW.getTime()),
+      testHooks: {
+        beforeSend: async ({ contactId }) => {
+          if (contactId !== changing.contactId) return;
+          const { error } = await testClient
+            .from("contacts")
+            .update({ phone_1: "+18165551932", phone_1_type: "mobile" })
+            .eq("id", changing.contactId);
+          expect(error).toBeNull();
+        },
+      },
+    });
+
+    expect(state.succeeded).toBe(1);
+    expect(state.skipped).toBe(0);
+    const { data: queued } = await testClient
+      .from("messages")
+      .select("to_address")
+      .eq("campaign_id", campaignId)
+      .eq("property_id", changing.propertyId)
+      .eq("contact_id", changing.contactId)
+      .single();
+    expect(queued?.to_address).toBe("+18165551932");
+  });
+
+  it("replays a queued campaign recipient instead of classifying its own destination as duplicate", async () => {
+    const orgId = await getOrgId();
+    const recipient = await seedTaggedLead({
+      orgId,
+      address: "1 Replay Guard Way",
+      phone: "+18165551941",
+    });
+    const campaignId = await seedCampaign({
+      orgId,
+      audienceSnapshot: { search: null, blockStack: [] },
+      body: "Hi, this is Mel with BMH. Replay guard.",
+    });
+    const input = {
+      origin: "automated" as const,
+      contactId: recipient.contactId,
+      propertyId: recipient.propertyId,
+      body: "Hi, this is Mel with BMH. Replay guard.",
+      from: MOCK_SENDER_PRIMARY,
+      campaignId,
+      dedupeCampaignDestination: true,
+      queueOnly: true,
+    };
+
+    const first = await sendSmsToContact(testClient, input);
+    expect(first.status).toBe("queued");
+    if (first.status !== "queued") return;
+    const replay = await sendSmsToContact(testClient, input);
+    expect(replay).toMatchObject({ status: "queued", messageId: first.messageId });
   });
 
   it("lets an eligible twin through after contact-only opt-out, while phone suppression blocks every twin", async () => {

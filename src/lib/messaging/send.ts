@@ -1231,6 +1231,61 @@ async function queueForLater(
       error: e instanceof Error ? e.message : String(e),
     };
   }
+  const normalizedToPhone = normalizePhone(destination.phone) ?? destination.phone;
+
+  // This is the final campaign-destination duplicate decision. It must use
+  // the destination just resolved from the live contact record, before a
+  // thread is created. Excluding the current row is essential because the
+  // property/contact replay lookup follows this destination guard.
+  if (input.dedupeCampaignDestination && input.campaignId) {
+    const { data: existingDestination, error: existingDestinationError } = await supabase
+      .from("messages")
+      .select("id")
+      .eq("campaign_id", input.campaignId)
+      .eq("direction", "outbound")
+      .eq("to_address", normalizedToPhone)
+      // Equivalent to NOT (property_id = input.propertyId AND
+      // contact_id = input.contactId), while retaining rows whose nullable
+      // keys differ from the input row.
+      .or(
+        `property_id.neq.${input.propertyId},property_id.is.null,contact_id.neq.${input.contactId},contact_id.is.null`,
+      )
+      .limit(1)
+      .maybeSingle();
+    if (existingDestinationError) {
+      return { status: "db_error", error: existingDestinationError.message };
+    }
+    if (existingDestination) return { status: "skipped_duplicate_destination" };
+
+    // The campaign/property/contact unique index is the replay fence. It
+    // intentionally follows destination de-dupe so the own-key exclusion
+    // above is exercised for replays instead of misclassifying the row.
+    const { data: existingRecipient, error: existingRecipientError } = await supabase
+      .from("messages")
+      .select("id, status, to_address")
+      .eq("campaign_id", input.campaignId)
+      .eq("direction", "outbound")
+      .eq("property_id", input.propertyId)
+      .eq("contact_id", input.contactId)
+      .maybeSingle();
+    if (existingRecipientError) {
+      return { status: "db_error", error: existingRecipientError.message };
+    }
+    if (existingRecipient) {
+      if (existingRecipient.status === "paused") {
+        return {
+          status: "paused",
+          messageId: existingRecipient.id,
+          toAddress: existingRecipient.to_address ?? undefined,
+        };
+      }
+      return {
+        status: "queued",
+        messageId: existingRecipient.id,
+        toAddress: existingRecipient.to_address ?? undefined,
+      };
+    }
+  }
 
   let conversationId: string;
   try {
@@ -1245,7 +1300,6 @@ async function queueForLater(
       error: e instanceof Error ? e.message : String(e),
     };
   }
-  const normalizedToPhone = normalizePhone(destination.phone) ?? destination.phone;
   const provider = getMessagingProvider();
   if (!provider || provider.providerId !== providerId) {
     return {
@@ -1297,53 +1351,6 @@ async function queueForLater(
   }
   const queuedStatus = campaignPause.paused ? "paused" : "queued";
   const scheduledFor = input.scheduledFor?.toISOString() ?? null;
-
-  // The campaign/property/contact unique index is the first replay fence.
-  // Keep this before destination de-dupe: repeating the exact recipient must
-  // preserve its existing queued/paused result rather than become a skip.
-  if (input.dedupeCampaignDestination && input.campaignId) {
-    const { data: existingRecipient, error: existingRecipientError } = await supabase
-      .from("messages")
-      .select("id, status, to_address")
-      .eq("campaign_id", input.campaignId)
-      .eq("direction", "outbound")
-      .eq("property_id", input.propertyId)
-      .eq("contact_id", input.contactId)
-      .maybeSingle();
-    if (existingRecipientError) {
-      return { status: "db_error", error: existingRecipientError.message };
-    }
-    if (existingRecipient) {
-      if (existingRecipient.status === "paused") {
-        return {
-          status: "paused",
-          messageId: existingRecipient.id,
-          toAddress: existingRecipient.to_address ?? undefined,
-        };
-      }
-      return {
-        status: "queued",
-        messageId: existingRecipient.id,
-        toAddress: existingRecipient.to_address ?? undefined,
-      };
-    }
-
-    // Re-read against the resolved destination, not bulk-queue's earlier
-    // frozen contact snapshot. A contact can change phones while a batch is
-    // being prepared, so only this value is safe to use for the final guard.
-    const { data: existingDestination, error: existingDestinationError } = await supabase
-      .from("messages")
-      .select("id")
-      .eq("campaign_id", input.campaignId)
-      .eq("direction", "outbound")
-      .eq("to_address", normalizedToPhone)
-      .limit(1)
-      .maybeSingle();
-    if (existingDestinationError) {
-      return { status: "db_error", error: existingDestinationError.message };
-    }
-    if (existingDestination) return { status: "skipped_duplicate_destination" };
-  }
 
   // Stamp send provenance onto the row itself — `releaseQueuedMessage`
   // can't infer it later (a bulk campaign row and a manually-queued
