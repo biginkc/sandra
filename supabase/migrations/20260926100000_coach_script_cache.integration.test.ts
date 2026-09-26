@@ -10,10 +10,8 @@ import type { Database } from "@/lib/supabase/types";
 import { createTestClient } from "@tests/integration/client";
 import { loadTestEnv } from "@tests/integration/env";
 
-const serviceClient = createTestClient();
 const createdUserIds: string[] = [];
 let pg: Client;
-let createdSchemaThisRun = false;
 
 type Revision = {
   digest: string;
@@ -28,7 +26,10 @@ type CacheClient = {
   from(table: "coach_script_revisions"): {
     insert(values: Revision): Promise<{ error: { message: string } | null }>;
     select(columns: "digest"): {
-      eq(column: "digest", value: string): Promise<{
+      eq(
+        column: "digest",
+        value: string,
+      ): Promise<{
         data: { digest: string }[] | null;
         error: { message: string } | null;
       }>;
@@ -75,35 +76,25 @@ function testDbUrl(): string {
       "Missing TEST_SUPABASE_DB_URL in .env.test.local — see tests/integration/README.md.",
     );
   }
+  const parsed = new URL(url);
+  if (
+    process.env.E2E_DISPOSABLE_DATABASE !== "1" ||
+    parsed.hostname !== "127.0.0.1" ||
+    parsed.port !== "54322" ||
+    parsed.username !== "postgres" ||
+    parsed.pathname !== "/postgres"
+  ) {
+    throw new Error(
+      "Coach script cache migration tests require the disposable local Supabase database (E2E_DISPOSABLE_DATABASE=1). Refusing any shared or hosted database.",
+    );
+  }
   return url;
 }
 
-async function schemaAlreadyExists(): Promise<boolean> {
-  const { rows } = await pg.query<{
-    revisions: boolean;
-    defaults: boolean;
-    script_slug: boolean;
-    script_revision: boolean;
-    script_digest: boolean;
-  }>(`
-    select
-      to_regclass('public.coach_script_revisions') is not null as revisions,
-      to_regclass('public.coach_script_defaults') is not null as defaults,
-      exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'coach_call_index' and column_name = 'script_slug') as script_slug,
-      exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'coach_call_index' and column_name = 'script_revision') as script_revision,
-      exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'coach_call_index' and column_name = 'script_digest') as script_digest
-  `);
-  const shape = rows[0];
-  if (shape?.revisions || shape?.defaults || shape?.script_slug || shape?.script_revision || shape?.script_digest) {
-    if (!shape.revisions || !shape.defaults || !shape.script_slug || !shape.script_revision || !shape.script_digest) {
-      throw new Error(
-        `coach script cache schema is partially present; refusing to reapply or roll back it: ${JSON.stringify(shape)}`,
-      );
-    }
-    return true;
-  }
-  return false;
-}
+// Evaluate before creating an API client so this test cannot even initialize
+// against a shared or hosted database.
+const disposableDbUrl = testDbUrl();
+const serviceClient = createTestClient();
 
 async function assertExistingSchemaShape(): Promise<void> {
   const { rows } = await pg.query<{
@@ -126,30 +117,14 @@ async function assertExistingSchemaShape(): Promise<void> {
   });
 }
 
-async function applyMigrationIfNeeded(): Promise<void> {
-  if (await schemaAlreadyExists()) {
-    await assertExistingSchemaShape();
-    return;
-  }
-  await pg.query(
-    readFileSync(path.resolve(__dirname, "20260926100000_coach_script_cache.sql"), "utf8"),
+async function applyMigrationTwice(): Promise<void> {
+  const migration = readFileSync(
+    path.resolve(__dirname, "20260926100000_coach_script_cache.sql"),
+    "utf8",
   );
-  createdSchemaThisRun = true;
-}
-
-async function rollbackSchemaIfCreatedThisRun(): Promise<void> {
-  if (!createdSchemaThisRun) return;
-  await pg.query(`
-    begin;
-    alter table public.coach_call_index
-      drop column if exists script_digest,
-      drop column if exists script_revision,
-      drop column if exists script_slug;
-    drop table if exists public.coach_script_defaults;
-    drop table if exists public.coach_script_revisions;
-    drop function if exists public.prevent_coach_script_revision_mutation();
-    commit;
-  `);
+  await pg.query(migration);
+  await pg.query(migration);
+  await assertExistingSchemaShape();
 }
 
 function digestFor(label: string): string {
@@ -175,7 +150,8 @@ async function insertRevision(label: string): Promise<Revision> {
 async function createAuthenticatedClient(label: string) {
   const env = loadTestEnv();
   const url = process.env.TEST_SUPABASE_URL ?? env.TEST_SUPABASE_URL;
-  const anonKey = process.env.TEST_SUPABASE_ANON_KEY ?? env.TEST_SUPABASE_ANON_KEY;
+  const anonKey =
+    process.env.TEST_SUPABASE_ANON_KEY ?? env.TEST_SUPABASE_ANON_KEY;
   if (!url || !anonKey) throw new Error("Missing Sandra test URL or anon key.");
 
   const password = `Coach-${crypto.randomUUID()}-A1!`;
@@ -199,25 +175,23 @@ async function createAuthenticatedClient(label: string) {
 }
 
 beforeAll(async () => {
-  pg = new Client({ connectionString: testDbUrl() });
+  pg = new Client({ connectionString: disposableDbUrl });
   await pg.connect();
-  await applyMigrationIfNeeded();
+  await applyMigrationTwice();
 });
 
 afterAll(async () => {
   const cleanupErrors: string[] = [];
   for (const userId of createdUserIds) {
     const { error } = await serviceClient.auth.admin.deleteUser(userId);
-    if (error) cleanupErrors.push(`delete auth user ${userId}: ${error.message}`);
-  }
-  try {
-    await rollbackSchemaIfCreatedThisRun();
-  } catch (error) {
-    cleanupErrors.push(`rollback cache schema: ${error instanceof Error ? error.message : String(error)}`);
+    if (error)
+      cleanupErrors.push(`delete auth user ${userId}: ${error.message}`);
   }
   await pg.end();
   if (cleanupErrors.length > 0) {
-    throw new Error(`coach script cache cleanup failed: ${cleanupErrors.join("; ")}`);
+    throw new Error(
+      `coach script cache cleanup failed: ${cleanupErrors.join("; ")}`,
+    );
   }
 });
 
@@ -235,17 +209,24 @@ describe("Migration 20260926100000 — coach script cache", () => {
 
     const { error: directWriteError } = await asCacheClient(reader.client)
       .from("coach_script_revisions")
-      .insert({ ...revision, digest: digestFor(`forbidden-${crypto.randomUUID()}`) });
-    expect(directWriteError?.message).toMatch(/permission denied|row-level security/i);
+      .insert({
+        ...revision,
+        digest: digestFor(`forbidden-${crypto.randomUUID()}`),
+      });
+    expect(directWriteError?.message).toMatch(
+      /permission denied|row-level security/i,
+    );
 
     await expect(
-      pg.query("update public.coach_script_revisions set slug = $1 where digest = $2", [
-        `changed-${crypto.randomUUID()}`,
-        revision.digest,
-      ]),
+      pg.query(
+        "update public.coach_script_revisions set slug = $1 where digest = $2",
+        [`changed-${crypto.randomUUID()}`, revision.digest],
+      ),
     ).rejects.toThrow(/immutable/);
     await expect(
-      pg.query("delete from public.coach_script_revisions where digest = $1", [revision.digest]),
+      pg.query("delete from public.coach_script_revisions where digest = $1", [
+        revision.digest,
+      ]),
     ).rejects.toThrow(/immutable/);
   });
 
@@ -256,7 +237,9 @@ describe("Migration 20260926100000 — coach script cache", () => {
     const { error: defaultWriteError } = await asCacheClient(reader.client)
       .from("coach_script_defaults")
       .upsert({ slug: revision.slug, digest: revision.digest });
-    expect(defaultWriteError?.message).toMatch(/permission denied|row-level security/i);
+    expect(defaultWriteError?.message).toMatch(
+      /permission denied|row-level security/i,
+    );
 
     const { error: serviceWriteError } = await asCacheClient(serviceClient)
       .from("coach_script_defaults")

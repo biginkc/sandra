@@ -113,6 +113,11 @@ jobs:
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
         run: npx vitest run --config vitest.integration.config.ts supabase/migrations/20260914235900_esign_canary_lease.integration.test.ts
+      - name: Verify coach script cache migration on disposable database
+        if: success()
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+        run: npx vitest run --config vitest.integration.config.ts supabase/migrations/20260926100000_coach_script_cache.integration.test.ts
       - name: Destroy disposable E2E database
         if: always() && env.E2E_LOCAL_WORKDIR != ''
         run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup

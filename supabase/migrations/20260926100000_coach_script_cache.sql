@@ -46,6 +46,9 @@ alter table public.coach_script_revisions enable row level security;
 revoke all on table public.coach_script_revisions from public, anon, authenticated;
 grant select on table public.coach_script_revisions to authenticated;
 
+-- R20: revisions are intentionally readable by every authenticated user;
+-- cached content is shared coaching reference material, while writes remain
+-- service-role-only and immutable after insertion.
 drop policy if exists coach_script_revisions_authenticated_select on public.coach_script_revisions;
 create policy coach_script_revisions_authenticated_select on public.coach_script_revisions
   for select
@@ -58,11 +61,20 @@ create table if not exists public.coach_script_defaults (
   updated_at timestamptz not null default now()
 );
 
-alter table public.coach_script_defaults
-  add constraint coach_script_defaults_digest_slug_fkey
-  foreign key (digest, slug)
-  references public.coach_script_revisions(digest, slug)
-  on delete restrict;
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'coach_script_defaults_digest_slug_fkey'
+  ) then
+    alter table public.coach_script_defaults
+      add constraint coach_script_defaults_digest_slug_fkey
+      foreign key (digest, slug)
+      references public.coach_script_revisions(digest, slug)
+      on delete restrict;
+  end if;
+end;
+$$;
 
 comment on table public.coach_script_defaults is
   'Service-role-managed current cached revision by script slug. Absence is an expected unavailable-script state, never a fallback signal.';
@@ -78,12 +90,21 @@ alter table public.coach_call_index
   add column if not exists script_revision integer null,
   add column if not exists script_digest text null;
 
-alter table public.coach_call_index
-  add constraint coach_call_index_script_binding_fkey
-  foreign key (script_digest, script_slug, script_revision)
-  references public.coach_script_revisions(digest, slug, revision)
-  match full
-  on delete restrict;
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'coach_call_index_script_binding_fkey'
+  ) then
+    alter table public.coach_call_index
+      add constraint coach_call_index_script_binding_fkey
+      foreign key (script_digest, script_slug, script_revision)
+      references public.coach_script_revisions(digest, slug, revision)
+      match full
+      on delete restrict;
+  end if;
+end;
+$$;
 
 comment on column public.coach_call_index.script_slug is
   'Cached script slug selected at call start; null means coaching is unavailable for this call.';
