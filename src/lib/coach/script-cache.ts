@@ -95,6 +95,8 @@ export async function syncCoachScriptCache(deps: {
   if (!payload || typeof payload !== "object" || !Array.isArray((payload as { scripts?: unknown }).scripts)) {
     throw new Error("Closer Lab returned an invalid coach script catalogue");
   }
+  // Validate the entire catalogue before writing any row: defaults must
+  // never point at digests that have not been successfully cached.
   const scripts = await Promise.all((payload as { scripts: RemoteScript[] }).scripts.map(validatedRemoteScript));
   for (const script of scripts) {
     const revision = await deps.admin.from("coach_script_revisions").upsert({

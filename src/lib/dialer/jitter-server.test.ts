@@ -354,6 +354,34 @@ describe("authenticated Jitter softphone server boundary", () => {
     );
   });
 
+  it("still records coach channel ownership when the cached default lookup rejects", async () => {
+    mocks.coachDefaultMaybeSingle.mockRejectedValueOnce(new Error("default cache unavailable"));
+    const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    expect(result.ok).toBe(true);
+
+    await mocks.after.mock.calls[0][0]();
+    expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ script_slug: null, script_revision: null, script_digest: null }),
+      { onConflict: "client_call_id" },
+    );
+  });
+
+  it("still records coach channel ownership when the cached default lookup times out", async () => {
+    vi.useFakeTimers();
+    mocks.coachDefaultMaybeSingle.mockImplementationOnce(() => new Promise(() => undefined));
+    const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    expect(result.ok).toBe(true);
+
+    const indexed = mocks.after.mock.calls[0][0]();
+    await vi.advanceTimersByTimeAsync(1_500);
+    await indexed;
+    expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ script_slug: null, script_revision: null, script_digest: null }),
+      { onConflict: "client_call_id" },
+    );
+    vi.useRealTimers();
+  });
+
   it("sends only the server-prepared real refs, never browser-supplied refs", async () => {
     mocks.prepareLeadCall.mockResolvedValueOnce({
       ok: true,

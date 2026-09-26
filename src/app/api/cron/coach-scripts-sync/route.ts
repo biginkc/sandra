@@ -4,6 +4,8 @@ import { reportError, reportInfo } from "@/lib/errors/report";
 import { syncCoachScriptCache } from "@/lib/coach/script-cache";
 import { createAdminClient } from "@/lib/supabase/admin";
 
+export const maxDuration = 60;
+
 export async function GET(request: Request) {
   const secret = process.env.CRON_SECRET;
   if (!secret) return NextResponse.json({ error: "CRON_SECRET not configured" }, { status: 500 });

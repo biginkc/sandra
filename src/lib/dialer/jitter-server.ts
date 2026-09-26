@@ -164,7 +164,12 @@ async function indexCoachCall(input: {
     const script = await Promise.race([
       loadCachedCoachDefault("closr-outbound", admin as never),
       timeout(COACH_INDEX_TIMEOUT_MS),
-    ]);
+    ]).catch((error) => {
+      // Index ownership is required for the live coach channel even when
+      // the optional script-default lookup is unavailable or slow.
+      reportError(error, { tags: { surface: "coach_call_binding" } });
+      return null;
+    });
     const { error } = await Promise.race([
       admin.from("coach_call_index").upsert(
         {
