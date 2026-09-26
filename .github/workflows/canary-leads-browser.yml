@@ -1,5 +1,9 @@
 name: Leads Browser Canary
 
+permissions:
+  contents: read
+  packages: read
+
 # Enable the weekday schedule only after a dedicated Hugo canary identity has
 # completed a live workflow_dispatch run. The current legacy canary password is
 # rejected by Hugo, so scheduling this now would produce a guaranteed failure.
@@ -11,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CI: "1"
       RUN_PROD_CANARIES: "1"
       PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}

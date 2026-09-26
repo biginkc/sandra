@@ -10,6 +10,7 @@ on:
 # branches keep their shared-project queue; these jobs cannot reach that DB.
 permissions:
   contents: read
+  packages: read
 
 jobs:
   playwright:
@@ -42,6 +43,8 @@ jobs:
           cache: "npm"
 
       - name: Install dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       - uses: supabase/setup-cli@v1

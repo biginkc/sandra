@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 # This lock covers the whole canary lifecycle so it can't race the real
 # migration pipeline against the same shared test project. `queue: max`
@@ -76,10 +77,9 @@ jobs:
           node-version: "24"
           cache: "npm"
 
-      # No `env:` here — this step installs dependencies from a
-      # PR-controlled package.json/lockfile, which can execute arbitrary
-      # postinstall scripts.
       - name: Install coach canary dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm ci
 
       - name: Assert Coach identities are explicitly isolated

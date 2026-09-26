@@ -1,5 +1,9 @@
 name: Verify
 
+permissions:
+  contents: read
+  packages: read
+
 on:
   push:
     branches: [main, codex/esign-release-e2e-contracts-20260912, codex/sequence-readiness-20260917]
@@ -11,6 +15,8 @@ jobs:
     name: Typecheck and unit/RTL tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - uses: actions/checkout@v5

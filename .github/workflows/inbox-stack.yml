@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   fixture-sources:
@@ -44,6 +45,8 @@ jobs:
     name: Pinned packages and selection invariants
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     defaults:
       run:
         working-directory: experiments/inbox-stack

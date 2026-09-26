@@ -51,7 +51,13 @@ describe("E2E identity source contract", () => {
 
   it("provisions locally before identity checks and destroys after guarded cleanup", () => {
     const workflow = source(".github/workflows/e2e.yml");
-    expect(workflow).not.toMatch(/environment:\s*e2e-ci|secrets\.|vars\.E2E_CI_SUPABASE_PROJECT_REF/);
+    const withoutPackageInstallToken = workflow.replace(
+      "NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+      "",
+    );
+    expect(withoutPackageInstallToken).not.toMatch(
+      /environment:\s*e2e-ci|secrets\.|vars\.E2E_CI_SUPABASE_PROJECT_REF/,
+    );
     const provision = workflow.indexOf("node scripts/provision-e2e-local-database.mjs");
     const emit = workflow.indexOf("e2e-identity-lifecycle.ts emit");
     const cleanup = workflow.indexOf("e2e-identity-lifecycle.ts cleanup");
@@ -94,6 +100,9 @@ describe("E2E identity source contract", () => {
       workflow.indexOf("- name: Generate job-scoped E2E identity"),
     );
     expect(installStep).not.toContain("TEST_SUPABASE_");
+    expect(installStep).toContain(
+      "NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+    );
   });
 
   it("contains no E2E password repair or shared default password path", () => {
