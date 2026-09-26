@@ -109,18 +109,23 @@ function invalidInput(error: string): JitterProxyError {
 type CoachCallIndexAdminClient = {
   from(table: "coach_call_index"): {
     upsert(
-      values: {
-        client_call_id: string;
-        operator_user_id: string;
-        property_id: string | null;
-        script_slug: string | null;
-        script_revision: number | null;
-        script_digest: string | null;
-      },
+      values: CoachCallIndexValues,
       options: { onConflict: string },
     ): Promise<{ error: { message: string } | null }>;
   };
 };
+
+type CoachCallIndexOwnership = {
+  client_call_id: string;
+  operator_user_id: string;
+  property_id: string | null;
+};
+
+type CoachCallIndexValues = CoachCallIndexOwnership | (CoachCallIndexOwnership & {
+  script_slug: string;
+  script_revision: number;
+  script_digest: string;
+});
 
 /** Hard ceiling on the coach-indexing write. This value never gates the
  * dial path directly (the write isn't awaited there at all — see
@@ -170,16 +175,27 @@ async function indexCoachCall(input: {
       reportError(error, { tags: { surface: "coach_call_binding" } });
       return null;
     });
+    // Do not send null script fields. During a rolling deploy the
+    // coach_call_index ownership table can exist before #665 has added
+    // these binding columns; PostgREST rejects an entire upsert that names
+    // an unknown column. A resolved default necessarily came from #665's
+    // tables, so only that path may include the new fields.
+    const ownership: CoachCallIndexOwnership = {
+      client_call_id: input.clientCallId,
+      operator_user_id: input.operatorUserId,
+      property_id: input.propertyId,
+    };
+    const values: CoachCallIndexValues = script
+      ? {
+        ...ownership,
+        script_slug: script.slug,
+        script_revision: script.revision,
+        script_digest: script.digest,
+      }
+      : ownership;
     const { error } = await Promise.race([
       admin.from("coach_call_index").upsert(
-        {
-          client_call_id: input.clientCallId,
-          operator_user_id: input.operatorUserId,
-          property_id: input.propertyId,
-          script_slug: script?.slug ?? null,
-          script_revision: script?.revision ?? null,
-          script_digest: script?.digest ?? null,
-        },
+        values,
         { onConflict: "client_call_id" },
       ),
       timeout(COACH_INDEX_TIMEOUT_MS),

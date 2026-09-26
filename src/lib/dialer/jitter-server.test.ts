@@ -305,7 +305,7 @@ describe("authenticated Jitter softphone server boundary", () => {
     // ownership fields.
     await mocks.after.mock.calls[0][0]();
     expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
-      { client_call_id: START_CALL_TOKEN, operator_user_id: "user-1", property_id: "property-1", script_slug: null, script_revision: null, script_digest: null },
+      { client_call_id: START_CALL_TOKEN, operator_user_id: "user-1", property_id: "property-1" },
       { onConflict: "client_call_id" },
     );
   });
@@ -342,15 +342,40 @@ describe("authenticated Jitter softphone server boundary", () => {
     await expect(mocks.after.mock.calls[0][0]()).resolves.toBeUndefined();
   });
 
-  it("binds null when no cached default exists while the dial still starts", async () => {
+  it("uses exactly the pre-binding ownership payload when no cached default exists, so a 42703 schema cannot reject the upsert", async () => {
     mocks.coachDefaultMaybeSingle.mockResolvedValueOnce({ data: null, error: null });
     const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
     expect(result.ok).toBe(true);
     expect(mocks.requestStart).toHaveBeenCalled();
     await mocks.after.mock.calls[0][0]();
     expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({ script_slug: null, script_revision: null, script_digest: null }),
-      expect.any(Object),
+      { client_call_id: START_CALL_TOKEN, operator_user_id: "user-1", property_id: "property-1" },
+      { onConflict: "client_call_id" },
+    );
+  });
+
+  it("includes every script binding key only when the cached default resolves", async () => {
+    mocks.coachDefaultMaybeSingle.mockResolvedValueOnce({
+      data: {
+        digest: "a".repeat(64),
+        coach_script_revisions: { slug: "closr-outbound", revision: 7 },
+      },
+      error: null,
+    });
+    const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    expect(result.ok).toBe(true);
+
+    await mocks.after.mock.calls[0][0]();
+    expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
+      {
+        client_call_id: START_CALL_TOKEN,
+        operator_user_id: "user-1",
+        property_id: "property-1",
+        script_slug: "closr-outbound",
+        script_revision: 7,
+        script_digest: "a".repeat(64),
+      },
+      { onConflict: "client_call_id" },
     );
   });
 
@@ -361,7 +386,7 @@ describe("authenticated Jitter softphone server boundary", () => {
 
     await mocks.after.mock.calls[0][0]();
     expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({ script_slug: null, script_revision: null, script_digest: null }),
+      { client_call_id: START_CALL_TOKEN, operator_user_id: "user-1", property_id: "property-1" },
       { onConflict: "client_call_id" },
     );
   });
@@ -376,7 +401,7 @@ describe("authenticated Jitter softphone server boundary", () => {
     await vi.advanceTimersByTimeAsync(1_500);
     await indexed;
     expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({ script_slug: null, script_revision: null, script_digest: null }),
+      { client_call_id: START_CALL_TOKEN, operator_user_id: "user-1", property_id: "property-1" },
       { onConflict: "client_call_id" },
     );
     vi.useRealTimers();
