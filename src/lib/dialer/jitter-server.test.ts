@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   requestAudioHealth: vi.fn(),
   requestCallerIds: vi.fn(),
   coachCallIndexUpsert: vi.fn(),
+  coachDefaultMaybeSingle: vi.fn(),
   trainingUpsert: vi.fn(),
   trainingRead: vi.fn(),
   after: vi.fn(),
@@ -36,6 +37,10 @@ vi.mock("@/lib/supabase/admin", () => ({
       if (table === "call_activities") {
         const chain = { select: () => chain, eq: () => chain, single: mocks.trainingRead };
         return { upsert: mocks.trainingUpsert, ...chain };
+      }
+      if (table === "coach_script_defaults") {
+        const chain = { maybeSingle: mocks.coachDefaultMaybeSingle };
+        return { select: () => ({ eq: () => chain }) };
       }
       if (table !== "coach_call_index") throw new Error(`unexpected admin table: ${table}`);
       return { upsert: mocks.coachCallIndexUpsert };
@@ -183,6 +188,7 @@ describe("authenticated Jitter softphone server boundary", () => {
       data: { caller_ids: [{ phone_e164: "+18165550100", label: "Main" }] },
     });
     mocks.coachCallIndexUpsert.mockResolvedValue({ error: null });
+    mocks.coachDefaultMaybeSingle.mockResolvedValue({ data: null, error: null });
     const minted = await mintStartIntent();
     if (!minted.ok) throw new Error("expected start intent mint");
     START_INTENT = minted.data.intentCapability;
@@ -334,6 +340,71 @@ describe("authenticated Jitter softphone server boundary", () => {
     expect(result.ok).toBe(true);
     expect(mocks.requestStart).toHaveBeenCalled();
     await expect(mocks.after.mock.calls[0][0]()).resolves.toBeUndefined();
+  });
+
+  it("uses exactly the pre-binding ownership payload when no cached default exists, so a 42703 schema cannot reject the upsert", async () => {
+    mocks.coachDefaultMaybeSingle.mockResolvedValueOnce({ data: null, error: null });
+    const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    expect(result.ok).toBe(true);
+    expect(mocks.requestStart).toHaveBeenCalled();
+    await mocks.after.mock.calls[0][0]();
+    expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
+      { client_call_id: START_CALL_TOKEN, operator_user_id: "user-1", property_id: "property-1" },
+      { onConflict: "client_call_id" },
+    );
+  });
+
+  it("includes every script binding key only when the cached default resolves", async () => {
+    mocks.coachDefaultMaybeSingle.mockResolvedValueOnce({
+      data: {
+        digest: "a".repeat(64),
+        coach_script_revisions: { slug: "closr-outbound", revision: 7 },
+      },
+      error: null,
+    });
+    const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    expect(result.ok).toBe(true);
+
+    await mocks.after.mock.calls[0][0]();
+    expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
+      {
+        client_call_id: START_CALL_TOKEN,
+        operator_user_id: "user-1",
+        property_id: "property-1",
+        script_slug: "closr-outbound",
+        script_revision: 7,
+        script_digest: "a".repeat(64),
+      },
+      { onConflict: "client_call_id" },
+    );
+  });
+
+  it("still records coach channel ownership when the cached default lookup rejects", async () => {
+    mocks.coachDefaultMaybeSingle.mockRejectedValueOnce(new Error("default cache unavailable"));
+    const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    expect(result.ok).toBe(true);
+
+    await mocks.after.mock.calls[0][0]();
+    expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
+      { client_call_id: START_CALL_TOKEN, operator_user_id: "user-1", property_id: "property-1" },
+      { onConflict: "client_call_id" },
+    );
+  });
+
+  it("still records coach channel ownership when the cached default lookup times out", async () => {
+    vi.useFakeTimers();
+    mocks.coachDefaultMaybeSingle.mockImplementationOnce(() => new Promise(() => undefined));
+    const result = await startAuthenticatedJitterCall(callTarget({ propertyId: "property-1", contactId: "contact-1" }));
+    expect(result.ok).toBe(true);
+
+    const indexed = mocks.after.mock.calls[0][0]();
+    await vi.advanceTimersByTimeAsync(1_500);
+    await indexed;
+    expect(mocks.coachCallIndexUpsert).toHaveBeenCalledWith(
+      { client_call_id: START_CALL_TOKEN, operator_user_id: "user-1", property_id: "property-1" },
+      { onConflict: "client_call_id" },
+    );
+    vi.useRealTimers();
   });
 
   it("sends only the server-prepared real refs, never browser-supplied refs", async () => {

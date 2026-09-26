@@ -1,6 +1,10 @@
 {
   "crons": [
     {
+      "path": "/api/cron/coach-scripts-sync",
+      "schedule": "*/15 * * * *"
+    },
+    {
       "path": "/api/cron/notification-cleanup",
       "schedule": "0 4 * * *"
     },

@@ -4,6 +4,7 @@ import { after } from "next/server";
 import { getCallerMemberships, type Membership } from "@/lib/auth/memberships";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { isCoachUiEnabled } from "@/lib/coach/flags";
+import { loadCachedCoachDefault } from "@/lib/coach/script-cache";
 import { prepareLeadCall, prepareManualCall } from "@/lib/dialer/actions";
 import { reportError } from "@/lib/errors/report";
 import { STATE_TO_TZ } from "@/lib/messaging/quiet-hours";
@@ -108,11 +109,23 @@ function invalidInput(error: string): JitterProxyError {
 type CoachCallIndexAdminClient = {
   from(table: "coach_call_index"): {
     upsert(
-      values: { client_call_id: string; operator_user_id: string; property_id: string | null },
+      values: CoachCallIndexValues,
       options: { onConflict: string },
     ): Promise<{ error: { message: string } | null }>;
   };
 };
+
+type CoachCallIndexOwnership = {
+  client_call_id: string;
+  operator_user_id: string;
+  property_id: string | null;
+};
+
+type CoachCallIndexValues = CoachCallIndexOwnership | (CoachCallIndexOwnership & {
+  script_slug: string;
+  script_revision: number;
+  script_digest: string;
+});
 
 /** Hard ceiling on the coach-indexing write. This value never gates the
  * dial path directly (the write isn't awaited there at all — see
@@ -150,13 +163,39 @@ async function indexCoachCall(input: {
 }): Promise<void> {
   try {
     const admin = createAdminClient() as unknown as CoachCallIndexAdminClient;
+    // A missing/default-cache failure is deliberately represented as null.
+    // There is no "latest" fallback: this call either records the exact
+    // revision available at start, or coaching is unavailable for the call.
+    const script = await Promise.race([
+      loadCachedCoachDefault("closr-outbound", admin as never),
+      timeout(COACH_INDEX_TIMEOUT_MS),
+    ]).catch((error) => {
+      // Index ownership is required for the live coach channel even when
+      // the optional script-default lookup is unavailable or slow.
+      reportError(error, { tags: { surface: "coach_call_binding" } });
+      return null;
+    });
+    // Do not send null script fields. During a rolling deploy the
+    // coach_call_index ownership table can exist before #665 has added
+    // these binding columns; PostgREST rejects an entire upsert that names
+    // an unknown column. A resolved default necessarily came from #665's
+    // tables, so only that path may include the new fields.
+    const ownership: CoachCallIndexOwnership = {
+      client_call_id: input.clientCallId,
+      operator_user_id: input.operatorUserId,
+      property_id: input.propertyId,
+    };
+    const values: CoachCallIndexValues = script
+      ? {
+        ...ownership,
+        script_slug: script.slug,
+        script_revision: script.revision,
+        script_digest: script.digest,
+      }
+      : ownership;
     const { error } = await Promise.race([
       admin.from("coach_call_index").upsert(
-        {
-          client_call_id: input.clientCallId,
-          operator_user_id: input.operatorUserId,
-          property_id: input.propertyId,
-        },
+        values,
         { onConflict: "client_call_id" },
       ),
       timeout(COACH_INDEX_TIMEOUT_MS),
