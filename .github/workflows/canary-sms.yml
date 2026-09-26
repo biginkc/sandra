@@ -1,5 +1,9 @@
 name: SMS Prod Canaries
 
+permissions:
+  contents: read
+  packages: read
+
 # Three independent SMS canaries that hit prod's inbound webhook with
 # forged-but-properly-signed JWTs. Each catches a different class of
 # silent failure:
@@ -34,6 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
       DIALPAD_WEBHOOK_SECRET: ${{ secrets.PROD_DIALPAD_WEBHOOK_SECRET }}
@@ -54,6 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
       DIALPAD_WEBHOOK_SECRET: ${{ secrets.PROD_DIALPAD_WEBHOOK_SECRET }}
@@ -74,6 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
       DIALPAD_WEBHOOK_SECRET: ${{ secrets.PROD_DIALPAD_WEBHOOK_SECRET }}

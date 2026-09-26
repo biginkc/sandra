@@ -1,5 +1,9 @@
 name: Sequences V1 Prod Canary
 
+permissions:
+  contents: read
+  packages: read
+
 # Runs the same `scripts/smoke-sequences-prod.ts` that proved the pipe
 # end-to-end in prod, daily on weekdays. Deliberately hosted on GitHub
 # Actions rather than inside Vercel cron so the canary isn't gated on
@@ -30,6 +34,7 @@ jobs:
     timeout-minutes: 15
 
     env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # Prod Supabase URL + service-role key. Stored as GitHub repo
       # secrets so the canary works without any dependency on a
       # developer's local `.env.local`.

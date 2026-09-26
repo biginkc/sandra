@@ -80,7 +80,12 @@ describe("coach realtime authorization CI security contract", () => {
   it("keeps Playwright on a disposable database without hosted credentials", () => {
     const provisioning = readFileSync(path.join(repoRoot, "scripts/provision-e2e-local-database.mjs"), "utf8");
     expect(e2eWorkflow).toContain("node scripts/provision-e2e-local-database.mjs");
-    expect(withoutComments(e2eWorkflow)).not.toMatch(/environment:\s*e2e-ci|secrets\./);
+    expect(
+      withoutComments(e2eWorkflow).replace(
+        "NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+        "",
+      ),
+    ).not.toMatch(/environment:\s*e2e-ci|secrets\./);
     expect(provisioning).toContain("Unexpected disposable stack endpoints");
     expect(provisioning).toContain("publish('TEST_SUPABASE_SERVICE_ROLE_KEY', status.SERVICE_ROLE_KEY)");
     expect(provisioning.indexOf("Unexpected disposable stack endpoints")).toBeLessThan(provisioning.indexOf("const admin = createClient"));
@@ -152,11 +157,15 @@ describe("coach realtime authorization CI security contract", () => {
     const testStep = withoutComments(workflowStep(canaryJob, "Run the coach realtime authorization canary"));
     const cleanupStep = withoutComments(workflowStep(canaryJob, "Always clean up this run's ownership rows"));
 
-    // Step-level isolation still matters even though the credential is
-    // low-stakes now: `npm ci` (which can execute a PR-modified
-    // package.json's postinstall scripts) gets no env at all.
+    // Private package installation requires the read-only repository token,
+    // but no Supabase or identity credentials may reach postinstall scripts.
     expect(installStep).toContain("run: npm ci");
-    expect(installStep).not.toMatch(/env:/);
+    expect(installStep).toMatch(
+      /env:\s*\n\s*NODE_AUTH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/,
+    );
+    expect(installStep).not.toMatch(
+      /TEST_SUPABASE_|COACH_CI_|SERVICE_ROLE|DB_PASSWORD/,
+    );
 
     for (const step of [testStep, cleanupStep]) {
       expect(step).toContain("TEST_SUPABASE_URL");

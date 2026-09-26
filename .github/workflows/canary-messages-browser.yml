@@ -1,5 +1,9 @@
 name: Messages Browser Canary
 
+permissions:
+  contents: read
+  packages: read
+
 # Dispatch-only until a dedicated Hugo identity and owned SMS endpoint pass a
 # live run. Keep this separate from the Leads job so failures remain distinct.
 on:
@@ -10,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CI: "1"
       RUN_PROD_CANARIES: "1"
       PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
