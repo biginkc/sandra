@@ -4,6 +4,7 @@ import { after } from "next/server";
 import { getCallerMemberships, type Membership } from "@/lib/auth/memberships";
 import { SANDRA_ORG_ID } from "@/lib/auth/sandra-org";
 import { isCoachUiEnabled } from "@/lib/coach/flags";
+import { loadCachedCoachDefault } from "@/lib/coach/script-cache";
 import { prepareLeadCall, prepareManualCall } from "@/lib/dialer/actions";
 import { reportError } from "@/lib/errors/report";
 import { STATE_TO_TZ } from "@/lib/messaging/quiet-hours";
@@ -108,7 +109,14 @@ function invalidInput(error: string): JitterProxyError {
 type CoachCallIndexAdminClient = {
   from(table: "coach_call_index"): {
     upsert(
-      values: { client_call_id: string; operator_user_id: string; property_id: string | null },
+      values: {
+        client_call_id: string;
+        operator_user_id: string;
+        property_id: string | null;
+        script_slug: string | null;
+        script_revision: number | null;
+        script_digest: string | null;
+      },
       options: { onConflict: string },
     ): Promise<{ error: { message: string } | null }>;
   };
@@ -150,12 +158,22 @@ async function indexCoachCall(input: {
 }): Promise<void> {
   try {
     const admin = createAdminClient() as unknown as CoachCallIndexAdminClient;
+    // A missing/default-cache failure is deliberately represented as null.
+    // There is no "latest" fallback: this call either records the exact
+    // revision available at start, or coaching is unavailable for the call.
+    const script = await Promise.race([
+      loadCachedCoachDefault("closr-outbound", admin as never),
+      timeout(COACH_INDEX_TIMEOUT_MS),
+    ]);
     const { error } = await Promise.race([
       admin.from("coach_call_index").upsert(
         {
           client_call_id: input.clientCallId,
           operator_user_id: input.operatorUserId,
           property_id: input.propertyId,
+          script_slug: script?.slug ?? null,
+          script_revision: script?.revision ?? null,
+          script_digest: script?.digest ?? null,
         },
         { onConflict: "client_call_id" },
       ),
