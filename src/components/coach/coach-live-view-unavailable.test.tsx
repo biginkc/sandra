@@ -18,4 +18,13 @@ describe("unbound live coach", () => {
     expect(screen.getByText("Transcript")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("coach-hangup")); expect(hangup).toHaveBeenCalledOnce();
   });
+
+  it("shows a neutral loading state without interrupting transcript or hangup", () => {
+    const hangup = vi.fn();
+    render(<CoachLiveView session={{ ...session, scriptBindingStatus: "loading" }} callName="Jane" callStatus="live" seconds={12} muted={false} held={false} holdPending={false} onDigit={vi.fn()} onMute={vi.fn()} onHold={vi.fn()} onHangup={hangup} onCollapse={vi.fn()} />);
+    expect(screen.getByTestId("coach-script-loading")).toHaveTextContent("Loading script…");
+    expect(screen.queryByTestId("coach-script-unavailable")).not.toBeInTheDocument();
+    expect(screen.getByText("Transcript")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("coach-hangup")); expect(hangup).toHaveBeenCalledOnce();
+  });
 });

@@ -110,12 +110,14 @@ async function mountCoach(
   page: Page,
   viewport = { width: 1440, height: 900 },
   contextStartupMode: ContextStartupMode = "immediate",
+  scriptStartupMode: "immediate" | "late_index_write" = "immediate",
 ): Promise<void> {
   await page.setViewportSize(viewport);
   await page.setContent(`<style>${compiledCss}</style><div id="root"></div>`);
-  await page.evaluate((mode) => {
-    window.coachContextStartupMode = mode;
-  }, contextStartupMode);
+  await page.evaluate(({ contextMode, scriptMode }) => {
+    window.coachScriptStartupMode = scriptMode;
+    window.coachContextStartupMode = contextMode;
+  }, { contextMode: contextStartupMode, scriptMode: scriptStartupMode });
   await page.addScriptTag({ content: harnessBundle });
   const coach = page.getByTestId("coach-live-view");
   await expect(coach).toBeVisible();
@@ -123,6 +125,13 @@ async function mountCoach(
     await Promise.allSettled(element.getAnimations().map((animation) => animation.finished));
   });
 }
+
+test("renders a script when the call index write lands after the first two lookups", async ({ page }) => {
+  await mountCoach(page, { width: 1440, height: 900 }, "immediate", "late_index_write");
+  await expect(page.getByTestId("coach-script-loading")).toBeVisible();
+  await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title, { timeout: 4_000 });
+  await expect(page.getByTestId("coach-script-unavailable")).toHaveCount(0);
+});
 
 async function emitStimulus(page: Page, name: string): Promise<void> {
   await page.evaluate((stimulus) => window.coachBehaviorHarness[stimulus](), name);

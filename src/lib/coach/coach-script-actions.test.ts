@@ -18,14 +18,22 @@ beforeEach(() => {
 });
 
 describe("loadCoachCallScript", () => {
-  it("returns null for a null binding instead of substituting any revision", async () => {
-    await expect(loadCoachCallScript("call-1")).resolves.toBeNull();
+  it("reports a missing index row as pending so the client can await the after() write", async () => {
+    await expect(loadCoachCallScript("call-1")).resolves.toEqual({ status: "pending" });
     expect(mocks.eq).toHaveBeenCalledWith("operator_user_id", "owner-1");
+  });
+
+  it("reports an existing null binding as unavailable instead of substituting any revision", async () => {
+    mocks.maybeSingle.mockResolvedValue({
+      data: { script_slug: null, script_revision: null, script_digest: null, coach_script_revisions: null },
+      error: null,
+    });
+    await expect(loadCoachCallScript("call-1")).resolves.toEqual({ status: "unavailable" });
   });
 
   it("does not query a call row without an authenticated owner", async () => {
     mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
-    await expect(loadCoachCallScript("call-1")).resolves.toBeNull();
+    await expect(loadCoachCallScript("call-1")).resolves.toEqual({ status: "error" });
     expect(mocks.from).not.toHaveBeenCalled();
   });
 });

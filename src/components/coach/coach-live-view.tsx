@@ -337,7 +337,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           onSelectSectionBranch={selectSectionBranch}
           sectionIndex={Math.max(0, bundle.sections.sections.findIndex((section) => section.id === scriptBlock?.sectionId) + 1)}
           sectionCount={bundle.sections.sections.length}
-        /> : <ScriptUnavailable />}
+        /> : session.scriptBindingStatus === "loading" ? <ScriptLoading /> : <ScriptUnavailable />}
         <RecommendationsPanel
           {...recommendations}
           hasFinalSellerTranscript={state.transcript.some((line) => line.isFinal && line.speaker === "seller")}
@@ -712,6 +712,14 @@ function ScriptUnavailable() {
         <p className="text-sm font-semibold text-destructive">Script unavailable — coaching is off for this call</p>
         <p className="mt-1 text-xs text-muted-foreground">The call, transcript, and call controls are still available.</p>
       </div>
+    </main>
+  );
+}
+
+function ScriptLoading() {
+  return (
+    <main className="flex min-h-[28rem] min-w-0 flex-1 items-center justify-center border-b border-border p-6 xl:min-h-0 xl:border-b-0" data-testid="coach-script-loading">
+      <p className="text-sm font-medium text-muted-foreground">Loading script…</p>
     </main>
   );
 }

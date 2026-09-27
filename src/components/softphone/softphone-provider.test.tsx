@@ -136,7 +136,7 @@ describe("SoftphoneProvider transport gate", () => {
       leadSource: null,
       occupancy: null,
     });
-    loadCoachCallScript.mockReset().mockResolvedValue({ ref: closrOutbound123Ref, bundle: closrOutbound123Bundle });
+    loadCoachCallScript.mockReset().mockResolvedValue({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
     window.localStorage.clear();
     window.sessionStorage.clear();
   });
@@ -1400,7 +1400,7 @@ describe("SoftphoneProvider coach UI flag", () => {
 
     await user.click(screen.getByTestId("call-lead-button"));
     await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeVisible());
-    expect(screen.getByTestId("coach-script-unavailable")).toHaveTextContent("Script unavailable — coaching is off for this call");
+    expect(screen.getByTestId("coach-script-loading")).toHaveTextContent("Loading script…");
     expect(screen.getByTestId("coach-hangup")).toBeEnabled();
     expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
   });

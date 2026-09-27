@@ -156,7 +156,7 @@ describe("<CoachLiveView /> manual navigation", () => {
   beforeEach(() => {
     channels = [];
     loadCoachCallContext.mockReset().mockResolvedValue(sampleContext);
-    loadCoachCallScript.mockReset().mockResolvedValue({ ref: closrOutbound123Ref, bundle: closrOutbound123Bundle });
+    loadCoachCallScript.mockReset().mockResolvedValue({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
   });
 
   it("shows the full first section, boundary state, transcript, and next-section preview", async () => {

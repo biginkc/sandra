@@ -31,6 +31,10 @@ export type PreparedCoachTarget = {
 
 export type CoachScriptBinding = { ref: ScriptRef; bundle: ScriptBundle };
 
+// 15.5 seconds across six attempts keeps the expected after() gap out of the
+// call path without leaving coaching in a permanent loading state.
+const SCRIPT_BINDING_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
+
 function usablePreparedSellerName(
   value: string | null,
   preparedTarget: PreparedCoachTarget,
@@ -150,18 +154,40 @@ export function useCoachSession(
   }
 
   useEffect(() => {
-    let mounted = true;
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     if (!callId) {
-      return () => { mounted = false; };
+      return () => { cancelled = true; };
     }
-    loadCoachCallScript(callId).then((binding) => {
-      if (!mounted) return;
-      if (binding) assertValidScriptBundle(binding.bundle);
-      setScriptBinding(binding);
-      setScriptBindingStatus("ready");
-      if (binding) setActiveSectionId(getCoachSections(binding.bundle)[0]?.id ?? "introduction.opener");
-    }).catch(() => { if (mounted) { setScriptBinding(null); setScriptBindingStatus("ready"); } });
-    return () => { mounted = false; };
+    let retryIndex = 0;
+    const load = () => {
+      loadCoachCallScript(callId).then((result) => {
+        if (cancelled) return;
+        if (result.status === "bound") {
+          assertValidScriptBundle(result.binding.bundle);
+          setScriptBinding(result.binding);
+          setActiveSectionId(getCoachSections(result.binding.bundle)[0]?.id ?? "introduction.opener");
+          setScriptBindingStatus("ready");
+          return;
+        }
+        if (result.status === "pending" && retryIndex < SCRIPT_BINDING_RETRY_DELAYS_MS.length) {
+          retryTimer = setTimeout(load, SCRIPT_BINDING_RETRY_DELAYS_MS[retryIndex++]);
+          return;
+        }
+        setScriptBinding(null);
+        setScriptBindingStatus("ready");
+      }).catch(() => {
+        if (!cancelled) {
+          setScriptBinding(null);
+          setScriptBindingStatus("ready");
+        }
+      });
+    };
+    load();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, [callId]);
 
   useEffect(() => {
