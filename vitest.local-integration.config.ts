@@ -6,7 +6,7 @@ const defaultLocalDbUrl = "postgresql://postgres:postgres@127.0.0.1:54329/postgr
 const dbUrl = process.env.TEST_SUPABASE_DB_URL ?? defaultLocalDbUrl;
 const hostname = new URL(dbUrl).hostname;
 
-if (!["127.0.0.1", "localhost", "::1"].includes(hostname)) {
+if (!["127.0.0.1", "localhost", "[::1]"].includes(hostname)) {
   throw new Error("Local migration integration tests require a loopback Supabase database.");
 }
 

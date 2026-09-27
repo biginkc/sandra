@@ -28,7 +28,7 @@ let contactId = "";
 function requireLocalDb(): string {
   const url = process.env.TEST_SUPABASE_DB_URL ?? localDbUrl;
   const parsed = new URL(url);
-  if (!["127.0.0.1", "localhost", "::1"].includes(parsed.hostname)) {
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)) {
     throw new Error("Dialpad CTI KPI integration tests must run against local Supabase only.");
   }
   return url;
@@ -71,10 +71,14 @@ async function addCall(input: {
   );
 }
 
-async function kpis(): Promise<Record<string, unknown>> {
+async function setAuthenticatedRole(): Promise<void> {
   await pg.query("set local role authenticated");
   await pg.query("select set_config('request.jwt.claim.role','authenticated',true)");
   await pg.query("select set_config('request.jwt.claim.sub',$1,true)", [memberId]);
+}
+
+async function kpis(): Promise<Record<string, unknown>> {
+  await setAuthenticatedRole();
   const result = await pg.query<{ value: Record<string, unknown> }>(
     "select public.fn_get_acquisition_kpis($1,$2,'2026-09-01T00:00:00Z','2026-09-02T00:00:00Z') as value",
     [orgId, memberId],
@@ -84,9 +88,7 @@ async function kpis(): Promise<Record<string, unknown>> {
 }
 
 async function compareLegacyAndCurrentKpis(): Promise<Record<string, unknown>> {
-  await pg.query("set local role authenticated");
-  await pg.query("select set_config('request.jwt.claim.role','authenticated',true)");
-  await pg.query("select set_config('request.jwt.claim.sub',$1,true)", [memberId]);
+  await setAuthenticatedRole();
   const result = await pg.query<{ value: Record<string, unknown> }>(
     `select jsonb_build_object(
        'legacy', public.fn_get_acquisition_kpis_legacy_test($1,$2,'2026-09-01T00:00:00Z','2026-09-02T00:00:00Z'),
@@ -138,6 +140,55 @@ describe("20260927023443 Dialpad CTI seller speech KPI migration", () => {
     await pg.query("savepoint invalid_confidence");
     await expect(pg.query("update public.call_activities set seller_speech_confidence='unknown' where id=$1", [legacyCall])).rejects.toThrow(/check constraint/i);
     await pg.query("rollback to savepoint invalid_confidence");
+  });
+
+  it.each([
+    ["talk_duration_seconds", 301],
+    ["recording_expected", true],
+    ["provider_ended_at", "2026-09-01T12:10:00Z"],
+    ["seller_speech_seconds_measured", 301],
+    ["seller_speech_seconds_estimated", 301],
+    ["seller_speech_confidence", "full"],
+  ] as const)("rejects an authenticated INSERT that supplies %s", async (field, value) => {
+    await setAuthenticatedRole();
+    await pg.query("savepoint forbidden_provider_evidence");
+    await expect(pg.query(
+      `insert into public.call_activities(
+         id,org_id,property_id,contact_id,jitter_attempt_id,provider,${field}
+       ) values ($1,$2,$3,$4,$5,'dialpad',$6)`,
+      [crypto.randomUUID(), orgId, propertyId, contactId, crypto.randomUUID(), value],
+    )).rejects.toMatchObject({
+      code: "42501",
+      message: expect.stringMatching(/PROVIDER_EVIDENCE_READ_ONLY/),
+    });
+    await pg.query("rollback to savepoint forbidden_provider_evidence");
+    await pg.query("reset role");
+  });
+
+  it.each([
+    ["talk_duration_seconds", 301],
+    ["recording_expected", true],
+    ["provider_ended_at", "2026-09-01T12:10:00Z"],
+    ["seller_speech_seconds_measured", 301],
+    ["seller_speech_seconds_estimated", 301],
+    ["seller_speech_confidence", "full"],
+  ] as const)("rejects an authenticated UPDATE that changes %s", async (field, value) => {
+    const callId = crypto.randomUUID();
+    await pg.query(
+      "insert into public.call_activities(id,org_id,property_id,contact_id,jitter_attempt_id,provider) values ($1,$2,$3,$4,$5,'dialpad')",
+      [callId, orgId, propertyId, contactId, crypto.randomUUID()],
+    );
+    await setAuthenticatedRole();
+    await pg.query("savepoint forbidden_provider_evidence");
+    await expect(pg.query(
+      `update public.call_activities set ${field}=$1 where id=$2`,
+      [value, callId],
+    )).rejects.toMatchObject({
+      code: "42501",
+      message: expect.stringMatching(/PROVIDER_EVIDENCE_READ_ONLY/),
+    });
+    await pg.query("rollback to savepoint forbidden_provider_evidence");
+    await pg.query("reset role");
   });
 
   it.each([

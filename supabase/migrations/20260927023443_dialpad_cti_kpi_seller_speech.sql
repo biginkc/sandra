@@ -14,6 +14,28 @@ comment on column public.call_activities.seller_speech_seconds_estimated is
 comment on column public.call_activities.seller_speech_confidence is
   'Confidence in seller speech measurement: full, partial, or low; NULL means unavailable.';
 
+-- Existing browser column grants must not turn provider-derived seller speech
+-- into values a signed-in user can self-report.
+create or replace function public.my_leads_guard_call_metrics()
+returns trigger language plpgsql set search_path='' as $$
+begin
+  if current_user not in ('postgres','service_role','supabase_admin') and
+    ((tg_op='INSERT' and (new.talk_duration_seconds is not null or new.recording_expected is not null or new.provider_ended_at is not null
+      or new.seller_speech_seconds_measured is not null or new.seller_speech_seconds_estimated is not null
+      or new.seller_speech_confidence is not null))
+      or (tg_op='UPDATE' and (new.talk_duration_seconds is distinct from old.talk_duration_seconds
+        or new.recording_expected is distinct from old.recording_expected
+        or new.provider_ended_at is distinct from old.provider_ended_at
+        or new.seller_speech_seconds_measured is distinct from old.seller_speech_seconds_measured
+        or new.seller_speech_seconds_estimated is distinct from old.seller_speech_seconds_estimated
+        or new.seller_speech_confidence is distinct from old.seller_speech_confidence))) then
+    raise exception 'PROVIDER_EVIDENCE_READ_ONLY' using errcode='42501';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.my_leads_guard_call_metrics() from public,anon,authenticated;
+
 create or replace function public.fn_get_acquisition_kpis(p_org_id uuid,p_member_id uuid,p_start timestamptz,p_end timestamptz)
 returns jsonb language plpgsql security definer set search_path='' as $$
 declare
