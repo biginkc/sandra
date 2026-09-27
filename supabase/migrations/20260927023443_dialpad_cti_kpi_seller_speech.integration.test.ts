@@ -4,6 +4,8 @@ import path from "node:path";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postgres-url";
+
 /**
  * Local-only migration replay test. Run with `npm run test:integration:local`.
  * It deliberately rejects hosted database URLs and is excluded from
@@ -26,12 +28,7 @@ let propertyId = "";
 let contactId = "";
 
 function requireLocalDb(): string {
-  const url = process.env.TEST_SUPABASE_DB_URL ?? localDbUrl;
-  const parsed = new URL(url);
-  if (!["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)) {
-    throw new Error("Dialpad CTI KPI integration tests must run against local Supabase only.");
-  }
-  return url;
+  return requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? localDbUrl);
 }
 
 async function seedFixture(): Promise<void> {

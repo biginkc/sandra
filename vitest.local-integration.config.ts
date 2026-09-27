@@ -2,13 +2,10 @@ import path from "node:path";
 
 import { defineConfig } from "vitest/config";
 
-const defaultLocalDbUrl = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
-const dbUrl = process.env.TEST_SUPABASE_DB_URL ?? defaultLocalDbUrl;
-const hostname = new URL(dbUrl).hostname;
+import { requireLoopbackPostgresUrl } from "./src/lib/testing/loopback-postgres-url";
 
-if (!["127.0.0.1", "localhost", "[::1]"].includes(hostname)) {
-  throw new Error("Local migration integration tests require a loopback Supabase database.");
-}
+const defaultLocalDbUrl = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
+const dbUrl = requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? defaultLocalDbUrl);
 
 export default defineConfig({
   test: {
