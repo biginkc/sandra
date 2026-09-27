@@ -7,6 +7,10 @@ import type { CoachEntryToken, CoachEvent, CoachPhaseId, CoachState, CoachTransc
  * by the component itself (its own 45s timer or a tap), not driven from
  * here. */
 export type CoachLocalAction =
+  /** A shape-validated transcript from a call with no locally resolvable
+   * immutable script binding. This deliberately changes transcript records
+   * only: it cannot imply a healthy/coached script stream. */
+  | { type: "append_unbound_transcript"; event: CoachTranscriptEvent }
   | { type: "dismiss_objection"; cardId: string }
   | { type: "dismiss_nudge"; nudgeId: string }
   | { type: "override_phase"; phaseId: CoachPhaseId }
@@ -147,6 +151,14 @@ function groupTranscriptFragments(fragments: CoachTranscriptLine[]): CoachTransc
 export function createCoachReducer(bundle: ScriptBundle | null) {
   return function coachReducer(state: CoachState, action: CoachReducerAction): CoachState {
   switch (action.type) {
+    case "append_unbound_transcript": {
+      const transcriptFragments = upsertTranscriptFragment(state.transcriptFragments, action.event);
+      return {
+        ...state,
+        transcriptFragments,
+        transcript: groupTranscriptFragments(transcriptFragments),
+      };
+    }
     case "transcript":
       {
         const transcriptFragments = upsertTranscriptFragment(state.transcriptFragments, action);

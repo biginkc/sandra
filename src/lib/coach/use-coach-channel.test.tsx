@@ -264,7 +264,42 @@ describe("useCoachChannel", () => {
     expect(result.current.degraded).toBe(true);
   });
 
-  it("warns about valid strict wire events missed before the binding loads, without reducing them or resetting liveness", async () => {
+  it("keeps a normal verified Jitter transcript when Sandra has no binding, but never lets it masquerade as coaching or liveness", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result } = renderHook(() =>
+      useRuntimeCoachChannel("call-unbound-transcript", null, "introduction", true, "call-unbound-transcript", false),
+    );
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "transcript", speaker: "seller", text: "The call still has words.", isFinal: true, ts: "t1", ...STRICT_V },
+    }));
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["The call still has words."]);
+    // The fallback never uses the normal transcript reducer path, whose
+    // connected/lastEventAt fields could be mistaken for wire liveness.
+    expect(result.current.state.connected).toBe(false);
+    expect(result.current.state.lastEventAt).toBeNull();
+    expect(result.current.scriptOutOfSync).toBe(V.scriptVersion);
+
+    // These payloads would mutate phase/cursor in a bound stream. With no
+    // exact local identity they cannot mutate any script state or reset the
+    // watchdog after the transcript-only fallback.
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "phase", phaseId: "reveal", ts: "t2", ...STRICT_V },
+    }));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "cursor", phaseId: "introduction", branchTag: "route", variantKey: "default", lineIndex: 0, lineText: "Wrong script", ts: "t3", ...STRICT_V },
+    }));
+    expect(result.current.state.currentPhaseId).toBe("introduction");
+    expect(result.current.state.cursor).toBeNull();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+    expect(result.current.degraded).toBe(true);
+  });
+
+  it("keeps a normal strict transcript while its binding is pending, while warning that coaching events may have been missed", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
     const { result } = renderHook(() =>
       useRuntimeCoachChannel("call-pending-binding", null, "introduction", true, "call-pending-binding", true),
@@ -274,21 +309,27 @@ describe("useCoachChannel", () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     act(() => latestChannel()._broadcastHandler?.({
-      payload: { type: "counter", probeCount: 7, ts: "t1", ...STRICT_V },
+      payload: { type: "transcript", speaker: "seller", text: "Please keep the transcript.", isFinal: true, ts: "t1", ...STRICT_V },
     }));
 
     expect(result.current.bindingMissedEvents).toBe(true);
     expect(result.current.reconnectGap).toBe(false);
-    expect(result.current.state.probeCount).toBe(0);
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["Please keep the transcript."]);
+    expect(result.current.state.currentPhaseId).toBe("introduction");
+    expect(result.current.state.cursor).toBeNull();
+    expect(result.current.state.connected).toBe(false);
+    expect(result.current.state.lastEventAt).toBeNull();
     expect(result.current.degraded).toBe(false);
 
     await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
     expect(result.current.degraded).toBe(true);
   });
 
-  it("keeps an unavailable Jitter binding transcript-only, while its null-identity transcripts remain liveness proof", async () => {
+  it("drops an unverified null-identity transcript when Sandra has no binding", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
-    const { result } = renderHook(() => useCoachChannel("call-transcript-only"));
+    const { result } = renderHook(() =>
+      useRuntimeCoachChannel("call-transcript-only", null, "introduction", true, "call-transcript-only", false),
+    );
     await flush();
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
 
@@ -299,12 +340,50 @@ describe("useCoachChannel", () => {
         scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion,
       },
     }));
-    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["I can still talk"]);
+    expect(result.current.state.transcript).toEqual([]);
     expect(result.current.state.currentPhaseId).toBe("introduction");
     expect(result.current.state.probeCount).toBe(0);
+    expect(result.current.state.connected).toBe(false);
+    expect(result.current.state.lastEventAt).toBeNull();
+    expect(result.current.scriptOutOfSync).toBe("unbound");
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+    expect(result.current.degraded).toBe(true);
+  });
+
+  it("keeps the exact strict identity gate for a bound transcript and script-derived mutations", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result } = renderHook(() => useCoachChannel("call-bound-mismatch"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "phase", phaseId: "reveal", ts: "trusted-phase", ...STRICT_V },
+    }));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "cursor", phaseId: "reveal", branchTag: "route", variantKey: "default", lineIndex: 0, lineText: "Trusted line", ts: "trusted-cursor", ...STRICT_V },
+    }));
+    expect(result.current.state.currentPhaseId).toBe("reveal");
+    expect(result.current.state.cursor?.lineText).toBe("Trusted line");
 
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    expect(result.current.degraded).toBe(false);
+    const wrongDigest = "f".repeat(64);
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "transcript", speaker: "seller", text: "Crossed-call text", isFinal: true, ts: "bad-transcript", ...STRICT_V, scriptDigest: wrongDigest },
+    }));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "transcript", speaker: "seller", text: "Unidentified crossed-call text", isFinal: true, ts: "null-transcript", scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion },
+    }));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "phase", phaseId: "introduction", ts: "bad-phase", ...STRICT_V, scriptDigest: wrongDigest },
+    }));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "cursor", phaseId: "reveal", branchTag: "route", variantKey: "default", lineIndex: 1, lineText: "Crossed-call cursor", ts: "bad-cursor", ...STRICT_V, scriptDigest: wrongDigest },
+    }));
+    expect(result.current.state.transcript).toEqual([]);
+    expect(result.current.state.currentPhaseId).toBe("reveal");
+    expect(result.current.state.cursor?.lineText).toBe("Trusted line");
+
     await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
     expect(result.current.degraded).toBe(true);
   });

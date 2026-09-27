@@ -8,7 +8,7 @@ import { isCoachWireDigestStrict } from "./flags";
 import { createCoachReducer, initialCoachState } from "./event-reducer";
 import { parseCoachEvent } from "./event-validation";
 import type { ScriptBundle, ScriptRef } from "@biginkc/coach";
-import type { CoachEvent, CoachPhaseId, CoachState } from "./types";
+import type { CoachEvent, CoachPhaseId, CoachState, CoachTranscriptEvent } from "./types";
 
 /** Rolling liveness window: if no coach event arrives within this long of
  * the last one (or of subscribing, for the very first event), the coach is
@@ -29,6 +29,23 @@ function isStrictlyBoundEvent(
     && event.scriptVersion === binding.bundle.script.version
     && event.scriptDigest === binding.ref.digest,
   );
+}
+
+/** A transcript has an independently useful payload, but without a locally
+ * resolved immutable binding its declared script identity cannot establish
+ * coaching or transport liveness. parseCoachEvent has already checked its
+ * transcript shape; require Jitter's normal non-null SHA-256 identity here
+ * rather than treating its explicit unbound/null identity as trustworthy. */
+function isUnboundTranscript(
+  event: CoachEvent,
+  binding: { ref: ScriptRef; bundle: ScriptBundle } | null,
+): event is CoachTranscriptEvent {
+  return isCoachWireDigestStrict()
+    && !binding
+    && event.type === "transcript"
+    && typeof event.scriptVersion === "string"
+    && typeof event.scriptDigest === "string"
+    && /^[a-f0-9]{64}$/i.test(event.scriptDigest);
 }
 
 /**
@@ -58,9 +75,11 @@ function isStrictlyBoundEvent(
  * `scriptOutOfSync` is diagnostic state holding the producer's declared
  * scriptVersion whenever it differs from the exact bundle bound to this call.
  * With NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT=1, BOTH the version and digest
- * must match before an event reaches the reducer or resets liveness. The
- * one exception is Jitter's explicit null-identity transcript: it remains
- * transcript-only and counts as transport/liveness proof, never coaching.
+ * must match before a bound event reaches the reducer or resets liveness.
+ * When Sandra cannot resolve any binding, a shape-validated transcript is
+ * retained in transcript state only; it cannot prove the producer identity,
+ * reset liveness, or update script-derived state. That preserves the call
+ * record without presenting an unverified stream as live coaching.
  * `bindingMissedEvents` separately records valid wire events that arrived
  * before the binding loaded. That is a missed-event warning, not a
  * reconnection: the transport never necessarily failed.
@@ -229,14 +248,14 @@ export function useCoachChannel(
             // and reporting a healthy feed.
             return;
           }
-          const isNullIdentityTranscript = result.event.type === "transcript"
-            && result.event.scriptVersion === null
-            && result.event.scriptDigest === null;
+          const allowUnboundTranscript = isUnboundTranscript(result.event, activeBinding);
           // This is intentionally BEFORE armLiveness()/setDegraded(false)
           // and dispatch(). A same-version/wrong-digest event is just as
           // untrusted as a wrong version; accepting it as liveness proof
-          // would hide a broken or crossed-call producer stream.
-          if (!isNullIdentityTranscript && !isStrictlyBoundEvent(result.event, activeBinding)) {
+          // would hide a broken or crossed-call producer stream. The only
+          // fallback is an unbound transcript, handled below without those
+          // liveness or coaching side effects.
+          if (!allowUnboundTranscript && !isStrictlyBoundEvent(result.event, activeBinding)) {
             if (isCoachWireDigestStrict() && !activeBinding && bindingPendingRef.current) {
               // The event passed the wire-shape validation but arrived in
               // the bounded interval before this call's immutable binding
@@ -249,6 +268,20 @@ export function useCoachChannel(
             }
             return;
           }
+          if (allowUnboundTranscript && result.event.type === "transcript") {
+            // No local immutable identity exists to compare against this
+            // producer identity. Keep the independently useful transcript,
+            // but do not let it mutate phase/cursor/gates or claim the coach
+            // stream is live. A pending lookup may still have skipped script
+            // events; an unavailable lookup is explicitly out of sync.
+            if (bindingPendingRef.current) {
+              setBindingMissedEvents(true);
+            } else {
+              setScriptOutOfSync(result.event.scriptVersion ?? "unbound");
+            }
+            dispatch({ type: "append_unbound_transcript", event: result.event });
+            return;
+          }
           armLiveness();
           setDegraded(false);
           // reconnectGap is NOT cleared here. It represents events that
@@ -257,11 +290,9 @@ export function useCoachChannel(
           // in between. Only dismissReconnectGap (an explicit rep
           // acknowledgment) clears it.
           setScriptOutOfSync(
-            isNullIdentityTranscript
+            activeBinding && result.event.scriptVersion === activeBinding.bundle.script.version
               ? null
-              : activeBinding && result.event.scriptVersion === activeBinding.bundle.script.version
-                ? null
-                : result.event.scriptVersion,
+              : result.event.scriptVersion,
           );
           dispatch(result.event);
         })
