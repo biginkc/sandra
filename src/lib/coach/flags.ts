@@ -25,5 +25,12 @@ export function isCoachScriptV2Enabled(): boolean {
  * rejects that ambiguity before it can affect coaching state or liveness.
  */
 export function isCoachWireDigestStrict(): boolean {
-  return process.env.NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT === "1";
+  // Keep the public variable lookup direct so Next.js can inline it, but
+  // browser-only synthetic harnesses are allowed to have no Node process
+  // shim at all. An absent shim is the safe, rollout-compatible default.
+  return (
+    typeof process !== "undefined" &&
+    typeof process.env !== "undefined" &&
+    process.env.NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT === "1"
+  );
 }

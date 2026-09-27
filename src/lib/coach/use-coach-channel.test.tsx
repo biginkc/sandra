@@ -264,6 +264,28 @@ describe("useCoachChannel", () => {
     expect(result.current.degraded).toBe(true);
   });
 
+  it("warns about valid strict wire events missed before the binding loads, without reducing them or resetting liveness", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result } = renderHook(() =>
+      useRuntimeCoachChannel("call-pending-binding", null, "introduction", true, "call-pending-binding", true),
+    );
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "counter", probeCount: 7, ts: "t1", ...STRICT_V },
+    }));
+
+    expect(result.current.bindingMissedEvents).toBe(true);
+    expect(result.current.reconnectGap).toBe(false);
+    expect(result.current.state.probeCount).toBe(0);
+    expect(result.current.degraded).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+    expect(result.current.degraded).toBe(true);
+  });
+
   it("keeps an unavailable Jitter binding transcript-only, while its null-identity transcripts remain liveness proof", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
     const { result } = renderHook(() => useCoachChannel("call-transcript-only"));
@@ -441,7 +463,7 @@ describe("useCoachChannel", () => {
     expect(channelSpy).not.toHaveBeenCalled();
   });
 
-  it("resets transcript/degraded/reconnectGap/malformedEventCount/scriptOutOfSync when callId changes — a new call must never inherit the previous call's state", async () => {
+  it("resets transcript/degraded/reconnectGap/malformedEventCount/scriptOutOfSync/bindingMissedEvents when callId changes — a new call must never inherit the previous call's state", async () => {
     const { result, rerender } = renderHook(({ callId }) => useCoachChannel(callId), {
       initialProps: { callId: "call-A" },
     });
@@ -481,6 +503,7 @@ describe("useCoachChannel", () => {
     expect(result.current.reconnectGap).toBe(false);
     expect(result.current.malformedEventCount).toBe(0);
     expect(result.current.scriptOutOfSync).toBeNull();
+    expect(result.current.bindingMissedEvents).toBe(false);
     // The new callId subscribes on a fresh channel — coach:call-B, not a
     // reused coach:call-A instance.
     expect(channelSpy).toHaveBeenCalledWith("coach:call-B", { config: { private: true } });

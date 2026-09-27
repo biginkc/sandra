@@ -108,7 +108,14 @@ export function useCoachSession(
 ) {
   const [scriptBinding, setScriptBinding] = useState<CoachScriptBinding | null>(null);
   const [scriptBindingStatus, setScriptBindingStatus] = useState<"loading" | "ready">("loading");
-  const { dispatch, ...channel } = useCoachChannel(callId, scriptBinding, "introduction", livenessActive, sessionKey);
+  const { dispatch, ...channel } = useCoachChannel(
+    callId,
+    scriptBinding,
+    "introduction",
+    livenessActive,
+    sessionKey,
+    scriptBindingStatus === "loading",
+  );
   // Navigator position changes recommendation grounding in V2, so retain it
   // in React state rather than an imperative cache.
   const [navigatorState, setNavigatorState] = useState<NavigatorState | null>(null);

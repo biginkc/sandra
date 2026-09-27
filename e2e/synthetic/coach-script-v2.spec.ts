@@ -29,6 +29,7 @@ test.beforeAll(async () => {
       define: {
         "process.env.NODE_ENV": '"test"',
         ...(mode === "off" ? { "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""' } : {}),
+        "process.env.NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT": '""',
       },
       // Test-only process shape for the V2-on browser bundle. Keeping the
       // direct lookup intact here proves the no-process production guard.

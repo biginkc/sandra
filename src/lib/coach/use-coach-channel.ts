@@ -61,6 +61,9 @@ function isStrictlyBoundEvent(
  * must match before an event reaches the reducer or resets liveness. The
  * one exception is Jitter's explicit null-identity transcript: it remains
  * transcript-only and counts as transport/liveness proof, never coaching.
+ * `bindingMissedEvents` separately records valid wire events that arrived
+ * before the binding loaded. That is a missed-event warning, not a
+ * reconnection: the transport never necessarily failed.
  */
 export function useCoachChannel(
   callId: string | null,
@@ -68,13 +71,16 @@ export function useCoachChannel(
   startingPhaseId: CoachPhaseId = "introduction",
   livenessActive = true,
   sessionKey: string | null = callId,
+  bindingPending = false,
 ) {
   const [state, dispatch] = useReducer(createCoachReducer(binding?.bundle ?? null), startingPhaseId, initialCoachState);
   const [degraded, setDegraded] = useState(false);
   const [reconnectGap, setReconnectGap] = useState(false);
   const [malformedEventCount, setMalformedEventCount] = useState(0);
   const [scriptOutOfSync, setScriptOutOfSync] = useState<string | null>(null);
+  const [bindingMissedEvents, setBindingMissedEvents] = useState(false);
   const bindingRef = useRef(binding);
+  const bindingPendingRef = useRef(bindingPending);
   const livenessActiveRef = useRef(livenessActive);
   const livenessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -85,6 +91,10 @@ export function useCoachChannel(
   useEffect(() => {
     bindingRef.current = binding;
   }, [binding]);
+
+  useEffect(() => {
+    bindingPendingRef.current = bindingPending;
+  }, [bindingPending]);
 
   const clearLivenessTimer = useCallback(() => {
     if (livenessTimerRef.current !== null) {
@@ -120,6 +130,7 @@ export function useCoachChannel(
     setReconnectGap(false);
     setMalformedEventCount(0);
     setScriptOutOfSync(null);
+    setBindingMissedEvents(false);
   }
 
   const [trackedLivenessActive, setTrackedLivenessActive] = useState(livenessActive);
@@ -226,7 +237,14 @@ export function useCoachChannel(
           // untrusted as a wrong version; accepting it as liveness proof
           // would hide a broken or crossed-call producer stream.
           if (!isNullIdentityTranscript && !isStrictlyBoundEvent(result.event, activeBinding)) {
-            if (isCoachWireDigestStrict()) {
+            if (isCoachWireDigestStrict() && !activeBinding && bindingPendingRef.current) {
+              // The event passed the wire-shape validation but arrived in
+              // the bounded interval before this call's immutable binding
+              // loaded. It cannot safely be replayed or reduced later, so
+              // surface a persistent missed-events warning. Do not treat
+              // this as a reconnection and do not let it prove liveness.
+              setBindingMissedEvents(true);
+            } else if (isCoachWireDigestStrict()) {
               setScriptOutOfSync(result.event.scriptVersion ?? "unbound");
             }
             return;
@@ -309,6 +327,8 @@ export function useCoachChannel(
     dismissReconnectGap: () => setReconnectGap(false),
     malformedEventCount,
     scriptOutOfSync,
+    bindingMissedEvents,
+    dismissBindingMissedEvents: () => setBindingMissedEvents(false),
   };
 }
 
@@ -318,4 +338,6 @@ export type UseCoachChannelResult = {
   reconnectGap: boolean;
   malformedEventCount: number;
   scriptOutOfSync: string | null;
+  bindingMissedEvents: boolean;
+  dismissBindingMissedEvents: () => void;
 };

@@ -154,6 +154,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     degraded,
     reconnectGap,
     dismissReconnectGap,
+    bindingMissedEvents,
+    dismissBindingMissedEvents,
     contextLoad,
     retryContext,
     branchOverrides,
@@ -367,6 +369,18 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         >
           <span>Reconnected — some coach events may have been missed while disconnected.</span>
           <button type="button" data-testid="dismiss-reconnect-gap" onClick={dismissReconnectGap} className="font-bold underline">
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+      {bindingMissedEvents ? (
+        <div
+          role="status"
+          data-testid="coach-binding-missed-events"
+          className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-1.5 text-xs text-[var(--coach-amber-text)]"
+        >
+          <span>Coach script was still loading — some coach events may have been missed.</span>
+          <button type="button" data-testid="dismiss-binding-missed-events" onClick={dismissBindingMissedEvents} className="font-bold underline">
             Dismiss
           </button>
         </div>

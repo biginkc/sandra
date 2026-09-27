@@ -182,6 +182,20 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.queryByTestId("coach-script-ref-label")).not.toBeInTheDocument();
   });
 
+  it("visibly warns when strict wire events arrive before the script binding loads", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    loadCoachCallScript.mockReturnValue(new Promise(() => {}));
+    render(<Harness {...baseProps()} />);
+
+    await waitFor(() => expect(channels).toHaveLength(1));
+    broadcast({ type: "counter", probeCount: 7, scriptDigest: closrOutbound123Ref.digest, ts: "binding-pending" });
+
+    expect(await screen.findByTestId("coach-binding-missed-events")).toHaveTextContent(
+      "Coach script was still loading — some coach events may have been missed.",
+    );
+    expect(screen.queryByTestId("coach-reconnect-gap")).not.toBeInTheDocument();
+  });
+
   it("renders the package navigator in the three-column view and retains typed navigator state", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
     loadCoachCallContext.mockResolvedValue({ ...sampleContext, motivation: null });
