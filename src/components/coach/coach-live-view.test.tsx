@@ -251,9 +251,40 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(recommendationRequest.mock.calls[0]?.[0]).toMatchObject({
       activeSectionId: "offer.outcome-tracks",
       selectedSectionBranch: "Price too low",
-      branchOverrides: { Opener: "fsbo" },
       mode: "follow_up",
     });
+    expect(recommendationRequest.mock.calls[0]?.[0].branchOverrides).toEqual({
+      Opener: "fsbo",
+      "Price too low": "default",
+    });
+  });
+
+  it("sends the V2 navigator's auto-selected SMS opener variant with a follow-up recommendation", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
+    loadCoachCallContext.mockResolvedValue({ ...sampleContext, leadSource: "sms" });
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true, requestId: input.requestId, callId: input.callId,
+        activeSectionId: input.activeSectionId, mode: input.mode,
+        recommendations: [], followUpQuestions: ["What would make a conversation useful today?"],
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+
+    await screen.findByTestId("coach-script-ref");
+    broadcast({ type: "transcript", speaker: "seller", text: "I saw your text message.", isFinal: true, ts: "v2-sms-grounding" });
+    await user.click(screen.getByTestId("follow-up-questions"));
+
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0]?.[0]).toMatchObject({
+      activeSectionId: "introduction.opener",
+      selectedSectionBranch: null,
+      mode: "follow_up",
+    });
+    // This must be derived from the shared navigator resolver: removing the
+    // effective-variant mapping regresses it to {}, and the assertion fails.
+    expect(recommendationRequest.mock.calls[0]?.[0].branchOverrides).toEqual({ Opener: "sms" });
   });
 
   it("keeps file-number identity placeholder-only while loading, then shows the authorized context value", async () => {

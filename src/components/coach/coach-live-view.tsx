@@ -215,17 +215,55 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       : null,
     [branchOverrides, bundle, nextSectionId, sectionBranchSelections, selectCtx, tokens],
   );
+  // V2 owns its own navigator state. Use the exact initial state supplied to
+  // that navigator until it reports its first update, so recommendation
+  // grounding never briefly falls back to the legacy panel's selection.
+  const effectiveNavigatorState = useMemo<NavigatorState>(() => session.navigatorState ?? {
+    activeSectionId,
+    sectionBranchSelections,
+    branchOverrides,
+    entryFields: state.entryFields,
+  }, [activeSectionId, branchOverrides, sectionBranchSelections, session.navigatorState, state.entryFields]);
   const recommendationSectionId = scriptV2Enabled
-    ? session.navigatorState?.activeSectionId ?? activeSectionId
+    ? effectiveNavigatorState.activeSectionId
     : activeSectionId;
+  // Keep recommendation grounding in lockstep with ScriptNavigator: both
+  // resolve tokens from the live context and navigator-owned entry fields,
+  // then let the shared section resolver choose auto and manual variants.
+  const navigatorTokens = useMemo(
+    () => bundle ? resolveCoachTokens(bundle.script.tokens, activeContext, effectiveNavigatorState.entryFields) : {},
+    [activeContext, bundle, effectiveNavigatorState.entryFields],
+  );
+  const recommendationNavigatorBlock = useMemo(
+    () => scriptV2Enabled && bundle
+      ? buildCoachSectionScriptBlock(
+        bundle,
+        effectiveNavigatorState.activeSectionId,
+        navigatorTokens,
+        selectCtx,
+        effectiveNavigatorState.branchOverrides,
+        effectiveNavigatorState.sectionBranchSelections[effectiveNavigatorState.activeSectionId] ?? null,
+      )
+      : null,
+    [bundle, effectiveNavigatorState, navigatorTokens, scriptV2Enabled, selectCtx],
+  );
+  const effectiveNavigatorVariants = useMemo(
+    () => ({
+      ...effectiveNavigatorState.branchOverrides,
+      ...Object.fromEntries(
+        (recommendationNavigatorBlock?.branches ?? []).map((branch) => [branch.tag, branch.selected.key]),
+      ),
+    }),
+    [effectiveNavigatorState.branchOverrides, recommendationNavigatorBlock],
+  );
   const activePhaseId = scriptBlock?.phaseId ?? bundle?.script.phases[0]?.id ?? "unavailable";
   const recommendations = useCoachRecommendations({
     callId: session.callId,
     activeSectionId: recommendationSectionId,
     selectedSectionBranch: scriptV2Enabled
-      ? session.navigatorState?.sectionBranchSelections[recommendationSectionId] ?? null
+      ? effectiveNavigatorState.sectionBranchSelections[recommendationSectionId] ?? null
       : scriptBlock?.selectedBranchTag ?? null,
-    branchOverrides: scriptV2Enabled ? session.navigatorState?.branchOverrides ?? {} : selectedVariants,
+    branchOverrides: scriptV2Enabled ? effectiveNavigatorVariants : selectedVariants,
     transcript: state.transcript,
     request: recommendationRequest,
     continuity: session.recommendationContinuity,
