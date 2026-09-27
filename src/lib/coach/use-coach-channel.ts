@@ -31,18 +31,22 @@ function isStrictlyBoundEvent(
   );
 }
 
-/** A transcript has an independently useful payload, but without a locally
- * resolved immutable binding its declared script identity cannot establish
- * coaching or transport liveness. parseCoachEvent has already checked its
- * transcript shape; require Jitter's normal non-null SHA-256 identity here
- * rather than treating its explicit unbound/null identity as trustworthy. */
+/** A transcript has an independently useful payload, but its explicit
+ * unbound/null identity can never establish coaching or transport liveness —
+ * even during the rollout-compatible, non-strict mode. A normal Jitter
+ * transcript with no local binding is also transcript-only in strict mode:
+ * its SHA-256 identity is well formed but cannot be compared locally. */
 function isUnboundTranscript(
   event: CoachEvent,
   binding: { ref: ScriptRef; bundle: ScriptBundle } | null,
 ): event is CoachTranscriptEvent {
+  if (event.type !== "transcript") return false;
+  // This is Jitter's deliberate no-binding identity, not a legacy event
+  // which carries a non-null version and simply omits scriptDigest. Preserve
+  // its text, but never let it take the ordinary event/liveness path.
+  if (event.scriptVersion === null && event.scriptDigest === null) return true;
   return isCoachWireDigestStrict()
     && !binding
-    && event.type === "transcript"
     && typeof event.scriptVersion === "string"
     && typeof event.scriptDigest === "string"
     && /^[a-f0-9]{64}$/i.test(event.scriptDigest);

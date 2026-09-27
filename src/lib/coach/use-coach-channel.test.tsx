@@ -149,6 +149,35 @@ describe("useCoachChannel", () => {
     expect(result.current.state.probeCount).toBe(3);
   });
 
+  it("keeps an explicit unbound transcript transcript-only with the strict flag off", async () => {
+    // The rollout-compatible path still accepts real legacy events (above),
+    // but Jitter's null/null identity is an explicit statement that this
+    // transcript has no script binding. It must not take the normal reducer
+    // path merely because the digest gate is disabled.
+    const { result } = renderHook(() => useCoachChannel("call-unbound-flag-off"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "counter", probeCount: 1, ts: "bound-event", ...V, scriptVersion: "0.9.0" },
+    }));
+    expect(result.current.scriptOutOfSync).toBe("0.9.0");
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_001); });
+    expect(result.current.degraded).toBe(true);
+
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: {
+        type: "transcript", speaker: "seller", text: "I can still speak.", isFinal: true, ts: "unbound-transcript",
+        scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion,
+      },
+    }));
+
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["I can still speak."]);
+    expect(result.current.state.lastEventAt).toBe("bound-event");
+    expect(result.current.degraded).toBe(true);
+    expect(result.current.scriptOutOfSync).toBe("unbound");
+  });
+
   it("goes degraded after 15s of silence even with no explicit status change (rolling watchdog)", async () => {
     const { result } = renderHook(() => useCoachChannel("call-123"));
     await flush();
@@ -325,7 +354,7 @@ describe("useCoachChannel", () => {
     expect(result.current.degraded).toBe(true);
   });
 
-  it("drops an unverified null-identity transcript when Sandra has no binding", async () => {
+  it("keeps an explicit unbound transcript when Sandra has no binding without treating it as live coaching", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
     const { result } = renderHook(() =>
       useRuntimeCoachChannel("call-transcript-only", null, "introduction", true, "call-transcript-only", false),
@@ -340,7 +369,7 @@ describe("useCoachChannel", () => {
         scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion,
       },
     }));
-    expect(result.current.state.transcript).toEqual([]);
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["I can still talk"]);
     expect(result.current.state.currentPhaseId).toBe("introduction");
     expect(result.current.state.probeCount).toBe(0);
     expect(result.current.state.connected).toBe(false);
@@ -374,15 +403,17 @@ describe("useCoachChannel", () => {
     act(() => latestChannel()._broadcastHandler?.({
       payload: { type: "transcript", speaker: "seller", text: "Unidentified crossed-call text", isFinal: true, ts: "null-transcript", scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion },
     }));
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["Unidentified crossed-call text"]);
+    expect(result.current.scriptOutOfSync).toBe("unbound");
     act(() => latestChannel()._broadcastHandler?.({
       payload: { type: "phase", phaseId: "introduction", ts: "bad-phase", ...STRICT_V, scriptDigest: wrongDigest },
     }));
     act(() => latestChannel()._broadcastHandler?.({
       payload: { type: "cursor", phaseId: "reveal", branchTag: "route", variantKey: "default", lineIndex: 1, lineText: "Crossed-call cursor", ts: "bad-cursor", ...STRICT_V, scriptDigest: wrongDigest },
     }));
-    expect(result.current.state.transcript).toEqual([]);
     expect(result.current.state.currentPhaseId).toBe("reveal");
     expect(result.current.state.cursor?.lineText).toBe("Trusted line");
+    expect(result.current.scriptOutOfSync).toBe(V.scriptVersion);
 
     await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
     expect(result.current.degraded).toBe(true);
