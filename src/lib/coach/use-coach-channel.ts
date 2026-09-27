@@ -42,8 +42,8 @@ const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
  * are only refreshed by a fully VALIDATED event — malformed or
  * unknown-type traffic proves bytes are arriving, not that the contract
  * is intact, so it can't make a broken feed look healthy.
- * `scriptOutOfSync` is the producer's declared scriptVersion whenever it
- * differs from the exact bundle bound to this call — reset to
+ * `scriptOutOfSync` is diagnostic state holding the producer's declared
+ * scriptVersion whenever it differs from the exact bundle bound to this call — reset to
  * null the moment a later event reports a matching version. Every valid
  * event carries scriptVersion (required by the wire contract), so this is
  * checked on every dispatch, not conditionally.

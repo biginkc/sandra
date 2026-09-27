@@ -451,6 +451,13 @@ export async function requestCoachRecommendationsWithDeps(
   const input = parseRequest(rawInput);
   if (!input) return failure(rawInput, "invalid_request");
 
+  // Reject malformed or unusable request data before auth or any database
+  // reads. The section itself is intentionally checked later because it is
+  // defined by the call's owned, bound digest rather than caller input.
+  const transcript = boundFinalTranscript(input.transcript);
+  if (transcript.length === 0 || !input.transcript.some((line) => line.speaker === "seller")) return failure(input, "invalid_request");
+  if (input.mode === "automatic" && !input.transcript.some(isMeaningfulFinalSellerTurn)) return failure(input, "invalid_request");
+
   const authResult = await deps.auth.getUser();
   if (authResult.error || !authResult.data.user) return failure(input, "unauthorized");
   const userId = authResult.data.user.id;
@@ -463,10 +470,6 @@ export async function requestCoachRecommendationsWithDeps(
   try { assertValidScriptBundle(cachedScript.data); } catch { return failure(input, "invalid_request"); }
   const section = loadTrustedSectionContext(cachedScript.data, input.activeSectionId, input.branchOverrides, input.selectedSectionBranch);
   if (!section || input.transcript.length === 0) return failure(input, "invalid_request");
-
-  const transcript = boundFinalTranscript(input.transcript);
-  if (transcript.length === 0 || !input.transcript.some((line) => line.speaker === "seller")) return failure(input, "invalid_request");
-  if (input.mode === "automatic" && !input.transcript.some(isMeaningfulFinalSellerTurn)) return failure(input, "invalid_request");
 
   const context = await deps.contexts.load({ propertyId: ownedCall.data.propertyId });
   if (context.error || !context.data) return failure(input, "provider_error");

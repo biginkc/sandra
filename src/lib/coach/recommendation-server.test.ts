@@ -1,23 +1,408 @@
 import { describe, expect, it, vi } from "vitest";
 import { closrOutbound123Bundle, closrOutbound123Digest } from "@biginkc/coach/fixtures";
-import { requestCoachRecommendationsWithDeps, type CoachRecommendationServerDeps } from "./recommendation-server";
 
-const input = { requestId: "request-1", callId: "call-1", activeSectionId: "introduction.opener", selectedSectionBranch: null, branchOverrides: {}, mode: "automatic" as const, transcript: [{ id: "seller-1", speaker: "seller" as const, text: "I need to move soon for work.", isFinal: true, ts: "2026-09-26T00:00:00Z" }] };
-function deps(): CoachRecommendationServerDeps { return {
-  auth: { getUser: vi.fn(async () => ({ data: { user: { id: "user-1" } }, error: null })) },
-  calls: { findOwnedCall: vi.fn(async () => ({ data: { propertyId: "property-1", scriptDigest: closrOutbound123Digest }, error: null })) },
-  scripts: { loadByDigest: vi.fn(async ({ digest }) => ({ data: digest === closrOutbound123Digest ? closrOutbound123Bundle : null, error: null })) },
-  contexts: { load: vi.fn(async () => ({ data: { sellerName: null, propertyAddress: null, propertyCounty: null, yearBuilt: null, leadSource: null, occupancy: null }, error: null })) },
-  limiter: { consume: vi.fn(async () => ({ allowed: true })) },
-  anthropic: { messages: { create: vi.fn(async () => ({ content: [{ type: "tool_use", input: { recommendations: ["Ask what timeline works best."] } }] })) } } as never,
-}; }
-describe("recommendation server bound script", () => {
-  it("loads only the exact call digest before building recommendation context", async () => {
-    const d = deps(); await requestCoachRecommendationsWithDeps(input, d);
-    expect(d.scripts.loadByDigest).toHaveBeenCalledWith({ digest: closrOutbound123Digest });
+import type { CoachRecommendationRequest } from "./recommendation-types";
+import {
+  AUTOMATIC_RECOMMENDATION_LIMIT_PER_CALL,
+  MAX_RECOMMENDATION_TRANSCRIPT_CHARS,
+  MAX_RECOMMENDATION_TRANSCRIPT_LINES,
+  boundFinalTranscript,
+  createInMemoryCoachRecommendationLimiter,
+  loadTrustedSectionContext,
+  redactPhoneNumbers,
+  requestCoachRecommendationsWithDeps,
+  type CoachRecommendationAnthropic,
+  type CoachRecommendationServerDeps,
+} from "./recommendation-server";
+
+function request(overrides: Partial<CoachRecommendationRequest> = {}): CoachRecommendationRequest {
+  return {
+    requestId: "request-1",
+    callId: "call-1",
+    activeSectionId: "introduction.opener",
+    selectedSectionBranch: null,
+    branchOverrides: {},
+    mode: "automatic",
+    transcript: [{ speaker: "seller", text: "I need to sell because the repairs are too expensive.", isFinal: true }],
+    ...overrides,
+  };
+}
+
+function anthropicReturning(input: unknown, capture?: (args: unknown) => void): CoachRecommendationAnthropic {
+  const toolName = typeof input === "object" && input !== null && "questions" in input
+    ? "submit_follow_up_questions"
+    : "submit_coach_recommendations";
+  return {
+    messages: {
+      create: vi.fn(async (args: unknown) => {
+        capture?.(args);
+        return {
+          content: [{ type: "tool_use", id: "tool-1", name: toolName, input }],
+        };
+      }) as unknown as CoachRecommendationAnthropic["messages"]["create"],
+    } as unknown as CoachRecommendationAnthropic["messages"],
+  };
+}
+
+function deps(overrides: Partial<CoachRecommendationServerDeps> = {}): CoachRecommendationServerDeps {
+  return {
+    auth: {
+      getUser: vi.fn(async () => ({ data: { user: { id: "user-1" } }, error: null })),
+    },
+    calls: {
+      findOwnedCall: vi.fn(async () => ({ data: { propertyId: "property-1", scriptDigest: closrOutbound123Digest }, error: null })),
+    },
+    scripts: { loadByDigest: vi.fn(async ({ digest }) => ({ data: digest === closrOutbound123Digest ? closrOutbound123Bundle : null, error: null })) },
+    contexts: {
+      load: vi.fn(async () => ({
+        data: {
+          sellerName: "Jane Homeowner",
+          propertyAddress: "123 Main St",
+          propertyCounty: "Jackson",
+          yearBuilt: "1987",
+          leadSource: "cold_call",
+          occupancy: "owner_occupied",
+        },
+        error: null,
+      })),
+    },
+    anthropic: anthropicReturning({ recommendations: ["Ask how the repair burden has affected their plans."] }),
+    limiter: { consume: vi.fn(async () => ({ allowed: true })) },
+    ...overrides,
+  };
+}
+
+describe("coach recommendation server boundary", () => {
+  it("authenticates, verifies call ownership, and consumes the mode-specific server limit", async () => {
+    const dependencies = deps();
+    const result = await requestCoachRecommendationsWithDeps(request(), dependencies);
+
+    expect(result).toMatchObject({ ok: true, mode: "automatic", recommendations: expect.any(Array) });
+    expect(dependencies.calls.findOwnedCall).toHaveBeenCalledWith({ callId: "call-1", userId: "user-1" });
+    expect(dependencies.contexts.load).toHaveBeenCalledWith({ propertyId: "property-1" });
+    expect(dependencies.limiter.consume).toHaveBeenCalledWith({
+      userId: "user-1",
+      callId: "call-1",
+      mode: "automatic",
+      limit: AUTOMATIC_RECOMMENDATION_LIMIT_PER_CALL,
+    });
   });
-  it("does not substitute a missing cached bundle", async () => {
-    const d = deps(); d.scripts.loadByDigest = vi.fn(async () => ({ data: null, error: null }));
-    await expect(requestCoachRecommendationsWithDeps(input, d)).resolves.toMatchObject({ ok: false, code: "invalid_request" });
+
+  it("rejects unauthenticated and unowned calls before provider use", async () => {
+    const anthropic = anthropicReturning({ recommendations: ["unused"] });
+    const unauthenticated = deps({
+      auth: { getUser: vi.fn(async () => ({ data: { user: null }, error: null })) },
+      anthropic,
+    });
+    expect(await requestCoachRecommendationsWithDeps(request(), unauthenticated)).toMatchObject({
+      ok: false,
+      code: "unauthorized",
+    });
+    expect(anthropic.messages.create).not.toHaveBeenCalled();
+
+    const unowned = deps({
+      calls: { findOwnedCall: vi.fn(async () => ({ data: null, error: null })) },
+      anthropic,
+    });
+    expect(await requestCoachRecommendationsWithDeps(request(), unowned)).toMatchObject({
+      ok: false,
+      code: "call_not_owned",
+    });
+    expect(anthropic.messages.create).not.toHaveBeenCalled();
+  });
+
+  it("returns a cap result and never calls the provider when the injected limiter denies", async () => {
+    const anthropic = anthropicReturning({ recommendations: ["unused"] });
+    const dependencies = deps({ limiter: { consume: vi.fn(async () => ({ allowed: false })) }, anthropic });
+    const result = await requestCoachRecommendationsWithDeps(request(), dependencies);
+
+    expect(result).toMatchObject({ ok: false, code: "rate_limited" });
+    expect(anthropic.messages.create).not.toHaveBeenCalled();
+  });
+
+  it("the supplied limiter enforces the exact per-key limit", async () => {
+    const limiter = createInMemoryCoachRecommendationLimiter();
+    const input = { userId: "u", callId: "c", mode: "automatic" as const, limit: 2 };
+    await expect(limiter.consume(input)).resolves.toEqual({ allowed: true });
+    await expect(limiter.consume(input)).resolves.toEqual({ allowed: true });
+    await expect(limiter.consume(input)).resolves.toEqual({ allowed: false });
+    await expect(limiter.consume({ ...input, callId: "other" })).resolves.toEqual({ allowed: true });
+  });
+
+  it("rejects interim transcript input and automatic requests without a meaningful final seller turn", async () => {
+    const interim = request({ transcript: [{ speaker: "seller", text: "The roof is leaking badly", isFinal: false }] });
+    const interimDependencies = deps();
+    expect(await requestCoachRecommendationsWithDeps(interim, interimDependencies)).toMatchObject({ ok: false, code: "invalid_request" });
+    expect(interimDependencies.auth.getUser).not.toHaveBeenCalled();
+    expect(interimDependencies.calls.findOwnedCall).not.toHaveBeenCalled();
+    expect(interimDependencies.scripts.loadByDigest).not.toHaveBeenCalled();
+
+    const filler = request({ transcript: [{ speaker: "seller", text: "okay", isFinal: true }] });
+    expect(await requestCoachRecommendationsWithDeps(filler, deps())).toMatchObject({ ok: false, code: "invalid_request" });
+
+    const repOnlyFollowUp = request({
+      mode: "follow_up",
+      transcript: [{ speaker: "rep", text: "Tell me more about what has you considering a move.", isFinal: true }],
+    });
+    expect(await requestCoachRecommendationsWithDeps(repOnlyFollowUp, deps())).toMatchObject({
+      ok: false,
+      code: "invalid_request",
+    });
+  });
+
+  it("accepts an automatic request when overlap leaves the finalized seller line before a later rep line", async () => {
+    const result = await requestCoachRecommendationsWithDeps(
+      request({
+        transcript: [
+          { speaker: "seller", text: "The furnace repair is more than I can take on.", isFinal: true },
+          { speaker: "rep", text: "Tell me more about that.", isFinal: true },
+        ],
+      }),
+      deps(),
+    );
+
+    expect(result).toMatchObject({ ok: true, mode: "automatic" });
+  });
+
+  it("loads script content by trusted section line references and validates branch variants", () => {
+    const context = loadTrustedSectionContext(closrOutbound123Bundle, "introduction.opener", { Opener: "cold_call" });
+    expect(context).toMatchObject({ phase: "Introduction", sectionTitle: "Open the call" });
+    expect(context?.scriptLines.length).toBeGreaterThan(0);
+    // The UI stores overrides for the whole call. Overrides from another
+    // section are ignored rather than contaminating this section's prompt.
+    expect(loadTrustedSectionContext(closrOutbound123Bundle, "introduction.opener", { Opener: "cold_call", Entry: "vacant" })).toEqual(context);
+    expect(loadTrustedSectionContext(closrOutbound123Bundle, "introduction.opener", { Opener: "does-not-exist" })).toBeNull();
+    expect(loadTrustedSectionContext(closrOutbound123Bundle, "does-not-exist", {})).toBeNull();
+  });
+
+  it("isolates every selected Offer and Close path and defaults invalid path tags to the first authored branch", () => {
+    const cases = [
+      ["offer.outcome-tracks", "Good news", "CONGRATS", ["right around where I was thinking", "not able to get you approved", "our offer was lower"]],
+      ["offer.outcome-tracks", "Bad news", "right around where I was thinking", ["CONGRATS", "not able to get you approved", "our offer was lower"]],
+      ["offer.outcome-tracks", "Bad news — below mortgage", "not able to get you approved", ["CONGRATS", "right around where I was thinking", "our offer was lower"]],
+      ["offer.outcome-tracks", "Price too low", "our offer was lower", ["CONGRATS", "right around where I was thinking", "not able to get you approved"]],
+      ["close.decision-tracks", "If far apart — program pivot", "There is one program I can check", ["Congratulations"]],
+      ["close.decision-tracks", "They accept", "Congratulations", ["There is one program I can check"]],
+    ] as const;
+
+    for (const [sectionId, selectedPath, included, excluded] of cases) {
+      const script = loadTrustedSectionContext(closrOutbound123Bundle, sectionId, {}, selectedPath)?.scriptLines.join("\n") ?? "";
+      expect(script).toContain(included);
+      for (const siblingText of excluded) expect(script).not.toContain(siblingText);
+    }
+
+    expect(loadTrustedSectionContext(closrOutbound123Bundle, "offer.outcome-tracks", {}, "not-authored")).toEqual(
+      loadTrustedSectionContext(closrOutbound123Bundle, "offer.outcome-tracks", {}, "Good news"),
+    );
+    expect(loadTrustedSectionContext(closrOutbound123Bundle, "close.decision-tracks", {}, null)).toEqual(
+      loadTrustedSectionContext(closrOutbound123Bundle, "close.decision-tracks", {}, "If far apart — program pivot"),
+    );
+  });
+
+  it("uses the validated selected path in the provider prompt", async () => {
+    let captured: unknown;
+    const dependencies = deps({
+      anthropic: anthropicReturning(
+        { recommendations: ["Ask what offer amount would solve the seller's problem."] },
+        (args) => { captured = args; },
+      ),
+    });
+
+    const result = await requestCoachRecommendationsWithDeps(
+      request({
+        activeSectionId: "offer.outcome-tracks",
+        selectedSectionBranch: "Price too low",
+        branchOverrides: { "Price too low": "default" },
+      }),
+      dependencies,
+    );
+
+    expect(result).toMatchObject({ ok: true });
+    const serialized = JSON.stringify(captured);
+    expect(serialized).toContain("our offer was lower");
+    expect(serialized).not.toContain("CONGRATS");
+    expect(serialized).not.toContain("right around where I was thinking");
+    expect(serialized).not.toContain("not able to get you approved");
+  });
+
+  it("bounds to the latest 40 finalized lines and 12,000 formatted characters", () => {
+    const lines = Array.from({ length: 50 }, (_, index) => ({
+      speaker: "seller" as const,
+      text: `${index}-${"x".repeat(400)}`,
+      isFinal: true,
+    }));
+    const bounded = boundFinalTranscript(lines);
+    const formattedLength = bounded.reduce((sum, line) => sum + line.speaker.length + 2 + line.text.length, 0);
+
+    expect(bounded.length).toBeLessThanOrEqual(MAX_RECOMMENDATION_TRANSCRIPT_LINES);
+    expect(formattedLength).toBeLessThanOrEqual(MAX_RECOMMENDATION_TRANSCRIPT_CHARS);
+    expect(bounded.at(-1)?.text.startsWith("49-")).toBe(true);
+  });
+
+  it("removes phone numbers before prompting and labels reference data as untrusted", async () => {
+    let captured: unknown;
+    const dependencies = deps({
+      anthropic: anthropicReturning(
+        { recommendations: ["Ask how soon they need the repair resolved."] },
+        (args) => { captured = args; },
+      ),
+    });
+    const rawPhone = "(816) 555-1212";
+    const result = await requestCoachRecommendationsWithDeps(
+      request({ transcript: [{ speaker: "seller", text: `Call me at ${rawPhone} because the roof issue is urgent.`, isFinal: true }] }),
+      dependencies,
+    );
+
+    expect(result.ok).toBe(true);
+    const serialized = JSON.stringify(captured);
+    expect(serialized).not.toContain(rawPhone);
+    expect(serialized).toContain("[phone removed]");
+    expect(serialized).toContain("untrusted quoted reference data");
+    expect(serialized).toContain("123 Main St");
+    expect(redactPhoneNumbers("Built in 1987 at 1234 Main St")).toBe("Built in 1987 at 1234 Main St");
+  });
+
+  it("returns exactly three distinct follow-up questions and rejects malformed tool output", async () => {
+    const good = deps({
+      anthropic: {
+        messages: {
+          create: vi.fn(async () => ({
+            content: [{
+              type: "tool_use",
+              id: "tool-1",
+              name: "submit_follow_up_questions",
+              input: { questions: [
+                { template: "tell_more", groundingPhrase: "repairs are too expensive" },
+                { template: "impact", groundingPhrase: "repairs" },
+                { template: "priority", groundingPhrase: "repairs" },
+              ] },
+            }],
+          })) as unknown as CoachRecommendationAnthropic["messages"]["create"],
+        } as unknown as CoachRecommendationAnthropic["messages"],
+      },
+    });
+    const result = await requestCoachRecommendationsWithDeps(request({ mode: "follow_up" }), good);
+    expect(result).toMatchObject({ ok: true, recommendations: [], followUpQuestions: expect.arrayContaining([expect.any(String)]) });
+    if (result.ok) expect(result.followUpQuestions).toHaveLength(3);
+
+    const duplicate = deps({
+      anthropic: {
+        messages: {
+          create: vi.fn(async () => ({
+            content: [{
+              type: "tool_use",
+              id: "tool-1",
+              name: "submit_follow_up_questions",
+              input: { questions: [
+                { template: "tell_more", groundingPhrase: "repairs are too expensive" },
+                { template: "tell_more", groundingPhrase: "repairs are too expensive" },
+                { template: "impact", groundingPhrase: "repairs" },
+              ] },
+            }],
+          })) as unknown as CoachRecommendationAnthropic["messages"]["create"],
+        } as unknown as CoachRecommendationAnthropic["messages"],
+      },
+    });
+    expect(await requestCoachRecommendationsWithDeps(request({ mode: "follow_up" }), duplicate)).toMatchObject({
+      ok: false,
+      code: "provider_error",
+    });
+  });
+
+  it("separates seller grounding from script context and rejects script-only or falsely attributed premises", async () => {
+    let captured: unknown;
+    const transcript = [{ speaker: "seller" as const, text: "Audio check. This line repeats once per minute.", isFinal: true }];
+    const valid = deps({
+      anthropic: anthropicReturning({
+        questions: [
+          { template: "tell_more", groundingPhrase: "audio check" },
+          { template: "why_now", groundingPhrase: "once per minute" },
+          { template: "priority", groundingPhrase: "audio check" },
+        ],
+      }, (args) => { captured = args; }),
+    });
+    expect(await requestCoachRecommendationsWithDeps(request({ mode: "follow_up", transcript }), valid)).toMatchObject({
+      ok: true,
+      followUpQuestions: expect.any(Array),
+    });
+    const serialized = JSON.stringify(captured);
+    expect(serialized).toContain("seller_statements_allowed_for_grounding");
+    expect(serialized).toContain("conversation_planning_context_only");
+    expect(serialized).toContain("Only finalized seller statements may supply a factual premise");
+    expect(serialized).toContain("The server writes the final question from the selected template");
+
+    const scriptOnly = deps({
+      anthropic: anthropicReturning({
+        questions: [
+          { template: "tell_more", groundingPhrase: "structure" },
+          { template: "impact", groundingPhrase: "audio check" },
+          { template: "why_now", groundingPhrase: "once per minute" },
+        ],
+      }),
+    });
+    expect(await requestCoachRecommendationsWithDeps(request({ mode: "follow_up", transcript }), scriptOnly)).toMatchObject({
+      ok: false,
+      code: "provider_error",
+    });
+
+    const mixedInventedPremise = deps({
+      anthropic: anthropicReturning({
+        questions: [
+          {
+            template: "tell_more",
+            groundingPhrase: "audio check",
+            question: "Are there structural areas that concern you beyond the audio check?",
+          },
+          { template: "impact", groundingPhrase: "audio check" },
+          { template: "why_now", groundingPhrase: "once per minute" },
+        ],
+      }),
+    });
+    expect(await requestCoachRecommendationsWithDeps(request({ mode: "follow_up", transcript }), mixedInventedPremise)).toMatchObject({
+      ok: false,
+      code: "provider_error",
+    });
+  });
+});
+
+
+describe("bounded provider failure diagnostics", () => {
+  it.each([
+    ["billing", 400, "credit balance too low", "billing_indicated"],
+    ["auth", 401, "invalid x-api-key", "auth_indicated"],
+    ["unknown", 400, "invalid request", "unclassified"],
+    ["invalid status", "401", "invalid request", "unclassified"],
+    ["out-of-range status", 900, "invalid request", "unclassified"],
+    ["fractional status", 400.5, "invalid request", "unclassified"],
+  ])("reports only safe metadata for %s", async (_label, status, message, reason) => {
+    const secret = "SECRET_DIAGNOSTIC_CANARY";
+    const transcript = "TRANSCRIPT_DIAGNOSTIC_CANARY";
+    const error = Object.assign(new Error(`${message} ${secret} ${transcript}`), {
+      status,
+      error: { type: secret, message: transcript },
+      request_id: secret,
+      headers: { authorization: secret },
+    });
+    error.stack = `${secret} ${transcript}`;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const dependencies = deps({ anthropic: {
+        messages: { create: vi.fn().mockRejectedValue(error) },
+      } as unknown as CoachRecommendationAnthropic });
+      const result = await requestCoachRecommendationsWithDeps(request(), dependencies);
+      expect(result).toMatchObject({ ok: false, code: "provider_error" });
+      expect(logged).toHaveBeenCalledTimes(1);
+      const payload = logged.mock.calls[0]?.[1];
+      const expectedTags = typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
+        ? { surface: "coach_recommendation_generate", reason, httpStatus: status }
+        : { surface: "coach_recommendation_generate", reason };
+      expect(payload).toMatchObject({ message: "Coach recommendation generation failed", tags: expectedTags });
+      expect(payload.tags).toEqual(expectedTags);
+      const serialized = JSON.stringify(logged.mock.calls);
+      expect(serialized).not.toContain(secret);
+      expect(serialized).not.toContain(transcript);
+      expect(serialized).not.toContain("request-1");
+      expect(serialized).not.toContain("call-1");
+    } finally { logged.mockRestore(); }
   });
 });
