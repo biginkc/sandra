@@ -61,6 +61,7 @@ test.beforeAll(async () => {
       // CoachLiveView reads the independent V2 gate even when this audio
       // fixture intentionally verifies the flag-off composition.
       "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""',
+      "process.env.NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT": '""',
     },
     write: false,
     logLevel: "silent",

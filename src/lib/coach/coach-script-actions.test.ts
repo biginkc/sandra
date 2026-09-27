@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
 
 const mocks = vi.hoisted(() => ({ getUser: vi.fn(), maybeSingle: vi.fn(), eq: vi.fn(), select: vi.fn(), from: vi.fn() }));
 
@@ -35,5 +36,41 @@ describe("loadCoachCallScript", () => {
     mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
     await expect(loadCoachCallScript("call-1")).resolves.toEqual({ status: "error" });
     expect(mocks.from).not.toHaveBeenCalled();
+  });
+
+  it("returns a binding only when the cached bundle recomputes to the index-bound digest", async () => {
+    mocks.maybeSingle.mockResolvedValue({
+      data: {
+        script_slug: closrOutbound123Ref.slug,
+        script_revision: closrOutbound123Ref.revision,
+        script_digest: closrOutbound123Ref.digest,
+        coach_script_revisions: { bundle: closrOutbound123Bundle },
+      },
+      error: null,
+    });
+
+    await expect(loadCoachCallScript("call-1")).resolves.toEqual({
+      status: "bound",
+      binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle },
+    });
+  });
+
+  it("rejects a structurally valid cached bundle whose JSON was tampered after the call index bound its digest", async () => {
+    const tampered = structuredClone(closrOutbound123Bundle);
+    // Unknown integer fields are valid forward-compatible bundle content, so
+    // this proves the rejection comes from recomputing the canonical digest,
+    // not merely from schema validation failing first.
+    (tampered.sections as Record<string, unknown>).optional_future_field = 1;
+    mocks.maybeSingle.mockResolvedValue({
+      data: {
+        script_slug: closrOutbound123Ref.slug,
+        script_revision: closrOutbound123Ref.revision,
+        script_digest: closrOutbound123Ref.digest,
+        coach_script_revisions: { bundle: tampered },
+      },
+      error: null,
+    });
+
+    await expect(loadCoachCallScript("call-1")).resolves.toEqual({ status: "unavailable" });
   });
 });

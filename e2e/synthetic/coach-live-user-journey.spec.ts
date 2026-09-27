@@ -3,7 +3,6 @@ import { expect, test, type Page } from "@playwright/test";
 import { closrOutbound123Bundle } from "@biginkc/coach/fixtures";
 import tailwindcss from "@tailwindcss/postcss";
 import * as esbuild from "esbuild";
-import fs from "node:fs";
 import path from "node:path";
 import postcss from "postcss";
 
@@ -99,7 +98,11 @@ test.beforeAll(async () => {
         },
       },
     ],
-    define: { "process.env.NODE_ENV": '"test"', "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""' },
+    define: {
+      "process.env.NODE_ENV": '"test"',
+      "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""',
+      "process.env.NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT": '""',
+    },
     write: false,
     logLevel: "silent",
   });

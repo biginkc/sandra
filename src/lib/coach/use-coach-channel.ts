@@ -4,10 +4,11 @@ import { REALTIME_SUBSCRIBE_STATES } from "@supabase/supabase-js";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
+import { isCoachWireDigestStrict } from "./flags";
 import { createCoachReducer, initialCoachState } from "./event-reducer";
 import { parseCoachEvent } from "./event-validation";
 import type { ScriptBundle, ScriptRef } from "@biginkc/coach";
-import type { CoachPhaseId, CoachState } from "./types";
+import type { CoachEvent, CoachPhaseId, CoachState } from "./types";
 
 /** Rolling liveness window: if no coach event arrives within this long of
  * the last one (or of subscribing, for the very first event), the coach is
@@ -17,6 +18,18 @@ const LIVENESS_WINDOW_MS = 15_000;
 const COACH_BROADCAST_EVENT = "coach_event";
 /** Resubscribe backoff after CHANNEL_ERROR/TIMED_OUT/CLOSED. */
 const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+
+function isStrictlyBoundEvent(
+  event: CoachEvent,
+  binding: { ref: ScriptRef; bundle: ScriptBundle } | null,
+): boolean {
+  if (!isCoachWireDigestStrict()) return true;
+  return Boolean(
+    binding
+    && event.scriptVersion === binding.bundle.script.version
+    && event.scriptDigest === binding.ref.digest,
+  );
+}
 
 /**
  * Subscribes to the coach service's Supabase Realtime Broadcast channel for
@@ -43,10 +56,11 @@ const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
  * unknown-type traffic proves bytes are arriving, not that the contract
  * is intact, so it can't make a broken feed look healthy.
  * `scriptOutOfSync` is diagnostic state holding the producer's declared
- * scriptVersion whenever it differs from the exact bundle bound to this call — reset to
- * null the moment a later event reports a matching version. Every valid
- * event carries scriptVersion (required by the wire contract), so this is
- * checked on every dispatch, not conditionally.
+ * scriptVersion whenever it differs from the exact bundle bound to this call.
+ * With NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT=1, BOTH the version and digest
+ * must match before an event reaches the reducer or resets liveness. The
+ * one exception is Jitter's explicit null-identity transcript: it remains
+ * transcript-only and counts as transport/liveness proof, never coaching.
  */
 export function useCoachChannel(
   callId: string | null,
@@ -61,9 +75,16 @@ export function useCoachChannel(
   const [malformedEventCount, setMalformedEventCount] = useState(0);
   const [scriptOutOfSync, setScriptOutOfSync] = useState<string | null>(null);
   const bindingRef = useRef(binding);
-  bindingRef.current = binding;
   const livenessActiveRef = useRef(livenessActive);
   const livenessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // The Realtime subscription deliberately survives the async transition
+  // from no binding to a call-bound bundle. Update its latest identity after
+  // commit rather than recreating the channel (or mutating a ref in render).
+  // An event in the tiny pre-effect window fails closed in strict mode.
+  useEffect(() => {
+    bindingRef.current = binding;
+  }, [binding]);
 
   const clearLivenessTimer = useCallback(() => {
     if (livenessTimerRef.current !== null) {
@@ -197,6 +218,19 @@ export function useCoachChannel(
             // and reporting a healthy feed.
             return;
           }
+          const isNullIdentityTranscript = result.event.type === "transcript"
+            && result.event.scriptVersion === null
+            && result.event.scriptDigest === null;
+          // This is intentionally BEFORE armLiveness()/setDegraded(false)
+          // and dispatch(). A same-version/wrong-digest event is just as
+          // untrusted as a wrong version; accepting it as liveness proof
+          // would hide a broken or crossed-call producer stream.
+          if (!isNullIdentityTranscript && !isStrictlyBoundEvent(result.event, activeBinding)) {
+            if (isCoachWireDigestStrict()) {
+              setScriptOutOfSync(result.event.scriptVersion ?? "unbound");
+            }
+            return;
+          }
           armLiveness();
           setDegraded(false);
           // reconnectGap is NOT cleared here. It represents events that
@@ -204,7 +238,13 @@ export function useCoachChannel(
           // proves the feed is current again, not that nothing was lost
           // in between. Only dismissReconnectGap (an explicit rep
           // acknowledgment) clears it.
-          setScriptOutOfSync(activeBinding && result.event.scriptVersion === activeBinding.bundle.script.version ? null : result.event.scriptVersion);
+          setScriptOutOfSync(
+            isNullIdentityTranscript
+              ? null
+              : activeBinding && result.event.scriptVersion === activeBinding.bundle.script.version
+                ? null
+                : result.event.scriptVersion,
+          );
           dispatch(result.event);
         })
         .subscribe((status) => {

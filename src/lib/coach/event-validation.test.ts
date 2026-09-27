@@ -132,6 +132,23 @@ describe("parseCoachEvent — content versions (scriptVersion/matcherVersion)", 
     });
     expect(result).toEqual({ ok: false, reason: "malformed", rawType: "phase" });
   });
+
+  it("accepts Jitter's explicit null-identity transcript but rejects that identity on semantic events", () => {
+    expect(parseCoachEvent({
+      type: "transcript", speaker: "seller", text: "still hear me", isFinal: true, ts: "t1",
+      scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion,
+    })).toEqual({
+      ok: true,
+      event: {
+        type: "transcript", speaker: "seller", text: "still hear me", isFinal: true, ts: "t1",
+        scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion,
+      },
+    });
+    expect(parseCoachEvent({
+      type: "phase", phaseId: "reveal", ts: "t1",
+      scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion,
+    })).toEqual({ ok: false, reason: "malformed", rawType: "phase" });
+  });
 });
 
 describe("parseCoachEvent — malformed known-type events are dropped and counted", () => {

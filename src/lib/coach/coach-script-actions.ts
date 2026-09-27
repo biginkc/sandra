@@ -1,6 +1,6 @@
 "use server";
 
-import { assertValidScriptBundle, type ScriptBundle, type ScriptRef } from "@biginkc/coach";
+import { assertValidScriptBundle, computeScriptDigest, type ScriptBundle, type ScriptRef } from "@biginkc/coach";
 
 import { createClient } from "@/lib/supabase/server";
 
@@ -52,12 +52,17 @@ export async function loadCoachCallScript(clientCallId: string): Promise<CoachCa
       typeof row.script_digest !== "string" || !revision || typeof revision !== "object" ||
       !("bundle" in revision)
     ) return { status: "unavailable" };
-    assertValidScriptBundle((revision as { bundle: unknown }).bundle);
+    const bundle = (revision as { bundle: unknown }).bundle;
+    assertValidScriptBundle(bundle);
+    // The DB tuple is the call's identity, not an advisory cache key. A
+    // structurally valid but edited JSON bundle must never be returned as if
+    // it were the script Jitter and Sandra both bound to this call.
+    if (await computeScriptDigest(bundle as ScriptBundle) !== row.script_digest) return { status: "unavailable" };
     return {
       status: "bound",
       binding: {
         ref: { slug: row.script_slug, revision: row.script_revision as number, digest: row.script_digest },
-        bundle: (revision as { bundle: ScriptBundle }).bundle,
+        bundle: bundle as ScriptBundle,
       },
     };
   } catch {

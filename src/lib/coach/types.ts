@@ -5,10 +5,15 @@ export type {
 } from "@biginkc/coach";
 export { COACH_ENTRY_TOKENS, COACH_TOKENS } from "@biginkc/coach";
 
-import type { CoachEntryFields, CoachEntryToken, CoachPhaseId } from "@biginkc/coach";
+import type { CoachEntryFields, CoachPhaseId } from "@biginkc/coach";
 
 export type CoachSpeaker = "rep" | "seller";
-export type CoachEventVersions = { scriptVersion: string; matcherVersion: string };
+/**
+ * Legacy producers carry only scriptVersion. The bound-script producer adds
+ * scriptDigest; when it cannot bind a script it deliberately emits a
+ * transcript-only `{ scriptVersion: null, scriptDigest: null }` identity.
+ */
+export type CoachEventVersions = { scriptVersion: string | null; scriptDigest?: string | null; matcherVersion: string };
 export type CoachTranscriptEvent = CoachEventVersions & { type: "transcript"; speaker: CoachSpeaker; text: string; isFinal: boolean; ts: string };
 export type CoachPhaseEvent = CoachEventVersions & { type: "phase"; phaseId: CoachPhaseId; ts: string };
 export type CoachObjectionEvent = CoachEventVersions & { type: "objection"; objectionId: string; ts: string };
