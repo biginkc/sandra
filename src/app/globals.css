@@ -2,7 +2,35 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "./sandra-tokens.css";
+@import "@biginkc/coach/react/coach.css";
 @import "../components/coach/coach-live-view.css";
+
+/* Shared navigator skin: compose only Sandra's semantic design tokens. */
+:root {
+  --sandra-coach-background: var(--background);
+  --sandra-coach-foreground: var(--foreground);
+  --sandra-coach-card: var(--card);
+  --sandra-coach-card-foreground: var(--card-foreground);
+  --sandra-coach-popover: var(--popover);
+  --sandra-coach-popover-foreground: var(--popover-foreground);
+  --sandra-coach-muted: var(--muted);
+  --sandra-coach-muted-foreground: var(--muted-foreground);
+  --sandra-coach-border: var(--border);
+  --sandra-coach-input: var(--input);
+  --sandra-coach-primary: var(--primary);
+  --sandra-coach-primary-foreground: var(--primary-foreground);
+  --sandra-coach-secondary: var(--secondary);
+  --sandra-coach-secondary-foreground: var(--secondary-foreground);
+  --sandra-coach-ring: var(--ring);
+  --sandra-coach-destructive: var(--destructive);
+  --sandra-coach-destructive-foreground: var(--destructive-foreground);
+  /* Keep the shared-script header aligned with Sandra's navy navigation
+   * field in either application theme. */
+  --sandra-coach-header-background: var(--nav-field);
+  --sandra-coach-header-foreground: var(--sidebar-primary-foreground);
+  --sandra-coach-warning-foreground: var(--alert-warning-foreground);
+  --sandra-coach-warning-solid-foreground: var(--alert-warning-solid-foreground);
+}
 
 @custom-variant dark (&:is(.dark *));
 

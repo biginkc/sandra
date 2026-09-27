@@ -58,6 +58,9 @@ test.beforeAll(async () => {
       "process.env.NODE_ENV": '"test"',
       "process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT": '"jitter"',
       "process.env.NEXT_PUBLIC_COACH_UI_ENABLED": '"1"',
+      // CoachLiveView reads the independent V2 gate even when this audio
+      // fixture intentionally verifies the flag-off composition.
+      "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""',
     },
     write: false,
     logLevel: "silent",
@@ -68,7 +71,9 @@ test.beforeAll(async () => {
 async function mountCoach(page: Page): Promise<BrowserErrorEvidence> {
   const evidence: BrowserErrorEvidence = { consoleErrors: [], pageErrors: [] };
   page.on("console", (message) => {
-    if (message.type() === "error") evidence.consoleErrors.push(message.text());
+    // React can report a caught render failure as a warning instead of a
+    // pageerror; retain it so a missing mounted coach is diagnosable.
+    if (message.type() === "error" || message.type() === "warning") evidence.consoleErrors.push(`${message.type()}: ${message.text()}`);
   });
   page.on("pageerror", (error) => evidence.pageErrors.push(error.stack ?? error.message));
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -79,6 +84,9 @@ async function mountCoach(page: Page): Promise<BrowserErrorEvidence> {
   }));
   await page.goto("http://synthetic.local/");
   await page.addScriptTag({ content: harnessBundle });
+  // Surface an initialization failure at its source instead of obscuring it
+  // behind the missing coach root assertion below.
+  await expect.poll(() => evidence).toEqual({ consoleErrors: [], pageErrors: [] });
   await expect(page.getByTestId("coach-live-view")).toBeVisible();
   await expect(page.getByTestId("transport-state-history")).toContainText("audio_reconnect_required|live");
   await expect(page.getByTestId("transport-ready")).toHaveText("ready");

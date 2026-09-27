@@ -58,7 +58,7 @@ declare global {
   }
 }
 
-function Harness({ held: initialHeld = false, interrupted = false }: { held?: boolean; interrupted?: boolean }) {
+function Harness({ held: initialHeld = false, interrupted = false, unavailable = false, emptyMotivation = false }: { held?: boolean; interrupted?: boolean; unavailable?: boolean; emptyMotivation?: boolean }) {
   const [held, setHeld] = useState(initialHeld);
   const [state, dispatch] = useReducer(createCoachReducer(closrOutbound123Bundle), undefined, harnessState);
   const [reconnectGap, setReconnectGap] = useState(true);
@@ -78,7 +78,7 @@ function Harness({ held: initialHeld = false, interrupted = false }: { held?: bo
   const session = useMemo<CoachSession>(
     () => ({
       callId: "synthetic-call",
-      scriptBinding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle },
+      scriptBinding: unavailable ? null : { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle },
       scriptBindingStatus: "ready",
       recommendationContinuity: createCoachRecommendationContinuity("synthetic-call"),
       state,
@@ -88,13 +88,15 @@ function Harness({ held: initialHeld = false, interrupted = false }: { held?: bo
       dismissReconnectGap: () => setReconnectGap(false),
       malformedEventCount: 0,
       scriptOutOfSync: "0.9.0",
-      contextLoad: { status: "ready", context: sampleContext },
+      contextLoad: { status: "ready", context: { ...sampleContext, motivation: emptyMotivation ? null : sampleContext.motivation } },
       retryContext: () => {},
       branchOverrides: {},
       selectVariant: () => {},
       sectionBranchSelections: {},
       selectSectionBranch: () => {},
       setEntryField: (field, value) => dispatch({ type: "set_entry_field", field, value }),
+      navigatorState: null,
+      rememberNavigatorState: () => {},
       activeSectionId,
       previousSectionId,
       nextSectionId,
@@ -135,7 +137,7 @@ function Harness({ held: initialHeld = false, interrupted = false }: { held?: bo
       onDigit={(digit) => digitsRef.current.push(digit)}
       onMute={() => {}}
       onHold={() => setHeld((value) => !value)}
-      onHangup={() => {}}
+      onHangup={() => { document.getElementById("root")?.setAttribute("data-hungup", "true"); }}
       onReconnectAudio={() => {}}
       onCollapse={() => {}}
       recommendationRequest={async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
@@ -159,5 +161,7 @@ createRoot(rootElement).render(
   <Harness
     held={rootElement.dataset.held === "true"}
     interrupted={rootElement.dataset.interrupted === "true"}
+    unavailable={rootElement.dataset.unavailable === "true"}
+    emptyMotivation={rootElement.dataset.emptyMotivation === "true"}
   />,
 );

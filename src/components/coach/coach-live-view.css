@@ -27,10 +27,47 @@
   color-scheme: dark;
 }
 
+/* V2 is the first Sandra view to host the shared navigator. Restore the
+   application palette at the dialog boundary rather than inheriting the
+   legacy steel-blue coach skin above; every value originates in Sandra's
+   semantic design tokens declared in globals.css. */
+[data-testid="coach-live-view"].coach-script-v2 {
+  --background: var(--sandra-coach-background);
+  --foreground: var(--sandra-coach-foreground);
+  --card: var(--sandra-coach-card);
+  --card-foreground: var(--sandra-coach-card-foreground);
+  --popover: var(--sandra-coach-popover);
+  --popover-foreground: var(--sandra-coach-popover-foreground);
+  --muted: var(--sandra-coach-muted);
+  --muted-foreground: var(--sandra-coach-muted-foreground);
+  --border: var(--sandra-coach-border);
+  --input: var(--sandra-coach-input);
+  --primary: var(--sandra-coach-primary);
+  --primary-foreground: var(--sandra-coach-primary-foreground);
+  --secondary: var(--sandra-coach-secondary);
+  --secondary-foreground: var(--sandra-coach-secondary-foreground);
+  --ring: var(--sandra-coach-ring);
+  --destructive: var(--sandra-coach-destructive);
+  --coach-rail: var(--sandra-coach-header-background);
+  --coach-rail-foreground: var(--sandra-coach-header-foreground);
+  --coach-secondary: var(--sandra-coach-muted-foreground);
+  --coach-sky: var(--sandra-coach-primary);
+  --coach-amber: var(--alert-warning);
+  --coach-amber-text: var(--sandra-coach-warning-foreground);
+  color-scheme: light dark;
+}
+
+/* The navigator's disabled Back label is still instructional text. Preserve
+   its semantic muted colour without lowering its rendered contrast via the
+   package's generic disabled opacity. */
+[data-testid="coach-live-view"].coach-script-v2 .coach-script-panel .coach-button:disabled {
+  opacity: 1;
+}
+
 [data-testid="coach-live-view"] {
   .font-mono { font-family: var(--font-geist-mono, "Geist Mono"), monospace; }
   [data-testid="coach-script-panel"] { scroll-padding-bottom: calc(var(--coach-sticky-height, 0px) + 16px); }
-  .coach-top-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 24px; background: var(--coach-rail); }
+  .coach-top-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 24px; background: var(--coach-rail); color: var(--coach-rail-foreground, var(--foreground)); }
   .coach-identity { display: flex; min-width: 0; align-items: baseline; gap: 10px; }
   [data-testid="coach-file-number"] { color: var(--coach-secondary); white-space: nowrap; }
   .coach-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
@@ -38,7 +75,7 @@
   [data-testid^="phase-rail-"] { display: flex; align-items: center; gap: 6px; padding: 6px 12px; letter-spacing: .06em; }
   [data-testid^="phase-rail-"][aria-current] { font-weight: 800; }
   [data-testid^="phase-rail-"]:has(.coach-phase-tick) { color: var(--coach-sky); }
-  .coach-phase-tick { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; background: var(--coach-sky); color: var(--coach-rail); font-size: 10px; }
+  .coach-phase-tick { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; background: var(--coach-sky); color: var(--coach-rail-foreground, var(--coach-rail)); font-size: 10px; }
   .coach-phase-connector { width: 20px; height: 2px; background: var(--border); }
   .coach-phase-connector.is-complete { background: var(--coach-sky); }
   [data-testid="coach-live-pill"] { height: auto; padding: 4px 10px; border-color: var(--coach-sky); color: var(--coach-sky); font-size: 11px; }
@@ -85,6 +122,22 @@
   [data-testid="phone-keypad"] button:disabled { background: var(--card); border-color: var(--border); color: var(--muted-foreground); }
   button:disabled { opacity: 1; }
   [data-testid^="coach-"]:disabled, [data-testid="follow-up-questions"]:disabled { color: var(--muted-foreground); background: var(--card); }
+}
+
+/* V2 keeps the approved dark-navy Script Screen header in both application
+ * themes. Its active/live controls and identity text must contrast against
+ * that header instead of the ordinary page/card surface. */
+[data-testid="coach-live-view"].coach-script-v2 {
+  [data-testid="coach-file-number"],
+  [data-testid="coach-script-ref-label"] { color: var(--coach-rail-foreground); }
+  [data-testid="transcript-speaker-label"] { color: var(--coach-amber-text); }
+  [data-speaker="rep"] [data-testid="transcript-speaker-label"] { color: var(--coach-sky); }
+  [data-testid="tone-chip"] { color: var(--sandra-coach-warning-solid-foreground); }
+  [data-testid="coach-live-pill"] { border-color: var(--coach-rail-foreground); color: var(--coach-rail-foreground); }
+  [data-testid="coach-live-pill"] > span { background: var(--coach-rail-foreground); }
+  [data-testid="hold-timer"] { color: var(--coach-amber); }
+  [data-testid="coach-warning-hangup"],
+  [data-testid="coach-hangup"] { color: var(--sandra-coach-destructive-foreground); }
 }
 
 @media (min-width: 1280px) {

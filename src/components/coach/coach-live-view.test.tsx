@@ -1,7 +1,7 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
 import type {
@@ -153,6 +153,7 @@ function broadcast(payload: Record<string, unknown>) {
 }
 
 describe("<CoachLiveView /> manual navigation", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     channels = [];
     loadCoachCallContext.mockReset().mockResolvedValue(sampleContext);
@@ -172,6 +173,118 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.queryByTestId("entry-chip-cold_caller_name")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Live transcript")).not.toHaveAttribute("hidden");
     expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
+  });
+
+  it("keeps the S4 panel when the V2 flag is unset", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    expect(screen.queryByTestId("coach-script-v2-panel")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("coach-script-ref-label")).not.toBeInTheDocument();
+  });
+
+  it("renders the package navigator in the three-column view and retains typed navigator state", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
+    loadCoachCallContext.mockResolvedValue({ ...sampleContext, motivation: null });
+    const user = userEvent.setup();
+    render(<Harness {...baseProps()} />);
+
+    await waitFor(() => expect(screen.getByTestId("coach-script-v2-panel")).toBeVisible());
+    expect(screen.getByTestId("coach-script-ref-label")).toHaveTextContent("closr-outbound@1 · locked for this call");
+    expect(await screen.findByTestId("coach-script-ref")).toHaveTextContent("closr-outbound@1 · locked for this call");
+    expect(screen.queryByTestId("coach-phase-scroller")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("coach-next"));
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Set the qualification frame");
+    await user.click(screen.getByTestId("coach-back"));
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+    const motivation = await screen.findByTestId("coach-token-motivation");
+    fireEvent.change(motivation, { target: { value: "Downsize" } });
+    expect(motivation).toHaveValue("Downsize");
+  });
+
+  it("grounds V2 recommendations in the navigator's active section after Next", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true, requestId: input.requestId, callId: input.callId,
+        activeSectionId: input.activeSectionId, mode: input.mode,
+        recommendations: [], followUpQuestions: ["What is the timeline?"],
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+
+    await screen.findByTestId("coach-script-ref");
+    await user.click(screen.getByTestId("coach-next"));
+    await screen.findByText("Set the qualification frame");
+    broadcast({ type: "transcript", speaker: "seller", text: "I need to move before winter.", isFinal: true, ts: "v2-grounding" });
+    await user.click(screen.getByTestId("follow-up-questions"));
+
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0]?.[0]).toMatchObject({
+      activeSectionId: "introduction.qualification-frame",
+      mode: "follow_up",
+    });
+  });
+
+  it("sends V2 navigator branch and variant selections with a follow-up recommendation", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true, requestId: input.requestId, callId: input.callId,
+        activeSectionId: input.activeSectionId, mode: input.mode,
+        recommendations: [], followUpQuestions: ["What would make that price work?"],
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+
+    await screen.findByTestId("coach-script-ref");
+    await user.click(screen.getByTestId("variant-Opener-fsbo"));
+    await user.click(screen.getByRole("button", { name: "Offer" }));
+    await screen.findByText("Present the appropriate offer outcome");
+    await user.click(screen.getByTestId("section-path-offer.outcome-tracks-Price too low"));
+
+    broadcast({ type: "transcript", speaker: "seller", text: "That price is too low for me.", isFinal: true, ts: "v2-branch-grounding" });
+    await user.click(screen.getByTestId("follow-up-questions"));
+
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0]?.[0]).toMatchObject({
+      activeSectionId: "offer.outcome-tracks",
+      selectedSectionBranch: "Price too low",
+      mode: "follow_up",
+    });
+    expect(recommendationRequest.mock.calls[0]?.[0].branchOverrides).toEqual({
+      Opener: "fsbo",
+      "Price too low": "default",
+    });
+  });
+
+  it("sends the V2 navigator's auto-selected SMS opener variant with a follow-up recommendation", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
+    loadCoachCallContext.mockResolvedValue({ ...sampleContext, leadSource: "sms" });
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true, requestId: input.requestId, callId: input.callId,
+        activeSectionId: input.activeSectionId, mode: input.mode,
+        recommendations: [], followUpQuestions: ["What would make a conversation useful today?"],
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+
+    await screen.findByTestId("coach-script-ref");
+    broadcast({ type: "transcript", speaker: "seller", text: "I saw your text message.", isFinal: true, ts: "v2-sms-grounding" });
+    await user.click(screen.getByTestId("follow-up-questions"));
+
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0]?.[0]).toMatchObject({
+      activeSectionId: "introduction.opener",
+      selectedSectionBranch: null,
+      mode: "follow_up",
+    });
+    // This must be derived from the shared navigator resolver: removing the
+    // effective-variant mapping regresses it to {}, and the assertion fails.
+    expect(recommendationRequest.mock.calls[0]?.[0].branchOverrides).toEqual({ Opener: "sms" });
   });
 
   it("keeps file-number identity placeholder-only while loading, then shows the authorized context value", async () => {

@@ -55,6 +55,9 @@ test.beforeAll(async () => {
       "process.env.NODE_ENV": '"test"',
       "process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT": '"simulated"',
       "process.env.NEXT_PUBLIC_COACH_UI_ENABLED": '"1"',
+      // SoftphoneProvider imports the shared coach flag module. This
+      // popover-only harness must not accidentally opt into the V2 view.
+      "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""',
     },
     write: false,
     logLevel: "silent",

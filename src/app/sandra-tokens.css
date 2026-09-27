@@ -40,6 +40,7 @@
   --accent: #f5f5f4;
   --accent-foreground: #1c1917;
   --destructive: #ba1a1a;       /* errors, destructive actions */
+  --destructive-foreground: #ffffff;
 
   /* Muted */
   --muted: #f5f5f4;
@@ -105,6 +106,8 @@
    * notification banners. Used as 10–20% opacity fills + full-strength text. */
   --alert-critical: #dc2626;    /* escalated, unhandled */
   --alert-warning: #f59e0b;     /* aging approvals */
+  --alert-warning-foreground: #92400e;
+  --alert-warning-solid-foreground: #1c1917;
   --alert-caution: #eab308;     /* stale conversations */
   --alert-info: #6b7280;        /* unassigned / informational */
   --alert-healthy: #16a34a;     /* all-clear / success / +delta indicators */
@@ -134,6 +137,7 @@
   --accent: #292524;
   --accent-foreground: #fafaf9;
   --destructive: #f87171;       /* lightened for legibility */
+  --destructive-foreground: #1c1917;
 
   --muted: #292524;
   --muted-foreground: #a8a29e;  /* stone-400 */
@@ -156,6 +160,11 @@
   --sidebar-accent-foreground: #fafaf9;
   --sidebar-border: rgba(255, 255, 255, 0.1);
   --sidebar-ring: #78716c;
+
+  /* Alert foregrounds switch with the surface, while the text laid over a
+   * solid amber chip remains the same dark ink in both themes. */
+  --alert-warning-foreground: #fcd34d;
+  --alert-warning-solid-foreground: #1c1917;
 }
 
 /* ============================================================================
