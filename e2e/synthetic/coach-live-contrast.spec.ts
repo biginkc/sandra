@@ -37,7 +37,17 @@ test.beforeAll(async () => {
       ),
       "@": path.resolve(process.cwd(), "src"),
     },
-    define: { "process.env.NODE_ENV": '"test"', "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": JSON.stringify(mode === "on" ? "1" : "") },
+    define: {
+      "process.env.NODE_ENV": '"test"',
+      ...(mode === "off" ? { "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""' } : {}),
+    },
+    // Production relies on Next.js to replace the direct public-env lookup.
+    // This browser-only V2 fixture deliberately supplies the smallest local
+    // process shape so the defensive guard is exercised without a runtime
+    // process polyfill in shipping code.
+    banner: mode === "on"
+      ? { js: 'var process = { env: { NEXT_PUBLIC_COACH_SCRIPT_V2: "1" } };' }
+      : undefined,
     write: false,
     logLevel: "silent",
     });

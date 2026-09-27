@@ -8,5 +8,12 @@ export function isCoachUiEnabled(): boolean {
 /** V2 changes only the full-screen coach composition. Keeping this separate
  * from the full-screen UI flag makes an unset V2 flag select the S4 view. */
 export function isCoachScriptV2Enabled(): boolean {
-  return process.env.NEXT_PUBLIC_COACH_SCRIPT_V2 === "1";
+  // Keep the public variable lookup direct so Next.js can inline it into the
+  // client bundle, while allowing standalone browser harnesses with no Node
+  // `process` shim to default safely to the S4 composition.
+  return (
+    typeof process !== "undefined" &&
+    typeof process.env !== "undefined" &&
+    process.env.NEXT_PUBLIC_COACH_SCRIPT_V2 === "1"
+  );
 }

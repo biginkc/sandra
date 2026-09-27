@@ -22,7 +22,11 @@ test.beforeAll(async () => {
     jsx: "automatic",
     jsxImportSource: "react",
     alias: { "@": path.resolve(process.cwd(), "src") },
-    define: { "process.env.NODE_ENV": '"test"' },
+    define: {
+      "process.env.NODE_ENV": '"test"',
+      // Keep every coach-adjacent browser bundle explicit about the default.
+      "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""',
+    },
     write: false,
     logLevel: "silent",
   });

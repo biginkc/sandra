@@ -28,8 +28,13 @@ test.beforeAll(async () => {
       },
       define: {
         "process.env.NODE_ENV": '"test"',
-        "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": JSON.stringify(mode === "on" ? "1" : ""),
+        ...(mode === "off" ? { "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""' } : {}),
       },
+      // Test-only process shape for the V2-on browser bundle. Keeping the
+      // direct lookup intact here proves the no-process production guard.
+      banner: mode === "on"
+        ? { js: 'var process = { env: { NEXT_PUBLIC_COACH_SCRIPT_V2: "1" } };' }
+        : undefined,
       write: false,
       logLevel: "silent",
     });
