@@ -12,7 +12,7 @@ import sharp from "sharp";
 // Keep the probe's negative controls: computed swatches alone cannot catch
 // opacity, descendant colors, or text crossing multiple backgrounds.
 let compiledCss = "";
-let harnessBundle = "";
+const harnessBundles = new Map<"off" | "on", string>();
 
 test.beforeAll(async () => {
   const globalsPath = path.resolve(process.cwd(), "src/app/globals.css");
@@ -20,7 +20,8 @@ test.beforeAll(async () => {
   const cssResult = await postcss([tailwindcss()]).process(globalsSource, { from: globalsPath });
   compiledCss = cssResult.css;
 
-  const bundleResult = esbuild.buildSync({
+  for (const mode of ["off", "on"] as const) {
+    const bundleResult = esbuild.buildSync({
     entryPoints: [path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-live-responsive-harness.tsx")],
     bundle: true,
     platform: "browser",
@@ -36,16 +37,17 @@ test.beforeAll(async () => {
       ),
       "@": path.resolve(process.cwd(), "src"),
     },
-    define: { "process.env.NODE_ENV": '"test"', "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""' },
+    define: { "process.env.NODE_ENV": '"test"', "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": JSON.stringify(mode === "on" ? "1" : "") },
     write: false,
     logLevel: "silent",
-  });
-  harnessBundle = bundleResult.outputFiles[0].text;
+    });
+    harnessBundles.set(mode, bundleResult.outputFiles[0].text);
+  }
 });
 
 async function mountFullCoach(
   page: Page,
-  opts: { darkMode: boolean; withGuidance: boolean; held?: boolean; interrupted?: boolean; viewport?: { width: number; height: number } },
+  opts: { darkMode: boolean; withGuidance: boolean; scriptV2?: boolean; held?: boolean; interrupted?: boolean; viewport?: { width: number; height: number } },
 ): Promise<void> {
   await page.setViewportSize(opts.viewport ?? { width: 1440, height: 900 });
   await page.setContent(`
@@ -55,7 +57,7 @@ async function mountFullCoach(
   // Real app puts `.dark` on <html>, so the whole document — not just a
   // wrapper div — resolves the dark theme tokens, matching production.
   await page.evaluate((dark) => document.documentElement.classList.toggle("dark", dark), opts.darkMode);
-  await page.addScriptTag({ content: harnessBundle });
+  await page.addScriptTag({ content: harnessBundles.get(opts.scriptV2 ? "on" : "off")! });
   const coach = page.getByTestId("coach-live-view");
   await expect(coach).toBeVisible();
   await expect(page.locator("[data-starting-style], [data-ending-style]")).toHaveCount(0);
@@ -368,6 +370,35 @@ for (const mode of [
     await resume.hover();
     await expect(resume).toHaveCSS("background-color", "rgb(255, 255, 255)");
     assertAA("pressed hold control while hovered", await measureRenderedContrast(resume));
+  });
+
+  test(`meets WCAG AA for V2 navigator text in ${mode.label} mode`, async ({ page }) => {
+    await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false, scriptV2: true });
+    await expect(page.getByTestId("coach-script-ref")).toBeVisible();
+    // V2 owns the only phase rail; the retired header rail must not duplicate it.
+    await expect(page.getByTestId("coach-phase-scroller")).toHaveCount(0);
+
+    const script = page.getByTestId("coach-script-v2-panel");
+    const scriptLine = script.locator(".coach-spoken-line").first();
+    const phasePill = script.locator(".coach-phase-pill").first();
+    const tabLabel = script.getByRole("tab").first();
+    const refLabel = page.getByTestId("coach-script-ref-label");
+    const counter = page.getByTestId("coach-call-timer");
+    const back = page.getByTestId("coach-back");
+    const next = page.getByTestId("coach-next");
+
+    await expect(scriptLine).toBeVisible();
+    await expect(phasePill).toBeVisible();
+    await expect(tabLabel).toBeVisible();
+    assertAA("V2 script line", await measureRenderedContrast(scriptLine));
+    assertAA("V2 phase rail label", await measureRenderedContrast(phasePill));
+    assertAA("V2 tab label", await measureRenderedContrast(tabLabel));
+    assertAA("V2 header ref label", await measureRenderedContrast(refLabel));
+    assertAA("V2 ref label", await measureRenderedContrast(page.getByTestId("coach-script-ref")));
+    assertAA("V2 call counter", await measureRenderedContrast(counter));
+    assertAA("V2 disabled Back", await measureRenderedContrast(back));
+    await next.hover();
+    assertAA("V2 Next", await measureRenderedContrast(next));
   });
 
   test(`keeps keypad digits and letters readable in ${mode.label} mode`, async ({ page }) => {

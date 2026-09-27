@@ -23,14 +23,6 @@
   --sandra-coach-secondary-foreground: var(--secondary-foreground);
   --sandra-coach-ring: var(--ring);
   --sandra-coach-destructive: var(--destructive);
-  --coach-background: var(--background);
-  --coach-card: var(--card);
-  --coach-foreground: var(--foreground);
-  --coach-primary: var(--primary);
-  --coach-primary-foreground: var(--primary-foreground);
-  --coach-muted: var(--muted-foreground);
-  --coach-border: var(--border);
-  --coach-radius: var(--radius);
 }
 
 @custom-variant dark (&:is(.dark *));

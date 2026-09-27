@@ -190,7 +190,8 @@ describe("<CoachLiveView /> manual navigation", () => {
 
     await waitFor(() => expect(screen.getByTestId("coach-script-v2-panel")).toBeVisible());
     expect(screen.getByTestId("coach-script-ref-label")).toHaveTextContent("closr-outbound@1 · locked for this call");
-    expect(screen.getByTestId("coach-script-ref")).toHaveTextContent("closr-outbound@1 · locked for this call");
+    expect(await screen.findByTestId("coach-script-ref")).toHaveTextContent("closr-outbound@1 · locked for this call");
+    expect(screen.queryByTestId("coach-phase-scroller")).not.toBeInTheDocument();
     await user.click(screen.getByTestId("coach-next"));
     expect(screen.getByTestId("current-section-title")).toHaveTextContent("Set the qualification frame");
     await user.click(screen.getByTestId("coach-back"));
@@ -198,6 +199,31 @@ describe("<CoachLiveView /> manual navigation", () => {
     const motivation = await screen.findByTestId("coach-token-motivation");
     fireEvent.change(motivation, { target: { value: "Downsize" } });
     expect(motivation).toHaveValue("Downsize");
+  });
+
+  it("grounds V2 recommendations in the navigator's active section after Next", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true, requestId: input.requestId, callId: input.callId,
+        activeSectionId: input.activeSectionId, mode: input.mode,
+        recommendations: [], followUpQuestions: ["What is the timeline?"],
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+
+    await screen.findByTestId("coach-script-ref");
+    await user.click(screen.getByTestId("coach-next"));
+    await screen.findByText("Set the qualification frame");
+    broadcast({ type: "transcript", speaker: "seller", text: "I need to move before winter.", isFinal: true, ts: "v2-grounding" });
+    await user.click(screen.getByTestId("follow-up-questions"));
+
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0]?.[0]).toMatchObject({
+      activeSectionId: "introduction.qualification-frame",
+      mode: "follow_up",
+    });
   });
 
   it("keeps file-number identity placeholder-only while loading, then shows the authorized context value", async () => {

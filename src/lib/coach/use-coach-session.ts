@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { loadCoachCallContext } from "./coach-context-actions";
 import { loadCoachCallScript } from "./coach-script-actions";
@@ -109,7 +109,9 @@ export function useCoachSession(
   const [scriptBinding, setScriptBinding] = useState<CoachScriptBinding | null>(null);
   const [scriptBindingStatus, setScriptBindingStatus] = useState<"loading" | "ready">("loading");
   const { dispatch, ...channel } = useCoachChannel(callId, scriptBinding, "introduction", livenessActive, sessionKey);
-  const navigatorStateRef = useRef<NavigatorState | null>(null);
+  // Navigator position changes recommendation grounding in V2, so retain it
+  // in React state rather than an imperative cache.
+  const [navigatorState, setNavigatorState] = useState<NavigatorState | null>(null);
   const [contextLoad, setContextLoad] = useState<ContextLoadState>(() => ({
     status: "loading",
     context: preparedTargetErrorContext(
@@ -150,7 +152,7 @@ export function useCoachSession(
     setSectionBranchSelections({});
     setScriptBinding(null);
     setScriptBindingStatus("loading");
-    navigatorStateRef.current = null;
+    setNavigatorState(null);
     setActiveSectionId("introduction.opener");
     setRecommendationContinuity(createCoachRecommendationContinuity(sessionKey));
   }
@@ -249,9 +251,7 @@ export function useCoachSession(
     [dispatch],
   );
   const rememberNavigatorState = useCallback((navigator: NavigatorState) => {
-    // Avoid routing every keystroke through the live-feed reducer. The ref
-    // survives this view's collapse/reopen and initializes its next mount.
-    navigatorStateRef.current = navigator;
+    setNavigatorState(navigator);
   }, []);
   const goToSection = useCallback((sectionId: CoachSectionId) => {
     if (scriptBinding && getCoachSectionById(scriptBinding.bundle, sectionId)) setActiveSectionId(sectionId);
@@ -283,7 +283,7 @@ export function useCoachSession(
     sectionBranchSelections,
     selectSectionBranch,
     setEntryField,
-    navigatorState: navigatorStateRef.current,
+    navigatorState,
     rememberNavigatorState,
     activeSectionId,
     previousSectionId,

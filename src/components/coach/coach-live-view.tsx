@@ -1,8 +1,8 @@
 "use client";
 
 import { ChevronLeftIcon, ChevronRightIcon, Loader2Icon, MicIcon, MicOffIcon, PauseIcon, PhoneOffIcon, PlayIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ScriptNavigator, type NavigatorState } from "@biginkc/coach/react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { NavigatorState } from "@biginkc/coach/react";
 
 import { PhoneKeypad } from "@/components/softphone/phone-keypad";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +36,11 @@ import { isNearTranscriptBottom } from "@/lib/coach/transcript-scroll";
 import { isCoachScriptV2Enabled } from "@/lib/coach/flags";
 import { cn } from "@/lib/utils";
 import { HoldTimer } from "./hold-timer";
+
+// The shared navigator has browser-only dependencies. Loading it lazily keeps
+// the legacy coach (including its synthetic audio harness) independent from
+// that module when the V2 flag is off.
+const ScriptNavigator = lazy(() => import("@biginkc/coach/react").then(({ ScriptNavigator: Navigator }) => ({ default: Navigator })));
 
 export type CoachCallStatus = "connecting" | "ringing" | "live" | "audio_reconnecting" | "audio_reconnect_required" | "ended" | "failed" | null;
 
@@ -210,12 +215,17 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       : null,
     [branchOverrides, bundle, nextSectionId, sectionBranchSelections, selectCtx, tokens],
   );
+  const recommendationSectionId = scriptV2Enabled
+    ? session.navigatorState?.activeSectionId ?? activeSectionId
+    : activeSectionId;
   const activePhaseId = scriptBlock?.phaseId ?? bundle?.script.phases[0]?.id ?? "unavailable";
   const recommendations = useCoachRecommendations({
     callId: session.callId,
-    activeSectionId,
-    selectedSectionBranch: scriptBlock?.selectedBranchTag ?? null,
-    branchOverrides: selectedVariants,
+    activeSectionId: recommendationSectionId,
+    selectedSectionBranch: scriptV2Enabled
+      ? session.navigatorState?.sectionBranchSelections[recommendationSectionId] ?? null
+      : scriptBlock?.selectedBranchTag ?? null,
+    branchOverrides: scriptV2Enabled ? session.navigatorState?.branchOverrides ?? {} : selectedVariants,
     transcript: state.transcript,
     request: recommendationRequest,
     continuity: session.recommendationContinuity,
@@ -280,6 +290,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         holdTimer={held ? state.holdTimer : null}
         fileNumber={resolveFileNumber(activeContext)}
         bundle={bundle}
+        showPhaseScroller={!scriptV2Enabled}
         scriptRefLabel={scriptV2Enabled && session.scriptBinding ? `${session.scriptBinding.ref.slug}@${session.scriptBinding.ref.revision} · locked for this call` : null}
       />
       {callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
@@ -384,6 +395,7 @@ function CoachTopBar({
   fileNumber,
   bundle,
   scriptRefLabel,
+  showPhaseScroller,
 }: {
   callName: string;
   activePhaseId: CoachPhaseId;
@@ -396,6 +408,7 @@ function CoachTopBar({
   fileNumber: ResolvedToken;
   bundle: import("@biginkc/coach").ScriptBundle | null;
   scriptRefLabel: string | null;
+  showPhaseScroller: boolean;
 }) {
   const preConnectLabel = callStatus === "connecting" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : null;
   const timerLabel = held ? "On hold" : preConnectLabel ?? timerText(seconds);
@@ -431,7 +444,7 @@ function CoachTopBar({
         ) : null}
         <span className="font-mono text-base font-semibold tabular-nums" data-testid="coach-call-timer">{timerLabel}</span>
       </div>
-      <ol className="flex min-w-0 items-center gap-1 overflow-x-auto px-4 pb-2" aria-label="Call phases" data-testid="coach-phase-scroller">
+      {showPhaseScroller ? <ol className="flex min-w-0 items-center gap-1 overflow-x-auto px-4 pb-2" aria-label="Call phases" data-testid="coach-phase-scroller">
         {bundle?.script.phases.map((phase) => {
           const phaseId = phase.id;
           const fullName = phase?.name ?? phaseId;
@@ -466,7 +479,7 @@ function CoachTopBar({
             </li>
           );
         })}
-      </ol>
+      </ol> : null}
     </div>
   );
 }
@@ -480,7 +493,9 @@ function ScriptNavigatorPanel({ bundle, ref, context, initialState, onStateChang
 }) {
   return (
     <main className="min-h-[28rem] min-w-0 flex-1 overflow-y-auto border-b border-border xl:min-h-0 xl:border-b-0" data-testid="coach-script-v2-panel">
-      <ScriptNavigator bundle={bundle} ref={ref} context={context} initialState={initialState} onStateChange={onStateChange} refLabel={`${ref.slug}@${ref.revision} · locked for this call`} />
+      <Suspense fallback={<div data-testid="coach-script-v2-loading" aria-live="polite">Loading script…</div>}>
+        <ScriptNavigator bundle={bundle} ref={ref} context={context} initialState={initialState} onStateChange={onStateChange} refLabel={`${ref.slug}@${ref.revision} · locked for this call`} />
+      </Suspense>
     </main>
   );
 }
@@ -512,7 +527,7 @@ function TranscriptFeed({ lines, degraded }: { lines: CoachTranscriptLine[]; deg
   return (
     <aside
       aria-label="Live transcript"
-      className="flex h-48 w-full shrink-0 flex-col overflow-hidden border-b border-border bg-[var(--coach-rail)] xl:h-auto xl:min-h-0 xl:border-r xl:border-b-0"
+      className="flex h-48 w-full min-w-0 shrink-0 flex-col overflow-hidden border-b border-border bg-[var(--coach-rail)] xl:h-auto xl:min-h-0 xl:border-r xl:border-b-0"
     >
       <div className="flex items-center justify-between px-5 pt-4 pb-2.5 text-[11px] font-extrabold tracking-[0.12em] text-muted-foreground uppercase">
         Transcript

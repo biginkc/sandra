@@ -42,6 +42,9 @@ async function mount(page: Page, mode: "off" | "on", data = ""): Promise<void> {
   await page.setContent(`<style>${css}</style><div id="root" ${data}></div>`);
   await page.addScriptTag({ content: bundles.get(mode)! });
   await expect(page.getByTestId("coach-live-view")).toBeVisible();
+  // Capture the requested review screenshots after Base UI's opening
+  // transition has composited, rather than recording a faded first frame.
+  await page.waitForTimeout(350);
 }
 
 test("flag off preserves the S4 card while flag on renders three columns and the bound ref", async ({ page }) => {

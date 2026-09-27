@@ -51,9 +51,16 @@
   --coach-rail: var(--sandra-coach-card);
   --coach-secondary: var(--sandra-coach-muted-foreground);
   --coach-sky: var(--sandra-coach-primary);
-  --coach-amber: var(--sandra-coach-primary);
-  --coach-amber-text: var(--sandra-coach-primary);
+  --coach-amber: var(--alert-warning);
+  --coach-amber-text: var(--alert-warning);
   color-scheme: light dark;
+}
+
+/* The navigator's disabled Back label is still instructional text. Preserve
+   its semantic muted colour without lowering its rendered contrast via the
+   package's generic disabled opacity. */
+[data-testid="coach-live-view"].coach-script-v2 .coach-script-panel .coach-button:disabled {
+  opacity: 1;
 }
 
 [data-testid="coach-live-view"] {
