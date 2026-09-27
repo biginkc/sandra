@@ -25,6 +25,12 @@ export default defineConfig({
       // Added in phase 02-05 to include 046_backfill*.integration.test.ts.
       "supabase/migrations/**/*.integration.test.ts",
     ],
+    // This migration replays DDL against an isolated loopback database and
+    // rejects hosted URLs. It has its own local-only runner so this hosted
+    // suite cannot accidentally select it.
+    exclude: [
+      "supabase/migrations/20260927023443_dialpad_cti_kpi_seller_speech.integration.test.ts",
+    ],
     environment: "node",
     reporters: ["default"],
     // Cross-process mutex: a Postgres advisory lock so only one

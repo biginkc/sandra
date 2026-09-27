@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:integration:local": "vitest run --config vitest.local-integration.config.ts",
     "test:rtl": "vitest run --config vitest.rtl.config.ts",
     "test:e2e": "playwright test",
     "test:e2e:synthetic": "playwright test --config playwright.synthetic.config.ts",

@@ -4,11 +4,20 @@ import path from "node:path";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+/**
+ * Local-only migration replay test. Run with `npm run test:integration:local`.
+ * It deliberately rejects hosted database URLs and is excluded from
+ * `npm run test:integration`.
+ */
 const localDbUrl = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
 const migrationPath = path.resolve(__dirname, "20260927023443_dialpad_cti_kpi_seller_speech.sql");
 const legacyPath = path.resolve(__dirname, "20260917193000_recording_accountability.sql");
 const migrationSql = readFileSync(migrationPath, "utf8");
 const legacySql = readFileSync(legacyPath, "utf8");
+const legacyKpiSql = `${legacySql.slice(
+  legacySql.indexOf("begin;"),
+  legacySql.indexOf("create or replace function public.recording_library_rows"),
+)}commit;`;
 
 let pg: Client;
 let orgId = "";
@@ -40,7 +49,12 @@ async function seedFixture(): Promise<void> {
   );
 }
 
-async function addCall(input: { provider: "dialpad" | "jitter"; talk: number; measured?: number; confidence?: "full" | "partial" | "low" }): Promise<void> {
+async function addCall(input: {
+  provider: "dialpad" | "jitter" | null;
+  talk: number;
+  measured?: number;
+  confidence?: "full" | "partial" | "low";
+}): Promise<void> {
   const callId = crypto.randomUUID();
   await pg.query(
     `insert into public.call_activities(
@@ -63,6 +77,21 @@ async function kpis(): Promise<Record<string, unknown>> {
   await pg.query("select set_config('request.jwt.claim.sub',$1,true)", [memberId]);
   const result = await pg.query<{ value: Record<string, unknown> }>(
     "select public.fn_get_acquisition_kpis($1,$2,'2026-09-01T00:00:00Z','2026-09-02T00:00:00Z') as value",
+    [orgId, memberId],
+  );
+  await pg.query("reset role");
+  return result.rows[0]!.value;
+}
+
+async function compareLegacyAndCurrentKpis(): Promise<Record<string, unknown>> {
+  await pg.query("set local role authenticated");
+  await pg.query("select set_config('request.jwt.claim.role','authenticated',true)");
+  await pg.query("select set_config('request.jwt.claim.sub',$1,true)", [memberId]);
+  const result = await pg.query<{ value: Record<string, unknown> }>(
+    `select jsonb_build_object(
+       'legacy', public.fn_get_acquisition_kpis_legacy_test($1,$2,'2026-09-01T00:00:00Z','2026-09-02T00:00:00Z'),
+       'current', public.fn_get_acquisition_kpis($1,$2,'2026-09-01T00:00:00Z','2026-09-02T00:00:00Z')
+     ) as value`,
     [orgId, memberId],
   );
   await pg.query("reset role");
@@ -111,33 +140,45 @@ describe("20260927023443 Dialpad CTI seller speech KPI migration", () => {
     await pg.query("rollback to savepoint invalid_confidence");
   });
 
-  it("uses measured, full-confidence seller speech only for Dialpad CTI calls", async () => {
-    await addCall({ provider: "dialpad", talk: 600, measured: 100, confidence: "full" });
-    await addCall({ provider: "dialpad", talk: 600, measured: 320, confidence: "full" });
-    await addCall({ provider: "dialpad", talk: 600, measured: 400, confidence: "partial" });
-    await addCall({ provider: "dialpad", talk: 600, measured: 400, confidence: "low" });
-    await addCall({ provider: "jitter", talk: 600 });
+  it.each([
+    ["does not count exactly 300 measured seconds", { provider: "dialpad", talk: 600, measured: 300, confidence: "full" }, 0],
+    ["counts 301 measured seconds", { provider: "dialpad", talk: 0, measured: 301, confidence: "full" }, 1],
+    ["does not fall back to talk duration for Dialpad without a measurement", { provider: "dialpad", talk: 600 }, 0],
+    ["uses talk duration when the provider is NULL", { provider: null, talk: 301 }, 1],
+    ["does not count partial-confidence speech", { provider: "dialpad", talk: 600, measured: 400, confidence: "partial" }, 0],
+    ["does not count low-confidence speech", { provider: "dialpad", talk: 600, measured: 400, confidence: "low" }, 0],
+  ] satisfies ReadonlyArray<[string, Parameters<typeof addCall>[0], number]>)
+  ("%s", async (_description, call, expectedConversations) => {
+    // The current column is NOT NULL, but the SQL deliberately handles
+    // historical NULL providers. Make that legacy shape available only inside
+    // this fixture transaction; afterEach rolls the DDL back.
+    if (call.provider === null) {
+      await pg.query("alter table public.call_activities alter column provider drop not null");
+    }
+    await addCall(call);
     const result = await kpis();
-    expect(result.conversationsOverFiveMinutes).toBe(2);
+    expect(result.conversationsOverFiveMinutes).toBe(expectedConversations);
   });
 
   it("preserves every non-CTI KPI field from the September 17 definition", async () => {
-    await addCall({ provider: "jitter", talk: 600 });
-    const oldResult = await kpis();
     await pg.query("rollback");
     await pg.query("reset role");
 
-    await pg.query(legacySql);
+    await pg.query(legacyKpiSql);
+    await pg.query(
+      "alter function public.fn_get_acquisition_kpis(uuid,uuid,timestamptz,timestamptz) rename to fn_get_acquisition_kpis_legacy_test",
+    );
+    await pg.query(migrationSql);
     await pg.query("begin");
     await seedFixture();
     await addCall({ provider: "jitter", talk: 600 });
-    const legacyResult = await kpis();
+    const comparison = await compareLegacyAndCurrentKpis();
     await pg.query("rollback");
     await pg.query("reset role");
-    await pg.query(migrationSql);
-    await pg.query(migrationSql);
+    await pg.query("drop function public.fn_get_acquisition_kpis_legacy_test(uuid,uuid,timestamptz,timestamptz)");
 
-    const withoutAsOf = ({ asOf: _asOf, ...value }: Record<string, unknown>) => value;
-    expect(withoutAsOf(oldResult)).toEqual(withoutAsOf(legacyResult));
+    // Both functions execute in the same SQL statement, so statement_timestamp()
+    // (and therefore asOf) is identical. Compare their full outputs.
+    expect(comparison.current).toEqual(comparison.legacy);
   });
 });
