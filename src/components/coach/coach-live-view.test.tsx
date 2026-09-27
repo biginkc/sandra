@@ -226,6 +226,36 @@ describe("<CoachLiveView /> manual navigation", () => {
     });
   });
 
+  it("sends V2 navigator branch and variant selections with a follow-up recommendation", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
+    const recommendationRequest = vi.fn(
+      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+        ok: true, requestId: input.requestId, callId: input.callId,
+        activeSectionId: input.activeSectionId, mode: input.mode,
+        recommendations: [], followUpQuestions: ["What would make that price work?"],
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Harness {...baseProps({ recommendationRequest })} />);
+
+    await screen.findByTestId("coach-script-ref");
+    await user.click(screen.getByTestId("variant-Opener-fsbo"));
+    await user.click(screen.getByRole("button", { name: "Offer" }));
+    await screen.findByText("Present the appropriate offer outcome");
+    await user.click(screen.getByTestId("section-path-offer.outcome-tracks-Price too low"));
+
+    broadcast({ type: "transcript", speaker: "seller", text: "That price is too low for me.", isFinal: true, ts: "v2-branch-grounding" });
+    await user.click(screen.getByTestId("follow-up-questions"));
+
+    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
+    expect(recommendationRequest.mock.calls[0]?.[0]).toMatchObject({
+      activeSectionId: "offer.outcome-tracks",
+      selectedSectionBranch: "Price too low",
+      branchOverrides: { Opener: "fsbo" },
+      mode: "follow_up",
+    });
+  });
+
   it("keeps file-number identity placeholder-only while loading, then shows the authorized context value", async () => {
     let resolveContext!: (context: CoachCallContext) => void;
     loadCoachCallContext.mockReturnValue(new Promise((resolve) => { resolveContext = resolve; }));
