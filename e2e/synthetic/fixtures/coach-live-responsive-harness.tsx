@@ -2,14 +2,14 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { createRoot } from "react-dom/client";
 
 import { CoachLiveView } from "@/components/coach/coach-live-view";
-import { coachReducer, initialCoachState } from "@/lib/coach/event-reducer";
+import { createCoachReducer, initialCoachState } from "@/lib/coach/event-reducer";
 import {
-  FIRST_COACH_SECTION_ID,
   getFirstCoachSectionIdForPhase,
   getNextCoachSectionId,
   getPreviousCoachSectionId,
   type CoachSectionId,
 } from "@/lib/coach/section-manifest";
+import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
 import type { DtmfDigit } from "@/lib/dialer/transport";
 import type { CoachSession } from "@/lib/coach/use-coach-session";
 import type { CoachCallContext, CoachPhaseId, CoachState } from "@/lib/coach/types";
@@ -60,24 +60,26 @@ declare global {
 
 function Harness({ held: initialHeld = false, interrupted = false }: { held?: boolean; interrupted?: boolean }) {
   const [held, setHeld] = useState(initialHeld);
-  const [state, dispatch] = useReducer(coachReducer, undefined, harnessState);
+  const [state, dispatch] = useReducer(createCoachReducer(closrOutbound123Bundle), undefined, harnessState);
   const [reconnectGap, setReconnectGap] = useState(true);
-  const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
+  const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(closrOutbound123Bundle.sections.sections[0]!.id);
   const digitsRef = useRef<DtmfDigit[]>([]);
   const goPreviousSection = useCallback(() => {
-    setActiveSectionId((current) => getPreviousCoachSectionId(current) ?? current);
+    setActiveSectionId((current) => getPreviousCoachSectionId(closrOutbound123Bundle, current) ?? current);
   }, []);
   const goNextSection = useCallback(() => {
-    setActiveSectionId((current) => getNextCoachSectionId(current) ?? current);
+    setActiveSectionId((current) => getNextCoachSectionId(closrOutbound123Bundle, current) ?? current);
   }, []);
   const goToPhase = useCallback((phaseId: CoachPhaseId) => {
-    setActiveSectionId(getFirstCoachSectionIdForPhase(phaseId));
+    setActiveSectionId(getFirstCoachSectionIdForPhase(closrOutbound123Bundle, phaseId));
   }, []);
-  const previousSectionId = getPreviousCoachSectionId(activeSectionId);
-  const nextSectionId = getNextCoachSectionId(activeSectionId);
+  const previousSectionId = getPreviousCoachSectionId(closrOutbound123Bundle, activeSectionId);
+  const nextSectionId = getNextCoachSectionId(closrOutbound123Bundle, activeSectionId);
   const session = useMemo<CoachSession>(
     () => ({
       callId: "synthetic-call",
+      scriptBinding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle },
+      scriptBindingStatus: "ready",
       recommendationContinuity: createCoachRecommendationContinuity("synthetic-call"),
       state,
       dispatch,

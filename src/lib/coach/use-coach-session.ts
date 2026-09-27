@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { loadCoachCallContext } from "./coach-context-actions";
+import { loadCoachCallScript } from "./coach-script-actions";
 import { createCoachRecommendationContinuity } from "./recommendation-client";
 import {
-  FIRST_COACH_SECTION_ID,
   getFirstCoachSectionIdForPhase,
   getNextCoachSectionId,
   getPreviousCoachSectionId,
@@ -13,6 +13,7 @@ import {
   type CoachSectionId,
 } from "./section-manifest";
 import { useCoachChannel } from "./use-coach-channel";
+import { assertValidScriptBundle, getCoachSections, type ScriptBundle, type ScriptRef } from "@biginkc/coach";
 import type { CoachCallContext, CoachEntryToken, CoachPhaseId } from "./types";
 
 export type ContextLoadState =
@@ -27,6 +28,8 @@ export type PreparedCoachTarget = {
   sellerPhoneE164: string | null;
   maskedSellerPhone: string | null;
 };
+
+export type CoachScriptBinding = { ref: ScriptRef; bundle: ScriptBundle };
 
 function usablePreparedSellerName(
   value: string | null,
@@ -99,7 +102,9 @@ export function useCoachSession(
   preparedTarget: PreparedCoachTarget | null = null,
   sessionKey: string | null = callId,
 ) {
-  const { dispatch, ...channel } = useCoachChannel(callId, "introduction", livenessActive, sessionKey);
+  const [scriptBinding, setScriptBinding] = useState<CoachScriptBinding | null>(null);
+  const [scriptBindingStatus, setScriptBindingStatus] = useState<"loading" | "ready">("loading");
+  const { dispatch, ...channel } = useCoachChannel(callId, scriptBinding, "introduction", livenessActive, sessionKey);
   const [contextLoad, setContextLoad] = useState<ContextLoadState>(() => ({
     status: "loading",
     context: preparedTargetErrorContext(
@@ -111,7 +116,7 @@ export function useCoachSession(
   const [contextAttempt, setContextAttempt] = useState(0);
   const [branchOverrides, setBranchOverrides] = useState<Record<string, string>>({});
   const [sectionBranchSelections, setSectionBranchSelections] = useState<Record<string, string>>({});
-  const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>(FIRST_COACH_SECTION_ID);
+  const [activeSectionId, setActiveSectionId] = useState<CoachSectionId>("introduction.opener");
   const [recommendationContinuity, setRecommendationContinuity] = useState(
     () => createCoachRecommendationContinuity(sessionKey),
   );
@@ -138,9 +143,26 @@ export function useCoachSession(
     setContextAttempt(0);
     setBranchOverrides({});
     setSectionBranchSelections({});
-    setActiveSectionId(FIRST_COACH_SECTION_ID);
+    setScriptBinding(null);
+    setScriptBindingStatus("loading");
+    setActiveSectionId("introduction.opener");
     setRecommendationContinuity(createCoachRecommendationContinuity(sessionKey));
   }
+
+  useEffect(() => {
+    let mounted = true;
+    if (!callId) {
+      return () => { mounted = false; };
+    }
+    loadCoachCallScript(callId).then((binding) => {
+      if (!mounted) return;
+      if (binding) assertValidScriptBundle(binding.bundle);
+      setScriptBinding(binding);
+      setScriptBindingStatus("ready");
+      if (binding) setActiveSectionId(getCoachSections(binding.bundle)[0]?.id ?? "introduction.opener");
+    }).catch(() => { if (mounted) { setScriptBinding(null); setScriptBindingStatus("ready"); } });
+    return () => { mounted = false; };
+  }, [callId]);
 
   useEffect(() => {
     if (!sessionKey) return;
@@ -181,33 +203,35 @@ export function useCoachSession(
     setBranchOverrides((prev) => ({ ...prev, [tag]: key }));
   }, []);
   const selectSectionBranch = useCallback((sectionId: CoachSectionId, tag: string) => {
-    const section = getCoachSectionById(sectionId);
+    const section = scriptBinding ? getCoachSectionById(scriptBinding.bundle, sectionId) : undefined;
     if (section && section.content.length > 1 && section.content.some((content) => content.branch_tag === tag)) {
       setSectionBranchSelections((prev) => ({ ...prev, [sectionId]: tag }));
     }
-  }, []);
+  }, [scriptBinding]);
   const setEntryField = useCallback(
     (field: CoachEntryToken, value: string) => dispatch({ type: "set_entry_field", field, value }),
     [dispatch],
   );
   const goToSection = useCallback((sectionId: CoachSectionId) => {
-    if (getCoachSectionById(sectionId)) setActiveSectionId(sectionId);
-  }, []);
+    if (scriptBinding && getCoachSectionById(scriptBinding.bundle, sectionId)) setActiveSectionId(sectionId);
+  }, [scriptBinding]);
   const goPreviousSection = useCallback(() => {
-    setActiveSectionId((current) => getPreviousCoachSectionId(current) ?? current);
-  }, []);
+    if (scriptBinding) setActiveSectionId((current) => getPreviousCoachSectionId(scriptBinding.bundle, current) ?? current);
+  }, [scriptBinding]);
   const goNextSection = useCallback(() => {
-    setActiveSectionId((current) => getNextCoachSectionId(current) ?? current);
-  }, []);
+    if (scriptBinding) setActiveSectionId((current) => getNextCoachSectionId(scriptBinding.bundle, current) ?? current);
+  }, [scriptBinding]);
   const goToPhase = useCallback((phaseId: CoachPhaseId) => {
-    setActiveSectionId(getFirstCoachSectionIdForPhase(phaseId));
-  }, []);
+    if (scriptBinding) setActiveSectionId(getFirstCoachSectionIdForPhase(scriptBinding.bundle, phaseId));
+  }, [scriptBinding]);
 
-  const previousSectionId = getPreviousCoachSectionId(activeSectionId);
-  const nextSectionId = getNextCoachSectionId(activeSectionId);
+  const previousSectionId = scriptBinding ? getPreviousCoachSectionId(scriptBinding.bundle, activeSectionId) : null;
+  const nextSectionId = scriptBinding ? getNextCoachSectionId(scriptBinding.bundle, activeSectionId) : null;
 
   return {
     callId,
+    scriptBinding,
+    scriptBindingStatus,
     recommendationContinuity,
     ...channel,
     dispatch,

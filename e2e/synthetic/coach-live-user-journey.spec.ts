@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
+import { closrOutbound123Bundle } from "@biginkc/coach/fixtures";
 import tailwindcss from "@tailwindcss/postcss";
 import * as esbuild from "esbuild";
 import fs from "node:fs";
@@ -52,9 +53,7 @@ let harnessBundle = "";
 let sections: Section[] = [];
 
 test.beforeAll(async () => {
-  sections = JSON.parse(
-    fs.readFileSync(path.resolve(process.cwd(), "src/lib/coach/closr-sections-v1.json"), "utf8"),
-  ).sections as Section[];
+  sections = closrOutbound123Bundle.sections.sections as Section[];
   const cssResult = await postcss([tailwindcss()]).process(readFileSync(path.resolve(process.cwd(), "src/app/globals.css"), "utf8"), {
     from: path.resolve(process.cwd(), "src/app/globals.css"),
   });
@@ -63,6 +62,7 @@ test.beforeAll(async () => {
     entryPoints: [path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-live-behavior-harness.tsx")],
     bundle: true,
     platform: "browser",
+    external: ["crypto"],
     format: "iife",
     target: "chrome120",
     jsx: "automatic",
@@ -82,6 +82,12 @@ test.beforeAll(async () => {
             path: path.resolve(
               process.cwd(),
               "e2e/synthetic/fixtures/coach-context-actions-browser-stub.ts",
+            ),
+          }));
+          build.onResolve({ filter: /coach-script-actions$/ }, () => ({
+            path: path.resolve(
+              process.cwd(),
+              "e2e/synthetic/fixtures/coach-script-actions-browser-stub.ts",
             ),
           }));
           build.onResolve({ filter: /supabase\/client$/ }, () => ({

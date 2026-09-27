@@ -4,9 +4,9 @@ import { REALTIME_SUBSCRIBE_STATES } from "@supabase/supabase-js";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { createClient } from "@/lib/supabase/client";
-import { coachReducer, initialCoachState } from "./event-reducer";
+import { createCoachReducer, initialCoachState } from "./event-reducer";
 import { parseCoachEvent } from "./event-validation";
-import { CLOSR_SCRIPT } from "./script-block";
+import type { ScriptBundle, ScriptRef } from "@biginkc/coach";
 import type { CoachPhaseId, CoachState } from "./types";
 
 /** Rolling liveness window: if no coach event arrives within this long of
@@ -43,22 +43,25 @@ const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
  * unknown-type traffic proves bytes are arriving, not that the contract
  * is intact, so it can't make a broken feed look healthy.
  * `scriptOutOfSync` is the producer's declared scriptVersion whenever it
- * differs from this app's loaded script (CLOSR_SCRIPT.version) — reset to
+ * differs from the exact bundle bound to this call — reset to
  * null the moment a later event reports a matching version. Every valid
  * event carries scriptVersion (required by the wire contract), so this is
  * checked on every dispatch, not conditionally.
  */
 export function useCoachChannel(
   callId: string | null,
+  binding: { ref: ScriptRef; bundle: ScriptBundle } | null,
   startingPhaseId: CoachPhaseId = "introduction",
   livenessActive = true,
   sessionKey: string | null = callId,
 ) {
-  const [state, dispatch] = useReducer(coachReducer, startingPhaseId, initialCoachState);
+  const [state, dispatch] = useReducer(createCoachReducer(binding?.bundle ?? null), startingPhaseId, initialCoachState);
   const [degraded, setDegraded] = useState(false);
   const [reconnectGap, setReconnectGap] = useState(false);
   const [malformedEventCount, setMalformedEventCount] = useState(0);
   const [scriptOutOfSync, setScriptOutOfSync] = useState<string | null>(null);
+  const bindingRef = useRef(binding);
+  bindingRef.current = binding;
   const livenessActiveRef = useRef(livenessActive);
   const livenessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -179,7 +182,8 @@ export function useCoachChannel(
         .channel(`coach:${callId}`, { config: { private: true } })
         .on("broadcast", { event: COACH_BROADCAST_EVENT }, (message) => {
           if (!mounted || myGeneration !== generation) return;
-          const result = parseCoachEvent(message.payload);
+          const activeBinding = bindingRef.current;
+          const result = parseCoachEvent(message.payload, activeBinding?.bundle ?? null);
           if (!result.ok) {
             if (result.reason === "malformed") {
               setMalformedEventCount((value) => value + 1);
@@ -200,7 +204,7 @@ export function useCoachChannel(
           // proves the feed is current again, not that nothing was lost
           // in between. Only dismissReconnectGap (an explicit rep
           // acknowledgment) clears it.
-          setScriptOutOfSync(result.event.scriptVersion === CLOSR_SCRIPT.version ? null : result.event.scriptVersion);
+          setScriptOutOfSync(activeBinding && result.event.scriptVersion === activeBinding.bundle.script.version ? null : result.event.scriptVersion);
           dispatch(result.event);
         })
         .subscribe((status) => {

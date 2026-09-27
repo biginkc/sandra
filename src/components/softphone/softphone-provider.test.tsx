@@ -2,6 +2,7 @@ import type { DialerRecent, DialerSearchResult } from "@/lib/dialer/actions";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
 
 const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, mintStartIntent, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, searchDialerLeads, createTransport, jitterEnabled, transportEnabled, playDtmfTone } = vi.hoisted(() => ({
   completeSoftphoneCall: vi.fn(),
@@ -40,8 +41,9 @@ vi.mock("@/lib/dialer/transport-selection", () => ({
   isSoftphoneTransportEnabled: transportEnabled,
 }));
 
-const { loadCoachCallContext } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn() }));
+const { loadCoachCallContext, loadCoachCallScript } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn(), loadCoachCallScript: vi.fn() }));
 vi.mock("@/lib/coach/coach-context-actions", () => ({ loadCoachCallContext }));
+vi.mock("@/lib/coach/coach-script-actions", () => ({ loadCoachCallScript }));
 
 type CoachBroadcastHandler = (message: { payload: unknown }) => void;
 type CoachMockChannel = {
@@ -134,6 +136,7 @@ describe("SoftphoneProvider transport gate", () => {
       leadSource: null,
       occupancy: null,
     });
+    loadCoachCallScript.mockReset().mockResolvedValue({ ref: closrOutbound123Ref, bundle: closrOutbound123Bundle });
     window.localStorage.clear();
     window.sessionStorage.clear();
   });
@@ -1128,7 +1131,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     });
   });
 
-  it("defaults off, reveals the script picker with the keyboard, and persists both values across remount", async () => {
+  it("defaults off, toggles with the keyboard, and persists the opt-in across remount", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
     window.localStorage.clear();
@@ -1137,16 +1140,11 @@ describe("SoftphoneProvider coach UI flag", () => {
     await user.click(screen.getByTestId("header-dialer-button"));
     const toggle = screen.getByRole("switch", { name: "Enable live coach" });
     expect(toggle).toHaveAttribute("aria-checked", "false");
-    expect(screen.queryByTestId("dialer-coach-script")).not.toBeInTheDocument();
     toggle.focus();
     await user.keyboard(" ");
     expect(toggle).toHaveAttribute("aria-checked", "true");
-    const picker = await screen.findByRole("combobox", { name: "Coach script" });
-    expect(picker).toHaveTextContent("CLOSR Outbound Sales Script");
-    expect(picker).toHaveTextContent("v1.2.3");
-    await user.click(picker);
-    await user.click(await screen.findByRole("option"));
-    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)).toEqual({ enabled: true, scriptId: "closr-outbound" });
+    expect(screen.queryByTestId("dialer-coach-script")).not.toBeInTheDocument();
+    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)).toEqual({ enabled: true });
     first.unmount();
     const second = render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
     await user.click(screen.getByTestId("header-dialer-button"));
@@ -1184,13 +1182,14 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "false");
   });
 
-  it("falls back to the registered script for an unknown saved id", async () => {
+  it("accepts a legacy saved script id without making it a local script selection", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
     window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: true, scriptId: "removed" }));
     render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
     await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
-    expect(screen.getByTestId("dialer-coach-script")).toHaveTextContent("CLOSR Outbound Sales Script");
+    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByTestId("dialer-coach-script")).not.toBeInTheDocument();
   });
 
   it("keeps the in-memory switch working when storage reads and writes throw", async () => {
@@ -1237,7 +1236,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     await user.click(screen.getByTestId("reopen-coach"));
     await screen.findByTestId("coach-live-view");
     expect(screen.getByTestId("coach-transcript")).toHaveTextContent("heard while hidden");
-    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)).toEqual({ enabled: true, scriptId: "closr-outbound" });
+    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)).toEqual({ enabled: true });
     await user.click(screen.getByTestId("coach-collapse"));
     expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!).enabled).toBe(true);
     expect(coachChannels).toHaveLength(1);
@@ -1374,7 +1373,7 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
   });
 
-  it("shows every known script token while transport is still connecting", async () => {
+  it("keeps call controls available while transport is connecting before a call script can bind", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
     loadCoachCallContext.mockReturnValue(new Promise(() => undefined));
@@ -1401,12 +1400,8 @@ describe("SoftphoneProvider coach UI flag", () => {
 
     await user.click(screen.getByTestId("call-lead-button"));
     await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeVisible());
-    const script = screen.getByTestId("current-section-script");
-    expect(script).toHaveTextContent("Hey Softphone?");
-    expect(script).toHaveTextContent("this is Mel");
-    await user.click(screen.getByTestId("variant-Opener-cold_call"));
-    expect(script).toHaveTextContent("1 Main St");
-    expect(script.querySelectorAll('[data-testid="token-placeholder"]')).toHaveLength(0);
+    expect(screen.getByTestId("coach-script-unavailable")).toHaveTextContent("Script unavailable — coaching is off for this call");
+    expect(screen.getByTestId("coach-hangup")).toBeEnabled();
     expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
   });
 

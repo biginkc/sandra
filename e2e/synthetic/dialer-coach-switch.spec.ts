@@ -17,6 +17,7 @@ test.beforeAll(async () => {
     entryPoints: [path.resolve(process.cwd(), "e2e/synthetic/fixtures/dialer-coach-switch-harness.tsx")],
     bundle: true,
     platform: "browser",
+    external: ["crypto"],
     format: "iife",
     target: "chrome120",
     jsx: "automatic",
@@ -30,6 +31,9 @@ test.beforeAll(async () => {
       setup(build) {
         build.onResolve({ filter: /coach-context-actions$/ }, () => ({
           path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-context-actions-browser-stub.ts"),
+        }));
+        build.onResolve({ filter: /coach-script-actions$/ }, () => ({
+          path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-script-actions-browser-stub.ts"),
         }));
         build.onResolve({ filter: /supabase\/client$/ }, () => ({
           path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-supabase-browser-stub.ts"),
@@ -63,7 +67,7 @@ test.beforeAll(async () => {
 });
 
 for (const width of [1440, 375]) {
-  test(`coach switch layout and accessible script picker at ${width}px`, async ({ page }) => {
+  test(`coach switch layout and bound-script preference at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.route("http://synthetic.local/**", async (route) => {
       if (route.request().url().endsWith("mascot-writing.png")) return route.fulfill({ contentType: "image/png", body: await readFile("public/brand/mascot-writing.png") });
@@ -81,32 +85,14 @@ for (const width of [1440, 375]) {
     const off = await page.getByTestId("dialer-input").boundingBox();
     await toggle.press("Space");
     await expect(toggle).toBeChecked();
-    const picker = page.getByRole("combobox", { name: "Coach script" });
-    await expect(picker).toContainText("CLOSR Outbound Sales Script");
-    await expect(picker).toContainText("v1.2.3");
-    await expect.poll(async () => (await page.getByTestId("dialer-input").boundingBox())!.y - off!.y).toBeGreaterThan(25);
+    await expect(page.getByTestId("dialer-coach-script")).toHaveCount(0);
+    await expect.poll(async () => (await page.getByTestId("dialer-input").boundingBox())!.y - off!.y).toBeLessThan(25);
     const mascot = (await page.getByTestId("dialer-coach-mascot").boundingBox())!;
     const headline = (await page.getByText("Want some help? Enable live coach.", { exact: true }).boundingBox())!;
     expect(mascot.y).toBeLessThanOrEqual(headline.y);
-    await expect.poll(async () => {
-      const imageBox = (await page.getByTestId("dialer-coach-mascot").boundingBox())!;
-      const pickerBox = (await picker.boundingBox())!;
-      return Math.abs(imageBox.y + imageBox.height - pickerBox.y - pickerBox.height);
-    }).toBeLessThan(1);
-    await picker.click();
-    const option = page.getByRole("option");
-    await expect(option).toBeVisible();
-    await expect.poll(() => option.evaluate((row) => {
-      const title = row.querySelector('[data-testid="coach-script-option-title"]')!.getBoundingClientRect();
-      const version = row.querySelector('[data-testid="coach-script-option-version"]')!.getBoundingClientRect();
-      const indicator = row.querySelector('svg')!.getBoundingClientRect();
-      return title.right <= version.left && version.right <= indicator.left;
-    })).toBe(true);
-    await page.screenshot({ path: `tmp/dialer-switch-preview/menu-${width}.png` });
-    await option.click(); // Must be above the dialer, not covered by its portal.
-    await expect(option).toHaveCount(0);
+    await page.screenshot({ path: `tmp/dialer-switch-preview/on-${width}.png` });
     const bounds = await page.getByTestId("softphone-popover").boundingBox();
-    for (const element of [toggle, picker]) {
+    for (const element of [toggle]) {
       const box = (await element.boundingBox())!;
       expect(box.x).toBeGreaterThanOrEqual(bounds!.x);
       expect(box.x + box.width).toBeLessThanOrEqual(bounds!.x + bounds!.width);
@@ -117,10 +103,8 @@ for (const width of [1440, 375]) {
       return [sub, sub.previousElementSibling!].map((el) => (luminance(getComputedStyle(el).color.match(/\d+/g)!.map(Number)) + 0.05) / (background + 0.05));
     });
     expect(Math.min(...contrast)).toBeGreaterThanOrEqual(4.5);
-    await page.screenshot({ path: `tmp/dialer-switch-preview/on-${width}.png` });
     await toggle.click();
-    await expect(picker).toHaveCount(0);
     await page.screenshot({ path: `tmp/dialer-switch-preview/off-${width}.png` });
-    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("sandra.softphone.coach.v1")!))).toEqual({ enabled: false, scriptId: "closr-outbound" });
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("sandra.softphone.coach.v1")!))).toEqual({ enabled: false });
   });
 }

@@ -1,14 +1,17 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
 
 import type { CoachCallContext } from "./types";
 
-const { loadCoachCallContext, createCoachChannel } = vi.hoisted(() => ({
+const { loadCoachCallContext, loadCoachCallScript, createCoachChannel } = vi.hoisted(() => ({
   loadCoachCallContext: vi.fn(),
+  loadCoachCallScript: vi.fn(),
   createCoachChannel: vi.fn(),
 }));
 
 vi.mock("./coach-context-actions", () => ({ loadCoachCallContext }));
+vi.mock("./coach-script-actions", () => ({ loadCoachCallScript }));
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -40,6 +43,7 @@ const sampleContext: CoachCallContext = {
 describe("useCoachSession", () => {
   beforeEach(() => {
     loadCoachCallContext.mockReset().mockResolvedValue(sampleContext);
+    loadCoachCallScript.mockReset().mockResolvedValue({ ref: closrOutbound123Ref, bundle: closrOutbound123Bundle });
     createCoachChannel.mockReset().mockImplementation(() => ({
       on() {
         return this;
