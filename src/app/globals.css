@@ -23,6 +23,13 @@
   --sandra-coach-secondary-foreground: var(--secondary-foreground);
   --sandra-coach-ring: var(--ring);
   --sandra-coach-destructive: var(--destructive);
+  --sandra-coach-destructive-foreground: var(--destructive-foreground);
+  /* Keep the shared-script header aligned with Sandra's navy navigation
+   * field in either application theme. */
+  --sandra-coach-header-background: var(--nav-field);
+  --sandra-coach-header-foreground: var(--sidebar-primary-foreground);
+  --sandra-coach-warning-foreground: var(--alert-warning-foreground);
+  --sandra-coach-warning-solid-foreground: var(--alert-warning-solid-foreground);
 }
 
 @custom-variant dark (&:is(.dark *));

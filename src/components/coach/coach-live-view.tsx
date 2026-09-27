@@ -418,7 +418,7 @@ function CoachTopBar({
   return (
     <div className="coach-top-bar shrink-0 border-b border-border">
       <div className="coach-identity">
-        <span className="min-w-0 truncate text-[15px] font-extrabold">{callName}</span>
+        <span data-testid="coach-call-name" className="min-w-0 truncate text-[15px] font-extrabold">{callName}</span>
         <span data-testid="coach-file-number" aria-label="File number" className="font-mono text-xs tabular-nums">
           {`File number: ${fileNumber.value}`}
         </span>

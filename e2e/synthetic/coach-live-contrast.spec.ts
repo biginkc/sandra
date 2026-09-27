@@ -387,6 +387,7 @@ for (const mode of [
     await expect(page.getByTestId("coach-script-ref")).toBeVisible();
     // V2 owns the only phase rail; the retired header rail must not duplicate it.
     await expect(page.getByTestId("coach-phase-scroller")).toHaveCount(0);
+    await expect(page.locator(".coach-top-bar")).toHaveCSS("background-image", /gradient/);
 
     const script = page.getByTestId("coach-script-v2-panel");
     const scriptLine = script.locator(".coach-spoken-line").first();
@@ -396,6 +397,9 @@ for (const mode of [
     const counter = page.getByTestId("coach-call-timer");
     const back = page.getByTestId("coach-back");
     const next = page.getByTestId("coach-next");
+    const hangup = page.getByTestId("coach-hangup");
+    const reconnectBanner = page.getByTestId("coach-reconnect-gap");
+    const sellerLabel = page.getByTestId("transcript-speaker-label").filter({ hasText: "Seller" }).first();
 
     await expect(scriptLine).toBeVisible();
     await expect(phasePill).toBeVisible();
@@ -405,10 +409,27 @@ for (const mode of [
     assertAA("V2 tab label", await measureRenderedContrast(tabLabel));
     assertAA("V2 header ref label", await measureRenderedContrast(refLabel));
     assertAA("V2 ref label", await measureRenderedContrast(page.getByTestId("coach-script-ref")));
+    assertAA("V2 dark-navy header call name", await measureRenderedContrast(page.getByTestId("coach-call-name")));
     assertAA("V2 call counter", await measureRenderedContrast(counter));
+    assertAA("V2 Hang up label", await measureRenderedContrast(hangup));
+    assertAA("V2 reconnect banner", await measureRenderedContrast(reconnectBanner));
+    assertAA("V2 SELLER label", await measureRenderedContrast(sellerLabel));
+    const toneChip = script.getByTestId("tone-chip").first();
+    await expect(toneChip).toBeVisible();
+    assertAA("V2 Tone chip", await measureRenderedContrast(toneChip));
     assertAA("V2 disabled Back", await measureRenderedContrast(back));
     await next.hover();
     assertAA("V2 Next", await measureRenderedContrast(next));
+  });
+
+  test(`meets WCAG AA for the V2 hold pill in ${mode.label} mode`, async ({ page }) => {
+    // The hold countdown sits on the V2 navy header, not on a card. Mounting
+    // this state verifies its actual effective background in both themes.
+    await page.clock.setFixedTime(new Date("2026-09-07T12:00:00Z"));
+    await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false, scriptV2: true, held: true });
+    const holdPill = page.getByTestId("hold-timer");
+    await expect(holdPill).toBeVisible();
+    assertAA("V2 Hold pill", await measureRenderedContrast(holdPill));
   });
 
   test(`keeps keypad digits and letters readable in ${mode.label} mode`, async ({ page }) => {
