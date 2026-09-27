@@ -968,6 +968,9 @@ export type Database = {
           provider_ended_at: string | null
           talk_duration_seconds: number | null
           recording_expected: boolean | null
+          seller_speech_seconds_measured: number | null
+          seller_speech_seconds_estimated: number | null
+          seller_speech_confidence: "full" | "partial" | "low" | null
           ended_at: string | null
           error_code: string | null
           error_message: string | null
@@ -1003,6 +1006,9 @@ export type Database = {
           provider_ended_at?: string | null
           talk_duration_seconds?: number | null
           recording_expected?: boolean | null
+          seller_speech_seconds_measured?: number | null
+          seller_speech_seconds_estimated?: number | null
+          seller_speech_confidence?: "full" | "partial" | "low" | null
           ended_at?: string | null
           error_code?: string | null
           error_message?: string | null
@@ -1038,6 +1044,9 @@ export type Database = {
           provider_ended_at?: string | null
           talk_duration_seconds?: number | null
           recording_expected?: boolean | null
+          seller_speech_seconds_measured?: number | null
+          seller_speech_seconds_estimated?: number | null
+          seller_speech_confidence?: "full" | "partial" | "low" | null
           ended_at?: string | null
           error_code?: string | null
           error_message?: string | null
