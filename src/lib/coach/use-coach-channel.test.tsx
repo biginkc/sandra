@@ -61,6 +61,7 @@ import { useCoachChannel as useRuntimeCoachChannel } from "./use-coach-channel";
  * (the "in sync" default case) don't silently start failing the next time
  * the script artifact's version bumps. */
 const V = { scriptVersion: closrOutbound123Bundle.script.version, matcherVersion: "3" };
+const STRICT_V = { ...V, scriptDigest: closrOutbound123Ref.digest };
 const binding = { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle };
 
 function useCoachChannel(
@@ -70,6 +71,13 @@ function useCoachChannel(
   sessionKey: string | null = callId,
 ) {
   return useRuntimeCoachChannel(callId, binding, startingPhaseId, livenessActive, sessionKey);
+}
+
+function useBoundCoachChannel(
+  callId: string | null,
+  callBinding: typeof binding,
+) {
+  return useRuntimeCoachChannel(callId, callBinding, "introduction", true, callId);
 }
 
 function latestChannel(): MockChannel {
@@ -87,6 +95,7 @@ async function flush() {
 describe("useCoachChannel", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "");
     channels = [];
     getSession.mockReset().mockResolvedValue({ data: { session: { access_token: "tok" } } });
     setAuth.mockReset();
@@ -107,6 +116,7 @@ describe("useCoachChannel", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.useRealTimers();
   });
 
@@ -126,6 +136,46 @@ describe("useCoachChannel", () => {
     act(() => latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "reveal", ts: "t1", ...V } }));
     expect(result.current.state.currentPhaseId).toBe("reveal");
     expect(result.current.degraded).toBe(false);
+  });
+
+  it("keeps the legacy flag-off path version-only for mixed producer rollout", async () => {
+    const { result } = renderHook(() => useCoachChannel("call-legacy-version-only"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    // No scriptDigest is intentionally present: this is the deployed legacy
+    // wire shape and remains accepted until the explicit strict flag flips.
+    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "counter", probeCount: 3, ts: "t1", ...V } }));
+    expect(result.current.state.probeCount).toBe(3);
+  });
+
+  it("keeps an explicit unbound transcript transcript-only with the strict flag off", async () => {
+    // The rollout-compatible path still accepts real legacy events (above),
+    // but Jitter's null/null identity is an explicit statement that this
+    // transcript has no script binding. It must not take the normal reducer
+    // path merely because the digest gate is disabled.
+    const { result } = renderHook(() => useCoachChannel("call-unbound-flag-off"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "counter", probeCount: 1, ts: "bound-event", ...V, scriptVersion: "0.9.0" },
+    }));
+    expect(result.current.scriptOutOfSync).toBe("0.9.0");
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_001); });
+    expect(result.current.degraded).toBe(true);
+
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: {
+        type: "transcript", speaker: "seller", text: "I can still speak.", isFinal: true, ts: "unbound-transcript",
+        scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion,
+      },
+    }));
+
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["I can still speak."]);
+    expect(result.current.state.lastEventAt).toBe("bound-event");
+    expect(result.current.degraded).toBe(true);
+    expect(result.current.scriptOutOfSync).toBe("unbound");
   });
 
   it("goes degraded after 15s of silence even with no explicit status change (rolling watchdog)", async () => {
@@ -211,6 +261,189 @@ describe("useCoachChannel", () => {
     // 15.001s since SUBSCRIBED with nothing but malformed traffic in
     // between — the feed must show degraded, not healthy.
     expect(result.current.degraded).toBe(true);
+  });
+
+  it("strictly rejects same-version wrong-digest semantic events before reducer dispatch OR liveness reset", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result } = renderHook(() => useCoachChannel("call-wrong-digest"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "counter", probeCount: 7, ts: "t1", ...STRICT_V, scriptDigest: "f".repeat(64) },
+    }));
+    expect(result.current.state.probeCount).toBe(0);
+    expect(result.current.degraded).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+    expect(result.current.degraded).toBe(true);
+  });
+
+  it("strictly rejects semantic events with a missing digest before they can reset liveness", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result } = renderHook(() => useCoachChannel("call-missing-digest"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    act(() => latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "reveal", ts: "t1", ...V } }));
+    expect(result.current.state.currentPhaseId).toBe("introduction");
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+    expect(result.current.degraded).toBe(true);
+  });
+
+  it("keeps a normal verified Jitter transcript when Sandra has no binding, but never lets it masquerade as coaching or liveness", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result } = renderHook(() =>
+      useRuntimeCoachChannel("call-unbound-transcript", null, "introduction", true, "call-unbound-transcript", false),
+    );
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "transcript", speaker: "seller", text: "The call still has words.", isFinal: true, ts: "t1", ...STRICT_V },
+    }));
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["The call still has words."]);
+    // The fallback never uses the normal transcript reducer path, whose
+    // connected/lastEventAt fields could be mistaken for wire liveness.
+    expect(result.current.state.connected).toBe(false);
+    expect(result.current.state.lastEventAt).toBeNull();
+    expect(result.current.scriptOutOfSync).toBe(V.scriptVersion);
+
+    // These payloads would mutate phase/cursor in a bound stream. With no
+    // exact local identity they cannot mutate any script state or reset the
+    // watchdog after the transcript-only fallback.
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "phase", phaseId: "reveal", ts: "t2", ...STRICT_V },
+    }));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "cursor", phaseId: "introduction", branchTag: "route", variantKey: "default", lineIndex: 0, lineText: "Wrong script", ts: "t3", ...STRICT_V },
+    }));
+    expect(result.current.state.currentPhaseId).toBe("introduction");
+    expect(result.current.state.cursor).toBeNull();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+    expect(result.current.degraded).toBe(true);
+  });
+
+  it("keeps a normal strict transcript while its binding is pending, while warning that coaching events may have been missed", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result } = renderHook(() =>
+      useRuntimeCoachChannel("call-pending-binding", null, "introduction", true, "call-pending-binding", true),
+    );
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "transcript", speaker: "seller", text: "Please keep the transcript.", isFinal: true, ts: "t1", ...STRICT_V },
+    }));
+
+    expect(result.current.bindingMissedEvents).toBe(true);
+    expect(result.current.reconnectGap).toBe(false);
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["Please keep the transcript."]);
+    expect(result.current.state.currentPhaseId).toBe("introduction");
+    expect(result.current.state.cursor).toBeNull();
+    expect(result.current.state.connected).toBe(false);
+    expect(result.current.state.lastEventAt).toBeNull();
+    expect(result.current.degraded).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+    expect(result.current.degraded).toBe(true);
+  });
+
+  it("keeps an explicit unbound transcript when Sandra has no binding without treating it as live coaching", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result } = renderHook(() =>
+      useRuntimeCoachChannel("call-transcript-only", null, "introduction", true, "call-transcript-only", false),
+    );
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: {
+        type: "transcript", speaker: "seller", text: "I can still talk", isFinal: true, ts: "t1",
+        scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion,
+      },
+    }));
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["I can still talk"]);
+    expect(result.current.state.currentPhaseId).toBe("introduction");
+    expect(result.current.state.probeCount).toBe(0);
+    expect(result.current.state.connected).toBe(false);
+    expect(result.current.state.lastEventAt).toBeNull();
+    expect(result.current.scriptOutOfSync).toBe("unbound");
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+    expect(result.current.degraded).toBe(true);
+  });
+
+  it("keeps the exact strict identity gate for a bound transcript and script-derived mutations", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result } = renderHook(() => useCoachChannel("call-bound-mismatch"));
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "phase", phaseId: "reveal", ts: "trusted-phase", ...STRICT_V },
+    }));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "cursor", phaseId: "reveal", branchTag: "route", variantKey: "default", lineIndex: 0, lineText: "Trusted line", ts: "trusted-cursor", ...STRICT_V },
+    }));
+    expect(result.current.state.currentPhaseId).toBe("reveal");
+    expect(result.current.state.cursor?.lineText).toBe("Trusted line");
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    const wrongDigest = "f".repeat(64);
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "transcript", speaker: "seller", text: "Crossed-call text", isFinal: true, ts: "bad-transcript", ...STRICT_V, scriptDigest: wrongDigest },
+    }));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "transcript", speaker: "seller", text: "Unidentified crossed-call text", isFinal: true, ts: "null-transcript", scriptVersion: null, scriptDigest: null, matcherVersion: V.matcherVersion },
+    }));
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["Unidentified crossed-call text"]);
+    expect(result.current.scriptOutOfSync).toBe("unbound");
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "phase", phaseId: "introduction", ts: "bad-phase", ...STRICT_V, scriptDigest: wrongDigest },
+    }));
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "cursor", phaseId: "reveal", branchTag: "route", variantKey: "default", lineIndex: 1, lineText: "Crossed-call cursor", ts: "bad-cursor", ...STRICT_V, scriptDigest: wrongDigest },
+    }));
+    expect(result.current.state.currentPhaseId).toBe("reveal");
+    expect(result.current.state.cursor?.lineText).toBe("Trusted line");
+    expect(result.current.scriptOutOfSync).toBe(V.scriptVersion);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+    expect(result.current.degraded).toBe(true);
+  });
+
+  it("keeps concurrent same-version calls isolated by digest, not by version alone", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const secondBinding = {
+      ref: { ...closrOutbound123Ref, digest: "b".repeat(64) },
+      bundle: closrOutbound123Bundle,
+    };
+    const { result } = renderHook(() => ({
+      first: useBoundCoachChannel("call-digest-a", binding),
+      second: useBoundCoachChannel("call-digest-b", secondBinding),
+    }));
+    await flush();
+    expect(channels).toHaveLength(2);
+    for (const channel of channels) act(() => channel._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    const eventForFirst = { type: "counter", probeCount: 1, ts: "t1", ...STRICT_V };
+    act(() => channels[0]?._broadcastHandler?.({ payload: eventForFirst }));
+    act(() => channels[1]?._broadcastHandler?.({ payload: eventForFirst }));
+    expect(result.current.first.state.probeCount).toBe(1);
+    expect(result.current.second.state.probeCount).toBe(0);
+
+    const eventForSecond = { type: "counter", probeCount: 2, ts: "t2", ...V, scriptDigest: secondBinding.ref.digest };
+    act(() => channels[0]?._broadcastHandler?.({ payload: eventForSecond }));
+    act(() => channels[1]?._broadcastHandler?.({ payload: eventForSecond }));
+    expect(result.current.first.state.probeCount).toBe(1);
+    expect(result.current.second.state.probeCount).toBe(2);
   });
 
   it("does not clear degraded on a malformed event either", async () => {
@@ -340,7 +573,7 @@ describe("useCoachChannel", () => {
     expect(channelSpy).not.toHaveBeenCalled();
   });
 
-  it("resets transcript/degraded/reconnectGap/malformedEventCount/scriptOutOfSync when callId changes — a new call must never inherit the previous call's state", async () => {
+  it("resets transcript/degraded/reconnectGap/malformedEventCount/scriptOutOfSync/bindingMissedEvents when callId changes — a new call must never inherit the previous call's state", async () => {
     const { result, rerender } = renderHook(({ callId }) => useCoachChannel(callId), {
       initialProps: { callId: "call-A" },
     });
@@ -380,6 +613,7 @@ describe("useCoachChannel", () => {
     expect(result.current.reconnectGap).toBe(false);
     expect(result.current.malformedEventCount).toBe(0);
     expect(result.current.scriptOutOfSync).toBeNull();
+    expect(result.current.bindingMissedEvents).toBe(false);
     // The new callId subscribes on a fresh channel — coach:call-B, not a
     // reused coach:call-A instance.
     expect(channelSpy).toHaveBeenCalledWith("coach:call-B", { config: { private: true } });

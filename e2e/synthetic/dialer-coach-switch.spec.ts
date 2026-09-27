@@ -58,6 +58,7 @@ test.beforeAll(async () => {
       // SoftphoneProvider imports the shared coach flag module. This
       // popover-only harness must not accidentally opt into the V2 view.
       "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""',
+      "process.env.NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT": '""',
     },
     write: false,
     logLevel: "silent",

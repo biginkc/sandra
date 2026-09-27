@@ -88,6 +88,8 @@ function Harness({ held: initialHeld = false, interrupted = false, unavailable =
       dismissReconnectGap: () => setReconnectGap(false),
       malformedEventCount: 0,
       scriptOutOfSync: "0.9.0",
+      bindingMissedEvents: false,
+      dismissBindingMissedEvents: () => {},
       contextLoad: { status: "ready", context: { ...sampleContext, motivation: emptyMotivation ? null : sampleContext.motivation } },
       retryContext: () => {},
       branchOverrides: {},

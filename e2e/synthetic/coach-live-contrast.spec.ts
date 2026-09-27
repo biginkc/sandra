@@ -40,6 +40,7 @@ test.beforeAll(async () => {
     define: {
       "process.env.NODE_ENV": '"test"',
       ...(mode === "off" ? { "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""' } : {}),
+      "process.env.NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT": '""',
     },
     // Production relies on Next.js to replace the direct public-env lookup.
     // This browser-only V2 fixture deliberately supplies the smallest local

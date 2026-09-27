@@ -53,9 +53,22 @@ function isParseableTimestamp(value: unknown): value is string {
  * Jitter repo, WIRE_CONTRACT_VERSION '1.0.0'). An event missing either, or
  * carrying a wrong-typed/empty value, is malformed — not a legacy
  * unversioned event to pass through. */
-function parseVersions(payload: Record<string, unknown>): CoachEventVersions | null {
-  if (!isNonEmptyString(payload.scriptVersion) || !isNonEmptyString(payload.matcherVersion)) return null;
-  return { scriptVersion: payload.scriptVersion, matcherVersion: payload.matcherVersion };
+function parseVersions(payload: Record<string, unknown>, rawType: string): CoachEventVersions | null {
+  if (!isNonEmptyString(payload.matcherVersion)) return null;
+  // Jitter's bound-script mode intentionally emits this one identity only
+  // for transcript messages when no immutable binding is available. It is
+  // valid transcript transport, but can never authorize script-derived
+  // reducer events (which still require a non-empty scriptVersion below).
+  if (rawType === "transcript" && payload.scriptVersion === null && payload.scriptDigest === null) {
+    return { scriptVersion: null, scriptDigest: null, matcherVersion: payload.matcherVersion };
+  }
+  if (!isNonEmptyString(payload.scriptVersion)) return null;
+  if (payload.scriptDigest !== undefined && payload.scriptDigest !== null && !isNonEmptyString(payload.scriptDigest)) return null;
+  return {
+    scriptVersion: payload.scriptVersion,
+    ...(payload.scriptDigest !== undefined ? { scriptDigest: payload.scriptDigest as string | null } : {}),
+    matcherVersion: payload.matcherVersion,
+  };
 }
 
 /**
@@ -74,7 +87,7 @@ export function parseCoachEvent(payload: unknown, bundle: ScriptBundle | null = 
   if (!KNOWN_EVENT_TYPES.has(rawType)) {
     return { ok: false, reason: "unknown_type", rawType };
   }
-  const versions = parseVersions(payload);
+  const versions = parseVersions(payload, rawType);
   if (!versions) {
     return { ok: false, reason: "malformed", rawType };
   }

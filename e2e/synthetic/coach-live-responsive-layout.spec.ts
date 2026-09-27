@@ -29,7 +29,11 @@ test.beforeAll(async () => {
       ),
       "@": path.resolve(process.cwd(), "src"),
     },
-    define: { "process.env.NODE_ENV": '"test"', "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""' },
+    define: {
+      "process.env.NODE_ENV": '"test"',
+      "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""',
+      "process.env.NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT": '""',
+    },
     write: false,
     logLevel: "silent",
   });

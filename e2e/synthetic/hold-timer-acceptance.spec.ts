@@ -26,6 +26,7 @@ test.beforeAll(async () => {
       "process.env.NODE_ENV": '"test"',
       // Keep every coach-adjacent browser bundle explicit about the default.
       "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""',
+      "process.env.NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT": '""',
     },
     write: false,
     logLevel: "silent",
