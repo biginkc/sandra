@@ -1,7 +1,7 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
 import type {
@@ -153,6 +153,7 @@ function broadcast(payload: Record<string, unknown>) {
 }
 
 describe("<CoachLiveView /> manual navigation", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     channels = [];
     loadCoachCallContext.mockReset().mockResolvedValue(sampleContext);
@@ -172,6 +173,31 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.queryByTestId("entry-chip-cold_caller_name")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Live transcript")).not.toHaveAttribute("hidden");
     expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
+  });
+
+  it("keeps the S4 panel when the V2 flag is unset", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    expect(screen.queryByTestId("coach-script-v2-panel")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("coach-script-ref-label")).not.toBeInTheDocument();
+  });
+
+  it("renders the package navigator in the three-column view and retains typed navigator state", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
+    loadCoachCallContext.mockResolvedValue({ ...sampleContext, motivation: null });
+    const user = userEvent.setup();
+    render(<Harness {...baseProps()} />);
+
+    await waitFor(() => expect(screen.getByTestId("coach-script-v2-panel")).toBeVisible());
+    expect(screen.getByTestId("coach-script-ref-label")).toHaveTextContent("closr-outbound@1 · locked for this call");
+    expect(screen.getByTestId("coach-script-ref")).toHaveTextContent("closr-outbound@1 · locked for this call");
+    await user.click(screen.getByTestId("coach-next"));
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Set the qualification frame");
+    await user.click(screen.getByTestId("coach-back"));
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+    const motivation = await screen.findByTestId("coach-token-motivation");
+    fireEvent.change(motivation, { target: { value: "Downsize" } });
+    expect(motivation).toHaveValue("Downsize");
   });
 
   it("keeps file-number identity placeholder-only while loading, then shows the authorized context value", async () => {

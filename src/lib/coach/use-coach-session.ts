@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { loadCoachCallContext } from "./coach-context-actions";
 import { loadCoachCallScript } from "./coach-script-actions";
@@ -13,7 +13,7 @@ import {
   type CoachSectionId,
 } from "./section-manifest";
 import { useCoachChannel } from "./use-coach-channel";
-import { assertValidScriptBundle, getCoachSections, type ScriptBundle, type ScriptRef } from "@biginkc/coach";
+import { assertValidScriptBundle, getCoachSections, type NavigatorState, type ScriptBundle, type ScriptRef } from "@biginkc/coach";
 import type { CoachCallContext, CoachEntryToken, CoachPhaseId } from "./types";
 
 export type ContextLoadState =
@@ -109,6 +109,7 @@ export function useCoachSession(
   const [scriptBinding, setScriptBinding] = useState<CoachScriptBinding | null>(null);
   const [scriptBindingStatus, setScriptBindingStatus] = useState<"loading" | "ready">("loading");
   const { dispatch, ...channel } = useCoachChannel(callId, scriptBinding, "introduction", livenessActive, sessionKey);
+  const navigatorStateRef = useRef<NavigatorState | null>(null);
   const [contextLoad, setContextLoad] = useState<ContextLoadState>(() => ({
     status: "loading",
     context: preparedTargetErrorContext(
@@ -149,6 +150,7 @@ export function useCoachSession(
     setSectionBranchSelections({});
     setScriptBinding(null);
     setScriptBindingStatus("loading");
+    navigatorStateRef.current = null;
     setActiveSectionId("introduction.opener");
     setRecommendationContinuity(createCoachRecommendationContinuity(sessionKey));
   }
@@ -160,6 +162,7 @@ export function useCoachSession(
       return () => { cancelled = true; };
     }
     let retryIndex = 0;
+    let errorRetryUsed = false;
     const load = () => {
       loadCoachCallScript(callId).then((result) => {
         if (cancelled) return;
@@ -177,6 +180,13 @@ export function useCoachSession(
         setScriptBinding(null);
         setScriptBindingStatus("ready");
       }).catch(() => {
+        // The call-index write is intentionally after() work. Retry one
+        // transient action failure, but never keep the call blocked.
+        if (!cancelled && !errorRetryUsed) {
+          errorRetryUsed = true;
+          retryTimer = setTimeout(load, SCRIPT_BINDING_RETRY_DELAYS_MS[0]);
+          return;
+        }
         if (!cancelled) {
           setScriptBinding(null);
           setScriptBindingStatus("ready");
@@ -238,6 +248,11 @@ export function useCoachSession(
     (field: CoachEntryToken, value: string) => dispatch({ type: "set_entry_field", field, value }),
     [dispatch],
   );
+  const rememberNavigatorState = useCallback((navigator: NavigatorState) => {
+    // Avoid routing every keystroke through the live-feed reducer. The ref
+    // survives this view's collapse/reopen and initializes its next mount.
+    navigatorStateRef.current = navigator;
+  }, []);
   const goToSection = useCallback((sectionId: CoachSectionId) => {
     if (scriptBinding && getCoachSectionById(scriptBinding.bundle, sectionId)) setActiveSectionId(sectionId);
   }, [scriptBinding]);
@@ -268,6 +283,8 @@ export function useCoachSession(
     sectionBranchSelections,
     selectSectionBranch,
     setEntryField,
+    navigatorState: navigatorStateRef.current,
+    rememberNavigatorState,
     activeSectionId,
     previousSectionId,
     nextSectionId,

@@ -4,3 +4,9 @@
 export function isCoachUiEnabled(): boolean {
   return process.env.NEXT_PUBLIC_COACH_UI_ENABLED === "1";
 }
+
+/** V2 changes only the full-screen coach composition. Keeping this separate
+ * from the full-screen UI flag makes an unset V2 flag select the S4 view. */
+export function isCoachScriptV2Enabled(): boolean {
+  return process.env.NEXT_PUBLIC_COACH_SCRIPT_V2 === "1";
+}

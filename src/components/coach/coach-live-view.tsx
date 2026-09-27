@@ -2,6 +2,7 @@
 
 import { ChevronLeftIcon, ChevronRightIcon, Loader2Icon, MicIcon, MicOffIcon, PauseIcon, PhoneOffIcon, PlayIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ScriptNavigator, type NavigatorState } from "@biginkc/coach/react";
 
 import { PhoneKeypad } from "@/components/softphone/phone-keypad";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +33,7 @@ import type {
 import { COACH_ENTRY_TOKENS } from "@/lib/coach/types";
 import type { CoachSession, ContextLoadState } from "@/lib/coach/use-coach-session";
 import { isNearTranscriptBottom } from "@/lib/coach/transcript-scroll";
+import { isCoachScriptV2Enabled } from "@/lib/coach/flags";
 import { cn } from "@/lib/utils";
 import { HoldTimer } from "./hold-timer";
 
@@ -163,6 +165,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     goToPhase,
   } = session;
   const bundle = session.scriptBinding?.bundle ?? null;
+  const scriptV2Enabled = isCoachScriptV2Enabled();
   const [keypadOpen, setKeypadOpen] = useState(false);
 
   // The script must always render, even mid-load or after a failed context
@@ -263,7 +266,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         // exists once the collapse this very focus-move is part of has
         // finished committing).
         finalFocus={() => document.querySelector<HTMLElement>('[data-testid="header-dialer-button"]') ?? false}
-        className="inset-0 top-0 left-0 z-[80] flex h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none bg-background p-0 text-foreground ring-0 sm:max-w-none"
+        className={cn("inset-0 top-0 left-0 z-[80] flex h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none bg-background p-0 text-foreground ring-0 sm:max-w-none", scriptV2Enabled && "coach-script-v2")}
       >
       <DialogTitle className="sr-only">Live call coach</DialogTitle>
       <CoachTopBar
@@ -277,6 +280,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         holdTimer={held ? state.holdTimer : null}
         fileNumber={resolveFileNumber(activeContext)}
         bundle={bundle}
+        scriptRefLabel={scriptV2Enabled && session.scriptBinding ? `${session.scriptBinding.ref.slug}@${session.scriptBinding.ref.revision} · locked for this call` : null}
       />
       {callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
         <div role="alert" data-testid="coach-audio-reconnect-warning" className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-2 text-xs font-semibold text-[var(--coach-amber-text)]">
@@ -320,7 +324,13 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       ) : null}
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto xl:grid xl:grid-cols-[380px_minmax(0,1fr)_320px] xl:overflow-hidden">
         <TranscriptFeed lines={state.transcript} degraded={degraded} />
-        {bundle ? <ScriptPanel
+        {scriptV2Enabled && bundle && session.scriptBinding ? <ScriptNavigatorPanel
+          bundle={bundle}
+          ref={session.scriptBinding.ref}
+          context={contextLoad.context}
+          initialState={session.navigatorState ?? { activeSectionId, sectionBranchSelections, branchOverrides, entryFields: state.entryFields }}
+          onStateChange={session.rememberNavigatorState}
+        /> : bundle ? <ScriptPanel
           block={scriptBlock}
           nextBlock={nextBlock}
           degraded={degraded}
@@ -373,6 +383,7 @@ function CoachTopBar({
   holdTimer,
   fileNumber,
   bundle,
+  scriptRefLabel,
 }: {
   callName: string;
   activePhaseId: CoachPhaseId;
@@ -384,6 +395,7 @@ function CoachTopBar({
   holdTimer: CoachHoldTimer | null;
   fileNumber: ResolvedToken;
   bundle: import("@biginkc/coach").ScriptBundle | null;
+  scriptRefLabel: string | null;
 }) {
   const preConnectLabel = callStatus === "connecting" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : null;
   const timerLabel = held ? "On hold" : preConnectLabel ?? timerText(seconds);
@@ -397,6 +409,7 @@ function CoachTopBar({
         <span data-testid="coach-file-number" aria-label="File number" className="font-mono text-xs tabular-nums">
           {`File number: ${fileNumber.value}`}
         </span>
+        {scriptRefLabel ? <span data-testid="coach-script-ref-label" className="text-xs text-muted-foreground">{scriptRefLabel}</span> : null}
       </div>
       <div className="coach-status" data-testid="coach-status-strip">
         <HoldTimer timer={holdTimer} />
@@ -455,6 +468,20 @@ function CoachTopBar({
         })}
       </ol>
     </div>
+  );
+}
+
+function ScriptNavigatorPanel({ bundle, ref, context, initialState, onStateChange }: {
+  bundle: import("@biginkc/coach").ScriptBundle;
+  ref: import("@biginkc/coach").ScriptRef;
+  context: import("@biginkc/coach").CoachCallContext;
+  initialState: NavigatorState;
+  onStateChange: (state: NavigatorState) => void;
+}) {
+  return (
+    <main className="min-h-[28rem] min-w-0 flex-1 overflow-y-auto border-b border-border xl:min-h-0 xl:border-b-0" data-testid="coach-script-v2-panel">
+      <ScriptNavigator bundle={bundle} ref={ref} context={context} initialState={initialState} onStateChange={onStateChange} refLabel={`${ref.slug}@${ref.revision} · locked for this call`} />
+    </main>
   );
 }
 

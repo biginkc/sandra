@@ -27,6 +27,35 @@
   color-scheme: dark;
 }
 
+/* V2 is the first Sandra view to host the shared navigator. Restore the
+   application palette at the dialog boundary rather than inheriting the
+   legacy steel-blue coach skin above; every value originates in Sandra's
+   semantic design tokens declared in globals.css. */
+[data-testid="coach-live-view"].coach-script-v2 {
+  --background: var(--sandra-coach-background);
+  --foreground: var(--sandra-coach-foreground);
+  --card: var(--sandra-coach-card);
+  --card-foreground: var(--sandra-coach-card-foreground);
+  --popover: var(--sandra-coach-popover);
+  --popover-foreground: var(--sandra-coach-popover-foreground);
+  --muted: var(--sandra-coach-muted);
+  --muted-foreground: var(--sandra-coach-muted-foreground);
+  --border: var(--sandra-coach-border);
+  --input: var(--sandra-coach-input);
+  --primary: var(--sandra-coach-primary);
+  --primary-foreground: var(--sandra-coach-primary-foreground);
+  --secondary: var(--sandra-coach-secondary);
+  --secondary-foreground: var(--sandra-coach-secondary-foreground);
+  --ring: var(--sandra-coach-ring);
+  --destructive: var(--sandra-coach-destructive);
+  --coach-rail: var(--sandra-coach-card);
+  --coach-secondary: var(--sandra-coach-muted-foreground);
+  --coach-sky: var(--sandra-coach-primary);
+  --coach-amber: var(--sandra-coach-primary);
+  --coach-amber-text: var(--sandra-coach-primary);
+  color-scheme: light dark;
+}
+
 [data-testid="coach-live-view"] {
   .font-mono { font-family: var(--font-geist-mono, "Geist Mono"), monospace; }
   [data-testid="coach-script-panel"] { scroll-padding-bottom: calc(var(--coach-sticky-height, 0px) + 16px); }

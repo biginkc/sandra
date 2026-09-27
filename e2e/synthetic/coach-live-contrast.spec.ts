@@ -36,7 +36,7 @@ test.beforeAll(async () => {
       ),
       "@": path.resolve(process.cwd(), "src"),
     },
-    define: { "process.env.NODE_ENV": '"test"' },
+    define: { "process.env.NODE_ENV": '"test"', "process.env.NEXT_PUBLIC_COACH_SCRIPT_V2": '""' },
     write: false,
     logLevel: "silent",
   });

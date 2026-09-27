@@ -75,6 +75,21 @@ describe("useCoachSession", () => {
     expect(result.current.scriptBindingStatus).toBe("ready");
   });
 
+  it("retries one transient binding-action error before declaring coaching unavailable", async () => {
+    vi.useFakeTimers();
+    loadCoachCallScript
+      .mockRejectedValueOnce(new Error("temporary action failure"))
+      .mockResolvedValueOnce({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
+    const { result } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
+
+    await act(async () => { await Promise.resolve(); });
+    expect(result.current.scriptBindingStatus).toBe("loading");
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+
+    expect(loadCoachCallScript).toHaveBeenCalledTimes(2);
+    expect(result.current.scriptBinding).toEqual({ ref: closrOutbound123Ref, bundle: closrOutbound123Bundle });
+  });
+
   it("loads a binding that arrives on the third lookup after the index write", async () => {
     vi.useFakeTimers();
     loadCoachCallScript
