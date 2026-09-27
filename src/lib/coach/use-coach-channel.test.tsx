@@ -2,7 +2,7 @@ import { REALTIME_SUBSCRIBE_STATES } from "@supabase/supabase-js";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CLOSR_SCRIPT } from "./script-block";
+import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
 
 type BroadcastHandler = (message: { payload: unknown }) => void;
 type SubscribeCallback = (status: REALTIME_SUBSCRIBE_STATES) => void;
@@ -53,14 +53,24 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
-import { useCoachChannel } from "./use-coach-channel";
+import { useCoachChannel as useRuntimeCoachChannel } from "./use-coach-channel";
 
 /** Every wire event carries both content versions, always — required.
  * scriptVersion is deliberately the LOADED script's own version (not a
  * hardcoded literal) so tests that rely on it matching CLOSR_SCRIPT.version
  * (the "in sync" default case) don't silently start failing the next time
  * the script artifact's version bumps. */
-const V = { scriptVersion: CLOSR_SCRIPT.version, matcherVersion: "3" };
+const V = { scriptVersion: closrOutbound123Bundle.script.version, matcherVersion: "3" };
+const binding = { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle };
+
+function useCoachChannel(
+  callId: string | null,
+  startingPhaseId = "introduction",
+  livenessActive = true,
+  sessionKey: string | null = callId,
+) {
+  return useRuntimeCoachChannel(callId, binding, startingPhaseId, livenessActive, sessionKey);
+}
 
 function latestChannel(): MockChannel {
   const channel = channels[channels.length - 1];

@@ -8,20 +8,18 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { DtmfDigit } from "@/lib/dialer/transport";
-import { COACH_SECTIONS } from "@/lib/coach/section-manifest";
 import { splitDisplaySentences } from "@/lib/coach/display-sentences";
 import { requestCoachRecommendations } from "@/lib/coach/recommendation-action";
 import { useCoachRecommendations } from "@/lib/coach/recommendation-client";
 import type { CoachRecommendationRequestFn } from "@/lib/coach/recommendation-types";
 import {
   buildCoachSectionScriptBlock,
-  getScriptPhase,
   type BranchSelectContext,
   type CoachSectionScriptBlock,
   type DisplayLine,
   type ScriptBranchBlock,
 } from "@/lib/coach/script-block";
-import { resolveCoachTokens, type DisplayTextSegment } from "@/lib/coach/token-resolver";
+import { resolveCoachTokens, resolveFileNumber, type DisplayTextSegment } from "@/lib/coach/token-resolver";
 import type {
   CoachEntryToken,
   CoachHoldTimer,
@@ -31,7 +29,7 @@ import type {
   ResolvedToken,
   ResolvedTokens,
 } from "@/lib/coach/types";
-import { COACH_ENTRY_TOKENS, COACH_PHASE_ORDER } from "@/lib/coach/types";
+import { COACH_ENTRY_TOKENS } from "@/lib/coach/types";
 import type { CoachSession, ContextLoadState } from "@/lib/coach/use-coach-session";
 import { isNearTranscriptBottom } from "@/lib/coach/transcript-scroll";
 import { cn } from "@/lib/utils";
@@ -164,6 +162,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     goNextSection,
     goToPhase,
   } = session;
+  const bundle = session.scriptBinding?.bundle ?? null;
   const [keypadOpen, setKeypadOpen] = useState(false);
 
   // The script must always render, even mid-load or after a failed context
@@ -171,8 +170,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   // knew and leaves only genuinely unavailable values as placeholders.
   const activeContext = contextLoad.context;
   const tokens: ResolvedTokens = useMemo(
-    () => resolveCoachTokens(activeContext, state.entryFields),
-    [activeContext, state.entryFields],
+    () => bundle ? resolveCoachTokens(bundle.script.tokens, activeContext, state.entryFields) : {},
+    [activeContext, bundle, state.entryFields],
   );
   const selectCtx: BranchSelectContext = useMemo(
     () => ({ leadSource: activeContext.leadSource, occupancy: activeContext.occupancy }),
@@ -180,23 +179,25 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   );
 
   const { scriptBlock, selectedVariants } = useMemo(() => {
-    const block = buildCoachSectionScriptBlock(
+    const block = bundle ? buildCoachSectionScriptBlock(
+      bundle,
       activeSectionId,
       tokens,
       selectCtx,
       branchOverrides,
       sectionBranchSelections[activeSectionId] ?? null,
-    );
+    ) : null;
     return {
       scriptBlock: block,
       selectedVariants: Object.fromEntries(
         (block?.branches ?? []).map((branch) => [branch.tag, branch.selected.key]),
       ),
     };
-  }, [activeSectionId, branchOverrides, sectionBranchSelections, selectCtx, tokens]);
+  }, [activeSectionId, branchOverrides, bundle, sectionBranchSelections, selectCtx, tokens]);
   const nextBlock = useMemo(
-    () => nextSectionId
+    () => bundle && nextSectionId
       ? buildCoachSectionScriptBlock(
+        bundle,
         nextSectionId,
         tokens,
         selectCtx,
@@ -204,9 +205,9 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         sectionBranchSelections[nextSectionId] ?? null,
       )
       : null,
-    [branchOverrides, nextSectionId, sectionBranchSelections, selectCtx, tokens],
+    [branchOverrides, bundle, nextSectionId, sectionBranchSelections, selectCtx, tokens],
   );
-  const activePhaseId = scriptBlock?.phaseId ?? "introduction";
+  const activePhaseId = scriptBlock?.phaseId ?? bundle?.script.phases[0]?.id ?? "unavailable";
   const recommendations = useCoachRecommendations({
     callId: session.callId,
     activeSectionId,
@@ -274,7 +275,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         seconds={seconds}
         held={held}
         holdTimer={held ? state.holdTimer : null}
-        fileNumber={tokens.file_number}
+        fileNumber={resolveFileNumber(activeContext)}
+        bundle={bundle}
       />
       {callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
         <div role="alert" data-testid="coach-audio-reconnect-warning" className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-2 text-xs font-semibold text-[var(--coach-amber-text)]">
@@ -318,7 +320,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       ) : null}
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto xl:grid xl:grid-cols-[380px_minmax(0,1fr)_320px] xl:overflow-hidden">
         <TranscriptFeed lines={state.transcript} degraded={degraded} />
-        <ScriptPanel
+        {bundle ? <ScriptPanel
           block={scriptBlock}
           nextBlock={nextBlock}
           degraded={degraded}
@@ -333,7 +335,9 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           onBeginEntryEdit={() => setKeypadOpen(false)}
           onSelectVariant={onSelectVariant}
           onSelectSectionBranch={selectSectionBranch}
-        />
+          sectionIndex={Math.max(0, bundle.sections.sections.findIndex((section) => section.id === scriptBlock?.sectionId) + 1)}
+          sectionCount={bundle.sections.sections.length}
+        /> : session.scriptBindingStatus === "loading" ? <ScriptLoading /> : <ScriptUnavailable />}
         <RecommendationsPanel
           {...recommendations}
           hasFinalSellerTranscript={state.transcript.some((line) => line.isFinal && line.speaker === "seller")}
@@ -368,6 +372,7 @@ function CoachTopBar({
   held,
   holdTimer,
   fileNumber,
+  bundle,
 }: {
   callName: string;
   activePhaseId: CoachPhaseId;
@@ -378,11 +383,13 @@ function CoachTopBar({
   held: boolean;
   holdTimer: CoachHoldTimer | null;
   fileNumber: ResolvedToken;
+  bundle: import("@biginkc/coach").ScriptBundle | null;
 }) {
   const preConnectLabel = callStatus === "connecting" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : null;
   const timerLabel = held ? "On hold" : preConnectLabel ?? timerText(seconds);
-  const currentPhaseIndex = COACH_PHASE_ORDER.indexOf(activePhaseId);
-  const currentPhaseName = getScriptPhase(activePhaseId)?.name ?? activePhaseId;
+  const phaseIds = bundle?.script.phases.map((phase) => phase.id) ?? [];
+  const currentPhaseIndex = phaseIds.indexOf(activePhaseId);
+  const currentPhaseName = bundle?.script.phases.find((phase) => phase.id === activePhaseId)?.name ?? activePhaseId;
   return (
     <div className="coach-top-bar shrink-0 border-b border-border">
       <div className="coach-identity">
@@ -412,11 +419,11 @@ function CoachTopBar({
         <span className="font-mono text-base font-semibold tabular-nums" data-testid="coach-call-timer">{timerLabel}</span>
       </div>
       <ol className="flex min-w-0 items-center gap-1 overflow-x-auto px-4 pb-2" aria-label="Call phases" data-testid="coach-phase-scroller">
-        {COACH_PHASE_ORDER.map((phaseId) => {
-          const phase = getScriptPhase(phaseId);
+        {bundle?.script.phases.map((phase) => {
+          const phaseId = phase.id;
           const fullName = phase?.name ?? phaseId;
           const isCurrent = phaseId === activePhaseId;
-          const isComplete = COACH_PHASE_ORDER.indexOf(phaseId) < currentPhaseIndex;
+          const isComplete = phaseIds.indexOf(phaseId) < currentPhaseIndex;
           const suffix = isComplete ? " ✓" : "";
           return (
             <li key={phaseId} className="flex shrink-0 items-center">
@@ -442,7 +449,7 @@ function CoachTopBar({
                 {isComplete ? <span className="coach-phase-tick" aria-hidden>✓</span> : null}
                 <span>{RAIL_LABEL[phaseId] ?? fullName}</span>
               </button>
-              {phaseId !== COACH_PHASE_ORDER.at(-1) ? <span className={cn("coach-phase-connector", isComplete && "is-complete")} aria-hidden /> : null}
+              {phaseId !== phaseIds.at(-1) ? <span className={cn("coach-phase-connector", isComplete && "is-complete")} aria-hidden /> : null}
             </li>
           );
         })}
@@ -532,6 +539,8 @@ function ScriptPanel({
   onBeginEntryEdit,
   onSelectVariant,
   onSelectSectionBranch,
+  sectionIndex,
+  sectionCount,
 }: {
   block: CoachSectionScriptBlock | null;
   nextBlock: CoachSectionScriptBlock | null;
@@ -547,6 +556,8 @@ function ScriptPanel({
   onBeginEntryEdit: () => void;
   onSelectVariant: (tag: string, key: string) => void;
   onSelectSectionBranch: (sectionId: CoachSectionScriptBlock["sectionId"], tag: string) => void;
+  sectionIndex: number;
+  sectionCount: number;
 }) {
   const panelRef = useRef<HTMLElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
@@ -682,7 +693,7 @@ function ScriptPanel({
               <ChevronLeftIcon className="size-4" aria-hidden />
               Back
             </Button>
-            <span className="font-mono text-xs text-muted-foreground">Section {COACH_SECTIONS.findIndex((section) => section.id === block.sectionId) + 1} of {COACH_SECTIONS.length}</span>
+            <span className="font-mono text-xs text-muted-foreground">Section {sectionIndex} of {sectionCount}</span>
             <Button type="button" disabled={!canGoNext} onClick={onNext} data-testid="coach-next">
               Next
               <ChevronRightIcon className="size-4" aria-hidden />
@@ -690,6 +701,25 @@ function ScriptPanel({
           </div>
         </div>
       </div>
+    </main>
+  );
+}
+
+function ScriptUnavailable() {
+  return (
+    <main className="flex min-h-[28rem] min-w-0 flex-1 items-center justify-center border-b border-border p-6 xl:min-h-0 xl:border-b-0" data-testid="coach-script-unavailable">
+      <div className="max-w-sm text-center">
+        <p className="text-sm font-semibold text-destructive">Script unavailable — coaching is off for this call</p>
+        <p className="mt-1 text-xs text-muted-foreground">The call, transcript, and call controls are still available.</p>
+      </div>
+    </main>
+  );
+}
+
+function ScriptLoading() {
+  return (
+    <main className="flex min-h-[28rem] min-w-0 flex-1 items-center justify-center border-b border-border p-6 xl:min-h-0 xl:border-b-0" data-testid="coach-script-loading">
+      <p className="text-sm font-medium text-muted-foreground">Loading script…</p>
     </main>
   );
 }
@@ -927,7 +957,7 @@ function TokenChip({
   isEntryTokenEditable,
   onBeginEntryEdit,
 }: {
-  token: CoachToken;
+  token: string;
   resolved: ResolvedToken;
   onEditEntry: (field: CoachEntryToken, value: string) => void;
   isEntryTokenEditable: (token: CoachEntryToken) => boolean;

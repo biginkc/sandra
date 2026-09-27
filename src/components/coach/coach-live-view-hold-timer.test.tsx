@@ -2,7 +2,8 @@ import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createCoachRecommendationContinuity } from "@/lib/coach/recommendation-client";
-import { FIRST_COACH_SECTION_ID } from "@/lib/coach/section-manifest";
+import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
+import { getCoachSections } from "@biginkc/coach";
 import { initialCoachState } from "@/lib/coach/event-reducer";
 import type { CoachCallContext, CoachState } from "@/lib/coach/types";
 
@@ -46,7 +47,8 @@ function makeSession() {
     selectVariant: vi.fn(),
     selectSectionBranch: vi.fn(),
     setEntryField: vi.fn(),
-    activeSectionId: FIRST_COACH_SECTION_ID,
+    scriptBinding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle },
+    activeSectionId: getCoachSections(closrOutbound123Bundle)[0]!.id,
     previousSectionId: null,
     nextSectionId: null,
     canGoPrevious: false,

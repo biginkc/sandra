@@ -2,11 +2,10 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import { computeScriptDigest, type ScriptBundle } from "@biginkc/coach";
-import script from "./closr-script-v0.json";
-import sections from "./closr-sections-v1.json";
+import { closrOutbound123Bundle } from "@biginkc/coach/fixtures";
 import { syncCoachScriptCache } from "./script-cache";
 
-const bundle = { schema_version: 3, script, sections } as ScriptBundle;
+const bundle = closrOutbound123Bundle as ScriptBundle;
 const token = "shared-test-token";
 const baseUrl = "https://closer.example.test";
 

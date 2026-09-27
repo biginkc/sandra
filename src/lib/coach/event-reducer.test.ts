@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { coachReducer, initialCoachState, MAX_NUDGES, MAX_OBJECTION_CARDS, NUDGE_TTL_MS, OBJECTION_CARD_TTL_MS } from "./event-reducer";
-import { CLOSR_SCRIPT } from "./script-block";
+import { closrOutbound123Bundle } from "@biginkc/coach/fixtures";
+import { createCoachReducer, initialCoachState, MAX_NUDGES, MAX_OBJECTION_CARDS, NUDGE_TTL_MS, OBJECTION_CARD_TTL_MS } from "./event-reducer";
 import type { CoachState } from "./types";
 
 /** Every wire event carries both content versions, always — required. */
@@ -11,7 +11,8 @@ const V = { scriptVersion: "1.0.1", matcherVersion: "3" };
  * matches this client's loaded script (CLOSR_SCRIPT.version), unlike every
  * other event type, so cursor tests need the real, current version rather
  * than the arbitrary placeholder `V` uses. */
-const CV = { scriptVersion: CLOSR_SCRIPT.version, matcherVersion: "3" };
+const CV = { scriptVersion: closrOutbound123Bundle.script.version, matcherVersion: "3" };
+const coachReducer = createCoachReducer(closrOutbound123Bundle);
 
 describe("coachReducer — transcript", () => {
   it("appends a final line for a fresh speaker turn", () => {

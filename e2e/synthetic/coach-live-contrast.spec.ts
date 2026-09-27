@@ -24,6 +24,7 @@ test.beforeAll(async () => {
     entryPoints: [path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-live-responsive-harness.tsx")],
     bundle: true,
     platform: "browser",
+    external: ["crypto"],
     format: "iife",
     target: "chrome120",
     jsx: "automatic",

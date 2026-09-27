@@ -1,6 +1,7 @@
-import { COACH_PHASE_ORDER, type CoachEvent, type CoachEventVersions, type CoachPhaseId, type CoachSpeaker } from "./types";
+import type { CoachEvent, CoachEventVersions, CoachPhaseId, CoachSpeaker } from "./types";
+import type { ScriptBundle } from "@biginkc/coach";
 
-const PHASE_IDS: ReadonlySet<string> = new Set(COACH_PHASE_ORDER);
+const LEGACY_PHASE_IDS: ReadonlySet<string> = new Set(["introduction", "reveal", "assessment", "secure_positioning", "offer", "close"]);
 const SPEAKERS: ReadonlySet<string> = new Set<CoachSpeaker>(["rep", "seller"]);
 const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
   "transcript",
@@ -65,7 +66,7 @@ function parseVersions(payload: Record<string, unknown>): CoachEventVersions | n
  * `phaseId` could set state.currentPhaseId to a value buildPhaseScriptBlock
  * can never resolve, wedging the script panel on its spinner forever.
  */
-export function parseCoachEvent(payload: unknown): CoachEventParseResult {
+export function parseCoachEvent(payload: unknown, bundle: ScriptBundle | null = null): CoachEventParseResult {
   if (!isRecord(payload) || typeof payload.type !== "string") {
     return { ok: false, reason: "malformed", rawType: isRecord(payload) ? payload.type : undefined };
   }
@@ -77,6 +78,7 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
   if (!versions) {
     return { ok: false, reason: "malformed", rawType };
   }
+  const phaseIds = bundle ? new Set(bundle.script.phases.map((phase) => phase.id)) : LEGACY_PHASE_IDS;
 
   switch (rawType) {
     case "transcript": {
@@ -102,7 +104,7 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
       break;
     }
     case "phase": {
-      if (typeof payload.phaseId === "string" && PHASE_IDS.has(payload.phaseId) && isNonEmptyString(payload.ts)) {
+      if (isNonEmptyString(payload.phaseId) && phaseIds.has(payload.phaseId) && isNonEmptyString(payload.ts)) {
         return {
           ok: true,
           event: { type: "phase", phaseId: payload.phaseId as CoachPhaseId, ts: payload.ts, ...versions },
@@ -162,8 +164,7 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
       if (
         isNonEmptyString(payload.text) &&
         typeof payload.phaseId === "string" &&
-        PHASE_IDS.has(payload.phaseId) &&
-        isNonEmptyString(payload.ts)
+        phaseIds.has(payload.phaseId) && isNonEmptyString(payload.ts)
       ) {
         return {
           ok: true,
@@ -181,7 +182,7 @@ export function parseCoachEvent(payload: unknown): CoachEventParseResult {
     case "cursor": {
       if (
         typeof payload.phaseId === "string" &&
-        PHASE_IDS.has(payload.phaseId) &&
+        phaseIds.has(payload.phaseId) &&
         isNonEmptyString(payload.branchTag) &&
         isNonEmptyString(payload.variantKey) &&
         isNonNegativeInteger(payload.lineIndex) &&

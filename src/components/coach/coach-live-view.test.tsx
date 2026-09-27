@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CLOSR_SCRIPT } from "@/lib/coach/script-block";
+import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
 import type {
   CoachRecommendationRequest,
   CoachRecommendationRequestFn,
@@ -24,8 +24,9 @@ type MockChannel = {
   _subscribeCallback: SubscribeCallback | null;
 };
 
-const { loadCoachCallContext } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn() }));
+const { loadCoachCallContext, loadCoachCallScript } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn(), loadCoachCallScript: vi.fn() }));
 vi.mock("@/lib/coach/coach-context-actions", () => ({ loadCoachCallContext }));
+vi.mock("@/lib/coach/coach-script-actions", () => ({ loadCoachCallScript }));
 
 let channels: MockChannel[] = [];
 
@@ -143,7 +144,7 @@ function broadcast(payload: Record<string, unknown>) {
   act(() => {
     latestChannel()._broadcastHandler?.({
       payload: {
-        scriptVersion: CLOSR_SCRIPT.version,
+        scriptVersion: closrOutbound123Bundle.script.version,
         matcherVersion: "3",
         ...payload,
       },
@@ -155,6 +156,7 @@ describe("<CoachLiveView /> manual navigation", () => {
   beforeEach(() => {
     channels = [];
     loadCoachCallContext.mockReset().mockResolvedValue(sampleContext);
+    loadCoachCallScript.mockReset().mockResolvedValue({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
   });
 
   it("shows the full first section, boundary state, transcript, and next-section preview", async () => {
@@ -185,6 +187,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     }} />);
 
     expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: —");
+    await waitFor(() => expect(screen.getByTestId("coach-next")).toBeEnabled());
 
     for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");

@@ -11,8 +11,6 @@ import {
   type ReactNode,
 } from "react";
 import { Collapsible } from "@base-ui/react/collapsible";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { COACH_SCRIPTS } from "@/lib/coach/script-registry";
 import { createPortal } from "react-dom";
 import { ArrowDownLeftIcon, ArrowUpRightIcon, DeleteIcon, PhoneIcon, XIcon } from "lucide-react";
 
@@ -93,19 +91,15 @@ type Props = {
 const TEARDOWN_WARNING = "Jitter could not confirm that the call ended. Do not start another call yet; automatic cleanup is still pending.";
 const AUDIO_RECONNECT_WARNING = "The homeowner call is still live, but browser audio needs to reconnect.";
 const COACH_STORAGE_KEY = "sandra.softphone.coach.v1";
-type CoachPreference = { enabled: boolean; scriptId: string };
-const DEFAULT_COACH_PREFERENCE: CoachPreference = { enabled: false, scriptId: COACH_SCRIPTS[0].id };
+type CoachPreference = { enabled: boolean };
+const DEFAULT_COACH_PREFERENCE: CoachPreference = { enabled: false };
 
 function readCoachPreference(): CoachPreference {
   if (typeof window === "undefined") return DEFAULT_COACH_PREFERENCE;
   try {
     const saved: unknown = JSON.parse(window.localStorage.getItem(COACH_STORAGE_KEY) ?? "null");
     if (!saved || typeof saved !== "object" || !("enabled" in saved) || typeof saved.enabled !== "boolean") return DEFAULT_COACH_PREFERENCE;
-    return {
-      enabled: saved.enabled,
-      scriptId: "scriptId" in saved && COACH_SCRIPTS.some((script) => script.id === saved.scriptId)
-        ? saved.scriptId as string : DEFAULT_COACH_PREFERENCE.scriptId,
-    };
+    return { enabled: saved.enabled };
   } catch { return DEFAULT_COACH_PREFERENCE; }
 }
 
@@ -1111,7 +1105,6 @@ function IdleView({ coachUiEnabled, coachPreference, onCoachPreferenceChange, di
 }
 
 function CoachPreferenceControl({ preference, onChange }: { preference: CoachPreference; onChange: (preference: CoachPreference) => void }) {
-  const selectedScript = COACH_SCRIPTS.find((script) => script.id === preference.scriptId) ?? COACH_SCRIPTS[0];
   return <Collapsible.Root open={preference.enabled} className="mb-3 flex gap-1.5 rounded-[12px] border-[1.5px] border-[rgba(120,176,255,0.55)] px-2.5 py-2 text-[#f3f6fb]" style={{ background: "radial-gradient(120% 140% at 50% 0%, #16203a 0%, #0c1426 45%, #070b16 100%)", boxShadow: "0 0 0 1px rgba(60,130,255,0.16), 0 0 18px rgba(46,128,255,0.35), inset 0 1px 0 rgba(160,200,255,0.18)" }}>
     <span data-testid="dialer-coach-mascot" className="relative w-10 shrink-0 self-stretch overflow-hidden rounded-md">
       {/* Decorative full-body artwork spans the headline and script picker. */}
@@ -1128,19 +1121,6 @@ function CoachPreferenceControl({ preference, onChange }: { preference: CoachPre
         <span className="absolute top-[1.5px] size-3.5 rounded-full transition-[left,background-color] duration-150 ease-[ease]" style={{ left: preference.enabled ? 18 : 2, backgroundColor: preference.enabled ? "#78b0ff" : "#5b6479" }} />
       </button>
     </div>
-    <Collapsible.Panel className="h-[var(--collapsible-panel-height)] overflow-hidden opacity-100 transition-[height,opacity] duration-150 ease-[ease] data-ending-style:h-0 data-ending-style:opacity-0 data-starting-style:h-0 data-starting-style:opacity-0">
-      <div className="pt-1.5">
-        <Select value={selectedScript.id} onValueChange={(id) => { if (id && COACH_SCRIPTS.some((script) => script.id === id)) onChange({ ...preference, scriptId: id }); }}>
-          <SelectTrigger aria-label="Coach script" data-testid="dialer-coach-script" className="w-full rounded-[7px] border-[1.5px] border-[rgba(120,176,255,0.7)] px-2 py-1 text-[11px] font-bold text-[#f3f6fb] data-[size=default]:h-[26px] focus-visible:ring-[rgba(46,128,255,0.5)] [&_svg]:size-3 [&_svg]:text-[#7e889c]" style={{ background: "linear-gradient(180deg, rgba(28,46,82,0.65), rgba(14,24,46,0.7))" }}>
-            <SelectValue className="min-w-0"><span className="truncate">{selectedScript.title}</span></SelectValue>
-            <span className="shrink-0 font-mono text-[10px] text-[#7e889c]">v{selectedScript.version}</span>
-          </SelectTrigger>
-          <SelectContent positionerClassName="z-[70]" alignItemWithTrigger={false} className="border border-[rgba(120,176,255,0.7)] bg-[#0c1426] text-[#f3f6fb]">
-            {COACH_SCRIPTS.map((script) => <SelectItem key={script.id} value={script.id} className="text-[11px] font-bold [&>*:first-child]:min-w-0 [&>*:first-child]:shrink"><span data-testid="coach-script-option-title" className="min-w-0 flex-1 truncate">{script.title}</span><span data-testid="coach-script-option-version" className="shrink-0 font-mono text-[10px] text-[#7e889c]">v{script.version}</span></SelectItem>)}
-          </SelectContent>
-        </Select>
-      </div>
-    </Collapsible.Panel>
     </div>
   </Collapsible.Root>;
 }

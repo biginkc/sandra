@@ -1,14 +1,17 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
 
 import type { CoachCallContext } from "./types";
 
-const { loadCoachCallContext, createCoachChannel } = vi.hoisted(() => ({
+const { loadCoachCallContext, loadCoachCallScript, createCoachChannel } = vi.hoisted(() => ({
   loadCoachCallContext: vi.fn(),
+  loadCoachCallScript: vi.fn(),
   createCoachChannel: vi.fn(),
 }));
 
 vi.mock("./coach-context-actions", () => ({ loadCoachCallContext }));
+vi.mock("./coach-script-actions", () => ({ loadCoachCallScript }));
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -40,6 +43,7 @@ const sampleContext: CoachCallContext = {
 describe("useCoachSession", () => {
   beforeEach(() => {
     loadCoachCallContext.mockReset().mockResolvedValue(sampleContext);
+    loadCoachCallScript.mockReset().mockResolvedValue({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
     createCoachChannel.mockReset().mockImplementation(() => ({
       on() {
         return this;
@@ -48,6 +52,102 @@ describe("useCoachSession", () => {
         return this;
       },
     }));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("loads a binding that arrives on the second lookup after the index write", async () => {
+    vi.useFakeTimers();
+    loadCoachCallScript
+      .mockResolvedValueOnce({ status: "pending" })
+      .mockResolvedValueOnce({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
+    const { result } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
+
+    await act(async () => { await Promise.resolve(); });
+    expect(result.current.scriptBindingStatus).toBe("loading");
+    expect(loadCoachCallScript).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+
+    expect(loadCoachCallScript).toHaveBeenCalledTimes(2);
+    expect(result.current.scriptBinding).toEqual({ ref: closrOutbound123Ref, bundle: closrOutbound123Bundle });
+    expect(result.current.scriptBindingStatus).toBe("ready");
+  });
+
+  it("loads a binding that arrives on the third lookup after the index write", async () => {
+    vi.useFakeTimers();
+    loadCoachCallScript
+      .mockResolvedValueOnce({ status: "pending" })
+      .mockResolvedValueOnce({ status: "pending" })
+      .mockResolvedValueOnce({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
+    const { result } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
+
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(result.current.scriptBindingStatus).toBe("loading");
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+    expect(loadCoachCallScript).toHaveBeenCalledTimes(3);
+    expect(result.current.scriptBinding).toEqual({ ref: closrOutbound123Ref, bundle: closrOutbound123Bundle });
+  });
+
+  it("treats an existing null binding as unavailable without retrying", async () => {
+    vi.useFakeTimers();
+    loadCoachCallScript.mockResolvedValue({ status: "unavailable" });
+    const { result } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
+
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+
+    expect(loadCoachCallScript).toHaveBeenCalledTimes(1);
+    expect(result.current.scriptBinding).toBeNull();
+    expect(result.current.scriptBindingStatus).toBe("ready");
+  });
+
+  it("stops retrying and marks the script unavailable after the bounded pending window", async () => {
+    vi.useFakeTimers();
+    loadCoachCallScript.mockResolvedValue({ status: "pending" });
+    const { result } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
+
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_500); });
+
+    expect(loadCoachCallScript).toHaveBeenCalledTimes(6);
+    expect(result.current.scriptBinding).toBeNull();
+    expect(result.current.scriptBindingStatus).toBe("ready");
+  });
+
+  it("cancels pending binding retries when unmounted", async () => {
+    vi.useFakeTimers();
+    loadCoachCallScript.mockResolvedValue({ status: "pending" });
+    const { unmount } = renderHook(() => useCoachSession("call-1", "lead-1", null, null));
+
+    await act(async () => { await Promise.resolve(); });
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+
+    expect(loadCoachCallScript).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels the prior pending retry and starts fresh when callId changes", async () => {
+    vi.useFakeTimers();
+    loadCoachCallScript
+      .mockResolvedValueOnce({ status: "pending" })
+      .mockResolvedValueOnce({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
+    const { result, rerender } = renderHook(
+      ({ callId }: { callId: string }) => useCoachSession(callId, "lead-1", null, null),
+      { initialProps: { callId: "call-1" } },
+    );
+
+    await act(async () => { await Promise.resolve(); });
+    rerender({ callId: "call-2" });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+
+    expect(loadCoachCallScript).toHaveBeenCalledTimes(2);
+    expect(loadCoachCallScript).toHaveBeenLastCalledWith("call-2");
+    expect(result.current.scriptBinding).toEqual({ ref: closrOutbound123Ref, bundle: closrOutbound123Bundle });
   });
 
   it("hydrates prepared names during connecting, then subscribes without resetting the session", async () => {

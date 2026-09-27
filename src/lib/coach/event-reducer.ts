@@ -1,5 +1,5 @@
-import { CLOSR_SCRIPT } from "./script-block";
 import { EMPTY_ENTRY_FIELDS } from "./token-resolver";
+import type { ScriptBundle } from "@biginkc/coach";
 import type { CoachEntryToken, CoachEvent, CoachPhaseId, CoachState, CoachTranscriptEvent, CoachTranscriptLine } from "./types";
 
 /** Local, client-only actions layered on top of server CoachEvents — never
@@ -143,7 +143,9 @@ function groupTranscriptFragments(fragments: CoachTranscriptLine[]): CoachTransc
   return turns;
 }
 
-export function coachReducer(state: CoachState, action: CoachReducerAction): CoachState {
+/** Build a reducer tied to one immutable call bundle. */
+export function createCoachReducer(bundle: ScriptBundle | null) {
+  return function coachReducer(state: CoachState, action: CoachReducerAction): CoachState {
   switch (action.type) {
     case "transcript":
       {
@@ -247,7 +249,7 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
       // outright, never stored and later "clamped" into range at render
       // time. Checked here (not just at resolution) so a stray
       // wrong-version event can never overwrite a still-good stored cursor.
-      if (action.scriptVersion !== CLOSR_SCRIPT.version) return state;
+      if (!bundle || action.scriptVersion !== bundle.script.version) return state;
       return {
         ...state,
         connected: true,
@@ -288,4 +290,5 @@ export function coachReducer(state: CoachState, action: CoachReducerAction): Coa
     default:
       return state;
   }
+  };
 }

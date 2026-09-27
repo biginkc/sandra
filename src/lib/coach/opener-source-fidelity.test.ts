@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { closrOutbound123Bundle } from "@biginkc/coach/fixtures";
 
 import { buildCoachSectionScriptBlock } from "./script-block";
 import { resolveCoachTokens, type DisplayTextSegment } from "./token-resolver";
@@ -42,8 +43,9 @@ function displayedText(segments: DisplayTextSegment[]): string {
 
 function opener(leadSource: string | null, override?: string) {
   const block = buildCoachSectionScriptBlock(
+    closrOutbound123Bundle,
     "introduction.opener",
-    resolveCoachTokens(context),
+    resolveCoachTokens(closrOutbound123Bundle.script.tokens, context),
     { leadSource, occupancy: context.occupancy },
     override ? { Opener: override } : {},
   );

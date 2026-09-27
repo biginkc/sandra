@@ -16,6 +16,7 @@ test.beforeAll(async () => {
     entryPoints: [path.resolve(process.cwd(), "e2e/synthetic/fixtures/hold-timer-browser-harness.tsx")],
     bundle: true,
     platform: "browser",
+    external: ["crypto"],
     format: "iife",
     target: "chrome120",
     jsx: "automatic",

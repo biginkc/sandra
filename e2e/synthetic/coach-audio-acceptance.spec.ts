@@ -20,6 +20,9 @@ test.beforeAll(async () => {
     entryPoints: [path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-audio-acceptance-harness.tsx")],
     bundle: true,
     platform: "browser",
+    // The package's Node-only digest fallback is dynamically imported only
+    // when WebCrypto is absent; Chromium supplies WebCrypto for this harness.
+    external: ["crypto"],
     format: "iife",
     target: "chrome120",
     jsx: "automatic",
@@ -33,6 +36,9 @@ test.beforeAll(async () => {
       setup(build) {
         build.onResolve({ filter: /coach-context-actions$/ }, () => ({
           path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-context-actions-browser-stub.ts"),
+        }));
+        build.onResolve({ filter: /coach-script-actions$/ }, () => ({
+          path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-script-actions-browser-stub.ts"),
         }));
         build.onResolve({ filter: /supabase\/client$/ }, () => ({
           path: path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-supabase-browser-stub.ts"),

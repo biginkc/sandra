@@ -1,9 +1,11 @@
 "use server";
 
 import Anthropic from "@anthropic-ai/sdk";
+import type { ScriptBundle } from "@biginkc/coach";
 
 import { loadCoachCallContext } from "./coach-context-actions";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import type { CoachRecommendationRequest, CoachRecommendationResult } from "./recommendation-types";
 import { createRuntimeCacheCoachRecommendationLimiter } from "./recommendation-runtime-limiter";
 import { requestCoachRecommendationsWithDeps } from "./recommendation-server";
@@ -12,7 +14,7 @@ type CoachCallIndexQuery = {
   select(columns: string): CoachCallIndexQuery;
   eq(column: string, value: string): CoachCallIndexQuery;
   maybeSingle(): Promise<{
-    data: { property_id: string | null } | null;
+    data: { property_id: string | null; script_digest: string | null } | null;
     error: { message: string } | null;
   }>;
 };
@@ -37,14 +39,23 @@ export async function requestCoachRecommendations(
       async findOwnedCall({ callId, userId }) {
         const result = await coachIndex
           .from("coach_call_index")
-          .select("property_id")
+          .select("property_id, script_digest")
           .eq("client_call_id", callId)
           .eq("operator_user_id", userId)
           .maybeSingle();
         return {
-          data: result.data ? { propertyId: result.data.property_id } : null,
+          data: result.data ? { propertyId: result.data.property_id, scriptDigest: result.data.script_digest } : null,
           error: result.error,
         };
+      },
+    },
+    scripts: {
+      async loadByDigest({ digest }) {
+        const admin = createAdminClient() as unknown as {
+          from(table: "coach_script_revisions"): { select(columns: string): { eq(column: string, value: string): { maybeSingle(): Promise<{ data: { bundle: unknown } | null; error: { message: string } | null }> } } };
+        };
+        const result = await admin.from("coach_script_revisions").select("bundle").eq("digest", digest).maybeSingle();
+        return { data: result.data?.bundle as ScriptBundle | undefined ?? null, error: result.error };
       },
     },
     contexts: {

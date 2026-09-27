@@ -1,9 +1,9 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import { assertValidScriptBundle, type ScriptBundle } from "@biginkc/coach";
 import { classifyProviderFailure } from "@/lib/ai-responder/generate";
 import { reportError } from "@/lib/errors/report";
 
 import { getCoachSectionById } from "./coach-sections";
-import { CLOSR_SCRIPT } from "./script-block";
 import type {
   CoachRecommendationMode,
   CoachRecommendationRequest,
@@ -46,7 +46,11 @@ export type CoachRecommendationCalls = {
   findOwnedCall(input: {
     callId: string;
     userId: string;
-  }): Promise<{ data: { propertyId: string | null } | null; error: { message: string } | null }>;
+  }): Promise<{ data: { propertyId: string | null; scriptDigest: string | null } | null; error: { message: string } | null }>;
+};
+
+export type CoachRecommendationScripts = {
+  loadByDigest(input: { digest: string }): Promise<{ data: ScriptBundle | null; error: { message: string } | null }>;
 };
 
 export type CoachRecommendationLeadContext = {
@@ -79,6 +83,7 @@ export type CoachRecommendationLimiter = {
 export type CoachRecommendationServerDeps = {
   auth: CoachRecommendationAuth;
   calls: CoachRecommendationCalls;
+  scripts: CoachRecommendationScripts;
   contexts: CoachRecommendationContexts;
   anthropic: CoachRecommendationAnthropic;
   limiter: CoachRecommendationLimiter;
@@ -251,13 +256,14 @@ type TrustedSectionContext = {
 };
 
 export function loadTrustedSectionContext(
+  bundle: ScriptBundle,
   sectionId: string,
   branchOverrides: Record<string, string>,
   selectedSectionBranch: string | null = null,
 ): TrustedSectionContext | null {
-  const section = getCoachSectionById(sectionId);
+  const section = getCoachSectionById(bundle, sectionId);
   if (!section) return null;
-  const phase = CLOSR_SCRIPT.phases.find((candidate) => candidate.id === section.phaseId);
+  const phase = bundle.script.phases.find((candidate) => candidate.id === section.phaseId);
   if (!phase) return null;
 
   const selectedContent = section.content.length > 1
@@ -445,21 +451,12 @@ export async function requestCoachRecommendationsWithDeps(
   const input = parseRequest(rawInput);
   if (!input) return failure(rawInput, "invalid_request");
 
-  const section = loadTrustedSectionContext(
-    input.activeSectionId,
-    input.branchOverrides,
-    input.selectedSectionBranch,
-  );
-  if (!section || input.transcript.length === 0) return failure(input, "invalid_request");
-
+  // Reject malformed or unusable request data before auth or any database
+  // reads. The section itself is intentionally checked later because it is
+  // defined by the call's owned, bound digest rather than caller input.
   const transcript = boundFinalTranscript(input.transcript);
-  if (transcript.length === 0) return failure(input, "invalid_request");
-  if (!input.transcript.some((line) => line.speaker === "seller")) {
-    return failure(input, "invalid_request");
-  }
-  if (input.mode === "automatic" && !input.transcript.some(isMeaningfulFinalSellerTurn)) {
-    return failure(input, "invalid_request");
-  }
+  if (transcript.length === 0 || !input.transcript.some((line) => line.speaker === "seller")) return failure(input, "invalid_request");
+  if (input.mode === "automatic" && !input.transcript.some(isMeaningfulFinalSellerTurn)) return failure(input, "invalid_request");
 
   const authResult = await deps.auth.getUser();
   if (authResult.error || !authResult.data.user) return failure(input, "unauthorized");
@@ -467,6 +464,12 @@ export async function requestCoachRecommendationsWithDeps(
 
   const ownedCall = await deps.calls.findOwnedCall({ callId: input.callId, userId });
   if (ownedCall.error || !ownedCall.data) return failure(input, "call_not_owned");
+  if (!ownedCall.data.scriptDigest) return failure(input, "invalid_request");
+  const cachedScript = await deps.scripts.loadByDigest({ digest: ownedCall.data.scriptDigest });
+  if (cachedScript.error || !cachedScript.data) return failure(input, "invalid_request");
+  try { assertValidScriptBundle(cachedScript.data); } catch { return failure(input, "invalid_request"); }
+  const section = loadTrustedSectionContext(cachedScript.data, input.activeSectionId, input.branchOverrides, input.selectedSectionBranch);
+  if (!section || input.transcript.length === 0) return failure(input, "invalid_request");
 
   const context = await deps.contexts.load({ propertyId: ownedCall.data.propertyId });
   if (context.error || !context.data) return failure(input, "provider_error");

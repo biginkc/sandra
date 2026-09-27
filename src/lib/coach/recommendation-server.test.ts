@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { closrOutbound123Bundle, closrOutbound123Digest } from "@biginkc/coach/fixtures";
 
 import type { CoachRecommendationRequest } from "./recommendation-types";
 import {
@@ -49,8 +50,9 @@ function deps(overrides: Partial<CoachRecommendationServerDeps> = {}): CoachReco
       getUser: vi.fn(async () => ({ data: { user: { id: "user-1" } }, error: null })),
     },
     calls: {
-      findOwnedCall: vi.fn(async () => ({ data: { propertyId: "property-1" }, error: null })),
+      findOwnedCall: vi.fn(async () => ({ data: { propertyId: "property-1", scriptDigest: closrOutbound123Digest }, error: null })),
     },
+    scripts: { loadByDigest: vi.fn(async ({ digest }) => ({ data: digest === closrOutbound123Digest ? closrOutbound123Bundle : null, error: null })) },
     contexts: {
       load: vi.fn(async () => ({
         data: {
@@ -129,7 +131,11 @@ describe("coach recommendation server boundary", () => {
 
   it("rejects interim transcript input and automatic requests without a meaningful final seller turn", async () => {
     const interim = request({ transcript: [{ speaker: "seller", text: "The roof is leaking badly", isFinal: false }] });
-    expect(await requestCoachRecommendationsWithDeps(interim, deps())).toMatchObject({ ok: false, code: "invalid_request" });
+    const interimDependencies = deps();
+    expect(await requestCoachRecommendationsWithDeps(interim, interimDependencies)).toMatchObject({ ok: false, code: "invalid_request" });
+    expect(interimDependencies.auth.getUser).not.toHaveBeenCalled();
+    expect(interimDependencies.calls.findOwnedCall).not.toHaveBeenCalled();
+    expect(interimDependencies.scripts.loadByDigest).not.toHaveBeenCalled();
 
     const filler = request({ transcript: [{ speaker: "seller", text: "okay", isFinal: true }] });
     expect(await requestCoachRecommendationsWithDeps(filler, deps())).toMatchObject({ ok: false, code: "invalid_request" });
@@ -159,14 +165,14 @@ describe("coach recommendation server boundary", () => {
   });
 
   it("loads script content by trusted section line references and validates branch variants", () => {
-    const context = loadTrustedSectionContext("introduction.opener", { Opener: "cold_call" });
+    const context = loadTrustedSectionContext(closrOutbound123Bundle, "introduction.opener", { Opener: "cold_call" });
     expect(context).toMatchObject({ phase: "Introduction", sectionTitle: "Open the call" });
     expect(context?.scriptLines.length).toBeGreaterThan(0);
     // The UI stores overrides for the whole call. Overrides from another
     // section are ignored rather than contaminating this section's prompt.
-    expect(loadTrustedSectionContext("introduction.opener", { Opener: "cold_call", Entry: "vacant" })).toEqual(context);
-    expect(loadTrustedSectionContext("introduction.opener", { Opener: "does-not-exist" })).toBeNull();
-    expect(loadTrustedSectionContext("does-not-exist", {})).toBeNull();
+    expect(loadTrustedSectionContext(closrOutbound123Bundle, "introduction.opener", { Opener: "cold_call", Entry: "vacant" })).toEqual(context);
+    expect(loadTrustedSectionContext(closrOutbound123Bundle, "introduction.opener", { Opener: "does-not-exist" })).toBeNull();
+    expect(loadTrustedSectionContext(closrOutbound123Bundle, "does-not-exist", {})).toBeNull();
   });
 
   it("isolates every selected Offer and Close path and defaults invalid path tags to the first authored branch", () => {
@@ -180,16 +186,16 @@ describe("coach recommendation server boundary", () => {
     ] as const;
 
     for (const [sectionId, selectedPath, included, excluded] of cases) {
-      const script = loadTrustedSectionContext(sectionId, {}, selectedPath)?.scriptLines.join("\n") ?? "";
+      const script = loadTrustedSectionContext(closrOutbound123Bundle, sectionId, {}, selectedPath)?.scriptLines.join("\n") ?? "";
       expect(script).toContain(included);
       for (const siblingText of excluded) expect(script).not.toContain(siblingText);
     }
 
-    expect(loadTrustedSectionContext("offer.outcome-tracks", {}, "not-authored")).toEqual(
-      loadTrustedSectionContext("offer.outcome-tracks", {}, "Good news"),
+    expect(loadTrustedSectionContext(closrOutbound123Bundle, "offer.outcome-tracks", {}, "not-authored")).toEqual(
+      loadTrustedSectionContext(closrOutbound123Bundle, "offer.outcome-tracks", {}, "Good news"),
     );
-    expect(loadTrustedSectionContext("close.decision-tracks", {}, null)).toEqual(
-      loadTrustedSectionContext("close.decision-tracks", {}, "If far apart — program pivot"),
+    expect(loadTrustedSectionContext(closrOutbound123Bundle, "close.decision-tracks", {}, null)).toEqual(
+      loadTrustedSectionContext(closrOutbound123Bundle, "close.decision-tracks", {}, "If far apart — program pivot"),
     );
   });
 

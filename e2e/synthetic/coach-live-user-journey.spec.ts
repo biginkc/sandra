@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
+import { closrOutbound123Bundle } from "@biginkc/coach/fixtures";
 import tailwindcss from "@tailwindcss/postcss";
 import * as esbuild from "esbuild";
 import fs from "node:fs";
@@ -52,9 +53,7 @@ let harnessBundle = "";
 let sections: Section[] = [];
 
 test.beforeAll(async () => {
-  sections = JSON.parse(
-    fs.readFileSync(path.resolve(process.cwd(), "src/lib/coach/closr-sections-v1.json"), "utf8"),
-  ).sections as Section[];
+  sections = closrOutbound123Bundle.sections.sections as Section[];
   const cssResult = await postcss([tailwindcss()]).process(readFileSync(path.resolve(process.cwd(), "src/app/globals.css"), "utf8"), {
     from: path.resolve(process.cwd(), "src/app/globals.css"),
   });
@@ -63,6 +62,7 @@ test.beforeAll(async () => {
     entryPoints: [path.resolve(process.cwd(), "e2e/synthetic/fixtures/coach-live-behavior-harness.tsx")],
     bundle: true,
     platform: "browser",
+    external: ["crypto"],
     format: "iife",
     target: "chrome120",
     jsx: "automatic",
@@ -82,6 +82,12 @@ test.beforeAll(async () => {
             path: path.resolve(
               process.cwd(),
               "e2e/synthetic/fixtures/coach-context-actions-browser-stub.ts",
+            ),
+          }));
+          build.onResolve({ filter: /coach-script-actions$/ }, () => ({
+            path: path.resolve(
+              process.cwd(),
+              "e2e/synthetic/fixtures/coach-script-actions-browser-stub.ts",
             ),
           }));
           build.onResolve({ filter: /supabase\/client$/ }, () => ({
@@ -104,12 +110,14 @@ async function mountCoach(
   page: Page,
   viewport = { width: 1440, height: 900 },
   contextStartupMode: ContextStartupMode = "immediate",
+  scriptStartupMode: "immediate" | "late_index_write" = "immediate",
 ): Promise<void> {
   await page.setViewportSize(viewport);
   await page.setContent(`<style>${compiledCss}</style><div id="root"></div>`);
-  await page.evaluate((mode) => {
-    window.coachContextStartupMode = mode;
-  }, contextStartupMode);
+  await page.evaluate(({ contextMode, scriptMode }) => {
+    window.coachScriptStartupMode = scriptMode;
+    window.coachContextStartupMode = contextMode;
+  }, { contextMode: contextStartupMode, scriptMode: scriptStartupMode });
   await page.addScriptTag({ content: harnessBundle });
   const coach = page.getByTestId("coach-live-view");
   await expect(coach).toBeVisible();
@@ -117,6 +125,13 @@ async function mountCoach(
     await Promise.allSettled(element.getAnimations().map((animation) => animation.finished));
   });
 }
+
+test("renders a script when the call index write lands after the first two lookups", async ({ page }) => {
+  await mountCoach(page, { width: 1440, height: 900 }, "immediate", "late_index_write");
+  await expect(page.getByTestId("coach-script-loading")).toBeVisible();
+  await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title, { timeout: 4_000 });
+  await expect(page.getByTestId("coach-script-unavailable")).toHaveCount(0);
+});
 
 async function emitStimulus(page: Page, name: string): Promise<void> {
   await page.evaluate((stimulus) => window.coachBehaviorHarness[stimulus](), name);
