@@ -14,7 +14,6 @@ export type CallHandle = { id: string };
 export type CallResult = { durationSeconds: number; outcome: "connected_human" | "failed" };
 export type DtmfDigit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "*" | "#";
 export type CallTransportState =
-  | "checking"
   | "connecting"
   | "ringing"
   | "live"
