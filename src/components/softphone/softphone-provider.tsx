@@ -639,6 +639,11 @@ export function SoftphoneProvider({
         (status === "ended" || status === "failed") &&
         (transport.terminalIsAuthoritative?.() ?? true)
       ) {
+        // A transport must normally emit teardown_confirmed first, but exact
+        // terminal proof is itself authoritative and must never leave wrap-up
+        // locked if an older transport only emitted the terminal state.
+        setTeardownUnconfirmed(false);
+        setError((value) => (value === TEARDOWN_WARNING ? null : value));
         clearTimeout(checkingTimer);
         setRetainedStatusChecking(false);
         forgetRetainedActiveCall();

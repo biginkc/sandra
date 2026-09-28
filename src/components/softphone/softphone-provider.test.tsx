@@ -2333,6 +2333,61 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(screen.getByTestId("reconnect-audio")).toBeEnabled();
   });
 
+  it("re-enables wrap-up dispositions when authoritative terminal proof follows an unconfirmed teardown", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+    transportEnabled.mockReturnValue(true);
+    const prepared = await prepareLeadCall();
+    window.sessionStorage.setItem(
+      "sandra.softphone.active-call.v1",
+      JSON.stringify({
+        handle: { id: "retained" },
+        target: prepared.data,
+        startedAt: new Date().toISOString(),
+        wrapToken: "retained-token",
+      }),
+    );
+    let listener:
+      | ((
+          state:
+            | "audio_reconnect_required"
+            | "teardown_unconfirmed"
+            | "teardown_confirmed"
+            | "ended",
+        ) => void)
+      | null = null;
+    const terminalIsAuthoritative = vi.fn(() => false);
+    const transport = {
+      ...createTransport(),
+      onStateChange: vi.fn((callback) => {
+        listener = callback;
+      }),
+      recover: vi.fn(async () => {
+        listener?.("audio_reconnect_required");
+      }),
+      terminalIsAuthoritative,
+    };
+    const user = userEvent.setup();
+
+    render(
+      <SoftphoneProvider transportFactory={() => transport}>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
+    await screen.findByTestId("call-hangup");
+    act(() => {
+      listener?.("teardown_unconfirmed");
+    });
+    await screen.findByTestId("audio-reconnect-warning");
+    act(() => {
+      terminalIsAuthoritative.mockReturnValue(true);
+      listener?.("ended");
+    });
+
+    await user.type(await screen.findByTestId("dispo-notes"), "Provider ended");
+    expect(screen.getByTestId("dispo-follow-up")).toBeEnabled();
+    expect(screen.queryByTestId("retry-jitter-teardown")).not.toBeInTheDocument();
+  });
+
   it("shows the full-screen coach view instead of the classic popover when the flag is on and the call goes live", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");

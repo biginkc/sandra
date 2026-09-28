@@ -233,6 +233,9 @@ export class JitterCallTransport implements CallTransport {
   private expectedIncoming = false;
   private answerStarted = false;
   private rehydrating = false;
+  // A recovered call keeps provider-proof polling available even after its
+  // browser leg reattaches and `rehydrating` becomes false.
+  private retainedCall = false;
   private acceptedPromise: Promise<void> | null = null;
   private acceptedGeneration = 0;
   private acceptedRetryCall: TelnyxCallLike | null = null;
@@ -335,6 +338,7 @@ export class JitterCallTransport implements CallTransport {
     if (this.callId || this.startPromise)
       throw new Error("A softphone call is already owned.");
     const recoveryGeneration = ++this.recoverySetupGeneration;
+    this.retainedCall = true;
     this.callId = handle.id;
     this.liveAt = Number.isFinite(Date.parse(startedAt))
       ? Date.parse(startedAt)
@@ -1419,11 +1423,16 @@ export class JitterCallTransport implements CallTransport {
         }
         if (result?.ok && result.data.state === "terminal") {
           const exactOutcome = result.data.outcome ?? outcome;
+          const recovered = this.teardownUnconfirmedEmitted;
           this.terminal = exactOutcome;
           this.terminalAt ??= this.dependencies.now();
           this.lastTeardownConfirmed = true;
           this.terminalAuthorityConfirmed = true;
+          this.teardownUnconfirmedEmitted = false;
           this.lifecycleGeneration += 1;
+          // Exact signed provider terminal state resolves a previously
+          // unconfirmed cancel before consumers handle the terminal outcome.
+          if (recovered) this.emit("teardown_confirmed");
           this.emit(exactOutcome);
           // Signed Jitter state tied to this exact call proves the destination
           // provider leg terminal. No second cancel is sent.
@@ -1506,11 +1515,16 @@ export class JitterCallTransport implements CallTransport {
       }
       if (result?.ok && result.data.state === "terminal") {
         const outcome = result.data.outcome ?? "ended";
+        const recovered = this.teardownUnconfirmedEmitted;
         this.terminal = outcome;
         this.terminalAt ??= this.dependencies.now();
         this.lastTeardownConfirmed = true;
         this.terminalAuthorityConfirmed = true;
+        this.teardownUnconfirmedEmitted = false;
         this.lifecycleGeneration += 1;
+        // Exact signed provider terminal state resolves a previously
+        // unconfirmed cancel before consumers handle the terminal outcome.
+        if (recovered) this.emit("teardown_confirmed");
         this.emit(outcome);
         this.destroyRtc();
         return;
@@ -2149,12 +2163,12 @@ export class JitterCallTransport implements CallTransport {
     const canceled = await this.cancel("hangup");
     this.lastTeardownConfirmed = canceled;
     this.terminalAuthorityConfirmed = canceled;
-    if (!canceled && this.providerConfirmedActive) {
+    if (!canceled && (this.providerConfirmedActive || this.retainedCall)) {
       this.hangupRequested = false;
       this.terminalAt = null;
       this.requireAudioReconnect(
         new Error(
-          "Jitter did not confirm ending the provider-confirmed active call.",
+          "Jitter did not confirm ending the call; provider terminal proof is still pending.",
         ),
       );
       if (this.callId) void this.reconcileRetainedProviderProof(this.callId);

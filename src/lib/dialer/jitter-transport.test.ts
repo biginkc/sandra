@@ -2319,6 +2319,77 @@ describe("JitterCallTransport", () => {
     expect(states.at(-1)).toBe("audio_reconnect_required");
   });
 
+  it("confirms an unconfirmed retained teardown before provider-terminal proof ends the call", async () => {
+    const getProviderStatus = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true as const,
+        data: { state: "active" as const },
+      })
+      .mockResolvedValueOnce({
+        ok: true as const,
+        data: { state: "terminal" as const, outcome: "ended" as const },
+      });
+    const cancel = vi.fn(async () => ({
+      ok: false as const,
+      status: 503,
+      error: "unavailable",
+      errorCode: "provider_cancel_unavailable",
+    }));
+    const harness = transportHarness({ getProviderStatus, cancel });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    await harness.transport.recover?.(
+      { id: "call-1" },
+      "2026-08-21T20:00:00.000Z",
+    );
+    await vi.waitFor(() => expect(getProviderStatus).toHaveBeenCalledTimes(1));
+    await harness.transport.hangup();
+
+    await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+    expect(states.slice(-2)).toEqual(["teardown_confirmed", "ended"]);
+    expect(harness.transport.terminalIsAuthoritative()).toBe(true);
+  });
+
+  it("keeps an unknown retained call recoverable and polling when all cancels fail", async () => {
+    const getProviderStatus = vi.fn(async () => ({
+      ok: false as const,
+      status: 503,
+      error: "unavailable",
+      errorCode: "provider_status_unavailable",
+    }));
+    const cancel = vi.fn(async () => ({
+      ok: false as const,
+      status: 503,
+      error: "unavailable",
+      errorCode: "provider_cancel_unavailable",
+    }));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const harness = transportHarness({ getProviderStatus, cancel });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    try {
+      await harness.transport.recover?.(
+        { id: "call-1" },
+        "2026-08-21T20:00:00.000Z",
+      );
+      await vi.waitFor(() => expect(getProviderStatus).toHaveBeenCalledTimes(1));
+      await harness.transport.hangup();
+
+      await vi.waitFor(() => expect(getProviderStatus).toHaveBeenCalledTimes(2));
+      expect(cancel).toHaveBeenCalledTimes(3);
+      expect(harness.transport.terminalIsAuthoritative()).toBe(false);
+      expect(states).not.toContain("failed");
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("does not let delayed browser playback invalidate newer provider-terminal proof", async () => {
     let resolvePlay!: () => void;
     const play = new Promise<void>((resolve) => {
