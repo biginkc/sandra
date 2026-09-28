@@ -1,0 +1,52 @@
+[
+  {
+    "id": "O01",
+    "status": "pass",
+    "evidence": "docs/performance/inbox-redesign/evidence/6eac014f06782ee01998e6ff646e3a3e02c86c24/pre-merge/20260928225218188-d246be38-1599-4013-9d10-1025a3614d3a/screenshots/O01.png"
+  },
+  {
+    "id": "O03",
+    "status": "pass",
+    "evidence": "docs/performance/inbox-redesign/evidence/6eac014f06782ee01998e6ff646e3a3e02c86c24/pre-merge/20260928225218188-d246be38-1599-4013-9d10-1025a3614d3a/screenshots/O03.png"
+  },
+  {
+    "id": "O07",
+    "status": "pass",
+    "evidence": "docs/performance/inbox-redesign/evidence/6eac014f06782ee01998e6ff646e3a3e02c86c24/pre-merge/20260928225218188-d246be38-1599-4013-9d10-1025a3614d3a/screenshots/O07.png"
+  },
+  {
+    "id": "O06",
+    "status": "pass",
+    "evidence": "docs/performance/inbox-redesign/evidence/6eac014f06782ee01998e6ff646e3a3e02c86c24/pre-merge/20260928225218188-d246be38-1599-4013-9d10-1025a3614d3a/screenshots/O06.png"
+  },
+  {
+    "id": "O05",
+    "status": "pass",
+    "evidence": "docs/performance/inbox-redesign/evidence/6eac014f06782ee01998e6ff646e3a3e02c86c24/pre-merge/20260928225218188-d246be38-1599-4013-9d10-1025a3614d3a/screenshots/O05.png"
+  },
+  {
+    "id": "O04",
+    "status": "pass",
+    "evidence": "docs/performance/inbox-redesign/evidence/6eac014f06782ee01998e6ff646e3a3e02c86c24/pre-merge/20260928225218188-d246be38-1599-4013-9d10-1025a3614d3a/screenshots/O04.png"
+  },
+  {
+    "id": "O02",
+    "status": "pass",
+    "evidence": "docs/performance/inbox-redesign/evidence/6eac014f06782ee01998e6ff646e3a3e02c86c24/pre-merge/20260928225218188-d246be38-1599-4013-9d10-1025a3614d3a/screenshots/O02.png"
+  },
+  {
+    "id": "O09",
+    "status": "pass",
+    "evidence": "docs/performance/inbox-redesign/evidence/6eac014f06782ee01998e6ff646e3a3e02c86c24/pre-merge/20260928225218188-d246be38-1599-4013-9d10-1025a3614d3a/screenshots/O09.png"
+  },
+  {
+    "id": "O08",
+    "status": "pass",
+    "evidence": "docs/performance/inbox-redesign/evidence/6eac014f06782ee01998e6ff646e3a3e02c86c24/pre-merge/20260928225218188-d246be38-1599-4013-9d10-1025a3614d3a/screenshots/O08.png"
+  },
+  {
+    "id": "O10",
+    "status": "pass",
+    "evidence": "docs/performance/inbox-redesign/evidence/6eac014f06782ee01998e6ff646e3a3e02c86c24/pre-merge/20260928225218188-d246be38-1599-4013-9d10-1025a3614d3a/screenshots/O10.png"
+  }
+]
