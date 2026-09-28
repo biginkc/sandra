@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "../../src/lib/supabase/types";
 import { DEFAULT_ORG_ID, E2E_MOCK_BUSINESS_NUMBER, seedProspects } from "../fixtures";
+import { recordOwnedRow } from "./owned-rows";
 import { ensureConversationIdForThread } from "../../src/lib/messages/threading";
 
 /**
@@ -122,9 +123,11 @@ export async function seedQueuedMessage(
 ): Promise<{ id: string; propertyId: string; contactId: string }> {
   const phone = opts.phone ?? `+1816${String(nextQueuedPhoneSuffix()).padStart(7, "0")}`;
   const [prop] = await seedProspects(admin, 1, opts.addressTag);
+  if (process.env.OUTBOX_RUN_DIR) recordOwnedRow("properties", prop.id);
   const { data: contact, error: contactError } = await admin
     .from("contacts")
     .insert({
+      org_id: DEFAULT_ORG_ID,
       first_name: "Outbox",
       last_name: opts.addressTag,
       phone_1: phone,
@@ -137,9 +140,11 @@ export async function seedQueuedMessage(
   if (contactError || !contact) {
     throw new Error(`seedQueuedMessage: contact insert failed: ${contactError?.message}`);
   }
+  if (process.env.OUTBOX_RUN_DIR) recordOwnedRow("contacts", contact.id);
   const { error: propUpdateError } = await admin
     .from("properties")
     .update({ homeowner_contact_id: contact.id })
+    .eq("org_id", DEFAULT_ORG_ID)
     .eq("id", prop.id);
   if (propUpdateError) {
     throw new Error(`seedQueuedMessage: property update failed: ${propUpdateError.message}`);
@@ -148,6 +153,7 @@ export async function seedQueuedMessage(
   const { data: message, error } = await admin
     .from("messages")
     .insert({
+      org_id: DEFAULT_ORG_ID,
       channel: "sms",
       direction: "outbound",
       status: "queued",
@@ -174,6 +180,13 @@ export async function seedQueuedMessage(
     .single();
   if (error || !message) {
     throw new Error(`seedQueuedMessage: message insert failed: ${error?.message}`);
+  }
+  if (process.env.OUTBOX_RUN_DIR) {
+    recordOwnedRow("messages", message.id);
+    const { data: thread, error: threadError } = await admin.from("message_threads")
+      .select("id").eq("org_id", DEFAULT_ORG_ID).eq("contact_id", contact.id).eq("property_id", prop.id).single();
+    if (threadError || !thread) throw threadError ?? new Error("Seeded message thread missing");
+    recordOwnedRow("message_threads", thread.id);
   }
   return { id: message.id, propertyId: prop.id, contactId: contact.id };
 }

@@ -14,15 +14,9 @@ import type { RowOutcome } from "./matrix";
  * returned teardown after every spec has run.
  */
 
-const RESULTS_FILE = path.resolve(
-  __dirname,
-  "../../test-results/inbox-acceptance-results.json",
-);
+const RESULTS_FILE = process.env.OUTBOX_RUN_DIR ? path.join(process.env.OUTBOX_RUN_DIR, "row-results.json") : path.resolve(__dirname, "../../test-results/inbox-acceptance-results.json");
 
-const EVIDENCE_DIR = path.resolve(
-  __dirname,
-  "../../test-results/inbox-acceptance-evidence",
-);
+const EVIDENCE_DIR = process.env.OUTBOX_RUN_DIR ? path.join(process.env.OUTBOX_RUN_DIR, "screenshots") : path.resolve(__dirname, "../../test-results/inbox-acceptance-evidence");
 
 export function resetResultsFile(): void {
   fs.mkdirSync(path.dirname(RESULTS_FILE), { recursive: true });
