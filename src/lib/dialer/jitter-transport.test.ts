@@ -4590,7 +4590,7 @@ describe("JitterCallTransport", () => {
     await hangup;
   });
 
-  it("releases pre-live pagehide recovery after bounded cancel attempts remain unconfirmed", async () => {
+  it("retains pagehide recovery after bounded cancel attempts remain unconfirmed", async () => {
     const cancel = vi
       .fn()
       .mockRejectedValueOnce(new Error("lost 1"))
@@ -4604,8 +4604,9 @@ describe("JitterCallTransport", () => {
 
     harness.firePageHide();
     await flush();
-    expect(sendCancelBeacon).not.toHaveBeenCalled();
-    expect(cancel).toHaveBeenCalledTimes(3);
+    expect(sendCancelBeacon).toHaveBeenCalledWith("call-1", "abandoned");
+    expect(cancel).toHaveBeenLastCalledWith("call-1", "abandoned");
+    expect(cancel).toHaveBeenCalledTimes(4);
     expect(harness.rtc.serverDisconnect).toHaveBeenCalledTimes(1);
   });
 });

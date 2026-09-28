@@ -2335,9 +2335,11 @@ export class JitterCallTransport implements CallTransport {
   private destroyRtcAfterUnconfirmedCancel(): void {
     // Retain media only while a call is still live and no authoritative
     // terminal proof exists. Ringing/failed calls must still release their
-    // browser RTC client, audio element, and pagehide listener on exhaustion.
+    // browser RTC client and audio element on exhaustion. Preserve pagehide
+    // recovery until Jitter's terminal state is authoritative so a later
+    // navigation can beacon and retry cancellation.
     if (this.liveAt === null || this.terminalAuthorityConfirmed)
-      this.destroyRtc();
+      this.destroyRtc(true);
   }
 
   private onPageHide(): void {
