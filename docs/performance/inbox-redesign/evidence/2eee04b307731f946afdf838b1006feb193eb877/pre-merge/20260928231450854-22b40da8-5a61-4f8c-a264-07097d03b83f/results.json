@@ -1,0 +1,384 @@
+{
+  "config": {
+    "configFile": "./playwright.outbox-regression.config.ts",
+    "rootDir": "./e2e/inbox-acceptance",
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": "./e2e/inbox-acceptance/outbox-global-setup.ts",
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "./docs/performance/inbox-redesign/evidence/2eee04b307731f946afdf838b1006feb193eb877/pre-merge/20260928231450854-22b40da8-5a61-4f8c-a264-07097d03b83f/playwright",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "setup",
+        "name": "setup",
+        "testDir": "./e2e",
+        "testIgnore": [
+          "**/prod-canary/**",
+          "**/properties-filter-characterization.*.ts"
+        ],
+        "testMatch": [
+          "/auth\\.setup\\.ts$/"
+        ],
+        "timeout": 30000
+      },
+      {
+        "outputDir": "./docs/performance/inbox-redesign/evidence/2eee04b307731f946afdf838b1006feb193eb877/pre-merge/20260928231450854-22b40da8-5a61-4f8c-a264-07097d03b83f/playwright",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "chromium",
+        "name": "chromium",
+        "testDir": "./e2e/inbox-acceptance",
+        "testIgnore": [],
+        "testMatch": [
+          "/outbox\\.spec\\.ts$/"
+        ],
+        "timeout": 30000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.59.1",
+    "workers": 1
+  },
+  "suites": [
+    {
+      "title": "../auth.setup.ts",
+      "file": "../auth.setup.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "authenticate",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "setup",
+              "projectName": "setup",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1468,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "steps": [
+                    {
+                      "title": "Provision exact-run test identity",
+                      "duration": 48
+                    },
+                    {
+                      "title": "Load authenticated dashboard",
+                      "duration": 806
+                    },
+                    {
+                      "title": "Verify authenticated shell",
+                      "duration": 23
+                    }
+                  ],
+                  "startTime": "2026-09-28T23:14:56.617Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "17e3fe6f4d9d8bd79c6b-1aef690144aaba1a394d",
+          "file": "../auth.setup.ts",
+          "line": 20,
+          "column": 6
+        }
+      ]
+    },
+    {
+      "title": "outbox.spec.ts",
+      "file": "outbox.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "O01 — queued cards render with totals",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 811,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-28T23:14:58.650Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-0b502c22757538d609a1",
+          "file": "outbox.spec.ts",
+          "line": 102,
+          "column": 5
+        },
+        {
+          "title": "O03/O07 — send one and delete a queued message",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1462,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-28T23:14:59.572Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-b3de7270569016a60c5f",
+          "file": "outbox.spec.ts",
+          "line": 122,
+          "column": 5
+        },
+        {
+          "title": "O06 — edit queued text, save, then cancel leaves original",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 953,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-28T23:15:01.040Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-272d394dd1a76966af93",
+          "file": "outbox.spec.ts",
+          "line": 160,
+          "column": 5
+        },
+        {
+          "title": "O04/O05 — auto-send start/pause, cadence input",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 753,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-28T23:15:01.998Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-d55ac1190301c1aecefa",
+          "file": "outbox.spec.ts",
+          "line": 185,
+          "column": 5
+        },
+        {
+          "title": "O02 — Send next releases the head-of-queue message via that click alone",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 711,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-28T23:15:02.756Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-624c477895d0cbfc6e92",
+          "file": "outbox.spec.ts",
+          "line": 222,
+          "column": 5
+        },
+        {
+          "title": "O08/O09 — load more queue rows advances the page, loaded total updates",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 150000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 1490,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-28T23:15:03.473Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-77246467607e24a2682b",
+          "file": "outbox.spec.ts",
+          "line": 275,
+          "column": 5
+        },
+        {
+          "title": "O10 — a failed initial queue read recovers via Retry",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 8060,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-28T23:15:04.968Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-097dcc5f6a719e2909bc",
+          "file": "outbox.spec.ts",
+          "line": 323,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-09-28T23:14:51.507Z",
+    "duration": 24890.023,
+    "expected": 8,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

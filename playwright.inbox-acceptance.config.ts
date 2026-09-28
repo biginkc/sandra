@@ -93,6 +93,9 @@ const webServerEnv: Record<string, string> = {
   NEXT_PUBLIC_SOFTPHONE_TRANSPORT: softphoneTransport,
   SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
   E2E_RUN_SLUG: e2ePrimaryIdentity.runSlug,
+  E2E_DISPOSABLE_DATABASE: process.env.E2E_DISPOSABLE_DATABASE ?? "",
+  INBOX_ACCEPTANCE_ORG_ID: process.env.INBOX_ACCEPTANCE_ORG_ID ?? "",
+  OUTBOX_RUN_DIR: process.env.OUTBOX_RUN_DIR ?? "",
   E2E_TEST_USER_EMAIL: e2ePrimaryIdentity.email,
   E2E_TEST_USER_PASSWORD: e2ePrimaryIdentity.password,
   NEXT_PUBLIC_HUGO_SSO: "1",
@@ -112,6 +115,7 @@ const webServerEnv: Record<string, string> = {
 
 export default defineConfig({
   testDir: "./e2e/inbox-acceptance",
+  testIgnore: [/outbox\.spec\.ts$/, /owned-rows\.test\.ts$/],
   // Wraps the shared e2e/global-setup.ts (cross-run advisory lock) with
   // this harness's own start-of-run matrix reset and end-of-run matrix
   // write + fixture cleanup — see that file for why both live in one

@@ -2,6 +2,14 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
+### Outbox regression record
+
+`npm run test:outbox-regression` requires the owned disposable Supabase stack on
+`127.0.0.1:55421` (API) and `127.0.0.1:55422` (DB), plus its test credentials
+and `E2E_DISPOSABLE_DATABASE=1`. The runner starts and stops its loopback fault
+proxy on `127.0.0.1:54321` (API) and `127.0.0.1:54322` (DB). These four ports
+must be available to their respective processes.
+
 First, run the development server:
 
 ```bash

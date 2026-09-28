@@ -7,7 +7,7 @@ import {
   identityForPrincipal,
   type E2EPrincipal,
 } from "../src/lib/supabase/e2e-identity-guard";
-import { assertSafeE2ESupabaseTargetFromEnvironment } from "../src/lib/supabase/e2e-target-safety";
+import { assertDisposableE2EDatabaseEnvironment, assertSafeE2ESupabaseTargetFromEnvironment } from "../src/lib/supabase/e2e-target-safety";
 import {
   MOCK_PROVIDER_CAMPAIGN_ID,
   MOCK_SENDER_PRIMARY,
@@ -129,6 +129,19 @@ async function seedMockDeliveryCatalog(
  */
 export const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
 
+/** Only the dedicated Outbox runner sets this override. */
+export async function ensureAcceptanceOrganization(client: SupabaseClient<Database>): Promise<boolean> {
+  const id = process.env.INBOX_ACCEPTANCE_ORG_ID?.trim();
+  if (id !== DEFAULT_ORG_ID || !process.env.OUTBOX_RUN_DIR) throw new Error("Disposable acceptance run must use the Sandra organization ID");
+  assertDisposableE2EDatabaseEnvironment(process.env.TEST_SUPABASE_URL ?? '');
+  const { data, error } = await client.from("organizations").select("id").eq("id", id).maybeSingle();
+  if (error) throw error;
+  if (data) return false;
+  const { error: insertError } = await client.from("organizations").insert({ id, name: `Sandra Inbox Acceptance ${E2E_RUN_ENVIRONMENT.runSlug}` });
+  if (insertError) throw insertError;
+  return true;
+}
+
 /**
  * Ensure this run's namespaced E2E user exists in auth.users, can sign in with
  * the one job-scoped password, AND has the requested membership in the default
@@ -241,6 +254,7 @@ export async function seedProspects(
   addressPrefix = "E2E",
 ): Promise<SeededProspect[]> {
   const rows = Array.from({ length: count }, (_, i) => ({
+    org_id: DEFAULT_ORG_ID,
     address: `${addressPrefix} ${i + 1} Golden Path Ln`,
     state: "MO",
     status: "prospect",

@@ -1,6 +1,11 @@
 import { expect, test } from "@playwright/test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
-import { adminClient, ensureTestUser, resetTenantTables } from "../fixtures";
+import { adminClient, DEFAULT_ORG_ID, ensureTestUser, resetTenantTables } from "../fixtures";
+import { assertDisposableE2EDatabaseEnvironment } from "../../src/lib/supabase/e2e-target-safety";
+import { cleanupOwnedRows, readOwnedRows, recordOwnedRow } from "./owned-rows";
 import { seedQueuedMessage } from "./seed";
 import { captureRowEvidence, purgeRowOutcomes, readMatrixResults, recordRowOutcome } from "./results";
 
@@ -24,11 +29,39 @@ import { captureRowEvidence, purgeRowOutcomes, readMatrixResults, recordRowOutco
 test.describe.configure({ mode: "serial" });
 
 let admin: ReturnType<typeof adminClient>;
+let defaultRunDir: string | undefined;
 
 test.beforeAll(async () => {
+  if (!process.env.OUTBOX_RUN_DIR) {
+    // The broad CI job has no dedicated run record. Give its fixtures the
+    // same ID ledger, scoped to this worker, and retain main's clean setup.
+    assertDisposableE2EDatabaseEnvironment(process.env.TEST_SUPABASE_URL ?? "");
+    defaultRunDir = mkdtempSync(path.join(tmpdir(), "sandra-outbox-e2e-"));
+    process.env.OUTBOX_RUN_DIR = defaultRunDir;
+  }
   admin = adminClient();
-  await resetTenantTables(admin);
-  await ensureTestUser(admin);
+  if (defaultRunDir) {
+    await resetTenantTables(admin);
+    await ensureTestUser(admin);
+  }
+});
+
+test.afterAll(async () => {
+  if (!defaultRunDir) return; // The dedicated lane owns its teardown.
+  try {
+    // Sends can create append-only lead events referencing our properties.
+    // Preserve those audited properties exactly as dedicated teardown does.
+    for (const property of readOwnedRows().filter(row => row.table === "properties")) {
+      const { data, error } = await admin.from("lead_events").select("id,property_id")
+        .eq("org_id", DEFAULT_ORG_ID).eq("property_id", property.id);
+      if (error) throw error;
+      for (const event of data ?? []) recordOwnedRow("lead_events", event.id, event.property_id);
+    }
+    await cleanupOwnedRows(admin, DEFAULT_ORG_ID, readOwnedRows());
+  } finally {
+    delete process.env.OUTBOX_RUN_DIR;
+    rmSync(defaultRunDir, { recursive: true, force: true });
+  }
 });
 
 const ROW_OWNERSHIP: Record<string, string[]> = {
@@ -156,8 +189,14 @@ test("O04/O05 — auto-send start/pause, cadence input", async ({ page }) => {
   // (queue-panel.tsx's auto-send effect sends immediately on start, not
   // just on the cadence tick). That immediate send is exactly why O02
   // is NOT in this test — see the O02 test below.
-  await seedQueuedMessage(admin, { addressTag: "ACC-O045-A", body: "Mel with BMH. o045 body one", scheduledForOffsetMin: -2 });
-  await seedQueuedMessage(admin, { addressTag: "ACC-O045-B", body: "Mel with BMH. o045 body two", scheduledForOffsetMin: -1 });
+  const first = await seedQueuedMessage(admin, { addressTag: "ACC-O045-A", body: "Mel with BMH. o045 body one", scheduledForOffsetMin: -2 });
+  const second = await seedQueuedMessage(admin, { addressTag: "ACC-O045-B", body: "Mel with BMH. o045 body two", scheduledForOffsetMin: -1 });
+  const { data: queued, error: queueError } = await admin.from("messages")
+    .select("id").eq("org_id", DEFAULT_ORG_ID).eq("status", "queued");
+  if (queueError) throw queueError;
+  const runMessageIds = new Set(readOwnedRows().filter(row => row.table === "messages").map(row => row.id));
+  expect((queued ?? []).map(row => row.id)).toEqual(expect.arrayContaining([first.id, second.id]));
+  expect((queued ?? []).every(row => runMessageIds.has(row.id))).toBe(true);
 
   await page.goto("/messages?tab=outbox");
   await expect(page.getByTestId("outbox-card-list")).toBeVisible();
@@ -192,17 +231,19 @@ test("O02 — Send next releases the head-of-queue message via that click alone"
   // auto-send at all — the ONLY control that can transition this
   // message to "sent" is the "Send next" click itself.
   //
-  // Full isolation, not just "don't click auto-send": this suite's
-  // earlier tests (O01/O03/O07/O06/O04/O05) leave their own leftover
-  // queued rows in the shared DB (test.describe.configure({mode:
-  // "serial"}) means one beforeAll for the whole file, not a reset per
-  // test). Resetting here makes `target` the ONLY queued row in
-  // existence when "Send next" is clicked — no ambiguity about which
-  // row is "head of queue", and nothing else in the whole DB state
-  // could account for it becoming "sent" besides this click.
-  await resetTenantTables(admin);
-  await ensureTestUser(admin);
+  // Delete only earlier messages recorded by this run. The new target is
+  // then the sole queued row visible to this fixture organization.
+  const previousMessageIds = readOwnedRows().filter(row => row.table === "messages").map(row => row.id);
+  const queuedOwnedRows = [];
+  for (const id of previousMessageIds) {
+    const { data, error } = await admin.from("messages").select("id,status").eq("org_id", DEFAULT_ORG_ID).eq("id", id).maybeSingle();
+    if (error) throw error;
+    if (data?.status === "queued") queuedOwnedRows.push({ table: "messages" as const, id });
+  }
+  await cleanupOwnedRows(admin, DEFAULT_ORG_ID, queuedOwnedRows);
   const target = await seedQueuedMessage(admin, { addressTag: "ACC-O02-ONLY", body: "Mel with BMH. o02 isolated body", scheduledForOffsetMin: -2 });
+  const { count: ownedQueued } = await admin.from("messages").select("id", { count: "exact", head: true }).eq("org_id", DEFAULT_ORG_ID).eq("status", "queued");
+  expect(ownedQueued).toBe(1);
 
   await page.goto("/messages?tab=outbox");
   const sendNext = page.getByRole("button", { name: "Send next" });
@@ -237,17 +278,12 @@ test("O08/O09 — load more queue rows advances the page, loaded total updates",
   // hasMore/the load-more sentinel AND the "N of M loaded" total (O09) to
   // appear. Seed in small concurrent batches to keep this within timeout.
   //
-  // The suite runs test.describe.configure({mode:"serial"}) against one
-  // shared DB (beforeAll resets it only once for the whole file), so
-  // earlier tests' still-queued rows (O01's two future-scheduled cards,
-  // O06's edited row, O02/O04/O05's second message) are still present
-  // here too — read the actual pre-existing queued count instead of
-  // assuming a bare "110" total, or this assertion is exactly as fragile
-  // as the card-disappearance check Astra flagged elsewhere.
+  // Count only queued rows in this run-owned organization. Earlier tests
+  // can leave their own queued messages, so derive the expected total.
   const { count: preexistingQueued } = await admin
     .from("messages")
     .select("id", { count: "exact", head: true })
-    .eq("status", "queued");
+    .eq("status", "queued").eq("org_id", DEFAULT_ORG_ID);
   const newlySeeded = 110;
   const expectedTotal = (preexistingQueued ?? 0) + newlySeeded;
   const batchSize = 10;
@@ -287,36 +323,53 @@ test("O08/O09 — load more queue rows advances the page, loaded total updates",
 test("O10 — a failed initial queue read recovers via Retry", async ({ page }) => {
   await seedQueuedMessage(admin, { addressTag: "ACC-O10-RETRY", body: "o10 recovers after retry", scheduledForOffsetMin: 5 });
 
-  let failedOnce = false;
-  await page.route("**/messages*", async (route) => {
-    const request = route.request();
-    const isServerActionInvocation =
-      request.method() === "POST" && !!(await request.headerValue("next-action"));
-    if (isServerActionInvocation && !failedOnce) {
-      failedOnce = true;
-      await route.fulfill({ status: 500, body: "simulated queue read failure" });
-      return;
-    }
-    await route.continue();
-  });
+  if (process.env.OUTBOX_FAULT_TOKEN) {
+    const arm = await fetch('http://127.0.0.1:54321/__outbox_fault/arm', {
+      method: 'POST',
+      headers: { 'x-outbox-fault-token': process.env.OUTBOX_FAULT_TOKEN },
+    });
+    expect(arm.ok).toBe(true);
+  } else {
+    // Main's default-CI strategy: fail the first client-side server action.
+    // The initial queue read can happen in the server render instead; in
+    // that case this interception cannot prove Retry and is skipped below.
+    let failedOnce = false;
+    await page.route("**/messages*", async (route) => {
+      const request = route.request();
+      const isServerAction = request.method() === "POST" && !!(await request.headerValue("next-action"));
+      if (isServerAction && !failedOnce) {
+        failedOnce = true;
+        await route.fulfill({ status: 500, body: "simulated queue read failure" });
+      } else {
+        await route.continue();
+      }
+    });
+  }
 
   await page.goto("/messages?tab=outbox");
   const failure = page.getByTestId("queue-load-failure");
-  // locator.waitFor genuinely polls (unlike isVisible(), which returns
-  // immediately with no auto-wait) — this really does wait up to 10s for
-  // the intercepted server action's failure to render before deciding
-  // this render path doesn't hit it.
-  const sawFailure = await failure
-    .waitFor({ state: "visible", timeout: 10_000 })
-    .then(() => true)
-    .catch(() => false);
-  if (!sawFailure) {
-    const reason =
-      "Waited up to 10s (locator.waitFor) for queue-load-failure after intercepting the first POST request carrying a next-action header on /messages?tab=outbox and forcing it to fail. It never appeared, so the initial queue read on this render path did not route through the intercepted request in this run — not fabricating a pass.";
-    recordRowOutcome({ id: "O10", status: "skip", evidence: reason });
-    test.skip(true, reason);
+  if (process.env.OUTBOX_FAULT_TOKEN) {
+    await expect(failure).toBeVisible({ timeout: 10_000 });
+    const status = await fetch('http://127.0.0.1:54321/__outbox_fault/status', {
+      headers: { 'x-outbox-fault-token': process.env.OUTBOX_FAULT_TOKEN },
+    });
+    const fault = await status.json() as { armed: boolean; failures: number };
+    expect(fault.armed).toBe(true);
+    expect(fault.failures).toBeGreaterThan(0);
+    const disarm = await fetch('http://127.0.0.1:54321/__outbox_fault/disarm', {
+      method: 'POST',
+      headers: { 'x-outbox-fault-token': process.env.OUTBOX_FAULT_TOKEN },
+    });
+    expect(disarm.ok).toBe(true);
+  } else {
+    const sawFailure = await failure.waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => true).catch(() => false);
+    if (!sawFailure) {
+      const reason = "Default CI's page-route fault did not reach the initial queue read (server render); the dedicated fault-proxy lane proves O10 Retry.";
+      recordRowOutcome({ id: "O10", status: "skip", evidence: reason });
+      test.skip(true, reason);
+    }
   }
-
   await failure.getByRole("button", { name: "Retry" }).click();
   await expect(failure).toHaveCount(0, { timeout: 15_000 });
   await expect(page.getByText("o10 recovers after retry")).toBeVisible();
