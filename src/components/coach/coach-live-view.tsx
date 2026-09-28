@@ -468,7 +468,7 @@ function CoachTopBar({
   const currentPhaseIndex = phaseIds.indexOf(activePhaseId);
   const currentPhaseName = bundle?.script.phases.find((phase) => phase.id === activePhaseId)?.name ?? activePhaseId;
   const fileNumberValue = fileNumber.value.trim();
-  const hasFileNumber = fileNumberValue.length > 0 && fileNumberValue !== "—";
+  const hasFileNumber = !fileNumber.isPlaceholder && fileNumberValue.length > 0;
   return (
     <div className="coach-top-bar shrink-0 border-b border-border">
       <div className="coach-identity">

@@ -70,7 +70,7 @@
   .coach-top-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 24px; background: var(--coach-rail); color: var(--coach-rail-foreground, var(--foreground)); }
   .coach-identity { display: flex; min-width: 0; align-items: baseline; gap: 10px; }
   [data-testid="coach-file-number"] { color: var(--coach-secondary); white-space: nowrap; }
-  .coach-powered-by-closer-lab { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; border-radius: 9999px; background: rgb(255 255 255 / 0.94); padding: 3px 7px; color: #4b5563; font-size: 10px; font-weight: 600; line-height: 1; white-space: nowrap; }
+  .coach-powered-by-closer-lab { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; border-radius: 9999px; background: rgb(255 255 255 / 0.94); padding: 3px 7px; color: #4b5563; font-size: 11px; font-weight: 600; line-height: 1; white-space: nowrap; }
   .coach-powered-by-closer-lab img { display: block; width: auto; height: 15px; }
   .coach-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
   [data-testid="coach-phase-scroller"] { flex: 1 0 100%; padding: 0; gap: 0; }

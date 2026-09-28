@@ -276,7 +276,7 @@ describe("useCoachChannel", () => {
     expect(result.current.state.probeCount).toBe(0);
     expect(result.current.degraded).toBe(false);
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(15_001); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
     expect(result.current.degraded).toBe(true);
   });
 
@@ -289,7 +289,7 @@ describe("useCoachChannel", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     act(() => latestChannel()._broadcastHandler?.({ payload: { type: "phase", phaseId: "reveal", ts: "t1", ...V } }));
     expect(result.current.state.currentPhaseId).toBe("introduction");
-    await act(async () => { await vi.advanceTimersByTimeAsync(15_001); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
     expect(result.current.degraded).toBe(true);
   });
 
