@@ -28,6 +28,21 @@ const limiter = createRuntimeCacheCoachRecommendationLimiter();
 export async function requestCoachRecommendations(
   input: CoachRecommendationRequest,
 ): Promise<CoachRecommendationResult> {
+  // Recommendations are deliberately an explicit server-side opt-in. Keep
+  // the live script and transcript flow available while preventing a disabled
+  // recommendation surface from authenticating, reading call data, or
+  // constructing a provider client.
+  if (process.env.COACH_RECOMMENDATIONS_ENABLED !== "1") {
+    return {
+      ok: false,
+      requestId: input.requestId,
+      callId: input.callId,
+      activeSectionId: input.activeSectionId,
+      mode: input.mode,
+      code: "provider_error",
+    };
+  }
+
   const supabase = await createClient();
   const coachIndex = supabase as unknown as CoachCallIndexClient;
 
