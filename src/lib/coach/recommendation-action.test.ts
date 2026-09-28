@@ -69,6 +69,35 @@ describe("requestCoachRecommendations", () => {
     expect(mocks.reportError).not.toHaveBeenCalled();
   });
 
+  it("rejects null and malformed action payloads without mutation-side work or reflecting raw values", async () => {
+    const secret = "ACTION_INPUT_SECRET_DO_NOT_REFLECT";
+    const expected = {
+      ok: false,
+      requestId: "invalid",
+      callId: "invalid",
+      activeSectionId: "invalid",
+      mode: "automatic",
+      code: "invalid_request",
+    } as const;
+
+    await expect(requestCoachRecommendations(null)).resolves.toEqual(expected);
+    const malformed = {
+      ...input,
+      requestId: secret,
+      transcript: [{ ...input.transcript[0], text: secret, isFinal: false }],
+    };
+    const result = await requestCoachRecommendations(malformed);
+
+    expect(result).toEqual(expected);
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(mocks.createClient).not.toHaveBeenCalled();
+    expect(mocks.createAdminClient).not.toHaveBeenCalled();
+    expect(mocks.loadCoachCallContext).not.toHaveBeenCalled();
+    expect(mocks.Anthropic).not.toHaveBeenCalled();
+    expect(mocks.requestWithDeps).not.toHaveBeenCalled();
+    expect(mocks.reportError).not.toHaveBeenCalled();
+  });
+
   it("keeps the enabled path's dependency wiring and result passthrough unchanged", async () => {
     vi.stubEnv("COACH_RECOMMENDATIONS_ENABLED", "1");
     const supabase = { auth: { getUser: vi.fn() } };
