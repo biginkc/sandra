@@ -1,18 +1,34 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
+import {
+  closrOutbound123Bundle,
+  closrOutbound123Ref,
+} from "@biginkc/coach/fixtures";
 import type {
   CoachRecommendationRequest,
   CoachRecommendationRequestFn,
   CoachRecommendationResult,
 } from "@/lib/coach/recommendation-types";
 import type { CoachCallContext } from "@/lib/coach/types";
-import { useCoachSession, type PreparedCoachTarget } from "@/lib/coach/use-coach-session";
+import {
+  useCoachSession,
+  type PreparedCoachTarget,
+} from "@/lib/coach/use-coach-session";
 
-import { CoachLiveView, selectSpokenLine, type CoachLiveViewProps } from "./coach-live-view";
+import {
+  CoachLiveView,
+  selectSpokenLine,
+  type CoachLiveViewProps,
+} from "./coach-live-view";
 
 type BroadcastHandler = (message: { payload: unknown }) => void;
 type SubscribeCallback = (status: string) => void;
@@ -24,7 +40,10 @@ type MockChannel = {
   _subscribeCallback: SubscribeCallback | null;
 };
 
-const { loadCoachCallContext, loadCoachCallScript } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn(), loadCoachCallScript: vi.fn() }));
+const { loadCoachCallContext, loadCoachCallScript } = vi.hoisted(() => ({
+  loadCoachCallContext: vi.fn(),
+  loadCoachCallScript: vi.fn(),
+}));
 vi.mock("@/lib/coach/coach-context-actions", () => ({ loadCoachCallContext }));
 vi.mock("@/lib/coach/coach-script-actions", () => ({ loadCoachCallScript }));
 
@@ -80,41 +99,84 @@ type HarnessProps = Omit<CoachLiveViewProps, "session"> & {
   preparedTarget?: PreparedCoachTarget;
 };
 
-function Harness({ callId = "call-1", preparedTarget, ...props }: HarnessProps) {
-  const session = useCoachSession(callId, "unauthorized-abcdef", "+18165559876", "+18165551234", true, preparedTarget);
+function Harness({
+  callId = "call-1",
+  preparedTarget,
+  ...props
+}: HarnessProps) {
+  const session = useCoachSession(
+    callId,
+    "unauthorized-abcdef",
+    "+18165559876",
+    "+18165551234",
+    true,
+    preparedTarget,
+  );
   return <CoachLiveView session={session} {...props} />;
 }
 
-function CollapsibleHarness({ collapsed, ...props }: HarnessProps & { collapsed: boolean }) {
-  const session = useCoachSession("call-1", "lead-1", "+18165559876", "+18165551234");
+function CollapsibleHarness({
+  collapsed,
+  ...props
+}: HarnessProps & { collapsed: boolean }) {
+  const session = useCoachSession(
+    "call-1",
+    "lead-1",
+    "+18165559876",
+    "+18165551234",
+  );
   if (collapsed) return null;
   return <CoachLiveView session={session} {...props} />;
 }
 
 function DialogLifecycleHarness() {
   const [open, setOpen] = useState(true);
-  const session = useCoachSession("call-1", "lead-1", "+18165559876", "+18165551234");
+  const session = useCoachSession(
+    "call-1",
+    "lead-1",
+    "+18165559876",
+    "+18165551234",
+  );
   return (
     <>
-      <button type="button" data-testid="header-dialer-button">Dialer</button>
-      <button type="button" onClick={() => setOpen(true)}>Open live coach</button>
-      {open ? <CoachLiveView session={session} {...baseProps({ onCollapse: () => setOpen(false) })} /> : null}
+      <button type="button" data-testid="header-dialer-button">
+        Dialer
+      </button>
+      <button type="button" onClick={() => setOpen(true)}>
+        Open live coach
+      </button>
+      {open ? (
+        <CoachLiveView
+          session={session}
+          {...baseProps({ onCollapse: () => setOpen(false) })}
+        />
+      ) : null}
     </>
   );
 }
 
 function baseProps(overrides: Partial<HarnessProps> = {}): HarnessProps {
   const recommendationRequest: CoachRecommendationRequestFn = vi.fn(
-    async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+    async (
+      input: CoachRecommendationRequest,
+    ): Promise<CoachRecommendationResult> => ({
       ok: true,
       requestId: input.requestId,
       callId: input.callId,
       activeSectionId: input.activeSectionId,
       mode: input.mode,
-      recommendations: input.mode === "automatic" ? ["Ask how the repair issue affects their timing."] : [],
-      followUpQuestions: input.mode === "follow_up"
-        ? ["What repairs concern you most?", "How long has that been a problem?", "What happens if nothing changes?"]
-        : [],
+      recommendations:
+        input.mode === "automatic"
+          ? ["Ask how the repair issue affects their timing."]
+          : [],
+      followUpQuestions:
+        input.mode === "follow_up"
+          ? [
+              "What repairs concern you most?",
+              "How long has that been a problem?",
+              "What happens if nothing changes?",
+            ]
+          : [],
     }),
   );
   return {
@@ -157,29 +219,58 @@ describe("<CoachLiveView /> manual navigation", () => {
   beforeEach(() => {
     channels = [];
     loadCoachCallContext.mockReset().mockResolvedValue(sampleContext);
-    loadCoachCallScript.mockReset().mockResolvedValue({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
+    loadCoachCallScript
+      .mockReset()
+      .mockResolvedValue({
+        status: "bound",
+        binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle },
+      });
   });
 
   it("shows the full first section, boundary state, transcript, and next-section preview", async () => {
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Open the call",
+      ),
+    );
 
     expect(screen.getByTestId("coach-back")).toBeDisabled();
     expect(screen.getByTestId("coach-next")).toBeEnabled();
-    expect(screen.getByTestId("next-section-preview")).toHaveTextContent("Set the qualification frame");
-    expect(screen.getByTestId("current-section-script")).toHaveTextContent("Alex Rep");
-    expect(screen.getByTestId("current-section-script")).toHaveTextContent("spoke to one of my assistants Taylor");
-    expect(screen.queryByTestId("entry-chip-motivation")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("entry-chip-cold_caller_name")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Live transcript")).not.toHaveAttribute("hidden");
+    expect(screen.getByTestId("next-section-preview")).toHaveTextContent(
+      "Set the qualification frame",
+    );
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+      "Alex Rep",
+    );
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+      "spoke to one of my assistants Taylor",
+    );
+    expect(
+      screen.queryByTestId("entry-chip-motivation"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("entry-chip-cold_caller_name"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Live transcript")).not.toHaveAttribute(
+      "hidden",
+    );
     expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
   });
 
   it("keeps the S4 panel when the V2 flag is unset", async () => {
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
-    expect(screen.queryByTestId("coach-script-v2-panel")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("coach-script-ref-label")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Open the call",
+      ),
+    );
+    expect(
+      screen.queryByTestId("coach-script-v2-panel"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("coach-script-ref-label"),
+    ).not.toBeInTheDocument();
   });
 
   it("does not warn while strict wire events wait for the script binding", async () => {
@@ -188,28 +279,55 @@ describe("<CoachLiveView /> manual navigation", () => {
     render(<Harness {...baseProps()} />);
 
     await waitFor(() => expect(channels).toHaveLength(1));
-    broadcast({ type: "counter", probeCount: 7, scriptDigest: closrOutbound123Ref.digest, ts: "binding-pending" });
+    broadcast({
+      type: "counter",
+      probeCount: 7,
+      scriptDigest: closrOutbound123Ref.digest,
+      ts: "binding-pending",
+    });
 
-    expect(screen.queryByTestId("coach-binding-missed-events")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("coach-binding-missed-events"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByTestId("coach-reconnect-gap")).not.toBeInTheDocument();
   });
 
   it("renders the package navigator in the three-column view and retains typed navigator state", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
-    loadCoachCallContext.mockResolvedValue({ ...sampleContext, motivation: null });
+    loadCoachCallContext.mockResolvedValue({
+      ...sampleContext,
+      motivation: null,
+    });
     const user = userEvent.setup();
     render(<Harness {...baseProps()} />);
 
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
-    expect(screen.getByTestId("coach-script-ref-label")).toHaveTextContent("closr-outbound@1 · locked for this call");
-    expect(screen.getByTestId("coach-script-ref")).not.toHaveTextContent("locked for this call");
-    expect(screen.getByTestId("coach-powered-by-closer-lab")).toHaveTextContent("Powered by");
-    expect(screen.getByAltText("Closer Lab")).toHaveAttribute("src", "/brand/closer-lab-logo.svg");
-    expect(screen.queryByTestId("coach-phase-scroller")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toBeVisible(),
+    );
+    expect(screen.getByTestId("coach-script-ref-label")).toHaveTextContent(
+      "closr-outbound@1 · locked for this call",
+    );
+    expect(screen.getByTestId("coach-script-ref")).not.toHaveTextContent(
+      "locked for this call",
+    );
+    expect(screen.getByTestId("coach-powered-by-closer-lab")).toHaveTextContent(
+      "Powered by",
+    );
+    expect(screen.getByAltText("Closer Lab")).toHaveAttribute(
+      "src",
+      "/brand/closer-lab-logo.svg",
+    );
+    expect(
+      screen.queryByTestId("coach-phase-scroller"),
+    ).not.toBeInTheDocument();
     await user.click(screen.getByTestId("coach-next"));
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Set the qualification frame");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Set the qualification frame",
+    );
     await user.click(screen.getByTestId("coach-back"));
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Open the call",
+    );
     const motivation = await screen.findByTestId("coach-token-motivation");
     fireEvent.change(motivation, { target: { value: "Downsize" } });
     expect(motivation).toHaveValue("Downsize");
@@ -218,10 +336,16 @@ describe("<CoachLiveView /> manual navigation", () => {
   it("grounds V2 recommendations in the navigator's active section after Next", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
     const recommendationRequest = vi.fn(
-      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
-        ok: true, requestId: input.requestId, callId: input.callId,
-        activeSectionId: input.activeSectionId, mode: input.mode,
-        recommendations: [], followUpQuestions: ["What is the timeline?"],
+      async (
+        input: CoachRecommendationRequest,
+      ): Promise<CoachRecommendationResult> => ({
+        ok: true,
+        requestId: input.requestId,
+        callId: input.callId,
+        activeSectionId: input.activeSectionId,
+        mode: input.mode,
+        recommendations: [],
+        followUpQuestions: ["What is the timeline?"],
       }),
     );
     const user = userEvent.setup();
@@ -230,7 +354,13 @@ describe("<CoachLiveView /> manual navigation", () => {
     await screen.findByTestId("coach-script-v2-panel");
     await user.click(screen.getByTestId("coach-next"));
     await screen.findByText("Set the qualification frame");
-    broadcast({ type: "transcript", speaker: "seller", text: "I need to move before winter.", isFinal: true, ts: "v2-grounding" });
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "I need to move before winter.",
+      isFinal: true,
+      ts: "v2-grounding",
+    });
     await user.click(screen.getByTestId("follow-up-questions"));
 
     await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
@@ -243,10 +373,16 @@ describe("<CoachLiveView /> manual navigation", () => {
   it("sends V2 navigator branch and variant selections with a follow-up recommendation", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
     const recommendationRequest = vi.fn(
-      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
-        ok: true, requestId: input.requestId, callId: input.callId,
-        activeSectionId: input.activeSectionId, mode: input.mode,
-        recommendations: [], followUpQuestions: ["What would make that price work?"],
+      async (
+        input: CoachRecommendationRequest,
+      ): Promise<CoachRecommendationResult> => ({
+        ok: true,
+        requestId: input.requestId,
+        callId: input.callId,
+        activeSectionId: input.activeSectionId,
+        mode: input.mode,
+        recommendations: [],
+        followUpQuestions: ["What would make that price work?"],
       }),
     );
     const user = userEvent.setup();
@@ -256,9 +392,17 @@ describe("<CoachLiveView /> manual navigation", () => {
     await user.click(screen.getByTestId("variant-Opener-fsbo"));
     await user.click(screen.getByRole("button", { name: "Offer" }));
     await screen.findByText("Present the appropriate offer outcome");
-    await user.click(screen.getByTestId("section-path-offer.outcome-tracks-Price too low"));
+    await user.click(
+      screen.getByTestId("section-path-offer.outcome-tracks-Price too low"),
+    );
 
-    broadcast({ type: "transcript", speaker: "seller", text: "That price is too low for me.", isFinal: true, ts: "v2-branch-grounding" });
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "That price is too low for me.",
+      isFinal: true,
+      ts: "v2-branch-grounding",
+    });
     await user.click(screen.getByTestId("follow-up-questions"));
 
     await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
@@ -275,19 +419,34 @@ describe("<CoachLiveView /> manual navigation", () => {
 
   it("sends the V2 navigator's auto-selected SMS opener variant with a follow-up recommendation", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
-    loadCoachCallContext.mockResolvedValue({ ...sampleContext, leadSource: "sms" });
+    loadCoachCallContext.mockResolvedValue({
+      ...sampleContext,
+      leadSource: "sms",
+    });
     const recommendationRequest = vi.fn(
-      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
-        ok: true, requestId: input.requestId, callId: input.callId,
-        activeSectionId: input.activeSectionId, mode: input.mode,
-        recommendations: [], followUpQuestions: ["What would make a conversation useful today?"],
+      async (
+        input: CoachRecommendationRequest,
+      ): Promise<CoachRecommendationResult> => ({
+        ok: true,
+        requestId: input.requestId,
+        callId: input.callId,
+        activeSectionId: input.activeSectionId,
+        mode: input.mode,
+        recommendations: [],
+        followUpQuestions: ["What would make a conversation useful today?"],
       }),
     );
     const user = userEvent.setup();
     render(<Harness {...baseProps({ recommendationRequest })} />);
 
     await screen.findByTestId("coach-script-v2-panel");
-    broadcast({ type: "transcript", speaker: "seller", text: "I saw your text message.", isFinal: true, ts: "v2-sms-grounding" });
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "I saw your text message.",
+      isFinal: true,
+      ts: "v2-sms-grounding",
+    });
     await user.click(screen.getByTestId("follow-up-questions"));
 
     await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
@@ -298,36 +457,54 @@ describe("<CoachLiveView /> manual navigation", () => {
     });
     // This must be derived from the shared navigator resolver: removing the
     // effective-variant mapping regresses it to {}, and the assertion fails.
-    expect(recommendationRequest.mock.calls[0]?.[0].branchOverrides).toEqual({ Opener: "sms" });
+    expect(recommendationRequest.mock.calls[0]?.[0].branchOverrides).toEqual({
+      Opener: "sms",
+    });
   });
 
   it("keeps file-number identity placeholder-only while loading, then shows the authorized context value", async () => {
     let resolveContext!: (context: CoachCallContext) => void;
-    loadCoachCallContext.mockReturnValue(new Promise((resolve) => { resolveContext = resolve; }));
+    loadCoachCallContext.mockReturnValue(
+      new Promise((resolve) => {
+        resolveContext = resolve;
+      }),
+    );
     const user = userEvent.setup();
-    render(<Harness {...baseProps()} preparedTarget={{
-      repName: "Jarrad Henry",
-      sellerName: "Prepared Homeowner",
-      propertyAddress: "55 Oak Ave",
-      sellerPhoneE164: "+18165559876",
-      maskedSellerPhone: "+1 (816) 555-9876",
-    }} />);
+    render(
+      <Harness
+        {...baseProps()}
+        preparedTarget={{
+          repName: "Jarrad Henry",
+          sellerName: "Prepared Homeowner",
+          propertyAddress: "55 Oak Ave",
+          sellerPhoneE164: "+18165559876",
+          maskedSellerPhone: "+1 (816) 555-9876",
+        }}
+      />,
+    );
 
     expect(screen.queryByTestId("coach-file-number")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByTestId("coach-next")).toBeEnabled());
 
-    for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
+    for (let step = 0; step < 5; step += 1)
+      await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-abcdef");
     expect(script).toHaveTextContent("—");
 
-    act(() => resolveContext({
-      ...sampleContext,
-      repName: "Jarrad Henry",
-      authenticatedRepName: "Jarrad Henry",
-      leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
-    }));
-    await waitFor(() => expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: JH-c1c524"));
+    act(() =>
+      resolveContext({
+        ...sampleContext,
+        repName: "Jarrad Henry",
+        authenticatedRepName: "Jarrad Henry",
+        leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-file-number")).toHaveTextContent(
+        "File number: JH-c1c524",
+      ),
+    );
     expect(script).toHaveTextContent("JH-c1c524");
   });
 
@@ -342,7 +519,9 @@ describe("<CoachLiveView /> manual navigation", () => {
     render(<Harness {...baseProps()} />);
 
     const fileNumber = await screen.findByTestId("coach-file-number");
-    await waitFor(() => expect(fileNumber).toHaveTextContent("File number: JH-c1c524"));
+    await waitFor(() =>
+      expect(fileNumber).toHaveTextContent("File number: JH-c1c524"),
+    );
     for (let step = 0; step < 25; step += 1) {
       expect(fileNumber).toBeVisible();
       expect(fileNumber).toHaveTextContent("File number: JH-c1c524");
@@ -353,19 +532,29 @@ describe("<CoachLiveView /> manual navigation", () => {
   });
 
   it("never exposes requested/prepared file-number identity after a property authorization failure", async () => {
-    loadCoachCallContext.mockRejectedValue(new Error("permission denied for property"));
+    loadCoachCallContext.mockRejectedValue(
+      new Error("permission denied for property"),
+    );
     const user = userEvent.setup();
-    render(<Harness {...baseProps()} preparedTarget={{
-      repName: "Jarrad Henry",
-      sellerName: "Prepared Homeowner",
-      propertyAddress: "55 Oak Ave",
-      sellerPhoneE164: "+18165559876",
-      maskedSellerPhone: "+1 (816) 555-9876",
-    }} />);
+    render(
+      <Harness
+        {...baseProps()}
+        preparedTarget={{
+          repName: "Jarrad Henry",
+          sellerName: "Prepared Homeowner",
+          propertyAddress: "55 Oak Ave",
+          sellerPhoneE164: "+18165559876",
+          maskedSellerPhone: "+1 (816) 555-9876",
+        }}
+      />,
+    );
 
-    await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-context-error")).toBeVisible(),
+    );
     expect(screen.queryByTestId("coach-file-number")).not.toBeInTheDocument();
-    for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
+    for (let step = 0; step < 5; step += 1)
+      await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-abcdef");
     expect(script).toHaveTextContent("—");
@@ -379,17 +568,23 @@ describe("<CoachLiveView /> manual navigation", () => {
       leadId: "abcd1234-ef56-7890-abcd-ef1234c1c524",
     });
     const user = userEvent.setup();
-    render(<Harness {...baseProps()} preparedTarget={{
-      repName: "Jarrad Henry",
-      sellerName: "Prepared Homeowner",
-      propertyAddress: "55 Oak Ave",
-      sellerPhoneE164: "+18165559876",
-      maskedSellerPhone: "+1 (816) 555-9876",
-    }} />);
+    render(
+      <Harness
+        {...baseProps()}
+        preparedTarget={{
+          repName: "Jarrad Henry",
+          sellerName: "Prepared Homeowner",
+          propertyAddress: "55 Oak Ave",
+          sellerPhoneE164: "+18165559876",
+          maskedSellerPhone: "+1 (816) 555-9876",
+        }}
+      />,
+    );
 
     await waitFor(() => expect(loadCoachCallContext).toHaveBeenCalled());
     expect(screen.queryByTestId("coach-file-number")).not.toBeInTheDocument();
-    for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
+    for (let step = 0; step < 5; step += 1)
+      await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-c1c524");
     expect(script).toHaveTextContent("—");
@@ -399,19 +594,31 @@ describe("<CoachLiveView /> manual navigation", () => {
     const user = userEvent.setup();
     const onReconnectAudio = vi.fn();
     const onHangup = vi.fn();
-    render(<Harness {...baseProps({
-      callStatus: "audio_reconnect_required",
-      onReconnectAudio,
-      onHangup,
-    })} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    render(
+      <Harness
+        {...baseProps({
+          callStatus: "audio_reconnect_required",
+          onReconnectAudio,
+          onHangup,
+        })}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Open the call",
+      ),
+    );
 
-    expect(screen.getByTestId("coach-audio-reconnect-warning")).toHaveTextContent("Call live · audio interrupted");
+    expect(
+      screen.getByTestId("coach-audio-reconnect-warning"),
+    ).toHaveTextContent("Call live · audio interrupted");
     expect(screen.getByLabelText("Live transcript")).toBeVisible();
     expect(screen.getByTestId("current-section-script")).toBeVisible();
     expect(screen.getByTestId("coach-hangup")).toBeEnabled();
     expect(screen.getByTestId("coach-mute")).toBeDisabled();
-    expect(screen.getByTestId("coach-warning-hangup")).toHaveTextContent("Hang Up");
+    expect(screen.getByTestId("coach-warning-hangup")).toHaveTextContent(
+      "Hang Up",
+    );
     expect(onHangup).not.toHaveBeenCalled();
 
     await user.click(screen.getByTestId("coach-reconnect-audio"));
@@ -419,18 +626,41 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(onHangup).not.toHaveBeenCalled();
   });
 
+  it("uses neutral tokens while the retained-call status check is pending", async () => {
+    render(<Harness {...baseProps({ checkingCallStatus: true })} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Open the call",
+      ),
+    );
+
+    const warning = screen.getByTestId("coach-audio-reconnect-warning");
+    expect(warning).toHaveTextContent("Checking call status…");
+    expect(warning.className).not.toMatch(/amber|red/);
+  });
+
   it("keeps recovery and hangup visible while reconnecting without hiding live guidance", async () => {
     const user = userEvent.setup();
     const onReconnectAudio = vi.fn();
     const onHangup = vi.fn();
-    render(<Harness {...baseProps({
-      callStatus: "audio_reconnecting",
-      onReconnectAudio,
-      onHangup,
-    })} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    render(
+      <Harness
+        {...baseProps({
+          callStatus: "audio_reconnecting",
+          onReconnectAudio,
+          onHangup,
+        })}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Open the call",
+      ),
+    );
 
-    expect(screen.getByTestId("coach-audio-reconnect-warning")).toHaveTextContent("Call live · reconnecting browser audio…");
+    expect(
+      screen.getByTestId("coach-audio-reconnect-warning"),
+    ).toHaveTextContent("Call live · reconnecting browser audio…");
     expect(screen.getByTestId("coach-reconnect-audio")).toBeVisible();
     expect(screen.getByTestId("coach-reconnect-audio")).toBeDisabled();
     expect(screen.getByTestId("coach-mute")).toBeDisabled();
@@ -445,24 +675,43 @@ describe("<CoachLiveView /> manual navigation", () => {
   it("moves only when the rep uses Next, Back, or deliberate phase selection", async () => {
     const user = userEvent.setup();
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Open the call",
+      ),
+    );
 
     await user.click(screen.getByTestId("coach-next"));
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Set the qualification frame");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Set the qualification frame",
+    );
     expect(screen.getByTestId("coach-back")).toBeEnabled();
 
     await user.click(screen.getByTestId("coach-back"));
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Open the call",
+    );
 
     await user.click(screen.getByTestId("phase-rail-reveal"));
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the seller situation");
-    expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute("aria-current", "step");
-    expect(screen.getByTestId("coach-current-phase")).toHaveTextContent("Phase · Reveal");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Open the seller situation",
+    );
+    expect(screen.getByTestId("phase-rail-reveal")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(screen.getByTestId("coach-current-phase")).toHaveTextContent(
+      "Phase · Reveal",
+    );
   });
 
   it("keeps section, preview, and rail inert when legacy phase and cursor events arrive", async () => {
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Open the call",
+      ),
+    );
     const preview = screen.getByTestId("next-section-preview").textContent;
 
     broadcast({ type: "phase", phaseId: "close", ts: "phase-1" });
@@ -476,19 +725,48 @@ describe("<CoachLiveView /> manual navigation", () => {
       ts: "cursor-1",
     });
 
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
-    expect(screen.getByTestId("next-section-preview").textContent).toBe(preview);
-    expect(screen.getByTestId("phase-rail-introduction")).toHaveAttribute("aria-current", "step");
-    expect(screen.getByTestId("phase-rail-close")).not.toHaveAttribute("aria-current");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Open the call",
+    );
+    expect(screen.getByTestId("next-section-preview").textContent).toBe(
+      preview,
+    );
+    expect(screen.getByTestId("phase-rail-introduction")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(screen.getByTestId("phase-rail-close")).not.toHaveAttribute(
+      "aria-current",
+    );
   });
 
   it("renders both speakers and preserves final versus interim transcript state", async () => {
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toBeVisible(),
+    );
 
-    broadcast({ type: "transcript", speaker: "seller", text: "The roof", isFinal: true, ts: "seller-final-1" });
-    broadcast({ type: "transcript", speaker: "seller", text: "needs work.", isFinal: true, ts: "seller-final-2" });
-    broadcast({ type: "transcript", speaker: "rep", text: "Tell me more about", isFinal: false, ts: "rep-interim" });
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "The roof",
+      isFinal: true,
+      ts: "seller-final-1",
+    });
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "needs work.",
+      isFinal: true,
+      ts: "seller-final-2",
+    });
+    broadcast({
+      type: "transcript",
+      speaker: "rep",
+      text: "Tell me more about",
+      isFinal: false,
+      ts: "rep-interim",
+    });
 
     const lines = screen.getAllByTestId("transcript-line");
     expect(lines).toHaveLength(2);
@@ -503,7 +781,9 @@ describe("<CoachLiveView /> manual navigation", () => {
   it("keeps finalized seller speech eligible and AI-visible through a same-speaker interim", async () => {
     const user = userEvent.setup();
     const recommendationRequest = vi.fn(
-      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+      async (
+        input: CoachRecommendationRequest,
+      ): Promise<CoachRecommendationResult> => ({
         ok: true,
         requestId: input.requestId,
         callId: input.callId,
@@ -514,10 +794,24 @@ describe("<CoachLiveView /> manual navigation", () => {
       }),
     );
     render(<Harness {...baseProps({ recommendationRequest })} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toBeVisible(),
+    );
 
-    broadcast({ type: "transcript", speaker: "seller", text: "I need", isFinal: true, ts: "seller-final-1" });
-    broadcast({ type: "transcript", speaker: "seller", text: "to sell", isFinal: false, ts: "seller-interim-2" });
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "I need",
+      isFinal: true,
+      ts: "seller-final-1",
+    });
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "to sell",
+      isFinal: false,
+      ts: "seller-interim-2",
+    });
 
     expect(screen.getByTestId("follow-up-questions")).toBeEnabled();
     let lines = screen.getAllByTestId("transcript-line");
@@ -530,10 +824,20 @@ describe("<CoachLiveView /> manual navigation", () => {
     await user.click(screen.getByTestId("follow-up-questions"));
     await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
     expect(recommendationRequest.mock.calls[0][0].transcript).toEqual([
-      expect.objectContaining({ speaker: "seller", text: "I need", isFinal: true }),
+      expect.objectContaining({
+        speaker: "seller",
+        text: "I need",
+        isFinal: true,
+      }),
     ]);
 
-    broadcast({ type: "transcript", speaker: "seller", text: "to sell", isFinal: true, ts: "seller-final-2" });
+    broadcast({
+      type: "transcript",
+      speaker: "seller",
+      text: "to sell",
+      isFinal: true,
+      ts: "seller-final-2",
+    });
     lines = screen.getAllByTestId("transcript-line");
     expect(lines).toHaveLength(1);
     expect(lines[0]).toHaveTextContent("I need to sell");
@@ -543,7 +847,9 @@ describe("<CoachLiveView /> manual navigation", () => {
   it("enables follow-up questions only after a finalized homeowner turn and sends one grounded request per click", async () => {
     const user = userEvent.setup();
     const recommendationRequest = vi.fn(
-      async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
+      async (
+        input: CoachRecommendationRequest,
+      ): Promise<CoachRecommendationResult> => ({
         ok: true,
         requestId: input.requestId,
         callId: input.callId,
@@ -558,7 +864,11 @@ describe("<CoachLiveView /> manual navigation", () => {
       }),
     );
     render(<Harness {...baseProps({ recommendationRequest })} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Open the call",
+      ),
+    );
 
     broadcast({
       type: "transcript",
@@ -590,25 +900,55 @@ describe("<CoachLiveView /> manual navigation", () => {
         expect.objectContaining({ speaker: "seller", isFinal: true }),
       ],
     });
-    expect(screen.getByTestId("follow-up-question-options").children).toHaveLength(3);
-    expect(screen.getByText("Which repair is weighing on you the most?")).toBeVisible();
-    expect(screen.getByText("How has that affected your moving timeline?")).toBeVisible();
-    expect(screen.getByText("What happens if the property stays as-is?")).toBeVisible();
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+    expect(
+      screen.getByTestId("follow-up-question-options").children,
+    ).toHaveLength(3);
+    expect(
+      screen.getByText("Which repair is weighing on you the most?"),
+    ).toBeVisible();
+    expect(
+      screen.getByText("How has that affected your moving timeline?"),
+    ).toBeVisible();
+    expect(
+      screen.getByText("What happens if the property stays as-is?"),
+    ).toBeVisible();
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Open the call",
+    );
   });
 
   it("parses legacy guidance events without rendering them or covering the script", async () => {
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByTestId("current-script-card")).toBeVisible(),
+    );
 
-    broadcast({ type: "coach_note", text: "Legacy nudge", phaseId: "introduction", ts: "n1" });
+    broadcast({
+      type: "coach_note",
+      text: "Legacy nudge",
+      phaseId: "introduction",
+      ts: "n1",
+    });
     broadcast({ type: "objection", objectionId: "price_too_low", ts: "o1" });
     broadcast({ type: "counter", probeCount: 6, ts: "c1" });
-    broadcast({ type: "gate", gateId: "no_concerns", cleared: false, ts: "g1" });
-    broadcast({ type: "timer", timerId: "hold", startedAt: "2026-08-27T20:00:00.000Z", durationS: 300, ts: "t1" });
+    broadcast({
+      type: "gate",
+      gateId: "no_concerns",
+      cleared: false,
+      ts: "g1",
+    });
+    broadcast({
+      type: "timer",
+      timerId: "hold",
+      startedAt: "2026-08-27T20:00:00.000Z",
+      durationS: 300,
+      ts: "t1",
+    });
 
     expect(screen.getByTestId("current-script-card")).toBeVisible();
-    expect(screen.queryByTestId("coach-guidance-stack")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("coach-guidance-stack"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByTestId("coach-nudge")).not.toBeInTheDocument();
     expect(screen.queryByTestId("objection-card")).not.toBeInTheDocument();
     expect(screen.queryByTestId("probe-counter")).not.toBeInTheDocument();
@@ -618,12 +958,20 @@ describe("<CoachLiveView /> manual navigation", () => {
 
   it("keeps the exact manually selected section and transcript across collapse and reopen", async () => {
     const user = userEvent.setup();
-    const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    const { rerender } = render(
+      <CollapsibleHarness {...baseProps()} collapsed={false} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Open the call",
+      ),
+    );
 
     await user.click(screen.getByTestId("coach-next"));
     await user.click(screen.getByTestId("coach-next"));
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Explain how BMH works");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Explain how BMH works",
+    );
 
     broadcast({
       type: "transcript",
@@ -632,14 +980,20 @@ describe("<CoachLiveView /> manual navigation", () => {
       isFinal: true,
       ts: "transcript-1",
     });
-    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("We need to move before winter.");
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent(
+      "We need to move before winter.",
+    );
 
     rerender(<CollapsibleHarness {...baseProps()} collapsed />);
     expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
     rerender(<CollapsibleHarness {...baseProps()} collapsed={false} />);
 
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Explain how BMH works");
-    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("We need to move before winter.");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Explain how BMH works",
+    );
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent(
+      "We need to move before winter.",
+    );
     expect(channels).toHaveLength(1);
     expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
   });
@@ -648,44 +1002,82 @@ describe("<CoachLiveView /> manual navigation", () => {
     loadCoachCallContext.mockReset().mockRejectedValue(new Error("network"));
     render(<Harness {...baseProps()} />);
 
-    await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-context-error")).toBeVisible(),
+    );
     expect(screen.getByTestId("current-script-card")).toBeVisible();
     act(() => latestChannel()._subscribeCallback?.("CHANNEL_ERROR"));
-    expect(screen.getByTestId("coach-degraded-note")).toHaveTextContent("your place is saved");
-    expect(screen.getAllByTestId("token-placeholder").length).toBeGreaterThan(0);
+    expect(screen.getByTestId("coach-degraded-note")).toHaveTextContent(
+      "your place is saved",
+    );
+    expect(screen.getAllByTestId("token-placeholder").length).toBeGreaterThan(
+      0,
+    );
   });
 
   it("shows only one opener with four individual choices when lead source is unknown", async () => {
-    loadCoachCallContext.mockResolvedValue({ ...sampleContext, leadSource: null });
+    loadCoachCallContext.mockResolvedValue({
+      ...sampleContext,
+      leadSource: null,
+    });
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByTestId("current-script-card")).toBeVisible(),
+    );
     const opener = screen.getByTestId("current-section-script");
-    expect(opener).toHaveTextContent("It looks like you spoke to one of my assistants");
+    expect(opener).toHaveTextContent(
+      "It looks like you spoke to one of my assistants",
+    );
     expect(opener).not.toHaveTextContent("was listed For Sale by Owner.");
-    expect(opener).not.toHaveTextContent("I see you just responded to our teams text");
-    expect(opener).not.toHaveTextContent("I’m holding a copy of your tax records here");
+    expect(opener).not.toHaveTextContent(
+      "I see you just responded to our teams text",
+    );
+    expect(opener).not.toHaveTextContent(
+      "I’m holding a copy of your tax records here",
+    );
     expect(opener).not.toHaveTextContent("The reason for my call today");
-    expect(screen.queryByTestId("variant-Opener-default")).not.toBeInTheDocument();
-    expect(screen.getByRole("tablist", { name: "Opener variant" }).querySelectorAll("button")).toHaveLength(4);
+    expect(
+      screen.queryByTestId("variant-Opener-default"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen
+        .getByRole("tablist", { name: "Opener variant" })
+        .querySelectorAll("button"),
+    ).toHaveLength(4);
   });
 
   it("keeps conditional variants inside the visible section", async () => {
     const user = userEvent.setup();
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("variant-Opener-fsbo")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByTestId("variant-Opener-fsbo")).toBeVisible(),
+    );
 
-    expect(screen.getByTestId("variant-Opener-fsbo")).toHaveAccessibleName("Use FSBO spoken fork for Opener");
+    expect(screen.getByTestId("variant-Opener-fsbo")).toHaveAccessibleName(
+      "Use FSBO spoken fork for Opener",
+    );
     await user.click(screen.getByTestId("variant-Opener-fsbo"));
 
-    expect(screen.getByTestId("variant-Opener-fsbo")).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("current-section-script")).toHaveTextContent("For Sale by Owner");
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call");
+    expect(screen.getByTestId("variant-Opener-fsbo")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+      "For Sale by Owner",
+    );
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Open the call",
+    );
   }, 10_000);
 
   it("shows exactly one rep-selected Offer or Close spoken path and preserves it across collapse", async () => {
     const user = userEvent.setup();
-    const { rerender } = render(<CollapsibleHarness {...baseProps()} collapsed={false} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+    const { rerender } = render(
+      <CollapsibleHarness {...baseProps()} collapsed={false} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toBeVisible(),
+    );
 
     await user.click(screen.getByTestId("phase-rail-offer"));
     const offerPaths = [
@@ -700,9 +1092,13 @@ describe("<CoachLiveView /> manual navigation", () => {
       });
       await user.click(choice);
       expect(choice).toHaveAttribute("aria-selected", "true");
-      expect(screen.getByTestId("current-section-title")).toHaveTextContent("Present the appropriate offer outcome");
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Present the appropriate offer outcome",
+      );
       expect(screen.getAllByTestId("script-branch")).toHaveLength(1);
-      expect(screen.getByTestId("current-section-script")).toHaveTextContent(spokenText);
+      expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+        spokenText,
+      );
     }
 
     await user.click(screen.getByTestId("phase-rail-close"));
@@ -711,20 +1107,31 @@ describe("<CoachLiveView /> manual navigation", () => {
       ["They accept", "Congratulations"],
     ] as const;
     for (const [tag, spokenText] of closePaths) {
-      const choice = screen.getByRole("tab", { name: `Use ${tag} spoken path for Choose the closing path` });
+      const choice = screen.getByRole("tab", {
+        name: `Use ${tag} spoken path for Choose the closing path`,
+      });
       await user.click(choice);
       expect(choice).toHaveAttribute("aria-selected", "true");
-      expect(screen.getByTestId("current-section-title")).toHaveTextContent("Choose the closing path");
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Choose the closing path",
+      );
       expect(screen.getAllByTestId("script-branch")).toHaveLength(1);
-      expect(screen.getByTestId("current-section-script")).toHaveTextContent(spokenText);
+      expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+        spokenText,
+      );
     }
 
     rerender(<CollapsibleHarness {...baseProps()} collapsed />);
     expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
     rerender(<CollapsibleHarness {...baseProps()} collapsed={false} />);
-    expect(screen.getByRole("tab", { name: "Use They accept spoken path for Choose the closing path" }))
-      .toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("current-section-script")).toHaveTextContent("Congratulations");
+    expect(
+      screen.getByRole("tab", {
+        name: "Use They accept spoken path for Choose the closing path",
+      }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+      "Congratulations",
+    );
   }, 15_000);
 
   it("lets the rep fill motivation and cold-caller placeholders when context cannot", async () => {
@@ -735,41 +1142,65 @@ describe("<CoachLiveView /> manual navigation", () => {
     });
     const user = userEvent.setup();
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toHaveTextContent("Open the call"));
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+        "Open the call",
+      ),
+    );
 
     await user.click(screen.getAllByTestId("entry-chip-cold_caller_name")[0]);
-    await user.type(screen.getByTestId("entry-input-cold_caller_name"), "Morgan");
+    await user.type(
+      screen.getByTestId("entry-input-cold_caller_name"),
+      "Morgan",
+    );
     await user.tab();
     await user.click(screen.getAllByTestId("entry-chip-motivation")[0]);
-    await user.type(screen.getByTestId("entry-input-motivation"), "move closer to family");
+    await user.type(
+      screen.getByTestId("entry-input-motivation"),
+      "move closer to family",
+    );
     await user.tab();
 
-    expect(screen.getByTestId("current-section-script")).toHaveTextContent("assistants Morgan");
-    expect(screen.getByTestId("current-section-script")).toHaveTextContent("help with move closer to family");
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+      "assistants Morgan",
+    );
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+      "help with move closer to family",
+    );
     await user.click(screen.getByTestId("coach-next"));
     await user.click(screen.getByTestId("coach-back"));
-    expect(screen.getAllByTestId("entry-chip-motivation")[0]).toHaveTextContent("move closer to family");
+    expect(screen.getAllByTestId("entry-chip-motivation")[0]).toHaveTextContent(
+      "move closer to family",
+    );
   });
 
   it("disables Next at the final manual section and removes the preview", async () => {
     const user = userEvent.setup();
     render(<Harness {...baseProps()} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toBeVisible(),
+    );
 
     await user.click(screen.getByTestId("phase-rail-close"));
     await user.click(screen.getByTestId("coach-next"));
     await user.click(screen.getByTestId("coach-next"));
 
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Complete e-signing and wrap the call");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Complete e-signing and wrap the call",
+    );
     expect(screen.getByTestId("coach-next")).toBeDisabled();
-    expect(screen.queryByTestId("next-section-preview")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("next-section-preview"),
+    ).not.toBeInTheDocument();
   });
 
   it("preserves inline deal-entry editing without sending keypad tones", async () => {
     const user = userEvent.setup();
     const onDigit = vi.fn();
     render(<Harness {...baseProps({ onDigit })} />);
-    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByTestId("current-section-title")).toBeVisible(),
+    );
 
     await user.click(screen.getByTestId("phase-rail-offer"));
     await user.click(screen.getAllByTestId("entry-chip-offer_price")[0]);
@@ -777,7 +1208,9 @@ describe("<CoachLiveView /> manual navigation", () => {
     await user.type(input, "$210,000");
     await user.tab();
 
-    expect(screen.getAllByTestId("entry-chip-offer_price")[0]).toHaveTextContent("$210,000");
+    expect(
+      screen.getAllByTestId("entry-chip-offer_price")[0],
+    ).toHaveTextContent("$210,000");
     expect(onDigit).not.toHaveBeenCalled();
   });
 
@@ -788,8 +1221,14 @@ describe("<CoachLiveView /> manual navigation", () => {
     const onHangup = vi.fn();
     const onCollapse = vi.fn();
     const onDigit = vi.fn();
-    render(<Harness {...baseProps({ onMute, onHold, onHangup, onCollapse, onDigit })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-call-controls")).toBeVisible());
+    render(
+      <Harness
+        {...baseProps({ onMute, onHold, onHangup, onCollapse, onDigit })}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-call-controls")).toBeVisible(),
+    );
 
     await user.click(screen.getByTestId("coach-mute"));
     await user.click(screen.getByTestId("coach-hold"));
@@ -806,8 +1245,14 @@ describe("<CoachLiveView /> manual navigation", () => {
   });
 
   it("shows connecting and ringing status without enabling call-only controls", async () => {
-    const { rerender } = render(<Harness {...baseProps({ callStatus: "connecting" })} />);
-    await waitFor(() => expect(screen.getByTestId("coach-call-timer")).toHaveTextContent("Connecting"));
+    const { rerender } = render(
+      <Harness {...baseProps({ callStatus: "connecting" })} />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-call-timer")).toHaveTextContent(
+        "Connecting",
+      ),
+    );
     expect(screen.getByTestId("coach-keypad-toggle")).toBeDisabled();
     expect(screen.getByTestId("coach-hold")).toBeDisabled();
 
@@ -818,11 +1263,19 @@ describe("<CoachLiveView /> manual navigation", () => {
   it("collapses on Escape and returns focus to the stable header dialer", async () => {
     const user = userEvent.setup();
     render(<DialogLifecycleHarness />);
-    await waitFor(() => expect(screen.getByRole("dialog", { name: "Live call coach" })).toBeVisible());
+    await waitFor(() =>
+      expect(
+        screen.getByRole("dialog", { name: "Live call coach" }),
+      ).toBeVisible(),
+    );
 
     await user.keyboard("{Escape}");
 
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Live call coach" })).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Live call coach" }),
+      ).not.toBeInTheDocument(),
+    );
     expect(screen.getByTestId("header-dialer-button")).toHaveFocus();
   });
 });
@@ -830,10 +1283,20 @@ describe("<CoachLiveView /> manual navigation", () => {
 describe("selectSpokenLine", () => {
   it("skips internal notes and returns the first spoken line", () => {
     const spoken = { type: "say" as const, segments: [], id: "say-1" };
-    expect(selectSpokenLine({ selected: { lines: [{ type: "note", segments: [], id: "note-1" }, spoken] } } as never)).toBe(spoken);
+    expect(
+      selectSpokenLine({
+        selected: {
+          lines: [{ type: "note", segments: [], id: "note-1" }, spoken],
+        },
+      } as never),
+    ).toBe(spoken);
   });
 
   it("returns null for an all-note branch", () => {
-    expect(selectSpokenLine({ selected: { lines: [{ type: "note", segments: [], id: "note-1" }] } } as never)).toBeNull();
+    expect(
+      selectSpokenLine({
+        selected: { lines: [{ type: "note", segments: [], id: "note-1" }] },
+      } as never),
+    ).toBeNull();
   });
 });
