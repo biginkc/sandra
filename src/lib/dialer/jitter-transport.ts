@@ -525,6 +525,15 @@ export class JitterCallTransport implements CallTransport {
         const recovery = await this.dependencies.recoverAudio(callId);
         if (!this.isReconnectCurrent(reconnectGeneration, client)) return false;
         if (!recovery.ok) throw proxyError(recovery);
+        // A socket-only reconnect keeps the old BrowserSession call object.
+        // Treat the next Attach as a replacement candidate just as we do for a
+        // rebuilt client; otherwise a fresh valid Attach is discarded because
+        // it lacks a recoveredCallId linking it to that stale object.
+        this.rehydrating = true;
+        this.exactRecoveryAttachGeneration = reconnectGeneration;
+        this.recoveryAttachReady = false;
+        this.recoveryAttachCandidates.clear();
+        this.recoveryAttachAuthority = null;
         // In 2.27.1 this invokes only _closeConnection(). With
         // keepConnectionAliveOnSocketClose enabled the SDK reconnects the same
         // BrowserSession and handles the server Attach without Purge or BYE.
@@ -536,6 +545,29 @@ export class JitterCallTransport implements CallTransport {
         const connected = await this.dependencies.connect(callId, "registered");
         if (!this.isReconnectCurrent(reconnectGeneration, client)) return false;
         if (!connected.ok) throw proxyError(connected);
+        const identity =
+          connected.data.operator_attach_identity ??
+          (this.currentCall?.telnyxIDs?.telnyxCallControlId?.trim()
+            ? {
+                provider_id: "telnyx" as const,
+                operator_provider_call_control_id:
+                  this.currentCall.telnyxIDs.telnyxCallControlId.trim(),
+                operator_call_operation_id: "existing-browser-leg",
+                run_id: "existing-browser-leg",
+                request_generation: "existing-browser-leg",
+              }
+            : undefined);
+        if (!identity)
+          throw new Error(
+            "Jitter recovery operator identity is unavailable.",
+          );
+        this.recoveryAttachAuthority = {
+          generation: reconnectGeneration,
+          client,
+          identity,
+        };
+        this.recoveryAttachReady = true;
+        this.scheduleRecoveryAttachPromotion(reconnectGeneration);
         return true;
       } catch (error) {
         if (
@@ -1097,7 +1129,11 @@ export class JitterCallTransport implements CallTransport {
           return;
         }
         this.recoveryAttachCandidates.set(candidateId, call);
-        if (this.currentCall) {
+        if (
+          this.currentCall &&
+          (this.currentState !== "audio_reconnecting" ||
+            this.boundRecoveryProviderCallControlId !== null)
+        ) {
           const recoveryClient = this.rtcClient;
           if (recoveryClient)
             this.failAmbiguousRecoveryAttach(generation, recoveryClient);
@@ -1880,6 +1916,10 @@ export class JitterCallTransport implements CallTransport {
       return false;
     this.clearRecoveryTimer();
     this.providerProofGeneration += 1;
+    // A retained status request can be resolving while recovered browser media
+    // becomes usable. Its generation-mismatched finally must not strand this
+    // latch and suppress every subsequent retained status poll.
+    this.providerProofInFlight = false;
     if (this.providerProofRetryTimer)
       clearTimeout(this.providerProofRetryTimer);
     this.providerProofRetryTimer = null;
@@ -2163,7 +2203,7 @@ export class JitterCallTransport implements CallTransport {
     const canceled = await this.cancel("hangup");
     this.lastTeardownConfirmed = canceled;
     this.terminalAuthorityConfirmed = canceled;
-    if (!canceled && (this.providerConfirmedActive || this.retainedCall)) {
+    if (!canceled && this.liveAt !== null) {
       this.hangupRequested = false;
       this.terminalAt = null;
       this.requireAudioReconnect(
@@ -2171,6 +2211,8 @@ export class JitterCallTransport implements CallTransport {
           "Jitter did not confirm ending the call; provider terminal proof is still pending.",
         ),
       );
+      // A cancel attempt is not terminal authority. Keep the live call
+      // retryable and let exact Jitter provider status settle its lifecycle.
       if (this.callId) void this.reconcileRetainedProviderProof(this.callId);
     } else if (!this.terminal) {
       this.terminal = canceled ? "ended" : "failed";
@@ -2217,7 +2259,6 @@ export class JitterCallTransport implements CallTransport {
             this.lastTeardownConfirmed = false;
             this.teardownUnconfirmedEmitted = true;
             this.emit("teardown_unconfirmed");
-            this.destroyRtc(true);
             return false;
           })();
           this.cancelPromise = attempt;
@@ -2238,7 +2279,6 @@ export class JitterCallTransport implements CallTransport {
         this.lastTeardownConfirmed = false;
         this.teardownUnconfirmedEmitted = true;
         this.emit("teardown_unconfirmed");
-        this.destroyRtc(true);
         return Promise.resolve(false);
       }
       this.lastTeardownConfirmed = true;
@@ -2273,9 +2313,6 @@ export class JitterCallTransport implements CallTransport {
       this.lastTeardownConfirmed = false;
       this.teardownUnconfirmedEmitted = true;
       this.emit("teardown_unconfirmed");
-      // Stop media now, but retain the pagehide listener so a later navigation
-      // still gets an unload-safe best-effort cancel attempt.
-      this.destroyRtc(true);
       return false;
     })();
     this.cancelPromise = attempt;
