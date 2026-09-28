@@ -1,7 +1,11 @@
 import { expect, test } from "@playwright/test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
-import { adminClient, DEFAULT_ORG_ID } from "../fixtures";
-import { cleanupOwnedRows, readOwnedRows } from "./owned-rows";
+import { adminClient, DEFAULT_ORG_ID, ensureTestUser, resetTenantTables } from "../fixtures";
+import { assertDisposableE2EDatabaseEnvironment } from "../../src/lib/supabase/e2e-target-safety";
+import { cleanupOwnedRows, readOwnedRows, recordOwnedRow } from "./owned-rows";
 import { seedQueuedMessage } from "./seed";
 import { captureRowEvidence, purgeRowOutcomes, readMatrixResults, recordRowOutcome } from "./results";
 
@@ -25,9 +29,39 @@ import { captureRowEvidence, purgeRowOutcomes, readMatrixResults, recordRowOutco
 test.describe.configure({ mode: "serial" });
 
 let admin: ReturnType<typeof adminClient>;
+let defaultRunDir: string | undefined;
 
 test.beforeAll(async () => {
+  if (!process.env.OUTBOX_RUN_DIR) {
+    // The broad CI job has no dedicated run record. Give its fixtures the
+    // same ID ledger, scoped to this worker, and retain main's clean setup.
+    assertDisposableE2EDatabaseEnvironment(process.env.TEST_SUPABASE_URL ?? "");
+    defaultRunDir = mkdtempSync(path.join(tmpdir(), "sandra-outbox-e2e-"));
+    process.env.OUTBOX_RUN_DIR = defaultRunDir;
+  }
   admin = adminClient();
+  if (defaultRunDir) {
+    await resetTenantTables(admin);
+    await ensureTestUser(admin);
+  }
+});
+
+test.afterAll(async () => {
+  if (!defaultRunDir) return; // The dedicated lane owns its teardown.
+  try {
+    // Sends can create append-only lead events referencing our properties.
+    // Preserve those audited properties exactly as dedicated teardown does.
+    for (const property of readOwnedRows().filter(row => row.table === "properties")) {
+      const { data, error } = await admin.from("lead_events").select("id,property_id")
+        .eq("org_id", DEFAULT_ORG_ID).eq("property_id", property.id);
+      if (error) throw error;
+      for (const event of data ?? []) recordOwnedRow("lead_events", event.id, event.property_id);
+    }
+    await cleanupOwnedRows(admin, DEFAULT_ORG_ID, readOwnedRows());
+  } finally {
+    delete process.env.OUTBOX_RUN_DIR;
+    rmSync(defaultRunDir, { recursive: true, force: true });
+  }
 });
 
 const ROW_OWNERSHIP: Record<string, string[]> = {
@@ -289,26 +323,53 @@ test("O08/O09 — load more queue rows advances the page, loaded total updates",
 test("O10 — a failed initial queue read recovers via Retry", async ({ page }) => {
   await seedQueuedMessage(admin, { addressTag: "ACC-O10-RETRY", body: "o10 recovers after retry", scheduledForOffsetMin: 5 });
 
-  const arm = await fetch('http://127.0.0.1:54321/__outbox_fault/arm', {
-    method: 'POST',
-    headers: { 'x-outbox-fault-token': process.env.OUTBOX_FAULT_TOKEN ?? '' },
-  });
-  expect(arm.ok).toBe(true);
+  if (process.env.OUTBOX_FAULT_TOKEN) {
+    const arm = await fetch('http://127.0.0.1:54321/__outbox_fault/arm', {
+      method: 'POST',
+      headers: { 'x-outbox-fault-token': process.env.OUTBOX_FAULT_TOKEN },
+    });
+    expect(arm.ok).toBe(true);
+  } else {
+    // Main's default-CI strategy: fail the first client-side server action.
+    // The initial queue read can happen in the server render instead; in
+    // that case this interception cannot prove Retry and is skipped below.
+    let failedOnce = false;
+    await page.route("**/messages*", async (route) => {
+      const request = route.request();
+      const isServerAction = request.method() === "POST" && !!(await request.headerValue("next-action"));
+      if (isServerAction && !failedOnce) {
+        failedOnce = true;
+        await route.fulfill({ status: 500, body: "simulated queue read failure" });
+      } else {
+        await route.continue();
+      }
+    });
+  }
 
   await page.goto("/messages?tab=outbox");
   const failure = page.getByTestId("queue-load-failure");
-  await expect(failure).toBeVisible({ timeout: 10_000 });
-  const status = await fetch('http://127.0.0.1:54321/__outbox_fault/status', {
-    headers: { 'x-outbox-fault-token': process.env.OUTBOX_FAULT_TOKEN ?? '' },
-  });
-  const fault = await status.json() as { armed: boolean; failures: number };
-  expect(fault.armed).toBe(true);
-  expect(fault.failures).toBeGreaterThan(0);
-  const disarm = await fetch('http://127.0.0.1:54321/__outbox_fault/disarm', {
-    method: 'POST',
-    headers: { 'x-outbox-fault-token': process.env.OUTBOX_FAULT_TOKEN ?? '' },
-  });
-  expect(disarm.ok).toBe(true);
+  if (process.env.OUTBOX_FAULT_TOKEN) {
+    await expect(failure).toBeVisible({ timeout: 10_000 });
+    const status = await fetch('http://127.0.0.1:54321/__outbox_fault/status', {
+      headers: { 'x-outbox-fault-token': process.env.OUTBOX_FAULT_TOKEN },
+    });
+    const fault = await status.json() as { armed: boolean; failures: number };
+    expect(fault.armed).toBe(true);
+    expect(fault.failures).toBeGreaterThan(0);
+    const disarm = await fetch('http://127.0.0.1:54321/__outbox_fault/disarm', {
+      method: 'POST',
+      headers: { 'x-outbox-fault-token': process.env.OUTBOX_FAULT_TOKEN },
+    });
+    expect(disarm.ok).toBe(true);
+  } else {
+    const sawFailure = await failure.waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => true).catch(() => false);
+    if (!sawFailure) {
+      const reason = "Default CI's page-route fault did not reach the initial queue read (server render); the dedicated fault-proxy lane proves O10 Retry.";
+      recordRowOutcome({ id: "O10", status: "skip", evidence: reason });
+      test.skip(true, reason);
+    }
+  }
   await failure.getByRole("button", { name: "Retry" }).click();
   await expect(failure).toHaveCount(0, { timeout: 15_000 });
   await expect(page.getByText("o10 recovers after retry")).toBeVisible();

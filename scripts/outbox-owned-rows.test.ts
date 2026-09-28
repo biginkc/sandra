@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { Database } from '../../src/lib/supabase/types';
-import { cleanupOwnedRows, readOwnedRows, recordOwnedRow, type OwnedRow } from './owned-rows';
+import type { Database } from '../src/lib/supabase/types';
+import { cleanupOwnedRows, readOwnedRows, recordOwnedRow, type OwnedRow } from '../e2e/inbox-acceptance/owned-rows';
 
 const org = '11111111-1111-4111-8111-111111111111';
 const id = '22222222-2222-4222-8222-222222222222';
