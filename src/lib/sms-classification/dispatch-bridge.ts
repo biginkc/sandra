@@ -9,6 +9,7 @@ import type { Database } from "../supabase/types";
 import { buildTwoWayThreadState } from "./context";
 import { resolvePolicyOutcome } from "./policy";
 import { classifyWithJev, JevProviderError } from "./providers/jev-gateway";
+import { loadOrgThresholdMap, resolveThresholdDecision } from "./thresholds";
 import type { SmsClassificationDecision } from "./types";
 
 const SCHEMA_VERSION = JEV_SCHEMA_VERSION;
@@ -67,9 +68,83 @@ export type ClassificationBridgeResult =
       /** dnc always stays pending regardless of mode — see the DB
        *  constraint in 20260920120000_sms_classification_runs.sql. */
       eligibleForAutoAccept: boolean;
+      /** Native confidence + the threshold compared against it (null when
+       *  not thresholdable, e.g. dnc). Carried through so a below-threshold
+       *  new_lead escalate can still be recorded in jev_lead_decisions with
+       *  the real numbers, not just a generic attention flag. */
+      nativeConfidence: number | null;
+      thresholdAtDecision: number | null;
+      /** The threshold SETTINGS ROW'S version actually used at decision
+       *  time — null exactly when thresholdAtDecision is null (root
+       *  final-review P2: the version, not just the numeric cutoff, must
+       *  be recorded, since two different settings versions can share the
+       *  same number). */
+      thresholdVersion: number | null;
+      /** properties.decision_context_revision read BEFORE the Jev HTTP
+       *  call started (root review of 8361775a,
+       *  jev-root-revision-review.md, 2026-09-20: capturing revision at
+       *  decision-ROW-creation time, after model latency, can bless a
+       *  classification computed against context that's already gone
+       *  stale by the time the row exists). The caller passes this to
+       *  every propose/apply RPC, which enforces it against the row it's
+       *  locking — a mismatch means something decision-relevant happened
+       *  WHILE Jev was evaluating, not merely since a prior decision. */
+      evaluationRevision: number;
     }
-  | { kind: "jev_nurture"; classificationRunId: string }
-  | { kind: "jev_no_action"; classificationRunId: string };
+  | {
+      kind: "jev_nurture";
+      classificationRunId: string;
+      nativeConfidence: number | null;
+      thresholdAtDecision: number | null;
+      thresholdVersion: number | null;
+      evaluationRevision: number;
+    }
+  | { kind: "jev_no_action"; classificationRunId: string }
+  /**
+   * Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 2):
+   * automatic-mode-only. Jev's HTTP call failed, no decision-time
+   * revision baseline could be established, the source message's
+   * identity couldn't be verified, or the audit row failed to persist —
+   * in `automatic` mode this must never silently degrade to the legacy
+   * classifier (that would apply an outcome below/without any trusted
+   * Jev decision, violating the human-decision gate). The caller must
+   * create a durable, human-actionable item and apply nothing. Never
+   * returned for `shadow`/`legacy` provider, which already always defer
+   * to legacy regardless — see the `use_legacy` cases above.
+   */
+  | { kind: "jev_automatic_failed"; classificationRunId: string | null; reason: string }
+  /**
+   * Outcome resolved but is below its org threshold, missing/invalid
+   * confidence, or has no configured threshold — and has no existing
+   * disposition-review infra to fall back on (currently only `nurture`;
+   * `wrong_number`/`not_interested`/`opted_out` stay on `jev_route` with
+   * `eligibleForAutoAccept: false`, which already lands them in the
+   * existing pending-review path). The caller must NOT apply any effect
+   * for this outcome — only propose a `jev_lead_decisions` row (nurture)
+   * or mark the property for human attention.
+   */
+  | {
+      kind: "jev_needs_decision";
+      classificationRunId: string;
+      outcome: SmsClassificationDecision["outcome"];
+      nativeConfidence: number | null;
+      thresholdAtDecision: number | null;
+      thresholdVersion: number | null;
+      evaluationRevision: number;
+    }
+  /**
+   * new_lead resolved above its org threshold. The caller must call the
+   * sanctioned promotion primitive (`qualifyProperty`) — never appointment
+   * booking — and must not also route this through `resolveResponderOutcome`.
+   */
+  | {
+      kind: "jev_promote_new_lead";
+      classificationRunId: string;
+      nativeConfidence: number | null;
+      thresholdAtDecision: number | null;
+      thresholdVersion: number | null;
+      evaluationRevision: number;
+    };
 
 /**
  * Runs Jev alongside the caller's already-computed legacy decision
@@ -100,19 +175,61 @@ export async function classifyForDispatch(
     return { kind: "use_legacy", classificationRunId: null };
   }
 
+  // Root review of 8361775a (jev-root-revision-review.md, 2026-09-20):
+  // captured BEFORE the context read and the Jev HTTP call — both of
+  // which have real latency — so it reflects the property's state at
+  // the instant evaluation STARTS, not whatever it happens to be by the
+  // time a decision row gets created afterward. Every propose/apply RPC
+  // enforces this exact value against the row it locks.
+  const evaluationRevision = await readDecisionContextRevision(supabase, input.propertyId);
+  if (evaluationRevision === null) {
+    // Can't establish a decision-time baseline at all — fail closed.
+    // Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 2):
+    // in automatic mode this must NOT fall through to the legacy
+    // classifier (that would apply a below/no-trust decision, violating
+    // the human-decision gate) — it must create a durable human item
+    // instead. shadow/legacy-provider callers already always defer to
+    // legacy regardless, so use_legacy is still correct for them.
+    if (config.classifierMode === "automatic") {
+      await persistFailedRun(supabase, input, "missing_revision_baseline").catch(() => {});
+      return { kind: "jev_automatic_failed", classificationRunId: null, reason: "missing_revision_baseline" };
+    }
+    return { kind: "use_legacy", classificationRunId: null };
+  }
+
+  // Root review of dbbb12e6, finding 3: the SOURCE message's own stored
+  // `created_at` — not the moment this function happens to run — anchors
+  // both the context-window cutoff and this message's own `sentAt`. This
+  // also doubles as an identity check: if the message row this call was
+  // handed doesn't actually exist as inbound on this property, fail
+  // closed rather than evaluate against an unverifiable claim.
+  const sourceCreatedAt = input.inboundMessageId
+    ? await readSourceMessageCreatedAt(supabase, input.inboundMessageId, input.propertyId)
+    : null;
+  if (input.inboundMessageId && sourceCreatedAt === null) {
+    if (config.classifierMode === "automatic") {
+      await persistFailedRun(supabase, input, "source_message_not_found").catch(() => {});
+      return { kind: "jev_automatic_failed", classificationRunId: null, reason: "source_message_not_found" };
+    }
+    return { kind: "use_legacy", classificationRunId: null };
+  }
+
   const priorThread = await buildTwoWayThreadState(supabase, {
     propertyId: input.propertyId,
     contactId: input.contactId,
     conversationId: input.conversationId,
     excludeMessageId: input.inboundMessageId,
+    sourceCreatedAt,
   });
   // Append the current inbound explicitly, matching loadConversation's
   // exact pattern in dispatch.ts — buildTwoWayThreadState excludes it by
   // id, so without this Jev only ever sees prior history, never the
-  // message it's actually supposed to classify.
+  // message it's actually supposed to classify. sentAt is the message's
+  // OWN stored timestamp (not "now") — stable across a retry, and never
+  // drifts later than the cutoff just applied above it.
   const thread = [
     ...priorThread,
-    { direction: "inbound" as const, body: input.inboundBody, sentAt: new Date().toISOString() },
+    { direction: "inbound" as const, body: input.inboundBody, sentAt: sourceCreatedAt ?? new Date().toISOString() },
   ];
 
   const state = { propertyId: input.propertyId };
@@ -131,23 +248,64 @@ export async function classifyForDispatch(
       extra: { propertyId: input.propertyId },
     });
     await persistFailedRun(supabase, input, kind).catch(() => {});
+    if (config.classifierMode === "automatic") {
+      return { kind: "jev_automatic_failed", classificationRunId: null, reason: kind };
+    }
     return { kind: "use_legacy", classificationRunId: null };
   }
 
-  const classificationRunId = await persistRun(supabase, input, decision, stateHash).catch(
-    (persistErr) => {
-      reportError(persistErr, {
-        tags: { surface: "sms_classification_persist" },
-        extra: { propertyId: input.propertyId },
-      });
-      return null;
-    },
-  );
+  // Per-outcome native-confidence cutoffs (jev_outcome_thresholds) are a
+  // second, independent gate inside `automatic` mode — the org-level
+  // classifier_mode switch below answers "is Jev allowed to drive effects
+  // for this org at all"; this answers "is THIS outcome, at THIS
+  // confidence, above the bar this org configured for it". Loaded fresh
+  // on every classification (no caching) so a threshold edit through
+  // fn_set_jev_outcome_threshold takes effect on the very next inbound
+  // with no deployment. Computed BEFORE persisting (even in shadow mode,
+  // where it's never acted on) so the audit row for every outcome —
+  // not just new_lead/nurture's dedicated jev_lead_decisions rows —
+  // carries the actual threshold compared against, for Review Jev.
+  const thresholds = await loadOrgThresholdMap(supabase, input.orgId);
+  const thresholdDecision = resolveThresholdDecision(decision, thresholds);
+  // Record the actual measured confidence whenever it's a valid number —
+  // even when human-gated for a reason unrelated to the confidence value
+  // itself (e.g. no_threshold_configured) — so the audit trail isn't
+  // reported as "no confidence" just because there was nothing to
+  // compare it against. thresholdAtDecision, by contrast, is genuinely
+  // absent (not just unused) whenever thresholdDecision didn't compare
+  // against one.
+  const nativeConfidence =
+    typeof decision.outcomeConfidence === "number" &&
+    Number.isFinite(decision.outcomeConfidence) &&
+    decision.outcomeConfidence >= 0 &&
+    decision.outcomeConfidence <= 1
+      ? decision.outcomeConfidence
+      : null;
+  const thresholdAtDecision =
+    "minConfidence" in thresholdDecision ? thresholdDecision.minConfidence : null;
+  const thresholdVersion =
+    "thresholdVersion" in thresholdDecision ? thresholdDecision.thresholdVersion : null;
+
+  const classificationRunId = await persistRun(supabase, input, decision, stateHash, {
+    nativeConfidence,
+    thresholdAtDecision,
+    thresholdVersion,
+    evaluationRevision,
+  }).catch((persistErr) => {
+    reportError(persistErr, {
+      tags: { surface: "sms_classification_persist" },
+      extra: { propertyId: input.propertyId },
+    });
+    return null;
+  });
   if (!classificationRunId) {
-    // Audit write failed — still allow the decision through if the mode
-    // says to use it, but without a run id there is nothing to link an
-    // auto-accept to, so eligibleForAutoAccept below is always false in
-    // that case.
+    // Audit write failed. Root review of dbbb12e6, finding 2: in
+    // automatic mode a Jev decision that couldn't even be durably
+    // recorded must not be applied via the legacy classifier either —
+    // there is no audit trail for it and no linkable run id.
+    if (config.classifierMode === "automatic") {
+      return { kind: "jev_automatic_failed", classificationRunId: null, reason: "audit_persist_failed" };
+    }
     return { kind: "use_legacy", classificationRunId: null };
   }
 
@@ -166,17 +324,117 @@ export async function classifyForDispatch(
   if (resolved.kind === "no_action") {
     return { kind: "jev_no_action", classificationRunId };
   }
+
   if (resolved.kind === "nurture") {
-    return { kind: "jev_nurture", classificationRunId };
+    // Unlike wrong_number/not_interested/opted_out below, nurture has no
+    // existing ai_disposition_reviews path to fall back on when it isn't
+    // eligible to auto-apply — it either applies today via
+    // setOutreachDispoNurture, or (new behavior) the caller must leave the
+    // property alone and flag it for a human instead of silently closing
+    // it at a confidence the org hasn't configured to trust.
+    return thresholdDecision.status === "auto_apply"
+      ? { kind: "jev_nurture", classificationRunId, nativeConfidence, thresholdAtDecision, thresholdVersion, evaluationRevision }
+      : {
+          kind: "jev_needs_decision",
+          classificationRunId,
+          outcome: decision.outcome,
+          nativeConfidence,
+          thresholdAtDecision,
+          thresholdVersion,
+          evaluationRevision,
+        };
   }
 
+  if (resolved.assembled.action === "escalate") {
+    // new_lead. Above-threshold is the net-new capability: the caller
+    // must promote via `qualifyProperty`, never through
+    // `resolveResponderOutcome`/appointment booking. Below-threshold
+    // still escalates via the existing `jev_route` handling in
+    // dispatch.ts (eligibleForAutoAccept is always false for `escalate`),
+    // but now carries nativeConfidence/thresholdAtDecision so the caller
+    // can also propose a real jev_lead_decisions row instead of only a
+    // generic attention flag.
+    if (thresholdDecision.status === "auto_apply") {
+      return {
+        kind: "jev_promote_new_lead",
+        classificationRunId,
+        nativeConfidence,
+        thresholdAtDecision,
+        thresholdVersion,
+        evaluationRevision,
+      };
+    }
+    return {
+      kind: "jev_route",
+      route: resolved.route,
+      assembled: resolved.assembled,
+      classificationRunId,
+      eligibleForAutoAccept: false,
+      nativeConfidence,
+      thresholdAtDecision,
+      thresholdVersion,
+      evaluationRevision,
+    };
+  }
+
+  // wrong_number / not_interested / opted_out / dnc. dnc's
+  // thresholdDecision is always `human_gated` (resolveThresholdDecision
+  // never auto-applies it), so `eligibleForAutoAccept` stays false for it
+  // exactly as before — this is not a behavior change for dnc, just the
+  // same false arrived at through the threshold engine instead of a
+  // hardcoded action-name check. Below-threshold / missing-confidence for
+  // the other three already lands on the existing pending
+  // ai_disposition_reviews row (fn_apply_ai_disposition_with_review always
+  // creates it; only auto-accept is conditional) — that pending row IS the
+  // Needs-a-decision case for these three outcomes, no new plumbing
+  // required.
   return {
     kind: "jev_route",
     route: resolved.route,
+    nativeConfidence,
+    thresholdAtDecision,
+    thresholdVersion,
+    evaluationRevision,
     assembled: resolved.assembled,
     classificationRunId,
-    eligibleForAutoAccept: resolved.assembled.action !== "close_dnc" && resolved.assembled.action !== "escalate",
+    eligibleForAutoAccept: thresholdDecision.status === "auto_apply",
   };
+}
+
+async function readDecisionContextRevision(
+  supabase: SupabaseClient<Database>,
+  propertyId: string,
+): Promise<number | null> {
+  const { data, error } = await supabase
+    .from("properties")
+    .select("decision_context_revision")
+    .eq("id", propertyId)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data.decision_context_revision;
+}
+
+/**
+ * Root review of dbbb12e6 (jev-root-autoapply-review.md, finding 3): the
+ * SOURCE message's own stored `created_at`, verified to actually be an
+ * inbound SMS on this property (an identity check, not just a lookup —
+ * a retry with the same input must resolve to the same stable
+ * timestamp, never silently accept a mismatched or missing row).
+ */
+async function readSourceMessageCreatedAt(
+  supabase: SupabaseClient<Database>,
+  messageId: string,
+  propertyId: string,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("created_at")
+    .eq("id", messageId)
+    .eq("property_id", propertyId)
+    .eq("direction", "inbound")
+    .maybeSingle();
+  if (error || !data) return null;
+  return data.created_at;
 }
 
 function hashState(
@@ -211,6 +469,12 @@ async function persistRun(
   input: ClassificationBridgeInput,
   decision: SmsClassificationDecision,
   stateHash: string,
+  audit: {
+    nativeConfidence: number | null;
+    thresholdAtDecision: number | null;
+    thresholdVersion: number | null;
+    evaluationRevision: number;
+  },
 ): Promise<string | null> {
   if (!input.conversationId || !input.inboundMessageId) return null;
   const row = {
@@ -229,6 +493,22 @@ async function persistRun(
       wrongScope: decision.wrongScope,
       escalationReason: decision.escalationReason,
       probabilities: decision.probabilities,
+      // Root direct-review finding (2026-09-20): the wrong_number/
+      // not_interested/opted_out/dnc review path had no persisted
+      // threshold context at all (only jev_lead_decisions' own dedicated
+      // columns did) — Review Jev was displaying fabricated nulls
+      // instead of the real recorded value. nativeConfidence here is the
+      // SAME validated value as thresholdAtDecision below — persisted
+      // for every outcome, not just new_lead/nurture.
+      nativeConfidence: audit.nativeConfidence,
+      thresholdAtDecision: audit.thresholdAtDecision,
+      // Root final-review P2: the threshold SETTINGS ROW's version, not
+      // just the numeric cutoff — two versions can share the same number.
+      thresholdVersion: audit.thresholdVersion,
+      // Root review of 8361775a: the revision captured BEFORE evaluation
+      // started, for audit — distinct from whatever the property's
+      // revision happens to be by the time this run row lands.
+      evaluationRevision: audit.evaluationRevision,
     },
     resolved_outcome: decision.outcome,
     usage: decision.usage,
@@ -266,18 +546,33 @@ function isDuplicateKeyError(message: string): boolean {
   );
 }
 
+/**
+ * Root review of 999feefb (jev-root-round11-review.md, finding 1, P1):
+ * `state_hash: failed:${Date.now()}` made every retry's logical key
+ * (source_inbound_message_id, provider, model, schema_version, state_hash)
+ * unique, so a repeated failure on the same inbound inserted ANOTHER row
+ * instead of reusing one — Needs-a-decision then showed multiple
+ * actionable classifier events for a single inbound. `state_hash` is now
+ * deterministic per (message, reason) — `failed:${fallbackReason}` — so a
+ * retry with the IDENTICAL failure reason collides on the same unique
+ * index `persistRun` already relies on, and is handled the same way:
+ * catch the duplicate-key error and treat it as "this failure is already
+ * recorded," not an error. A retry that fails for a DIFFERENT reason is
+ * still a new, genuinely different logical event (schema_version/
+ * state_hash existing for a "context changed" row) — new row, by design.
+ */
 async function persistFailedRun(
   supabase: SupabaseClient<Database>,
   input: ClassificationBridgeInput,
   fallbackReason: string,
 ): Promise<void> {
   if (!input.conversationId || !input.inboundMessageId) return;
-  await supabase.from("sms_classification_runs").insert({
+  const { error } = await supabase.from("sms_classification_runs").insert({
     org_id: input.orgId,
     property_id: input.propertyId,
     conversation_id: input.conversationId,
     source_inbound_message_id: input.inboundMessageId,
-    state_hash: `failed:${Date.now()}`,
+    state_hash: `failed:${fallbackReason}`,
     schema_version: SCHEMA_VERSION,
     policy_version: POLICY_VERSION,
     provider: "jev",
@@ -285,4 +580,5 @@ async function persistFailedRun(
     decision: {},
     fallback_reason: fallbackReason,
   });
+  if (error && !isDuplicateKeyError(error.message)) throw new Error(error.message);
 }

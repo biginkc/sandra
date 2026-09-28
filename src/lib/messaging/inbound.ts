@@ -221,6 +221,31 @@ async function resolveInboundOrgId(
   return orgIds.size === 1 ? Array.from(orgIds)[0] : null;
 }
 
+/**
+ * True only when this org has an active `ai_responder_configs` row with
+ * `classifier_provider = 'jev'`. Used solely to gate the legacy Haiku
+ * auto-qualify block above away from an org where Jev's own threshold
+ * decision is the sole new_lead promotion authority — never inferred
+ * elsewhere, and defaults to `false` (preserve the legacy path) when
+ * `orgId` is unresolved or the lookup fails, since guessing wrong here
+ * either duplicates a promotion (safe, existing `qualifyProperty` is
+ * idempotent) or silently skips one (not safe) — failing toward "keep
+ * today's behavior" is the correct default.
+ */
+export async function isJevClassifierOrg(
+  supabase: SupabaseClient<Database>,
+  orgId: string | null,
+): Promise<boolean> {
+  if (!orgId) return false;
+  const { data } = await supabase
+    .from("ai_responder_configs")
+    .select("classifier_provider")
+    .eq("org_id", orgId)
+    .eq("active", true)
+    .maybeSingle();
+  return data?.classifier_provider === "jev";
+}
+
 export async function handleInboundWebhook(
   request: Request,
   opts: { includeFullUrl: boolean; provider: MessagingProvider | null },
@@ -724,7 +749,20 @@ export async function handleInboundWebhook(
       if (
         cur?.status === "prospect" &&
         ev.body &&
-        !inboundState.autoQualifiedAt
+        !inboundState.autoQualifiedAt &&
+        // Overlap guard (Jev workflow, 2026-09-20): this legacy Haiku
+        // intent-classify + auto-qualify path is independent of and runs
+        // before dispatchAndStampAiResponder/Jev below. For an org whose
+        // active classifier is Jev, Jev's own threshold-gated new_lead
+        // decision is the sole promotion authority — this legacy path
+        // must not also promote the same property, or a below-threshold
+        // Jev "needs a decision" case could get silently bypassed by this
+        // parallel Haiku path reaching qualifyProperty first. Only
+        // queried once the cheaper checks above already narrow to a
+        // prospect awaiting auto-qualify. For every other org
+        // (classifier_provider='legacy', the default, or no active
+        // config at all) this is unchanged from today.
+        !(await isJevClassifierOrg(supabase, orgId))
       ) {
         let shouldQualify = false;
         if (process.env.SKIP_INTENT_GATE === "1") {

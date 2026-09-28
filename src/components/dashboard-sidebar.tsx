@@ -14,6 +14,7 @@ import {
   Megaphone,
   MessageSquare,
   Repeat,
+  Sparkles,
   Target,
 } from "lucide-react";
 import Link from "next/link";
@@ -62,6 +63,7 @@ const ITEMS: readonly Item[] = [
   { href: "/sequences", label: "Sequences", icon: Repeat },
   { href: "/templates", label: "Templates", icon: FileText },
   { href: "/messages", label: "Messages", icon: MessageSquare },
+  { href: "/jev", label: "Jev", icon: Sparkles, matchAlso: ["/jev/needs-decision", "/jev/review"] },
   { href: "/leads", label: "Leads", icon: LayoutDashboard },
   { href: "/my-leads", label: "My Leads", icon: ClipboardList },
   { href: "/calculators", label: "Calculators", icon: Calculator },
@@ -79,7 +81,7 @@ function visibleItems(
     (item) =>
       (item.href !== "/my-leads" || showMyLeads) &&
       (item.href !== "/calculators" || showCalculators) &&
-      ((item.href !== "/messages" && item.href !== "/leads") || showMessagesAndLeads),
+      ((item.href !== "/messages" && item.href !== "/leads" && item.href !== "/jev") || showMessagesAndLeads),
   );
   const recordings: Item[] = [];
   if (showRecordings) recordings.push({ href: "/owner/recordings", label: "Recordings", icon: Headphones });
