@@ -3163,7 +3163,7 @@ describe("JitterCallTransport", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(states.at(-1)).toBe("audio_reconnect_required");
 
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(110_000);
       await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
       expect(harness.dependencies.cancel).not.toHaveBeenCalled();
       expect(harness.rtc.serverDisconnect).toHaveBeenCalledTimes(1);
@@ -3173,7 +3173,61 @@ describe("JitterCallTransport", () => {
     }
   });
 
+  it("keeps polling a retained call every 10 seconds after twenty 400 status failures", async () => {
+    vi.useFakeTimers();
+    try {
+      const getProviderStatus = vi.fn(async () => ({
+        ok: false as const, status: 400, error: "bad status", errorCode: "provider_status_bad_request",
+      }));
+      const harness = transportHarness({ getProviderStatus });
+      const states: string[] = [];
+      const pollErrors: Array<{ status: number; errorCode: string }> = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      harness.transport.onProviderStatusError((error) => pollErrors.push(error));
+
+      await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+      await vi.advanceTimersByTimeAsync(190_000);
+
+      expect(getProviderStatus).toHaveBeenCalledTimes(20);
+      expect(pollErrors).toHaveLength(20);
+      expect(pollErrors.every((error) => error.status === 400 && error.errorCode === "provider_status_bad_request")).toBe(true);
+      expect(states).not.toContain("ended");
+      expect(states).not.toContain("failed");
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps polling a retained call after twenty thrown status errors, then accepts terminal proof", async () => {
+    vi.useFakeTimers();
+    try {
+      const getProviderStatus = vi.fn()
+        .mockRejectedValueOnce(new Error("network down"));
+      for (let index = 1; index < 20; index += 1) getProviderStatus.mockRejectedValueOnce(new Error("network down"));
+      getProviderStatus.mockResolvedValueOnce({ ok: true, data: { state: "terminal" as const, outcome: "ended" as const } });
+      const harness = transportHarness({ getProviderStatus });
+      const states: string[] = [];
+      const pollErrors: Array<{ status: number; errorCode: string }> = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      harness.transport.onProviderStatusError((error) => pollErrors.push(error));
+
+      await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+      await vi.advanceTimersByTimeAsync(200_000);
+
+      expect(getProviderStatus).toHaveBeenCalledTimes(21);
+      expect(pollErrors).toHaveLength(20);
+      expect(pollErrors.every((error) => error.status === 0 && error.errorCode === "provider_status_poll_threw")).toBe(true);
+      expect(states.at(-1)).toBe("ended");
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("converges retained terminal proof when browser microphone recovery fails first", async () => {
+    vi.useFakeTimers();
+    try {
     const getProviderStatus = vi.fn()
       .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
       .mockResolvedValueOnce({ ok: true, data: { state: "terminal", outcome: "ended" } });
@@ -3187,11 +3241,15 @@ describe("JitterCallTransport", () => {
     await expect(
       harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z"),
     ).resolves.toEqual({ id: "call-1" });
+    await vi.advanceTimersByTimeAsync(10_000);
     await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
 
     expect(getProviderStatus).toHaveBeenCalledTimes(2);
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
     expect(harness.rtc.disconnect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not continue retained recovery when terminal proof wins during microphone setup", async () => {

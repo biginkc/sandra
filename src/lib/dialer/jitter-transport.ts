@@ -29,6 +29,7 @@ import type {
   CallTransport,
   CallTransportState,
   DtmfDigit,
+  ProviderStatusPollError,
 } from "./transport";
 import { startBrowserPlaybackCapture, type BrowserCaptureHandle } from "./reliability-browser-capture";
 import {
@@ -56,6 +57,7 @@ const JITTER_AUDIO_HEALTH_RESUME_FAILURE_LIMIT = 3;
 const JITTER_AUDIO_HEALTH_LOCAL_FAILURE_LIMIT = 3;
 const JITTER_RECOVERY_MEDIA_PROOF_ATTEMPTS = 6;
 const JITTER_PROVIDER_PROOF_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 10_000, 10_000, 10_000, 10_000, 10_000] as const;
+const JITTER_RETAINED_PROVIDER_POLL_MS = 10_000;
 const JITTER_RECOVERY_CONTROL_ATTEMPTS = 3;
 const TELNYX_TOKEN_EXPIRING_SOON = 34_001;
 const TELNYX_LOGIN_FAILED = 46_001;
@@ -207,6 +209,7 @@ export function mapTelnyxCallState(
 
 export class JitterCallTransport implements CallTransport {
   private listener: ((state: CallTransportState) => void) | null = null;
+  private providerStatusErrorListener: ((error: ProviderStatusPollError) => void) | null = null;
   private currentState: CallTransportState | null = null;
   private callId: string | null = null;
   private startIntentCapability: string | null = null;
@@ -294,6 +297,10 @@ export class JitterCallTransport implements CallTransport {
 
   onStateChange(cb: (state: CallTransportState) => void): void {
     this.listener = cb;
+  }
+
+  onProviderStatusError(cb: (error: ProviderStatusPollError) => void): void {
+    this.providerStatusErrorListener = cb;
   }
 
   callHandle(): CallHandle | null {
@@ -1291,34 +1298,34 @@ export class JitterCallTransport implements CallTransport {
     this.providerProofInFlight = true;
     const proofGeneration = this.providerProofGeneration;
     try {
-      for (let attempt = 0; attempt <= JITTER_PROVIDER_PROOF_BACKOFF_MS.length; attempt += 1) {
-        let result: JitterProxyResult<JitterProviderStatusResponse> | undefined;
-        try {
-          result = await this.dependencies.getProviderStatus(callId);
-        } catch {
-          // Missing proof is recoverable and retried persistently.
-        }
-        if (
-          this.callId !== callId ||
-          this.providerProofGeneration !== proofGeneration ||
-          this.terminal ||
-          this.hangupRequested
-        ) return;
-        if (result?.ok && result.data.state === "terminal") {
-          const outcome = result.data.outcome ?? "ended";
-          this.terminal = outcome;
-          this.terminalAt ??= this.dependencies.now();
-          this.lastTeardownConfirmed = true;
-          this.terminalAuthorityConfirmed = true;
-          this.lifecycleGeneration += 1;
-          this.emit(outcome);
-          this.destroyRtc();
-          return;
-        }
-        const delayMs = JITTER_PROVIDER_PROOF_BACKOFF_MS[attempt];
-        if (delayMs !== undefined) await this.dependencies.sleep(delayMs);
+      let result: JitterProxyResult<JitterProviderStatusResponse> | undefined;
+      try {
+        result = await this.dependencies.getProviderStatus(callId);
+      } catch (error) {
+        this.reportProviderStatusPollError({ status: 0, errorCode: "provider_status_poll_threw" }, error);
       }
       if (this.providerProofGeneration !== proofGeneration) return;
+      if (result && !result.ok) this.reportProviderStatusPollError(
+        { status: result.status, errorCode: result.errorCode },
+        new Error(result.error),
+      );
+      if (
+        this.callId !== callId ||
+        this.providerProofGeneration !== proofGeneration ||
+        this.terminal ||
+        this.hangupRequested
+      ) return;
+      if (result?.ok && result.data.state === "terminal") {
+        const outcome = result.data.outcome ?? "ended";
+        this.terminal = outcome;
+        this.terminalAt ??= this.dependencies.now();
+        this.lastTeardownConfirmed = true;
+        this.terminalAuthorityConfirmed = true;
+        this.lifecycleGeneration += 1;
+        this.emit(outcome);
+        this.destroyRtc();
+        return;
+      }
       // Active/unknown provider truth must not interrupt an in-progress
       // browser recovery or clear its no-Attach/media deadline. The call is
       // already visibly reconnecting; keep terminal-proof polling independent.
@@ -1328,11 +1335,31 @@ export class JitterCallTransport implements CallTransport {
         this.providerProofRetryTimer = setTimeout(() => {
           this.providerProofRetryTimer = null;
           void this.reconcileRetainedProviderProof(callId);
-        }, 10_000);
+        }, JITTER_RETAINED_PROVIDER_POLL_MS);
       }
     } finally {
       if (this.providerProofGeneration === proofGeneration) this.providerProofInFlight = false;
     }
+  }
+
+  private reportProviderStatusPollError(
+    details: ProviderStatusPollError,
+    error: unknown,
+  ): void {
+    // Provider state is observability, not teardown authority. Surface every
+    // failed poll while retaining the call capability and continuing polling.
+    console.error("[softphone] retained provider-status poll failed", details);
+    // Sandra's client Sentry runtime is optional in local/synthetic builds.
+    // Do not import the server reporter here: its Node-only transitive code
+    // must never enter the browser softphone bundle.
+    const sentry = (globalThis as typeof globalThis & {
+      Sentry?: { captureException: (exception: unknown, context: { tags: Record<string, string>; extra: ProviderStatusPollError }) => void };
+    }).Sentry;
+    sentry?.captureException(error, {
+      tags: { surface: "softphone_retained_provider_status_poll" },
+      extra: details,
+    });
+    this.providerStatusErrorListener?.(details);
   }
 
   private async acceptActiveCall(call: TelnyxCallLike): Promise<void> {

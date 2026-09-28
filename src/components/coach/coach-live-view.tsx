@@ -54,6 +54,9 @@ export type CoachLiveViewProps = {
   held: boolean;
   holdPending: boolean;
   endingCall?: boolean;
+  /** Hydrated calls remain neutral until Jitter returns terminal proof or the initial check window expires. */
+  checkingCallStatus?: boolean;
+  providerStatusErrorCode?: string | null;
   onDigit: (digit: DtmfDigit) => void;
   onMute: () => void;
   onHold: () => void;
@@ -140,6 +143,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     held,
     holdPending,
     endingCall = false,
+    checkingCallStatus = false,
+    providerStatusErrorCode = null,
     onDigit,
     onMute,
     onHold,
@@ -332,9 +337,9 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         showPhaseScroller={!scriptV2Enabled}
         scriptRefLabel={scriptV2Enabled && session.scriptBinding ? `${session.scriptBinding.ref.slug}@${session.scriptBinding.ref.revision} · locked for this call` : null}
       />
-      {callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
+      {checkingCallStatus || callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
         <div role="alert" data-testid="coach-audio-reconnect-warning" className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-2 text-xs font-semibold text-[var(--coach-amber-text)]">
-          <span>{callStatus === "audio_reconnecting" ? "Call live · reconnecting browser audio…" : "Call live · audio interrupted"}</span>
+          <span>{checkingCallStatus ? "Checking call status…" : callStatus === "audio_reconnecting" ? "Call live · reconnecting browser audio…" : "Call live · audio interrupted"}{providerStatusErrorCode ? <small className="ml-2 font-medium">Status check: {providerStatusErrorCode}</small> : null}</span>
           <div className="flex shrink-0 items-center gap-2">
             {onReconnectAudio ? (
               <button

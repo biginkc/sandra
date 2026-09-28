@@ -558,6 +558,7 @@ describe("SoftphoneProvider transport gate", () => {
     await user.click(screen.getByTestId("reconnect-audio"));
     expect(reconnectAudio).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Reconnecting browser audio");
+    expect(screen.getByTestId("reconnect-audio")).toBeDisabled();
     expect(hangup).not.toHaveBeenCalled();
 
     act(() => listener?.("live"));
@@ -1278,6 +1279,56 @@ describe("SoftphoneProvider coach UI flag", () => {
       expect(recover).toHaveBeenCalled();
       await waitFor(() => expect(coachChannels).toHaveLength(1));
     } finally { window.sessionStorage.clear(); }
+  });
+
+  it("shows a neutral retained-call check for 15 seconds, preserves its capability, and lets the header open coach", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+      transportEnabled.mockReturnValue(true);
+      vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+      loadCoachCallScript.mockResolvedValue({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
+      window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: false }));
+      const prepared = await prepareLeadCall();
+      window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({ handle: { id: "retained" }, target: prepared.data, startedAt: new Date().toISOString(), wrapToken: "retained-token" }));
+      const reconnectAudio = vi.fn(async () => true);
+      const hangup = vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const }));
+      const transport = { ...createTransport(), recover: vi.fn(async () => undefined), reconnectAudio, hangup, onProviderStatusError: vi.fn((callback) => callback({ status: 400, errorCode: "provider_status_bad_request" })) };
+
+      render(<SoftphoneProvider transportFactory={() => transport}><SoftphoneHeaderButton /></SoftphoneProvider>);
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Checking call status…");
+      expect(screen.getByTestId("reconnect-audio")).toBeEnabled();
+      expect(screen.getByTestId("call-hangup")).toBeEnabled();
+      expect(screen.getByTestId("provider-status-error-code")).toHaveTextContent("provider_status_bad_request");
+      expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).not.toBeNull();
+      act(() => screen.getByTestId("header-dialer-button").click());
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.getByTestId("coach-live-view")).toBeVisible();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+      expect(screen.getByTestId("coach-audio-reconnect-warning")).toHaveTextContent("Call live · audio interrupted");
+      expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the retained capability only after a successful user Hang Up", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+    transportEnabled.mockReturnValue(true);
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "0");
+    const prepared = await prepareLeadCall();
+    window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({ handle: { id: "retained" }, target: prepared.data, startedAt: new Date().toISOString(), wrapToken: "retained-token" }));
+    const hangup = vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const }));
+    const transport = { ...createTransport(), recover: vi.fn(async () => undefined), hangup };
+    const user = userEvent.setup();
+
+    render(<SoftphoneProvider transportFactory={() => transport}><SoftphoneHeaderButton /></SoftphoneProvider>);
+    await screen.findByTestId("call-hangup");
+    await user.click(screen.getByTestId("call-hangup"));
+    await waitFor(() => expect(hangup).toHaveBeenCalledOnce());
+    expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toBeNull();
   });
 
   it("shows the full-screen coach view instead of the classic popover when the flag is on and the call goes live", async () => {
