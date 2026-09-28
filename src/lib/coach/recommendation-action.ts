@@ -6,9 +6,13 @@ import type { ScriptBundle } from "@biginkc/coach";
 import { loadCoachCallContext } from "./coach-context-actions";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { CoachRecommendationRequest, CoachRecommendationResult } from "./recommendation-types";
+import type { CoachRecommendationResult } from "./recommendation-types";
 import { createRuntimeCacheCoachRecommendationLimiter } from "./recommendation-runtime-limiter";
-import { requestCoachRecommendationsWithDeps } from "./recommendation-server";
+import {
+  invalidCoachRecommendationRequestResult,
+  parseCoachRecommendationRequest,
+  requestCoachRecommendationsWithDeps,
+} from "./recommendation-server";
 
 type CoachCallIndexQuery = {
   select(columns: string): CoachCallIndexQuery;
@@ -26,8 +30,26 @@ type CoachCallIndexClient = {
 const limiter = createRuntimeCacheCoachRecommendationLimiter();
 
 export async function requestCoachRecommendations(
-  input: CoachRecommendationRequest,
+  rawInput: unknown,
 ): Promise<CoachRecommendationResult> {
+  const input = parseCoachRecommendationRequest(rawInput);
+  if (!input) return invalidCoachRecommendationRequestResult();
+
+  // Recommendations are deliberately an explicit server-side opt-in. Keep
+  // the live script and transcript flow available while preventing a disabled
+  // recommendation surface from authenticating, reading call data, or
+  // constructing a provider client.
+  if (process.env.COACH_RECOMMENDATIONS_ENABLED !== "1") {
+    return {
+      ok: false,
+      requestId: input.requestId,
+      callId: input.callId,
+      activeSectionId: input.activeSectionId,
+      mode: input.mode,
+      code: "provider_error",
+    };
+  }
+
   const supabase = await createClient();
   const coachIndex = supabase as unknown as CoachCallIndexClient;
 

@@ -162,6 +162,22 @@ function failure(
   return { ok: false, ...safeEnvelope(input), code };
 }
 
+/**
+ * Server actions are untrusted entry points. Do not reflect any portion of a
+ * request that failed shape validation, including identifiers that might have
+ * been supplied alongside sensitive transcript content.
+ */
+export function invalidCoachRecommendationRequestResult(): CoachRecommendationResult {
+  return {
+    ok: false,
+    requestId: "invalid",
+    callId: "invalid",
+    activeSectionId: "invalid",
+    mode: "automatic",
+    code: "invalid_request",
+  };
+}
+
 function isValidTranscriptLine(value: unknown): value is CoachRecommendationTranscriptLine {
   return (
     isRecord(value) &&
@@ -174,7 +190,7 @@ function isValidTranscriptLine(value: unknown): value is CoachRecommendationTran
   );
 }
 
-function parseRequest(input: unknown): CoachRecommendationRequest | null {
+export function parseCoachRecommendationRequest(input: unknown): CoachRecommendationRequest | null {
   if (!isRecord(input)) return null;
   if (
     typeof input.requestId !== "string" ||
@@ -448,8 +464,8 @@ export async function requestCoachRecommendationsWithDeps(
   rawInput: unknown,
   deps: CoachRecommendationServerDeps,
 ): Promise<CoachRecommendationResult> {
-  const input = parseRequest(rawInput);
-  if (!input) return failure(rawInput, "invalid_request");
+  const input = parseCoachRecommendationRequest(rawInput);
+  if (!input) return invalidCoachRecommendationRequestResult();
 
   // Reject malformed or unusable request data before auth or any database
   // reads. The section itself is intentionally checked later because it is
