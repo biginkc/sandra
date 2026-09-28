@@ -328,10 +328,14 @@ describe("useCoachChannel", () => {
     expect(result.current.degraded).toBe(true);
   });
 
-  it("keeps a normal strict transcript while its binding is pending, while warning that coaching events may have been missed", async () => {
+  it("replays a strict transcript that arrives before its binding resolves without a missed-events warning", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
-    const { result } = renderHook(() =>
-      useRuntimeCoachChannel("call-pending-binding", null, "introduction", true, "call-pending-binding", true),
+    const { result, rerender } = renderHook(({ callBinding, bindingPending }: {
+      callBinding: typeof binding | null;
+      bindingPending: boolean;
+    }) =>
+      useRuntimeCoachChannel("call-pending-binding", callBinding, "introduction", true, "call-pending-binding", bindingPending),
+      { initialProps: { callBinding: null as typeof binding | null, bindingPending: true } },
     );
     await flush();
     act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
@@ -341,17 +345,49 @@ describe("useCoachChannel", () => {
       payload: { type: "transcript", speaker: "seller", text: "Please keep the transcript.", isFinal: true, ts: "t1", ...STRICT_V },
     }));
 
-    expect(result.current.bindingMissedEvents).toBe(true);
+    expect(result.current.bindingMissedEvents).toBe(false);
     expect(result.current.reconnectGap).toBe(false);
-    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["Please keep the transcript."]);
+    expect(result.current.state.transcript).toEqual([]);
     expect(result.current.state.currentPhaseId).toBe("introduction");
     expect(result.current.state.cursor).toBeNull();
     expect(result.current.state.connected).toBe(false);
     expect(result.current.state.lastEventAt).toBeNull();
     expect(result.current.degraded).toBe(false);
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(5_001); });
+    rerender({ callBinding: binding, bindingPending: false });
+    await flush();
+    expect(result.current.bindingMissedEvents).toBe(false);
+    expect(result.current.state.transcript.map((line) => line.text)).toEqual(["Please keep the transcript."]);
+    expect(result.current.state.connected).toBe(true);
+    expect(result.current.state.lastEventAt).not.toBeNull();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_001); });
     expect(result.current.degraded).toBe(true);
+  });
+
+  it("rejects a buffered strict event whose digest mismatches the resolved binding", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result, rerender } = renderHook(({ callBinding, bindingPending }: {
+      callBinding: typeof binding | null;
+      bindingPending: boolean;
+    }) =>
+      useRuntimeCoachChannel("call-pending-mismatch", callBinding, "introduction", true, "call-pending-mismatch", bindingPending),
+      { initialProps: { callBinding: null as typeof binding | null, bindingPending: true } },
+    );
+    await flush();
+    act(() => latestChannel()._subscribeCallback?.(REALTIME_SUBSCRIBE_STATES.SUBSCRIBED));
+
+    act(() => latestChannel()._broadcastHandler?.({
+      payload: { type: "transcript", speaker: "seller", text: "Wrong bound script.", isFinal: true, ts: "t1", ...STRICT_V, scriptDigest: "f".repeat(64) },
+    }));
+    expect(result.current.state.transcript).toEqual([]);
+
+    rerender({ callBinding: binding, bindingPending: false });
+    await flush();
+    expect(result.current.bindingMissedEvents).toBe(true);
+    expect(result.current.scriptOutOfSync).toBe(STRICT_V.scriptVersion);
+    expect(result.current.state.transcript).toEqual([]);
+    expect(result.current.state.connected).toBe(false);
   });
 
   it("keeps an explicit unbound transcript when Sandra has no binding without treating it as live coaching", async () => {

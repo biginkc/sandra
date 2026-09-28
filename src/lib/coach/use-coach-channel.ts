@@ -18,6 +18,9 @@ const LIVENESS_WINDOW_MS = 15_000;
 const COACH_BROADCAST_EVENT = "coach_event";
 /** Resubscribe backoff after CHANNEL_ERROR/TIMED_OUT/CLOSED. */
 const RESUBSCRIBE_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+/** Preserve the short binding lookup window without turning it into an
+ * unbounded client-side event queue. */
+const MAX_PENDING_BINDING_EVENTS = 200;
 
 function isStrictlyBoundEvent(
   event: CoachEvent,
@@ -84,9 +87,10 @@ function isUnboundTranscript(
  * retained in transcript state only; it cannot prove the producer identity,
  * reset liveness, or update script-derived state. That preserves the call
  * record without presenting an unverified stream as live coaching.
- * `bindingMissedEvents` separately records valid wire events that arrived
- * before the binding loaded. That is a missed-event warning, not a
- * reconnection: the transport never necessarily failed.
+ * Valid bound events that arrive during the short binding lookup are buffered
+ * and verified against the immutable digest once it resolves. `bindingMissedEvents`
+ * records only an actual rejection or a bounded-buffer overflow; it is not a
+ * reconnection warning because the transport never necessarily failed.
  */
 export function useCoachChannel(
   callId: string | null,
@@ -104,6 +108,7 @@ export function useCoachChannel(
   const [bindingMissedEvents, setBindingMissedEvents] = useState(false);
   const bindingRef = useRef(binding);
   const bindingPendingRef = useRef(bindingPending);
+  const pendingBindingEventsRef = useRef<unknown[]>([]);
   const livenessActiveRef = useRef(livenessActive);
   const livenessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -118,6 +123,11 @@ export function useCoachChannel(
   useEffect(() => {
     bindingPendingRef.current = bindingPending;
   }, [bindingPending]);
+
+  // A fresh call must never replay an event captured for its predecessor.
+  useEffect(() => {
+    pendingBindingEventsRef.current = [];
+  }, [sessionKey]);
 
   const clearLivenessTimer = useCallback(() => {
     if (livenessTimerRef.current !== null) {
@@ -171,6 +181,103 @@ export function useCoachChannel(
     if (livenessActive) armLiveness();
     return clearLivenessTimer;
   }, [armLiveness, clearLivenessTimer, livenessActive]);
+
+  const processBroadcastPayload = useCallback((payload: unknown, allowPendingBuffer = true) => {
+    const activeBinding = bindingRef.current;
+    const result = parseCoachEvent(payload, activeBinding?.bundle ?? null);
+    if (!result.ok) {
+      if (result.reason === "malformed") {
+        setMalformedEventCount((value) => value + 1);
+        console.warn("[coach] dropped malformed event", result.rawType, payload);
+      }
+      // Only a VALIDATED event counts as liveness proof — armLiveness
+      // /setDegraded(false) run below, never here. Malformed traffic
+      // (or a genuinely unknown forward-compat type) proves bytes are
+      // arriving, not that the contract is intact; a run of garbage
+      // must surface as degraded, not keep resetting the 15s window
+      // and reporting a healthy feed.
+      return;
+    }
+
+    const isExplicitUnboundTranscript = result.event.type === "transcript"
+      && result.event.scriptVersion === null
+      && result.event.scriptDigest === null;
+    // A normally identified transcript is only transcript-only after the
+    // binding lookup finishes unavailable. While it is pending, defer it to
+    // the exact bound digest check just like every other bound event.
+    const allowUnboundTranscript = isUnboundTranscript(result.event, activeBinding)
+      && (isExplicitUnboundTranscript || !bindingPendingRef.current);
+    // An explicit null identity is deliberately transcript-only whether or
+    // not a binding lookup is pending. It is not a delayed bound event.
+    if (
+      allowPendingBuffer
+      && isCoachWireDigestStrict()
+      && !activeBinding
+      && bindingPendingRef.current
+      && !allowUnboundTranscript
+    ) {
+      if (pendingBindingEventsRef.current.length < MAX_PENDING_BINDING_EVENTS) {
+        pendingBindingEventsRef.current.push(payload);
+      } else {
+        // The oldest buffered event cannot be recovered safely; do not evict
+        // it and pretend the stream is complete.
+        setBindingMissedEvents(true);
+      }
+      return;
+    }
+
+    // This is intentionally BEFORE armLiveness()/setDegraded(false) and
+    // dispatch(). A same-version/wrong-digest event is just as untrusted as
+    // a wrong version; accepting it as liveness proof would hide a broken or
+    // crossed-call producer stream. The only fallback is an unbound
+    // transcript, handled below without those liveness or coaching effects.
+    if (!allowUnboundTranscript && !isStrictlyBoundEvent(result.event, activeBinding)) {
+      if (isCoachWireDigestStrict()) {
+        setScriptOutOfSync(result.event.scriptVersion ?? "unbound");
+        // A replayed event that fails the resolved immutable binding was
+        // genuinely lost to this call. A live, already-bound mismatch is
+        // still diagnosed via scriptOutOfSync, not mislabeled as a lookup
+        // gap.
+        if (!allowPendingBuffer) setBindingMissedEvents(true);
+      }
+      return;
+    }
+    if (allowUnboundTranscript && result.event.type === "transcript") {
+      // No local immutable identity exists to compare against this producer
+      // identity. Keep the independently useful transcript, but do not let
+      // it mutate phase/cursor/gates or claim the coach stream is live.
+      if (bindingPendingRef.current) {
+        setBindingMissedEvents(true);
+      } else {
+        setScriptOutOfSync(result.event.scriptVersion ?? "unbound");
+      }
+      dispatch({ type: "append_unbound_transcript", event: result.event });
+      return;
+    }
+    armLiveness();
+    setDegraded(false);
+    // reconnectGap is NOT cleared here. It represents events that were
+    // unrecoverably missed while disconnected — a fresh event proves the
+    // feed is current again, not that nothing was lost in between. Only
+    // dismissReconnectGap (an explicit rep acknowledgment) clears it.
+    setScriptOutOfSync(
+      activeBinding && result.event.scriptVersion === activeBinding.bundle.script.version
+        ? null
+        : result.event.scriptVersion,
+    );
+    dispatch(result.event);
+  }, [armLiveness]);
+
+  // Replay in arrival order only after the refs above reflect the resolved
+  // immutable binding. Reusing the normal processor keeps R14 intact: every
+  // buffered event must pass the same exact version-and-digest check as a
+  // live event before it can affect state or liveness.
+  useEffect(() => {
+    if (bindingPending || pendingBindingEventsRef.current.length === 0) return;
+    const bufferedEvents = pendingBindingEventsRef.current;
+    pendingBindingEventsRef.current = [];
+    for (const payload of bufferedEvents) processBroadcastPayload(payload, false);
+  }, [binding, bindingPending, processBroadcastPayload]);
 
   useEffect(() => {
     if (!callId) return;
@@ -237,68 +344,7 @@ export function useCoachChannel(
         .channel(`coach:${callId}`, { config: { private: true } })
         .on("broadcast", { event: COACH_BROADCAST_EVENT }, (message) => {
           if (!mounted || myGeneration !== generation) return;
-          const activeBinding = bindingRef.current;
-          const result = parseCoachEvent(message.payload, activeBinding?.bundle ?? null);
-          if (!result.ok) {
-            if (result.reason === "malformed") {
-              setMalformedEventCount((value) => value + 1);
-              console.warn("[coach] dropped malformed event", result.rawType, message.payload);
-            }
-            // Only a VALIDATED event counts as liveness proof — armLiveness
-            // /setDegraded(false) run below, never here. Malformed traffic
-            // (or a genuinely unknown forward-compat type) proves bytes are
-            // arriving, not that the contract is intact; a run of garbage
-            // must surface as degraded, not keep resetting the 15s window
-            // and reporting a healthy feed.
-            return;
-          }
-          const allowUnboundTranscript = isUnboundTranscript(result.event, activeBinding);
-          // This is intentionally BEFORE armLiveness()/setDegraded(false)
-          // and dispatch(). A same-version/wrong-digest event is just as
-          // untrusted as a wrong version; accepting it as liveness proof
-          // would hide a broken or crossed-call producer stream. The only
-          // fallback is an unbound transcript, handled below without those
-          // liveness or coaching side effects.
-          if (!allowUnboundTranscript && !isStrictlyBoundEvent(result.event, activeBinding)) {
-            if (isCoachWireDigestStrict() && !activeBinding && bindingPendingRef.current) {
-              // The event passed the wire-shape validation but arrived in
-              // the bounded interval before this call's immutable binding
-              // loaded. It cannot safely be replayed or reduced later, so
-              // surface a persistent missed-events warning. Do not treat
-              // this as a reconnection and do not let it prove liveness.
-              setBindingMissedEvents(true);
-            } else if (isCoachWireDigestStrict()) {
-              setScriptOutOfSync(result.event.scriptVersion ?? "unbound");
-            }
-            return;
-          }
-          if (allowUnboundTranscript && result.event.type === "transcript") {
-            // No local immutable identity exists to compare against this
-            // producer identity. Keep the independently useful transcript,
-            // but do not let it mutate phase/cursor/gates or claim the coach
-            // stream is live. A pending lookup may still have skipped script
-            // events; an unavailable lookup is explicitly out of sync.
-            if (bindingPendingRef.current) {
-              setBindingMissedEvents(true);
-            } else {
-              setScriptOutOfSync(result.event.scriptVersion ?? "unbound");
-            }
-            dispatch({ type: "append_unbound_transcript", event: result.event });
-            return;
-          }
-          armLiveness();
-          setDegraded(false);
-          // reconnectGap is NOT cleared here. It represents events that
-          // were unrecoverably missed while disconnected — a fresh event
-          // proves the feed is current again, not that nothing was lost
-          // in between. Only dismissReconnectGap (an explicit rep
-          // acknowledgment) clears it.
-          setScriptOutOfSync(
-            activeBinding && result.event.scriptVersion === activeBinding.bundle.script.version
-              ? null
-              : result.event.scriptVersion,
-          );
-          dispatch(result.event);
+          processBroadcastPayload(message.payload);
         })
         .subscribe((status) => {
           if (!mounted || myGeneration !== generation) return;
@@ -352,7 +398,7 @@ export function useCoachChannel(
       // synchronously the way scheduleResubscribe's continuation does.
       void teardownChannel();
     };
-  }, [armLiveness, callId, clearLivenessTimer]);
+  }, [armLiveness, callId, clearLivenessTimer, processBroadcastPayload]);
 
   return {
     state,
