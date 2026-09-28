@@ -593,6 +593,38 @@ describe("SoftphoneProvider transport gate", () => {
     });
   });
 
+  it("clears the retained call after Hang Up succeeds", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    createTransport.mockImplementation(() => {
+      let listener: ((state: "ringing" | "live") => void) | null = null;
+      return { onStateChange: vi.fn((cb) => { listener = cb; }), callHandle: vi.fn(() => ({ id: "retained-call" })), start: vi.fn(async () => { listener?.("ringing"); listener?.("live"); return { id: "retained-call" }; }), mute: vi.fn(), hold: vi.fn(async () => true), reconnectAudio: vi.fn(async () => true), sendDigit: vi.fn(async () => true), hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })) };
+    });
+    const user = userEvent.setup();
+    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+    expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).not.toBeNull();
+    await user.click(screen.getByTestId("call-hangup"));
+    await waitFor(() => expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toBeNull());
+  });
+
+  it("checks a retained call before exposing live-call controls and clears terminal recovery", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+    transportEnabled.mockReturnValue(true);
+    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    const prepared = await prepareLeadCall();
+    window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({ handle: { id: "retained" }, target: prepared.data, startedAt: new Date().toISOString(), wrapToken: "retained-token" }));
+    let listener: ((state: "ended") => void) | null = null;
+    const transport = { onStateChange: vi.fn((cb) => { listener = cb; }), start: vi.fn(async () => ({ id: "retained" })), recover: vi.fn(async () => ({ id: "retained" })), mute: vi.fn(), hold: vi.fn(async () => false), reconnectAudio: vi.fn(async () => false), sendDigit: vi.fn(async () => false), hangup: vi.fn(async () => ({ durationSeconds: 0, outcome: "connected_human" as const })) };
+    render(<SoftphoneProvider transportFactory={() => transport}><SoftphoneHeaderButton /></SoftphoneProvider>);
+    expect(await screen.findByTestId("call-checking")).toHaveTextContent("Checking call");
+    expect(screen.queryByTestId("audio-reconnect-warning")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("call-hangup")).not.toBeInTheDocument();
+    act(() => listener?.("ended"));
+    await waitFor(() => expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toBeNull());
+  });
+
   it.each([
     ["operator_busy", "You already have an active Jitter call."],
     ["not_callable", "This number is no longer callable."],
@@ -1269,8 +1301,10 @@ describe("SoftphoneProvider coach UI flag", () => {
     window.localStorage.clear();
     const prepared = await prepareLeadCall();
     window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({ handle: { id: "retained" }, target: prepared.data, startedAt: new Date().toISOString(), wrapToken: "retained-token" }));
-    const recover = vi.fn(async () => undefined);
-    const transport = { ...createTransport(), recover };
+    let recoveryListener: ((state: "audio_reconnect_required") => void) | null = null;
+    const recover = vi.fn(async () => { recoveryListener?.("audio_reconnect_required"); });
+    const onStateChange = vi.fn((listener) => { recoveryListener = listener; });
+    const transport = { ...createTransport(), recover, onStateChange };
     try {
       render(<SoftphoneProvider transportFactory={() => transport}><SoftphoneHeaderButton /></SoftphoneProvider>);
       await screen.findByTestId("reopen-coach");
