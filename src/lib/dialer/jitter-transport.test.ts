@@ -3126,8 +3126,9 @@ describe("JitterCallTransport", () => {
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
   });
 
-  it("restores a rehydrated provider-held call without automatically unholding it", async () => {
-    const harness = transportHarness();
+  it("restores a rehydrated provider-held call before provider proof confirms it", async () => {
+    const providerProof = deferred<JitterProxyResult<{ state: "terminal"; outcome: "ended" }>>();
+    const harness = transportHarness({ getProviderStatus: vi.fn(() => providerProof.promise) });
     const states: string[] = [];
     harness.transport.onStateChange((state) => states.push(state));
     await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
@@ -3138,6 +3139,32 @@ describe("JitterCallTransport", () => {
     await vi.waitFor(() => expect(states).toContain("hold_restored"));
     expect(recovered.unhold).not.toHaveBeenCalled();
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it("converges retained terminal proof even when no SDK call reattaches after reload", async () => {
+    vi.useFakeTimers();
+    try {
+      const getProviderStatus = vi.fn();
+      for (let attempt = 0; attempt < 11; attempt += 1)
+        getProviderStatus.mockResolvedValueOnce({ ok: true, data: { state: "active" } });
+      getProviderStatus.mockResolvedValueOnce({ ok: true, data: { state: "terminal", outcome: "ended" } });
+      const harness = transportHarness({ getProviderStatus });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+      expect(getProviderStatus).toHaveBeenCalledTimes(10);
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+      expect(getProviderStatus).toHaveBeenCalledTimes(12);
+      expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+      expect(harness.rtc.serverDisconnect).toHaveBeenCalledTimes(1);
+      expect(harness.rtc.disconnect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("ends retained recovery after bounded provider-status errors", async () => {

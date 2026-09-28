@@ -31,6 +31,15 @@ vi.mock("@/lib/dialer/actions", () => ({
 vi.mock("@/lib/dialer/jitter-actions", () => ({
   loadJitterSoftphoneCallerIds: loadCallerIds,
   mintJitterStartIntent: mintStartIntent,
+  startJitterSoftphoneCall: vi.fn(),
+  getJitterSoftphoneToken: vi.fn(),
+  getJitterSoftphoneProviderStatus: vi.fn(),
+  recoverJitterSoftphoneAudio: vi.fn(),
+  connectJitterSoftphoneCall: vi.fn(),
+  cancelJitterSoftphoneCall: vi.fn(),
+  cancelJitterSoftphoneCallByStartIntent: vi.fn(),
+  reportJitterSoftphoneAudioHealth: vi.fn(),
+  sendJitterSoftphoneDigit: vi.fn(),
 }));
 
 vi.mock("@/lib/dialer/dtmf-tone", () => ({ playDtmfTone }));
@@ -82,6 +91,11 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
+import {
+  JitterCallTransport,
+  type JitterTransportDependencies,
+} from "@/lib/dialer/jitter-transport";
+import type { JitterProxyResult } from "@/lib/dialer/jitter-contract";
 import { SoftphoneLeadButton } from "./softphone-lead-button";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "./softphone-provider";
 
@@ -615,14 +629,41 @@ describe("SoftphoneProvider transport gate", () => {
     prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
     const prepared = await prepareLeadCall();
     window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({ handle: { id: "retained" }, target: prepared.data, startedAt: new Date().toISOString(), wrapToken: "retained-token" }));
-    let listener: ((state: "ended") => void) | null = null;
-    const transport = { onStateChange: vi.fn((cb) => { listener = cb; }), start: vi.fn(async () => ({ id: "retained" })), recover: vi.fn(async () => ({ id: "retained" })), mute: vi.fn(), hold: vi.fn(async () => false), reconnectAudio: vi.fn(async () => false), sendDigit: vi.fn(async () => false), hangup: vi.fn(async () => ({ durationSeconds: 0, outcome: "connected_human" as const })) };
+    let resolveProviderStatus!: (value: JitterProxyResult<{ state: "terminal"; outcome: "ended" }>) => void;
+    const providerStatus = new Promise<JitterProxyResult<{ state: "terminal"; outcome: "ended" }>>((resolve) => {
+      resolveProviderStatus = resolve;
+    });
+    const dependencies: JitterTransportDependencies = {
+      prepareMicrophone: vi.fn(() => new Promise<void>(() => undefined)),
+      startCall: vi.fn(),
+      getToken: vi.fn(),
+      getProviderStatus: vi.fn(() => providerStatus),
+      recoverAudio: vi.fn(),
+      connect: vi.fn(),
+      cancel: vi.fn(),
+      reportAudioHealth: vi.fn(),
+      sendDigit: vi.fn(),
+      createRtcClient: vi.fn(),
+      createRemoteAudio: vi.fn(() => null),
+      subscribePageHide: vi.fn(() => vi.fn()),
+      sendCancelBeacon: vi.fn(() => false),
+      sleep: vi.fn(async () => undefined),
+      scheduleAudioHealth: vi.fn(() => vi.fn()),
+      now: () => Date.now(),
+      registrationTimeoutMs: 100,
+    };
+    const transport = new JitterCallTransport(dependencies);
     render(<SoftphoneProvider transportFactory={() => transport}><SoftphoneHeaderButton /></SoftphoneProvider>);
     expect(await screen.findByTestId("call-checking")).toHaveTextContent("Checking call");
     expect(screen.queryByTestId("audio-reconnect-warning")).not.toBeInTheDocument();
     expect(screen.queryByTestId("call-hangup")).not.toBeInTheDocument();
-    act(() => listener?.("ended"));
+    await act(async () => {
+      resolveProviderStatus({ ok: true, data: { state: "terminal", outcome: "ended" } });
+      await Promise.resolve();
+    });
     await waitFor(() => expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toBeNull());
+    expect(dependencies.getProviderStatus).toHaveBeenCalledWith("retained");
+    expect(dependencies.getProviderStatus).toHaveBeenCalledTimes(1);
   });
 
   it.each([

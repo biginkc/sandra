@@ -1326,9 +1326,22 @@ export class JitterCallTransport implements CallTransport {
         if (delayMs !== undefined) await this.dependencies.sleep(delayMs);
       }
       if (this.providerProofGeneration !== proofGeneration) return;
-      // An active provider result is sufficient to resume browser recovery.
-      // Only absent/error-only proof exhausts the retained capability.
-      if (this.retainedProviderConfirmed) return;
+      // Active proof keeps the retained call capability alive, but browser
+      // recovery can still fail to reattach. Continue exact provider polling
+      // until it becomes terminal or a recovered browser leg supersedes this
+      // generation in markAudioRecovered().
+      if (this.retainedProviderConfirmed) {
+        this.providerProofRetryTimer = setTimeout(() => {
+          this.providerProofRetryTimer = null;
+          if (
+            this.callId === callId &&
+            this.providerProofGeneration === proofGeneration &&
+            !this.terminal &&
+            !this.hangupRequested
+          ) void this.reconcileRetainedProviderProof(callId);
+        }, 10_000);
+        return;
+      }
       // A retained capability without any provider proof must not keep the
       // browser advertising a call forever. The bounded probe window is long
       // enough for Jitter's callback reconciliation; after that, retire it.
@@ -2048,6 +2061,7 @@ export class JitterCallTransport implements CallTransport {
       !this.retainedProviderConfirmed &&
       state !== "checking" &&
       state !== "audio_reconnecting" &&
+      state !== "hold_restored" &&
       state !== "ended" &&
       state !== "failed"
     ) return;
