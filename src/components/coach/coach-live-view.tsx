@@ -1,7 +1,6 @@
 "use client";
 
 import { ChevronLeftIcon, ChevronRightIcon, Loader2Icon, MicIcon, MicOffIcon, PauseIcon, PhoneOffIcon, PlayIcon, XIcon } from "lucide-react";
-import Image from "next/image";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { NavigatorState } from "@biginkc/coach/react";
 
@@ -479,7 +478,9 @@ function CoachTopBar({
         {scriptRefLabel ? <span data-testid="coach-script-ref-label" className="text-xs text-muted-foreground">{scriptRefLabel}</span> : null}
         <span data-testid="coach-powered-by-closer-lab" className="coach-powered-by-closer-lab">
           <span>Powered by</span>
-          <Image src="/brand/closer-lab-logo.svg" alt="Closer Lab" width={75} height={15} />
+          {/* This static logo must remain bundle-safe for the synthetic browser harness. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/brand/closer-lab-logo.svg" alt="Closer Lab" width={75} height={15} />
         </span>
       </div>
       <div className="coach-status" data-testid="coach-status-strip">
