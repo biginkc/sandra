@@ -107,7 +107,7 @@ const CALLER_ID_STORAGE_KEY = "sandra.softphone.caller-id.v1";
 const ACTIVE_CALL_STORAGE_KEY = "sandra.softphone.active-call.v1";
 const E164 = /^\+[1-9]\d{7,14}$/;
 type CallerIdState = "loading" | "ready" | "empty" | "error";
-type LiveCallStatus = "checking" | "connecting" | "ringing" | "live" | "audio_reconnecting" | "audio_reconnect_required" | "ended" | "failed";
+type LiveCallStatus = "connecting" | "ringing" | "live" | "audio_reconnecting" | "audio_reconnect_required" | "ended" | "failed";
 type RetainedActiveCall = {
   handle: CallHandle;
   target: SoftphoneTarget;
@@ -410,7 +410,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     setCoachCallId(retained.wrapToken);
     setSeconds(Math.max(0, Math.floor((Date.now() - Date.parse(retained.startedAt)) / 1000)));
     setPhone("live");
-    setCallStatus("checking");
+    setCallStatus("audio_reconnect_required");
     transport.onStateChange((status) => {
       if (status === "hold_restored") {
         heldRef.current = true;
@@ -453,7 +453,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
         setHoldPending(false);
         return;
       }
-      if (status === "checking" || status === "live" || status === "audio_reconnecting" || status === "audio_reconnect_required") {
+      if (status === "live" || status === "audio_reconnecting" || status === "audio_reconnect_required") {
         setCallStatus(status);
         return;
       }
@@ -840,7 +840,6 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     setEndingCall(true);
     try {
       const result = await transport.hangup();
-      forgetRetainedActiveCall();
       setCallOutcome(result.outcome);
       setFinalSeconds(result.durationSeconds);
       setCallStatus("ended");
@@ -985,7 +984,7 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
   return (
     <SoftphoneContext.Provider value={contextValue}>
       {children}
-      {typeof document !== "undefined" && phone !== "closed" && coachUiEnabled && isOnCall && callStatus !== "checking" && wrapToken && !coachCollapsed
+      {typeof document !== "undefined" && phone !== "closed" && coachUiEnabled && isOnCall && wrapToken && !coachCollapsed
         ? createPortal(
           <KeyedCoachLiveView
             session={coachSession}
@@ -1053,8 +1052,6 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
               />
             ) : phone === "preparing" ? (
               <PreparingView target={target} />
-            ) : callStatus === "checking" ? (
-              <CheckingCallView target={target} />
             ) : isOnCall ? (
               <LiveView target={target} callName={callName} callStatus={callStatus} seconds={seconds} muted={muted} held={held} holdPending={holdPending} endingCall={endingCall} keypadOpen={liveKeypadOpen} onToggleKeypad={() => setLiveKeypadOpen((value) => !value)} onDigit={sendLiveDigit} onMute={() => { void toggleMute(); }} onHold={() => { void toggleHold(); }} onReconnectAudio={() => { void reconnectAudio(); }} onHangup={hangup} coachAvailable={coachUiEnabled} onReopenCoach={() => { updateCoachPreference({ ...coachPreference, enabled: true }); setCoachCollapsed(false); }} />
             ) : (
@@ -1140,10 +1137,6 @@ function CallerIdControl({ callerIds, state, error, selected, onChange, onRetry 
 
 function PreparingView({ target }: { target: SoftphoneTarget | null }) {
   return <div data-testid="call-preparing" className="p-8 text-center"><span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-blue-800">Preparing call</span><div className="mt-4 text-lg font-extrabold">{target?.name || "Connecting…"}</div><div className="mt-1 text-xs text-[#78716c]">{target ? `${maskPhone(target.phoneE164)}${target.address ? ` · ${target.address}` : ""}` : "Checking call details and microphone…"}</div></div>;
-}
-
-function CheckingCallView({ target }: { target: SoftphoneTarget | null }) {
-  return <div data-testid="call-checking" className="p-8 text-center"><span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-[10px] font-extrabold uppercase tracking-[0.08em] text-blue-800">Checking call…</span><div className="mt-4 text-lg font-extrabold">{target?.name ?? "Checking call…"}</div><div className="mt-1 text-xs text-[#78716c]">Confirming whether this call is still live.</div></div>;
 }
 
 function LiveView({ target, callName, callStatus, seconds, muted, held, holdPending, endingCall, keypadOpen, onToggleKeypad, onDigit, onMute, onHold, onReconnectAudio, onHangup, coachAvailable, onReopenCoach }: { target: SoftphoneTarget | null; callName: string; callStatus: LiveCallStatus | null; seconds: number; muted: boolean; held: boolean; holdPending: boolean; endingCall: boolean; keypadOpen: boolean; onToggleKeypad: () => void; onDigit: (digit: DtmfDigit) => void; onMute: () => void; onHold: () => void; onReconnectAudio: () => void; onHangup: () => void; coachAvailable: boolean; onReopenCoach: () => void }) {
