@@ -620,10 +620,13 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       setCoachCallId(null);
       terminalPromise = (async () => {
         try {
-          forgetRetainedActiveCall();
           const terminalResult = transport.terminalIsAuthoritative?.()
             ? { durationSeconds: Math.max(0, Math.floor((Date.now() - Date.parse(result.data.startedAt)) / 1000)), outcome: kind === "ended" ? "connected_human" as const : "failed" as const }
             : await transport.hangup();
+          // A failed cancellation leaves a live provider leg possible. Keep
+          // its reload capability until the transport has terminal proof.
+          if (transport.terminalIsAuthoritative?.() ?? true)
+            forgetRetainedActiveCall();
           setCallOutcome(kind === "failed" ? "failed" : terminalResult.outcome);
           setFinalSeconds(terminalResult.durationSeconds);
           setWrapToken((value) => value ?? crypto.randomUUID());
@@ -856,7 +859,8 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
       const result = await transport.hangup();
       // A user-initiated hangup only retires the retained capability after
       // Jitter has acknowledged that explicit cleanup.
-      forgetRetainedActiveCall();
+      if (transport.terminalIsAuthoritative?.() ?? true)
+        forgetRetainedActiveCall();
       setRetainedStatusChecking(false);
       setCallOutcome(result.outcome);
       setFinalSeconds(result.durationSeconds);
@@ -875,6 +879,8 @@ export function SoftphoneProvider({ children, transportFactory = createSoftphone
     setPending(true);
     try {
       await transport.hangup();
+      if (transport.terminalIsAuthoritative?.() ?? true)
+        forgetRetainedActiveCall();
     } finally {
       setPending(false);
     }

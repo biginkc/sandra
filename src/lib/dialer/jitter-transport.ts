@@ -1,3 +1,5 @@
+import * as Sentry from "@sentry/nextjs";
+
 import {
   cancelJitterSoftphoneCall,
   cancelJitterSoftphoneCallByStartIntent,
@@ -1299,22 +1301,29 @@ export class JitterCallTransport implements CallTransport {
     const proofGeneration = this.providerProofGeneration;
     try {
       let result: JitterProxyResult<JitterProviderStatusResponse> | undefined;
+      let thrownPollError: unknown;
       try {
         result = await this.dependencies.getProviderStatus(callId);
       } catch (error) {
-        this.reportProviderStatusPollError({ status: 0, errorCode: "provider_status_poll_threw" }, error);
+        thrownPollError = error;
       }
-      if (this.providerProofGeneration !== proofGeneration) return;
-      if (result && !result.ok) this.reportProviderStatusPollError(
-        { status: result.status, errorCode: result.errorCode },
-        new Error(result.error),
-      );
       if (
         this.callId !== callId ||
         this.providerProofGeneration !== proofGeneration ||
         this.terminal ||
         this.hangupRequested
       ) return;
+      if (thrownPollError) {
+        this.reportProviderStatusPollError(
+          { status: 0, errorCode: "provider_status_poll_threw" },
+          thrownPollError,
+        );
+      } else if (result && !result.ok) {
+        this.reportProviderStatusPollError(
+          { status: result.status, errorCode: result.errorCode },
+          new Error(result.error),
+        );
+      }
       if (result?.ok && result.data.state === "terminal") {
         const outcome = result.data.outcome ?? "ended";
         this.terminal = outcome;
@@ -1349,13 +1358,12 @@ export class JitterCallTransport implements CallTransport {
     // Provider state is observability, not teardown authority. Surface every
     // failed poll while retaining the call capability and continuing polling.
     console.error("[softphone] retained provider-status poll failed", details);
-    // Sandra's client Sentry runtime is optional in local/synthetic builds.
-    // Do not import the server reporter here: its Node-only transitive code
-    // must never enter the browser softphone bundle.
-    const sentry = (globalThis as typeof globalThis & {
-      Sentry?: { captureException: (exception: unknown, context: { tags: Record<string, string>; extra: ProviderStatusPollError }) => void };
-    }).Sentry;
-    sentry?.captureException(error, {
+    Sentry.addBreadcrumb({
+      category: "softphone.retained_provider_status_poll",
+      level: "error",
+      data: details,
+    });
+    Sentry.captureException(error, {
       tags: { surface: "softphone_retained_provider_status_poll" },
       extra: details,
     });

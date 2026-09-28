@@ -816,6 +816,7 @@ describe("SoftphoneProvider transport gate", () => {
     });
     let resolveHangup!: (result: { durationSeconds: number; outcome: "failed" }) => void;
     let resolveRetry!: (result: { durationSeconds: number; outcome: "failed" }) => void;
+    let terminalAuthoritative = false;
     createTransport.mockImplementation(() => {
       let listener: ((state: "connecting" | "live" | "ended" | "teardown_unconfirmed" | "teardown_confirmed") => void) | null = null;
       let hangupAttempts = 0;
@@ -828,6 +829,7 @@ describe("SoftphoneProvider transport gate", () => {
         }),
         mute: vi.fn(),
         hold: vi.fn(async () => true),
+        terminalIsAuthoritative: vi.fn(() => terminalAuthoritative),
         hangup: vi.fn(() => {
           hangupAttempts += 1;
           if (hangupAttempts === 1) {
@@ -873,14 +875,17 @@ describe("SoftphoneProvider transport gate", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Jitter could not confirm that the call ended. Do not start another call yet",
     );
+    expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).not.toBeNull();
     await user.type(screen.getByTestId("dispo-notes"), "Left voicemail");
     expect(screen.getByTestId("dispo-not-interested")).toBeDisabled();
     await user.click(screen.getByTestId("retry-jitter-teardown"));
     expect(screen.getByTestId("retry-jitter-teardown")).toBeDisabled();
     expect(screen.getByTestId("retry-jitter-teardown")).toHaveTextContent("Retrying…");
+    terminalAuthoritative = true;
     act(() => { resolveRetry({ durationSeconds: 2, outcome: "failed" }); });
     await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
     expect(screen.getByTestId("dispo-not-interested")).toBeEnabled();
+    await waitFor(() => expect(window.sessionStorage.getItem("sandra.softphone.active-call.v1")).toBeNull());
   });
 
   afterEach(() => {
