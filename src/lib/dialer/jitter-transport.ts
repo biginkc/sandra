@@ -386,7 +386,15 @@ export class JitterCallTransport implements CallTransport {
       }
       await this.registerRtc(recoveryClient);
       if (!this.isRecoverySetupCurrent(recoveryGeneration, handle.id)) {
-        if (this.rtcClient === recoveryClient) this.destroyRtc();
+        // A Hang Up request is not provider-terminal authority.  In
+        // particular, a reload can receive ready while its cancel request is
+        // still in flight; retain that live RTC capability until Jitter (or a
+        // confirmed cancel) proves the leg is actually terminal.
+        if (
+          this.rtcClient === recoveryClient &&
+          !this.shouldRetainLiveRtcDuringUnconfirmedTeardown()
+        )
+          this.destroyRtc();
         return handle;
       }
       return handle;
@@ -481,6 +489,7 @@ export class JitterCallTransport implements CallTransport {
           this.recoveryAttachReady = false;
           this.recoveryAttachCandidates.clear();
           this.recoveryAttachAuthority = null;
+          this.boundRecoveryProviderCallControlId = null;
           this.beginRecoveryTimeout();
           this.expectedIncoming = true;
           this.answerStarted = false;
@@ -534,6 +543,10 @@ export class JitterCallTransport implements CallTransport {
         this.recoveryAttachReady = false;
         this.recoveryAttachCandidates.clear();
         this.recoveryAttachAuthority = null;
+        // The old browser-leg Attach is no longer an identity constraint once
+        // Jitter has accepted a new recovery operation. Its provider identity
+        // is re-proven below against this generation's registered response.
+        this.boundRecoveryProviderCallControlId = null;
         // In 2.27.1 this invokes only _closeConnection(). With
         // keepConnectionAliveOnSocketClose enabled the SDK reconnects the same
         // BrowserSession and handles the server Attach without Purge or BYE.
@@ -650,7 +663,10 @@ export class JitterCallTransport implements CallTransport {
       this.rtcClient = client;
       this.bindRtcEvents(client);
       await this.registerRtc(client);
-      if (!this.isReconnectCurrent(generation, client))
+      if (
+        !this.isReconnectCurrent(generation, client) &&
+        !this.shouldRetainLiveRtcDuringUnconfirmedTeardown()
+      )
         this.releaseRecoveryClient(client, audio);
     } catch (error) {
       if (client && this.rtcClient === client)
@@ -1299,6 +1315,16 @@ export class JitterCallTransport implements CallTransport {
     this.recoveryAttachCandidates.clear();
     this.recoveryAttachAuthority = null;
     this.expectedIncoming = false;
+    // Attach ambiguity is an audio-recovery failure, not proof that the
+    // provider leg ended. Never destroy the only live RTC capability (or
+    // discard its call object) before terminal authority is confirmed.
+    if (this.shouldRetainLiveRtcDuringUnconfirmedTeardown()) {
+      this.requireAudioReconnect(
+        new Error("Telnyx recovery returned ambiguous browser call identities."),
+      );
+      if (this.callId) void this.reconcileRetainedProviderProof(this.callId);
+      return;
+    }
     this.currentCall = null;
     this.currentCallId = null;
     this.boundRecoveryProviderCallControlId = null;
@@ -2340,6 +2366,10 @@ export class JitterCallTransport implements CallTransport {
     // navigation can beacon and retry cancellation.
     if (this.liveAt === null || this.terminalAuthorityConfirmed)
       this.destroyRtc(true);
+  }
+
+  private shouldRetainLiveRtcDuringUnconfirmedTeardown(): boolean {
+    return this.liveAt !== null && !this.terminalAuthorityConfirmed;
   }
 
   private onPageHide(): void {
