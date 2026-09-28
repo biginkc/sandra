@@ -27,7 +27,12 @@ BEGIN
  PERFORM inbox_reply_review.require_admission();
  RETURN inbox_reply_review.freeze(canonical_input,idempotency_key);
 END $$;
+CREATE FUNCTION public.inbox_reply_source_context(source_operation_id uuid) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
+BEGIN
+ PERFORM inbox_reply_review.require_admission();
+ RETURN inbox_reply_review.source_context(source_operation_id);
+END $$;
 REVOKE ALL ON FUNCTION inbox_reply_review.require_admission() FROM PUBLIC,anon,authenticated,service_role;
-REVOKE ALL ON FUNCTION public.inbox_capture_reply_recipients(uuid[]),public.inbox_freeze_reply_review(text,uuid) FROM PUBLIC,anon,service_role;
-GRANT EXECUTE ON FUNCTION public.inbox_capture_reply_recipients(uuid[]),public.inbox_freeze_reply_review(text,uuid) TO authenticated;
+REVOKE ALL ON FUNCTION public.inbox_capture_reply_recipients(uuid[]),public.inbox_freeze_reply_review(text,uuid),public.inbox_reply_source_context(uuid) FROM PUBLIC,anon,service_role;
+GRANT EXECUTE ON FUNCTION public.inbox_capture_reply_recipients(uuid[]),public.inbox_freeze_reply_review(text,uuid),public.inbox_reply_source_context(uuid) TO authenticated;
 COMMIT;

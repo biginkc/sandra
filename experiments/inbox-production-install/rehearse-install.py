@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Install or resume concurrent indexes in the marked candidate fixture only."""
-import argparse,hashlib,json,re,subprocess,time
+import argparse,hashlib,json,os,re,subprocess,time
 from pathlib import Path
-from fixture_db import guard,sql,literal
 P=Path(__file__).resolve().parent
-ap=argparse.ArgumentParser();ap.add_argument('--owned-fixture',action='store_true');ap.add_argument('--indexes-only',action='store_true');ap.add_argument('--rollback-probe',action='store_true');a=ap.parse_args()
+ap=argparse.ArgumentParser();ap.add_argument('--owned-fixture',action='store_true');ap.add_argument('--indexes-only',action='store_true');ap.add_argument('--rollback-probe',action='store_true');ap.add_argument('--target',choices=('release-db','http'),default=os.environ.get('INBOX_RELEASE_TARGET_PROFILE','release-db'));a=ap.parse_args()
 if not a.owned_fixture:raise SystemExit('Explicit owned fixture required')
+if a.target=='http':
+ from http_fixture_db import DATABASE,MARKER,guard,sql,ensure_concurrent_index
+else:
+ from fixture_db import DB as DATABASE,EXPECTED_MARKER as MARKER,guard,sql,ensure_concurrent_index
 guard();subprocess.run([__import__('sys').executable,str(P/'build.py')],check=True)
 installed=sql("SELECT to_regnamespace('inbox_control') IS NOT NULL")=='t'
 if not a.indexes_only:
@@ -44,5 +47,5 @@ except RuntimeError as e:
  if 'INBOX_NOT_READY' not in str(e):raise
 else:raise RuntimeError('Disabled API unexpectedly served')
 if sql("SELECT relreplident FROM pg_class WHERE oid='inbox_bridge.summaries'::regclass")!='f':raise RuntimeError('Narrow DTO lacks REPLICA IDENTITY FULL')
-(P/'install-evidence.json').write_text(json.dumps({'installed':True,'atomic_late_failure_probe':a.rollback_probe,'serving_enabled':False,'foundation_wall_seconds':elapsed,'concurrent_indexes':indexes,'source_sha256':hashlib.sha256((P/'generated/install-candidate.sql').read_bytes()).hexdigest(),'scope':'Owned new DB only; not production lock/performance acceptance'},indent=2)+'\n')
+(P/'install-evidence.json').write_text(json.dumps({'installed':True,'atomic_late_failure_probe':a.rollback_probe,'serving_enabled':False,'target_profile':a.target,'database':DATABASE,'marker':MARKER,'foundation_wall_seconds':elapsed,'concurrent_indexes':indexes,'source_sha256':hashlib.sha256((P/'generated/install-candidate.sql').read_bytes()).hexdigest(),'scope':'Owned new DB only; not production lock/performance acceptance'},indent=2)+'\n')
 print('Candidate installed, indexes valid, APIs disabled')

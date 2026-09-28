@@ -1,0 +1,182 @@
+{
+  "inbox_authenticated_detail.detail": [],
+  "inbox_authenticated_detail.detail_v2": [],
+  "inbox_backfill.batch": [],
+  "inbox_backfill.capture_collision": [],
+  "inbox_backfill.claim": [],
+  "inbox_backfill.fingerprint": [],
+  "inbox_backfill.inspect_collisions": [],
+  "inbox_backfill.readiness": [],
+  "inbox_backfill.start": [],
+  "inbox_bridge.assert_serving": [],
+  "inbox_bridge.authorize": [],
+  "inbox_bridge.authorize_serving": [],
+  "inbox_bridge.authorized_scope": [],
+  "inbox_bridge.bind_handle": [],
+  "inbox_bridge.capture_access": [],
+  "inbox_bridge.counts_typed": [],
+  "inbox_bridge.create_scope": [],
+  "inbox_bridge.finalize_scope": [],
+  "inbox_bridge.get_scope": [],
+  "inbox_bridge.matching": [],
+  "inbox_bridge.normalize_filter": [],
+  "inbox_bridge.outcome_counts": [],
+  "inbox_bridge.page": [],
+  "inbox_bridge.probe_current_workset": [],
+  "inbox_bridge.project": [],
+  "inbox_bridge.project_filter": [],
+  "inbox_bridge.scope_json": [],
+  "inbox_bridge.upsert_filter": [],
+  "inbox_capture_boundary.detail": [],
+  "inbox_control.admit_command": [],
+  "inbox_control.prune_expired_worksets": [],
+  "inbox_control.readiness": [],
+  "inbox_control.seed_baseline_batch": [],
+  "inbox_control.wake_due_expiries": [],
+  "inbox_maintained.claim_work": [],
+  "inbox_maintained.enqueue_dirty": [],
+  "inbox_maintained.finish_work": [],
+  "inbox_maintained.publish": [],
+  "inbox_maintained.snapshot": [],
+  "inbox_maintained.wake_expiry": [],
+  "inbox_message_capture.capture": [],
+  "inbox_message_capture.sender_id": [],
+  "inbox_parent.batch": [],
+  "inbox_parent.capture_parent": [],
+  "inbox_parent.capture_review": [],
+  "inbox_parent.claim": [],
+  "inbox_policy.bump": [],
+  "inbox_policy.capture_ai_disposition_reviews": [],
+  "inbox_policy.capture_consent_events": [],
+  "inbox_policy.capture_contacts": [],
+  "inbox_policy.capture_memberships": [],
+  "inbox_policy.capture_message_threads": [],
+  "inbox_policy.capture_properties": [],
+  "inbox_policy.capture_sms_phone_suppressions": [],
+  "inbox_policy.snapshot": [],
+  "inbox_policy.validate_key": [],
+  "inbox_read.acknowledge": [],
+  "inbox_read.authoritative_context": [],
+  "inbox_read.detail": [],
+  "inbox_read.history_page": [],
+  "inbox_read.prune_expired_boundaries": [],
+  "inbox_read.prune_expired_unknown_cursors": [],
+  "inbox_read.review_selection": [],
+  "inbox_read.unknown_history_page": [],
+  "inbox_read.unknown_history_values": [],
+  "inbox_safety.batch": [],
+  "inbox_safety.claim": [],
+  "inbox_safety.consent_capture": [],
+  "inbox_safety.suppression_capture": [],
+  "inbox_safety.thread_capture": [],
+  "inbox_summary_contract.compute": [],
+  "inbox_unknown_summary.compute": [],
+  "inbox_unknown_summary.propose_message_ids": [],
+  "public.inbox_acknowledge_read": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_authorize_sync": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_bind_sync_handle": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_capture_inbound_head": [],
+  "public.inbox_counts_v2": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_create_workset": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_create_workset_v2": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_get_sync_scope": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_guard_inbound_revision": [],
+  "public.inbox_history_page": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_outcome_counts_v1": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_probe_workset_updates": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_read_detail": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_review_selection": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_sync_finalize_v1": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_sync_snapshot_v1": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ],
+  "public.inbox_unknown_history_page": [
+    {
+      "grantable": false,
+      "grantee": "authenticated",
+      "privilege_type": "EXECUTE"
+    }
+  ]
+}

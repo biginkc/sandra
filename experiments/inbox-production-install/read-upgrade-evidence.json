@@ -1,0 +1,12 @@
+{
+  "status": "INSTALLED_CURRENT_SCHEMA_UPGRADE",
+  "upgrade": "current",
+  "packet_sha256": "c9e6a2ad1c9fb1f2fa1dc096be274981f5a51457457233f470923c12ed6cade0",
+  "packet_path": "experiments/inbox-production-install/generated/read-upgrade-current.sql",
+  "auth_upgrade_sha256": "c65046046b63d1e362476b617e01b72e9a2de09977e42732ec886e773a8ddcad",
+  "auth_upgrade_path": "experiments/inbox-production-install/generated/auth-upgrade.sql",
+  "database": "postgres",
+  "marker": "sandra-inbox-http-owned-synthetic-20260917",
+  "serving_enabled": false,
+  "scope": "Live owned http catalog proof after guarded existing-schema read upgrade; no production claim."
+}
