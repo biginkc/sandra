@@ -1,7 +1,26 @@
 "use client";
 
-import { ChevronLeftIcon, ChevronRightIcon, Loader2Icon, MicIcon, MicOffIcon, PauseIcon, PhoneOffIcon, PlayIcon, XIcon } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  Loader2Icon,
+  MicIcon,
+  MicOffIcon,
+  PauseIcon,
+  PhoneOffIcon,
+  PlayIcon,
+  XIcon,
+} from "lucide-react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { NavigatorState } from "@biginkc/coach/react";
 
 import { PhoneKeypad } from "@/components/softphone/phone-keypad";
@@ -20,7 +39,11 @@ import {
   type DisplayLine,
   type ScriptBranchBlock,
 } from "@/lib/coach/script-block";
-import { resolveCoachTokens, resolveFileNumber, type DisplayTextSegment } from "@/lib/coach/token-resolver";
+import {
+  resolveCoachTokens,
+  resolveFileNumber,
+  type DisplayTextSegment,
+} from "@/lib/coach/token-resolver";
 import type {
   CoachEntryToken,
   CoachHoldTimer,
@@ -30,7 +53,10 @@ import type {
   ResolvedTokens,
 } from "@/lib/coach/types";
 import { COACH_ENTRY_TOKENS } from "@/lib/coach/types";
-import type { CoachSession, ContextLoadState } from "@/lib/coach/use-coach-session";
+import type {
+  CoachSession,
+  ContextLoadState,
+} from "@/lib/coach/use-coach-session";
 import { isNearTranscriptBottom } from "@/lib/coach/transcript-scroll";
 import { isCoachScriptV2Enabled } from "@/lib/coach/flags";
 import { cn } from "@/lib/utils";
@@ -39,9 +65,21 @@ import { HoldTimer } from "./hold-timer";
 // The shared navigator has browser-only dependencies. Loading it lazily keeps
 // the legacy coach (including its synthetic audio harness) independent from
 // that module when the V2 flag is off.
-const ScriptNavigator = lazy(() => import("@biginkc/coach/react").then(({ ScriptNavigator: Navigator }) => ({ default: Navigator })));
+const ScriptNavigator = lazy(() =>
+  import("@biginkc/coach/react").then(({ ScriptNavigator: Navigator }) => ({
+    default: Navigator,
+  })),
+);
 
-export type CoachCallStatus = "connecting" | "ringing" | "live" | "audio_reconnecting" | "audio_reconnect_required" | "ended" | "failed" | null;
+export type CoachCallStatus =
+  | "connecting"
+  | "ringing"
+  | "live"
+  | "audio_reconnecting"
+  | "audio_reconnect_required"
+  | "ended"
+  | "failed"
+  | null;
 
 export type CoachLiveViewProps = {
   /** The persistent coach session — owned by the provider, not this view,
@@ -54,6 +92,9 @@ export type CoachLiveViewProps = {
   held: boolean;
   holdPending: boolean;
   endingCall?: boolean;
+  /** Hydrated calls remain neutral until Jitter returns terminal proof or the initial check window expires. */
+  checkingCallStatus?: boolean;
+  providerStatusErrorCode?: string | null;
   onDigit: (digit: DtmfDigit) => void;
   onMute: () => void;
   onHold: () => void;
@@ -125,7 +166,9 @@ function timerText(seconds: number): string {
  * a live path to rendering a note as speech, just relocated rather than
  * fixed. Every caller must treat null as "nothing to show" and render
  * nothing, never substitute the first line regardless of its type. */
-export function selectSpokenLine(branch: ScriptBranchBlock | null | undefined): DisplayLine | null {
+export function selectSpokenLine(
+  branch: ScriptBranchBlock | null | undefined,
+): DisplayLine | null {
   if (!branch) return null;
   return branch.selected.lines.find((line) => line.type === "say") ?? null;
 }
@@ -140,6 +183,8 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     held,
     holdPending,
     endingCall = false,
+    checkingCallStatus = false,
+    providerStatusErrorCode = null,
     onDigit,
     onMute,
     onHold,
@@ -179,52 +224,92 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   // knew and leaves only genuinely unavailable values as placeholders.
   const activeContext = contextLoad.context;
   const tokens: ResolvedTokens = useMemo(
-    () => bundle ? resolveCoachTokens(bundle.script.tokens, activeContext, state.entryFields) : {},
+    () =>
+      bundle
+        ? resolveCoachTokens(
+            bundle.script.tokens,
+            activeContext,
+            state.entryFields,
+          )
+        : {},
     [activeContext, bundle, state.entryFields],
   );
   const selectCtx: BranchSelectContext = useMemo(
-    () => ({ leadSource: activeContext.leadSource, occupancy: activeContext.occupancy }),
+    () => ({
+      leadSource: activeContext.leadSource,
+      occupancy: activeContext.occupancy,
+    }),
     [activeContext.leadSource, activeContext.occupancy],
   );
 
   const { scriptBlock, selectedVariants } = useMemo(() => {
-    const block = bundle ? buildCoachSectionScriptBlock(
-      bundle,
-      activeSectionId,
-      tokens,
-      selectCtx,
-      branchOverrides,
-      sectionBranchSelections[activeSectionId] ?? null,
-    ) : null;
+    const block = bundle
+      ? buildCoachSectionScriptBlock(
+          bundle,
+          activeSectionId,
+          tokens,
+          selectCtx,
+          branchOverrides,
+          sectionBranchSelections[activeSectionId] ?? null,
+        )
+      : null;
     return {
       scriptBlock: block,
       selectedVariants: Object.fromEntries(
-        (block?.branches ?? []).map((branch) => [branch.tag, branch.selected.key]),
+        (block?.branches ?? []).map((branch) => [
+          branch.tag,
+          branch.selected.key,
+        ]),
       ),
     };
-  }, [activeSectionId, branchOverrides, bundle, sectionBranchSelections, selectCtx, tokens]);
+  }, [
+    activeSectionId,
+    branchOverrides,
+    bundle,
+    sectionBranchSelections,
+    selectCtx,
+    tokens,
+  ]);
   const nextBlock = useMemo(
-    () => bundle && nextSectionId
-      ? buildCoachSectionScriptBlock(
-        bundle,
-        nextSectionId,
-        tokens,
-        selectCtx,
-        branchOverrides,
-        sectionBranchSelections[nextSectionId] ?? null,
-      )
-      : null,
-    [branchOverrides, bundle, nextSectionId, sectionBranchSelections, selectCtx, tokens],
+    () =>
+      bundle && nextSectionId
+        ? buildCoachSectionScriptBlock(
+            bundle,
+            nextSectionId,
+            tokens,
+            selectCtx,
+            branchOverrides,
+            sectionBranchSelections[nextSectionId] ?? null,
+          )
+        : null,
+    [
+      branchOverrides,
+      bundle,
+      nextSectionId,
+      sectionBranchSelections,
+      selectCtx,
+      tokens,
+    ],
   );
   // V2 owns its own navigator state. Use the exact initial state supplied to
   // that navigator until it reports its first update, so recommendation
   // grounding never briefly falls back to the legacy panel's selection.
-  const effectiveNavigatorState = useMemo<NavigatorState>(() => session.navigatorState ?? {
-    activeSectionId,
-    sectionBranchSelections,
-    branchOverrides,
-    entryFields: state.entryFields,
-  }, [activeSectionId, branchOverrides, sectionBranchSelections, session.navigatorState, state.entryFields]);
+  const effectiveNavigatorState = useMemo<NavigatorState>(
+    () =>
+      session.navigatorState ?? {
+        activeSectionId,
+        sectionBranchSelections,
+        branchOverrides,
+        entryFields: state.entryFields,
+      },
+    [
+      activeSectionId,
+      branchOverrides,
+      sectionBranchSelections,
+      session.navigatorState,
+      state.entryFields,
+    ],
+  );
   const recommendationSectionId = scriptV2Enabled
     ? effectiveNavigatorState.activeSectionId
     : activeSectionId;
@@ -232,39 +317,63 @@ export function CoachLiveView(props: CoachLiveViewProps) {
   // resolve tokens from the live context and navigator-owned entry fields,
   // then let the shared section resolver choose auto and manual variants.
   const navigatorTokens = useMemo(
-    () => bundle ? resolveCoachTokens(bundle.script.tokens, activeContext, effectiveNavigatorState.entryFields) : {},
+    () =>
+      bundle
+        ? resolveCoachTokens(
+            bundle.script.tokens,
+            activeContext,
+            effectiveNavigatorState.entryFields,
+          )
+        : {},
     [activeContext, bundle, effectiveNavigatorState.entryFields],
   );
   const recommendationNavigatorBlock = useMemo(
-    () => scriptV2Enabled && bundle
-      ? buildCoachSectionScriptBlock(
-        bundle,
-        effectiveNavigatorState.activeSectionId,
-        navigatorTokens,
-        selectCtx,
-        effectiveNavigatorState.branchOverrides,
-        effectiveNavigatorState.sectionBranchSelections[effectiveNavigatorState.activeSectionId] ?? null,
-      )
-      : null,
-    [bundle, effectiveNavigatorState, navigatorTokens, scriptV2Enabled, selectCtx],
+    () =>
+      scriptV2Enabled && bundle
+        ? buildCoachSectionScriptBlock(
+            bundle,
+            effectiveNavigatorState.activeSectionId,
+            navigatorTokens,
+            selectCtx,
+            effectiveNavigatorState.branchOverrides,
+            effectiveNavigatorState.sectionBranchSelections[
+              effectiveNavigatorState.activeSectionId
+            ] ?? null,
+          )
+        : null,
+    [
+      bundle,
+      effectiveNavigatorState,
+      navigatorTokens,
+      scriptV2Enabled,
+      selectCtx,
+    ],
   );
   const effectiveNavigatorVariants = useMemo(
     () => ({
       ...effectiveNavigatorState.branchOverrides,
       ...Object.fromEntries(
-        (recommendationNavigatorBlock?.branches ?? []).map((branch) => [branch.tag, branch.selected.key]),
+        (recommendationNavigatorBlock?.branches ?? []).map((branch) => [
+          branch.tag,
+          branch.selected.key,
+        ]),
       ),
     }),
     [effectiveNavigatorState.branchOverrides, recommendationNavigatorBlock],
   );
-  const activePhaseId = scriptBlock?.phaseId ?? bundle?.script.phases[0]?.id ?? "unavailable";
+  const activePhaseId =
+    scriptBlock?.phaseId ?? bundle?.script.phases[0]?.id ?? "unavailable";
   const recommendations = useCoachRecommendations({
     callId: session.callId,
     activeSectionId: recommendationSectionId,
     selectedSectionBranch: scriptV2Enabled
-      ? effectiveNavigatorState.sectionBranchSelections[recommendationSectionId] ?? null
-      : scriptBlock?.selectedBranchTag ?? null,
-    branchOverrides: scriptV2Enabled ? effectiveNavigatorVariants : selectedVariants,
+      ? (effectiveNavigatorState.sectionBranchSelections[
+          recommendationSectionId
+        ] ?? null)
+      : (scriptBlock?.selectedBranchTag ?? null),
+    branchOverrides: scriptV2Enabled
+      ? effectiveNavigatorVariants
+      : selectedVariants,
     transcript: state.transcript,
     request: recommendationRequest,
     continuity: session.recommendationContinuity,
@@ -281,7 +390,10 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       (token === "cold_caller_name" && !activeContext.coldCallerName?.trim()),
     [activeContext.coldCallerName, activeContext.motivation],
   );
-  const onSelectVariant = useCallback((tag: string, key: string) => selectVariant(tag, key), [selectVariant]);
+  const onSelectVariant = useCallback(
+    (tag: string, key: string) => selectVariant(tag, key),
+    [selectVariant],
+  );
 
   return (
     <Dialog
@@ -314,121 +426,192 @@ export function CoachLiveView(props: CoachLiveViewProps) {
         // (unlike the classic popover's "reopen coach" button, which only
         // exists once the collapse this very focus-move is part of has
         // finished committing).
-        finalFocus={() => document.querySelector<HTMLElement>('[data-testid="header-dialer-button"]') ?? false}
-        className={cn("inset-0 top-0 left-0 z-[80] flex h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none bg-background p-0 text-foreground ring-0 sm:max-w-none", scriptV2Enabled && "coach-script-v2")}
+        finalFocus={() =>
+          document.querySelector<HTMLElement>(
+            '[data-testid="header-dialer-button"]',
+          ) ?? false
+        }
+        className={cn(
+          "inset-0 top-0 left-0 z-[80] flex h-dvh w-screen max-w-none translate-x-0 translate-y-0 flex-col gap-0 rounded-none bg-background p-0 text-foreground ring-0 sm:max-w-none",
+          scriptV2Enabled && "coach-script-v2",
+        )}
       >
-      <DialogTitle className="sr-only">Live call coach</DialogTitle>
-      <CoachTopBar
-        callName={callName}
-        activePhaseId={activePhaseId}
-        onSelectPhase={goToPhase}
-        degraded={degraded}
-        callStatus={callStatus}
-        seconds={seconds}
-        held={held}
-        holdTimer={held ? state.holdTimer : null}
-        fileNumber={resolveFileNumber(activeContext)}
-        bundle={bundle}
-        showPhaseScroller={!scriptV2Enabled}
-        scriptRefLabel={scriptV2Enabled && session.scriptBinding ? `${session.scriptBinding.ref.slug}@${session.scriptBinding.ref.revision} · locked for this call` : null}
-      />
-      {callStatus === "audio_reconnecting" || callStatus === "audio_reconnect_required" ? (
-        <div role="alert" data-testid="coach-audio-reconnect-warning" className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-2 text-xs font-semibold text-[var(--coach-amber-text)]">
-          <span>{callStatus === "audio_reconnecting" ? "Call live · reconnecting browser audio…" : "Call live · audio interrupted"}</span>
-          <div className="flex shrink-0 items-center gap-2">
-            {onReconnectAudio ? (
+        <DialogTitle className="sr-only">Live call coach</DialogTitle>
+        <CoachTopBar
+          callName={callName}
+          activePhaseId={activePhaseId}
+          onSelectPhase={goToPhase}
+          degraded={degraded}
+          callStatus={callStatus}
+          seconds={seconds}
+          held={held}
+          holdTimer={held ? state.holdTimer : null}
+          fileNumber={resolveFileNumber(activeContext)}
+          bundle={bundle}
+          showPhaseScroller={!scriptV2Enabled}
+          scriptRefLabel={
+            scriptV2Enabled && session.scriptBinding
+              ? `${session.scriptBinding.ref.slug}@${session.scriptBinding.ref.revision} · locked for this call`
+              : null
+          }
+        />
+        {checkingCallStatus ||
+        callStatus === "audio_reconnecting" ||
+        callStatus === "audio_reconnect_required" ? (
+          <div
+            role="alert"
+            data-testid="coach-audio-reconnect-warning"
+            className={cn(
+              "flex shrink-0 items-center justify-between gap-3 border-b bg-card px-4 py-2 text-xs font-semibold",
+              checkingCallStatus
+                ? "border-border text-muted-foreground"
+                : "border-[var(--coach-amber)] text-[var(--coach-amber-text)]",
+            )}
+          >
+            <span>
+              {checkingCallStatus
+                ? "Checking call status…"
+                : callStatus === "audio_reconnecting"
+                  ? "Call live · reconnecting browser audio…"
+                  : "Call live · audio interrupted"}
+              {providerStatusErrorCode ? (
+                <small className="ml-2 font-medium">
+                  Status check: {providerStatusErrorCode}
+                </small>
+              ) : null}
+            </span>
+            <div className="flex shrink-0 items-center gap-2">
+              {onReconnectAudio ? (
+                <button
+                  type="button"
+                  data-testid="coach-reconnect-audio"
+                  onClick={onReconnectAudio}
+                  disabled={endingCall || callStatus === "audio_reconnecting"}
+                  className="rounded-md border border-[var(--coach-amber)] bg-card px-3 py-1.5 font-bold disabled:cursor-wait disabled:opacity-60"
+                >
+                  Reconnect Audio
+                </button>
+              ) : null}
               <button
                 type="button"
-                data-testid="coach-reconnect-audio"
-                onClick={onReconnectAudio}
-                disabled={endingCall || callStatus === "audio_reconnecting"}
-                className="rounded-md border border-[var(--coach-amber)] bg-card px-3 py-1.5 font-bold disabled:cursor-wait disabled:opacity-60"
+                data-testid="coach-warning-hangup"
+                disabled={endingCall}
+                aria-busy={endingCall}
+                onClick={onHangup}
+                className="rounded-md border border-destructive bg-destructive px-3 py-1.5 font-bold text-white disabled:cursor-wait disabled:opacity-60"
               >
-                Reconnect Audio
+                {endingCall ? "Ending call…" : "Hang Up"}
               </button>
-            ) : null}
+            </div>
+          </div>
+        ) : null}
+        {reconnectGap ? (
+          <div
+            role="status"
+            data-testid="coach-reconnect-gap"
+            className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-1.5 text-xs text-[var(--coach-amber-text)]"
+          >
+            <span>
+              Reconnected — some coach events may have been missed while
+              disconnected.
+            </span>
             <button
               type="button"
-              data-testid="coach-warning-hangup"
-              disabled={endingCall}
-              aria-busy={endingCall}
-              onClick={onHangup}
-              className="rounded-md border border-destructive bg-destructive px-3 py-1.5 font-bold text-white disabled:cursor-wait disabled:opacity-60"
+              data-testid="dismiss-reconnect-gap"
+              onClick={dismissReconnectGap}
+              className="font-bold underline"
             >
-              {endingCall ? "Ending call…" : "Hang Up"}
+              Dismiss
             </button>
           </div>
+        ) : null}
+        {bindingMissedEvents ? (
+          <div
+            role="status"
+            data-testid="coach-binding-missed-events"
+            className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-1.5 text-xs text-[var(--coach-amber-text)]"
+          >
+            <span>
+              Coach script was still loading — some coach events may have been
+              missed.
+            </span>
+            <button
+              type="button"
+              data-testid="dismiss-binding-missed-events"
+              onClick={dismissBindingMissedEvents}
+              className="font-bold underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto xl:grid xl:grid-cols-[380px_minmax(0,1fr)_320px] xl:overflow-hidden">
+          <TranscriptFeed lines={state.transcript} degraded={degraded} />
+          {scriptV2Enabled && bundle && session.scriptBinding ? (
+            <ScriptNavigatorPanel
+              bundle={bundle}
+              ref={session.scriptBinding.ref}
+              context={contextLoad.context}
+              initialState={
+                session.navigatorState ?? {
+                  activeSectionId,
+                  sectionBranchSelections,
+                  branchOverrides,
+                  entryFields: state.entryFields,
+                }
+              }
+              onStateChange={session.rememberNavigatorState}
+            />
+          ) : bundle ? (
+            <ScriptPanel
+              block={scriptBlock}
+              nextBlock={nextBlock}
+              degraded={degraded}
+              contextLoad={contextLoad}
+              canGoPrevious={canGoPrevious}
+              canGoNext={canGoNext}
+              onPrevious={goPreviousSection}
+              onNext={goNextSection}
+              onRetryContext={retryContext}
+              onEditEntry={onEditEntry}
+              isEntryTokenEditable={isEntryTokenEditable}
+              onBeginEntryEdit={() => setKeypadOpen(false)}
+              onSelectVariant={onSelectVariant}
+              onSelectSectionBranch={selectSectionBranch}
+              sectionIndex={Math.max(
+                0,
+                bundle.sections.sections.findIndex(
+                  (section) => section.id === scriptBlock?.sectionId,
+                ) + 1,
+              )}
+              sectionCount={bundle.sections.sections.length}
+            />
+          ) : session.scriptBindingStatus === "loading" ? (
+            <ScriptLoading />
+          ) : (
+            <ScriptUnavailable />
+          )}
+          <RecommendationsPanel
+            {...recommendations}
+            hasFinalSellerTranscript={state.transcript.some(
+              (line) => line.isFinal && line.speaker === "seller",
+            )}
+          />
         </div>
-      ) : null}
-      {reconnectGap ? (
-        <div
-          role="status"
-          data-testid="coach-reconnect-gap"
-          className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-1.5 text-xs text-[var(--coach-amber-text)]"
-        >
-          <span>Reconnected — some coach events may have been missed while disconnected.</span>
-          <button type="button" data-testid="dismiss-reconnect-gap" onClick={dismissReconnectGap} className="font-bold underline">
-            Dismiss
-          </button>
-        </div>
-      ) : null}
-      {bindingMissedEvents ? (
-        <div
-          role="status"
-          data-testid="coach-binding-missed-events"
-          className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--coach-amber)] bg-card px-4 py-1.5 text-xs text-[var(--coach-amber-text)]"
-        >
-          <span>Coach script was still loading — some coach events may have been missed.</span>
-          <button type="button" data-testid="dismiss-binding-missed-events" onClick={dismissBindingMissedEvents} className="font-bold underline">
-            Dismiss
-          </button>
-        </div>
-      ) : null}
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto xl:grid xl:grid-cols-[380px_minmax(0,1fr)_320px] xl:overflow-hidden">
-        <TranscriptFeed lines={state.transcript} degraded={degraded} />
-        {scriptV2Enabled && bundle && session.scriptBinding ? <ScriptNavigatorPanel
-          bundle={bundle}
-          ref={session.scriptBinding.ref}
-          context={contextLoad.context}
-          initialState={session.navigatorState ?? { activeSectionId, sectionBranchSelections, branchOverrides, entryFields: state.entryFields }}
-          onStateChange={session.rememberNavigatorState}
-        /> : bundle ? <ScriptPanel
-          block={scriptBlock}
-          nextBlock={nextBlock}
-          degraded={degraded}
-          contextLoad={contextLoad}
-          canGoPrevious={canGoPrevious}
-          canGoNext={canGoNext}
-          onPrevious={goPreviousSection}
-          onNext={goNextSection}
-          onRetryContext={retryContext}
-          onEditEntry={onEditEntry}
-          isEntryTokenEditable={isEntryTokenEditable}
-          onBeginEntryEdit={() => setKeypadOpen(false)}
-          onSelectVariant={onSelectVariant}
-          onSelectSectionBranch={selectSectionBranch}
-          sectionIndex={Math.max(0, bundle.sections.sections.findIndex((section) => section.id === scriptBlock?.sectionId) + 1)}
-          sectionCount={bundle.sections.sections.length}
-        /> : session.scriptBindingStatus === "loading" ? <ScriptLoading /> : <ScriptUnavailable />}
-        <RecommendationsPanel
-          {...recommendations}
-          hasFinalSellerTranscript={state.transcript.some((line) => line.isFinal && line.speaker === "seller")}
+        <CallControlDock
+          callStatus={callStatus}
+          muted={muted}
+          held={held}
+          holdPending={holdPending}
+          endingCall={endingCall}
+          onDigit={onDigit}
+          onMute={onMute}
+          onHold={onHold}
+          onHangup={onHangup}
+          onCollapse={onCollapse}
+          keypadOpen={keypadOpen}
+          onKeypadOpenChange={setKeypadOpen}
         />
-      </div>
-      <CallControlDock
-        callStatus={callStatus}
-        muted={muted}
-        held={held}
-        holdPending={holdPending}
-        endingCall={endingCall}
-        onDigit={onDigit}
-        onMute={onMute}
-        onHold={onHold}
-        onHangup={onHangup}
-        onCollapse={onCollapse}
-        keypadOpen={keypadOpen}
-        onKeypadOpenChange={setKeypadOpen}
-      />
       </DialogContent>
     </Dialog>
   );
@@ -461,89 +644,171 @@ function CoachTopBar({
   scriptRefLabel: string | null;
   showPhaseScroller: boolean;
 }) {
-  const preConnectLabel = callStatus === "connecting" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : null;
-  const timerLabel = held ? "On hold" : preConnectLabel ?? timerText(seconds);
+  const preConnectLabel =
+    callStatus === "connecting"
+      ? "Connecting…"
+      : callStatus === "ringing"
+        ? "Ringing…"
+        : null;
+  const timerLabel = held ? "On hold" : (preConnectLabel ?? timerText(seconds));
   const phaseIds = bundle?.script.phases.map((phase) => phase.id) ?? [];
   const currentPhaseIndex = phaseIds.indexOf(activePhaseId);
-  const currentPhaseName = bundle?.script.phases.find((phase) => phase.id === activePhaseId)?.name ?? activePhaseId;
+  const currentPhaseName =
+    bundle?.script.phases.find((phase) => phase.id === activePhaseId)?.name ??
+    activePhaseId;
   const fileNumberValue = fileNumber.value.trim();
   const hasFileNumber = !fileNumber.isPlaceholder && fileNumberValue.length > 0;
   return (
     <div className="coach-top-bar shrink-0 border-b border-border">
       <div className="coach-identity">
-        <span data-testid="coach-call-name" className="min-w-0 truncate text-[15px] font-extrabold">{callName}</span>
-        {hasFileNumber ? <span data-testid="coach-file-number" aria-label="File number" className="font-mono text-xs tabular-nums">
-          {`File number: ${fileNumber.value}`}
-        </span> : null}
-        {scriptRefLabel ? <span data-testid="coach-script-ref-label" className="text-xs text-muted-foreground">{scriptRefLabel}</span> : null}
-        <span data-testid="coach-powered-by-closer-lab" className="coach-powered-by-closer-lab">
+        <span
+          data-testid="coach-call-name"
+          className="min-w-0 truncate text-[15px] font-extrabold"
+        >
+          {callName}
+        </span>
+        {hasFileNumber ? (
+          <span
+            data-testid="coach-file-number"
+            aria-label="File number"
+            className="font-mono text-xs tabular-nums"
+          >
+            {`File number: ${fileNumber.value}`}
+          </span>
+        ) : null}
+        {scriptRefLabel ? (
+          <span
+            data-testid="coach-script-ref-label"
+            className="text-xs text-muted-foreground"
+          >
+            {scriptRefLabel}
+          </span>
+        ) : null}
+        <span
+          data-testid="coach-powered-by-closer-lab"
+          className="coach-powered-by-closer-lab"
+        >
           <span>Powered by</span>
           {/* This static logo must remain bundle-safe for the synthetic browser harness. */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/brand/closer-lab-logo.svg" alt="Closer Lab" width={75} height={15} />
+          <img
+            src="/brand/closer-lab-logo.svg"
+            alt="Closer Lab"
+            width={75}
+            height={15}
+          />
         </span>
       </div>
       <div className="coach-status" data-testid="coach-status-strip">
         <HoldTimer timer={holdTimer} />
         {preConnectLabel ? (
-          <Badge variant="outline" data-testid="call-status-pill" className="h-5 text-[10px] text-muted-foreground">
+          <Badge
+            variant="outline"
+            data-testid="call-status-pill"
+            className="h-5 text-[10px] text-muted-foreground"
+          >
             {preConnectLabel}
           </Badge>
         ) : null}
         {callStatus === "live" && !held ? (
-          <Badge variant="outline" data-testid="coach-live-pill" className="h-5 gap-1 text-[11px]">
-            <span className="size-1.5 animate-pulse rounded-full bg-[var(--coach-sky)]" aria-hidden />
+          <Badge
+            variant="outline"
+            data-testid="coach-live-pill"
+            className="h-5 gap-1 text-[11px]"
+          >
+            <span
+              className="size-1.5 animate-pulse rounded-full bg-[var(--coach-sky)]"
+              aria-hidden
+            />
             Live
           </Badge>
         ) : null}
         {degraded ? (
-          <Badge variant="outline" data-testid="coach-connecting-pill" className="h-5 text-[10px] text-muted-foreground">
+          <Badge
+            variant="outline"
+            data-testid="coach-connecting-pill"
+            className="h-5 text-[10px] text-muted-foreground"
+          >
             Transcript connecting…
           </Badge>
         ) : null}
-        <span className="font-mono text-base font-semibold tabular-nums" data-testid="coach-call-timer">{timerLabel}</span>
+        <span
+          className="font-mono text-base font-semibold tabular-nums"
+          data-testid="coach-call-timer"
+        >
+          {timerLabel}
+        </span>
       </div>
-      {showPhaseScroller ? <ol className="flex min-w-0 items-center gap-1 overflow-x-auto px-4 pb-2" aria-label="Call phases" data-testid="coach-phase-scroller">
-        {bundle?.script.phases.map((phase) => {
-          const phaseId = phase.id;
-          const fullName = phase?.name ?? phaseId;
-          const isCurrent = phaseId === activePhaseId;
-          const isComplete = phaseIds.indexOf(phaseId) < currentPhaseIndex;
-          const suffix = isComplete ? " ✓" : "";
-          return (
-            <li key={phaseId} className="flex shrink-0 items-center">
-              {isCurrent ? <span className="sr-only" data-testid="coach-current-phase">{`Phase · ${currentPhaseName}`}</span> : null}
-              <button
-                type="button"
-                data-testid={`phase-rail-${phaseId}`}
-                aria-current={isCurrent ? "step" : undefined}
-                // Accessible name stays the full phase name (matching the
-                // Say This card and the top-strip phase badges) even though
-                // the visible label below is shortened.
-                aria-label={`${fullName}${suffix}`}
-                onClick={() => onSelectPhase(phaseId)}
-                className={cn(
-                  "rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide whitespace-nowrap uppercase transition-colors",
-                  isCurrent
-                    ? "bg-primary text-primary-foreground"
-                    : isComplete
-                      ? "text-[var(--coach-sky)]"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                )}
-              >
-                {isComplete ? <span className="coach-phase-tick" aria-hidden>✓</span> : null}
-                <span>{RAIL_LABEL[phaseId] ?? fullName}</span>
-              </button>
-              {phaseId !== phaseIds.at(-1) ? <span className={cn("coach-phase-connector", isComplete && "is-complete")} aria-hidden /> : null}
-            </li>
-          );
-        })}
-      </ol> : null}
+      {showPhaseScroller ? (
+        <ol
+          className="flex min-w-0 items-center gap-1 overflow-x-auto px-4 pb-2"
+          aria-label="Call phases"
+          data-testid="coach-phase-scroller"
+        >
+          {bundle?.script.phases.map((phase) => {
+            const phaseId = phase.id;
+            const fullName = phase?.name ?? phaseId;
+            const isCurrent = phaseId === activePhaseId;
+            const isComplete = phaseIds.indexOf(phaseId) < currentPhaseIndex;
+            const suffix = isComplete ? " ✓" : "";
+            return (
+              <li key={phaseId} className="flex shrink-0 items-center">
+                {isCurrent ? (
+                  <span
+                    className="sr-only"
+                    data-testid="coach-current-phase"
+                  >{`Phase · ${currentPhaseName}`}</span>
+                ) : null}
+                <button
+                  type="button"
+                  data-testid={`phase-rail-${phaseId}`}
+                  aria-current={isCurrent ? "step" : undefined}
+                  // Accessible name stays the full phase name (matching the
+                  // Say This card and the top-strip phase badges) even though
+                  // the visible label below is shortened.
+                  aria-label={`${fullName}${suffix}`}
+                  onClick={() => onSelectPhase(phaseId)}
+                  className={cn(
+                    "rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide whitespace-nowrap uppercase transition-colors",
+                    isCurrent
+                      ? "bg-primary text-primary-foreground"
+                      : isComplete
+                        ? "text-[var(--coach-sky)]"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                >
+                  {isComplete ? (
+                    <span className="coach-phase-tick" aria-hidden>
+                      ✓
+                    </span>
+                  ) : null}
+                  <span>{RAIL_LABEL[phaseId] ?? fullName}</span>
+                </button>
+                {phaseId !== phaseIds.at(-1) ? (
+                  <span
+                    className={cn(
+                      "coach-phase-connector",
+                      isComplete && "is-complete",
+                    )}
+                    aria-hidden
+                  />
+                ) : null}
+              </li>
+            );
+          })}
+        </ol>
+      ) : null}
     </div>
   );
 }
 
-function ScriptNavigatorPanel({ bundle, ref, context, initialState, onStateChange }: {
+function ScriptNavigatorPanel({
+  bundle,
+  ref,
+  context,
+  initialState,
+  onStateChange,
+}: {
   bundle: import("@biginkc/coach").ScriptBundle;
   ref: import("@biginkc/coach").ScriptRef;
   context: import("@biginkc/coach").CoachCallContext;
@@ -551,15 +816,36 @@ function ScriptNavigatorPanel({ bundle, ref, context, initialState, onStateChang
   onStateChange: (state: NavigatorState) => void;
 }) {
   return (
-    <main className="flex min-h-[28rem] min-w-0 flex-1 flex-col overflow-y-auto border-b border-border xl:min-h-0 xl:overflow-hidden xl:border-b-0" data-testid="coach-script-v2-panel">
-      <Suspense fallback={<div data-testid="coach-script-v2-loading" aria-live="polite">Loading script…</div>}>
-        <ScriptNavigator bundle={bundle} ref={ref} context={context} initialState={initialState} onStateChange={onStateChange} />
+    <main
+      className="flex min-h-[28rem] min-w-0 flex-1 flex-col overflow-y-auto border-b border-border xl:min-h-0 xl:overflow-hidden xl:border-b-0"
+      data-testid="coach-script-v2-panel"
+    >
+      <Suspense
+        fallback={
+          <div data-testid="coach-script-v2-loading" aria-live="polite">
+            Loading script…
+          </div>
+        }
+      >
+        <ScriptNavigator
+          bundle={bundle}
+          ref={ref}
+          context={context}
+          initialState={initialState}
+          onStateChange={onStateChange}
+        />
       </Suspense>
     </main>
   );
 }
 
-function TranscriptFeed({ lines, degraded }: { lines: CoachTranscriptLine[]; degraded: boolean }) {
+function TranscriptFeed({
+  lines,
+  degraded,
+}: {
+  lines: CoachTranscriptLine[];
+  degraded: boolean;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wasAtBottomRef = useRef(true);
 
@@ -567,7 +853,11 @@ function TranscriptFeed({ lines, degraded }: { lines: CoachTranscriptLine[]; deg
     const el = containerRef.current;
     if (!el) return;
     const onScroll = () => {
-      wasAtBottomRef.current = isNearTranscriptBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
+      wasAtBottomRef.current = isNearTranscriptBottom(
+        el.scrollTop,
+        el.scrollHeight,
+        el.clientHeight,
+      );
     };
     el.addEventListener("scroll", onScroll);
     return () => el.removeEventListener("scroll", onScroll);
@@ -579,9 +869,10 @@ function TranscriptFeed({ lines, degraded }: { lines: CoachTranscriptLine[]; deg
     el.scrollTo?.({ top: el.scrollHeight });
   }, [lines]);
 
-  const visibleLines = lines.length > MAX_RENDERED_TRANSCRIPT_LINES
-    ? lines.slice(lines.length - MAX_RENDERED_TRANSCRIPT_LINES)
-    : lines;
+  const visibleLines =
+    lines.length > MAX_RENDERED_TRANSCRIPT_LINES
+      ? lines.slice(lines.length - MAX_RENDERED_TRANSCRIPT_LINES)
+      : lines;
 
   return (
     <aside
@@ -590,11 +881,21 @@ function TranscriptFeed({ lines, degraded }: { lines: CoachTranscriptLine[]; deg
     >
       <div className="flex items-center justify-between px-5 pt-4 pb-2.5 text-[11px] font-extrabold tracking-[0.12em] text-muted-foreground uppercase">
         Transcript
-        {!degraded ? <span className="text-[var(--coach-sky)] normal-case tracking-normal">● listening</span> : null}
+        {!degraded ? (
+          <span className="text-[var(--coach-sky)] normal-case tracking-normal">
+            ● listening
+          </span>
+        ) : null}
       </div>
-      <div ref={containerRef} data-testid="coach-transcript" className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 pt-1.5 pb-3.5">
+      <div
+        ref={containerRef}
+        data-testid="coach-transcript"
+        className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 pt-1.5 pb-3.5"
+      >
         {visibleLines.length === 0 ? (
-          <p className="text-xs text-muted-foreground">Waiting for the call to start talking…</p>
+          <p className="text-xs text-muted-foreground">
+            Waiting for the call to start talking…
+          </p>
         ) : null}
         {visibleLines.map((line) => (
           <p
@@ -612,10 +913,13 @@ function TranscriptFeed({ lines, degraded }: { lines: CoachTranscriptLine[]; deg
               data-testid="transcript-speaker-label"
               className={cn(
                 "mr-1.5 text-[10px] font-bold tracking-wide uppercase",
-                line.speaker === "rep" ? "text-[var(--coach-sky)]" : "text-[var(--coach-amber)]",
+                line.speaker === "rep"
+                  ? "text-[var(--coach-sky)]"
+                  : "text-[var(--coach-amber)]",
               )}
             >
-              {line.speaker === "rep" ? "Rep" : "Seller"}{!line.isFinal ? " · speaking…" : ""}
+              {line.speaker === "rep" ? "Rep" : "Seller"}
+              {!line.isFinal ? " · speaking…" : ""}
             </span>
             {line.text}
           </p>
@@ -656,7 +960,10 @@ function ScriptPanel({
   isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
   onSelectVariant: (tag: string, key: string) => void;
-  onSelectSectionBranch: (sectionId: CoachSectionScriptBlock["sectionId"], tag: string) => void;
+  onSelectSectionBranch: (
+    sectionId: CoachSectionScriptBlock["sectionId"],
+    tag: string,
+  ) => void;
   sectionIndex: number;
   sectionCount: number;
 }) {
@@ -669,11 +976,16 @@ function ScriptPanel({
     const panel = panelRef.current;
     const footer = footerRef.current;
     if (!panel || !footer || typeof ResizeObserver === "undefined") return;
-    const navigation = footer.querySelector<HTMLElement>('[data-testid="section-navigation"]');
+    const navigation = footer.querySelector<HTMLElement>(
+      '[data-testid="section-navigation"]',
+    );
     const updateScrollPadding = () => {
       // In a short panel the wrapper is display:contents and only navigation
       // stays pinned. Keep keyboard-focused chips above the actual overlay.
-      const height = footer.getBoundingClientRect().height || navigation?.getBoundingClientRect().height || 0;
+      const height =
+        footer.getBoundingClientRect().height ||
+        navigation?.getBoundingClientRect().height ||
+        0;
       panel.style.setProperty("--coach-sticky-height", `${height}px`);
     };
     const observer = new ResizeObserver(updateScrollPadding);
@@ -693,13 +1005,19 @@ function ScriptPanel({
     return (
       <main className="flex flex-1 items-center justify-center overflow-y-auto p-6">
         <div className="max-w-sm text-center">
-          <p className="text-sm font-semibold text-destructive">This script section isn&apos;t recognized.</p>
-          <p className="mt-1 text-xs text-muted-foreground">Use the phase rail above to return to a known section.</p>
+          <p className="text-sm font-semibold text-destructive">
+            This script section isn&apos;t recognized.
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Use the phase rail above to return to a known section.
+          </p>
         </div>
       </main>
     );
   }
-  const nextSpokenLine = nextBlock ? selectSpokenLine(nextBlock.branches[0] ?? null) : null;
+  const nextSpokenLine = nextBlock
+    ? selectSpokenLine(nextBlock.branches[0] ?? null)
+    : null;
   return (
     <main
       className="min-h-[28rem] min-w-0 flex-1 overflow-y-auto border-b border-border px-4 pt-7 md:px-8 xl:min-h-0 xl:border-b-0 xl:px-12"
@@ -713,15 +1031,28 @@ function ScriptPanel({
             data-testid="coach-context-error"
             className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-[var(--coach-amber)] bg-card px-3 py-2 text-xs text-[var(--coach-amber-text)]"
           >
-            <span>Couldn&apos;t load lead details — showing the script with placeholders.</span>
-            <Button type="button" variant="outline" size="xs" data-testid="coach-context-retry" onClick={onRetryContext}>
+            <span>
+              Couldn&apos;t load lead details — showing the script with
+              placeholders.
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              data-testid="coach-context-retry"
+              onClick={onRetryContext}
+            >
               Retry
             </Button>
           </div>
         ) : null}
         {degraded ? (
-          <p className="mb-4 rounded-lg border border-[var(--coach-amber)] bg-card px-3 py-2 text-xs text-[var(--coach-amber-text)]" data-testid="coach-degraded-note">
-            Live transcript is reconnecting. Keep following the current script — your place is saved.
+          <p
+            className="mb-4 rounded-lg border border-[var(--coach-amber)] bg-card px-3 py-2 text-xs text-[var(--coach-amber-text)]"
+            data-testid="coach-degraded-note"
+          >
+            Live transcript is reconnecting. Keep following the current script —
+            your place is saved.
           </p>
         ) : null}
         <section
@@ -729,9 +1060,13 @@ function ScriptPanel({
           data-testid="current-script-card"
           className="min-w-0"
         >
-          <h2 className="text-[11px] font-black tracking-[0.16em] text-muted-foreground uppercase">{block.phaseName} · <span data-testid="current-section-title">{block.title}</span></h2>
+          <h2 className="text-[11px] font-black tracking-[0.16em] text-muted-foreground uppercase">
+            {block.phaseName} ·{" "}
+            <span data-testid="current-section-title">{block.title}</span>
+          </h2>
           <p className="sr-only" data-testid="current-phase-purpose">
-            <span className="font-semibold text-foreground">Purpose:</span> {block.purpose}
+            <span className="font-semibold text-foreground">Purpose:</span>{" "}
+            {block.purpose}
           </p>
           {block.branchOptions.length > 1 ? (
             <div
@@ -761,7 +1096,10 @@ function ScriptPanel({
               ))}
             </div>
           ) : null}
-          <div className="mt-[26px] space-y-5" data-testid="current-section-script">
+          <div
+            className="mt-[26px] space-y-5"
+            data-testid="current-section-script"
+          >
             {block.branches.map((branch) => (
               <BranchCard
                 key={branch.tag}
@@ -774,28 +1112,61 @@ function ScriptPanel({
             ))}
           </div>
         </section>
-        <div ref={footerRef} className="coach-script-footer sticky bottom-0 z-10 mt-auto shrink-0 bg-background pt-7">
+        <div
+          ref={footerRef}
+          className="coach-script-footer sticky bottom-0 z-10 mt-auto shrink-0 bg-background pt-7"
+        >
           {nextBlock ? (
-            <section className="border-t border-border pt-[18px] pb-5" data-testid="next-section-preview">
+            <section
+              className="border-t border-border pt-[18px] pb-5"
+              data-testid="next-section-preview"
+            >
               <div className="text-[11px] font-black tracking-[0.14em] text-[var(--coach-sky)] uppercase">
                 Up next · {nextBlock.phaseName} — {nextBlock.title}
               </div>
               {nextSpokenLine ? (
-                <p data-testid="next-section-preview-body" className="mt-2 line-clamp-2 text-[17px] leading-[1.5] text-[var(--coach-secondary)]">
-                  “{nextSpokenLine.segments
-                    .map((segment) => (segment.kind === "tone" ? "" : segment.kind === "text" ? segment.value : segment.resolved.value))
-                    .join("")}”
+                <p
+                  data-testid="next-section-preview-body"
+                  className="mt-2 line-clamp-2 text-[17px] leading-[1.5] text-[var(--coach-secondary)]"
+                >
+                  “
+                  {nextSpokenLine.segments
+                    .map((segment) =>
+                      segment.kind === "tone"
+                        ? ""
+                        : segment.kind === "text"
+                          ? segment.value
+                          : segment.resolved.value,
+                    )
+                    .join("")}
+                  ”
                 </p>
               ) : null}
             </section>
           ) : null}
-          <div className="flex items-center justify-between gap-3 border-t border-border pt-4 pb-5" data-testid="section-navigation">
-            <Button type="button" variant="outline" disabled={!canGoPrevious} onClick={onPrevious} data-testid="coach-back">
+          <div
+            className="flex items-center justify-between gap-3 border-t border-border pt-4 pb-5"
+            data-testid="section-navigation"
+          >
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!canGoPrevious}
+              onClick={onPrevious}
+              data-testid="coach-back"
+            >
               <ChevronLeftIcon className="size-4" aria-hidden />
               Back
             </Button>
-            <span className="font-mono text-xs text-muted-foreground">Section {sectionIndex} of {sectionCount}</span>
-            <Button type="button" disabled={!canGoNext} onClick={onNext} data-testid="coach-next">
+            <span className="font-mono text-xs text-muted-foreground">
+              Section {sectionIndex} of {sectionCount}
+            </span>
+            <Button
+              type="button"
+              disabled={!canGoNext}
+              onClick={onNext}
+              data-testid="coach-next"
+            >
               Next
               <ChevronRightIcon className="size-4" aria-hidden />
             </Button>
@@ -808,10 +1179,17 @@ function ScriptPanel({
 
 function ScriptUnavailable() {
   return (
-    <main className="flex min-h-[28rem] min-w-0 flex-1 items-center justify-center border-b border-border p-6 xl:min-h-0 xl:border-b-0" data-testid="coach-script-unavailable">
+    <main
+      className="flex min-h-[28rem] min-w-0 flex-1 items-center justify-center border-b border-border p-6 xl:min-h-0 xl:border-b-0"
+      data-testid="coach-script-unavailable"
+    >
       <div className="max-w-sm text-center">
-        <p className="text-sm font-semibold text-destructive">Script unavailable — coaching is off for this call</p>
-        <p className="mt-1 text-xs text-muted-foreground">The call, transcript, and call controls are still available.</p>
+        <p className="text-sm font-semibold text-destructive">
+          Script unavailable — coaching is off for this call
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          The call, transcript, and call controls are still available.
+        </p>
       </div>
     </main>
   );
@@ -819,8 +1197,13 @@ function ScriptUnavailable() {
 
 function ScriptLoading() {
   return (
-    <main className="flex min-h-[28rem] min-w-0 flex-1 items-center justify-center border-b border-border p-6 xl:min-h-0 xl:border-b-0" data-testid="coach-script-loading">
-      <p className="text-sm font-medium text-muted-foreground">Loading script…</p>
+    <main
+      className="flex min-h-[28rem] min-w-0 flex-1 items-center justify-center border-b border-border p-6 xl:min-h-0 xl:border-b-0"
+      data-testid="coach-script-loading"
+    >
+      <p className="text-sm font-medium text-muted-foreground">
+        Loading script…
+      </p>
     </main>
   );
 }
@@ -834,7 +1217,9 @@ function RecommendationsPanel({
   followUpLimitReached,
   hasFinalSellerTranscript,
   requestFollowUp,
-}: ReturnType<typeof useCoachRecommendations> & { hasFinalSellerTranscript: boolean }) {
+}: ReturnType<typeof useCoachRecommendations> & {
+  hasFinalSellerTranscript: boolean;
+}) {
   const followUpBusy = loadingMode === "follow_up";
   const failureMessage =
     error === "rate_limited"
@@ -850,18 +1235,26 @@ function RecommendationsPanel({
       data-testid="coach-recommendations"
       className="min-h-64 shrink-0 border-l border-border bg-[var(--coach-rail)] p-4 xl:min-h-0 xl:overflow-y-auto"
     >
-      <h2 className="text-[11px] font-extrabold tracking-[0.12em] text-muted-foreground uppercase">Coach</h2>
+      <h2 className="text-[11px] font-extrabold tracking-[0.12em] text-muted-foreground uppercase">
+        Coach
+      </h2>
       {recommendations.length === 0 && followUpQuestions.length === 0 ? (
         <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-          Sandra is listening for a meaningful homeowner response. Suggestions will appear here without changing your place in the script.
+          Sandra is listening for a meaningful homeowner response. Suggestions
+          will appear here without changing your place in the script.
         </p>
       ) : null}
       {recommendations.length > 0 ? (
         <div className="mt-5" data-testid="automatic-recommendations">
           <ul className="mt-2 space-y-2">
             {recommendations.map((recommendation) => (
-              <li key={recommendation} className="rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed">
-                <div className="mb-1 text-[10px] font-extrabold tracking-[0.1em] text-muted-foreground uppercase">Consider saying</div>
+              <li
+                key={recommendation}
+                className="rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed"
+              >
+                <div className="mb-1 text-[10px] font-extrabold tracking-[0.1em] text-muted-foreground uppercase">
+                  Consider saying
+                </div>
                 {recommendation}
               </li>
             ))}
@@ -872,36 +1265,54 @@ function RecommendationsPanel({
         type="button"
         variant="outline"
         className="mt-5 w-full"
-        disabled={followUpBusy || !hasFinalSellerTranscript || followUpLimitReached}
+        disabled={
+          followUpBusy || !hasFinalSellerTranscript || followUpLimitReached
+        }
         data-testid="follow-up-questions"
         onClick={() => void requestFollowUp()}
       >
-        {loadingMode === "follow_up" ? <Loader2Icon className="size-4 animate-spin" aria-hidden /> : null}
+        {loadingMode === "follow_up" ? (
+          <Loader2Icon className="size-4 animate-spin" aria-hidden />
+        ) : null}
         Follow-up Questions
       </Button>
       {!hasFinalSellerTranscript ? (
-        <p className="mt-2 text-xs text-muted-foreground">Available after the homeowner has spoken.</p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          Available after the homeowner has spoken.
+        </p>
       ) : null}
       {followUpQuestions.length > 0 ? (
         <ol className="mt-4 space-y-2" data-testid="follow-up-question-options">
           {followUpQuestions.map((question) => (
-            <li key={question} className="rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed">
+            <li
+              key={question}
+              className="rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed"
+            >
               {question}
             </li>
           ))}
         </ol>
       ) : null}
       {loadingMode === "automatic" ? (
-        <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground" data-testid="automatic-recommendations-loading">
+        <p
+          className="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
+          data-testid="automatic-recommendations-loading"
+        >
           <Loader2Icon className="size-3.5 animate-spin" aria-hidden />
           Preparing suggestions…
         </p>
       ) : null}
       {automaticLimitReached ? (
-        <p className="mt-3 text-xs text-muted-foreground">Automatic suggestions have reached their limit for this call.</p>
+        <p className="mt-3 text-xs text-muted-foreground">
+          Automatic suggestions have reached their limit for this call.
+        </p>
       ) : null}
       {failureMessage ? (
-        <p role="status" className="mt-3 text-xs text-muted-foreground" data-testid="recommendation-error">
+        <p
+          role="status"
+          className="mt-3 text-xs text-muted-foreground"
+          data-testid="recommendation-error"
+        >
           {failureMessage}
         </p>
       ) : null}
@@ -923,32 +1334,33 @@ function BranchCard({
   onSelectVariant: (key: string) => void;
 }) {
   return (
-    <div
-      data-testid="script-branch"
-      className="space-y-5"
-    >
+    <div data-testid="script-branch" className="space-y-5">
       {branch.variantOptions.length > 1 ? (
-          <div className="flex flex-wrap gap-1" role="tablist" aria-label={`${branch.tag} variant`}>
-            {branch.variantOptions.map((option) => (
-              <button
-                key={option.key}
-                type="button"
-                role="tab"
-                aria-selected={option.key === branch.selected.key}
-                aria-label={`Use ${option.label ?? option.key} spoken fork for ${branch.tag}`}
-                data-testid={`variant-${branch.tag}-${option.key}`}
-                onClick={() => onSelectVariant(option.key)}
-                className={cn(
-                  "rounded-full border px-2 py-0.5 text-[10px] font-bold",
-                  option.key === branch.selected.key
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-border text-muted-foreground hover:bg-muted",
-                )}
-              >
-                {option.label ?? option.key}
-              </button>
-            ))}
-          </div>
+        <div
+          className="flex flex-wrap gap-1"
+          role="tablist"
+          aria-label={`${branch.tag} variant`}
+        >
+          {branch.variantOptions.map((option) => (
+            <button
+              key={option.key}
+              type="button"
+              role="tab"
+              aria-selected={option.key === branch.selected.key}
+              aria-label={`Use ${option.label ?? option.key} spoken fork for ${branch.tag}`}
+              data-testid={`variant-${branch.tag}-${option.key}`}
+              onClick={() => onSelectVariant(option.key)}
+              className={cn(
+                "rounded-full border px-2 py-0.5 text-[10px] font-bold",
+                option.key === branch.selected.key
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border text-muted-foreground hover:bg-muted",
+              )}
+            >
+              {option.label ?? option.key}
+            </button>
+          ))}
+        </div>
       ) : null}
       {branch.selected.tone ? (
         <div className="mb-2">
@@ -956,24 +1368,26 @@ function BranchCard({
         </div>
       ) : null}
       <div className="space-y-5">
-        {branch.selected.lines.flatMap(splitDisplaySentences).map((line, index) => (
-          <p
-            key={index}
-            className={cn(
-              "whitespace-normal",
-              line.type === "note"
-                ? "text-[13px] text-[var(--coach-secondary)] italic"
-                : "text-[27px] leading-[1.5] font-medium",
-            )}
-          >
-            <LineSegments
-              segments={line.segments}
-              onEditEntry={onEditEntry}
-              isEntryTokenEditable={isEntryTokenEditable}
-              onBeginEntryEdit={onBeginEntryEdit}
-            />
-          </p>
-        ))}
+        {branch.selected.lines
+          .flatMap(splitDisplaySentences)
+          .map((line, index) => (
+            <p
+              key={index}
+              className={cn(
+                "whitespace-normal",
+                line.type === "note"
+                  ? "text-[13px] text-[var(--coach-secondary)] italic"
+                  : "text-[27px] leading-[1.5] font-medium",
+              )}
+            >
+              <LineSegments
+                segments={line.segments}
+                onEditEntry={onEditEntry}
+                isEntryTokenEditable={isEntryTokenEditable}
+                onBeginEntryEdit={onBeginEntryEdit}
+              />
+            </p>
+          ))}
       </div>
       {branch.trailingNote ? (
         <p className="mt-2 text-[13px] text-[var(--coach-secondary)] italic">
@@ -1023,8 +1437,10 @@ function LineSegments({
   return (
     <>
       {segments.map((segment, index) => {
-        if (segment.kind === "text") return <span key={index}>{segment.value}</span>;
-        if (segment.kind === "tone") return <ToneChip key={index} text={segment.label} />;
+        if (segment.kind === "text")
+          return <span key={index}>{segment.value}</span>;
+        if (segment.kind === "tone")
+          return <ToneChip key={index} text={segment.label} />;
         return (
           <TokenChip
             key={index}
@@ -1064,7 +1480,10 @@ function TokenChip({
   isEntryTokenEditable: (token: CoachEntryToken) => boolean;
   onBeginEntryEdit: () => void;
 }) {
-  if (ENTRY_TOKEN_SET.has(token) && isEntryTokenEditable(token as CoachEntryToken)) {
+  if (
+    ENTRY_TOKEN_SET.has(token) &&
+    isEntryTokenEditable(token as CoachEntryToken)
+  ) {
     return (
       <EntryTokenChip
         token={token as CoachEntryToken}
@@ -1085,7 +1504,10 @@ function TokenChip({
     );
   }
   return (
-    <span data-testid="token-resolved" className="font-bold text-[var(--coach-sky)]">
+    <span
+      data-testid="token-resolved"
+      className="font-bold text-[var(--coach-sky)]"
+    >
       {resolved.value}
     </span>
   );
@@ -1103,7 +1525,9 @@ function EntryTokenChip({
   onCommit: (value: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(resolved.isPlaceholder ? "" : resolved.value);
+  const [draft, setDraft] = useState(
+    resolved.isPlaceholder ? "" : resolved.value,
+  );
 
   if (editing) {
     return (
@@ -1150,7 +1574,9 @@ function EntryTokenChip({
           : "border-[var(--coach-sky)] text-[var(--coach-sky)]",
       )}
     >
-      {resolved.isPlaceholder ? `+ ${ENTRY_TOKEN_LABEL[token]}` : resolved.value}
+      {resolved.isPlaceholder
+        ? `+ ${ENTRY_TOKEN_LABEL[token]}`
+        : resolved.value}
     </button>
   );
 }
@@ -1196,7 +1622,11 @@ function CallControlDock({
     if (!keypadOpen || held || callStatus !== "live") return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (!/^[0-9*#]$/.test(event.key) || event.repeat) return;
-      if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']")) return;
+      if (
+        event.target instanceof Element &&
+        event.target.closest("input, textarea, [contenteditable='true']")
+      )
+        return;
       // An entry editor can remain mounted while pointer focus moves to the
       // keypad. Treat the mounted editor as the source of truth instead of
       // trusting only the key event's newly moved target.
@@ -1210,7 +1640,12 @@ function CallControlDock({
 
   return (
     <div className="flex shrink-0 flex-col gap-2 border-t border-border bg-[var(--coach-rail)] px-6 py-3">
-      {keypadOpen ? <PhoneKeypad onDigit={onDigit} disabled={endingCall || held || holdPending || !live} /> : null}
+      {keypadOpen ? (
+        <PhoneKeypad
+          onDigit={onDigit}
+          disabled={endingCall || held || holdPending || !live}
+        />
+      ) : null}
       <div
         data-testid="coach-call-dock-row"
         className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between"
@@ -1228,7 +1663,10 @@ function CallControlDock({
             Collapse
           </Button>
         </div>
-        <div data-testid="coach-call-controls" className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
+        <div
+          data-testid="coach-call-controls"
+          className="grid grid-cols-2 gap-2 sm:flex sm:items-center"
+        >
           <Button
             type="button"
             variant={muted ? "default" : "outline"}
@@ -1238,7 +1676,11 @@ function CallControlDock({
             data-testid="coach-mute"
             onClick={onMute}
           >
-            {muted ? <MicOffIcon className="size-4" aria-hidden /> : <MicIcon className="size-4" aria-hidden />}
+            {muted ? (
+              <MicOffIcon className="size-4" aria-hidden />
+            ) : (
+              <MicIcon className="size-4" aria-hidden />
+            )}
             {muted ? "Unmute" : "Mute"}
           </Button>
           <Button
@@ -1261,10 +1703,22 @@ function CallControlDock({
             data-testid="coach-hold"
             onClick={onHold}
           >
-            {held ? <PlayIcon className="size-4" aria-hidden /> : <PauseIcon className="size-4" aria-hidden />}
+            {held ? (
+              <PlayIcon className="size-4" aria-hidden />
+            ) : (
+              <PauseIcon className="size-4" aria-hidden />
+            )}
             {held ? "Resume" : "Hold"}
           </Button>
-          <Button type="button" variant="destructive" size="sm" data-testid="coach-hangup" disabled={endingCall} aria-busy={endingCall} onClick={onHangup}>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            data-testid="coach-hangup"
+            disabled={endingCall}
+            aria-busy={endingCall}
+            onClick={onHangup}
+          >
             <PhoneOffIcon className="size-4" aria-hidden />
             {endingCall ? "Ending call…" : "Hang up"}
           </Button>

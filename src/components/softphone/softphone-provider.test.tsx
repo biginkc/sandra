@@ -2,17 +2,39 @@ import type { DialerRecent, DialerSearchResult } from "@/lib/dialer/actions";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
+import {
+  closrOutbound123Bundle,
+  closrOutbound123Ref,
+} from "@biginkc/coach/fixtures";
 
-const { completeSoftphoneCall, loadCallerIds, loadDialerRecents, mintStartIntent, prepareLeadCall, prepareManualCall, resumeFailedSoftphoneCall, searchDialerLeads, createTransport, jitterEnabled, transportEnabled, playDtmfTone } = vi.hoisted(() => ({
+const {
+  completeSoftphoneCall,
+  loadCallerIds,
+  loadDialerRecents,
+  mintStartIntent,
+  prepareLeadCall,
+  prepareManualCall,
+  resumeFailedSoftphoneCall,
+  searchDialerLeads,
+  createTransport,
+  jitterEnabled,
+  transportEnabled,
+  playDtmfTone,
+} = vi.hoisted(() => ({
   completeSoftphoneCall: vi.fn(),
-  loadDialerRecents: vi.fn(async () => ({ ok: true, data: [] as DialerRecent[] })),
+  loadDialerRecents: vi.fn(async () => ({
+    ok: true,
+    data: [] as DialerRecent[],
+  })),
   prepareLeadCall: vi.fn(),
   prepareManualCall: vi.fn(),
   resumeFailedSoftphoneCall: vi.fn(),
   createTransport: vi.fn(),
   transportEnabled: vi.fn(),
-  searchDialerLeads: vi.fn(async () => ({ ok: true, data: [] as DialerSearchResult[] })),
+  searchDialerLeads: vi.fn(async () => ({
+    ok: true,
+    data: [] as DialerSearchResult[],
+  })),
   playDtmfTone: vi.fn(),
   loadCallerIds: vi.fn(),
   mintStartIntent: vi.fn(),
@@ -41,13 +63,20 @@ vi.mock("@/lib/dialer/transport-selection", () => ({
   isSoftphoneTransportEnabled: transportEnabled,
 }));
 
-const { loadCoachCallContext, loadCoachCallScript } = vi.hoisted(() => ({ loadCoachCallContext: vi.fn(), loadCoachCallScript: vi.fn() }));
+const { loadCoachCallContext, loadCoachCallScript } = vi.hoisted(() => ({
+  loadCoachCallContext: vi.fn(),
+  loadCoachCallScript: vi.fn(),
+}));
 vi.mock("@/lib/coach/coach-context-actions", () => ({ loadCoachCallContext }));
 vi.mock("@/lib/coach/coach-script-actions", () => ({ loadCoachCallScript }));
 
 type CoachBroadcastHandler = (message: { payload: unknown }) => void;
 type CoachMockChannel = {
-  on: (type: string, filter: unknown, handler: CoachBroadcastHandler) => CoachMockChannel;
+  on: (
+    type: string,
+    filter: unknown,
+    handler: CoachBroadcastHandler,
+  ) => CoachMockChannel;
   subscribe: () => CoachMockChannel;
   _broadcastHandler: CoachBroadcastHandler | null;
 };
@@ -58,7 +87,9 @@ function latestCoachChannel(): CoachMockChannel {
   return channel;
 }
 
-const { removeCoachChannel } = vi.hoisted(() => ({ removeCoachChannel: vi.fn() }));
+const { removeCoachChannel } = vi.hoisted(() => ({
+  removeCoachChannel: vi.fn(),
+}));
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -95,12 +126,22 @@ describe("SoftphoneProvider transport gate", () => {
     resumeFailedSoftphoneCall.mockReset();
     mintStartIntent.mockReset();
     loadDialerRecents.mockResolvedValue({ ok: true, data: [] });
-    transportEnabled.mockImplementation(() => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "simulated");
-    jitterEnabled.mockImplementation(() => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "jitter");
+    transportEnabled.mockImplementation(
+      () => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "simulated",
+    );
+    jitterEnabled.mockImplementation(
+      () => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "jitter",
+    );
     createTransport.mockImplementation(() => {
-      let listener: ((state: "connecting" | "ringing" | "live" | "ended" | "failed") => void) | null = null;
+      let listener:
+        | ((
+            state: "connecting" | "ringing" | "live" | "ended" | "failed",
+          ) => void)
+        | null = null;
       return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
+        onStateChange: vi.fn((cb) => {
+          listener = cb;
+        }),
         start: vi.fn(async () => {
           listener?.("connecting");
           listener?.("live");
@@ -121,7 +162,10 @@ describe("SoftphoneProvider transport gate", () => {
     });
     mintStartIntent.mockResolvedValue({
       ok: true,
-      data: { callToken: "server-call-token", intentCapability: "server-intent-capability" },
+      data: {
+        callToken: "server-call-token",
+        intentCapability: "server-intent-capability",
+      },
     });
     loadCoachCallContext.mockReset().mockResolvedValue({
       sellerName: "Softphone Lead",
@@ -136,57 +180,143 @@ describe("SoftphoneProvider transport gate", () => {
       leadSource: null,
       occupancy: null,
     });
-    loadCoachCallScript.mockReset().mockResolvedValue({ status: "bound", binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle } });
+    loadCoachCallScript
+      .mockReset()
+      .mockResolvedValue({
+        status: "bound",
+        binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle },
+      });
     window.localStorage.clear();
     window.sessionStorage.clear();
   });
 
   it("shows one company caller ID read-only and sends it with the call", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
+    });
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneHeaderButton /><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("header-dialer-button"));
-    await waitFor(() => expect(screen.getByTestId("caller-id-readonly")).toHaveTextContent("Main"));
+    await waitFor(() =>
+      expect(screen.getByTestId("caller-id-readonly")).toHaveTextContent(
+        "Main",
+      ),
+    );
     await user.click(screen.getByLabelText("Close dialer"));
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalledWith(
-      expect.objectContaining({ callerIdE164: "+18165550100" }),
-    ));
+    await waitFor(() =>
+      expect(createTransport.mock.results[0].value.start).toHaveBeenCalledWith(
+        expect.objectContaining({ callerIdE164: "+18165550100" }),
+      ),
+    );
   });
 
   it("persists a valid selection and discards it when inventory changes", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    loadCallerIds.mockResolvedValueOnce({ ok: true, data: { caller_ids: [
-      { phone_e164: "+18165550100", label: "Main" },
-      { phone_e164: "+18165550101", label: "Sales" },
-    ] } });
+    loadCallerIds.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        caller_ids: [
+          { phone_e164: "+18165550100", label: "Main" },
+          { phone_e164: "+18165550101", label: "Sales" },
+        ],
+      },
+    });
     const user = userEvent.setup();
-    const rendered = render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    const rendered = render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("header-dialer-button"));
     const selector = await screen.findByLabelText("Call from");
     await user.selectOptions(selector, "+18165550101");
-    expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBe("+18165550101");
+    expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBe(
+      "+18165550101",
+    );
     rendered.unmount();
 
-    loadCallerIds.mockResolvedValueOnce({ ok: true, data: { caller_ids: [
-      { phone_e164: "+18165550100", label: "Main" },
-    ] } });
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
-    await waitFor(() => expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBe("+18165550100"));
+    loadCallerIds.mockResolvedValueOnce({
+      ok: true,
+      data: { caller_ids: [{ phone_e164: "+18165550100", label: "Main" }] },
+    });
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
+    await waitFor(() =>
+      expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBe(
+        "+18165550100",
+      ),
+    );
   });
 
   it("fails closed on inventory errors and retries without preparing a lead", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     let resolveInventory!: (value: unknown) => void;
-    loadCallerIds.mockReturnValueOnce(new Promise((resolve) => { resolveInventory = resolve; }));
+    loadCallerIds.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveInventory = resolve;
+      }),
+    );
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("call-lead-button"));
-    expect(screen.getByTestId("call-preparing")).toHaveTextContent("Softphone Lead");
+    expect(screen.getByTestId("call-preparing")).toHaveTextContent(
+      "Softphone Lead",
+    );
     expect(prepareLeadCall).not.toHaveBeenCalled();
     resolveInventory({ ok: false, error: "Inventory unavailable" });
-    expect(await screen.findByRole("alert")).toHaveTextContent("Inventory unavailable");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Inventory unavailable",
+    );
     expect(prepareLeadCall).not.toHaveBeenCalled();
     expect(screen.getByTestId("retry-caller-ids")).toBeVisible();
   });
@@ -194,29 +324,62 @@ describe("SoftphoneProvider transport gate", () => {
   it("disables manual dialing while inventory loads and explains an empty inventory", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     let resolveInventory!: (value: unknown) => void;
-    loadCallerIds.mockReturnValueOnce(new Promise((resolve) => { resolveInventory = resolve; }));
+    loadCallerIds.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveInventory = resolve;
+      }),
+    );
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("header-dialer-button"));
     await user.type(screen.getByTestId("dialer-input"), "8165550123");
     expect(screen.getByTestId("dialer-call-manual")).toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent("Loading company numbers");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Loading company numbers",
+    );
 
     resolveInventory({ ok: true, data: { caller_ids: [] } });
-    expect(await screen.findByRole("alert")).toHaveTextContent("No company calling numbers are available");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "No company calling numbers are available",
+    );
     expect(screen.getByTestId("dialer-call-manual")).toBeDisabled();
-    expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBeNull();
+    expect(
+      window.localStorage.getItem("sandra.softphone.caller-id.v1"),
+    ).toBeNull();
   });
 
   it("shows the selected lead while preparation is pending without flashing the idle keypad", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     prepareLeadCall.mockImplementation(() => new Promise(() => undefined));
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
 
     await user.click(screen.getByTestId("call-lead-button"));
 
-    expect(screen.getByTestId("call-preparing")).toHaveTextContent("Softphone Lead");
+    expect(screen.getByTestId("call-preparing")).toHaveTextContent(
+      "Softphone Lead",
+    );
     expect(screen.queryByTestId("dialer-input")).not.toBeInTheDocument();
     expect(screen.queryByTestId("phone-keypad")).not.toBeInTheDocument();
   });
@@ -226,16 +389,35 @@ describe("SoftphoneProvider transport gate", () => {
     prepareLeadCall
       .mockRejectedValueOnce(new Error("network failed"))
       .mockResolvedValueOnce({ ok: false, error: "Lead is not callable." });
-    const lead = { id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true };
+    const lead = {
+      id: "property-1",
+      contactId: "contact-1",
+      firstName: "Softphone",
+      name: "Softphone Lead",
+      address: "1 Main St",
+      state: "MO",
+      phones: ["+18165550123"],
+      dncLocked: false,
+      contactDnc: false,
+      callable: true,
+    };
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={lead} /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton lead={lead} />
+      </SoftphoneProvider>,
+    );
 
     await user.click(screen.getByTestId("call-lead-button"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Could not prepare the call. Try again.");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not prepare the call. Try again.",
+    );
     expect(screen.getByTestId("dialer-input")).toBeInTheDocument();
 
     await user.click(screen.getByTestId("call-lead-button"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Lead is not callable.");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Lead is not callable.",
+    );
     expect(prepareLeadCall).toHaveBeenCalledTimes(2);
   });
 
@@ -256,9 +438,28 @@ describe("SoftphoneProvider transport gate", () => {
       },
     });
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(createTransport.mock.results[0].value.start).toHaveBeenCalled(),
+    );
     expect(mintStartIntent).not.toHaveBeenCalled();
     expect(createTransport.mock.results[0].value.start).toHaveBeenCalledWith(
       expect.not.objectContaining({ intentCapability: expect.anything() }),
@@ -273,7 +474,10 @@ describe("SoftphoneProvider transport gate", () => {
       .mockRejectedValueOnce(new Error("start intent response lost"))
       .mockResolvedValueOnce({
         ok: true,
-        data: { callToken: "server-call-token", intentCapability: "server-intent-capability" },
+        data: {
+          callToken: "server-call-token",
+          intentCapability: "server-intent-capability",
+        },
       });
     prepareLeadCall.mockResolvedValue({
       ok: true,
@@ -290,21 +494,46 @@ describe("SoftphoneProvider transport gate", () => {
       },
     });
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
 
     await user.click(screen.getByTestId("call-lead-button"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Could not start the call. Try again.");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not start the call. Try again.",
+    );
     expect(screen.queryByTestId("call-preparing")).not.toBeInTheDocument();
 
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(createTransport.mock.results[0].value.start).toHaveBeenCalled(),
+    );
     expect(mintStartIntent).toHaveBeenCalledTimes(2);
   });
 
   it("accepts clicked and keyboard digits once, tones only those presses, and keeps paste silent", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("header-dialer-button"));
     const input = screen.getByTestId("dialer-input");
 
@@ -313,14 +542,24 @@ describe("SoftphoneProvider transport gate", () => {
     await user.paste("7540662");
 
     expect(input).toHaveValue("(310) 754-0662");
-    expect(playDtmfTone.mock.calls.map(([digit]) => digit)).toEqual(["3", "1", "0"]);
-    expect(screen.getByTestId("dialer-call-manual")).toHaveTextContent("Call (310) 754-0662");
+    expect(playDtmfTone.mock.calls.map(([digit]) => digit)).toEqual([
+      "3",
+      "1",
+      "0",
+    ]);
+    expect(screen.getByTestId("dialer-call-manual")).toHaveTextContent(
+      "Call (310) 754-0662",
+    );
   });
 
   it("accepts formatted ten-digit paste but rejects 11-digit and mixed text", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("header-dialer-button"));
     const input = screen.getByTestId("dialer-input");
 
@@ -339,23 +578,43 @@ describe("SoftphoneProvider transport gate", () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     searchDialerLeads.mockResolvedValue({
       ok: true,
-      data: [{ propertyId: "property-1", contactId: "contact-1", name: "Unrelated Lead", detail: "1 Main St", address: "1 Main St", state: "MO", phoneE164: "+18165550123" } as never],
+      data: [
+        {
+          propertyId: "property-1",
+          contactId: "contact-1",
+          name: "Unrelated Lead",
+          detail: "1 Main St",
+          address: "1 Main St",
+          state: "MO",
+          phoneE164: "+18165550123",
+        } as never,
+      ],
     });
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("header-dialer-button"));
 
     await user.type(screen.getByTestId("dialer-input"), "3107540662");
     await waitFor(() => expect(searchDialerLeads).toHaveBeenCalled());
 
     expect(screen.getByTestId("dialer-call-manual")).toBeEnabled();
-    expect(screen.getByTestId("dialer-call-manual")).toHaveTextContent("Call (310) 754-0662");
+    expect(screen.getByTestId("dialer-call-manual")).toHaveTextContent(
+      "Call (310) 754-0662",
+    );
   });
 
   it("clears the keypad source when the dialer is closed and reopened", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
 
     await user.click(screen.getByTestId("header-dialer-button"));
     await user.click(screen.getByLabelText("Keypad 3"));
@@ -369,235 +628,6 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("keeps live keypad hidden until requested and sends digits only while live and not held", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
-    const sendDigit = vi.fn(async () => true);
-    createTransport.mockImplementation(() => {
-      let listener: ((state: "connecting" | "live" | "ended") => void) | null = null;
-      return { onStateChange: vi.fn((cb) => { listener = cb; }), start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }), mute: vi.fn(), hold: vi.fn(async () => true), sendDigit, hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })) };
-    });
-    const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
-    await user.click(screen.getByTestId("call-lead-button"));
-    await screen.findByTestId("call-live-pill");
-    expect(screen.queryByTestId("phone-keypad")).not.toBeInTheDocument();
-    await user.click(screen.getByTestId("call-keypad"));
-    await user.click(screen.getByLabelText("Keypad #"));
-    expect(sendDigit).toHaveBeenCalledWith("#");
-    expect(playDtmfTone).toHaveBeenCalledWith("#");
-    await user.click(screen.getByTestId("call-hold"));
-    expect(screen.queryByTestId("phone-keypad")).not.toBeInTheDocument();
-    expect(screen.getByTestId("call-keypad")).toBeDisabled();
-  });
-
-  it("keeps the call live and tells the rep when Hold fails", async () => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
-    let listener: ((state: "connecting" | "live" | "hold_sync_pending") => void) | null = null;
-    const emitState = (state: "connecting" | "live" | "hold_sync_pending") => listener?.(state);
-    const hangup = vi.fn();
-    createTransport.mockImplementation(() => {
-      return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
-        start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
-        mute: vi.fn(),
-        hold: vi.fn(async () => false),
-        sendDigit: vi.fn(async () => true),
-        hangup,
-      };
-    });
-    const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
-    await user.click(screen.getByTestId("call-lead-button"));
-    await screen.findByTestId("call-live-pill");
-
-    await user.click(screen.getByTestId("call-hold"));
-
-    expect(await screen.findByRole("status")).toHaveTextContent("Hold failed. The call is still live.");
-    expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live");
-    expect(screen.getByTestId("call-hold")).toBeEnabled();
-    expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
-    expect(screen.getByTestId("call-keypad")).toBeEnabled();
-    expect(screen.getByTestId("call-hangup")).toBeEnabled();
-    expect(hangup).not.toHaveBeenCalled();
-
-    // A later exact provider update is the first authority that the call did
-    // become held despite the direct SDK failure result.
-    await act(async () => emitState("hold_sync_pending"));
-    expect(screen.getByTestId("call-hold")).toHaveTextContent("Resume");
-    expect(screen.getByTestId("call-keypad")).toBeDisabled();
-    expect(screen.getByTestId("call-hangup")).toBeEnabled();
-    expect(hangup).not.toHaveBeenCalled();
-  });
-
-  it("keeps held truth and controls usable when Resume fails until provider correction", async () => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
-    let listener: ((state: "connecting" | "live" | "hold_sync_confirmed" | "resume_sync_pending") => void) | null = null;
-    const emitState = (state: "connecting" | "live" | "hold_sync_confirmed" | "resume_sync_pending") => listener?.(state);
-    const hangup = vi.fn();
-    const hold = vi.fn(async (on: boolean) => {
-      if (on) {
-        emitState("hold_sync_confirmed");
-        return true;
-      }
-      return false;
-    });
-    createTransport.mockImplementation(() => ({
-      onStateChange: vi.fn((cb) => { listener = cb; }),
-      start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
-      mute: vi.fn(),
-      hold,
-      sendDigit: vi.fn(async () => true),
-      hangup,
-    }));
-    const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
-    await user.click(screen.getByTestId("call-lead-button"));
-    await screen.findByTestId("call-live-pill");
-    await user.click(screen.getByTestId("call-hold"));
-    await user.click(screen.getByTestId("call-hold"));
-
-    expect(await screen.findByRole("status")).toHaveTextContent("Resume failed. The call is still on hold.");
-    expect(screen.getByTestId("call-hold")).toBeEnabled();
-    expect(screen.getByTestId("call-hold")).toHaveTextContent("Resume");
-    expect(screen.getByTestId("call-keypad")).toBeDisabled();
-    expect(screen.getByTestId("call-hangup")).toBeEnabled();
-    expect(hangup).not.toHaveBeenCalled();
-
-    await act(async () => emitState("resume_sync_pending"));
-    expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
-    expect(screen.getByTestId("call-keypad")).toBeEnabled();
-    expect(screen.getByTestId("call-hangup")).toBeEnabled();
-    expect(hangup).not.toHaveBeenCalled();
-  });
-
-  it("settles successful Hold controls while durable sync is unknown", async () => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
-    let listener: ((state: "connecting" | "live" | "hold_sync_pending") => void) | null = null;
-    const hangup = vi.fn();
-    createTransport.mockImplementation(() => ({
-      onStateChange: vi.fn((cb) => { listener = cb; }),
-      start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
-      mute: vi.fn(async () => true),
-      hold: vi.fn(async () => { listener?.("hold_sync_pending"); return true; }),
-      sendDigit: vi.fn(async () => true),
-      hangup,
-    }));
-    const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
-    await user.click(screen.getByTestId("call-lead-button"));
-    await screen.findByTestId("call-live-pill");
-
-    await user.click(screen.getByTestId("call-hold"));
-
-    expect(screen.getByRole("status")).toHaveTextContent("The call is held, but Jitter has not confirmed the hold yet.");
-    expect(screen.getByTestId("call-hold")).toBeEnabled();
-    expect(screen.getByTestId("call-hold")).toHaveTextContent("Resume");
-    expect(screen.getByTestId("call-keypad")).toBeDisabled();
-    expect(screen.getByTestId("call-hangup")).toBeEnabled();
-    expect(hangup).not.toHaveBeenCalled();
-  });
-
-  it("settles successful Resume controls while durable sync is unknown", async () => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
-    let listener: ((state: "connecting" | "live" | "hold_sync_confirmed" | "resume_sync_pending") => void) | null = null;
-    const hangup = vi.fn();
-    createTransport.mockImplementation(() => ({
-      onStateChange: vi.fn((cb) => { listener = cb; }),
-      start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
-      mute: vi.fn(async () => true),
-      hold: vi.fn(async (on: boolean) => { listener?.(on ? "hold_sync_confirmed" : "resume_sync_pending"); return true; }),
-      sendDigit: vi.fn(async () => true),
-      hangup,
-    }));
-    const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
-    await user.click(screen.getByTestId("call-lead-button"));
-    await screen.findByTestId("call-live-pill");
-    await user.click(screen.getByTestId("call-hold"));
-    await user.click(screen.getByTestId("call-hold"));
-
-    expect(screen.getByRole("status")).toHaveTextContent("The call resumed, but Jitter has not confirmed audio monitoring yet.");
-    expect(screen.getByTestId("call-hold")).toBeEnabled();
-    expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
-    expect(screen.getByTestId("call-keypad")).toBeEnabled();
-    expect(screen.getByTestId("call-hangup")).toBeEnabled();
-    expect(hangup).not.toHaveBeenCalled();
-  });
-
-  it("offers Reconnect Audio while preserving manual Hang Up", async () => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
-    let listener: ((state: "connecting" | "live" | "audio_reconnecting" | "audio_reconnect_required" | "ended") => void) | null = null;
-    const hangup = vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const }));
-    const reconnectAudio = vi.fn(async () => {
-      listener?.("audio_reconnecting");
-      return true;
-    });
-    createTransport.mockImplementation(() => ({
-      onStateChange: vi.fn((cb) => { listener = cb; }),
-      start: vi.fn(async () => { listener?.("connecting"); listener?.("live"); return { id: "call-1" }; }),
-      mute: vi.fn(),
-      hold: vi.fn(async () => true),
-      reconnectAudio,
-      sendDigit: vi.fn(async () => true),
-      hangup,
-    }));
-    const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
-    await user.click(screen.getByTestId("call-lead-button"));
-    await screen.findByTestId("call-live-pill");
-
-    act(() => listener?.("audio_reconnect_required"));
-    expect(screen.getByTestId("audio-reconnect-warning")).toHaveTextContent("homeowner call is still live");
-    expect(screen.getByTestId("call-hangup")).toBeEnabled();
-    expect(hangup).not.toHaveBeenCalled();
-
-    await user.click(screen.getByTestId("reconnect-audio"));
-    expect(reconnectAudio).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Reconnecting browser audio");
-    expect(hangup).not.toHaveBeenCalled();
-
-    act(() => listener?.("live"));
-    expect(screen.queryByTestId("audio-reconnect-warning")).not.toBeInTheDocument();
-    expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live · browser audio");
-  });
-
-  it("persists the exact live handle before a registered-connect response settles", async () => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    prepareLeadCall.mockResolvedValue({ ok: true, data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" } });
-    let listener: ((state: "ringing" | "live") => void) | null = null;
-    createTransport.mockImplementation(() => ({
-      onStateChange: vi.fn((cb) => { listener = cb; }),
-      callHandle: vi.fn(() => ({ id: "call-early" })),
-      start: vi.fn(() => {
-        listener?.("ringing");
-        listener?.("live");
-        return new Promise(() => undefined);
-      }),
-      mute: vi.fn(async () => true),
-      hold: vi.fn(async () => true),
-      reconnectAudio: vi.fn(async () => true),
-      sendDigit: vi.fn(async () => true),
-      hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
-    }));
-    const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
-    await user.click(screen.getByTestId("call-lead-button"));
-    await screen.findByTestId("call-live-pill");
-    expect(JSON.parse(window.sessionStorage.getItem("sandra.softphone.active-call.v1") ?? "null")).toMatchObject({
-      handle: { id: "call-early" },
-      wrapToken: expect.any(String),
-    });
-  });
-
-  it.each([
-    ["operator_busy", "You already have an active Jitter call."],
-    ["not_callable", "This number is no longer callable."],
-  ] as const)("returns to idle without wrap-up for %s", async (rejectionState, message) => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     prepareLeadCall.mockResolvedValue({
       ok: true,
       data: {
@@ -606,23 +636,31 @@ describe("SoftphoneProvider transport gate", () => {
         phoneE164: "+18165550123",
         maskedPhone: "(816) 555-0123",
         name: "Softphone Lead",
-        repName: "Mel",
         address: "1 Main St",
         state: "MO",
         startedAt: "2026-08-21T15:00:00.000Z",
       },
     });
+    const sendDigit = vi.fn(async () => true);
     createTransport.mockImplementation(() => {
-      let listener: ((state: typeof rejectionState) => void) | null = null;
+      let listener: ((state: "connecting" | "live" | "ended") => void) | null =
+        null;
       return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
+        onStateChange: vi.fn((cb) => {
+          listener = cb;
+        }),
         start: vi.fn(async () => {
-          listener?.(rejectionState);
-          throw new Error(rejectionState);
+          listener?.("connecting");
+          listener?.("live");
+          return { id: "call-1" };
         }),
         mute: vi.fn(),
         hold: vi.fn(async () => true),
-        hangup: vi.fn(),
+        sendDigit,
+        hangup: vi.fn(async () => ({
+          durationSeconds: 1,
+          outcome: "connected_human" as const,
+        })),
       };
     });
     const user = userEvent.setup();
@@ -645,51 +683,637 @@ describe("SoftphoneProvider transport gate", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    expect(await screen.findByRole("alert")).toHaveTextContent(message);
-    expect(screen.queryByTestId("dispo-notes")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("call-live-pill")).not.toBeInTheDocument();
-    expect(resumeFailedSoftphoneCall).toHaveBeenCalledWith("property-1");
+    await screen.findByTestId("call-live-pill");
+    expect(screen.queryByTestId("phone-keypad")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("call-keypad"));
+    await user.click(screen.getByLabelText("Keypad #"));
+    expect(sendDigit).toHaveBeenCalledWith("#");
+    expect(playDtmfTone).toHaveBeenCalledWith("#");
+    await user.click(screen.getByTestId("call-hold"));
+    expect(screen.queryByTestId("phone-keypad")).not.toBeInTheDocument();
+    expect(screen.getByTestId("call-keypad")).toBeDisabled();
   });
 
-  it.each([
-    ["caller_id_unavailable", "That company calling number is no longer available."],
-    ["caller_id_inventory_unavailable", "Company calling numbers could not be verified."],
-  ] as const)("returns to idle with caller-ID Retry and no wrap-up for %s", async (rejectionState, message) => {
+  it("keeps the call live and tells the rep when Hold fails", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     prepareLeadCall.mockResolvedValue({
       ok: true,
-      data: { propertyId: "property-1", contactId: "contact-1", phoneE164: "+18165550123", maskedPhone: "(816) 555-0123", name: "Softphone Lead", address: "1 Main St", state: "MO", startedAt: "2026-08-21T15:00:00.000Z" },
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
     });
+    let listener:
+      ((state: "connecting" | "live" | "hold_sync_pending") => void) | null =
+      null;
+    const emitState = (state: "connecting" | "live" | "hold_sync_pending") =>
+      listener?.(state);
+    const hangup = vi.fn();
     createTransport.mockImplementation(() => {
-      let listener: ((state: typeof rejectionState) => void) | null = null;
       return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
+        onStateChange: vi.fn((cb) => {
+          listener = cb;
+        }),
         start: vi.fn(async () => {
-          listener?.(rejectionState);
-          const failure = new Error(message);
-          failure.name = rejectionState;
-          throw failure;
+          listener?.("connecting");
+          listener?.("live");
+          return { id: "call-1" };
         }),
         mute: vi.fn(),
-        hold: vi.fn(async () => true),
-        sendDigit: vi.fn(async () => false),
-        hangup: vi.fn(),
+        hold: vi.fn(async () => false),
+        sendDigit: vi.fn(async () => true),
+        hangup,
       };
     });
     const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneLeadButton lead={{ id: "property-1", contactId: "contact-1", firstName: "Softphone", name: "Softphone Lead", address: "1 Main St", state: "MO", phones: ["+18165550123"], dncLocked: false, contactDnc: false, callable: true }} /></SoftphoneProvider>);
-
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("call-lead-button"));
-    expect(await screen.findByRole("alert")).toHaveTextContent(message);
-    expect(screen.getByTestId("retry-caller-ids")).toBeVisible();
-    expect(screen.queryByTestId("dispo-notes")).not.toBeInTheDocument();
-    expect(completeSoftphoneCall).not.toHaveBeenCalled();
-    expect(resumeFailedSoftphoneCall).toHaveBeenCalledWith("property-1");
-    expect(window.localStorage.getItem("sandra.softphone.caller-id.v1")).toBeNull();
-    await user.click(screen.getByTestId("retry-caller-ids"));
-    expect(await screen.findByTestId("caller-id-readonly")).toHaveTextContent("Main");
-    expect(loadCallerIds).toHaveBeenCalledTimes(2);
+    await screen.findByTestId("call-live-pill");
+
+    await user.click(screen.getByTestId("call-hold"));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Hold failed. The call is still live.",
+    );
+    expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live");
+    expect(screen.getByTestId("call-hold")).toBeEnabled();
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
+    expect(screen.getByTestId("call-keypad")).toBeEnabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+
+    // A later exact provider update is the first authority that the call did
+    // become held despite the direct SDK failure result.
+    await act(async () => emitState("hold_sync_pending"));
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Resume");
+    expect(screen.getByTestId("call-keypad")).toBeDisabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
   });
+
+  it("keeps held truth and controls usable when Resume fails until provider correction", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
+    });
+    let listener:
+      | ((
+          state:
+            | "connecting"
+            | "live"
+            | "hold_sync_confirmed"
+            | "resume_sync_pending",
+        ) => void)
+      | null = null;
+    const emitState = (
+      state:
+        "connecting" | "live" | "hold_sync_confirmed" | "resume_sync_pending",
+    ) => listener?.(state);
+    const hangup = vi.fn();
+    const hold = vi.fn(async (on: boolean) => {
+      if (on) {
+        emitState("hold_sync_confirmed");
+        return true;
+      }
+      return false;
+    });
+    createTransport.mockImplementation(() => ({
+      onStateChange: vi.fn((cb) => {
+        listener = cb;
+      }),
+      start: vi.fn(async () => {
+        listener?.("connecting");
+        listener?.("live");
+        return { id: "call-1" };
+      }),
+      mute: vi.fn(),
+      hold,
+      sendDigit: vi.fn(async () => true),
+      hangup,
+    }));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+    await user.click(screen.getByTestId("call-hold"));
+    await user.click(screen.getByTestId("call-hold"));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Resume failed. The call is still on hold.",
+    );
+    expect(screen.getByTestId("call-hold")).toBeEnabled();
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Resume");
+    expect(screen.getByTestId("call-keypad")).toBeDisabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+
+    await act(async () => emitState("resume_sync_pending"));
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
+    expect(screen.getByTestId("call-keypad")).toBeEnabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+  });
+
+  it("settles successful Hold controls while durable sync is unknown", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
+    });
+    let listener:
+      ((state: "connecting" | "live" | "hold_sync_pending") => void) | null =
+      null;
+    const hangup = vi.fn();
+    createTransport.mockImplementation(() => ({
+      onStateChange: vi.fn((cb) => {
+        listener = cb;
+      }),
+      start: vi.fn(async () => {
+        listener?.("connecting");
+        listener?.("live");
+        return { id: "call-1" };
+      }),
+      mute: vi.fn(async () => true),
+      hold: vi.fn(async () => {
+        listener?.("hold_sync_pending");
+        return true;
+      }),
+      sendDigit: vi.fn(async () => true),
+      hangup,
+    }));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+
+    await user.click(screen.getByTestId("call-hold"));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "The call is held, but Jitter has not confirmed the hold yet.",
+    );
+    expect(screen.getByTestId("call-hold")).toBeEnabled();
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Resume");
+    expect(screen.getByTestId("call-keypad")).toBeDisabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+  });
+
+  it("settles successful Resume controls while durable sync is unknown", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
+    });
+    let listener:
+      | ((
+          state:
+            | "connecting"
+            | "live"
+            | "hold_sync_confirmed"
+            | "resume_sync_pending",
+        ) => void)
+      | null = null;
+    const hangup = vi.fn();
+    createTransport.mockImplementation(() => ({
+      onStateChange: vi.fn((cb) => {
+        listener = cb;
+      }),
+      start: vi.fn(async () => {
+        listener?.("connecting");
+        listener?.("live");
+        return { id: "call-1" };
+      }),
+      mute: vi.fn(async () => true),
+      hold: vi.fn(async (on: boolean) => {
+        listener?.(on ? "hold_sync_confirmed" : "resume_sync_pending");
+        return true;
+      }),
+      sendDigit: vi.fn(async () => true),
+      hangup,
+    }));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+    await user.click(screen.getByTestId("call-hold"));
+    await user.click(screen.getByTestId("call-hold"));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "The call resumed, but Jitter has not confirmed audio monitoring yet.",
+    );
+    expect(screen.getByTestId("call-hold")).toBeEnabled();
+    expect(screen.getByTestId("call-hold")).toHaveTextContent("Hold");
+    expect(screen.getByTestId("call-keypad")).toBeEnabled();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+  });
+
+  it("offers Reconnect Audio while preserving manual Hang Up", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
+    });
+    let listener:
+      | ((
+          state:
+            | "connecting"
+            | "live"
+            | "audio_reconnecting"
+            | "audio_reconnect_required"
+            | "ended",
+        ) => void)
+      | null = null;
+    const hangup = vi.fn(async () => ({
+      durationSeconds: 1,
+      outcome: "connected_human" as const,
+    }));
+    const reconnectAudio = vi.fn(async () => {
+      listener?.("audio_reconnecting");
+      return true;
+    });
+    createTransport.mockImplementation(() => ({
+      onStateChange: vi.fn((cb) => {
+        listener = cb;
+      }),
+      start: vi.fn(async () => {
+        listener?.("connecting");
+        listener?.("live");
+        return { id: "call-1" };
+      }),
+      mute: vi.fn(),
+      hold: vi.fn(async () => true),
+      reconnectAudio,
+      sendDigit: vi.fn(async () => true),
+      hangup,
+    }));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+
+    act(() => listener?.("audio_reconnect_required"));
+    expect(screen.getByTestId("audio-reconnect-warning")).toHaveTextContent(
+      "homeowner call is still live",
+    );
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(hangup).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("reconnect-audio"));
+    expect(reconnectAudio).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("call-live-pill")).toHaveTextContent(
+      "Reconnecting browser audio",
+    );
+    expect(screen.getByTestId("reconnect-audio")).toBeDisabled();
+    expect(hangup).not.toHaveBeenCalled();
+
+    act(() => listener?.("live"));
+    expect(
+      screen.queryByTestId("audio-reconnect-warning"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("call-live-pill")).toHaveTextContent(
+      "Live · browser audio",
+    );
+  });
+
+  it("persists the exact live handle before a registered-connect response settles", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+    prepareLeadCall.mockResolvedValue({
+      ok: true,
+      data: {
+        propertyId: "property-1",
+        contactId: "contact-1",
+        phoneE164: "+18165550123",
+        maskedPhone: "(816) 555-0123",
+        name: "Softphone Lead",
+        address: "1 Main St",
+        state: "MO",
+        startedAt: "2026-08-21T15:00:00.000Z",
+      },
+    });
+    let listener: ((state: "ringing" | "live") => void) | null = null;
+    createTransport.mockImplementation(() => ({
+      onStateChange: vi.fn((cb) => {
+        listener = cb;
+      }),
+      callHandle: vi.fn(() => ({ id: "call-early" })),
+      start: vi.fn(() => {
+        listener?.("ringing");
+        listener?.("live");
+        return new Promise(() => undefined);
+      }),
+      mute: vi.fn(async () => true),
+      hold: vi.fn(async () => true),
+      reconnectAudio: vi.fn(async () => true),
+      sendDigit: vi.fn(async () => true),
+      hangup: vi.fn(async () => ({
+        durationSeconds: 1,
+        outcome: "connected_human" as const,
+      })),
+    }));
+    const user = userEvent.setup();
+    render(
+      <SoftphoneProvider>
+        <SoftphoneLeadButton
+          lead={{
+            id: "property-1",
+            contactId: "contact-1",
+            firstName: "Softphone",
+            name: "Softphone Lead",
+            address: "1 Main St",
+            state: "MO",
+            phones: ["+18165550123"],
+            dncLocked: false,
+            contactDnc: false,
+            callable: true,
+          }}
+        />
+      </SoftphoneProvider>,
+    );
+    await user.click(screen.getByTestId("call-lead-button"));
+    await screen.findByTestId("call-live-pill");
+    expect(
+      JSON.parse(
+        window.sessionStorage.getItem("sandra.softphone.active-call.v1") ??
+          "null",
+      ),
+    ).toMatchObject({
+      handle: { id: "call-early" },
+      wrapToken: expect.any(String),
+    });
+  });
+
+  it.each([
+    ["operator_busy", "You already have an active Jitter call."],
+    ["not_callable", "This number is no longer callable."],
+  ] as const)(
+    "returns to idle without wrap-up for %s",
+    async (rejectionState, message) => {
+      vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+      prepareLeadCall.mockResolvedValue({
+        ok: true,
+        data: {
+          propertyId: "property-1",
+          contactId: "contact-1",
+          phoneE164: "+18165550123",
+          maskedPhone: "(816) 555-0123",
+          name: "Softphone Lead",
+          repName: "Mel",
+          address: "1 Main St",
+          state: "MO",
+          startedAt: "2026-08-21T15:00:00.000Z",
+        },
+      });
+      createTransport.mockImplementation(() => {
+        let listener: ((state: typeof rejectionState) => void) | null = null;
+        return {
+          onStateChange: vi.fn((cb) => {
+            listener = cb;
+          }),
+          start: vi.fn(async () => {
+            listener?.(rejectionState);
+            throw new Error(rejectionState);
+          }),
+          mute: vi.fn(),
+          hold: vi.fn(async () => true),
+          hangup: vi.fn(),
+        };
+      });
+      const user = userEvent.setup();
+      render(
+        <SoftphoneProvider>
+          <SoftphoneLeadButton
+            lead={{
+              id: "property-1",
+              contactId: "contact-1",
+              firstName: "Softphone",
+              name: "Softphone Lead",
+              address: "1 Main St",
+              state: "MO",
+              phones: ["+18165550123"],
+              dncLocked: false,
+              contactDnc: false,
+              callable: true,
+            }}
+          />
+        </SoftphoneProvider>,
+      );
+      await user.click(screen.getByTestId("call-lead-button"));
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      expect(screen.queryByTestId("dispo-notes")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("call-live-pill")).not.toBeInTheDocument();
+      expect(resumeFailedSoftphoneCall).toHaveBeenCalledWith("property-1");
+    },
+  );
+
+  it.each([
+    [
+      "caller_id_unavailable",
+      "That company calling number is no longer available.",
+    ],
+    [
+      "caller_id_inventory_unavailable",
+      "Company calling numbers could not be verified.",
+    ],
+  ] as const)(
+    "returns to idle with caller-ID Retry and no wrap-up for %s",
+    async (rejectionState, message) => {
+      vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+      prepareLeadCall.mockResolvedValue({
+        ok: true,
+        data: {
+          propertyId: "property-1",
+          contactId: "contact-1",
+          phoneE164: "+18165550123",
+          maskedPhone: "(816) 555-0123",
+          name: "Softphone Lead",
+          address: "1 Main St",
+          state: "MO",
+          startedAt: "2026-08-21T15:00:00.000Z",
+        },
+      });
+      createTransport.mockImplementation(() => {
+        let listener: ((state: typeof rejectionState) => void) | null = null;
+        return {
+          onStateChange: vi.fn((cb) => {
+            listener = cb;
+          }),
+          start: vi.fn(async () => {
+            listener?.(rejectionState);
+            const failure = new Error(message);
+            failure.name = rejectionState;
+            throw failure;
+          }),
+          mute: vi.fn(),
+          hold: vi.fn(async () => true),
+          sendDigit: vi.fn(async () => false),
+          hangup: vi.fn(),
+        };
+      });
+      const user = userEvent.setup();
+      render(
+        <SoftphoneProvider>
+          <SoftphoneLeadButton
+            lead={{
+              id: "property-1",
+              contactId: "contact-1",
+              firstName: "Softphone",
+              name: "Softphone Lead",
+              address: "1 Main St",
+              state: "MO",
+              phones: ["+18165550123"],
+              dncLocked: false,
+              contactDnc: false,
+              callable: true,
+            }}
+          />
+        </SoftphoneProvider>,
+      );
+
+      await user.click(screen.getByTestId("call-lead-button"));
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      expect(screen.getByTestId("retry-caller-ids")).toBeVisible();
+      expect(screen.queryByTestId("dispo-notes")).not.toBeInTheDocument();
+      expect(completeSoftphoneCall).not.toHaveBeenCalled();
+      expect(resumeFailedSoftphoneCall).toHaveBeenCalledWith("property-1");
+      expect(
+        window.localStorage.getItem("sandra.softphone.caller-id.v1"),
+      ).toBeNull();
+      await user.click(screen.getByTestId("retry-caller-ids"));
+      expect(await screen.findByTestId("caller-id-readonly")).toHaveTextContent(
+        "Main",
+      );
+      expect(loadCallerIds).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("still clears a refused start when sequence resume loses its response", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
@@ -710,7 +1334,9 @@ describe("SoftphoneProvider transport gate", () => {
     createTransport.mockImplementation(() => {
       let listener: ((state: "operator_busy") => void) | null = null;
       return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
+        onStateChange: vi.fn((cb) => {
+          listener = cb;
+        }),
         start: vi.fn(async () => {
           listener?.("operator_busy");
           throw new Error("operator_busy");
@@ -740,7 +1366,9 @@ describe("SoftphoneProvider transport gate", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("You already have an active Jitter call.");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "You already have an active Jitter call.",
+    );
     expect(screen.queryByTestId("dispo-notes")).not.toBeInTheDocument();
   });
 
@@ -763,7 +1391,9 @@ describe("SoftphoneProvider transport gate", () => {
     createTransport.mockImplementation(() => {
       let listener: ((state: "connecting" | "failed") => void) | null = null;
       return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
+        onStateChange: vi.fn((cb) => {
+          listener = cb;
+        }),
         start: vi.fn(async () => {
           listener?.("connecting");
           listener?.("failed");
@@ -771,7 +1401,10 @@ describe("SoftphoneProvider transport gate", () => {
         }),
         mute: vi.fn(),
         hold: vi.fn(async () => true),
-        hangup: vi.fn(async () => ({ durationSeconds: 0, outcome: "failed" as const })),
+        hangup: vi.fn(async () => ({
+          durationSeconds: 0,
+          outcome: "failed" as const,
+        })),
       };
     });
     const user = userEvent.setup();
@@ -795,7 +1428,9 @@ describe("SoftphoneProvider transport gate", () => {
     );
     await user.click(screen.getByTestId("call-lead-button"));
     expect(await screen.findByTestId("dispo-notes")).toBeVisible();
-    expect(screen.getByRole("alert")).toHaveTextContent("Microphone access is required to place calls.");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Microphone access is required to place calls.",
+    );
   });
 
   it("shows a blocking warning when Jitter teardown is still unconfirmed", async () => {
@@ -813,13 +1448,26 @@ describe("SoftphoneProvider transport gate", () => {
         startedAt: "2026-08-21T15:00:00.000Z",
       },
     });
-    let resolveHangup!: (result: { durationSeconds: number; outcome: "failed" }) => void;
-    let resolveRetry!: (result: { durationSeconds: number; outcome: "failed" }) => void;
+    let resolveHangup!: (result: {
+      durationSeconds: number;
+      outcome: "failed";
+    }) => void;
     createTransport.mockImplementation(() => {
-      let listener: ((state: "connecting" | "live" | "ended" | "teardown_unconfirmed" | "teardown_confirmed") => void) | null = null;
+      let listener:
+        | ((
+            state:
+              | "connecting"
+              | "live"
+              | "ended"
+              | "teardown_unconfirmed"
+              | "teardown_confirmed",
+          ) => void)
+        | null = null;
       let hangupAttempts = 0;
       return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
+        onStateChange: vi.fn((cb) => {
+          listener = cb;
+        }),
         start: vi.fn(async () => {
           listener?.("connecting");
           listener?.("live");
@@ -827,18 +1475,16 @@ describe("SoftphoneProvider transport gate", () => {
         }),
         mute: vi.fn(),
         hold: vi.fn(async () => true),
+        terminalIsAuthoritative: vi.fn(() => false),
         hangup: vi.fn(() => {
           hangupAttempts += 1;
           if (hangupAttempts === 1) {
             listener?.("teardown_unconfirmed");
-            return new Promise((resolve) => { resolveHangup = resolve; });
+            return new Promise((resolve) => {
+              resolveHangup = resolve;
+            });
           }
-          return new Promise((resolve) => {
-            resolveRetry = (result) => {
-              listener?.("teardown_confirmed");
-              resolve(result);
-            };
-          });
+          return new Promise(() => undefined);
         }),
       };
     });
@@ -863,23 +1509,29 @@ describe("SoftphoneProvider transport gate", () => {
     );
 
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"));
-    await user.click(screen.getByTestId("call-hangup"));
-    expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Ending call…");
-    expect(screen.getByTestId("call-hangup")).toBeDisabled();
-    expect(createTransport.mock.results[0].value.hangup).toHaveBeenCalledTimes(1);
-    act(() => { resolveHangup({ durationSeconds: 2, outcome: "failed" }); });
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Jitter could not confirm that the call ended. Do not start another call yet",
+    await waitFor(() =>
+      expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"),
     );
-    await user.type(screen.getByTestId("dispo-notes"), "Left voicemail");
-    expect(screen.getByTestId("dispo-not-interested")).toBeDisabled();
-    await user.click(screen.getByTestId("retry-jitter-teardown"));
-    expect(screen.getByTestId("retry-jitter-teardown")).toBeDisabled();
-    expect(screen.getByTestId("retry-jitter-teardown")).toHaveTextContent("Retrying…");
-    act(() => { resolveRetry({ durationSeconds: 2, outcome: "failed" }); });
-    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
-    expect(screen.getByTestId("dispo-not-interested")).toBeEnabled();
+    await user.click(screen.getByTestId("call-hangup"));
+    expect(screen.getByTestId("call-live-pill")).toHaveTextContent(
+      "Ending call…",
+    );
+    expect(screen.getByTestId("call-hangup")).toBeDisabled();
+    expect(createTransport.mock.results[0].value.hangup).toHaveBeenCalledTimes(
+      1,
+    );
+    act(() => {
+      resolveHangup({ durationSeconds: 2, outcome: "failed" });
+    });
+    expect(await screen.findByTestId("audio-reconnect-warning")).toHaveTextContent(
+      "The homeowner call is still live, but browser audio needs to reconnect.",
+    );
+    expect(
+      window.sessionStorage.getItem("sandra.softphone.active-call.v1"),
+    ).not.toBeNull();
+    expect(screen.queryByTestId("dispo-notes")).not.toBeInTheDocument();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(screen.getByTestId("reconnect-audio")).toBeEnabled();
   });
 
   afterEach(() => {
@@ -939,7 +1591,10 @@ describe("SoftphoneProvider transport gate", () => {
     });
     completeSoftphoneCall
       .mockRejectedValueOnce(new Error("response lost"))
-      .mockResolvedValueOnce({ ok: true, data: { activityId: "activity-1", callbackTaskId: "task-1" } });
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { activityId: "activity-1", callbackTaskId: "task-1" },
+      });
     const user = userEvent.setup();
     render(
       <SoftphoneProvider>
@@ -961,24 +1616,36 @@ describe("SoftphoneProvider transport gate", () => {
     );
 
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"));
+    await waitFor(() =>
+      expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"),
+    );
     await user.click(screen.getByTestId("call-hangup"));
     await user.type(screen.getByTestId("dispo-notes"), "Call back tomorrow");
 
     const disposition = screen.getByTestId("dispo-not-interested");
     await user.click(disposition);
-    expect(await screen.findByRole("alert")).toHaveTextContent("Could not confirm the call was saved. Try again.");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not confirm the call was saved. Try again.",
+    );
     expect(disposition).toBeEnabled();
 
     await user.click(disposition);
     await waitFor(() => expect(completeSoftphoneCall).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument(),
+    );
 
     const firstToken = completeSoftphoneCall.mock.calls[0][0].wrapToken;
     const retryToken = completeSoftphoneCall.mock.calls[1][0].wrapToken;
-    expect(completeSoftphoneCall.mock.calls[0][0].callCapability).toBe("simulated-session");
-    expect(completeSoftphoneCall.mock.calls[1][0].callCapability).toBe("simulated-session");
-    expect(firstToken).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    expect(completeSoftphoneCall.mock.calls[0][0].callCapability).toBe(
+      "simulated-session",
+    );
+    expect(completeSoftphoneCall.mock.calls[1][0].callCapability).toBe(
+      "simulated-session",
+    );
+    expect(firstToken).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     expect(retryToken).toBe(firstToken);
     expect(createTransport.mock.results[0].value.start).toHaveBeenCalledWith(
       expect.objectContaining({ callToken: firstToken }),
@@ -987,12 +1654,28 @@ describe("SoftphoneProvider transport gate", () => {
 
   it("keeps a connecting call reachable and uses the transport's remote-end result", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    const listener: { current: ((state: "connecting" | "ringing" | "live" | "ended" | "failed") => void) | null } = { current: null };
+    const listener: {
+      current:
+        | ((
+            state: "connecting" | "ringing" | "live" | "ended" | "failed",
+          ) => void)
+        | null;
+    } = { current: null };
     let resolveStart!: (value: { id: string }) => void;
-    const hangup = vi.fn(async () => ({ durationSeconds: 7, outcome: "connected_human" as const }));
+    const hangup = vi.fn(async () => ({
+      durationSeconds: 7,
+      outcome: "connected_human" as const,
+    }));
     createTransport.mockReturnValue({
-      onStateChange: vi.fn((cb) => { listener.current = cb; }),
-      start: vi.fn(() => new Promise<{ id: string }>((resolve) => { resolveStart = resolve; })),
+      onStateChange: vi.fn((cb) => {
+        listener.current = cb;
+      }),
+      start: vi.fn(
+        () =>
+          new Promise<{ id: string }>((resolve) => {
+            resolveStart = resolve;
+          }),
+      ),
       mute: vi.fn(),
       hold: vi.fn(async () => true),
       hangup,
@@ -1032,7 +1715,9 @@ describe("SoftphoneProvider transport gate", () => {
     await user.click(screen.getByTestId("call-lead-button"));
     await waitFor(() => expect(createTransport).toHaveBeenCalledTimes(1));
     act(() => listener.current?.("connecting"));
-    expect(await screen.findByTestId("call-live-pill")).toHaveTextContent("Connecting");
+    expect(await screen.findByTestId("call-live-pill")).toHaveTextContent(
+      "Connecting",
+    );
     await user.click(screen.getByLabelText("Close dialer"));
     expect(screen.getByTestId("softphone-popover")).toBeVisible();
     await user.click(screen.getByTestId("call-lead-button"));
@@ -1071,12 +1756,22 @@ describe("SoftphoneProvider coach UI flag", () => {
     loadDialerRecents.mockResolvedValue({ ok: true, data: [] });
     searchDialerLeads.mockResolvedValue({ ok: true, data: [] });
     playDtmfTone.mockReset();
-    transportEnabled.mockImplementation(() => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "simulated");
-    jitterEnabled.mockImplementation(() => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "jitter");
+    transportEnabled.mockImplementation(
+      () => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "simulated",
+    );
+    jitterEnabled.mockImplementation(
+      () => process.env.NEXT_PUBLIC_SOFTPHONE_TRANSPORT === "jitter",
+    );
     createTransport.mockImplementation(() => {
-      let listener: ((state: "connecting" | "ringing" | "live" | "ended" | "failed") => void) | null = null;
+      let listener:
+        | ((
+            state: "connecting" | "ringing" | "live" | "ended" | "failed",
+          ) => void)
+        | null = null;
       return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
+        onStateChange: vi.fn((cb) => {
+          listener = cb;
+        }),
         start: vi.fn(async () => {
           listener?.("connecting");
           listener?.("live");
@@ -1097,7 +1792,10 @@ describe("SoftphoneProvider coach UI flag", () => {
     });
     mintStartIntent.mockResolvedValue({
       ok: true,
-      data: { callToken: "server-call-token", intentCapability: "server-intent-capability" },
+      data: {
+        callToken: "server-call-token",
+        intentCapability: "server-intent-capability",
+      },
     });
     loadCoachCallContext.mockReset().mockResolvedValue({
       sellerName: "Softphone Lead",
@@ -1114,7 +1812,10 @@ describe("SoftphoneProvider coach UI flag", () => {
     });
     window.localStorage.clear();
     // Existing coach lifecycle tests explicitly opt in; new reps default off.
-    window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: true, scriptId: "closr-outbound" }));
+    window.localStorage.setItem(
+      "sandra.softphone.coach.v1",
+      JSON.stringify({ enabled: true, scriptId: "closr-outbound" }),
+    );
     prepareLeadCall.mockResolvedValue({
       ok: true,
       data: {
@@ -1136,7 +1837,11 @@ describe("SoftphoneProvider coach UI flag", () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
     window.localStorage.clear();
     const user = userEvent.setup();
-    const first = render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    const first = render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("header-dialer-button"));
     const toggle = screen.getByRole("switch", { name: "Enable live coach" });
     expect(toggle).toHaveAttribute("aria-checked", "false");
@@ -1144,123 +1849,281 @@ describe("SoftphoneProvider coach UI flag", () => {
     await user.keyboard(" ");
     expect(toggle).toHaveAttribute("aria-checked", "true");
     expect(screen.queryByTestId("dialer-coach-script")).not.toBeInTheDocument();
-    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)).toEqual({ enabled: true });
+    expect(
+      JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!),
+    ).toEqual({ enabled: true });
     first.unmount();
-    const second = render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    const second = render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("header-dialer-button"));
-    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
     await user.click(screen.getByTestId("dialer-coach-toggle"));
-    await waitFor(() => expect(screen.queryByTestId("dialer-coach-script")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("dialer-coach-script"),
+      ).not.toBeInTheDocument(),
+    );
     second.unmount();
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
     await user.click(screen.getByTestId("header-dialer-button"));
-    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
   });
 
-  it.each([undefined, "0", "true"])("hides the preference when coach flag is %s", async (flag) => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", flag);
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
-    await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
-    expect(screen.queryByTestId("dialer-coach-toggle")).not.toBeInTheDocument();
-  });
+  it.each([undefined, "0", "true"])(
+    "hides the preference when coach flag is %s",
+    async (flag) => {
+      vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+      vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", flag);
+      render(
+        <SoftphoneProvider>
+          <SoftphoneHeaderButton />
+        </SoftphoneProvider>,
+      );
+      await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
+      expect(
+        screen.queryByTestId("dialer-coach-toggle"),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("hides the preference when calling is disabled", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "disabled");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
     await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
     expect(screen.queryByTestId("dialer-coach-toggle")).not.toBeInTheDocument();
   });
 
-  it.each(["broken-json", "null", "1", "0", '{"enabled":"true"}'])("defaults safely off for malformed or legacy storage: %s", async (saved) => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    window.localStorage.setItem("sandra.softphone.coach.v1", saved);
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
-    await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
-    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "false");
-  });
+  it.each(["broken-json", "null", "1", "0", '{"enabled":"true"}'])(
+    "defaults safely off for malformed or legacy storage: %s",
+    async (saved) => {
+      vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+      vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+      window.localStorage.setItem("sandra.softphone.coach.v1", saved);
+      render(
+        <SoftphoneProvider>
+          <SoftphoneHeaderButton />
+        </SoftphoneProvider>,
+      );
+      await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
+      expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+    },
+  );
 
   it("accepts a legacy saved script id without making it a local script selection", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: true, scriptId: "removed" }));
-    render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+    window.localStorage.setItem(
+      "sandra.softphone.coach.v1",
+      JSON.stringify({ enabled: true, scriptId: "removed" }),
+    );
+    render(
+      <SoftphoneProvider>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
     await userEvent.setup().click(screen.getByTestId("header-dialer-button"));
-    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
     expect(screen.queryByTestId("dialer-coach-script")).not.toBeInTheDocument();
   });
 
   it("keeps the in-memory switch working when storage reads and writes throw", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    const read = vi.spyOn(window.localStorage, "getItem").mockImplementation(() => { throw new Error("blocked"); });
-    const write = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => { throw new Error("blocked"); });
+    const read = vi
+      .spyOn(window.localStorage, "getItem")
+      .mockImplementation(() => {
+        throw new Error("blocked");
+      });
+    const write = vi
+      .spyOn(window.localStorage, "setItem")
+      .mockImplementation(() => {
+        throw new Error("blocked");
+      });
     try {
-      render(<SoftphoneProvider><SoftphoneHeaderButton /></SoftphoneProvider>);
+      render(
+        <SoftphoneProvider>
+          <SoftphoneHeaderButton />
+        </SoftphoneProvider>,
+      );
       const user = userEvent.setup();
       await user.click(screen.getByTestId("header-dialer-button"));
-      expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
       await user.click(screen.getByTestId("dialer-coach-toggle"));
-      expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", "true");
-    } finally { read.mockRestore(); write.mockRestore(); }
-  });
-
-  it.each(["lead", "manual", "suggestion", "recent"])("keeps coaching hidden but running for the %s entry point, then reopens and opts in", async (entry) => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled: false, scriptId: "closr-outbound" }));
-    prepareManualCall.mockImplementation(() => prepareLeadCall());
-    searchDialerLeads.mockResolvedValue({ ok: true, data: [{ propertyId: "property-1", name: "Softphone Lead", detail: "1 Main St", contactId: "contact-1", phoneE164: "+18165550123", address: "1 Main St", state: "MO" }] });
-    loadDialerRecents.mockResolvedValue({ ok: true, data: [{ id: "recent-1", propertyId: "property-1", phoneE164: "+18165550123", name: "Softphone Lead", detail: "1 Main St", when: "Today", contactId: "contact-1", missed: false }] });
-    const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneHeaderButton /><SoftphoneLeadButton lead={COACH_LEAD} /></SoftphoneProvider>);
-    if (entry === "lead") await user.click(screen.getByTestId("call-lead-button"));
-    else {
-      await user.click(screen.getByTestId("header-dialer-button"));
-      await screen.findByTestId("caller-id-readonly");
-      if (entry === "manual") {
-        await user.type(screen.getByTestId("dialer-input"), "8165550123");
-        await user.click(screen.getByTestId("dialer-call-manual"));
-      } else if (entry === "suggestion") {
-        await user.type(screen.getByTestId("dialer-input"), "Soft");
-        await user.click(await screen.findByTestId("dialer-suggestion"));
-      } else await user.click(await screen.findByTestId("dialer-recent"));
+      expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    } finally {
+      read.mockRestore();
+      write.mockRestore();
     }
-    await screen.findByTestId("reopen-coach");
-    expect(screen.getByTestId("softphone-popover")).toBeInTheDocument();
-    expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
-    await waitFor(() => expect(coachChannels).toHaveLength(1));
-    act(() => latestCoachChannel()._broadcastHandler?.({ payload: { type: "transcript", speaker: "seller", text: "heard while hidden", isFinal: true, ts: "t2", scriptVersion: "1.2.0", matcherVersion: "3" } }));
-    await user.click(screen.getByTestId("reopen-coach"));
-    await screen.findByTestId("coach-live-view");
-    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("heard while hidden");
-    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)).toEqual({ enabled: true });
-    await user.click(screen.getByTestId("coach-collapse"));
-    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!).enabled).toBe(true);
-    expect(coachChannels).toHaveLength(1);
   });
 
-  it.each([false, true])("preserves preference %s after wrap-up and applies it to the next call", async (enabled) => {
-    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
-    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    window.localStorage.setItem("sandra.softphone.coach.v1", JSON.stringify({ enabled, scriptId: "closr-outbound" }));
-    completeSoftphoneCall.mockResolvedValue({ ok: true, data: {} });
-    const user = userEvent.setup();
-    render(<SoftphoneProvider><SoftphoneHeaderButton /><SoftphoneLeadButton lead={COACH_LEAD} /></SoftphoneProvider>);
-    await user.click(screen.getByTestId("call-lead-button"));
-    await user.click(await screen.findByTestId(enabled ? "coach-hangup" : "call-hangup"));
-    await user.type(await screen.findByTestId("dispo-notes"), "Synthetic test call");
-    await user.click(screen.getByTestId("dispo-not-interested"));
-    await waitFor(() => expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument());
-    await user.click(screen.getByTestId("header-dialer-button"));
-    expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute("aria-checked", String(enabled));
-    await user.click(screen.getByLabelText("Close dialer"));
-    await user.click(screen.getByTestId("call-lead-button"));
-    await screen.findByTestId(enabled ? "coach-live-view" : "reopen-coach");
-    expect(JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!).enabled).toBe(enabled);
-  });
+  it.each(["lead", "manual", "suggestion", "recent"])(
+    "keeps coaching hidden but running for the %s entry point, then reopens and opts in",
+    async (entry) => {
+      vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+      vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+      window.localStorage.setItem(
+        "sandra.softphone.coach.v1",
+        JSON.stringify({ enabled: false, scriptId: "closr-outbound" }),
+      );
+      prepareManualCall.mockImplementation(() => prepareLeadCall());
+      searchDialerLeads.mockResolvedValue({
+        ok: true,
+        data: [
+          {
+            propertyId: "property-1",
+            name: "Softphone Lead",
+            detail: "1 Main St",
+            contactId: "contact-1",
+            phoneE164: "+18165550123",
+            address: "1 Main St",
+            state: "MO",
+          },
+        ],
+      });
+      loadDialerRecents.mockResolvedValue({
+        ok: true,
+        data: [
+          {
+            id: "recent-1",
+            propertyId: "property-1",
+            phoneE164: "+18165550123",
+            name: "Softphone Lead",
+            detail: "1 Main St",
+            when: "Today",
+            contactId: "contact-1",
+            missed: false,
+          },
+        ],
+      });
+      const user = userEvent.setup();
+      render(
+        <SoftphoneProvider>
+          <SoftphoneHeaderButton />
+          <SoftphoneLeadButton lead={COACH_LEAD} />
+        </SoftphoneProvider>,
+      );
+      if (entry === "lead")
+        await user.click(screen.getByTestId("call-lead-button"));
+      else {
+        await user.click(screen.getByTestId("header-dialer-button"));
+        await screen.findByTestId("caller-id-readonly");
+        if (entry === "manual") {
+          await user.type(screen.getByTestId("dialer-input"), "8165550123");
+          await user.click(screen.getByTestId("dialer-call-manual"));
+        } else if (entry === "suggestion") {
+          await user.type(screen.getByTestId("dialer-input"), "Soft");
+          await user.click(await screen.findByTestId("dialer-suggestion"));
+        } else await user.click(await screen.findByTestId("dialer-recent"));
+      }
+      await screen.findByTestId("reopen-coach");
+      expect(screen.getByTestId("softphone-popover")).toBeInTheDocument();
+      expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
+      await waitFor(() => expect(coachChannels).toHaveLength(1));
+      act(() =>
+        latestCoachChannel()._broadcastHandler?.({
+          payload: {
+            type: "transcript",
+            speaker: "seller",
+            text: "heard while hidden",
+            isFinal: true,
+            ts: "t2",
+            scriptVersion: "1.2.0",
+            matcherVersion: "3",
+          },
+        }),
+      );
+      await user.click(screen.getByTestId("reopen-coach"));
+      await screen.findByTestId("coach-live-view");
+      expect(screen.getByTestId("coach-transcript")).toHaveTextContent(
+        "heard while hidden",
+      );
+      expect(
+        JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!),
+      ).toEqual({ enabled: true });
+      await user.click(screen.getByTestId("coach-collapse"));
+      expect(
+        JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)
+          .enabled,
+      ).toBe(true);
+      expect(coachChannels).toHaveLength(1);
+    },
+  );
+
+  it.each([false, true])(
+    "preserves preference %s after wrap-up and applies it to the next call",
+    async (enabled) => {
+      vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
+      vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+      window.localStorage.setItem(
+        "sandra.softphone.coach.v1",
+        JSON.stringify({ enabled, scriptId: "closr-outbound" }),
+      );
+      completeSoftphoneCall.mockResolvedValue({ ok: true, data: {} });
+      const user = userEvent.setup();
+      render(
+        <SoftphoneProvider>
+          <SoftphoneHeaderButton />
+          <SoftphoneLeadButton lead={COACH_LEAD} />
+        </SoftphoneProvider>,
+      );
+      await user.click(screen.getByTestId("call-lead-button"));
+      await user.click(
+        await screen.findByTestId(enabled ? "coach-hangup" : "call-hangup"),
+      );
+      await user.type(
+        await screen.findByTestId("dispo-notes"),
+        "Synthetic test call",
+      );
+      await user.click(screen.getByTestId("dispo-not-interested"));
+      await waitFor(() =>
+        expect(
+          screen.queryByTestId("softphone-popover"),
+        ).not.toBeInTheDocument(),
+      );
+      await user.click(screen.getByTestId("header-dialer-button"));
+      expect(screen.getByTestId("dialer-coach-toggle")).toHaveAttribute(
+        "aria-checked",
+        String(enabled),
+      );
+      await user.click(screen.getByLabelText("Close dialer"));
+      await user.click(screen.getByTestId("call-lead-button"));
+      await screen.findByTestId(enabled ? "coach-live-view" : "reopen-coach");
+      expect(
+        JSON.parse(window.localStorage.getItem("sandra.softphone.coach.v1")!)
+          .enabled,
+      ).toBe(enabled);
+    },
+  );
 
   it("keeps a recovered active call collapsed when the saved preference is off", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
@@ -1268,16 +2131,261 @@ describe("SoftphoneProvider coach UI flag", () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
     window.localStorage.clear();
     const prepared = await prepareLeadCall();
-    window.sessionStorage.setItem("sandra.softphone.active-call.v1", JSON.stringify({ handle: { id: "retained" }, target: prepared.data, startedAt: new Date().toISOString(), wrapToken: "retained-token" }));
+    window.sessionStorage.setItem(
+      "sandra.softphone.active-call.v1",
+      JSON.stringify({
+        handle: { id: "retained" },
+        target: prepared.data,
+        startedAt: new Date().toISOString(),
+        wrapToken: "retained-token",
+      }),
+    );
     const recover = vi.fn(async () => undefined);
     const transport = { ...createTransport(), recover };
     try {
-      render(<SoftphoneProvider transportFactory={() => transport}><SoftphoneHeaderButton /></SoftphoneProvider>);
+      render(
+        <SoftphoneProvider transportFactory={() => transport}>
+          <SoftphoneHeaderButton />
+        </SoftphoneProvider>,
+      );
       await screen.findByTestId("reopen-coach");
       expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
       expect(recover).toHaveBeenCalled();
       await waitFor(() => expect(coachChannels).toHaveLength(1));
-    } finally { window.sessionStorage.clear(); }
+    } finally {
+      window.sessionStorage.clear();
+    }
+  });
+
+  it("shows a neutral retained-call check for 15 seconds, preserves its capability, and lets the header open coach", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+      transportEnabled.mockReturnValue(true);
+      vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
+      loadCoachCallScript.mockResolvedValue({
+        status: "bound",
+        binding: { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle },
+      });
+      window.localStorage.setItem(
+        "sandra.softphone.coach.v1",
+        JSON.stringify({ enabled: false }),
+      );
+      const prepared = await prepareLeadCall();
+      window.sessionStorage.setItem(
+        "sandra.softphone.active-call.v1",
+        JSON.stringify({
+          handle: { id: "retained" },
+          target: prepared.data,
+          startedAt: new Date().toISOString(),
+          wrapToken: "retained-token",
+        }),
+      );
+      const reconnectAudio = vi.fn(async () => true);
+      const hangup = vi.fn(async () => ({
+        durationSeconds: 1,
+        outcome: "connected_human" as const,
+      }));
+      const transport = {
+        ...createTransport(),
+        recover: vi.fn(async () => undefined),
+        reconnectAudio,
+        hangup,
+        onProviderStatusError: vi.fn((callback) =>
+          callback({ status: 400, errorCode: "provider_status_bad_request" }),
+        ),
+      };
+
+      render(
+        <SoftphoneProvider transportFactory={() => transport}>
+          <SoftphoneHeaderButton />
+        </SoftphoneProvider>,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId("call-live-pill")).toHaveTextContent(
+        "Checking call status…",
+      );
+      expect(screen.getByTestId("call-live-pill").className).not.toMatch(
+        /amber|red/,
+      );
+      expect(
+        screen.getByTestId("audio-reconnect-warning").className,
+      ).not.toMatch(/amber|red/);
+      expect(screen.getByTestId("reconnect-audio")).toBeEnabled();
+      expect(screen.getByTestId("call-hangup")).toBeEnabled();
+      expect(
+        screen.getByTestId("provider-status-error-code"),
+      ).toHaveTextContent("provider_status_bad_request");
+      expect(
+        window.sessionStorage.getItem("sandra.softphone.active-call.v1"),
+      ).not.toBeNull();
+      act(() => screen.getByTestId("header-dialer-button").click());
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId("coach-live-view")).toBeVisible();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000);
+      });
+      expect(
+        screen.getByTestId("coach-audio-reconnect-warning"),
+      ).toHaveTextContent("Call live · audio interrupted");
+      expect(
+        window.sessionStorage.getItem("sandra.softphone.active-call.v1"),
+      ).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the retained capability only after a successful user Hang Up", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+    transportEnabled.mockReturnValue(true);
+    vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "0");
+    const prepared = await prepareLeadCall();
+    window.sessionStorage.setItem(
+      "sandra.softphone.active-call.v1",
+      JSON.stringify({
+        handle: { id: "retained" },
+        target: prepared.data,
+        startedAt: new Date().toISOString(),
+        wrapToken: "retained-token",
+      }),
+    );
+    const hangup = vi.fn(async () => ({
+      durationSeconds: 1,
+      outcome: "connected_human" as const,
+    }));
+    const transport = {
+      ...createTransport(),
+      recover: vi.fn(async () => undefined),
+      hangup,
+    };
+    const user = userEvent.setup();
+
+    render(
+      <SoftphoneProvider transportFactory={() => transport}>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
+    await screen.findByTestId("call-hangup");
+    await user.click(screen.getByTestId("call-hangup"));
+    await waitFor(() => expect(hangup).toHaveBeenCalledOnce());
+    expect(
+      window.sessionStorage.getItem("sandra.softphone.active-call.v1"),
+    ).toBeNull();
+  });
+
+  it("keeps a reloaded provider-confirmed active call live when all Hang Up cancels fail", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+    transportEnabled.mockReturnValue(true);
+    const prepared = await prepareLeadCall();
+    window.sessionStorage.setItem(
+      "sandra.softphone.active-call.v1",
+      JSON.stringify({
+        handle: { id: "retained" },
+        target: prepared.data,
+        startedAt: new Date().toISOString(),
+        wrapToken: "retained-token",
+      }),
+    );
+    let listener:
+      | ((
+          state: "audio_reconnect_required" | "teardown_unconfirmed" | "failed",
+        ) => void)
+      | null = null;
+    const hangup = vi.fn(async () => {
+      listener?.("teardown_unconfirmed");
+      listener?.("failed");
+      return { durationSeconds: 1, outcome: "failed" as const };
+    });
+    const transport = {
+      ...createTransport(),
+      onStateChange: vi.fn((callback) => {
+        listener = callback;
+      }),
+      recover: vi.fn(async () => {
+        listener?.("audio_reconnect_required");
+      }),
+      reconnectAudio: vi.fn(async () => true),
+      hangup,
+      terminalIsAuthoritative: vi.fn(() => false),
+    };
+    const user = userEvent.setup();
+
+    render(
+      <SoftphoneProvider transportFactory={() => transport}>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
+    await screen.findByTestId("call-hangup");
+    await user.click(screen.getByTestId("call-hangup"));
+
+    expect(hangup).toHaveBeenCalledOnce();
+    expect(
+      window.sessionStorage.getItem("sandra.softphone.active-call.v1"),
+    ).not.toBeNull();
+    expect(screen.queryByTestId("dispo-notes")).not.toBeInTheDocument();
+    expect(screen.getByTestId("call-hangup")).toBeEnabled();
+    expect(screen.getByTestId("reconnect-audio")).toBeEnabled();
+  });
+
+  it("re-enables wrap-up dispositions when authoritative terminal proof follows an unconfirmed teardown", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "jitter");
+    transportEnabled.mockReturnValue(true);
+    const prepared = await prepareLeadCall();
+    window.sessionStorage.setItem(
+      "sandra.softphone.active-call.v1",
+      JSON.stringify({
+        handle: { id: "retained" },
+        target: prepared.data,
+        startedAt: new Date().toISOString(),
+        wrapToken: "retained-token",
+      }),
+    );
+    let listener:
+      | ((
+          state:
+            | "audio_reconnect_required"
+            | "teardown_unconfirmed"
+            | "teardown_confirmed"
+            | "ended",
+        ) => void)
+      | null = null;
+    const terminalIsAuthoritative = vi.fn(() => false);
+    const transport = {
+      ...createTransport(),
+      onStateChange: vi.fn((callback) => {
+        listener = callback;
+      }),
+      recover: vi.fn(async () => {
+        listener?.("audio_reconnect_required");
+      }),
+      terminalIsAuthoritative,
+    };
+    const user = userEvent.setup();
+
+    render(
+      <SoftphoneProvider transportFactory={() => transport}>
+        <SoftphoneHeaderButton />
+      </SoftphoneProvider>,
+    );
+    await screen.findByTestId("call-hangup");
+    act(() => {
+      listener?.("teardown_unconfirmed");
+    });
+    await screen.findByTestId("audio-reconnect-warning");
+    act(() => {
+      terminalIsAuthoritative.mockReturnValue(true);
+      listener?.("ended");
+    });
+
+    await user.type(await screen.findByTestId("dispo-notes"), "Provider ended");
+    expect(screen.getByTestId("dispo-follow-up")).toBeEnabled();
+    expect(screen.queryByTestId("retry-jitter-teardown")).not.toBeInTheDocument();
   });
 
   it("shows the full-screen coach view instead of the classic popover when the flag is on and the call goes live", async () => {
@@ -1290,21 +2398,34 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
     expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument();
   });
 
   it("shows pending feedback and ignores duplicate hangup clicks in the full-screen coach view", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    let resolveHangup!: (result: { durationSeconds: number; outcome: "connected_human" }) => void;
-    const hangup = vi.fn(() => new Promise<{ durationSeconds: number; outcome: "connected_human" }>((resolve) => {
-      resolveHangup = resolve;
-    }));
+    let resolveHangup!: (result: {
+      durationSeconds: number;
+      outcome: "connected_human";
+    }) => void;
+    const hangup = vi.fn(
+      () =>
+        new Promise<{ durationSeconds: number; outcome: "connected_human" }>(
+          (resolve) => {
+            resolveHangup = resolve;
+          },
+        ),
+    );
     createTransport.mockImplementation(() => {
-      let listener: ((state: "connecting" | "live" | "ended") => void) | null = null;
+      let listener: ((state: "connecting" | "live" | "ended") => void) | null =
+        null;
       return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
+        onStateChange: vi.fn((cb) => {
+          listener = cb;
+        }),
         start: vi.fn(async () => {
           listener?.("connecting");
           listener?.("live");
@@ -1323,17 +2444,28 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
 
     await user.click(screen.getByTestId("coach-hangup"));
     expect(screen.getByTestId("coach-hangup")).toBeDisabled();
-    expect(screen.getByTestId("coach-hangup")).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByTestId("coach-hangup")).toHaveTextContent("Ending call…");
+    expect(screen.getByTestId("coach-hangup")).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    expect(screen.getByTestId("coach-hangup")).toHaveTextContent(
+      "Ending call…",
+    );
     await user.click(screen.getByTestId("coach-hangup"));
     expect(hangup).toHaveBeenCalledTimes(1);
 
-    act(() => resolveHangup({ durationSeconds: 2, outcome: "connected_human" }));
-    await waitFor(() => expect(screen.getByTestId("dispo-notes")).toBeInTheDocument());
+    act(() =>
+      resolveHangup({ durationSeconds: 2, outcome: "connected_human" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("dispo-notes")).toBeInTheDocument(),
+    );
   });
 
   it("keeps the prepared homeowner and address in the script when live context loading fails", async () => {
@@ -1348,10 +2480,16 @@ describe("SoftphoneProvider coach UI flag", () => {
     );
 
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeVisible());
-    expect(screen.getByTestId("current-section-script")).toHaveTextContent("Hey Softphone?");
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-context-error")).toBeVisible(),
+    );
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+      "Hey Softphone?",
+    );
     await user.click(screen.getByTestId("variant-Opener-cold_call"));
-    expect(screen.getByTestId("current-section-script")).toHaveTextContent("1 Main St");
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+      "1 Main St",
+    );
   });
 
   it("shows the prepared homeowner and address on the first live paint while context is still loading", async () => {
@@ -1366,10 +2504,16 @@ describe("SoftphoneProvider coach UI flag", () => {
     );
 
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeVisible());
-    expect(screen.getByTestId("current-section-script")).toHaveTextContent("Hey Softphone?");
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeVisible(),
+    );
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+      "Hey Softphone?",
+    );
     await user.click(screen.getByTestId("variant-Opener-cold_call"));
-    expect(screen.getByTestId("current-section-script")).toHaveTextContent("1 Main St");
+    expect(screen.getByTestId("current-section-script")).toHaveTextContent(
+      "1 Main St",
+    );
     expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
   });
 
@@ -1380,7 +2524,9 @@ describe("SoftphoneProvider coach UI flag", () => {
     createTransport.mockImplementation(() => {
       let listener: ((state: "connecting" | "live") => void) | null = null;
       return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
+        onStateChange: vi.fn((cb) => {
+          listener = cb;
+        }),
         start: vi.fn(() => {
           listener?.("connecting");
           return new Promise(() => undefined);
@@ -1388,7 +2534,10 @@ describe("SoftphoneProvider coach UI flag", () => {
         mute: vi.fn(),
         hold: vi.fn(async () => true),
         sendDigit: vi.fn(async () => true),
-        hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
+        hangup: vi.fn(async () => ({
+          durationSeconds: 1,
+          outcome: "connected_human" as const,
+        })),
       };
     });
     const user = userEvent.setup();
@@ -1399,8 +2548,12 @@ describe("SoftphoneProvider coach UI flag", () => {
     );
 
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeVisible());
-    expect(screen.getByTestId("coach-script-loading")).toHaveTextContent("Loading script…");
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeVisible(),
+    );
+    expect(screen.getByTestId("coach-script-loading")).toHaveTextContent(
+      "Loading script…",
+    );
     expect(screen.getByTestId("coach-hangup")).toBeEnabled();
     expect(loadCoachCallContext).toHaveBeenCalledTimes(1);
   });
@@ -1415,7 +2568,9 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"));
+    await waitFor(() =>
+      expect(screen.getByTestId("call-live-pill")).toHaveTextContent("Live"),
+    );
     expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
   });
 
@@ -1429,7 +2584,9 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
 
     await user.click(screen.getByTestId("coach-collapse"));
     expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
@@ -1437,7 +2594,9 @@ describe("SoftphoneProvider coach UI flag", () => {
     expect(screen.getByTestId("softphone-popover")).toBeVisible();
 
     await user.click(reopenButton);
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
     expect(screen.queryByTestId("softphone-popover")).not.toBeInTheDocument();
   });
 
@@ -1460,12 +2619,16 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
 
     await user.click(screen.getByTestId("coach-collapse"));
 
     expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
-    await waitFor(() => expect(screen.getByTestId("header-dialer-button")).toHaveFocus());
+    await waitFor(() =>
+      expect(screen.getByTestId("header-dialer-button")).toHaveFocus(),
+    );
   });
 
   it("Escape inside the coach view also collapses back to the classic popover", async () => {
@@ -1478,10 +2641,14 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
 
     await user.keyboard("{Escape}");
-    await waitFor(() => expect(screen.getByTestId("softphone-popover")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByTestId("softphone-popover")).toBeVisible(),
+    );
   });
 
   it("preserves the coach session across collapse/reopen — exact manual section and transcript survive", async () => {
@@ -1494,11 +2661,15 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
 
     await user.click(screen.getByTestId("coach-next"));
     await user.click(screen.getByTestId("coach-next"));
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Explain how BMH works");
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Explain how BMH works",
+    );
 
     act(() =>
       latestCoachChannel()._broadcastHandler?.({
@@ -1513,16 +2684,24 @@ describe("SoftphoneProvider coach UI flag", () => {
         },
       }),
     );
-    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("hello there");
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent(
+      "hello there",
+    );
 
     await user.click(screen.getByTestId("coach-collapse"));
     expect(screen.queryByTestId("coach-live-view")).not.toBeInTheDocument();
     expect(screen.getByTestId("softphone-popover")).toBeVisible();
 
     await user.click(screen.getByTestId("reopen-coach"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent("Explain how BMH works");
-    expect(screen.getByTestId("coach-transcript")).toHaveTextContent("hello there");
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
+      "Explain how BMH works",
+    );
+    expect(screen.getByTestId("coach-transcript")).toHaveTextContent(
+      "hello there",
+    );
     // The underlying realtime subscription itself was never torn down and
     // recreated by the collapse/reopen — proof the session, not just its
     // rendered values, lived in the provider the whole time.
@@ -1535,9 +2714,15 @@ describe("SoftphoneProvider coach UI flag", () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
     let resolveSendDigit!: (value: boolean) => void;
     createTransport.mockImplementation(() => {
-      let listener: ((state: "connecting" | "ringing" | "live" | "ended" | "failed") => void) | null = null;
+      let listener:
+        | ((
+            state: "connecting" | "ringing" | "live" | "ended" | "failed",
+          ) => void)
+        | null = null;
       return {
-        onStateChange: vi.fn((cb) => { listener = cb; }),
+        onStateChange: vi.fn((cb) => {
+          listener = cb;
+        }),
         start: vi.fn(async () => {
           listener?.("connecting");
           listener?.("live");
@@ -1545,8 +2730,16 @@ describe("SoftphoneProvider coach UI flag", () => {
         }),
         mute: vi.fn(),
         hold: vi.fn(async () => true),
-        sendDigit: vi.fn(() => new Promise<boolean>((resolve) => { resolveSendDigit = resolve; })),
-        hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
+        sendDigit: vi.fn(
+          () =>
+            new Promise<boolean>((resolve) => {
+              resolveSendDigit = resolve;
+            }),
+        ),
+        hangup: vi.fn(async () => ({
+          durationSeconds: 1,
+          outcome: "connected_human" as const,
+        })),
       };
     });
     const user = userEvent.setup();
@@ -1556,7 +2749,9 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
 
     await user.click(screen.getByTestId("coach-keypad-toggle"));
     await user.click(screen.getByLabelText("Keypad 5"));
@@ -1566,7 +2761,9 @@ describe("SoftphoneProvider coach UI flag", () => {
 
     act(() => resolveSendDigit(false)); // transport reports the digit was not delivered
     const toast = await screen.findByRole("status");
-    expect(toast).toHaveTextContent("That keypad tone was not sent. Try again.");
+    expect(toast).toHaveTextContent(
+      "That keypad tone was not sent. Try again.",
+    );
     expect(playDtmfTone).not.toHaveBeenCalled();
     // Must render above the full-screen coach dialog (z-[80]), including its
     // in-flow objection focus card, so it stays visible while coach mode is open.
@@ -1587,7 +2784,9 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
     expect(removeCoachChannel).not.toHaveBeenCalled();
 
     await user.click(screen.getByTestId("coach-hangup"));
@@ -1597,9 +2796,14 @@ describe("SoftphoneProvider coach UI flag", () => {
   it("tears down the coach subscription when a refusal (operator_busy) arrives AFTER the call was already live and coaching — not just on a clean hangup", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    const listener: { current: ((state: "connecting" | "live" | "operator_busy") => void) | null } = { current: null };
+    const listener: {
+      current:
+        ((state: "connecting" | "live" | "operator_busy") => void) | null;
+    } = { current: null };
     createTransport.mockReturnValue({
-      onStateChange: vi.fn((cb) => { listener.current = cb; }),
+      onStateChange: vi.fn((cb) => {
+        listener.current = cb;
+      }),
       start: vi.fn(async () => {
         listener.current?.("connecting");
         listener.current?.("live");
@@ -1608,7 +2812,10 @@ describe("SoftphoneProvider coach UI flag", () => {
       mute: vi.fn(),
       hold: vi.fn(async () => true),
       sendDigit: vi.fn(async () => true),
-      hangup: vi.fn(async () => ({ durationSeconds: 1, outcome: "connected_human" as const })),
+      hangup: vi.fn(async () => ({
+        durationSeconds: 1,
+        outcome: "connected_human" as const,
+      })),
     });
     const user = userEvent.setup();
     render(
@@ -1617,7 +2824,9 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(screen.getByTestId("coach-live-view")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByTestId("coach-live-view")).toBeInTheDocument(),
+    );
     expect(removeCoachChannel).not.toHaveBeenCalled();
 
     // A refusal arriving well after the call went live and the coach
@@ -1630,18 +2839,31 @@ describe("SoftphoneProvider coach UI flag", () => {
   it("invalidates coaching synchronously when a terminal callback beats a deferred transport start", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    const listener: { current: ((state: "connecting" | "failed") => void) | null } = { current: null };
+    const listener: {
+      current: ((state: "connecting" | "failed") => void) | null;
+    } = { current: null };
     let resolveStart!: (value: { id: string }) => void;
-    let resolveHangup!: (value: { durationSeconds: number; outcome: "failed" }) => void;
-    const deferredHangup = new Promise<{ durationSeconds: number; outcome: "failed" }>((resolve) => {
+    let resolveHangup!: (value: {
+      durationSeconds: number;
+      outcome: "failed";
+    }) => void;
+    const deferredHangup = new Promise<{
+      durationSeconds: number;
+      outcome: "failed";
+    }>((resolve) => {
       resolveHangup = resolve;
     });
     createTransport.mockReturnValue({
-      onStateChange: vi.fn((cb) => { listener.current = cb; }),
-      start: vi.fn(() => new Promise<{ id: string }>((resolve) => {
-        resolveStart = resolve;
-        listener.current?.("connecting");
-      })),
+      onStateChange: vi.fn((cb) => {
+        listener.current = cb;
+      }),
+      start: vi.fn(
+        () =>
+          new Promise<{ id: string }>((resolve) => {
+            resolveStart = resolve;
+            listener.current?.("connecting");
+          }),
+      ),
       mute: vi.fn(),
       hold: vi.fn(async () => true),
       sendDigit: vi.fn(async () => true),
@@ -1655,11 +2877,15 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(createTransport.mock.results[0].value.start).toHaveBeenCalled(),
+    );
 
     act(() => listener.current?.("failed"));
     act(() => resolveStart({ id: "late-session" }));
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     expect(coachChannels).toHaveLength(0);
 
@@ -1672,22 +2898,34 @@ describe("SoftphoneProvider coach UI flag", () => {
   it("invalidates coaching synchronously when an operator-busy refusal beats a deferred transport start and recovery", async () => {
     vi.stubEnv("NEXT_PUBLIC_SOFTPHONE_TRANSPORT", "simulated");
     vi.stubEnv("NEXT_PUBLIC_COACH_UI_ENABLED", "1");
-    const listener: { current: ((state: "connecting" | "operator_busy") => void) | null } = { current: null };
+    const listener: {
+      current: ((state: "connecting" | "operator_busy") => void) | null;
+    } = { current: null };
     let resolveStart!: (value: { id: string }) => void;
     let resolveRecovery!: () => void;
-    resumeFailedSoftphoneCall.mockReturnValue(new Promise<void>((resolve) => {
-      resolveRecovery = resolve;
-    }));
+    resumeFailedSoftphoneCall.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveRecovery = resolve;
+      }),
+    );
     createTransport.mockReturnValue({
-      onStateChange: vi.fn((cb) => { listener.current = cb; }),
-      start: vi.fn(() => new Promise<{ id: string }>((resolve) => {
-        resolveStart = resolve;
-        listener.current?.("connecting");
-      })),
+      onStateChange: vi.fn((cb) => {
+        listener.current = cb;
+      }),
+      start: vi.fn(
+        () =>
+          new Promise<{ id: string }>((resolve) => {
+            resolveStart = resolve;
+            listener.current?.("connecting");
+          }),
+      ),
       mute: vi.fn(),
       hold: vi.fn(async () => true),
       sendDigit: vi.fn(async () => true),
-      hangup: vi.fn(async () => ({ durationSeconds: 0, outcome: "failed" as const })),
+      hangup: vi.fn(async () => ({
+        durationSeconds: 0,
+        outcome: "failed" as const,
+      })),
     });
 
     const user = userEvent.setup();
@@ -1697,11 +2935,15 @@ describe("SoftphoneProvider coach UI flag", () => {
       </SoftphoneProvider>,
     );
     await user.click(screen.getByTestId("call-lead-button"));
-    await waitFor(() => expect(createTransport.mock.results[0].value.start).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(createTransport.mock.results[0].value.start).toHaveBeenCalled(),
+    );
 
     act(() => listener.current?.("operator_busy"));
     act(() => resolveStart({ id: "late-session" }));
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     expect(coachChannels).toHaveLength(0);
 

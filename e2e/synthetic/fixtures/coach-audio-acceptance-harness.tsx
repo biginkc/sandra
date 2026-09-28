@@ -35,6 +35,7 @@ class FakeRtcClient {
 }
 class FakeCall {
   direction = "inbound"; state = "ringing"; cause = ""; sipCode = 0; sipReason = ""; hangupCount = 0;
+  telnyxIDs = { telnyxCallControlId: "synthetic-operator-browser-leg" };
   manualAppHangupCount = 0; localPurgeHangupCount = 0; byeSendingHangupCount = 0;
   muteCount = 0; unmuteCount = 0; rejectMute = false; rejectUnmute = false;
   rejectHold = false; rejectResume = false;

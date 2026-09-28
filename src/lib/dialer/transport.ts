@@ -12,6 +12,8 @@ export type CallTarget = {
 
 export type CallHandle = { id: string };
 export type CallResult = { durationSeconds: number; outcome: "connected_human" | "failed" };
+/** A non-authoritative provider-status poll failure. It never ends a call. */
+export type ProviderStatusPollError = { status: number; errorCode: string };
 export type DtmfDigit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "*" | "#";
 export type CallTransportState =
   | "connecting"
@@ -57,6 +59,8 @@ export interface CallTransport {
   sendDigit(digit: DtmfDigit): Promise<boolean>;
   hangup(): Promise<CallResult>;
   onStateChange(cb: (state: CallTransportState) => void): void;
+  /** Reports status-poll failures without turning unknown provider state into terminal state. */
+  onProviderStatusError?(cb: (error: ProviderStatusPollError) => void): void;
 }
 
 /**
