@@ -81,7 +81,7 @@ describe("loadCoachCallContext — rep display name", () => {
 
     expect(context.repName).toBe("Jarrad");
     expect(context.authenticatedRepName).toBe("Jarrad Henry");
-    expect(resolveFileNumber(context)).toEqual({ value: "JH-c1c524", isPlaceholder: false });
+    expect(resolveFileNumber(context)).toEqual({ value: "JH-c1c524", isPlaceholder: false, source: "host" });
   });
 
   it("does not pretend a single-token email local part is the rep's complete known name", async () => {

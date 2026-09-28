@@ -22,6 +22,25 @@ function lineText(line: { segments?: Array<{ kind: string; value?: string; token
   return (line.segments ?? []).map((segment) => segment.kind === "text" ? segment.value : segment.kind === "token" ? `{${segment.token}}` : `[${segment.label ?? ""}]`).join("");
 }
 
+function omitResolvedTokenProvenance(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(omitResolvedTokenProvenance);
+  if (!value || typeof value !== "object") return value;
+
+  const record = value as Record<string, unknown>;
+  const normalized = Object.fromEntries(
+    Object.entries(record).map(([key, entry]) => [key, omitResolvedTokenProvenance(entry)]),
+  );
+
+  return typeof record.value === "string"
+    && typeof record.isPlaceholder === "boolean"
+    && (record.source === "host" || record.source === "entry" || record.source === "placeholder")
+    ? (() => {
+        const { source: _source, ...resolvedToken } = normalized;
+        return resolvedToken;
+      })()
+    : normalized;
+}
+
 function enumerateRuntime() {
   const phases = closrOutbound123Bundle.script.phases.map((phase) => phase.id);
   const sections = getCoachSections(closrOutbound123Bundle);
@@ -83,7 +102,7 @@ function enumerateRuntime() {
 
 describe("coach runtime parity", () => {
   it("enumerates the bound bundle identically to the pre-refactor runtime", () => {
-    const canonicalJson = JSON.stringify(enumerateRuntime(), null, 1);
+    const canonicalJson = JSON.stringify(omitResolvedTokenProvenance(enumerateRuntime()), null, 1);
     expect(createHash("sha256").update(canonicalJson).digest("hex")).toBe("8280d028a995e1886e18b4684f31550ff1eaa4cac9184d7cd56a806a85317cd1");
   });
 });
