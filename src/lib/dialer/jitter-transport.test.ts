@@ -3126,8 +3126,9 @@ describe("JitterCallTransport", () => {
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
   });
 
-  it("restores a rehydrated provider-held call without automatically unholding it", async () => {
-    const harness = transportHarness();
+  it("restores a rehydrated provider-held call before provider proof confirms it", async () => {
+    const providerProof = deferred<JitterProxyResult<{ state: "terminal"; outcome: "ended" }>>();
+    const harness = transportHarness({ getProviderStatus: vi.fn(() => providerProof.promise) });
     const states: string[] = [];
     harness.transport.onStateChange((state) => states.push(state));
     await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
@@ -3143,31 +3144,79 @@ describe("JitterCallTransport", () => {
   it("converges retained terminal proof even when no SDK call reattaches after reload", async () => {
     vi.useFakeTimers();
     try {
-      const getProviderStatus = vi.fn()
-        .mockResolvedValue({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "active" } })
-        .mockResolvedValueOnce({ ok: true, data: { state: "terminal", outcome: "ended" } });
+      const getProviderStatus = vi.fn();
+      for (let attempt = 0; attempt < 11; attempt += 1)
+        getProviderStatus.mockResolvedValueOnce({ ok: true, data: { state: "active" } });
+      getProviderStatus.mockResolvedValueOnce({ ok: true, data: { state: "terminal", outcome: "ended" } });
       const harness = transportHarness({ getProviderStatus });
       const states: string[] = [];
       harness.transport.onStateChange((state) => states.push(state));
       await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
       await vi.advanceTimersByTimeAsync(0);
       expect(states.at(-1)).toBe("audio_reconnect_required");
+      expect(getProviderStatus).toHaveBeenCalledTimes(10);
 
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(20_000);
       await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+      expect(getProviderStatus).toHaveBeenCalledTimes(12);
       expect(harness.dependencies.cancel).not.toHaveBeenCalled();
       expect(harness.rtc.serverDisconnect).toHaveBeenCalledTimes(1);
       expect(harness.rtc.disconnect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends retained recovery after bounded provider-status errors", async () => {
+    const getProviderStatus = vi.fn(async () => { throw new Error("provider unavailable"); });
+    const harness = transportHarness({ getProviderStatus });
+    const states: string[] = [];
+    harness.transport.onStateChange((state) => states.push(state));
+
+    await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+    await vi.waitFor(() => expect(states.at(-1)).toBe("ended"));
+
+    expect(states).toContain("checking");
+    expect(getProviderStatus).toHaveBeenCalledTimes(10);
+    expect(harness.dependencies.cancel).not.toHaveBeenCalled();
+  });
+
+  it("keeps an attached active SDK call recoverable when stats and all provider-status probes fail", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstProviderStatus = deferred<JitterProxyResult<{ state: "active" }>>();
+      let providerStatusCalls = 0;
+      const getProviderStatus = vi.fn(() => {
+        providerStatusCalls += 1;
+        if (providerStatusCalls === 1) return firstProviderStatus.promise;
+        return Promise.reject(new Error("provider unavailable"));
+      });
+      const harness = transportHarness({ getProviderStatus });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+
+      await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+      await vi.waitFor(() => expect(getProviderStatus).toHaveBeenCalledTimes(1));
+      const recovered = new FakeCall();
+      recovered.state = "active";
+      attachUnavailableStatsPeer(recovered, "getStats rejection");
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: recovered });
+      for (let index = 0; index < 3; index += 1)
+        await (harness.transport as unknown as { sampleAudioHealth(): Promise<void> }).sampleAudioHealth();
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+
+      firstProviderStatus.reject(new Error("provider unavailable"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getProviderStatus).toHaveBeenCalledTimes(10);
+      expect(harness.rtc.serverDisconnect).not.toHaveBeenCalled();
+      expect(harness.rtc.disconnect).not.toHaveBeenCalled();
+      expect((harness.transport as unknown as { callId: string | null }).callId).toBe("call-1");
+      expect((harness.transport as unknown as { currentCall: FakeCall | null }).currentCall).toBe(recovered);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(getProviderStatus).toHaveBeenCalledTimes(20);
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+      expect(harness.rtc.serverDisconnect).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -3213,7 +3262,7 @@ describe("JitterCallTransport", () => {
 
     expect(harness.dependencies.getToken).not.toHaveBeenCalled();
     expect(harness.dependencies.createRtcClient).not.toHaveBeenCalled();
-    expect(states).toEqual(["audio_reconnect_required", "ended"]);
+    expect(states).toEqual(["checking", "ended"]);
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
     expect(harness.rtc.disconnect).not.toHaveBeenCalled();
     expect((harness.transport as unknown as { rtcClient: unknown }).rtcClient).toBeNull();
@@ -3246,7 +3295,7 @@ describe("JitterCallTransport", () => {
     await expect(recovery).resolves.toEqual({ id: "call-1" });
 
     expect(harness.dependencies.createRtcClient).not.toHaveBeenCalled();
-    expect(states).toEqual(["audio_reconnect_required", "ended"]);
+    expect(states).toEqual(["checking", "ended"]);
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
     expect(harness.rtc.disconnect).not.toHaveBeenCalled();
     expect((harness.transport as unknown as { rtcClient: unknown }).rtcClient).toBeNull();
@@ -3277,7 +3326,7 @@ describe("JitterCallTransport", () => {
     expect(staleClient.serverDisconnect).toHaveBeenCalledTimes(1);
     expect(staleClient.disconnect).not.toHaveBeenCalled();
     expect(removeAudio).toHaveBeenCalledTimes(1);
-    expect(states).toEqual(["audio_reconnect_required", "ended"]);
+    expect(states).toEqual(["checking", "ended"]);
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
     expect((harness.transport as unknown as { rtcClient: unknown }).rtcClient).toBeNull();
     expect((harness.transport as unknown as { remoteAudio: unknown }).remoteAudio).toBeNull();
@@ -3304,7 +3353,7 @@ describe("JitterCallTransport", () => {
 
     expect(staleClient.serverDisconnect).toHaveBeenCalledTimes(1);
     expect(staleClient.disconnect).not.toHaveBeenCalled();
-    expect(states).toEqual(["audio_reconnect_required", "ended"]);
+    expect(states).toEqual(["checking", "ended"]);
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
     expect((harness.transport as unknown as { rtcClient: unknown }).rtcClient).toBeNull();
     expect((harness.transport as unknown as { remoteAudio: unknown }).remoteAudio).toBeNull();
