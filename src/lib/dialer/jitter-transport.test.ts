@@ -3181,6 +3181,47 @@ describe("JitterCallTransport", () => {
     expect(harness.dependencies.cancel).not.toHaveBeenCalled();
   });
 
+  it("keeps an attached active SDK call recoverable when stats and all provider-status probes fail", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstProviderStatus = deferred<JitterProxyResult<{ state: "active" }>>();
+      let providerStatusCalls = 0;
+      const getProviderStatus = vi.fn(() => {
+        providerStatusCalls += 1;
+        if (providerStatusCalls === 1) return firstProviderStatus.promise;
+        return Promise.reject(new Error("provider unavailable"));
+      });
+      const harness = transportHarness({ getProviderStatus });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+
+      await harness.transport.recover?.({ id: "call-1" }, "2026-08-21T20:00:00.000Z");
+      await vi.waitFor(() => expect(getProviderStatus).toHaveBeenCalledTimes(1));
+      const recovered = new FakeCall();
+      recovered.state = "active";
+      attachUnavailableStatsPeer(recovered, "getStats rejection");
+      harness.rtc.emit("telnyx.notification", { type: "callUpdate", call: recovered });
+      for (let index = 0; index < 3; index += 1)
+        await (harness.transport as unknown as { sampleAudioHealth(): Promise<void> }).sampleAudioHealth();
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+
+      firstProviderStatus.reject(new Error("provider unavailable"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getProviderStatus).toHaveBeenCalledTimes(10);
+      expect(harness.rtc.serverDisconnect).not.toHaveBeenCalled();
+      expect(harness.rtc.disconnect).not.toHaveBeenCalled();
+      expect((harness.transport as unknown as { callId: string | null }).callId).toBe("call-1");
+      expect((harness.transport as unknown as { currentCall: FakeCall | null }).currentCall).toBe(recovered);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(getProviderStatus).toHaveBeenCalledTimes(20);
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+      expect(harness.rtc.serverDisconnect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("converges retained terminal proof when browser microphone recovery fails first", async () => {
     const getProviderStatus = vi.fn()
       .mockResolvedValueOnce({ ok: true, data: { state: "active" } })

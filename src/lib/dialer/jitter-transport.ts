@@ -1326,20 +1326,17 @@ export class JitterCallTransport implements CallTransport {
         if (delayMs !== undefined) await this.dependencies.sleep(delayMs);
       }
       if (this.providerProofGeneration !== proofGeneration) return;
-      // Active proof keeps the retained call capability alive, but browser
-      // recovery can still fail to reattach. Continue exact provider polling
-      // until it becomes terminal or a recovered browser leg supersedes this
+      // Provider proof can be unavailable while an SDK call is already
+      // attached after a reload. That attached, non-terminal call is still a
+      // live capability: do not infer terminal state from failed status
+      // requests, because destroyRtc() would purge the only recoverable leg.
+      // Keep the recovery UI visible and continue exact, slow polling until
+      // either terminal proof arrives or media recovery supersedes this
       // generation in markAudioRecovered().
-      if (this.retainedProviderConfirmed) {
-        this.providerProofRetryTimer = setTimeout(() => {
-          this.providerProofRetryTimer = null;
-          if (
-            this.callId === callId &&
-            this.providerProofGeneration === proofGeneration &&
-            !this.terminal &&
-            !this.hangupRequested
-          ) void this.reconcileRetainedProviderProof(callId);
-        }, 10_000);
+      if (this.retainedProviderConfirmed || this.hasPotentiallyLiveSdkCall()) {
+        if (this.hasPotentiallyLiveSdkCall())
+          this.requireAudioReconnect(new Error("Retained call terminal proof is unavailable."));
+        this.scheduleRetainedProviderProofRetry(callId, proofGeneration);
         return;
       }
       // A retained capability without any provider proof must not keep the
@@ -1353,6 +1350,22 @@ export class JitterCallTransport implements CallTransport {
     } finally {
       if (this.providerProofGeneration === proofGeneration) this.providerProofInFlight = false;
     }
+  }
+
+  private hasPotentiallyLiveSdkCall(): boolean {
+    return this.currentCall !== null && !isTerminalCallState(this.currentCall.state);
+  }
+
+  private scheduleRetainedProviderProofRetry(callId: string, proofGeneration: number): void {
+    this.providerProofRetryTimer = setTimeout(() => {
+      this.providerProofRetryTimer = null;
+      if (
+        this.callId === callId &&
+        this.providerProofGeneration === proofGeneration &&
+        !this.terminal &&
+        !this.hangupRequested
+      ) void this.reconcileRetainedProviderProof(callId);
+    }, 10_000);
   }
 
   private async acceptActiveCall(call: TelnyxCallLike): Promise<void> {
@@ -2061,6 +2074,7 @@ export class JitterCallTransport implements CallTransport {
       !this.retainedProviderConfirmed &&
       state !== "checking" &&
       state !== "audio_reconnecting" &&
+      (state !== "audio_reconnect_required" || !this.hasPotentiallyLiveSdkCall()) &&
       state !== "hold_restored" &&
       state !== "ended" &&
       state !== "failed"
