@@ -2517,7 +2517,7 @@ describe("JitterCallTransport", () => {
     expect(harness.rtc.disconnect).not.toHaveBeenCalled();
   });
 
-  it("warns after bounded cancel retries and does not memoize the failed attempt", async () => {
+  it("releases ringing RTC after bounded unconfirmed Hang Up retries", async () => {
     const cancel = vi
       .fn()
       .mockRejectedValueOnce(new Error("action transport failed 1"))
@@ -2528,13 +2528,22 @@ describe("JitterCallTransport", () => {
     const states: string[] = [];
     harness.transport.onStateChange((state) => states.push(state));
     await harness.transport.start(target());
+    const call = new FakeCall();
+    harness.rtc.emit("telnyx.notification", { type: "callUpdate", call });
     await expect(harness.transport.hangup()).resolves.toEqual({
       durationSeconds: 0,
       outcome: "failed",
     });
     expect(cancel).toHaveBeenCalledTimes(3);
     expect(harness.dependencies.sleep).toHaveBeenCalledTimes(2);
-    expect(states).toEqual(["connecting", "teardown_unconfirmed", "failed"]);
+    expect(states).toEqual([
+      "connecting",
+      "ringing",
+      "teardown_unconfirmed",
+      "failed",
+    ]);
+    expect(harness.rtc.serverDisconnect).toHaveBeenCalledTimes(1);
+    expect(harness.rtc.disconnect).not.toHaveBeenCalled();
     await expect(harness.transport.hangup()).resolves.toEqual({
       durationSeconds: 0,
       outcome: "failed",
@@ -2544,6 +2553,7 @@ describe("JitterCallTransport", () => {
     expect(harness.rtc.disconnect).not.toHaveBeenCalled();
     expect(states).toEqual([
       "connecting",
+      "ringing",
       "teardown_unconfirmed",
       "failed",
       "teardown_confirmed",
@@ -4580,7 +4590,7 @@ describe("JitterCallTransport", () => {
     await hangup;
   });
 
-  it("retains pagehide recovery after bounded cancel attempts remain unconfirmed", async () => {
+  it("releases pre-live pagehide recovery after bounded cancel attempts remain unconfirmed", async () => {
     const cancel = vi
       .fn()
       .mockRejectedValueOnce(new Error("lost 1"))
@@ -4594,9 +4604,9 @@ describe("JitterCallTransport", () => {
 
     harness.firePageHide();
     await flush();
-    expect(sendCancelBeacon).toHaveBeenCalledWith("call-1", "abandoned");
-    expect(cancel).toHaveBeenLastCalledWith("call-1", "abandoned");
-    expect(cancel).toHaveBeenCalledTimes(4);
+    expect(sendCancelBeacon).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledTimes(3);
+    expect(harness.rtc.serverDisconnect).toHaveBeenCalledTimes(1);
   });
 });
 

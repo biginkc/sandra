@@ -2259,6 +2259,7 @@ export class JitterCallTransport implements CallTransport {
             this.lastTeardownConfirmed = false;
             this.teardownUnconfirmedEmitted = true;
             this.emit("teardown_unconfirmed");
+            this.destroyRtcAfterUnconfirmedCancel();
             return false;
           })();
           this.cancelPromise = attempt;
@@ -2279,6 +2280,7 @@ export class JitterCallTransport implements CallTransport {
         this.lastTeardownConfirmed = false;
         this.teardownUnconfirmedEmitted = true;
         this.emit("teardown_unconfirmed");
+        this.destroyRtcAfterUnconfirmedCancel();
         return Promise.resolve(false);
       }
       this.lastTeardownConfirmed = true;
@@ -2313,6 +2315,7 @@ export class JitterCallTransport implements CallTransport {
       this.lastTeardownConfirmed = false;
       this.teardownUnconfirmedEmitted = true;
       this.emit("teardown_unconfirmed");
+      this.destroyRtcAfterUnconfirmedCancel();
       return false;
     })();
     this.cancelPromise = attempt;
@@ -2327,6 +2330,14 @@ export class JitterCallTransport implements CallTransport {
       },
     );
     return attempt;
+  }
+
+  private destroyRtcAfterUnconfirmedCancel(): void {
+    // Retain media only while a call is still live and no authoritative
+    // terminal proof exists. Ringing/failed calls must still release their
+    // browser RTC client, audio element, and pagehide listener on exhaustion.
+    if (this.liveAt === null || this.terminalAuthorityConfirmed)
+      this.destroyRtc();
   }
 
   private onPageHide(): void {
