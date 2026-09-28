@@ -18,13 +18,18 @@ test('results remove webServer env and every text artifact is redacted before ha
   const anon = 'demo-anon-value';
   const service = 'demo-service-value';
   const jwt = 'eyJabcdefghij.payload.signature';
-  const results = { config: { webServer: { env: { NEXT_PUBLIC_SUPABASE_ANON_KEY: anon, SUPABASE_SERVICE_ROLE_KEY: service } }, rootDir: '/tmp' }, suites: [{ title: 'passing test', specs: [] }] };
+  const results = { config: { webServer: { env: { NEXT_PUBLIC_SUPABASE_ANON_KEY: anon, SUPABASE_SERVICE_ROLE_KEY: service } }, rootDir: dir, configFile: `${dir}/playwright.outbox-regression.config.ts`, globalSetup: `${dir}/e2e/inbox-acceptance/outbox-global-setup.ts`, externalPath: '/Users/another/private/config.ts' }, suites: [{ title: 'passing test', specs: [], file: `${dir}/e2e/inbox-acceptance/outbox.spec.ts` }] };
   writeFileSync(path.join(full, 'results.json'), JSON.stringify(results));
   for (const extension of ['log', 'txt', 'html', 'json']) writeFileSync(path.join(full, `extra.${extension}`), `${anon} ${service} ${jwt} sb_secret_sample sb_publishable_sample`);
   const manifest = writeManifest(dir, relative, { tested_sha: 'a'.repeat(40) }, { NEXT_PUBLIC_SUPABASE_ANON_KEY: anon, SUPABASE_SERVICE_ROLE_KEY: service });
   const safeResults = JSON.parse(readFileSync(path.join(full, 'results.json'), 'utf8'));
   assert.equal(safeResults.config.webServer, undefined);
-  assert.deepEqual(safeResults.suites, results.suites);
+  assert.equal(safeResults.config.rootDir, '.');
+  assert.equal(safeResults.config.configFile, './playwright.outbox-regression.config.ts');
+  assert.equal(safeResults.config.globalSetup, './e2e/inbox-acceptance/outbox-global-setup.ts');
+  assert.equal(safeResults.config.externalPath, '[LOCAL_PATH]');
+  assert.equal(safeResults.suites[0].file, './e2e/inbox-acceptance/outbox.spec.ts');
+  assert.doesNotMatch(JSON.stringify(safeResults), /\/Users\//);
   for (const extension of ['log', 'txt', 'html', 'json']) {
     const safe = readFileSync(path.join(full, `extra.${extension}`), 'utf8');
     assert.equal(safe, '[REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]');
@@ -32,12 +37,21 @@ test('results remove webServer env and every text artifact is redacted before ha
   }
   assert.equal(manifest.artifacts['results.json'], sha256(readFileSync(path.join(full, 'results.json'))));
 });
-test('residual secret in an unrecognized artifact fails without a manifest', () => {
+test('stray zip fails closed without a manifest, even without recognizable secret text', () => {
   const dir = repo();
   const relative = runPath('a'.repeat(40), 'pre-merge', 'residual');
   const full = path.join(dir, relative);
   mkdirSync(full, { recursive: true });
-  writeFileSync(path.join(full, 'trace.bin'), 'header sb_secret_residual footer');
-  assert.throws(() => writeManifest(dir, relative, { tested_sha: 'a'.repeat(40) }, {}), /Residual secret in run artifact: trace\.bin/);
+  writeFileSync(path.join(full, 'trace.zip'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff]));
+  assert.throws(() => writeManifest(dir, relative, { tested_sha: 'a'.repeat(40) }, {}), /Disallowed run artifact: trace\.zip/);
   assert.equal(existsSync(path.join(full, 'manifest.json')), false);
+});
+test('short env values are not redacted from text artifacts', () => {
+  const dir = repo();
+  const relative = runPath('a'.repeat(40), 'pre-merge', 'short-env');
+  const full = path.join(dir, relative);
+  mkdirSync(full, { recursive: true });
+  writeFileSync(path.join(full, 'runner.log'), 'status=1 enabled=false');
+  writeManifest(dir, relative, { tested_sha: 'a'.repeat(40) }, { TEST_TOKEN: '1', TEST_SECRET: 'false' });
+  assert.equal(readFileSync(path.join(full, 'runner.log'), 'utf8'), 'status=1 enabled=false');
 });

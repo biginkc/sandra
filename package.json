@@ -14,6 +14,8 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:integration:local": "vitest run --config vitest.local-integration.config.ts",
+    "test:outbox-unit": "vitest run --config vitest.outbox.config.ts && node --test scripts/outbox-run-record.test.mjs",
+    "test:outbox-regression": "node scripts/outbox-run-record.mjs",
     "test:rtl": "vitest run --config vitest.rtl.config.ts",
     "test:e2e": "playwright test",
     "test:e2e:synthetic": "playwright test --config playwright.synthetic.config.ts",

@@ -1,8 +1,9 @@
 import http from 'node:http';
 import net from 'node:net';
 
-// Test-only loopback bridge: the app's existing disposable-target guard
-// requires 54321/54322, while the owned Supabase stack uses 55421/55422.
+// Test-only loopback bridge. The runner owns 54321 (API) and 54322 (DB),
+// forwarding to the already-running owned Supabase stack on 55421/55422.
+// The app's disposable-target guard requires the 54321/54322 endpoints.
 const token = process.env.OUTBOX_FAULT_TOKEN;
 if (!token || process.env.E2E_DISPOSABLE_DATABASE !== '1' || process.env.MESSAGING_PROVIDER !== 'mock') {
   throw new Error('Outbox fault proxy requires disposable mode, mock provider, and token');
@@ -42,7 +43,7 @@ const api = http.createServer((request, response) => {
   if (armed && isQueueRead) {
     failures += 1;
     response.writeHead(503, { 'content-type': 'application/json' })
-      .end(JSON.stringify({ code: 'P0_TEST_FAULT', message: 'One-shot outbox queue read failure' }));
+      .end(JSON.stringify({ code: 'P0_TEST_FAULT', message: 'Outbox queue read failure while armed' }));
     return;
   }
   const upstream = http.request({

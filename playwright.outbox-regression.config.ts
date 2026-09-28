@@ -10,4 +10,5 @@ export default defineConfig({
   testIgnore: [],
   globalSetup: './e2e/inbox-acceptance/outbox-global-setup.ts',
   outputDir: `${process.env.OUTBOX_RUN_DIR}/playwright`,
+  use: { ...base.use, trace: 'off', video: 'off', screenshot: 'off' },
 });
