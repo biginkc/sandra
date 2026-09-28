@@ -36,7 +36,8 @@ BEGIN
   IF boundary.expires_at<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_READ_EXPIRED' USING ERRCODE='55000';END IF;
   -- Reuse the canonical measured keyset query. No message update and no new read
   -- boundary: later/backdated arrivals cannot extend the acknowledged snapshot.
-  result:=inbox_t2_authenticated_detail.detail_v2(o,c,position.before_at,position.before_id);
+  result:=inbox_t2_authenticated_detail.detail_v2(o,c,position.before_at,position.before_id)
+    || inbox_t2_read.authoritative_context(o,c);
   result:=result||jsonb_build_object('read_boundary',boundary.id,'boundary_expires_at',boundary.expires_at,
    'capture_generation',boundary.generation,'head_revision',boundary.revision::text);
  END IF;

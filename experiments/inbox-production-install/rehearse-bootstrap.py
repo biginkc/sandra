@@ -8,20 +8,38 @@ from transaction_envelope import normalize
 ap=argparse.ArgumentParser();ap.add_argument('--resume-full-auth',action='store_true');a=ap.parse_args()
 if not a.resume_full_auth:raise SystemExit('Explicit existing full-Auth fixture mode required')
 SOCKET=os.environ.get('INBOX_T2_DOCKER_SOCKET','unix:///Users/jarradhenry/.colima/inbox-redesign-20260913/docker.sock')
-D=['docker','--host',SOCKET];N='sandra-inbox-projection-t2-db';DB='sandra_inbox_install_20260913';MARKER='sandra-inbox-production-candidate-owned-synthetic'
-validate_container(json.loads(subprocess.check_output(D+['inspect',N],text=True))[0])
+D=['docker','--host',SOCKET];N=os.environ.get('INBOX_RELEASE_DOCKER_CONTAINER','sandra-inbox-projection-t2-db')
+HTTP_MODE=N.startswith('sandra-inbox-release-http-')
+# The original install database remains backend-owned.  A release rehearsal
+# may opt into exactly one separately-owned database after the coordinator has
+# recorded the ownership window; arbitrary database names are rejected.
+DB=os.environ.get('INBOX_RELEASE_DATABASE','sandra_inbox_install_20260913')
+MARKER=os.environ.get('INBOX_RELEASE_FIXTURE_MARKER','sandra-inbox-production-candidate-owned-synthetic')
+if DB not in {'sandra_inbox_install_20260913','sandra_inbox_release_20260917'} and not (HTTP_MODE and DB=='postgres'):
+ raise SystemExit('Refusing unapproved rehearsal database: '+DB)
+container=json.loads(subprocess.check_output(D+['inspect',N],text=True))[0]
+if HTTP_MODE:
+ labels=container.get('Config',{}).get('Labels',{})
+ if labels.get('purpose')!='sandra-inbox-release-http' or labels.get('owner')!='release-infra' or labels.get('marker')!='sandra-inbox-release-http-owned-20260917' or not container.get('State',{}).get('Running'):
+  raise RuntimeError('Refusing bootstrap: HTTP fixture ownership marker/container state mismatch')
+else:
+ validate_container(container)
 def sql(q,db=DB):
  r=subprocess.run(D+['exec','-i',N,'psql','-XqAt','-U','supabase_admin','-d',db,'-v','ON_ERROR_STOP=1'],input=q,text=True,capture_output=True,timeout=90)
  if r.returncode:raise RuntimeError(r.stderr)
  return r.stdout.strip()
 validate_cron(sql('SHOW cron.launch_active_jobs','postgres'))
-if sql('SELECT marker FROM inbox_t2_fixture.identity','postgres')!='sandra-inbox-projection-t2-owned-synthetic':raise RuntimeError('Wrong container database')
+if not HTTP_MODE and sql('SELECT marker FROM inbox_t2_fixture.identity','postgres')!='sandra-inbox-projection-t2-owned-synthetic':raise RuntimeError('Wrong container database')
 if sql(f"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname='{DB}')",'postgres')!='t':raise RuntimeError('Full Auth database missing; never create/reset automatically')
-if sql('SELECT marker FROM install_fixture.identity')!=MARKER:raise RuntimeError('Wrong owned database')
+if sql('SELECT marker FROM install_fixture.identity')!=MARKER:raise RuntimeError('Wrong owned database marker')
 if sql("SELECT to_regclass('auth.sessions') IS NOT NULL AND to_regclass('auth.schema_migrations') IS NOT NULL AND to_regclass('auth.flow_state') IS NOT NULL AND to_regclass('auth.one_time_tokens') IS NOT NULL AND to_regprocedure('auth.uid()') IS NOT NULL AND to_regprocedure('auth.jwt()') IS NOT NULL")!='t':raise RuntimeError('Expected real GoTrue Auth migrations, not subset')
 sql('CREATE TABLE IF NOT EXISTS install_fixture.ledger(name text PRIMARY KEY,sha256 text NOT NULL)')
 base="CREATE SCHEMA IF NOT EXISTS extensions AUTHORIZATION postgres;CREATE SCHEMA IF NOT EXISTS realtime AUTHORIZATION postgres;CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA extensions;GRANT USAGE ON SCHEMA extensions TO postgres,anon,authenticated,service_role;"
-foundation2="SET LOCAL ROLE postgres;CREATE PUBLICATION supabase_realtime;GRANT USAGE ON SCHEMA public TO postgres,anon,authenticated,service_role;ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO postgres,anon,authenticated,service_role;ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS TO postgres,anon,authenticated,service_role;ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres,anon,authenticated,service_role;RESET ROLE;"
+# A template0 database gives public ownership to pg_database_owner and the
+# GoTrue Auth schema/tables to supabase_auth_admin.  The application migration
+# role is postgres, so record the minimum fresh-template grants before running
+# the same pinned migration stream used by the fixture.
+foundation2=f"GRANT CREATE ON DATABASE \"{DB}\" TO postgres;ALTER SCHEMA public OWNER TO postgres;GRANT USAGE ON SCHEMA auth TO postgres;GRANT ALL ON ALL TABLES IN SCHEMA auth TO postgres;GRANT USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA auth TO postgres;SET LOCAL ROLE postgres;DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_publication WHERE pubname='supabase_realtime') THEN CREATE PUBLICATION supabase_realtime;END IF;END $$;GRANT USAGE ON SCHEMA public TO postgres,anon,authenticated,service_role;ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO postgres,anon,authenticated,service_role;ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON FUNCTIONS TO postgres,anon,authenticated,service_role;ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres,anon,authenticated,service_role;RESET ROLE;"
 files=[('fixture-platform-foundation',base,hashlib.sha256(base.encode()).hexdigest(),False),('fixture-platform-publication-grants',foundation2,hashlib.sha256(foundation2.encode()).hexdigest(),False)]
 for entry in json.loads((F/'vendor/manifest.json').read_text()):
  f=F/'vendor'/entry['file'];text=f.read_text()

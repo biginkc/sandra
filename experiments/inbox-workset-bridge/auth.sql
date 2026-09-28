@@ -29,7 +29,7 @@ BEGIN
  -- One SQL snapshot supplies session, global membership count, selected row and epoch.
  -- Never combine a prior count with a later row/epoch after a concurrent membership commit.
  WITH active AS MATERIALIZED (
-  SELECT m.org_id,m.access_expires_at FROM public.memberships m
+  SELECT m.org_id,m.access_expires_at,m.role,m.acquisitions_enabled FROM public.memberships m
   WHERE m.user_id=u AND m.access_status='active' AND m.deletion_prepared_at IS NULL
    AND (m.access_expires_at IS NULL OR m.access_expires_at>checked_at)
  ), membership_state AS (
@@ -42,6 +42,11 @@ BEGIN
  IF NOT session_found OR session_expiry<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_SESSION_REVOKED' USING ERRCODE='42501';END IF;
  IF n<>1 THEN RAISE EXCEPTION 'INBOX_MEMBERSHIP_AMBIGUOUS_OR_MISSING' USING ERRCODE='42501';END IF;
  IF o IS NOT NULL AND (membership->>'org_id')::uuid IS DISTINCT FROM o THEN RAISE EXCEPTION 'INBOX_ORG_DENIED' USING ERRCODE='42501';END IF;
+ -- Keep direct Inbox RPCs behind the same shared-workspace boundary as the
+ -- page/API gate: owners retain access, while active Acquisitions members
+ -- are scoped to My Leads. This stays in the authorization snapshot so a
+ -- SECURITY DEFINER wrapper cannot bypass the HTTP surface check.
+ IF (membership->>'role')='member' AND (membership->>'acquisitions_enabled')::boolean IS TRUE THEN RAISE EXCEPTION 'INBOX_SHARED_SURFACE_DENIED' USING ERRCODE='42501';END IF;
  IF epoch IS NULL THEN RAISE EXCEPTION 'INBOX_ACCESS_BASELINE_MISSING' USING ERRCODE='42501';END IF;
  expiry:=least(claim_expiry,session_expiry,(membership->>'access_expires_at')::timestamptz);
  IF expiry<=clock_timestamp() THEN RAISE EXCEPTION 'INBOX_SESSION_EXPIRED' USING ERRCODE='42501';END IF;

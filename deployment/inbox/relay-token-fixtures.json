@@ -1,0 +1,18 @@
+{
+  "_comment": "G4 (#592) relay token parity fixture. Every 'valid' token must be accepted by BOTH src/lib/inbox/sync-upstream-config.ts (Next alphabet /^[A-Za-z0-9_-]{32,256}$/) and services/inbox-sync-relay/server.mjs (any non-whitespace string, 32-256 chars). Every 'invalid' token must be rejected by the Next side. Consumed by src/lib/inbox/sync-upstream-config.test.ts and services/inbox-sync-relay/server.test.mjs — do not edit one side without re-running both suites.",
+  "valid": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "Aa9Bb8Cc7Dd6Aa9Bb8Cc7Dd6Aa9Bb8Cc7Dd6Aa9Bb8Cc7Dd6Aa9Bb8Cc7Dd6Aa9B",
+    "Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Yy1Xx2Ww3Zz0Y",
+    "valid_underscore_token_uuuuuuuuuuuuuuuuuuuuuuuuu",
+    "valid-hyphen-token-hhhhhhhhhhhhhhhhhhhhhhhhhh"
+  ],
+  "invalid": [
+    "sssssssssssssssssssssssssssssss",
+    "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL",
+    "nnnnnnnnnn\nnnnnnnnnnnnnnnnnnnnnn",
+    "ppppp pppppppppppppppppppppppppppppppppp",
+    "xxxxx!xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    ""
+  ]
+}
