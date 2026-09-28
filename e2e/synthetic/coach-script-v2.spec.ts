@@ -61,7 +61,9 @@ test("flag off preserves the S4 card while flag on renders three columns and the
   await mount(page, "on");
   await expect(page.getByTestId("coach-script-v2-panel")).toBeVisible();
   await expect(page.getByTestId("coach-script-ref-label")).toHaveText("closr-outbound@1 · locked for this call");
-  await expect(page.getByTestId("coach-script-ref")).toHaveText("closr-outbound@1 · locked for this call");
+  await expect(page.getByTestId("coach-script-ref")).toBeHidden();
+  await expect(page.getByTestId("coach-powered-by-closer-lab")).toContainText("Powered by");
+  await expect(page.getByAltText("Closer Lab")).toHaveAttribute("src", "/brand/closer-lab-logo.svg");
   const transcript = await page.getByLabel("Live transcript").boundingBox();
   const script = await page.getByTestId("coach-script-v2-panel").boundingBox();
   const recommendations = await page.getByTestId("coach-recommendations").boundingBox();

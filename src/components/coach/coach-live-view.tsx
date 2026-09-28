@@ -1,6 +1,7 @@
 "use client";
 
 import { ChevronLeftIcon, ChevronRightIcon, Loader2Icon, MicIcon, MicOffIcon, PauseIcon, PhoneOffIcon, PlayIcon, XIcon } from "lucide-react";
+import Image from "next/image";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { NavigatorState } from "@biginkc/coach/react";
 
@@ -25,7 +26,6 @@ import type {
   CoachEntryToken,
   CoachHoldTimer,
   CoachPhaseId,
-  CoachToken,
   CoachTranscriptLine,
   ResolvedToken,
   ResolvedTokens,
@@ -467,14 +467,20 @@ function CoachTopBar({
   const phaseIds = bundle?.script.phases.map((phase) => phase.id) ?? [];
   const currentPhaseIndex = phaseIds.indexOf(activePhaseId);
   const currentPhaseName = bundle?.script.phases.find((phase) => phase.id === activePhaseId)?.name ?? activePhaseId;
+  const fileNumberValue = fileNumber.value.trim();
+  const hasFileNumber = fileNumberValue.length > 0 && fileNumberValue !== "—";
   return (
     <div className="coach-top-bar shrink-0 border-b border-border">
       <div className="coach-identity">
         <span data-testid="coach-call-name" className="min-w-0 truncate text-[15px] font-extrabold">{callName}</span>
-        <span data-testid="coach-file-number" aria-label="File number" className="font-mono text-xs tabular-nums">
+        {hasFileNumber ? <span data-testid="coach-file-number" aria-label="File number" className="font-mono text-xs tabular-nums">
           {`File number: ${fileNumber.value}`}
-        </span>
+        </span> : null}
         {scriptRefLabel ? <span data-testid="coach-script-ref-label" className="text-xs text-muted-foreground">{scriptRefLabel}</span> : null}
+        <span data-testid="coach-powered-by-closer-lab" className="coach-powered-by-closer-lab">
+          <span>Powered by</span>
+          <Image src="/brand/closer-lab-logo.svg" alt="Closer Lab" width={75} height={15} />
+        </span>
       </div>
       <div className="coach-status" data-testid="coach-status-strip">
         <HoldTimer timer={holdTimer} />
@@ -544,9 +550,9 @@ function ScriptNavigatorPanel({ bundle, ref, context, initialState, onStateChang
   onStateChange: (state: NavigatorState) => void;
 }) {
   return (
-    <main className="min-h-[28rem] min-w-0 flex-1 overflow-y-auto border-b border-border xl:min-h-0 xl:border-b-0" data-testid="coach-script-v2-panel">
+    <main className="flex min-h-[28rem] min-w-0 flex-1 flex-col overflow-y-auto border-b border-border xl:min-h-0 xl:overflow-hidden xl:border-b-0" data-testid="coach-script-v2-panel">
       <Suspense fallback={<div data-testid="coach-script-v2-loading" aria-live="polite">Loading script…</div>}>
-        <ScriptNavigator bundle={bundle} ref={ref} context={context} initialState={initialState} onStateChange={onStateChange} refLabel={`${ref.slug}@${ref.revision} · locked for this call`} />
+        <ScriptNavigator bundle={bundle} ref={ref} context={context} initialState={initialState} onStateChange={onStateChange} />
       </Suspense>
     </main>
   );

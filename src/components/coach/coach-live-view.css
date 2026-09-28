@@ -70,6 +70,8 @@
   .coach-top-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 24px; background: var(--coach-rail); color: var(--coach-rail-foreground, var(--foreground)); }
   .coach-identity { display: flex; min-width: 0; align-items: baseline; gap: 10px; }
   [data-testid="coach-file-number"] { color: var(--coach-secondary); white-space: nowrap; }
+  .coach-powered-by-closer-lab { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; border-radius: 9999px; background: rgb(255 255 255 / 0.94); padding: 3px 7px; color: #4b5563; font-size: 10px; font-weight: 600; line-height: 1; white-space: nowrap; }
+  .coach-powered-by-closer-lab img { display: block; width: auto; height: 15px; }
   .coach-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
   [data-testid="coach-phase-scroller"] { flex: 1 0 100%; padding: 0; gap: 0; }
   [data-testid^="phase-rail-"] { display: flex; align-items: center; gap: 6px; padding: 6px 12px; letter-spacing: .06em; }
@@ -130,6 +132,10 @@
 [data-testid="coach-live-view"].coach-script-v2 {
   [data-testid="coach-file-number"],
   [data-testid="coach-script-ref-label"] { color: var(--coach-rail-foreground); }
+  /* The immutable script identity lives beside the call identity in V2.
+     ScriptNavigator still exposes its default ref badge internally, but it
+     must not duplicate that header label in the script card. */
+  .coach-script-ref { display: none; }
   [data-testid="transcript-speaker-label"] { color: var(--coach-amber-text); }
   [data-speaker="rep"] [data-testid="transcript-speaker-label"] { color: var(--coach-sky); }
   [data-testid="tone-chip"] { color: var(--sandra-coach-warning-solid-foreground); }
@@ -138,6 +144,32 @@
   [data-testid="hold-timer"] { color: var(--coach-amber); }
   [data-testid="coach-warning-hangup"],
   [data-testid="coach-hangup"] { color: var(--sandra-coach-destructive-foreground); }
+}
+
+/* Keep navigation anchored to the lower edge of the available script column.
+   The card is the only scrollable part, so its preview and controls remain in
+   view without adding a second page scrollbar. */
+@media (min-width: 1280px) {
+  [data-testid="coach-live-view"].coach-script-v2 {
+    [data-testid="coach-script-v2-panel"] > .coach-script-panel {
+      display: flex;
+      height: 100%;
+      min-height: 0;
+      flex: 1;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    [data-testid="coach-script-v2-panel"] .coach-script-card {
+      min-height: 0;
+      flex: 1;
+      overflow-y: auto;
+    }
+    [data-testid="coach-script-v2-panel"] .coach-next-section-preview { flex-shrink: 0; }
+    [data-testid="coach-script-v2-panel"] .coach-navigation-footer {
+      margin-top: auto;
+      flex-shrink: 0;
+    }
+  }
 }
 
 @media (min-width: 1280px) {

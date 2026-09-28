@@ -182,7 +182,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.queryByTestId("coach-script-ref-label")).not.toBeInTheDocument();
   });
 
-  it("visibly warns when strict wire events arrive before the script binding loads", async () => {
+  it("does not warn while strict wire events wait for the script binding", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
     loadCoachCallScript.mockReturnValue(new Promise(() => {}));
     render(<Harness {...baseProps()} />);
@@ -190,9 +190,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     await waitFor(() => expect(channels).toHaveLength(1));
     broadcast({ type: "counter", probeCount: 7, scriptDigest: closrOutbound123Ref.digest, ts: "binding-pending" });
 
-    expect(await screen.findByTestId("coach-binding-missed-events")).toHaveTextContent(
-      "Coach script was still loading — some coach events may have been missed.",
-    );
+    expect(screen.queryByTestId("coach-binding-missed-events")).not.toBeInTheDocument();
     expect(screen.queryByTestId("coach-reconnect-gap")).not.toBeInTheDocument();
   });
 
@@ -202,9 +200,11 @@ describe("<CoachLiveView /> manual navigation", () => {
     const user = userEvent.setup();
     render(<Harness {...baseProps()} />);
 
-    await waitFor(() => expect(screen.getByTestId("coach-script-v2-panel")).toBeVisible());
+    await waitFor(() => expect(screen.getByTestId("current-section-title")).toBeVisible());
     expect(screen.getByTestId("coach-script-ref-label")).toHaveTextContent("closr-outbound@1 · locked for this call");
-    expect(await screen.findByTestId("coach-script-ref")).toHaveTextContent("closr-outbound@1 · locked for this call");
+    expect(screen.getByTestId("coach-script-ref")).not.toHaveTextContent("locked for this call");
+    expect(screen.getByTestId("coach-powered-by-closer-lab")).toHaveTextContent("Powered by");
+    expect(screen.getByAltText("Closer Lab")).toHaveAttribute("src", "/brand/closer-lab-logo.svg");
     expect(screen.queryByTestId("coach-phase-scroller")).not.toBeInTheDocument();
     await user.click(screen.getByTestId("coach-next"));
     expect(screen.getByTestId("current-section-title")).toHaveTextContent("Set the qualification frame");
@@ -227,7 +227,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     const user = userEvent.setup();
     render(<Harness {...baseProps({ recommendationRequest })} />);
 
-    await screen.findByTestId("coach-script-ref");
+    await screen.findByTestId("coach-script-v2-panel");
     await user.click(screen.getByTestId("coach-next"));
     await screen.findByText("Set the qualification frame");
     broadcast({ type: "transcript", speaker: "seller", text: "I need to move before winter.", isFinal: true, ts: "v2-grounding" });
@@ -252,7 +252,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     const user = userEvent.setup();
     render(<Harness {...baseProps({ recommendationRequest })} />);
 
-    await screen.findByTestId("coach-script-ref");
+    await screen.findByTestId("coach-script-v2-panel");
     await user.click(screen.getByTestId("variant-Opener-fsbo"));
     await user.click(screen.getByRole("button", { name: "Offer" }));
     await screen.findByText("Present the appropriate offer outcome");
@@ -286,7 +286,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     const user = userEvent.setup();
     render(<Harness {...baseProps({ recommendationRequest })} />);
 
-    await screen.findByTestId("coach-script-ref");
+    await screen.findByTestId("coach-script-v2-panel");
     broadcast({ type: "transcript", speaker: "seller", text: "I saw your text message.", isFinal: true, ts: "v2-sms-grounding" });
     await user.click(screen.getByTestId("follow-up-questions"));
 
@@ -313,7 +313,7 @@ describe("<CoachLiveView /> manual navigation", () => {
       maskedSellerPhone: "+1 (816) 555-9876",
     }} />);
 
-    expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: —");
+    expect(screen.queryByTestId("coach-file-number")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByTestId("coach-next")).toBeEnabled());
 
     for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
@@ -364,7 +364,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     }} />);
 
     await waitFor(() => expect(screen.getByTestId("coach-context-error")).toBeVisible());
-    expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: —");
+    expect(screen.queryByTestId("coach-file-number")).not.toBeInTheDocument();
     for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-abcdef");
@@ -388,7 +388,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     }} />);
 
     await waitFor(() => expect(loadCoachCallContext).toHaveBeenCalled());
-    expect(screen.getByTestId("coach-file-number")).toHaveTextContent("File number: —");
+    expect(screen.queryByTestId("coach-file-number")).not.toBeInTheDocument();
     for (let step = 0; step < 5; step += 1) await user.click(screen.getByTestId("coach-next"));
     const script = screen.getByTestId("current-section-script");
     expect(script).not.toHaveTextContent("JH-c1c524");

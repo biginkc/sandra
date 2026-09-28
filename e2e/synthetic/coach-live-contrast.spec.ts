@@ -322,7 +322,8 @@ for (const mode of [
     assertAA("resolved script token", await measureRenderedContrast(tokenValue));
 
     assertAA("script body", await measureRenderedContrast(currentScript));
-    assertAA("file number", await measureRenderedContrast(page.getByTestId("coach-file-number")));
+    const fileNumber = page.getByTestId("coach-file-number");
+    if (await fileNumber.count()) assertAA("file number", await measureRenderedContrast(fileNumber));
     const next = page.getByTestId("coach-next");
     await next.hover();
     await expect(next).toHaveCSS("background-color", "rgb(255, 255, 255)");
@@ -385,7 +386,7 @@ for (const mode of [
 
   test(`meets WCAG AA for V2 navigator text in ${mode.label} mode`, async ({ page }) => {
     await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false, scriptV2: true });
-    await expect(page.getByTestId("coach-script-ref")).toBeVisible();
+    await expect(page.getByTestId("coach-script-v2-panel")).toBeVisible();
     // V2 owns the only phase rail; the retired header rail must not duplicate it.
     await expect(page.getByTestId("coach-phase-scroller")).toHaveCount(0);
     await expect(page.locator(".coach-top-bar")).toHaveCSS("background-image", /gradient/);
@@ -409,7 +410,10 @@ for (const mode of [
     assertAA("V2 phase rail label", await measureRenderedContrast(phasePill));
     assertAA("V2 tab label", await measureRenderedContrast(tabLabel));
     assertAA("V2 header ref label", await measureRenderedContrast(refLabel));
-    assertAA("V2 ref label", await measureRenderedContrast(page.getByTestId("coach-script-ref")));
+    await expect(page.getByTestId("coach-script-ref")).toBeHidden();
+    const poweredBy = page.getByTestId("coach-powered-by-closer-lab");
+    await expect(poweredBy).toBeVisible();
+    assertAA("V2 Powered by mark", await measureRenderedContrast(poweredBy));
     assertAA("V2 dark-navy header call name", await measureRenderedContrast(page.getByTestId("coach-call-name")));
     assertAA("V2 call counter", await measureRenderedContrast(counter));
     assertAA("V2 Hang up label", await measureRenderedContrast(hangup));
