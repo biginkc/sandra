@@ -7,6 +7,18 @@ import type { Json } from '@/lib/supabase/types';
  * Sources: https://developers.dialpad.com/docs/call-events,
  * https://developers.dialpad.com/docs/event-subscriptions,
  * https://developers.dialpad.com/docs/dialpad-mini-dialer
+ *
+ * A2 dispatch contract: fn_prepare_dialpad_call_intent returns the stored,
+ * immutable intent on an idempotent replay, whatever its state. That is
+ * historical attribution, not permission to dial. Before dialing, A2 must
+ * (1) accept only status 'prepared' with expiresAt in the future
+ * (assessDialpadIntentForDispatch) and reject cancelled, matched and expired
+ * intents, and (2) re-prove, in the same transaction that authorizes the dial,
+ * that the frozen dialpadUserId, assignmentEpisodeId, destinationE164 and
+ * caller number/grant are still the rep's current, verified and active values.
+ * A revoked binding or grant cancels the intent permanently; a replacement
+ * binding never revives it. The caller must prepare a new intent with a new
+ * idempotency key.
  */
 
 export const DIALPAD_CTI_CUSTOM_DATA_PATTERN = /^sandra\.dialpad\.v1\.[0-9a-f]{48}$/;
@@ -91,6 +103,23 @@ export interface PreparedDialpadCallIntent {
   contactId: string;
   assignmentEpisodeId: string;
   replayed: boolean;
+}
+
+export type DialpadIntentDispatchAssessment =
+  | { dispatchable: true }
+  | { dispatchable: false; reason: 'cancelled' | 'matched' | 'expired' | 'invalid_expiry' };
+
+/** Necessary, not sufficient: it checks only the intent's own state, not the frozen identity/assignment/phone/grant. */
+export function assessDialpadIntentForDispatch(
+  intent: Pick<PreparedDialpadCallIntent, 'status' | 'expiresAt'>,
+  now: Date,
+): DialpadIntentDispatchAssessment {
+  if (intent.status === 'cancelled') return { dispatchable: false, reason: 'cancelled' };
+  if (intent.status === 'matched') return { dispatchable: false, reason: 'matched' };
+  const expiresAt = Date.parse(intent.expiresAt);
+  if (Number.isNaN(expiresAt)) return { dispatchable: false, reason: 'invalid_expiry' };
+  if (expiresAt <= now.getTime()) return { dispatchable: false, reason: 'expired' };
+  return { dispatchable: true };
 }
 
 export interface DialpadEventIngestResult {

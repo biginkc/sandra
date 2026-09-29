@@ -625,6 +625,11 @@ begin
 
   -- Authorization is re-proven on every call, including replays, so a rep who
   -- lost their binding or assignment cannot retrieve a live intent token.
+  -- Lock order is binding, then grant. The verified binding and the active
+  -- grant are read FOR SHARE and held until commit, so a concurrent revoke
+  -- (FOR UPDATE on the same row, then cancelling prepared intents) either waits
+  -- for this transaction and cancels the intent inserted here, or commits first
+  -- and makes the re-read below fail. Neither revoke takes both locks.
   select * into v_conn from public.dialpad_org_connections where org_id = p_org_id;
   if not found or v_conn.status <> 'active' then
     raise exception 'FORBIDDEN' using errcode = '42501', detail = 'connection_inactive';
@@ -637,7 +642,7 @@ begin
     raise exception 'FORBIDDEN' using errcode = '42501', detail = 'rep_not_active';
   end if;
   select * into v_binding from public.dialpad_member_bindings
-    where org_id = p_org_id and user_id = p_rep_user_id and status = 'verified';
+    where org_id = p_org_id and user_id = p_rep_user_id and status = 'verified' for share;
   if not found then
     raise exception 'FORBIDDEN' using errcode = '42501', detail = 'binding_not_verified';
   end if;
@@ -677,7 +682,7 @@ begin
   end if;
   if p_number_grant_id is not null then
     select * into v_grant from public.dialpad_number_grants
-      where id = p_number_grant_id and org_id = p_org_id and user_id = p_rep_user_id and status = 'active';
+      where id = p_number_grant_id and org_id = p_org_id and user_id = p_rep_user_id and status = 'active' for share;
     if not found then
       raise exception 'FORBIDDEN' using errcode = '42501', detail = 'caller_grant_unavailable';
     end if;
@@ -914,17 +919,17 @@ create policy dialpad_org_connections_member_select on public.dialpad_org_connec
 drop policy if exists dialpad_member_bindings_own_select on public.dialpad_member_bindings;
 create policy dialpad_member_bindings_own_select on public.dialpad_member_bindings
   for select to authenticated
-  using (user_id = (select auth.uid()));
+  using (user_id = (select auth.uid()) and public.dialpad_cti_caller_is_active_member(org_id));
 
 drop policy if exists dialpad_number_grants_own_select on public.dialpad_number_grants;
 create policy dialpad_number_grants_own_select on public.dialpad_number_grants
   for select to authenticated
-  using (user_id = (select auth.uid()));
+  using (user_id = (select auth.uid()) and public.dialpad_cti_caller_is_active_member(org_id));
 
 drop policy if exists dialpad_call_intents_own_select on public.dialpad_call_intents;
 create policy dialpad_call_intents_own_select on public.dialpad_call_intents
   for select to authenticated
-  using (rep_user_id = (select auth.uid()));
+  using (rep_user_id = (select auth.uid()) and public.dialpad_cti_caller_is_active_member(org_id));
 
 revoke all on function public.dialpad_cti_origins_valid(text[]) from public, anon, authenticated;
 revoke all on function public.dialpad_cti_normalize_us_phone(text) from public, anon, authenticated;

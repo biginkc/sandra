@@ -304,6 +304,56 @@ describe("20260929034021 Dialpad CTI foundation migration", () => {
       expect((await authenticated(ownerId, () => pg.query("select id from public.dialpad_call_intents"))).rows).toHaveLength(0);
     });
 
+    it("drops own-row access once the member is no longer active in the org, keeping historical rows intact", async () => {
+      const grant = await grantCaller(repA);
+      const intent = await prepare({ grant });
+      const visible = () =>
+        authenticated(repA, async () => ({
+          bindings: (await pg.query("select id from public.dialpad_member_bindings")).rowCount,
+          grants: (await pg.query("select id from public.dialpad_number_grants")).rowCount,
+          intents: (await pg.query("select id, custom_data from public.dialpad_call_intents")).rowCount,
+        }));
+      expect(await visible()).toEqual({ bindings: 1, grants: 1, intents: 1 });
+      const none = { bindings: 0, grants: 0, intents: 0 };
+      const setMembership = (assignment: string) =>
+        service(() => pg.query(`update public.memberships set ${assignment} where user_id=$1 and org_id=$2`, [repA, orgId]));
+
+      await setMembership("access_status='suspended'");
+      expect(await visible()).toEqual(none);
+      await setMembership("access_status='active'");
+      expect(await visible()).toEqual({ bindings: 1, grants: 1, intents: 1 });
+
+      await setMembership("access_expires_at = now() - interval '1 minute'");
+      expect(await visible()).toEqual(none);
+      await setMembership("access_expires_at = now() + interval '1 day'");
+      expect(await visible()).toEqual({ bindings: 1, grants: 1, intents: 1 });
+      await setMembership("access_expires_at = null");
+
+      await setMembership("deletion_prepared_at = now()");
+      expect(await visible()).toEqual(none);
+      await setMembership("deletion_prepared_at = null");
+      expect(await visible()).toEqual({ bindings: 1, grants: 1, intents: 1 });
+
+      await service(() => pg.query("delete from public.memberships where user_id=$1 and org_id=$2", [repA, orgId]));
+      expect(await visible()).toEqual(none);
+
+      const historical = await service(() =>
+        pg.query("select rep_user_id, binding_id, dialpad_user_id, status from public.dialpad_call_intents where id=$1", [intent.intentId]),
+      );
+      expect(historical.rows[0]).toEqual({ rep_user_id: repA, binding_id: bindingA, dialpad_user_id: DIALPAD_REP_A, status: "prepared" });
+    });
+
+    it("does not let active membership in another org open this org's own rows", async () => {
+      await prepare();
+      await service(() => pg.query("delete from public.memberships where user_id=$1 and org_id=$2", [repA, orgId]));
+      await service(() => pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member')", [repA, otherOrgId]));
+      const rows = await authenticated(repA, async () => ({
+        bindings: (await pg.query("select id from public.dialpad_member_bindings")).rowCount,
+        intents: (await pg.query("select id from public.dialpad_call_intents")).rowCount,
+      }));
+      expect(rows).toEqual({ bindings: 0, intents: 0 });
+    });
+
     it("keeps every privileged function service-role only", async () => {
       const functions = [
         "fn_claim_dialpad_member_binding(uuid,uuid,text)",
@@ -566,6 +616,52 @@ describe("20260929034021 Dialpad CTI foundation migration", () => {
       expect((await prepareFailure({ key })).detail).toBe("binding_not_verified");
       const stored = await service(() => pg.query("select status, rep_user_id, dialpad_user_id from public.dialpad_call_intents where id=$1", [first.intentId]));
       expect(stored.rows[0]).toEqual({ status: "cancelled", rep_user_id: repA, dialpad_user_id: DIALPAD_REP_A });
+    });
+
+    it("keeps a revoked intent terminal when a replacement binding exists and the old key is replayed", async () => {
+      const key = uuid();
+      const first = await prepare({ key });
+      await service(() => pg.query("select public.fn_revoke_dialpad_member_binding($1,'device replaced')", [bindingA]));
+      const replacement = await verifiedBinding(orgId, repA, "5150000000000009");
+      expect(replacement).not.toBe(bindingA);
+
+      const replay = await prepare({ key });
+      expect(replay).toMatchObject({
+        intentId: first.intentId,
+        customData: first.customData,
+        status: "cancelled",
+        replayed: true,
+        dialpadUserId: DIALPAD_REP_A,
+        expiresAt: first.expiresAt,
+      });
+      const stored = await service(() =>
+        pg.query("select status, binding_id, dialpad_user_id, cancelled_at from public.dialpad_call_intents where id=$1", [first.intentId]),
+      );
+      expect(stored.rows[0]).toMatchObject({ status: "cancelled", binding_id: bindingA, dialpad_user_id: DIALPAD_REP_A });
+      expect(stored.rows[0].cancelled_at).not.toBeNull();
+      expect(await count("dialpad_call_intents")).toBe(1);
+
+      const fresh = await prepare({ key: uuid() });
+      expect(fresh).toMatchObject({ status: "prepared", replayed: false, dialpadUserId: "5150000000000009" });
+      expect(fresh.intentId).not.toBe(first.intentId);
+      expect(fresh.customData).not.toBe(first.customData);
+    });
+
+    it("replays an expired or matched intent as its stored state, never as newly prepared", async () => {
+      const expiredKey = uuid();
+      const expired = await prepare({ key: expiredKey, ttl: 60, slot: 2 });
+      await pg.query("alter table public.dialpad_call_intents disable trigger user");
+      await pg.query("update public.dialpad_call_intents set prepared_at = now() - interval '2 minutes', expires_at = now() - interval '1 second' where id=$1", [expired.intentId]);
+      await pg.query("alter table public.dialpad_call_intents enable trigger user");
+      const expiredReplay = await prepare({ key: expiredKey, ttl: 60, slot: 2 });
+      expect(expiredReplay).toMatchObject({ intentId: expired.intentId, status: "prepared", replayed: true });
+      expect(new Date(String(expiredReplay.expiresAt)).getTime()).toBeLessThan(Date.now());
+
+      const matchedKey = uuid();
+      const matchedIntent = await prepare({ key: matchedKey });
+      const result = await ingestAndMatch(eventPayload({ custom_data: String(matchedIntent.customData) }));
+      expect(result).toMatchObject({ disposition: "matched", intentId: matchedIntent.intentId });
+      expect(await prepare({ key: matchedKey })).toMatchObject({ intentId: matchedIntent.intentId, status: "matched", replayed: true });
     });
 
     it("denies stale and revoked bindings, membership loss and disabled features", async () => {
@@ -838,5 +934,149 @@ describe("20260929034021 Dialpad CTI foundation migration", () => {
       const stored = await service(() => pg.query("select status from public.dialpad_call_intents where id=$1", [intent.intentId]));
       expect(stored.rows[0].status).toBe("prepared");
     });
+  });
+});
+
+/**
+ * Two-client interleavings need committed rows, so this block seeds real data,
+ * runs the revoke and prepare transactions on separate connections, and removes
+ * its org, users and rows afterwards (replica role: the CTI tables are
+ * append-only by trigger). Scratch database only.
+ */
+describe("20260929034021 prepare versus revoke serialization", () => {
+  let c1: Client;
+  let c2: Client;
+  let admin: Client;
+  const created: { orgs: string[]; users: string[] } = { orgs: [], users: [] };
+  let grantId = "";
+
+  const url = () => requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? localDbUrl);
+
+  async function begin(client: Client): Promise<void> {
+    await client.query("begin");
+    await client.query("set local role service_role");
+    await client.query("select set_config('request.jwt.claim.role','service_role',true)");
+  }
+
+  const callPrepare = (client: Client, key: string, grant: string | null) =>
+    client.query("select public.fn_prepare_dialpad_call_intent($1,$2,$3,$4,1::smallint,$5,$6,600) as v", [orgId, repA, propertyId, contactId, key, grant]);
+
+  async function waitUntilBlocked(client: Client, pid: number): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const waiting = await client.query("select 1 from pg_stat_activity where pid=$1 and wait_event_type='Lock'", [pid]);
+      if (waiting.rowCount) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`backend ${pid} never blocked on a lock`);
+  }
+
+  const settle = <T>(promise: Promise<T>) =>
+    promise.then(
+      (value) => ({ ok: true as const, value }),
+      (error: PgError) => ({ ok: false as const, error }),
+    );
+
+  async function preparedCount(): Promise<number> {
+    const result = await admin.query("select count(*)::int as n from public.dialpad_call_intents where org_id=$1 and status='prepared'", [orgId]);
+    return result.rows[0].n as number;
+  }
+
+  beforeAll(async () => {
+    pg = new Client({ connectionString: url() });
+    c1 = new Client({ connectionString: url() });
+    c2 = new Client({ connectionString: url() });
+    await Promise.all([pg.connect(), c1.connect(), c2.connect()]);
+    admin = pg;
+    await pg.query(migrationSql);
+  });
+
+  afterAll(async () => {
+    await Promise.all([c1.query("rollback"), c2.query("rollback")]).catch(() => undefined);
+    await pg.query("rollback").catch(() => undefined);
+    await pg.query("begin");
+    await pg.query("set local session_replication_role = replica");
+    const tables = await pg.query<{ table_name: string }>(
+      `select c.table_name from information_schema.columns c join information_schema.tables t using (table_schema, table_name)
+       where c.table_schema='public' and c.column_name='org_id' and t.table_type='BASE TABLE'`,
+    );
+    for (const org of created.orgs) {
+      for (const { table_name } of tables.rows) await pg.query(`delete from public.${table_name} where org_id=$1`, [org]);
+      await pg.query("delete from public.organizations where id=$1", [org]);
+    }
+    for (const user of created.users) await pg.query("delete from auth.users where id=$1", [user]);
+    await pg.query("commit");
+    await Promise.all([c1.end(), c2.end(), pg.end()]);
+  });
+
+  beforeEach(async () => {
+    NOW_MS = Date.now();
+    await pg.query("begin");
+    await seedFixture();
+    grantId = await grantCaller(repA);
+    await pg.query("commit");
+    created.orgs.push(orgId, otherOrgId);
+    created.users.push(ownerId, repA, repB, otherRep);
+  });
+
+  afterEach(async () => {
+    await Promise.all([c1.query("rollback"), c2.query("rollback")]);
+  });
+
+  it("makes a binding revoke wait for an in-flight prepare, then cancels that new intent", async () => {
+    const revokerPid = (await c2.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
+    await begin(c1);
+    await callPrepare(c1, uuid(), grantId);
+    await begin(c2);
+    const revoke = settle(c2.query("select public.fn_revoke_dialpad_member_binding($1,'offboarded') as v", [bindingA]));
+    await waitUntilBlocked(admin, revokerPid);
+    await c1.query("commit");
+    const outcome = await revoke;
+    expect(outcome.ok && outcome.value.rows[0].v).toMatchObject({ status: "revoked", cancelledIntents: 1 });
+    await c2.query("commit");
+    expect(await preparedCount()).toBe(0);
+  });
+
+  it("makes a prepare that races a committed binding revoke fail instead of creating a prepared intent", async () => {
+    const preparerPid = (await c1.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
+    await begin(c2);
+    await c2.query("select public.fn_revoke_dialpad_member_binding($1,'offboarded')", [bindingA]);
+    await begin(c1);
+    const preparing = settle(callPrepare(c1, uuid(), grantId));
+    await waitUntilBlocked(admin, preparerPid);
+    await c2.query("commit");
+    const outcome = await preparing;
+    expect(outcome.ok).toBe(false);
+    expect(!outcome.ok && outcome.error).toMatchObject({ code: "42501", detail: "binding_not_verified" });
+    await c1.query("rollback");
+    expect(await preparedCount()).toBe(0);
+  });
+
+  it("makes a grant revoke wait for an in-flight prepare, then cancels that new intent", async () => {
+    const revokerPid = (await c2.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
+    await begin(c1);
+    await callPrepare(c1, uuid(), grantId);
+    await begin(c2);
+    const revoke = settle(c2.query("select public.fn_revoke_dialpad_caller_grant($1,$2) as v", [grantId, ownerId]));
+    await waitUntilBlocked(admin, revokerPid);
+    await c1.query("commit");
+    const outcome = await revoke;
+    expect(outcome.ok && outcome.value.rows[0].v).toMatchObject({ cancelledIntents: 1, replayed: false });
+    await c2.query("commit");
+    expect(await preparedCount()).toBe(0);
+  });
+
+  it("makes a prepare that races a committed grant revoke fail instead of creating a prepared intent", async () => {
+    const preparerPid = (await c1.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
+    await begin(c2);
+    await c2.query("select public.fn_revoke_dialpad_caller_grant($1,$2)", [grantId, ownerId]);
+    await begin(c1);
+    const preparing = settle(callPrepare(c1, uuid(), grantId));
+    await waitUntilBlocked(admin, preparerPid);
+    await c2.query("commit");
+    const outcome = await preparing;
+    expect(outcome.ok).toBe(false);
+    expect(!outcome.ok && outcome.error).toMatchObject({ code: "42501", detail: "caller_grant_unavailable" });
+    await c1.query("rollback");
+    expect(await preparedCount()).toBe(0);
   });
 });

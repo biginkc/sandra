@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  assessDialpadIntentForDispatch,
   classifyDialpadRpcError,
   DIALPAD_CTI_CUSTOM_DATA_PATTERN,
   parseDialpadEventIngestResult,
@@ -42,6 +43,15 @@ describe('dialpad CTI contracts', () => {
     ['replayed flag', { replayed: 'no' }],
   ])('rejects an invalid %s', (_label, override) => {
     expect(() => parsePreparedDialpadCallIntent({ ...intent, ...override })).toThrow();
+  });
+
+  it('treats a replayed cancelled, matched or expired intent as not dispatchable', () => {
+    const now = new Date('2026-09-28T12:05:00Z');
+    expect(assessDialpadIntentForDispatch(parsePreparedDialpadCallIntent(intent), now)).toEqual({ dispatchable: true });
+    expect(assessDialpadIntentForDispatch(parsePreparedDialpadCallIntent({ ...intent, status: 'cancelled', replayed: true }), now)).toEqual({ dispatchable: false, reason: 'cancelled' });
+    expect(assessDialpadIntentForDispatch(parsePreparedDialpadCallIntent({ ...intent, status: 'matched', replayed: true }), now)).toEqual({ dispatchable: false, reason: 'matched' });
+    expect(assessDialpadIntentForDispatch(parsePreparedDialpadCallIntent(intent), new Date('2026-09-28T12:10:00Z'))).toEqual({ dispatchable: false, reason: 'expired' });
+    expect(assessDialpadIntentForDispatch({ status: 'prepared', expiresAt: 'not-a-date' }, now)).toEqual({ dispatchable: false, reason: 'invalid_expiry' });
   });
 
   it('rejects non-object responses', () => {
