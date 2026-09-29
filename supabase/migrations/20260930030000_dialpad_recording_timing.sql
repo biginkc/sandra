@@ -376,7 +376,7 @@ begin
     if exists (
       select 1
         from public.dialpad_recording_timing_records current_row
-        join public.dialpad_recording_timing_records previous_row
+        left join public.dialpad_recording_timing_records previous_row
           on previous_row.capture_id=current_row.capture_id and previous_row.epoch=current_row.epoch
          and previous_row.stream='exchange' and previous_row.seq=current_row.seq-1
        where current_row.capture_id=p_capture_id and current_row.epoch=p_epoch and current_row.stream='exchange'

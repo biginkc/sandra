@@ -224,6 +224,16 @@ describe('Dialpad timing migration', () => {
       expect(result.rows[0]!.value).toMatchObject({ status: 'incomplete', reasons: ['clock_discontinuity'] })
     } finally { await pg.query('reset role') }
 
+    const within = await seed()
+    const withinExchange = { ...exchange(), serverReceiveWallMs: 10, serverSendWallMs: 9 }
+    expect(await append(within, [withinExchange])).toMatchObject({ status: 'recorded' })
+    await pg.query('set role service_role')
+    try {
+      const result = await pg.query<{ value: { status: string; reasons: string[] } }>('select public.fn_finish_dialpad_recording_timing($1,$2,1,$3,$4,$5) as value', [orgId, within.captureId, JSON.stringify({ tabAnchor: -1, micAnchor: -1, tabContext: -1, micContext: -1, exchange: 0 }), 'collected', '[]'])
+      expect(result.rows[0]!.value.status).toBe('incomplete')
+      expect(result.rows[0]!.value.reasons).toContain('clock_discontinuity')
+    } finally { await pg.query('reset role') }
+
     const wall = await seed()
     const wallJump = { ...exchange(), seq: 1, browserSendMs: 4, browserReceiveMs: 5, serverReceiveMonoMs: 3, serverSendMonoMs: 4, serverReceiveWallMs: 11, serverSendWallMs: 10 }
     expect(await append(wall, [...sparseCompleteRecords(), wallJump])).toMatchObject({ status: 'recorded' })
@@ -234,7 +244,7 @@ describe('Dialpad timing migration', () => {
     } finally { await pg.query('reset role') }
 
     const bridge = await seed()
-    const previousSend = { ...exchange(), seq: 1, browserSendMs: 4, browserReceiveMs: 5, serverReceiveMonoMs: 1.75, serverSendMonoMs: 2.5, serverReceiveWallMs: 9.5, serverSendWallMs: 11 }
+    const previousSend = { ...exchange(), seq: 1, browserSendMs: 4, browserReceiveMs: 5, serverReceiveMonoMs: 2.25, serverSendMonoMs: 2.5, serverReceiveWallMs: 9.5, serverSendWallMs: 11 }
     expect(await append(bridge, [...sparseCompleteRecords(), previousSend])).toMatchObject({ status: 'recorded' })
     await pg.query('set role service_role')
     try {
