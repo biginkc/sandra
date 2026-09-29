@@ -131,7 +131,8 @@ test('NC-T5b Production binding and acknowledgement', () => {
 test('NC-T5c Production uses the asserted read-only transaction path', async () => {
   const entry=readFileSync(new URL('./outbox-db-contract-readonly.mjs',import.meta.url),'utf8');
   assert.match(entry,/const hostedReadOnly = \['shared-readonly', 'production'\]\.includes\(args\.target\)/);
-  assert.match(entry,/await collect\(client, args\.org/);
+  assert.match(entry,/collectData = collect/);
+  assert.match(entry,/await collectData\(client, args\.org/);
   const seen=[]; const c={query:async sql=>{seen.push(sql);return {rows:[sql.includes('transaction_isolation')?{transaction_isolation:'read committed'}:{transaction_read_only:'on'}]}}};
   await assert.rejects(openReadTxn(c,'BEGIN READ ONLY'),/READ_PRECONDITION_FAILED/);
   assert.deepEqual(seen,['BEGIN READ ONLY','SHOW transaction_isolation','SHOW transaction_read_only']);

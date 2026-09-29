@@ -83,7 +83,8 @@ export function assertSealedPre({ manifest, sealed, sealedBytes, rawBytes, targe
       sealed.source_output_sha256 !== sha(rawBytes)) throw new Error('PLAN_PRE_NOT_SEALED');
   return sealed;
 }
-async function main() {
+export async function main({ argv = args, createClient = config => new Client(config), collectData = collect, readCatalog = catalog } = {}) {
+  const args = argv;
   const dsn = process.env.DATABASE_URL;
   if (!dsn) throw new Error('DATABASE_URL_REQUIRED');
   assertTarget(args.target, dsn, { apiUrl: args['api-url'] });
@@ -91,7 +92,7 @@ async function main() {
   const hostedReadOnly = ['shared-readonly', 'production'].includes(args.target);
   if (args['probe-connection']) {
     if (!hostedReadOnly || args.phase || args.org) throw new Error('TARGET_REFUSED');
-    const probe = new Client(connectionConfig(args.target, dsn));
+    const probe = createClient(connectionConfig(args.target, dsn));
     await probe.connect();
     try {
       await probe.query('SET default_transaction_read_only=on');
@@ -113,14 +114,14 @@ async function main() {
   if (hostedReadOnly && (!args['api-url'] || !args['catalog-compare'] || !args['platform-compare'] || (args.phase === 'post' && (!args['pre-file'] || !args['plan-compare'])))) throw new Error('READ_PRECONDITION_FAILED');
   if (!['pre','post'].includes(args.phase)) throw new Error('PHASE_REQUIRED');
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(args.org ?? '')) throw new Error('ORG_ID_REQUIRED');
-  const client = new Client(connectionConfig(args.target, dsn));
+  const client = createClient(connectionConfig(args.target, dsn));
   await client.connect();
   try {
     const failures = [];
     const preBytes = args['pre-file'] ? await readFile(args['pre-file']) : null;
     const pre = preBytes ? JSON.parse(preBytes) : null;
     if (pre && (pre.target !== args.target || pre.phase !== 'pre')) throw new Error('PLAN_PRE_TARGET_MISMATCH');
-    const data = await collect(client, args.org, { previousIds: pre ? Object.keys(pre.queued.per_row) : [], hosted: hostedReadOnly });
+    const data = await collectData(client, args.org, { previousIds: pre ? Object.keys(pre.queued.per_row) : [], hosted: hostedReadOnly });
     const major = (await client.query('SHOW server_version_num')).rows[0].server_version_num.slice(0, 2);
     const result = { verdict: 'PASS', items: {}, summary: 'no hosted HTTP 200 was observed at the shared boundary; hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog-fingerprint, platform-config and claim-plumbing equality; a GoTrue major match does not prove identical hosted claim configuration.', target: args.target, phase: args.phase, ...data };
     if (args.target === 'production') { result.member_org_count = data.member_orgs.length; delete result.member_orgs; }
@@ -138,7 +139,7 @@ async function main() {
     }
     if (args['catalog'] || args['catalog-compare']) {
       process.env.INBOX_CATALOG_TLS_MODE = hostedReadOnly ? 'verify-full' : 'disable';
-      result.catalog_fingerprint = await catalog(dsn);
+      result.catalog_fingerprint = await readCatalog(dsn);
       result.catalog_indexes = catalogIndexes(result.catalog_fingerprint);
       if (pre) {
         try {
@@ -164,7 +165,7 @@ async function main() {
       }
       result.comparisons = { ...result.comparisons, catalog: { verdict: catalogVerdict, ...(catalogReason ? { reason: catalogReason } : {}), input_sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'), observed_section_sha256: result.catalog_fingerprint.section_sha256 } };
     }
-    if (args['plan-compare'] && result.items.indexes?.verdict !== 'INCONCLUSIVE') {
+    if (args['plan-compare']) {
       const sealedBytes = await readFile(args['plan-compare']);
       let pinned = JSON.parse(sealedBytes);
       if (hostedReadOnly) {
