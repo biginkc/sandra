@@ -779,6 +779,8 @@ export function InboxDetail({
                   ? `In ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`
                   : data.drip.status === "completed" && data.drip.stoppedAt
                   ? `Was in ${data.drip.name} · finished, then they replied`
+                  : data.drip.status === "completed"
+                  ? `Was in ${data.drip.name} · ended`
                   : data.drip.stoppedAt
                   ? `Was in ${data.drip.name} · stopped ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: data.drip.timeZone ?? "America/Chicago" }).format(new Date(data.drip.stoppedAt))} when they replied`
                   : `${data.drip.status === "paused" ? "Paused in" : "In"} ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`}

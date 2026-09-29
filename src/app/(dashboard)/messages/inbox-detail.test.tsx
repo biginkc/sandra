@@ -1499,6 +1499,9 @@ describe("<InboxDetail />", () => {
     rerender(<InboxDetail data={makeData({ contactId: "drip-ui", drip: { ...drip, status: "completed", replied: false, stoppedAt: "2026-04-29T12:02:00Z" }, initialMessages: [sent, manual, reply], dripReplyMessageIds: ["seller-reply"], dripReplyLabels: { "seller-reply": "Reply to drip text 1" } })} assigneeEmails={{}} currentUserId="user-1" />);
     expect(screen.getByTestId("inbox-detail-drip-line")).toHaveTextContent("Was in Seller follow-up · finished, then they replied");
     expect(screen.getByTestId("messages-thread-drip-reply")).toHaveTextContent("Reply to drip text 1");
+    rerender(<InboxDetail data={makeData({ contactId: "drip-ui", drip: { ...drip, status: "completed", replied: false, stoppedAt: null }, initialMessages: [sent, manual], dripMessageLabels: { "drip-sent": "Drip · Seller follow-up · text 1 of 4" } })} assigneeEmails={{}} currentUserId="user-1" />);
+    expect(screen.getByTestId("inbox-detail-drip-line")).toHaveTextContent("Was in Seller follow-up · ended");
+    expect(screen.getByTestId("inbox-detail-drip-line")).not.toHaveTextContent("text 2 of 4");
   });
 
   it("preserves the saved outcome and offers switch when enrollment reports an active drip", async () => {
