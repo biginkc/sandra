@@ -31,7 +31,7 @@ begin
     case when f.latest_reply is not null and not exists (
       select 1 from public.messages m where m.org_id = p_org_id and m.property_id = f.id
         and m.direction = 'outbound' and m.campaign_id is null
-        and not (m.metadata ? 'generated_by') and m.created_at > f.latest_reply
+        and m.metadata->>'generated_by' is null and m.created_at > f.latest_reply
         and not exists (select 1 from public.sequence_step_runs r where r.message_id = m.id)
     ) and not exists (
       select 1 from public.acquisition_attempts a where a.org_id = p_org_id and a.property_id = f.id
