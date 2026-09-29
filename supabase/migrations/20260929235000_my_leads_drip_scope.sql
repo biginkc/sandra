@@ -12,11 +12,13 @@ begin
   with owned as (
     select r.property_id as id, r.stage as queue_stage, r.search_text as search_value, r.row_data
     from public.my_leads_queue_rows(p_org_id, p_member_id, statement_timestamp()) r
-  ), newest as (
+  ), preferred as (
     select distinct on (e.property_id) e.property_id, e.id, e.status, e.pause_reason
     from public.sequence_enrollments e join owned o on o.id = e.property_id
     where e.org_id = p_org_id and e.status in ('active', 'paused', 'completed')
-    order by e.property_id, e.enrolled_at desc, e.id desc
+    order by e.property_id,
+      case when e.status in ('active', 'paused') then 0 else 1 end,
+      e.enrolled_at desc, e.id desc
   ), facts as (
     select o.id, o.queue_stage, o.search_value, o.row_data, (n.status = 'active') as active_drip,
       case when (n.status = 'paused' and n.pause_reason in ('inbound_reply', 'rep_sms_human_takeover'))
@@ -41,7 +43,7 @@ begin
             and reply.direction = 'inbound'
         )
       end as latest_reply
-    from owned o join newest n on n.property_id = o.id
+    from owned o join preferred n on n.property_id = o.id
   )
   select f.id, f.queue_stage, f.active_drip,
     case when f.latest_reply is not null and not exists (

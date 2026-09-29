@@ -33,8 +33,9 @@ export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:
       p_expected_episode_id:input.expectedEpisodeId,p_expected_queue_version:input.expectedQueueVersion,
       p_expected_shared_status:input.expectedSharedStatus,p_idempotency_key:input.idempotencyKey,
     });
-    if(error||data?.ok!==true) return {ok:false as const,message:error?.message?.includes('STALE_')
-      ? 'This lead changed. Refresh before trying again.':'This lead is unavailable. Refresh and try again.'};
+    if(error||data?.ok!==true) return error?.message?.includes('STALE_')
+      ? {ok:false as const,code:'STALE_STATE' as const,message:'This lead changed. Refresh before trying again.'}
+      : {ok:false as const,message:'This lead is unavailable. Refresh and try again.'};
     revalidatePath('/my-leads');revalidatePath('/leads');revalidatePath(`/leads/${input.propertyId}`);
     // The RPC commits the guarded outcome before enrollment starts.
     const enrolled=await startDripForLeads(input.sequenceId,[input.propertyId]);

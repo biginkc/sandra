@@ -7,8 +7,10 @@ import { DailyCallClock } from "./_components/daily-call-clock"
 const mocks = vi.hoisted(() => ({
   routerRefresh: vi.fn(),
   submitMyLeadCommand: vi.fn(),
+  submitMyLeadHandoffDrip: vi.fn(),
   loadMyLeads: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
+  listDripChoices: vi.fn(async () => ({ ok: true, data: [{ id: 'drip-1', name: 'Seller follow-up', textCount: 4, days: 90, firstSend: 'Today' }] })),
 }))
 
 vi.mock("next/navigation", () => ({
@@ -29,12 +31,13 @@ vi.mock("./actions", () => ({
   loadMyLeadDetail: vi.fn(),
   loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
   submitMyLeadCommand: mocks.submitMyLeadCommand,
+  submitMyLeadHandoffDrip: mocks.submitMyLeadHandoffDrip,
   changeAcquisitionDesignation: vi.fn(),
   changeAcquisitionSettings: vi.fn(),
 }))
 
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({
-  listDripChoices: vi.fn(async () => ({ ok: true, data: [] })),
+  listDripChoices: mocks.listDripChoices,
   startDripForLeads: vi.fn(),
 }))
 
@@ -72,6 +75,7 @@ vi.mock("./_components/queue", () => ({
         <button onClick={() => row && onStageAction("log-offer", row)}>Log offer</button>
         <button onClick={() => row && onStageAction("start-call", row)}>Start call</button>
         <button onClick={() => row && onStageAction("ready-for-offer", row)}>Ready for offer</button>
+        <button onClick={() => row && onStageAction("handoff", row)}>Handoff</button>
         <span data-testid="queue-address">{row?.address}</span>
         <input aria-label="Search My Leads" value={search} onChange={(event) => onSearchChange(event.target.value)} />
         {canSelectRep && (
@@ -89,10 +93,6 @@ vi.mock("./_components/queue", () => ({
 }))
 
 
-
-vi.mock("./_components/lifecycle-dialog", () => ({
-  AcquisitionLifecycleDialog: () => null,
-}))
 
 import type { AcquisitionKpis, AcquisitionRoster, QueueSnapshot } from "@/lib/my-leads/queries"
 import type { MyLeadDripSnapshot } from "@/lib/my-leads/drip-queries"
@@ -435,6 +435,27 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
 
 describe('stale form recovery',()=>{
   beforeEach(()=>{vi.resetAllMocks();mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});});
+  it('refreshes a stale drip handoff and retries with the current queue version',async()=>{
+    const user=userEvent.setup();
+    mocks.listDripChoices.mockResolvedValue({ok:true,data:[{id:'drip-1',name:'Seller follow-up',textCount:4,days:90,firstSend:'Today'}]});
+    mocks.submitMyLeadHandoffDrip.mockResolvedValueOnce({ok:false,code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'})
+      .mockResolvedValueOnce({ok:true});
+    renderClient(snapshot('106 Fixture Lane'));
+    await user.click(screen.getByRole('button',{name:'Handoff'}));
+    await user.selectOptions(screen.getByLabelText('Handoff reason'),'not_interested');
+    await user.click(await screen.findByRole('button',{name:/Seller follow-up/}));
+    await user.click(screen.getByRole('button',{name:'Hand off lead'}));
+    await screen.findByRole('button',{name:'Refresh'});
+    expect(mocks.submitMyLeadHandoffDrip.mock.calls[0][0]).toMatchObject({expectedQueueVersion:1,sequenceId:'drip-1'});
+    const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=2;
+    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    await user.click(screen.getByRole('button',{name:'Refresh'}));
+    await screen.findByText('Lead refreshed. Your draft is retained. Review it before saving.');
+    expect(screen.getByLabelText('Handoff reason')).toHaveValue('not_interested');
+    await user.click(screen.getByRole('button',{name:'Hand off lead'}));
+    await waitFor(()=>expect(mocks.submitMyLeadHandoffDrip).toHaveBeenCalledTimes(2));
+    expect(mocks.submitMyLeadHandoffDrip.mock.calls[1][0]).toMatchObject({expectedQueueVersion:2,sequenceId:'drip-1'});
+  });
   async function rejectedDraft(code='STALE_STATE'){
     const user=userEvent.setup();
     mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,code,message:'This lead changed. Refresh before trying again.'});

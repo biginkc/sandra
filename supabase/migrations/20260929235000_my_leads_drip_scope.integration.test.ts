@@ -9,32 +9,42 @@ const url=process.env.TEST_SUPABASE_DB_URL??loadTestEnv().TEST_SUPABASE_DB_URL;
 
 it('keeps a reply flag until a human text, logged attempt, or outcome, while opening has no effect',async()=>{
   if(!url) throw new Error('Missing TEST_SUPABASE_DB_URL');
+  const target=new URL(url);
+  if(target.hostname!=='127.0.0.1'||target.port!=='54329') throw new Error('Drip scope integration requires local Postgres at 127.0.0.1:54329');
+  if(!/^begin;\s*/i.test(sql)||!/\s*commit;\s*$/i.test(sql)) throw new Error('Migration transaction wrapper changed');
   const db=new Client({connectionString:url});
   await db.connect();
   try {
-    await db.query(sql);
     await db.query('begin');
+    await db.query(sql.replace(/^begin;\s*/i,'').replace(/\s*commit;\s*$/i,''));
     const org=randomUUID(), rep=randomUUID(), sequence=randomUUID();
     await db.query('insert into auth.users(id) values ($1)',[rep]);
     await db.query("insert into public.organizations(id,name) values ($1,'Drip scope')",[org]);
-    await db.query("insert into public.memberships(user_id,org_id,role,acquisitions_enabled) values ($1,$2,'owner',true)",[rep,org]);
+    await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner')",[rep,org]);
+    await db.query("select set_config('request.jwt.claim.sub',$1,true)",[rep]);
+    await db.query("select set_config('my_leads.designation_update',$1,true)",[`${rep}:${org}:${rep}`]);
+    await db.query('update public.memberships set acquisitions_enabled=true where user_id=$1 and org_id=$2',[rep,org]);
+    await db.query("select set_config('my_leads.designation_update','',true)");
     await db.query('insert into public.acquisition_org_settings(org_id,my_leads_enabled) values ($1,true)',[org]);
     await db.query("insert into public.sequences(id,org_id,name) values ($1,$2,'Follow-up')",[sequence,org]);
     const step=randomUUID();
     await db.query("insert into public.sequence_steps(id,sequence_id,step_index,action_type,template_body) values ($1,$2,0,'send_sms','Follow up')",[step,sequence]);
-    const ids=Object.fromEntries(['active','open','sms','ai','attempt','outcome','command','loggedAttempt','takeover','completed','resumed','otherEnrollment'].map(key=>[key,randomUUID()]));
+    const ids=Object.fromEntries(['active','activeWithNewerCompleted','open','sms','ai','attempt','outcome','command','loggedAttempt','takeover','completed','resumed','otherEnrollment'].map(key=>[key,randomUUID()]));
     for(const [key,id] of Object.entries(ids)) {
       await db.query("insert into public.properties(id,org_id,address,state,status,assigned_user_id) values ($1,$2,$3,'MO','new_lead',$4)",[id,org,`${key} Main`,rep]);
-      const status=['active','completed'].includes(key)?'active':'paused';
+      const status=['active','activeWithNewerCompleted','completed'].includes(key)?'active':'paused';
       const pauseReason=status==='paused'?(key==='takeover'?'rep_sms_human_takeover':'inbound_reply'):null;
       const enrollment=(await db.query("insert into public.sequence_enrollments(org_id,sequence_id,property_id,status,pause_reason,enrolled_at) values ($1,$2,$3,$4,$5,'2026-09-02T00:00:00Z') returning id",
         [org,sequence,id,status,pauseReason])).rows[0].id;
       const drip=(await db.query("insert into public.messages(org_id,property_id,channel,direction,body,status,created_at) values ($1,$2,'sms','outbound','Drip text','sent','2026-09-02T01:00:00Z') returning id",[org,id])).rows[0].id;
       await db.query("insert into public.sequence_step_runs(enrollment_id,step_id,message_id,scheduled_for) values ($1,$2,$3,'2026-09-02T01:00:00Z')",[enrollment,step,drip]);
       if(key==='completed') await db.query("update public.sequence_enrollments set status='completed',completed_at='2026-09-02T02:00:00Z' where id=$1",[enrollment]);
-      if(key!=='active') await db.query("insert into public.messages(org_id,property_id,channel,direction,body,status,created_at) values ($1,$2,'sms','inbound','Reply','received','2026-09-03T00:00:00Z')",[org,id]);
+      if(key!=='active'&&key!=='activeWithNewerCompleted') await db.query("insert into public.messages(org_id,property_id,channel,direction,body,status,created_at) values ($1,$2,'sms','inbound','Reply','received','2026-09-03T00:00:00Z')",[org,id]);
       if(key==='resumed') await db.query("update public.sequence_enrollments set status='active',pause_reason=null where id=$1",[enrollment]);
       if(key==='otherEnrollment') {
+        await db.query("insert into public.sequence_enrollments(org_id,sequence_id,property_id,status,enrolled_at) values ($1,$2,$3,'completed','2026-09-04T00:00:00Z')",[org,sequence,id]);
+      }
+      if(key==='activeWithNewerCompleted') {
         await db.query("insert into public.sequence_enrollments(org_id,sequence_id,property_id,status,enrolled_at) values ($1,$2,$3,'completed','2026-09-04T00:00:00Z')",[org,sequence,id]);
       }
     }
@@ -48,12 +58,14 @@ it('keeps a reply flag until a human text, logged attempt, or outcome, while ope
     };
     const before=await read();
     expect(before.get(ids.active).in_drip).toBe(true);
+    expect(before.get(ids.activeWithNewerCompleted).in_drip).toBe(true);
+    expect(before.get(ids.activeWithNewerCompleted).replied_at).toBeNull();
     expect(before.get(ids.open).replied_at).toBeTruthy();
     expect(before.get(ids.takeover).replied_at).toBeTruthy();
     expect(before.get(ids.completed).replied_at).toBeTruthy();
     expect(before.get(ids.resumed).in_drip).toBe(true);
     expect(before.get(ids.resumed).replied_at).toBeNull();
-    expect(before.has(ids.otherEnrollment)).toBe(false);
+    expect(before.get(ids.otherEnrollment).replied_at).toBeTruthy();
     // Reading/opening the lead writes no action and therefore leaves the flag.
     expect((await read()).get(ids.open).replied_at).toBeTruthy();
     await db.query("insert into public.messages(org_id,property_id,channel,direction,body,status,created_at) values ($1,$2,'sms','outbound','Human reply','sent','2026-09-04T00:00:00Z')",[org,ids.sms]);
@@ -76,7 +88,7 @@ it('keeps a reply flag until a human text, logged attempt, or outcome, while ope
     const args=[org,rep,ids.open,openEpisode.rows[0].id,0,'new_lead',commandKey];
     const saved=await db.query('select public.fn_handoff_acquisition_lead_to_drip($1,$2,$3,$4,$5,$6,$7) as result',args);
     expect(saved.rows[0].result.ok).toBe(true);
-    expect((await db.query('select public.fn_handoff_acquisition_lead_to_drip($1,$2,$3,$4,$5,$6,$7) as result',args)).rows[0].result).toEqual(saved.rows[0].result);
+    expect((await db.query('select public.fn_handoff_acquisition_lead_to_drip($1,$2,$3,$4,$5,$6,$7) as result',args)).rows[0].result).toEqual({...saved.rows[0].result,duplicate:true});
     await db.query('reset role');
     expect((await db.query('select outreach_dispo from public.properties where id=$1',[ids.open])).rows[0].outreach_dispo).toBe('needs_sequence');
     expect((await db.query('select version from public.acquisition_queue_states where property_id=$1',[ids.open])).rows[0].version).toBe('1');
@@ -85,7 +97,10 @@ it('keeps a reply flag until a human text, logged attempt, or outcome, while ope
     expect(prior.rows).toHaveLength(1);
     const nextRep=randomUUID();
     await db.query('insert into auth.users(id) values ($1)',[nextRep]);
-    await db.query("insert into public.memberships(user_id,org_id,role,acquisitions_enabled) values ($1,$2,'member',true)",[nextRep,org]);
+    await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member')",[nextRep,org]);
+    await db.query("select set_config('my_leads.designation_update',$1,true)",[`${rep}:${org}:${nextRep}`]);
+    await db.query('update public.memberships set acquisitions_enabled=true where user_id=$1 and org_id=$2',[nextRep,org]);
+    await db.query("select set_config('my_leads.designation_update','',true)");
     await db.query('update public.properties set assigned_user_id=$1 where id=$2 and org_id=$3',[nextRep,ids.active,org]);
     await db.query('savepoint stale_handoff');
     await db.query('set local role authenticated');
