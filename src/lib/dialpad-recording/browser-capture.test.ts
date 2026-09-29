@@ -315,6 +315,31 @@ describe("Dialpad capture preparation", () => {
     await prepared.dispose();
   });
 
+  it("defers a pre-auth timing persistence failure until attachment without interrupting audio", async () => {
+    const timingFailures: BrowserCaptureError[] = [];
+    const pcmFrames: number[] = [];
+    const createPcmSession: BrowserCaptureRuntime["createPcmSession"] = async (_stream, track, epoch, _onFrame, _onTail, options) => {
+      const contextId = track === "tab" ? "00000000-0000-4000-8000-000000000001" : "00000000-0000-4000-8000-000000000002";
+      for (let seq = 0; seq < 65; seq += 1) {
+        await options?.onTiming?.({ kind: "anchor", track, seq, contextId, anchor: seq === 0 ? "start" : "periodic", contextFrame: seq * 128, sourceCursor: seq * 128, blockLength: 128, sourceRateHz: 48_000, outputCursor: seq * 40, outputFrameIndex: seq, phaseNumerator: 0, continuity: "continuous", previousContextEndFrame: seq === 0 ? null : (seq - 1) * 128, discardedTailSamples: null });
+      }
+      return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) };
+    };
+    const recorders = [new FakeRecorder(), new FakeRecorder()];
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => recorders.shift()!, createPcmSession),
+    });
+    const active = await prepared.startLocal!(1);
+    await active.attach!({ onTrackFormat: vi.fn(), onTimingFailure: (error) => timingFailures.push(error), onPcmFrame: (frame) => { pcmFrames.push(frame.frameIndex); }, onWebmChunk: vi.fn() }, 1);
+    expect(timingFailures).toHaveLength(1);
+    expect(timingFailures[0]?.code).toBe("buffer_overflow");
+    expect(pcmFrames).toEqual([]);
+    expect(active.state()).toBe("recording");
+    await active.dispose();
+    await prepared.dispose();
+  });
+
   it("keeps attachment-time PCM in the bounded spool while a WebM prefix sink is stalled", async () => {
     const callbacks: { tab: ((frame: PcmFrame) => void | Promise<void>) | null; mic: ((frame: PcmFrame) => void | Promise<void>) | null } = { tab: null, mic: null };
     const tabRecorder = new FakeRecorder();

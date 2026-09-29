@@ -23,7 +23,9 @@ function generatedProcessor(sourceRateHz: number): { processor: { port: PcmWorkl
   }
   const registerProcessor = (_name: string, constructor: new () => typeof HarnessBase) => { Processor = constructor as unknown as typeof Processor; };
   new Function("AudioWorkletProcessor", "registerProcessor", "sampleRate", PCM_AUDIO_WORKLET_SOURCE)(HarnessBase, registerProcessor, sourceRateHz);
-  return { processor: new Processor(), messages };
+  const processor = new Processor();
+  processor.port.onmessage?.({ data: { type: "init", contextId: { track: "tab", id: "00000000-0000-4000-8000-000000000001" } } } as MessageEvent);
+  return { processor, messages };
 }
 
 function inputSamples(length: number): Float32Array {

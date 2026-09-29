@@ -204,6 +204,7 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
     this.contextId = null;
     this.anchorSeq = 0;
     this.lastContextEnd = 0;
+    this.hasContextEnd = false;
     this.nextPeriodicContextFrame = sampleRate * 10;
     this.gapPending = false;
     this.initialized = false;
@@ -222,7 +223,7 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
   emitAnchor(anchor, contextFrame, sourceCursor, blockLength, continuity, discardedTailSamples) {
     if (!this.contextId) return;
     const product = BigInt(Math.trunc(this.nextOutput)) * BigInt(Math.trunc(sampleRate));
-    this.port.postMessage({ type: "anchor", record: { kind: "anchor", track: this.contextId.track, seq: this.anchorSeq++, contextId: this.contextId.id, anchor, contextFrame, sourceCursor, blockLength, sourceRateHz: sampleRate, outputCursor: this.nextOutput, outputFrameIndex: Math.floor(this.nextOutput / FRAME_SAMPLES), phaseNumerator: Number(product % 16000n), continuity, previousContextEndFrame: this.lastContextEnd === 0 ? null : this.lastContextEnd, discardedTailSamples, uncertainOutputStartSample: null, uncertainOutputEndSample: null } });
+    this.port.postMessage({ type: "anchor", record: { kind: "anchor", track: this.contextId.track, seq: this.anchorSeq++, contextId: this.contextId.id, anchor, contextFrame, sourceCursor, blockLength, sourceRateHz: sampleRate, outputCursor: this.nextOutput, outputFrameIndex: Math.floor(this.nextOutput / FRAME_SAMPLES), phaseNumerator: Number(product % 16000n), continuity, previousContextEndFrame: this.hasContextEnd ? this.lastContextEnd : null, discardedTailSamples } });
   }
   process(inputs) {
     if (this.closed) return false;
@@ -233,10 +234,10 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
     }
     if (this.flushing) return false;
     const contextFrame = typeof currentFrame === "number" ? currentFrame : this.lastContextEnd;
-    const channels = inputs[0] ?? [];
+      const channels = inputs[0] ?? [];
+    if (!this.contextId) return true;
     if (channels.length === 0 || channels[0].length === 0) {
       this.gapPending = true;
-      this.lastContextEnd = contextFrame;
       return true;
     }
     if (this.inputChannels === 0) {
@@ -253,7 +254,8 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
       return false;
     }
     const length = channels[0].length;
-    const continuity = !this.initialized ? "continuous" : (this.gapPending || (this.lastContextEnd !== 0 && contextFrame !== this.lastContextEnd) ? "empty_input_gap" : "continuous");
+    const contextFrameGap = this.hasContextEnd && contextFrame !== this.lastContextEnd;
+    const continuity = !this.initialized ? "continuous" : (contextFrameGap ? "context_frame_gap" : this.gapPending ? "empty_input_gap" : "continuous");
     if (!this.initialized || continuity !== "continuous" || contextFrame >= this.nextPeriodicContextFrame) {
       this.emitAnchor(!this.initialized ? "start" : continuity !== "continuous" ? "discontinuity" : "periodic", contextFrame, this.totalInput, length, continuity, null);
       while (this.nextPeriodicContextFrame <= contextFrame) this.nextPeriodicContextFrame += sampleRate * 10;
@@ -294,6 +296,7 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
       this.pendingBase = keepFrom;
     }
     this.lastContextEnd = contextFrame + length;
+    this.hasContextEnd = true;
     return true;
   }
 }
@@ -414,6 +417,7 @@ export async function startPcmWorkletSession(
   let deliveryQueue = Promise.resolve();
   let timingQueue = Promise.resolve();
   let timingSequence = 0;
+  const onContextStateChange = () => emitContextClock('state_change', context.state === 'closed' ? 'closed' : context.state === 'suspended' ? 'suspended' : 'running');
   let pendingDeliveries = 0;
   let failureNotified = false;
   const notifyFailure = (error: Error) => {
@@ -442,6 +446,7 @@ export async function startPcmWorkletSession(
     enqueueTiming({ kind: 'context_clock', track, seq: timingSequence++, contextId, observation, browserBeforeMs: before, contextTimeMs: contextTime, browserAfterMs: after, browserTimeOriginMs: perf?.timeOrigin ?? 0, state });
   };
   const cleanup = async () => {
+    context.removeEventListener?.('statechange', onContextStateChange);
     if (node) {
       node.port.onmessage = null;
       node.port.close?.();
@@ -514,6 +519,7 @@ export async function startPcmWorkletSession(
     };
     source.connect(node);
     node.port.postMessage({ type: 'init', contextId: { id: contextId, track } });
+    context.addEventListener?.('statechange', onContextStateChange);
     emitContextClock('start', context.state === 'suspended' ? 'suspended' : 'running');
     const silent = context.createGain();
     silent.gain.value = 0;
@@ -560,7 +566,7 @@ export async function startPcmWorkletSession(
         deliveryActive = false;
         acceptingFrames = false;
         emitContextClock('final', context.state === 'closed' ? 'closed' : context.state === 'suspended' ? 'suspended' : 'running');
-        await timingQueue;
+        await Promise.race([timingQueue, wait(remaining())]);
         await cleanup();
         return tail!;
       })();

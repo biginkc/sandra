@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createSupabaseDialpadTimingDb,
   encodeDialpadTimingBatch,
+  parseDialpadTimingReasons,
   parseDialpadTimingRecord,
   type DialpadTimingAnchor,
 } from './timing-evidence'
@@ -14,7 +15,6 @@ const anchor: DialpadTimingAnchor = {
   sourceCursor: 0, blockLength: 128, sourceRateHz: 48_000, outputCursor: 0,
   outputFrameIndex: 0, phaseNumerator: 0, continuity: 'continuous',
   previousContextEndFrame: null, discardedTailSamples: null,
-  uncertainOutputStartSample: null, uncertainOutputEndSample: null,
 }
 
 describe('Dialpad timing evidence', () => {
@@ -22,7 +22,11 @@ describe('Dialpad timing evidence', () => {
     expect(parseDialpadTimingRecord(anchor)).toEqual(anchor)
     expect(() => parseDialpadTimingRecord({ ...anchor, extra: true })).toThrow('Invalid Dialpad timing anchor')
     expect(() => encodeDialpadTimingBatch(1, batchId, Array.from({ length: 16 }, (_, seq) => ({ ...anchor, seq, contextId: `${contextId.slice(0, -1)}${(seq % 9) + 1}` })))).not.toThrow()
-    expect(() => encodeDialpadTimingBatch(1, batchId, [{ ...anchor, uncertainOutputStartSample: Number.MAX_SAFE_INTEGER }])).not.toThrow()
+    expect(() => encodeDialpadTimingBatch(1, batchId, [{ ...anchor, uncertainOutputStartSample: Number.MAX_SAFE_INTEGER } as never])).toThrow('Invalid Dialpad timing anchor')
+    expect(() => parseDialpadTimingRecord({ kind: 'exchange', seq: 0, serverClockId: contextId, browserSendMs: 1, browserReceiveMs: 2, serverReceiveMonoMs: 3, serverSendMonoMs: 4, serverReceiveWallMs: 100, serverSendWallMs: 5 })).not.toThrow()
+    expect(() => parseDialpadTimingRecord({ kind: 'exchange', seq: 0, serverClockId: contextId, browserSendMs: 1, browserReceiveMs: 2, serverReceiveMonoMs: 3, serverSendMonoMs: 4, serverReceiveWallMs: 100, serverSendWallMs: 5, nonce: 'a'.repeat(64) })).toThrow('Invalid Dialpad timing exchange')
+    expect(() => parseDialpadTimingRecord({ ...anchor, continuity: 'empty_input_gap', previousContextEndFrame: null })).not.toThrow()
+    expect(() => parseDialpadTimingRecord({ ...anchor, continuity: 'context_frame_gap', previousContextEndFrame: 128 })).not.toThrow()
   })
 
   it('uses only the two service RPCs and rejects invented terminal status', async () => {
@@ -36,5 +40,8 @@ describe('Dialpad timing evidence', () => {
     expect(rpc).toHaveBeenNthCalledWith(2, 'fn_finish_dialpad_recording_timing', expect.objectContaining({ p_outcome: 'collected' }))
     const badRpc = vi.fn().mockResolvedValue({ data: { status: 'finalized', reasons: [] }, error: null })
     await expect(createSupabaseDialpadTimingDb({ rpc: badRpc } as never).finish('org', 'capture', 1, { tabAnchor: -1, micAnchor: -1, tabContext: -1, micContext: -1, exchange: -1 }, 'incomplete', [])).rejects.toThrow('Invalid Dialpad timing finish response')
+    expect(() => parseDialpadTimingRecord({ ...anchor, continuity: 'continuous' })).not.toThrow()
+    expect(parseDialpadTimingReasons(['clock_discontinuity', 'missing_final'])).toEqual(['clock_discontinuity', 'missing_final'])
+    expect(() => parseDialpadTimingReasons(['missing_final', 'clock_discontinuity'])).toThrow('Invalid Dialpad timing reasons')
   })
 })

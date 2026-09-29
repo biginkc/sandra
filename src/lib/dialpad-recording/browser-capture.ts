@@ -490,6 +490,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
       let state: ActiveDialpadCaptureState = "starting";
       let failed: BrowserCaptureError | null = null;
       let timingFailed = false;
+      let timingFailure: BrowserCaptureError | null = null;
       let timingFailureNotified = false;
       let handleMonitor: CaptureHandleMonitor | null = null;
       const trackMonitors: CaptureHandleMonitor[] = [];
@@ -543,9 +544,11 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         if (timingFailed) return;
         const notifyTimingFailure = (error: BrowserCaptureError) => {
           timingFailed = true;
+          timingFailure ??= error;
+          if (!attachedSinks) return;
           if (timingFailureNotified) return;
           timingFailureNotified = true;
-          try { attachedSinks?.onTimingFailure?.(error); } catch { /* timing failure remains sticky */ }
+          try { attachedSinks.onTimingFailure?.(timingFailure); } catch { /* timing failure remains sticky */ }
         };
         try {
           const bytes = new TextEncoder().encode(JSON.stringify(record)).byteLength;
@@ -653,9 +656,9 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         pcmPrefixDraining = true;
         attachedSinks = nextSinks;
         try {
-          if (timingFailed && !timingFailureNotified) {
+          if (timingFailed && timingFailure && !timingFailureNotified) {
             timingFailureNotified = true;
-            try { nextSinks.onTimingFailure?.(new BrowserCaptureError("buffer_overflow", "Timing evidence reached its bounded pre-call capacity.")); } catch { /* timing failure remains sticky */ }
+            try { nextSinks.onTimingFailure?.(timingFailure); } catch { /* timing failure remains sticky */ }
           }
           for (const track of ["tab", "mic"] as const) {
             const format = spool.formats[track];

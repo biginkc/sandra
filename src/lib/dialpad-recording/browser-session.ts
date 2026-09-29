@@ -150,14 +150,16 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   let timingIncomplete = false;
   let timingBarrierSent = false;
   let timingSendQueue = Promise.resolve();
-  let timingBatchInFlight: { batchId: string; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
-  let timingProbeInFlight: { seq: number; nonce: string; browserSendMs: number; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  let timingBatchInFlight: { batchId: string; records: readonly DialpadTimingRecord[]; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  let timingProbeInFlight: { seq: number; nonce: string | null; browserSendMs: number; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  let timingProbePromise: Promise<void> | null = null;
   let timingEndInFlight: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   let timingProbeTimer: ReturnType<typeof setInterval> | null = null;
   let timingExchangeSeq = 0;
   const pendingTimingRecords: DialpadTimingRecord[] = [];
   let pendingTimingBytes = 0;
   const timingLastSeq = { tabAnchor: -1, micAnchor: -1, tabContext: -1, micContext: -1, exchange: -1 };
+  const timingDurableLastSeq = { tabAnchor: -1, micAnchor: -1, tabContext: -1, micContext: -1, exchange: -1 };
   let queueDepth = 0;
   let queuedBytes = 0;
   let sendQueue = Promise.resolve();
@@ -365,7 +367,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         const encoded = encodeDialpadTimingBatch(options.epoch, batchId, batch);
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => { timingBatchInFlight = null; timingIncomplete = true; reject(new DialpadBrowserSessionError('timeout', 'Timing batch acknowledgement timed out.')); }, ackTimeoutMs);
-          timingBatchInFlight = { batchId, resolve, reject, timer };
+          timingBatchInFlight = { batchId, records: batch, resolve, reject, timer };
           void enqueueSend(encoded).catch((error) => { timingIncomplete = true; reject(error instanceof Error ? error : new Error('Timing batch send failed.')); });
         }).catch(() => undefined);
       }
@@ -374,17 +376,20 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   }
 
   async function sendTimingProbe(): Promise<void> {
-    if (!timingNegotiated || timingIncomplete || timingProbeInFlight) return;
+    if (!timingNegotiated || timingIncomplete) return;
+    if (timingProbePromise) {
+      await timingProbePromise.catch(() => undefined);
+      return;
+    }
     const seq = timingExchangeSeq++;
-    const nonceBytes = new Uint8Array(32);
-    globalThis.crypto?.getRandomValues?.(nonceBytes);
-    const nonce = [...nonceBytes].map((value) => value.toString(16).padStart(2, '0')).join('') || `${'0'.repeat(63)}1`;
     const browserSendMs = timingNow();
-    await new Promise<void>((resolve, reject) => {
+    const exchange = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { timingProbeInFlight = null; timingIncomplete = true; reject(new DialpadBrowserSessionError('timeout', 'Timing exchange timed out.')); }, ackTimeoutMs);
-      timingProbeInFlight = { seq, nonce, browserSendMs, resolve, reject, timer };
+      timingProbeInFlight = { seq, nonce: null, browserSendMs, resolve, reject, timer };
       void sendControl({ type: 'timing_probe', epoch: options.epoch, seq, browserSendMs }).catch(reject);
-    }).catch(() => undefined);
+    });
+    timingProbePromise = exchange;
+    try { await exchange; } catch { timingIncomplete = true; } finally { if (timingProbePromise === exchange) timingProbePromise = null; }
   }
 
   async function finishTiming(): Promise<void> {
@@ -402,7 +407,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => { timingEndInFlight = null; reject(new DialpadBrowserSessionError('timeout', 'Timing end acknowledgement timed out.')); }, ackTimeoutMs);
         timingEndInFlight = { resolve, reject, timer };
-        void sendControl({ type: 'timing_end', epoch: options.epoch, lastSeq: timingLastSeq, outcome, reasons }).catch(reject);
+        void sendControl({ type: 'timing_end', epoch: options.epoch, lastSeq: timingDurableLastSeq, outcome, reasons }).catch(reject);
       });
     } catch { timingIncomplete = true; }
   }
@@ -438,7 +443,10 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       if (message.type === 'ready') {
         ready = true;
         timingNegotiated = enableTiming && message.capabilities?.includes('capture_timing_v1') === true;
-        if (timingNegotiated && timingProbeTimer === null) timingProbeTimer = setInterval(() => { void sendTimingProbe(); }, 10_000);
+        if (timingNegotiated && timingProbeTimer === null) {
+          void sendTimingProbe();
+          timingProbeTimer = setInterval(() => { void sendTimingProbe(); }, 10_000);
+        }
         state = 'hydrating';
       } else if (message.type === 'measurement_snapshot') {
         if (message.revision < snapshotRevision) return;
@@ -495,19 +503,26 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         }
         pcmDrainAcks.set(message.track, message.endSample);
       } else if (message.type === 'timing_batch_ack') {
-        if (!timingBatchInFlight || timingBatchInFlight.batchId !== message.batchId) throw new DialpadBrowserSessionError('protocol', 'Unexpected timing batch acknowledgement.');
-        clearTimeout(timingBatchInFlight.timer); timingBatchInFlight.resolve(); timingBatchInFlight = null;
+        if (!timingBatchInFlight || timingBatchInFlight.batchId !== message.batchId) {
+          if (timingIncomplete) return;
+          throw new DialpadBrowserSessionError('protocol', 'Unexpected timing batch acknowledgement.');
+        }
+        const completed = timingBatchInFlight;
+        clearTimeout(completed.timer);
+        for (const record of completed.records) {
+          if (record.kind === 'anchor') timingDurableLastSeq[record.track === 'tab' ? 'tabAnchor' : 'micAnchor'] = Math.max(timingDurableLastSeq[record.track === 'tab' ? 'tabAnchor' : 'micAnchor'], record.seq);
+          else if (record.kind === 'context_clock') timingDurableLastSeq[record.track === 'tab' ? 'tabContext' : 'micContext'] = Math.max(timingDurableLastSeq[record.track === 'tab' ? 'tabContext' : 'micContext'], record.seq);
+        }
+        completed.resolve(); timingBatchInFlight = null;
       } else if (message.type === 'timing_probe_reply') {
-        if (!timingProbeInFlight || timingProbeInFlight.seq !== message.seq || timingProbeInFlight.nonce !== message.nonce) throw new DialpadBrowserSessionError('protocol', 'Unexpected timing probe reply.');
+        if (!timingProbeInFlight || timingProbeInFlight.seq !== message.seq || (timingProbeInFlight.nonce !== null && timingProbeInFlight.nonce !== message.nonce)) throw new DialpadBrowserSessionError('protocol', 'Unexpected timing probe reply.');
         const pending = timingProbeInFlight;
-        clearTimeout(pending.timer);
+        pending.nonce = message.nonce;
         const browserReceiveMs = timingNow();
-        timingLastSeq.exchange = Math.max(timingLastSeq.exchange, message.seq);
         await sendControl({ type: 'timing_confirm', epoch: options.epoch, seq: message.seq, nonce: message.nonce, browserReceiveMs });
-        void pending.resolve();
       } else if (message.type === 'timing_exchange_ack') {
         if (!timingProbeInFlight || timingProbeInFlight.seq !== message.seq) return;
-        clearTimeout(timingProbeInFlight.timer); timingProbeInFlight.resolve(); timingProbeInFlight = null;
+        clearTimeout(timingProbeInFlight.timer); timingDurableLastSeq.exchange = Math.max(timingDurableLastSeq.exchange, message.seq); timingProbeInFlight.resolve(); timingProbeInFlight = null;
       } else if (message.type === 'timing_end_ack') {
         if (message.status === 'incomplete') timingIncomplete = true;
         if (timingEndInFlight) { clearTimeout(timingEndInFlight.timer); timingEndInFlight.resolve(); timingEndInFlight = null; }

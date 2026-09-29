@@ -452,6 +452,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
           "dialpad_recording_capture_prefix",
           "dialpad_recording_chunk_path",
           "dialpad_recording_final_path",
+          "fn_append_dialpad_recording_timing",
           "fn_claim_dialpad_recording_seal_work",
           "fn_close_dialpad_recording_capture",
           "fn_consume_dialpad_recording_ingest_grant",
@@ -472,6 +473,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
           "fn_mint_dialpad_recording_next_epoch",
           "fn_get_dialpad_recording_shadow_input",
           "fn_finalize_dialpad_recording_shadow",
+          "fn_finish_dialpad_recording_timing",
           "fn_get_dialpad_recording_shadow_measurement",
         ].sort(),
       );

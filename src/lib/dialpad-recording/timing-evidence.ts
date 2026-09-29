@@ -35,8 +35,6 @@ export type DialpadTimingAnchor = {
   readonly continuity: DialpadTimingContinuity
   readonly previousContextEndFrame: number | null
   readonly discardedTailSamples: number | null
-  readonly uncertainOutputStartSample?: number | null
-  readonly uncertainOutputEndSample?: number | null
 }
 
 export type DialpadTimingContextClock = {
@@ -54,10 +52,8 @@ export type DialpadTimingContextClock = {
 
 export type DialpadTimingExchange = {
   readonly kind: 'exchange'
-  readonly track: 'tab'
   readonly seq: number
   readonly serverClockId: string
-  readonly nonce: string
   readonly browserSendMs: number
   readonly browserReceiveMs: number
   readonly serverReceiveMonoMs: number
@@ -77,7 +73,6 @@ export type DialpadTimingEndSequences = {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const NONCE = /^[0-9a-f]{64}$/
 const integer = (v: unknown, min = 0): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= min
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -87,8 +82,8 @@ const oneOf = <T extends string>(v: unknown, values: readonly T[]): v is T => ty
 function invalid(message: string): Error { return new Error(`Invalid Dialpad timing ${message}`) }
 
 function parseAnchor(v: Record<string, unknown>): DialpadTimingAnchor {
-  const keys = ['kind', 'track', 'seq', 'contextId', 'anchor', 'contextFrame', 'sourceCursor', 'blockLength', 'sourceRateHz', 'outputCursor', 'outputFrameIndex', 'phaseNumerator', 'continuity', 'previousContextEndFrame', 'discardedTailSamples', 'uncertainOutputStartSample', 'uncertainOutputEndSample']
-  if (!exact(v, keys) || v.kind !== 'anchor' || !oneOf(v.track, ['tab', 'mic']) || !integer(v.seq) || !UUID.test(String(v.contextId)) || !oneOf(v.anchor, ['start', 'periodic', 'discontinuity', 'final']) || !integer(v.contextFrame) || !integer(v.sourceCursor) || !integer(v.blockLength) || !integer(v.sourceRateHz, 8_000) || v.sourceRateHz > 192_000 || !integer(v.outputCursor) || !integer(v.outputFrameIndex) || !integer(v.phaseNumerator) || v.phaseNumerator >= 16_000 || !oneOf(v.continuity, ['continuous', 'empty_input_gap', 'context_frame_gap', 'channel_change', 'unknown']) || !(v.previousContextEndFrame === null || integer(v.previousContextEndFrame)) || !(v.discardedTailSamples === null || integer(v.discardedTailSamples)) || !(v.uncertainOutputStartSample === null || integer(v.uncertainOutputStartSample)) || !(v.uncertainOutputEndSample === null || integer(v.uncertainOutputEndSample))) throw invalid('anchor')
+  const keys = ['kind', 'track', 'seq', 'contextId', 'anchor', 'contextFrame', 'sourceCursor', 'blockLength', 'sourceRateHz', 'outputCursor', 'outputFrameIndex', 'phaseNumerator', 'continuity', 'previousContextEndFrame', 'discardedTailSamples']
+  if (!exact(v, keys) || v.kind !== 'anchor' || !oneOf(v.track, ['tab', 'mic']) || !integer(v.seq) || !UUID.test(String(v.contextId)) || !oneOf(v.anchor, ['start', 'periodic', 'discontinuity', 'final']) || !integer(v.contextFrame) || !integer(v.sourceCursor) || !integer(v.blockLength) || !integer(v.sourceRateHz, 8_000) || v.sourceRateHz > 192_000 || !integer(v.outputCursor) || !integer(v.outputFrameIndex) || !integer(v.phaseNumerator) || v.phaseNumerator >= 16_000 || !oneOf(v.continuity, ['continuous', 'empty_input_gap', 'context_frame_gap', 'channel_change', 'unknown']) || !(v.previousContextEndFrame === null || integer(v.previousContextEndFrame)) || !(v.discardedTailSamples === null || integer(v.discardedTailSamples))) throw invalid('anchor')
   if (v.anchor === 'final' && v.blockLength !== 0) throw invalid('final anchor')
   return v as DialpadTimingAnchor
 }
@@ -100,8 +95,8 @@ function parseContext(v: Record<string, unknown>): DialpadTimingContextClock {
 }
 
 function parseExchange(v: Record<string, unknown>): DialpadTimingExchange {
-  const keys = ['kind', 'track', 'seq', 'serverClockId', 'nonce', 'browserSendMs', 'browserReceiveMs', 'serverReceiveMonoMs', 'serverSendMonoMs', 'serverReceiveWallMs', 'serverSendWallMs']
-  if (!exact(v, keys) || v.kind !== 'exchange' || v.track !== 'tab' || !integer(v.seq) || !UUID.test(String(v.serverClockId)) || !NONCE.test(String(v.nonce)) || !finite(v.browserSendMs) || !finite(v.browserReceiveMs) || !finite(v.serverReceiveMonoMs) || !finite(v.serverSendMonoMs) || !finite(v.serverReceiveWallMs) || !finite(v.serverSendWallMs) || v.browserReceiveMs < v.browserSendMs || v.serverSendMonoMs < v.serverReceiveMonoMs || v.serverSendWallMs < v.serverReceiveWallMs) throw invalid('exchange')
+  const keys = ['kind', 'seq', 'serverClockId', 'browserSendMs', 'browserReceiveMs', 'serverReceiveMonoMs', 'serverSendMonoMs', 'serverReceiveWallMs', 'serverSendWallMs']
+  if (!exact(v, keys) || v.kind !== 'exchange' || !integer(v.seq) || !UUID.test(String(v.serverClockId)) || !finite(v.browserSendMs) || !finite(v.browserReceiveMs) || !finite(v.serverReceiveMonoMs) || !finite(v.serverSendMonoMs) || !finite(v.serverReceiveWallMs) || !finite(v.serverSendWallMs) || v.browserReceiveMs < v.browserSendMs || v.serverSendMonoMs < v.serverReceiveMonoMs) throw invalid('exchange')
   return v as DialpadTimingExchange
 }
 
@@ -115,6 +110,8 @@ export function parseDialpadTimingRecord(value: unknown): DialpadTimingRecord {
 
 export function parseDialpadTimingReasons(value: unknown): DialpadTimingReason[] {
   if (!Array.isArray(value) || value.length > DIALPAD_TIMING_MAX_REASONS || new Set(value).size !== value.length || value.some((reason) => !oneOf(reason, DIALPAD_TIMING_REASONS))) throw invalid('reasons')
+  const sorted = [...value].sort()
+  if (value.some((reason, index) => reason !== sorted[index])) throw invalid('reasons')
   return [...value] as DialpadTimingReason[]
 }
 

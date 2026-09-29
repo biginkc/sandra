@@ -679,7 +679,7 @@ function validateServerMessage(message: DialpadBrowserServerMessage): void {
   }
   if (message.type === 'capture_state') {
     const validDeadline = message.drainDeadlineAt === null || (typeof message.drainDeadlineAt === 'string' && !Number.isNaN(Date.parse(message.drainDeadlineAt)))
-    if (!hasExactKeys(message, ['type', 'epoch', 'latestConsumedEpoch', 'state', 'drainDeadlineAt']) || !isEpoch(message.epoch) || !isEpoch(message.latestConsumedEpoch) || message.latestConsumedEpoch !== message.epoch || (message.state !== 'open' && message.state !== 'closing' && message.state !== 'closed') || !validDeadline || (message.state === 'closing' && message.drainDeadlineAt === null) || (message.state !== 'closing' && message.drainDeadlineAt !== null)) throw protocolError('server_message_invalid')
+    if (!hasExactKeys(message, ['type', 'epoch', 'latestConsumedEpoch', 'state', 'drainDeadlineAt']) || !isEpoch(message.epoch) || !isEpoch(message.latestConsumedEpoch) || message.latestConsumedEpoch < message.epoch || (message.state !== 'open' && message.state !== 'closing' && message.state !== 'closed') || !validDeadline || (message.state === 'closing' && message.drainDeadlineAt === null) || (message.state !== 'closing' && message.drainDeadlineAt !== null)) throw protocolError('server_message_invalid')
     return
   }
   if (message.type === 'recording_chunk_ack') {

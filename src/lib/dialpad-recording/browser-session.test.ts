@@ -150,6 +150,48 @@ describe('Dialpad browser session', () => {
     expect(session.state()).toBe('recording');
   });
 
+  it('binds the server-owned timing nonce and waits for timing batch and exchange ACKs', async () => {
+    const socket = new FakeSocket();
+    const timingAnchor = {
+      kind: 'anchor', track: 'tab', seq: 0, contextId: '00000000-0000-4000-8000-000000000001', anchor: 'start',
+      contextFrame: 0, sourceCursor: 0, blockLength: 128, sourceRateHz: 48_000, outputCursor: 0,
+      outputFrameIndex: 0, phaseNumerator: 0, continuity: 'continuous', previousContextEndFrame: null, discardedTailSamples: null,
+    } as const;
+    socket.send = (data) => {
+      socket.sent.push(data);
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; seq?: number; batchId?: string; nonce?: string };
+      if (message.type === 'timing_probe') {
+        expect(message.nonce).toBeUndefined();
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_probe_reply', epoch: 1, seq: message.seq, nonce: 'a'.repeat(64), serverClockId: '00000000-0000-4000-8000-000000000003', serverReceiveMonoMs: 1, serverSendMonoMs: 2, serverReceiveWallMs: 100, serverSendWallMs: 90 })));
+      } else if (message.type === 'timing_confirm') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_exchange_ack', epoch: 1, seq: message.seq, status: 'recorded' })));
+      } else if (message.type === 'timing_batch') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_batch_ack', epoch: 1, batchId: message.batchId, status: 'recorded' })));
+      } else if (message.type === 'timing_end') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_end_ack', epoch: 1, status: 'collected', reasons: [] })));
+      }
+    };
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, enableTiming: true, ackTimeoutMs: 100,
+      capture: fakeCapture((sinks) => { void sinks.onTiming?.(timingAnchor); }),
+    });
+    const started = session.start();
+    socket.open();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.message(JSON.stringify({ type: 'ready', epoch: 1, controlVersion: 2, capabilities: ['capture_timing_v1'] }));
+    socket.message(JSON.stringify({ type: 'measurement_snapshot', epoch: 1, revision: 0, totalSamples: 0, measurementStatus: 'provisional', threshold: { crossed: false, crossingEpoch: null, crossingSample: null }, degradedReasons: [] }));
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'open', drainDeadlineAt: null }));
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await session.stop();
+    const probes = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string; lastSeq?: { tabAnchor?: number } }).filter((entry) => entry.type === 'timing_probe');
+    expect(probes.length).toBeGreaterThanOrEqual(1);
+    const ends = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string; lastSeq?: { tabAnchor?: number } }).filter((entry) => entry.type === 'timing_end');
+    expect(ends.at(-1)?.lastSeq?.tabAnchor).toBe(0);
+    expect(session.state()).toBe('stopped');
+  });
+
   it('holds a recording chunk until its matching ACK and finishes both tracks only after drain responses', async () => {
     const socket = new FakeSocket();
     let chunk: EncodedMediaChunk | null = null;
