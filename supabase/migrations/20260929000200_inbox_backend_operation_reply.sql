@@ -1819,6 +1819,7 @@ CREATE TABLE inbox_reply_context.versions(
  org_id uuid NOT NULL, namespace text NOT NULL CHECK(namespace IN ('sender_inventory','organization_name','property_market')),
  target_id uuid NOT NULL, revision bigint NOT NULL CHECK(revision>0), PRIMARY KEY(org_id,namespace,target_id)
 );
+ALTER TABLE inbox_reply_context.versions ENABLE ROW LEVEL SECURITY;
 -- No canonical FK: deletion and same-ID reinsertion must not reset authority.
 CREATE FUNCTION inbox_reply_context.bump(ns text,old_org uuid,old_id uuid,new_org uuid,new_id uuid) RETURNS void
 LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
