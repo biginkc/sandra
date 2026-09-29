@@ -42,7 +42,7 @@ else:
     DB=os.environ['INBOX_SCRATCH_DATABASE']
     EXPECTED_MARKER=os.environ['INBOX_SCRATCH_MARKER_TOKEN']
     # Never allow the scratch path to retarget the retained fixture.
-    validate_scratch_target(SOCKET,N,DB,os.environ.get('GITHUB_ACTIONS')=='true')
+    validate_scratch_target(SOCKET,N,DB,os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('MIGRATION_LOCAL_EXECUTION')!='1')
 
 def sql(q,role='postgres',retry=False):
  for attempt in range(3 if retry else 1):

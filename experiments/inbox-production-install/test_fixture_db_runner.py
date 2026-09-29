@@ -41,6 +41,13 @@ class ScratchFixtureTest(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 load({**self.env, **change})
 
+    def test_local_socket_requires_explicit_diagnostic_mode(self):
+        local = {**self.env, 'INBOX_SCRATCH_DOCKER_SOCKET': 'unix:///tmp/colima/docker.sock'}
+        with self.assertRaises(RuntimeError):
+            load(local)
+        f = load({**local, 'MIGRATION_LOCAL_EXECUTION': '1'})
+        self.assertEqual(f.SOCKET, local['INBOX_SCRATCH_DOCKER_SOCKET'])
+
     def test_missing_environment_fails(self):
         for key in ('INBOX_SCRATCH_DOCKER_SOCKET', 'INBOX_SCRATCH_CONTAINER', 'INBOX_SCRATCH_DATABASE', 'INBOX_SCRATCH_MARKER_TOKEN'):
             with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, 'requires all'):

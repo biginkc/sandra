@@ -10,6 +10,11 @@ spec.loader.exec_module(a)
 
 
 class MigrationAssertionsTest(unittest.TestCase):
+    def test_runner_socket_requires_system_docker_socket(self):
+        self.assertEqual(a.docker_socket({'GITHUB_ACTIONS': 'true'}), 'unix:///var/run/docker.sock')
+        with self.assertRaisesRegex(ValueError, 'Runner requires'):
+            a.docker_socket({'GITHUB_ACTIONS': 'true', 'DOCKER_HOST': 'unix:///tmp/colima/docker.sock'})
+        self.assertEqual(a.docker_socket({'GITHUB_ACTIONS': 'true', 'MIGRATION_LOCAL_EXECUTION': '1', 'DOCKER_HOST': 'unix:///tmp/colima/docker.sock'}), 'unix:///tmp/colima/docker.sock')
     def test_exact_three_migration_names_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp) / 'supabase/migrations'

@@ -12,6 +12,17 @@ NAMES = ('inbox_control_foundation', 'inbox_read_companion', 'inbox_backend_oper
 REFUSAL = 'Existing candidate: use validated forward upgrade, never reset'
 
 
+def docker_socket(env):
+    if env.get('MIGRATION_LOCAL_EXECUTION') == '1':
+        socket = env.get('DOCKER_HOST', '')
+        if not socket.startswith('unix:///') or socket == 'unix:///var/run/docker.sock':
+            raise ValueError('Local diagnostic requires a Colima Unix DOCKER_HOST')
+        return socket
+    if env.get('DOCKER_HOST', 'unix:///var/run/docker.sock') != 'unix:///var/run/docker.sock':
+        raise ValueError('Runner requires /var/run/docker.sock')
+    return 'unix:///var/run/docker.sock'
+
+
 def migration_files(root):
     directory = Path(root) / 'supabase/migrations'
     expected = [directory / f'{version}_{name}.sql' for version, name in zip(VERSIONS, NAMES)]
@@ -81,7 +92,7 @@ if __name__ == '__main__':
         command = sys.argv[1] if len(sys.argv) > 1 else 'preflight'
         if command == 'indexes':
             for statement in index_statements((root / 'experiments/inbox-production-install/operator/concurrent-indexes.sql').read_text()):
-                subprocess.run(['docker', '--host', 'unix:///var/run/docker.sock', 'exec', '-i', os.environ['INBOX_SCRATCH_CONTAINER'], 'psql', '-X', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], input=statement+';\n', text=True, check=True)
+                subprocess.run(['docker', '--host', docker_socket(os.environ), 'exec', '-i', os.environ['INBOX_SCRATCH_CONTAINER'], 'psql', '-X', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], input=statement+';\n', text=True, check=True)
         elif command == 'second-apply':
             assert_second_apply(int(sys.argv[2]), Path(sys.argv[3]).read_text(), sys.argv[4:])
         elif command == 'verify':

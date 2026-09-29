@@ -33,6 +33,7 @@ test('each W2 lane produces a pullable record and the W1 gate selects both keys'
     const writer = path.join(repo, 'scripts/inbox-ci/write-migration-record.mjs');
     const baseEnv = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF_NAME: 'main', GITHUB_RUN_ID: '901', GITHUB_RUN_ATTEMPT: '2', HEAVY_LANE: 'migration-dry-run', HEAVY_TESTED_SHA: sha };
     const invoke = env => execFileSync('node', [writer, work], { cwd: repo, env: { ...baseEnv, ...env }, encoding: 'utf8', stdio: 'pipe' });
+    assert.throws(() => invoke({ MIGRATION_LOCAL_EXECUTION: '1' }), error => error.stderr?.toString().includes('Local diagnostic cannot seal a run record'));
     for (const [env, message] of [[{ GITHUB_EVENT_NAME: 'push' }, 'Untrusted dispatch provenance'], [{ GITHUB_REF_NAME: 'feature' }, 'Untrusted dispatch provenance'], [{ HEAVY_LANE: 'outbox' }, 'Invalid heavy lane identity'], [{ HEAVY_TESTED_SHA: '0'.repeat(40) }, 'Invalid heavy lane identity']]) {
       assert.throws(() => invoke(env), error => error.stderr?.toString().includes(message));
     }

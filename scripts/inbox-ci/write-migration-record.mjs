@@ -5,6 +5,7 @@ import path from 'node:path';
 import { assertOnlyRunDirDirty, writeManifest, runPath } from '../../scripts/outbox-run-record.mjs';
 
 const repo = path.resolve(import.meta.dirname, '../..');
+if (process.env.MIGRATION_LOCAL_EXECUTION === '1') throw new Error('Local diagnostic cannot seal a run record');
 const work = process.argv[2];
 if (!work || !path.isAbsolute(work)) throw new Error('Runner scratch output directory required');
 const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
