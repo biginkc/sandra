@@ -6,7 +6,15 @@ import { spawnSync } from 'node:child_process';
 import { collect, reconcile, stabilityProbe } from './outbox-db-contract/readonly.mjs';
 import { platformFingerprint, comparePlatform } from './outbox-db-contract/platform.mjs';
 
-const args = Object.fromEntries(process.argv.slice(2).reduce((a, v, i, all) => (v.startsWith('--') && (a.push([v.slice(2), all[i + 1]])), a), []));
+export function parseArgs(argv) {
+  const parsed = {};
+  for (let i = 0; i < argv.length; i++) {
+    if (!argv[i].startsWith('--')) continue;
+    parsed[argv[i].slice(2)] = argv[i + 1] === undefined || argv[i + 1].startsWith('--') ? true : argv[++i];
+  }
+  return parsed;
+}
+const args = parseArgs(process.argv.slice(2));
 const fail = (message, code = 1) => { console.error(message); process.exit(code); };
 const TEST_REF = 'ncsngxlcyxylaeskiteu';
 const PROD_REF = 'copflsklaefwzipsrjqz';

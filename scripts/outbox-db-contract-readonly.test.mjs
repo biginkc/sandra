@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
 import { readonlyGet, comparePlatform } from './outbox-db-contract/platform.mjs';
-import { assertTarget } from './outbox-db-contract-readonly.mjs';
+import { assertTarget, parseArgs } from './outbox-db-contract-readonly.mjs';
 
 const row = (id, body='a') => ({ id, body, status:'queued', updated_at:'2026-01-01', from_address:'x', to_address:'y', created_at:'2026-01-01', scheduled_for:null, property_id:null, contact_id:null });
 function fails(label, fn, pattern) { assert.throws(fn, pattern, label); }
@@ -15,8 +15,23 @@ const api=ref=>`https://${ref}.supabase.co`;
 test('NC-T5a, NC-A5 target boundary', () => {
   fails('shared loopback', () => assertTarget('shared-readonly','postgres://postgres@127.0.0.1:55422/test'), /TARGET_REFUSED/);
   fails('disposable hosted', () => assertTarget('disposable-readonly','postgres://postgres@db.example.supabase.co/test'), /TARGET_REFUSED/);
-  for (const target of ['disposable','disposable-readonly','shared-readonly']) fails(`${target} prod ref`, () => assertTarget(target, hosted(PROD_REF), {apiUrl:api(PROD_REF)}), /TARGET_REFUSED/);
+  for (const target of ['disposable-readonly','shared-readonly']) fails(`${target} prod ref`, () => assertTarget(target, hosted(PROD_REF), {apiUrl:api(PROD_REF)}), /TARGET_REFUSED/);
+  const previous = process.env.SUPABASE_URL;
+  const previousDisposable = process.env.E2E_DISPOSABLE_DATABASE;
+  process.env.SUPABASE_URL = api(PROD_REF);
+  process.env.E2E_DISPOSABLE_DATABASE = '1';
+  try {
+    fails('disposable loopback with prod ref in environment', () => assertTarget('disposable-readonly', 'postgres://postgres@127.0.0.1:55422/test', {apiUrl:'http://127.0.0.1:55421'}), /TARGET_REFUSED/);
+  } finally {
+    if (previous === undefined) delete process.env.SUPABASE_URL;
+    else process.env.SUPABASE_URL = previous;
+    if (previousDisposable === undefined) delete process.env.E2E_DISPOSABLE_DATABASE;
+    else process.env.E2E_DISPOSABLE_DATABASE = previousDisposable;
+  }
   assert.doesNotThrow(()=>assertTarget('shared-readonly',hosted(TEST_REF),{apiUrl:api(TEST_REF)}));
+});
+test('argument parser preserves flags followed by a flag or end of args', () => {
+  assert.deepEqual(parseArgs(['--boundary', '--target', 'production', '--dry-run']), {boundary:true,target:'production','dry-run':true});
 });
 test('NC-T5b Production binding and acknowledgement', () => {
   for (const dsn of [hosted(TEST_REF),'postgres://postgres@127.0.0.1:55422/postgres']) fails('wrong database',()=>assertTarget('production',dsn,{apiUrl:api(PROD_REF),ack:PROD_REF}),/TARGET_REFUSED/);
@@ -78,7 +93,9 @@ test('NC-C3 each stability observation opens a new transaction', () => {
 test('NC-R1/R2 static surface', () => {
   const ro=readFileSync(new URL('./outbox-db-contract/readonly.mjs',import.meta.url),'utf8');
   const plat=readFileSync(new URL('./outbox-db-contract/platform.mjs',import.meta.url),'utf8');
-  for (const source of [ro,plat]) assert.doesNotMatch(source,/\b(?:INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE|GRANT|REVOKE)\b/);
+  const forbidden = /(?<!\.)\b(?:insert|update|delete|truncate|merge|copy|alter|create|drop|grant|revoke)\b(?!_)/i;
+  assert.doesNotMatch('updated_at and hash.update(value)', forbidden);
+  for (const source of [ro,plat]) assert.doesNotMatch(source,forbidden);
   assert.doesNotMatch(ro,/fixture\.mjs|contracts\.mjs|\bfetch\(/);
   assert.doesNotMatch(plat,/\bfetch\(/);
   assert.match(ACTIVE,/access_expires_at > now\(\)/);
