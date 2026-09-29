@@ -12,12 +12,14 @@ export function StartDripPicker({
   onLeave,
   disabled = false,
   inline = false,
+  triggerTone = "teal",
 }: {
   triggerLabel?: string;
   onChoose: (sequenceId: string) => Promise<PickResult>;
   onLeave?: () => Promise<void>;
   disabled?: boolean;
   inline?: boolean;
+  triggerTone?: "teal" | "outline" | "primary";
 }) {
   const [open, setOpen] = useState(false);
   const [choices, setChoices] = useState<DripChoice[]>([]);
@@ -76,7 +78,7 @@ export function StartDripPicker({
   return (
     <div className={inline ? "relative" : "relative inline-block"}>
       {!inline && <button type="button" onClick={() => open ? setOpen(false) : void openPicker()} disabled={disabled || busy}
-        className="min-h-11 rounded-md border border-teal-200 bg-teal-50 px-3 py-1 text-[11px] font-medium text-teal-800">
+        className={`rounded-md border px-3 py-1 text-[11px] font-medium ${triggerTone === "primary" ? "min-h-9 border-primary bg-primary text-primary-foreground" : triggerTone === "outline" ? "min-h-9 border-border bg-card text-foreground" : "min-h-11 border-teal-200 bg-teal-50 text-teal-800"}`}>
         {triggerLabel}
       </button>}
       {(inline || open) && <div className={inline ? "space-y-2" : "absolute left-0 top-full z-50 mt-1 w-80 rounded-md border bg-white p-3 shadow-lg"} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">

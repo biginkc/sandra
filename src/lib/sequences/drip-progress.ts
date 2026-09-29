@@ -5,6 +5,7 @@ import { dripStatus, pauseReasonText, type DripStatus } from "./drip-status";
 export type DripProgress = {
   propertyId: string;
   enrollmentId: string;
+  enrollmentStatus: string;
   sequenceId: string;
   sequenceName: string;
   step: number;
@@ -148,13 +149,18 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
     return {
       propertyId: row.property_id,
       enrollmentId: row.id,
+      enrollmentStatus: row.status,
       sequenceId: row.sequence_id,
       sequenceName: names.get(row.sequence_id) ?? "Drip",
       step: totalSteps ? step : 0,
       totalSteps,
       nextTextAt: row.status === "active" && nextText && row.next_run_at ? new Date(new Date(row.next_run_at).getTime() + delay * 60_000).toISOString() : null,
       lastText: message?.sent_at ? { sentAt: message.sent_at, preview: message.body.replace(/\s+/g, " ").trim().slice(0, 100) } : null,
-      status: dripStatus(row.status, row.pause_reason, canceled.has(row.id), repliedAfterLast.has(row.id)),
+      // The SQL overview does not bucket completed enrollments with a later reply,
+      // but the lead card must name that visible state instead of calling it paused.
+      status: row.status === "completed" && repliedAfterLast.has(row.id) && !canceled.has(row.id)
+        ? "Replied" as const
+        : dripStatus(row.status, row.pause_reason, canceled.has(row.id), repliedAfterLast.has(row.id)),
       reason: row.status === "active" && missingCurrentStep
         ? "Drip will end — next step is missing."
         : pauseReasonText(row.pause_reason),

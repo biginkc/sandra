@@ -11,6 +11,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
+import { messageDripLabels } from "@/lib/sequences/message-drip-labels";
 
 import {
   CallEventCard,
@@ -140,6 +141,21 @@ export function LeadActivityTimeline(props: Props) {
       propertyId,
     },
   });
+  const [dripLabels, setDripLabels] = useState<Record<string, string>>({});
+  const outboundMessageIds = messages.filter((message) => message.direction === "outbound").map((message) => message.id).join(",");
+  useEffect(() => {
+    let current = true;
+    if (!outboundMessageIds) return;
+    void (async () => {
+      try {
+        const labels = await messageDripLabels(createClient(), outboundMessageIds.split(","));
+        if (current) setDripLabels(labels);
+      } catch {
+        if (current) setDripLabels((previous) => Object.keys(previous).length ? {} : previous);
+      }
+    })();
+    return () => { current = false; };
+  }, [outboundMessageIds]);
   const { notes, authorEmails: liveAuthorEmails } = useLeadNotes({
     propertyId,
     initial: noteSnapshot,
@@ -365,6 +381,7 @@ export function LeadActivityTimeline(props: Props) {
                       isLastInGroup={isLastInGroup}
                       isMostRecentOutbound={event.id === mostRecentOutboundId}
                       presentation="timeline"
+                      dripLabel={dripLabels[event.id] ?? null}
                     />
                   </div>
                 </Fragment>

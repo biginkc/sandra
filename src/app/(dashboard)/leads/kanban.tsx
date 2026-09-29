@@ -30,6 +30,9 @@ import { Input } from "@/components/ui/input";
 import { SoftphoneLeadButton } from "@/components/softphone/softphone-lead-button";
 import type { SoftphoneLead } from "@/components/softphone/softphone-provider";
 import { callAction } from "@/lib/errors/call-action";
+import { LeadDripChip } from "@/components/sequences/lead-drip-chip";
+import { listDripProgress, type DripProgress } from "@/lib/sequences/drip-progress";
+import { createClient } from "@/lib/supabase/client";
 import { canShowCallButton } from "@/lib/dialer/eligibility";
 import {
   teamMemberOptionLabel,
@@ -152,6 +155,7 @@ type KanbanProps = {
   hasInboundFilter?: boolean;
   inboundScopeLabel?: string | null;
   renderedAt: string;
+  initialDripsByLead?: Record<string, DripProgress>;
 };
 
 export function Kanban({
@@ -178,6 +182,7 @@ export function Kanban({
   hasInboundFilter = false,
   inboundScopeLabel = null,
   renderedAt,
+  initialDripsByLead,
 }: KanbanProps) {
   const router = useRouter();
   const [leads, setLeads] = useState<Lead[]>(initialLeads);
@@ -199,6 +204,7 @@ export function Kanban({
   const [listsByLead, setListsByLead] = useState(listMemberships);
   const [tagsByLead, setTagsByLead] = useState(customTags);
   const [messagesByLead, setMessagesByLead] = useState(lastMessageByPropertyId);
+  const [dripsByLead, setDripsByLead] = useState<Record<string, DripProgress>>(initialDripsByLead ?? {});
   const [contractsByLead, setContractsByLead] = useState<
     Record<string, ContractStatusRecord>
   >(() => contractsFromLeads(initialLeads));
@@ -288,6 +294,21 @@ export function Kanban({
       ),
     [dayEnd, dayStart, motivationFiltered, search, urgency],
   );
+  const visibleDripIds = filteredLeads.map((lead) => lead.id).join(",");
+  useEffect(() => {
+    if (initialDripsByLead) return;
+    let current = true;
+    const ids = visibleDripIds ? visibleDripIds.split(",") : [];
+    if (!ids.length) return;
+    void listDripProgress(createClient(), ids).then((rows) => {
+      if (current) setDripsByLead((previous) => {
+        const next = Object.fromEntries(rows.map((row) => [row.propertyId, row]));
+        if (!rows.length && !Object.keys(previous).length) return previous;
+        return next;
+      });
+    }).catch(() => { if (current) setDripsByLead((previous) => Object.keys(previous).length ? {} : previous); });
+    return () => { current = false; };
+  }, [visibleDripIds, initialDripsByLead]);
   useEffect(() => {
     const visibleIds = new Set(filteredLeads.map((lead) => lead.id));
     // eslint-disable-next-line react-hooks/set-state-in-effect -- discard selections hidden by a changed board view.
@@ -416,6 +437,7 @@ export function Kanban({
   };
 
   useEffect(() => {
+    if (initialDripsByLead) return;
     if (initialRender.current) {
       initialRender.current = false;
       return;
@@ -982,6 +1004,7 @@ export function Kanban({
                 customTags={tagsByLead}
                 lastMessageByPropertyId={messagesByLead}
                 latestContractByPropertyId={contractsByLead}
+                dripsByLead={dripsByLead}
                 renderedAtMs={renderedAtMs}
                 dayStart={dayStart}
                 dayEnd={dayEnd}
@@ -1030,6 +1053,7 @@ export function Kanban({
                 customTags={tagsByLead[activeLead.id] ?? []}
                 lastMessage={messagesByLead[activeLead.id] ?? null}
                 contractStatus={contractsByLead[activeLead.id]?.status ?? null}
+                drip={dripsByLead[activeLead.id] ?? null}
                 renderedAtMs={renderedAtMs}
                 dayStart={dayStart}
                 dayEnd={dayEnd}
@@ -1150,6 +1174,7 @@ function Column({
   customTags,
   lastMessageByPropertyId,
   latestContractByPropertyId,
+  dripsByLead,
   renderedAtMs,
   dayStart,
   dayEnd,
@@ -1179,6 +1204,7 @@ function Column({
   customTags: Record<string, CustomTag[]>;
   lastMessageByPropertyId: Record<string, LastMessage>;
   latestContractByPropertyId: Record<string, ContractStatusRecord>;
+  dripsByLead: Record<string, DripProgress>;
   renderedAtMs: number;
   dayStart: string;
   dayEnd: string;
@@ -1300,6 +1326,7 @@ function Column({
               contractStatus={
                 latestContractByPropertyId[lead.id]?.status ?? null
               }
+              drip={dripsByLead[lead.id] ?? null}
               renderedAtMs={renderedAtMs}
               dayStart={dayStart}
               dayEnd={dayEnd}
@@ -1339,6 +1366,7 @@ function LeadCard({
   customTags = [],
   lastMessage = null,
   contractStatus = null,
+  drip = null,
   renderedAtMs,
   dayStart,
   dayEnd,
@@ -1360,6 +1388,7 @@ function LeadCard({
   customTags?: CustomTag[];
   lastMessage?: LastMessage | null;
   contractStatus?: ContractStatusRecord["status"] | null;
+  drip?: DripProgress | null;
   renderedAtMs: number;
   dayStart: string;
   dayEnd: string;
@@ -1620,6 +1649,8 @@ function LeadCard({
           ) : null}
         </div>
       ) : null}
+
+      {drip?.status === "Waiting" ? <div className="mt-1.5"><LeadDripChip drip={drip} /></div> : null}
 
       <div
         className={`mt-2 rounded-md px-2 py-1.5 ${

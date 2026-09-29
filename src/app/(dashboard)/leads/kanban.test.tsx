@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { dndHandlers, dragPointerDown, enrollPropertyIds, routerPush, routerRefresh, updatePropertyStatus, loadLeadBoardAction, setLeadNextActionAction } = vi.hoisted(() => ({
+const { dndHandlers, dragPointerDown, enrollPropertyIds, routerPush, routerRefresh, updatePropertyStatus, loadLeadBoardAction, setLeadNextActionAction, listDripProgress } = vi.hoisted(() => ({
   dndHandlers: {
     onDragStart: null as null | ((event: unknown) => void),
     onDragEnd: null as null | ((event: unknown) => Promise<void>),
@@ -14,7 +14,11 @@ const { dndHandlers, dragPointerDown, enrollPropertyIds, routerPush, routerRefre
   updatePropertyStatus: vi.fn(),
   loadLeadBoardAction: vi.fn((_input: unknown) => new Promise(() => {})),
   setLeadNextActionAction: vi.fn(),
+  listDripProgress: vi.fn().mockResolvedValue([]),
 }));
+
+vi.mock("@/lib/sequences/drip-progress", () => ({ listDripProgress }));
+vi.mock("@/lib/supabase/client", () => ({ createClient: () => ({}) }));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: routerPush, refresh: routerRefresh }),
@@ -178,6 +182,13 @@ function emptyBoardData() {
 function renderBoard(leads: Lead[]) {
   return render(<Kanban {...baseProps} initialLeads={leads} />);
 }
+
+it("shows the drip chip from one visible-card progress read", async () => {
+  listDripProgress.mockResolvedValueOnce([{ propertyId: "lead-a", status: "Waiting", step: 2, totalSteps: 4 }]);
+  renderBoard([makeLead()]);
+  expect(await screen.findByTestId("lead-drip-chip-lead-a")).toHaveTextContent("Drip · 2 of 4");
+  expect(listDripProgress).toHaveBeenCalledWith(expect.anything(), ["lead-a"]);
+});
 
 function column(status: string): HTMLElement {
   const element = document.querySelector(`[data-status="${status}"]`);

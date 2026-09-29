@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 
 import { Badge } from "@/components/ui/badge";
+import { Droplet } from "lucide-react";
 import { OPERATOR_TIME_ZONE } from "@/lib/messages/message-metrics";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
@@ -405,12 +406,14 @@ export function MessageBubble({
   isLastInGroup,
   isMostRecentOutbound,
   presentation = "thread",
+  dripLabel = null,
 }: {
   message: Message;
   isContinuation: boolean;
   isLastInGroup: boolean;
   isMostRecentOutbound: boolean;
   presentation?: "thread" | "timeline";
+  dripLabel?: string | null;
 }) {
   const outbound = message.direction === "outbound";
   const timeline = presentation === "timeline";
@@ -494,11 +497,13 @@ export function MessageBubble({
           </time>
         </div>
       ) : null}
+      {dripLabel && outbound && timeline ? <div className="mb-1 flex items-center gap-1 text-[11px] text-sky-800" data-testid="message-drip-label"><Droplet className="size-3" />{dripLabel}</div> : null}
       <div className={bubbleShape}>
         <div className="whitespace-pre-wrap break-words text-[14px] leading-relaxed">
           {message.body}
         </div>
       </div>
+      {dripLabel && outbound && !timeline ? <div className="mt-1 flex items-center gap-1 text-[11px] text-sky-800" data-testid="message-drip-label"><Droplet className="size-3" />{dripLabel}</div> : null}
       {showMetadataFooter ? (
         <div
           className={`mt-1 flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground ${
