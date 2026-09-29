@@ -54,6 +54,7 @@ command -v docker >/dev/null
 command -v psql >/dev/null
 command -v node >/dev/null
 WORK=$(mktemp -d "$RUNNER_TEMP/inbox-migration.XXXXXX")
+ORIGINAL_GITHUB_ENV=${GITHUB_ENV:-}
 CATALOG_CONTAINER="inbox-catalog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
 cleanup() {
   docker --host "$DOCKER_SOCKET" rm -f "$CATALOG_CONTAINER" >/dev/null 2>&1 || true
@@ -67,10 +68,26 @@ cleanup() {
 trap cleanup EXIT
 export INBOX_LANE_STARTED_MS
 INBOX_LANE_STARTED_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
+export_run_dir() {
+  printf 'HEAVY_RUN_DIR=docs/performance/inbox-redesign/evidence/%s/pre-merge/%s\n' "$HEAVY_TESTED_SHA" "$GITHUB_RUN_ID" >> "$ORIGINAL_GITHUB_ENV"
+}
+on_error() {
+  local status=$1 command=$2 line=$3
+  trap - ERR
+  printf 'Migration lane failed at line %s: %s (exit %s)\n' "$line" "$command" "$status" >&2
+  printf 'line=%s\ncommand=%s\nexit_status=%s\n' "$line" "$command" "$status" > "$WORK/failure.log"
+  for log in "$WORK"/catalog-live.txt "$WORK"/production-install-unit.txt; do
+    if [[ -s "$log" ]]; then printf 'Last lines of %s:\n' "${log##*/}" >&2; tail -80 "$log" >&2; fi
+  done
+  if [[ "$LOCAL" == 0 ]]; then
+    if node scripts/inbox-ci/write-migration-record.mjs "$WORK" --fail "$status"; then export_run_dir; fi
+  fi
+  exit "$status"
+}
+trap 'on_error "$?" "$BASH_COMMAND" "$LINENO"' ERR
 
 # W1's provisioner replays the complete checked-out history except these three.
 # It must leave the disposable stack running; no hosted URL is accepted.
-ORIGINAL_GITHUB_ENV=${GITHUB_ENV:-}
 export GITHUB_ENV="$WORK/provision.env"
 node scripts/ci/provision-disposable-stack.mjs --api-port "$API_PORT" --db-port "$DB_PORT" --exclude-migrations '2026093000*' --no-baseline-owner
 if [[ -f "$GITHUB_ENV" ]]; then
@@ -166,7 +183,7 @@ env -u GITHUB_ACTIONS -u CATALOG_FINGERPRINT_SCRATCH python3 scripts/inbox-ci/ru
 python3 "$ASSERT" offline-suite "$WORK/production-install-unit.txt"
 # Live catalog mutation tests require their own blank postgres:17 database:
 # Supabase already owns supabase_migrations.schema_migrations.
-docker --host "$DOCKER_SOCKET" run -d --name "$CATALOG_CONTAINER" -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17 > /dev/null
+docker --host "$DOCKER_SOCKET" run -d --name "$CATALOG_CONTAINER" -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 public.ecr.aws/docker/library/postgres:17 > /dev/null
 CATALOG_PORT=$(docker --host "$DOCKER_SOCKET" inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$CATALOG_CONTAINER")
 for _ in {1..30}; do
   if docker --host "$DOCKER_SOCKET" exec "$CATALOG_CONTAINER" pg_isready -U postgres -d postgres >/dev/null 2>&1; then break; fi
@@ -181,4 +198,5 @@ if [[ "$LOCAL" == 1 ]]; then
 else
   [[ -z "$(git status --porcelain --untracked-files=all)" ]] || { echo 'Rehearsal left checkout dirty before record sealing' >&2; exit 3; }
   node scripts/inbox-ci/write-migration-record.mjs "$WORK"
+  export_run_dir
 fi
