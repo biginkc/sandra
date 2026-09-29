@@ -17,6 +17,15 @@ import {
 } from "@/lib/messaging/sms-phone";
 import type { Database } from "@/lib/supabase/types";
 
+export const DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS = [
+  "ready_acquisition_offer",
+  "log_acquisition_offer",
+  "record_acquisition_contract",
+  "decline_acquisition_offer",
+  "handoff_acquisition_lead",
+  "log_acquisition_attempt",
+] as const;
+
 export type InboxDetail = {
   /** The conversation UUID — same value as `conversationId`; kept as the
    *  field name the cockpit keys selection on. */
@@ -300,6 +309,7 @@ async function loadMessageDripContext(
   if (runsResult.error) throw new Error(`fetchInboxDetail drip messages: ${runsResult.error.message}`);
   const enrollment = enrollmentResult.data;
   const runs = runsResult.data ?? [];
+  const stepRunMessageIds = new Set(runs.map((run) => run.message_id));
   const sequenceIds = [...new Set([
     ...(enrollment ? [enrollment.sequence_id] : []),
     ...runs.filter((run) => run.sequence_enrollments?.org_id === orgId)
@@ -348,25 +358,26 @@ async function loadMessageDripContext(
     supabase.from("lead_events").select("id").eq("org_id", orgId)
       .eq("property_id", propertyId).eq("event_type", "dispo_set")
       .eq("actor_type", "user").gt("created_at", reply.created_at).limit(1),
-    supabase.from("call_activities").select("id").eq("org_id", orgId)
-      .eq("property_id", propertyId).eq("call_purpose", "customer")
+    supabase.from("lead_events").select("id").eq("org_id", orgId)
+      .eq("property_id", propertyId).eq("event_type", "my_leads_workflow")
+      .eq("actor_type", "user").in("payload->>operation", [...DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS])
       .gt("created_at", reply.created_at).limit(1),
   ]) : null;
-  // Acquisition attempts are exposed through the authenticated history RPC;
-  // direct table reads are intentionally denied to browser sessions.
-  const attemptHistory = reply && propertyId
-    ? await supabase.rpc("fn_get_lead_acquisition_history" as never, { p_property_id: propertyId, p_limit: 100 } as never)
+  // The history RPC is ordered by occurred_at; clearing uses recorded_at.
+  const attemptAfterReply = reply && propertyId
+    ? await supabase.rpc("fn_has_acquisition_attempt_recorded_after" as never,
+        { p_property_id: propertyId, p_after: reply.created_at } as never)
     : null;
   if (actionSinceReply?.[0].error) throw new Error(`fetchInboxDetail drip outcome: ${actionSinceReply[0].error.message}`);
-  if (actionSinceReply?.[1].error) throw new Error(`fetchInboxDetail drip attempt: ${actionSinceReply[1].error.message}`);
-  if (attemptHistory?.error) throw new Error(`fetchInboxDetail acquisition attempts: ${attemptHistory.error.message}`);
-  const attempts = (attemptHistory?.data as unknown as { rows?: Array<{ kind?: string; at?: string }> } | null)?.rows ?? [];
+  if (actionSinceReply?.[1].error) throw new Error(`fetchInboxDetail drip workflow: ${actionSinceReply[1].error.message}`);
+  if (attemptAfterReply?.error) throw new Error(`fetchInboxDetail acquisition attempts: ${attemptAfterReply.error.message}`);
   const humanOutboundAfterReply = reply && messages.some((message) =>
     message.direction === "outbound" && message.created_at > reply.created_at &&
-    !dripMessageLabels[message.id] &&
-    (message.metadata as { generated_by?: string } | null)?.generated_by !== "ai_responder_v1");
+    message.campaign_id == null &&
+    (message.metadata as { generated_by?: string } | null)?.generated_by == null &&
+    !stepRunMessageIds.has(message.id));
   const repActed = Boolean(humanOutboundAfterReply || actionSinceReply?.some((result) => (result.data?.length ?? 0) > 0) ||
-    (reply && attempts.some((attempt) => attempt.kind === "attempt" && attempt.at && attempt.at > reply.created_at)));
+    attemptAfterReply?.data);
   const replied = Boolean(reply && !repActed && (pausedForReply || enrollment?.status === "completed"));
   // TODO(PR-8): Align the inbox row icon and filter snapshot with this outstanding state.
   const name = enrollment ? names.get(enrollment.sequence_id) : null;

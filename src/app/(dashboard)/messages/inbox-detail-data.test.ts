@@ -1,9 +1,21 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 
-import { fetchInboxDetail } from "./inbox-detail-data";
+import { DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS, fetchInboxDetail } from "./inbox-detail-data";
+
+const dripScopeMigration = resolve(process.cwd(), "supabase/migrations/20260929235000_my_leads_drip_scope.sql");
+
+it.skipIf(!existsSync(dripScopeMigration))("matches the drip scope SQL workflow operations", () => {
+  const sql = readFileSync(dripScopeMigration, "utf8");
+  const operations = sql.match(/payload->>'operation'\s+in\s*\(([^)]+)\)/)?.[1];
+  expect(operations).toBeDefined();
+  expect(operations?.match(/'[^']+'/g)?.map((operation) => operation.slice(1, -1)))
+    .toEqual([...DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS]);
+});
 
 vi.mock("@/lib/messaging/opt-out-phone", () => ({
   isSmsPhoneSuppressed: vi.fn(async () => false),
@@ -33,6 +45,7 @@ function makeMessage(
     contact_id: overrides.contact_id,
     property_id: overrides.property_id,
     conversation_id: overrides.conversation_id ?? null,
+    campaign_id: overrides.campaign_id ?? null,
     body: overrides.body ?? "hello",
     from_address: overrides.from_address ?? "+15551234567",
     to_address: overrides.to_address ?? "+18165550000",
@@ -162,7 +175,7 @@ type SeedData = {
   sequence_steps?: Array<Record<string, unknown>>;
   lead_events?: Array<Record<string, unknown>>;
   call_activities?: Array<Record<string, unknown>>;
-  acquisition_attempts?: Array<{ kind: string; at: string }>;
+  acquisition_attempts?: Array<{ recorded_at: string; occurred_at?: string }>;
 };
 
 function makeSupabaseStub(seed: SeedData) {
@@ -243,7 +256,9 @@ function makeSupabaseStub(seed: SeedData) {
       let rows = [...(seed[table] ?? [])];
       for (const filter of filters) {
         rows = rows.filter((row) => {
-          const value = row[filter.key as keyof typeof row];
+          const value = filter.key === "payload->>operation"
+            ? ("payload" in row ? (row.payload as { operation?: string } | undefined)?.operation : undefined)
+            : row[filter.key as keyof typeof row];
           if (filter.kind === "in") return (filter.value as unknown[]).includes(value);
           if (filter.kind === "gt") return String(value) > String(filter.value);
           return filter.kind === "eq"
@@ -282,9 +297,12 @@ function makeSupabaseStub(seed: SeedData) {
   }
 
   return {
-    rpc(_name: string, args: { p_conversation_id?: string }) {
-      if (_name === "fn_get_lead_acquisition_history") {
-        return Promise.resolve({ data: { rows: seed.acquisition_attempts ?? [] }, error: null });
+    rpc(_name: string, args: { p_conversation_id?: string; p_after?: string }) {
+      if (_name === "fn_has_acquisition_attempt_recorded_after") {
+        return Promise.resolve({
+          data: seed.acquisition_attempts?.some((attempt) => attempt.recorded_at > (args.p_after ?? "")) ?? false,
+          error: null,
+        });
       }
       const orgIds = [
         ...new Set(
@@ -1002,7 +1020,8 @@ describe("fetchInboxDetail", () => {
     expect(manuallyPaused?.drip).toMatchObject({ status: "paused", replied: false });
   });
 
-  it.each(["dispo", "call", "logged attempt"])("clears outstanding reply after a rep %s", async (action) => {
+  it.each(["dispo", "logged attempt", ...DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS])(
+    "clears outstanding reply after %s", async (action) => {
     const seed: SeedData = {
       messages: [
         makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
@@ -1013,14 +1032,39 @@ describe("fetchInboxDetail", () => {
       sequence_step_runs: [{ message_id: "drip-text", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
       sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
       sequence_steps: [{ id: "step-1", sequence_id: "drip" }],
-      lead_events: action === "dispo" ? [{ id: "event", org_id: "org-1", property_id: RECENT_PROPERTY_ID, event_type: "dispo_set", actor_type: "user", created_at: "2026-06-09T12:03:00Z" }] : [],
-      call_activities: action === "call" ? [{ id: "call", org_id: "org-1", property_id: RECENT_PROPERTY_ID, call_purpose: "customer", created_at: "2026-06-09T12:03:00Z" }] : [],
-      acquisition_attempts: action === "logged attempt" ? [{ kind: "attempt", at: "2026-06-09T12:03:00Z" }] : [],
+      lead_events: action === "dispo" ? [{ id: "event", org_id: "org-1", property_id: RECENT_PROPERTY_ID, event_type: "dispo_set", actor_type: "user", created_at: "2026-06-09T12:03:00Z" }] :
+        DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS.some((operation) => operation === action)
+          ? [{ id: "event", org_id: "org-1", property_id: RECENT_PROPERTY_ID, event_type: "my_leads_workflow", actor_type: "user", payload: { operation: action }, created_at: "2026-06-09T12:03:00Z" }] : [],
+      acquisition_attempts: action === "logged attempt" ? [{ recorded_at: "2026-06-09T12:03:00Z", occurred_at: "2026-06-09T11:00:00Z" }] : [],
     };
     const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
     expect(detail?.drip?.replied).toBe(false);
     expect(detail?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
   });
+
+  it.each(["call", "campaign", "ai", "step-run", "other workflow", "old attempt"])(
+    "keeps the reply outstanding after %s", async (action) => {
+      const seed: SeedData = {
+        messages: [
+          makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
+          makeMessage({ id: "reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+        ],
+        contacts: [makeContact({ id: CONTACT_ID })], properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+        sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "drip", status: "paused", pause_reason: "inbound_reply", current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" }],
+        sequence_step_runs: [{ message_id: "drip-text", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+        sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
+        sequence_steps: [{ id: "step-1", sequence_id: "drip" }],
+        call_activities: action === "call" ? [{ id: "call", org_id: "org-1", property_id: RECENT_PROPERTY_ID, call_purpose: "customer", created_at: "2026-06-09T12:03:00Z" }] : [],
+        lead_events: action === "other workflow" ? [{ id: "event", org_id: "org-1", property_id: RECENT_PROPERTY_ID, event_type: "my_leads_workflow", actor_type: "user", payload: { operation: "unrelated" }, created_at: "2026-06-09T12:03:00Z" }] : [],
+        acquisition_attempts: action === "old attempt" ? [{ recorded_at: "2026-06-09T12:01:00Z", occurred_at: "2026-06-09T12:03:00Z" }] : [],
+      };
+      if (["campaign", "ai", "step-run"].includes(action)) {
+        seed.messages.push(makeMessage({ id: "later-outbound", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:03:00Z", campaign_id: action === "campaign" ? "campaign" : null, metadata: action === "ai" ? { generated_by: "another_generator" } : null }));
+        if (action === "step-run") seed.sequence_step_runs!.push({ message_id: "later-outbound", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } });
+      }
+      const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
+      expect(detail?.drip?.replied).toBe(true);
+    });
 
   it("keeps attribution after a drip completed before the inbound reply", async () => {
     const seed: SeedData = {
