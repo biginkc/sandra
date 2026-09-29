@@ -16,7 +16,7 @@ test('each W2 lane produces a pullable record and the W1 gate selects both keys'
   const root = mkdtempSync(path.join(os.tmpdir(), 'w2-record-'));
   const repo = path.join(root, 'repo'); mkdirSync(repo);
   try {
-    for (const file of ['scripts/outbox-run-record.mjs', 'scripts/inbox-ci/write-migration-record.mjs', 'scripts/inbox-ci/migration-dry-run.sh', 'scripts/inbox-ci/catalog-fingerprint.sh', 'scripts/ci/pull-heavy-record.mjs', '.github/workflows/inbox-heavy-verification.yml']) copy(repo, file);
+    for (const file of ['scripts/outbox-run-record.mjs', 'src/lib/supabase/e2e-identity-guard.ts', 'scripts/inbox-ci/write-migration-record.mjs', 'scripts/inbox-ci/migration-dry-run.sh', 'scripts/inbox-ci/catalog-fingerprint.sh', 'scripts/ci/pull-heavy-record.mjs', '.github/workflows/inbox-heavy-verification.yml']) copy(repo, file);
     mkdirSync(path.join(repo, 'e2e/inbox-acceptance'), { recursive: true });
     writeFileSync(path.join(repo, 'e2e/inbox-acceptance/fault-proxy.mjs'), '// synthetic proxy\n');
     writeFileSync(path.join(repo, 'package.json'), '{"type":"module"}\n');
@@ -52,7 +52,7 @@ test('each W2 lane produces a pullable record and the W1 gate selects both keys'
       mkdirSync(path.dirname(path.join(download, prefix)), { recursive: true });
       cpSync(path.join(repo, prefix), path.join(download, prefix), { recursive: true });
       const artifactName = `heavy-${lane}-${sha}-${id}-2`;
-      const run = { id: Number(id), run_attempt: 2, event: 'workflow_dispatch', head_branch: 'main', path: '.github/workflows/inbox-heavy-verification.yml', conclusion: 'success', head_sha: sha, display_title: `Inbox heavy ${lane} ${sha}` };
+      const run = { id: Number(id), run_attempt: 2, status: 'completed', event: 'workflow_dispatch', head_branch: 'main', path: '.github/workflows/inbox-heavy-verification.yml', conclusion: 'success', head_sha: sha, display_title: `Inbox heavy ${lane} ${sha}` };
       const artifact = { name: artifactName, expired: false, size_in_bytes: 1000 };
       assert.equal(manifest.kind, lane);
       assert.equal(verifyDownload(repo, download, run, artifact, sha).manifest.kind, lane);

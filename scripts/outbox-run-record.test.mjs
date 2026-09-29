@@ -24,8 +24,15 @@ test('producer rejects malformed GitHub run ID and attempt itself', () => {
   assert.throws(() => buildOutboxIdentityEnvironment({ GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: 'bad', GITHUB_RUN_ATTEMPT: '2' }, validIdentity), /numeric GITHUB_RUN_ID/);
   assert.throws(() => buildOutboxIdentityEnvironment({ GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: 'bad' }, validIdentity), /numeric GITHUB_RUN_ATTEMPT/);
 });
+test('missing or mislabelled HEAVY_PHASE stops before Playwright and record creation', async () => {
+  for (const phase of [undefined, 'post-mislabeled']) {
+    let called = false;
+    await assert.rejects(executeOutboxRun({ repo: '.', relativeDir: 'unused', sha: 'a'.repeat(40), tier: 'pre-merge', runId: 'unused', startedAt: new Date().toISOString(), baseEnv: { HEAVY_PHASE: phase }, playwright: () => { called = true; }, record: () => { called = true; } }), /HEAVY_PHASE/);
+    assert.equal(called, false);
+  }
+});
 test('CI=1 without GITHUB_ACTIONS runs both identity lifecycle steps', async () => {
-  const env = buildOutboxIdentityEnvironment({ CI: '1', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '3' });
+  const env = buildOutboxIdentityEnvironment({ CI: '1', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '3', HEAVY_PHASE: 'pre' });
   assert.equal(isGitHubE2ERun(env), true);
   const steps = [];
   let recorded;
@@ -39,7 +46,7 @@ test('CI=1 without GITHUB_ACTIONS runs both identity lifecycle steps', async () 
   assert.equal(recorded.cleanupError, undefined);
 });
 test('preflight failure reaches the recorder', async () => {
-  const env = { CI: '1', RUNNER_TEMP: '/tmp' };
+  const env = { CI: '1', RUNNER_TEMP: '/tmp', HEAVY_PHASE: 'pre' };
   let recorded;
   await executeOutboxRun({ repo: '.', baseEnv: env, relativeDir: 'unused', sha: 'a'.repeat(40), tier: 'pre-merge', runId: 'unused', startedAt: new Date().toISOString(),
     identity: () => env, startProxy: () => ({}), ready: () => {}, stop: () => {},
@@ -63,7 +70,7 @@ test('each lifecycle failure seals exactly one stage-named FAIL and exits non-ze
     const dir = repo();
     mkdirSync(path.join(dir, 'scripts/inbox-ci'), { recursive: true });
     mkdirSync(path.join(dir, 'e2e/inbox-acceptance'), { recursive: true });
-    writeFileSync(path.join(dir, 'scripts/inbox-ci/outbox.sh'), '#!/bin/sh\n');
+    writeFileSync(path.join(dir, 'scripts/inbox-ci/outbox-pre.sh'), '#!/bin/sh\n');
     writeFileSync(path.join(dir, 'e2e/inbox-acceptance/fault-proxy.mjs'), '// proxy\n');
     execFileSync('git', ['-C', dir, 'add', '.']);
     execFileSync('git', ['-C', dir, 'commit', '-qm', 'record fixtures']);
@@ -83,7 +90,7 @@ test('each lifecycle failure seals exactly one stage-named FAIL and exits non-ze
       lifecycle: step => invokedSteps.push(step), startProxy: () => ({}), ready: () => {}, stop: () => {},
       playwright: () => ({ status: 0, stdout: JSON.stringify(results), stderr: '' }),
     };
-    const exitStatus = await executeOutboxRun({ repo: dir, relativeDir, sha, tier: 'pre-merge', runId, startedAt: new Date().toISOString(), baseEnv: { CI: '1', HEAVY_LANE: 'outbox' }, ...defaults, ...injection, record: fields => { records++; return recordOutboxResult(fields); } });
+    const exitStatus = await executeOutboxRun({ repo: dir, relativeDir, sha, tier: 'pre-merge', runId, startedAt: new Date().toISOString(), baseEnv: { CI: '1', HEAVY_LANE: 'outbox-pre', HEAVY_PHASE: 'pre' }, ...defaults, ...injection, record: fields => { records++; return recordOutboxResult(fields); } });
     const manifest = JSON.parse(readFileSync(path.join(full, 'manifest.json'), 'utf8'));
     assert.equal(records, 1, name);
     assert.equal(manifest.verdict, 'FAIL', name);
@@ -97,7 +104,7 @@ test('cleanup failure after Playwright seals a FAIL record and returns non-zero'
   const dir = repo();
   mkdirSync(path.join(dir, 'scripts/inbox-ci'), { recursive: true });
   mkdirSync(path.join(dir, 'e2e/inbox-acceptance'), { recursive: true });
-  writeFileSync(path.join(dir, 'scripts/inbox-ci/outbox.sh'), '#!/bin/sh\n');
+  writeFileSync(path.join(dir, 'scripts/inbox-ci/outbox-pre.sh'), '#!/bin/sh\n');
   writeFileSync(path.join(dir, 'e2e/inbox-acceptance/fault-proxy.mjs'), '// proxy\n');
   execFileSync('git', ['-C', dir, 'add', '.']);
   execFileSync('git', ['-C', dir, 'commit', '-qm', 'record fixtures']);
@@ -109,7 +116,7 @@ test('cleanup failure after Playwright seals a FAIL record and returns non-zero'
   const passed = () => ({ status: 'expected', results: [{ retry: 0, status: 'passed' }] });
   const results = { stats: { expected: 8, skipped: 0, unexpected: 0, flaky: 0 }, suites: [{ specs: Array.from({ length: 8 }, () => ({ tests: [passed()] })) }] };
   writeFileSync(path.join(full, 'row-results.json'), JSON.stringify(rows));
-  const env = { CI: '1', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '3', HEAVY_LANE: 'outbox' };
+  const env = { CI: '1', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '3', HEAVY_LANE: 'outbox-pre', HEAVY_PHASE: 'pre' };
   const exitStatus = await executeOutboxRun({ repo: dir, relativeDir: relative, sha, tier: 'pre-merge', runId: 'cleanup-failure', startedAt: new Date().toISOString(), baseEnv: env,
     identity: value => ({ ...value, E2E_RUN_SLUG: 'gha-test', RUNNER_TEMP: dir }), startProxy: () => ({}), ready: () => {}, stop: () => {},
     lifecycle: step => { if (step === 'cleanup') throw new Error('injected exact-run cleanup failure'); },
@@ -128,14 +135,14 @@ test('recorder rejects a non-zero Playwright status without stage failures', () 
   const dir = repo();
   mkdirSync(path.join(dir, 'scripts/inbox-ci'), { recursive: true });
   mkdirSync(path.join(dir, 'e2e/inbox-acceptance'), { recursive: true });
-  writeFileSync(path.join(dir, 'scripts/inbox-ci/outbox.sh'), '#!/bin/sh\n');
+  writeFileSync(path.join(dir, 'scripts/inbox-ci/outbox-pre.sh'), '#!/bin/sh\n');
   writeFileSync(path.join(dir, 'e2e/inbox-acceptance/fault-proxy.mjs'), '// proxy\n');
   execFileSync('git', ['-C', dir, 'add', '.']);
   execFileSync('git', ['-C', dir, 'commit', '-qm', 'record fixtures']);
   const sha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const relativeDir = runPath(sha, 'pre-merge', 'nonzero-gate');
   mkdirSync(path.join(dir, relativeDir), { recursive: true });
-  const exitStatus = recordOutboxResult({ repo: dir, relativeDir, sha, tier: 'pre-merge', runId: 'nonzero-gate', startedAt: new Date().toISOString(), env: { HEAVY_LANE: 'outbox' }, result: { status: 9, stdout: '', stderr: '' }, failures: [] });
+  const exitStatus = recordOutboxResult({ repo: dir, relativeDir, sha, tier: 'pre-merge', runId: 'nonzero-gate', startedAt: new Date().toISOString(), env: { HEAVY_LANE: 'outbox-pre', HEAVY_PHASE: 'pre' }, result: { status: 9, stdout: '', stderr: '' }, failures: [] });
   const manifest = JSON.parse(readFileSync(path.join(dir, relativeDir, 'manifest.json'), 'utf8'));
   assert.equal(manifest.verdict, 'FAIL');
   assert.equal(manifest.exit_status, 9);

@@ -208,14 +208,14 @@ export function recordOutboxResult({ repo, relativeDir, sha, tier, runId, starte
   const status = assertOnlyRunDirDirty(repo, relativeDir);
   const exitStatus = verdict === 'PASS' ? 0 : (result.status || 1);
   writeManifest(repo, relativeDir, {
-    tested_sha: sha, tier, kind: 'browser', phase: env.HEAVY_PHASE ?? 'pre', target: 'disposable', verdict, run_id: runId, started_at: startedAt, completed_at: new Date().toISOString(),
+    tested_sha: sha, tier, kind: 'browser', phase: env.HEAVY_PHASE, target: 'disposable', verdict, run_id: runId, started_at: startedAt, completed_at: new Date().toISOString(),
     summary: cleanupError ? 'Exact-run cleanup failed' : '', cleanup_failure: Boolean(cleanupError),
     workflow_path: env.GITHUB_WORKFLOW_REF?.split('@')[0]?.replace(/^[^/]+\/[^/]+\//, '') ?? '',
     workflow_input_sha: env.HEAVY_TESTED_SHA ?? '',
     github_run_id: env.GITHUB_RUN_ID ?? '', github_run_attempt: env.GITHUB_RUN_ATTEMPT ?? '',
     artifact_name: isGitHubE2ERun(env) ? `heavy-${env.HEAVY_LANE}-${sha}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}` : '',
     event: env.GITHUB_EVENT_NAME ?? '', head_branch: env.GITHUB_REF_NAME ?? '', lane: env.HEAVY_LANE ?? '',
-    runner_script_sha256: sha256(readFileSync(path.join(repo, 'scripts/inbox-ci', `${env.HEAVY_LANE ?? 'outbox'}.sh`))),
+    runner_script_sha256: sha256(readFileSync(path.join(repo, 'scripts/inbox-ci', `${env.HEAVY_LANE}.sh`))),
     fault_proxy_script_sha256: sha256(readFileSync(path.join(repo, 'e2e/inbox-acceptance/fault-proxy.mjs'))),
     clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relativeDir, end_status: status },
     exit_status: exitStatus,
@@ -226,6 +226,7 @@ export function recordOutboxResult({ repo, relativeDir, sha, tier, runId, starte
 }
 
 export async function executeOutboxRun({ repo, relativeDir, sha, tier, runId, startedAt, baseEnv = process.env, identity = buildOutboxIdentityEnvironment, lifecycle = runIdentityLifecycle, startProxy = (env) => spawn(process.execPath, ['e2e/inbox-acceptance/fault-proxy.mjs'], { cwd: repo, env, stdio: 'ignore' }), ready = waitForProxy, stop = stopProxy, playwright = env => spawnSync('npx', ['playwright', 'test', '--config', 'playwright.outbox-regression.config.ts', '--reporter=json'], { cwd: repo, env, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 }), record = recordOutboxResult }) {
+  if (!['pre', 'post'].includes(baseEnv.HEAVY_PHASE)) throw new Error('HEAVY_PHASE must be pre or post before Playwright');
   const absoluteDir = path.join(repo, relativeDir);
   const token = `${randomUUID()}${randomUUID()}`;
   let env = { ...baseEnv, OUTBOX_RUN_DIR: absoluteDir, OUTBOX_FAULT_TOKEN: token, INBOX_ACCEPTANCE_ORG_ID: '00000000-0000-0000-0000-000000000bbb', MESSAGING_PROVIDER: 'mock' };
@@ -268,6 +269,7 @@ export async function executeOutboxRun({ repo, relativeDir, sha, tier, runId, st
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const repo = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
   const tier = process.argv[2] ?? 'pre-merge';
+  if (!['pre', 'post'].includes(process.env.HEAVY_PHASE)) throw new Error('HEAVY_PHASE must be pre or post before Playwright');
   assertCleanStart(repo);
   const sha = git(repo, 'rev-parse', 'HEAD');
   const runId = isGitHubE2ERun(process.env) ? process.env.GITHUB_RUN_ID : `${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${randomUUID()}`;

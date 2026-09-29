@@ -71,7 +71,7 @@ async function main() {
   if (args.boundary) throw new Error('TARGET_REFUSED');
   const hostedReadOnly = ['shared-readonly', 'production'].includes(args.target);
   if (hostedReadOnly && !process.env.SUPABASE_ANON_KEY) throw new Error('READ_PRECONDITION_FAILED');
-  if (hostedReadOnly && (!args['api-url'] || !args['catalog'] || !args['platform-compare'] || (args.phase === 'post' && (!args['pre-file'] || !args['plan-compare'] || !args['catalog-compare'])))) throw new Error('READ_PRECONDITION_FAILED');
+  if (hostedReadOnly && (!args['api-url'] || !args['catalog-compare'] || !args['platform-compare'] || (args.phase === 'post' && (!args['pre-file'] || !args['plan-compare'])))) throw new Error('READ_PRECONDITION_FAILED');
   if (!['pre','post'].includes(args.phase)) throw new Error('PHASE_REQUIRED');
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(args.org ?? '')) throw new Error('ORG_ID_REQUIRED');
   const client = new Client({ connectionString: dsn, ssl: hostedReadOnly ? { rejectUnauthorized: true } : false });
@@ -94,12 +94,19 @@ async function main() {
     }
     delete result.current_status;
     if (args['api-url']) result.platform_config = await platformFingerprint(args['api-url'], process.env.SUPABASE_ANON_KEY, major);
-    if (args['platform-compare']) comparePlatform(JSON.parse(await readFile(args['platform-compare'], 'utf8')), result.platform_config);
-    if (args['catalog']) result.catalog_fingerprint = await catalog(dsn);
-    if (args['catalog-compare']) {
-      const pinned = JSON.parse(await readFile(args['catalog-compare'], 'utf8'));
-      compareCatalog(pinned, result.catalog_fingerprint);
+    if (args['platform-compare']) {
+      const bytes = await readFile(args['platform-compare']);
+      comparePlatform(JSON.parse(bytes), result.platform_config);
+      result.comparisons = { ...result.comparisons, platform: { verdict: 'PASS', input_sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'), observed_sha256: result.platform_config.sha256 } };
     }
+    if (args['catalog'] || args['catalog-compare']) result.catalog_fingerprint = await catalog(dsn);
+    if (args['catalog-compare']) {
+      const bytes = await readFile(args['catalog-compare']);
+      const pinned = JSON.parse(bytes);
+      compareCatalog(pinned, result.catalog_fingerprint);
+      result.comparisons = { ...result.comparisons, catalog: { verdict: 'PASS', input_sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'), observed_section_sha256: result.catalog_fingerprint.section_sha256 } };
+    }
+    delete result.catalog_fingerprint;
     const serialized = JSON.stringify(result, null, 2) + '\n';
     if (Buffer.byteLength(serialized) > 40 * 1024 * 1024) throw new Error('RUN_RECORD_TOO_LARGE');
     if (args.output) await writeFile(args.output, serialized, { flag: 'wx', mode: 0o600 });

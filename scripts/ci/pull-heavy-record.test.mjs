@@ -19,8 +19,8 @@ function fixture({ historical = false } = {}) {
   writeFileSync(path.join(repo, '.github/workflows/inbox-heavy-verification.yml'), 'safe: true\n');
   mkdirSync(path.join(repo, 'scripts/inbox-ci'), { recursive: true });
   mkdirSync(path.join(repo, 'e2e/inbox-acceptance'), { recursive: true });
-  writeFileSync(path.join(repo, 'scripts/inbox-ci/outbox.sh'), 'echo safe\n');
-  writeFileSync(path.join(repo, 'scripts/inbox-ci/migration.sh'), 'echo migration\n');
+  writeFileSync(path.join(repo, 'scripts/inbox-ci/outbox-pre.sh'), 'echo safe\n');
+  writeFileSync(path.join(repo, 'scripts/inbox-ci/migration-dry-run.sh'), 'echo migration\n');
   writeFileSync(path.join(repo, 'e2e/inbox-acceptance/fault-proxy.mjs'), 'safe\n');
   if (historical) {
     const old = path.join(repo, `docs/performance/inbox-redesign/evidence/${'a'.repeat(40)}/pre-merge/122`);
@@ -36,16 +36,16 @@ function fixture({ historical = false } = {}) {
   writeFileSync(path.join(dir, 'results.json'), '{}');
   const manifest = {
     tested_sha: sha, tier: 'pre-merge', kind: 'browser', phase: 'pre', target: 'disposable', verdict: 'PASS', run_id: '123',
-    exit_status: 0, started_at: '2026-09-28T23:00:00Z', completed_at: '2026-09-29T00:00:00Z', lane: 'outbox',
+    exit_status: 0, started_at: '2026-09-28T23:00:00Z', completed_at: '2026-09-29T00:00:00Z', lane: 'outbox-pre',
     workflow_path: '.github/workflows/inbox-heavy-verification.yml', workflow_input_sha: sha,
-    github_run_id: '123', github_run_attempt: '2', artifact_name: `heavy-outbox-${sha}-123-2`, event: 'workflow_dispatch', head_branch: 'main',
+    github_run_id: '123', github_run_attempt: '2', artifact_name: `heavy-outbox-pre-${sha}-123-2`, event: 'workflow_dispatch', head_branch: 'main',
     runner_script_sha256: hash('echo safe\n'), fault_proxy_script_sha256: hash('safe\n'),
     clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: `docs/performance/inbox-redesign/evidence/${sha}/pre-merge/123` },
     artifacts: { 'results.json': hash('{}') },
   };
   writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
-  const run = { head_sha: sha, id: 123, run_attempt: 2, event: 'workflow_dispatch', head_branch: 'main', path: manifest.workflow_path, status: 'completed', conclusion: 'success', inputs: { sha, lane: 'outbox' }, display_title: `Inbox heavy outbox ${sha}` };
-  const artifact = { name: `heavy-outbox-${sha}-123-2`, expired: false, size_in_bytes: 100 };
+  const run = { head_sha: sha, id: 123, run_attempt: 2, event: 'workflow_dispatch', head_branch: 'main', path: manifest.workflow_path, status: 'completed', conclusion: 'success', inputs: { sha, lane: 'outbox-pre' }, display_title: `Inbox heavy outbox-pre ${sha}` };
+  const artifact = { name: `heavy-outbox-pre-${sha}-123-2`, expired: false, size_in_bytes: 100 };
   return { repo, root, dir, sha, manifest, run, artifact, save() { writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest)); }, check() { return verifyDownload(repo, root, run, artifact, sha); } };
 }
 test('valid downloaded evidence verifies', () => assert.equal(fixture().check().manifest.verdict, 'PASS'));
@@ -92,14 +92,16 @@ test('workflow upload round trip selects only the new run and preserves its dotf
 });
 test('non-outbox record does not require a fault proxy hash', () => {
   const f = fixture();
-  f.manifest.lane = 'migration';
+  f.manifest.lane = 'migration-dry-run';
+  f.manifest.kind = 'migration-dry-run';
+  f.manifest.phase = 'n/a';
   f.manifest.runner_script_sha256 = hash('echo migration\n');
   delete f.manifest.fault_proxy_script_sha256;
-  f.manifest.artifact_name = `heavy-migration-${f.sha}-123-2`;
+  f.manifest.artifact_name = `heavy-migration-dry-run-${f.sha}-123-2`;
   f.artifact.name = f.manifest.artifact_name;
-  f.run.display_title = `Inbox heavy migration ${f.sha}`;
+  f.run.display_title = `Inbox heavy migration-dry-run ${f.sha}`;
   f.save();
-  assert.equal(f.check().manifest.lane, 'migration');
+  assert.equal(f.check().manifest.lane, 'migration-dry-run');
 });
 test('outbox record requires its fault proxy hash', () => {
   const f = fixture();
@@ -108,12 +110,14 @@ test('outbox record requires its fault proxy hash', () => {
   assert.throws(() => f.check(), /Runner\/proxy script hash mismatch/);
 });
 for (const [label, mutate] of [
+  ['legacy outbox lane', f => { f.manifest.lane = 'outbox'; f.save(); }],
+  ['mislabelled browser phase', f => { f.manifest.phase = 'post'; f.save(); }],
   ['non-dispatch', f => { f.run.event = 'pull_request'; }],
   ['non-main', f => { f.run.head_branch = 'feature'; }],
   ['in-progress run', f => { f.run.status = 'in_progress'; }],
   ['wrong workflow', f => { f.run.path = 'other.yml'; }],
   ['wrong workflow definition SHA', f => { f.run.head_sha = '0'.repeat(40); }],
-  ['wrong input sha', f => { f.run.display_title = `Inbox heavy outbox ${'0'.repeat(40)}`; }],
+  ['wrong input sha', f => { f.run.display_title = `Inbox heavy outbox-pre ${'0'.repeat(40)}`; }],
   ['wrong run attempt', f => { f.artifact.name = f.artifact.name.replace(/-2$/, '-1'); }],
   ['manifest attempt mismatch', f => { f.manifest.github_run_attempt = '1'; f.save(); }],
   ['external artifacts', f => { f.manifest.external_artifacts = {}; f.save(); }],

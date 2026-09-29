@@ -30,7 +30,7 @@ export async function run(args = process.argv.slice(2), env = process.env) {
   if (!env.OUTBOX_CONTRACT_SCRATCH_DIR) throw new Error('Contract child requires orchestrator scratch directory');
   const apiUrl = env.TEST_SUPABASE_URL;
   const dbUrl = env.E2E_CI_SUPABASE_DB_URL;
-  const binding = assertWriteMode(opts.target, { apiUrl, dbUrl, env });
+  assertWriteMode(opts.target, { apiUrl, dbUrl, env });
   if (!env.TEST_SUPABASE_ANON_KEY || !env.TEST_SUPABASE_SERVICE_ROLE_KEY) throw new Error('Disposable keys missing');
   if (env.MESSAGING_PROVIDER !== 'mock') throw new Error('Mock provider required');
   const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
@@ -39,7 +39,6 @@ export async function run(args = process.argv.slice(2), env = process.env) {
   const relative = runPath(sha, 'pre-merge', runId);
   const runDir = env.OUTBOX_CONTRACT_SCRATCH_DIR || path.join(repo, relative);
   mkdirSync(runDir, { recursive: true });
-  const startedAt = new Date().toISOString();
   const db = new pg.Client({ connectionString: dbUrl });
   const checks = [];
   let schemaState = {}, verdict = 'FAIL', errorText = '', status = 1;
@@ -75,7 +74,7 @@ export async function run(args = process.argv.slice(2), env = process.env) {
   return status;
 }
 
-export function sealPhaseRecord({ phase, checks = [], schemaState = {}, mutations = [], fixtureRows, verdict = 'FAIL', errorText = '', env = process.env, runId, startedAt }) {
+export function sealPhaseRecord({ phase, checks = [], schemaState = {}, mutations = [], fixtureRows, platformConfig, verdict = 'FAIL', errorText = '', env = process.env, runId, startedAt }) {
   const binding = assertWriteMode('disposable', { apiUrl: env.TEST_SUPABASE_URL, dbUrl: env.E2E_CI_SUPABASE_DB_URL, env });
   const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
   runId ??= env.GITHUB_ACTIONS === 'true' ? env.GITHUB_RUN_ID : `${Date.now()}-${randomUUID().slice(0, 8)}-${phase}`;
@@ -86,6 +85,7 @@ export function sealPhaseRecord({ phase, checks = [], schemaState = {}, mutation
   if (verdict === 'PASS' && !complete) { verdict = 'FAIL'; errorText = 'INCOMPLETE_PHASE_INVENTORY'; }
   writeFileSync(path.join(runDir, 'contracts.json'), `${JSON.stringify(checks, null, 2)}\n`);
   writeFileSync(path.join(runDir, 'mutations.json'), `${JSON.stringify(mutations, null, 2)}\n`);
+  if (platformConfig) writeFileSync(path.join(runDir, 'platform-config.json'), `${JSON.stringify(platformConfig, null, 2)}\n`);
   if (fixtureRows) writeFileSync(path.join(runDir, 'fixture-rows.json'), fixtureRows);
   if (errorText) writeFileSync(path.join(runDir, 'failure.log'), `${errorText}\n`);
   const lane = env.HEAVY_LANE || `db-contract-${phase}`;

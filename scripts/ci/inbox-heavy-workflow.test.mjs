@@ -1,9 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import yaml from 'js-yaml';
 
 const workflow = readFileSync('.github/workflows/inbox-heavy-verification.yml', 'utf8');
+export function assertUnchangedFromMain(source) {
+  const main = execFileSync('git', ['show', 'origin/main:.github/workflows/inbox-heavy-verification.yml']);
+  assert.deepEqual(Buffer.from(source), main);
+}
+test('workflow stays byte-identical to origin/main', () => assertUnchangedFromMain(workflow));
+test('workflow drift is refused', () => assert.throws(() => assertUnchangedFromMain(`${workflow}\n`)));
 export function validateWorkflow(source) {
   if (/secrets\.(?!GITHUB_TOKEN\b)/i.test(source)) throw new Error('Non-GITHUB_TOKEN secret');
   if (/^\s*environment\s*:/mi.test(source)) throw new Error('Environment binding');
