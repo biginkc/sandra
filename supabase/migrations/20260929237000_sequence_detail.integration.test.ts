@@ -8,6 +8,8 @@ const sql = readFileSync("supabase/migrations/20260929237000_sequence_detail.sql
 // Replays function DDL, so this suite runs only against the local scratch database.
 const url = requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres");
 const pg = new Client({ connectionString: url });
+const preservedFunctions = ["sequence_overview_stats(uuid)", "sequence_needs_person(uuid)"];
+let originalDefinitions: string[];
 let org: string;
 let otherOrg: string;
 let actor: string;
@@ -32,12 +34,17 @@ async function rejected(sqlText: string, params: unknown[], code: string) {
 
 beforeAll(async () => {
   await pg.connect();
+  await pg.query("begin");
+  originalDefinitions = await Promise.all(preservedFunctions.map(async (signature) => {
+    const result = await pg.query<{ definition: string }>("select pg_get_functiondef($1::regprocedure) as definition", [`public.${signature}`]);
+    return result.rows[0].definition;
+  }));
   await pg.query(sql);
   await pg.query(sql);
 });
-afterAll(async () => { await pg.end(); });
+afterAll(async () => { await pg.query("rollback"); await pg.end(); });
 beforeEach(async () => {
-  await pg.query("begin");
+  await pg.query("savepoint detail_test");
   org = randomUUID(); otherOrg = randomUUID(); actor = randomUUID();
   source = randomUUID(); target = randomUUID(); otherSource = randomUUID();
   await pg.query("insert into auth.users(id) values ($1)", [actor]);
@@ -50,7 +57,29 @@ beforeEach(async () => {
   steps = [first.rows[0].id, second.rows[0].id];
   await pg.query("insert into public.sequence_steps(sequence_id,step_index,action_type,template_body) values ($1,0,'send_sms','Other')", [otherSource]);
 });
-afterEach(async () => { await pg.query("rollback"); await pg.query("reset role"); });
+afterEach(async () => { await pg.query("rollback to savepoint detail_test"); await pg.query("release savepoint detail_test"); });
+
+it("preserves the overview and needs-person RPCs, including dead-lead and latest-enrollment triage", async () => {
+  const definitions = await Promise.all(preservedFunctions.map(async (signature) => {
+    const result = await pg.query<{ definition: string }>("select pg_get_functiondef($1::regprocedure) as definition", [`public.${signature}`]);
+    return result.rows[0].definition;
+  }));
+  expect(definitions).toEqual(originalDefinitions);
+
+  const dead = randomUUID();
+  const restarted = randomUUID();
+  await pg.query("insert into public.properties(id,org_id,address,state,status) values ($1,$3,'Dead detail lead','MO','dead'),($2,$3,'Restarted detail lead','MO','new_lead')", [dead, restarted, org]);
+  await pg.query(`insert into public.sequence_enrollments(id,org_id,sequence_id,property_id,status,enrolled_at)
+    values ($1,$5,$6,$3,'completed','2026-09-01T00:00:00Z'),
+      ($2,$5,$6,$4,'completed','2026-09-01T00:00:00Z')`,
+  [randomUUID(), randomUUID(), dead, restarted, org, source]);
+  await pg.query(`insert into public.sequence_enrollments(id,org_id,sequence_id,property_id,status,enrolled_at)
+    values ($1,$3,$4,$2,'active','2026-09-02T00:00:00Z')`,
+  [randomUUID(), restarted, org, source]);
+  await asActor();
+  const result = await pg.query("select property_id from public.sequence_needs_person($1) where property_id in ($2,$3)", [org, dead, restarted]);
+  expect(result.rows).toEqual([]);
+});
 
 it("copies ordered steps into an empty same-org target without changing the source", async () => {
   const original = (await pg.query("select step_index,delay_after_previous_minutes,action_type,template_body from public.sequence_steps where sequence_id=$1 order by step_index", [source])).rows;
@@ -112,7 +141,8 @@ it("counts distinct sends, replies after send, and active waiters for each step"
   const overview = await pg.query("select finished_no_reply from public.sequence_overview_stats($1) where id=$2", [org, source]);
   expect(overview.rows[0].finished_no_reply).toBe("1");
   const needsPerson = await pg.query("select property_id from public.sequence_needs_person($1) where bucket='finished_no_reply'", [org]);
-  expect(needsPerson.rows.map((row) => row.property_id)).toContain(noReply.property);
+  // #704 still uses run_at here, so the 11:00 reply clears this bucket.
+  expect(needsPerson.rows.map((row) => row.property_id)).not.toContain(noReply.property);
   expect(needsPerson.rows.map((row) => row.property_id)).not.toContain(replied.property);
   await pg.query("reset role");
   await rejected("select * from public.sequence_step_stats($1,$2)", [otherOrg, source], "42501");
