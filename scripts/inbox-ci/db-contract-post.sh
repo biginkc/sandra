@@ -4,7 +4,7 @@ set -euo pipefail
 [[ "$(git rev-parse HEAD)" == "${HEAVY_TESTED_SHA:-}" ]]
 [[ -z "$(git status --porcelain --untracked-files=all)" ]]
 if [[ "$(uname)" == Darwin ]]; then [[ "$(df -g /System/Volumes/Data | awk 'NR==2 {print $4}')" -ge 8 ]]; fi
-for version in 20260930000000 20260930000100 20260930000200; do
+for version in 20260930020000 20260930020100 20260930020200; do
   compgen -G "supabase/migrations/${version}_*.sql" >/dev/null || { echo "SCHEMA_PHASE_MISMATCH post: migration $version absent" >&2; exit 1; }
 done
 lane_env="$(mktemp)"
