@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
-import { readonlyGet, comparePlatform } from './outbox-db-contract/platform.mjs';
-import { assertTarget, parseArgs } from './outbox-db-contract-readonly.mjs';
+import { readonlyGet, comparePlatform, platformFingerprint } from './outbox-db-contract/platform.mjs';
+import { assertTarget, parseArgs, compareCatalog } from './outbox-db-contract-readonly.mjs';
 
 const row = (id, body='a') => ({ id, body, status:'queued', updated_at:'2026-01-01', from_address:'x', to_address:'y', created_at:'2026-01-01', scheduled_for:null, property_id:null, contact_id:null });
 function fails(label, fn, pattern) { assert.throws(fn, pattern, label); }
@@ -101,6 +101,43 @@ test('NC-R1/R2 static surface', () => {
   assert.match(ACTIVE,/access_expires_at > now\(\)/);
 });
 test('NC platform major mismatch',()=>fails('major',()=>comparePlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'},{postgres_major:'17',postgrest_major:'13',gotrue_major:'2'}),/PLATFORM_MISMATCH/));
+const catalogSections = ['relations', 'functions', 'types', 'extensions', 'schemas', 'index_names', 'trigger_names', 'schema_migrations', 'created_objects_present'];
+const catalogMap = () => Object.fromEntries(catalogSections.map((name, index) => [name, String(index).padStart(64, 'a')]));
+test('NC catalog empty section map fails', () => {
+  fails('empty expected', () => compareCatalog({section_sha256:{}}, {section_sha256:catalogMap()}), /CATALOG_MISMATCH/);
+  fails('empty observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:{}}), /CATALOG_MISMATCH/);
+});
+test('NC catalog omitted section fails', () => {
+  const expected = catalogMap();
+  delete expected.relations;
+  fails('omitted expected', () => compareCatalog({section_sha256:expected}, {section_sha256:catalogMap()}), /CATALOG_MISMATCH/);
+  fails('omitted observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:expected}), /CATALOG_MISMATCH/);
+});
+test('NC catalog extra section fails', () => {
+  fails('extra observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:{...catalogMap(), unexpected:'f'.repeat(64)}}), /CATALOG_MISMATCH/);
+  fails('extra expected', () => compareCatalog({section_sha256:{...catalogMap(), unexpected:'f'.repeat(64)}}, {section_sha256:catalogMap()}), /CATALOG_MISMATCH/);
+});
+test('NC catalog malformed digest fails on either side', () => {
+  fails('malformed expected', () => compareCatalog({section_sha256:{...catalogMap(), relations:'x'}}, {section_sha256:{...catalogMap(), relations:'x'}}), /CATALOG_MISMATCH/);
+  fails('malformed observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:{...catalogMap(), relations:'x'}}), /CATALOG_MISMATCH/);
+});
+test('NC catalog changed policies or grants digest fails', () => {
+  const changed = {...catalogMap(), relations:'f'.repeat(64)};
+  fails('relation policies/grants', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:changed}), /CATALOG_MISMATCH/);
+  assert.doesNotThrow(() => compareCatalog({section_sha256:catalogMap()}, {section_sha256:catalogMap()}));
+});
+test('NC platform accepts only identifiable PostgREST versions', async () => {
+  const probe = async (server, versionHeader) => platformFingerprint('http://127.0.0.1:55421', 'anon', 17, async url => ({
+    ok:true,
+    headers:{get:name => name === 'server' ? server : name === 'x-postgrest-version' ? versionHeader : null},
+    json:async()=>({version:'2.1.0'}),
+  }));
+  await assert.rejects(probe('nginx/1.25.5', null), /PLATFORM_UNIDENTIFIED/);
+  await assert.rejects(probe(null, null), /PLATFORM_UNIDENTIFIED/);
+  await assert.rejects(probe('PostgREST/garbage', null), /PLATFORM_UNIDENTIFIED/);
+  assert.equal((await probe('PostgREST/12.2.0', null)).postgrest_major, '12');
+  assert.equal((await probe(null, '12.2.0')).postgrest_major, '12');
+});
 test('Outbox source shape and claim pin', () => {
   const actions=readFileSync(new URL('../src/app/(dashboard)/messages/actions.ts',import.meta.url),'utf8');
   const cursor=readFileSync(new URL('../src/app/(dashboard)/messages/queued-cursor.ts',import.meta.url),'utf8');

@@ -16,10 +16,15 @@ export async function platformFingerprint(apiUrl, anonKey, postgresMajor, transp
   if (!rest.ok || !auth.ok) throw new Error('PLATFORM_READ_FAILED');
   const health = await auth.json();
   const version = String(health.version ?? '');
-  const postgrest = rest.headers.get('x-postgrest-version') ?? rest.headers.get('server') ?? '';
-  if (!version || !postgrest) throw new Error('PLATFORM_VERSION_MISSING');
-  const result = { postgres_major: String(postgresMajor), postgrest_major: postgrest.match(/\d+/)?.[0], gotrue_major: version.match(/\d+/)?.[0] };
-  if (!result.postgrest_major || !result.gotrue_major) throw new Error('PLATFORM_VERSION_MISSING');
+  const versionHeader = rest.headers.get('x-postgrest-version');
+  const serverHeader = rest.headers.get('server');
+  const postgrest = versionHeader === null
+    ? /^PostgREST\/(\d+)\.\d+(?:\.\d+)?$/i.exec(serverHeader ?? '')
+    : /^(?:PostgREST\/)?(\d+)\.\d+(?:\.\d+)?$/i.exec(versionHeader);
+  if (!postgrest) throw new Error('PLATFORM_UNIDENTIFIED');
+  if (!version) throw new Error('PLATFORM_VERSION_MISSING');
+  const result = { postgres_major: String(postgresMajor), postgrest_major: postgrest[1], gotrue_major: version.match(/\d+/)?.[0] };
+  if (!result.gotrue_major) throw new Error('PLATFORM_VERSION_MISSING');
   return { ...result, sha256: digest(result) };
 }
 export function comparePlatform(a, b) {

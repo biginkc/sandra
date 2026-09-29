@@ -51,6 +51,19 @@ async function catalog(dsn) {
   if (run.status !== 0) throw new Error(`CATALOG_FAILED ${run.stderr.trim()}`);
   return JSON.parse(run.stdout);
 }
+// Pinned to catalog_fingerprint.py at e767bec7; catalog-scope.json does not list section names.
+export const CATALOG_SECTIONS = Object.freeze(['created_objects_present', 'extensions', 'functions', 'index_names', 'relations', 'schema_migrations', 'schemas', 'trigger_names', 'types']);
+export function compareCatalog(pinned, observed) {
+  const required = CATALOG_SECTIONS.join(',');
+  for (const [side, value] of [['expected', pinned], ['observed', observed]]) {
+    const sections = value?.section_sha256;
+    if (!sections || typeof sections !== 'object' || Array.isArray(sections) || Object.keys(sections).sort().join(',') !== required ||
+        Object.values(sections).some(digest => typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest))) {
+      throw new Error(`CATALOG_MISMATCH ${side} sections`);
+    }
+  }
+  for (const section of CATALOG_SECTIONS) if (pinned.section_sha256[section] !== observed.section_sha256[section]) throw new Error(`CATALOG_MISMATCH ${section}`);
+}
 async function main() {
   const dsn = process.env.DATABASE_URL;
   if (!dsn) throw new Error('DATABASE_URL_REQUIRED');
@@ -85,7 +98,7 @@ async function main() {
     if (args['catalog']) result.catalog_fingerprint = await catalog(dsn);
     if (args['catalog-compare']) {
       const pinned = JSON.parse(await readFile(args['catalog-compare'], 'utf8'));
-      for (const [section, digest] of Object.entries(pinned.section_sha256)) if (result.catalog_fingerprint?.section_sha256?.[section] !== digest) throw new Error(`CATALOG_MISMATCH ${section}`);
+      compareCatalog(pinned, result.catalog_fingerprint);
     }
     const serialized = JSON.stringify(result, null, 2) + '\n';
     if (Buffer.byteLength(serialized) > 40 * 1024 * 1024) throw new Error('RUN_RECORD_TOO_LARGE');
