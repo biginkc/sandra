@@ -11,7 +11,7 @@ LANES = Path(__file__).resolve().parent
 
 
 class ExitFailureTest(unittest.TestCase):
-    def run_lane(self, lane, node_script, *, env_extra=None, script=None):
+    def run_lane(self, lane, node_script, *, env_extra=None, script=None, expected_error=None):
         with tempfile.TemporaryDirectory() as temporary:
             tmp = Path(temporary)
             bin_dir = tmp / 'bin'
@@ -39,6 +39,8 @@ class ExitFailureTest(unittest.TestCase):
             result = subprocess.run(['bash', str(script or LANES / f'{lane}.sh')], cwd=ROOT, env=env,
                                     text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            if expected_error:
+                self.assertIn(expected_error, result.stderr)
             self.assertTrue((tmp / 'manifest.json').exists(), result.stderr)
             self.assertIn('"verdict":"FAIL"', (tmp / 'manifest.json').read_text())
             self.assertIn('HEAVY_RUN_DIR=', github_env.read_text())
@@ -63,7 +65,8 @@ if [[ "$1" == *write-migration-record.mjs ]]; then
   exit 0
 fi
 exit 7
-''', script=script, env_extra={'DOCKER_HOST': 'unix:///var/run/docker.sock'})
+''', script=script, env_extra={'DOCKER_HOST': 'unix:///var/run/docker.sock'},
+                                  expected_error='Provisioner did not report the requested local DB URL')
                 finally:
                     script.unlink()
 
@@ -87,7 +90,9 @@ exit 7
             with self.subTest(lane=lane):
                 self.run_lane(lane, '''
 if [[ "$1" == *provision-disposable-stack.mjs ]]; then
-  printf 'E2E_LOCAL_WORKDIR=%s\\nE2E_CI_SUPABASE_DB_URL=postgresql://unsafe.example/postgres\\nTEST_SUPABASE_URL=http://127.0.0.1:55421\\n' "$FAIL_TEST_DIR/owned" >> "$GITHUB_ENV"
+  mkdir -p "$FAIL_TEST_DIR/owned/supabase"
+  printf 'project_id = "sandra-heavy-test"\\n' > "$FAIL_TEST_DIR/owned/supabase/config.toml"
+  printf 'E2E_LOCAL_WORKDIR=%s\\nE2E_CI_SUPABASE_DB_URL=postgresql://unsafe.example/postgres\\nTEST_SUPABASE_URL=http://127.0.0.1:55421\\nTEST_SUPABASE_SERVICE_ROLE_KEY=synthetic\\n' "$FAIL_TEST_DIR/owned" >> "$GITHUB_ENV"
   exit 0
 fi
 if [[ "$1" == *write-failure-record.mjs ]]; then
@@ -95,7 +100,7 @@ if [[ "$1" == *write-failure-record.mjs ]]; then
   exit 0
 fi
 exit 7
-''')
+''', expected_error='Non-local Supabase endpoint')
 
     def test_outbox_post_provision_guard(self):
         self.run_lane('outbox', '''
