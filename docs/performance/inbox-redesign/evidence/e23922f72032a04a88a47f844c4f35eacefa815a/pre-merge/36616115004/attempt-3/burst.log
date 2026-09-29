@@ -1,0 +1,1 @@
+{"counts":{"scheduled":{"update":10200,"inbound":2400},"completed":{"update":10200,"inbound":2400},"failed":{"update":0,"inbound":0},"worker":{"parent":60,"parent_sources":60,"claim":12317,"finish":12317,"stale":0,"errors":0}},"errorCount":0}

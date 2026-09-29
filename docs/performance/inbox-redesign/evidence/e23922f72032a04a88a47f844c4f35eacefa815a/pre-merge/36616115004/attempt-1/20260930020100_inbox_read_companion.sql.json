@@ -1,0 +1,13 @@
+{
+  "file": "20260930020100_inbox_read_companion.sql",
+  "exit": 0,
+  "wall_ms": 162.791444,
+  "sample_interval_ms": 50,
+  "access_exclusive_messages_observed_ms": 0,
+  "access_exclusive_samples": 0,
+  "max_waiting_locks": 0,
+  "writer_count": 5,
+  "writer_max_ms": 15.80079,
+  "monitor_error": null,
+  "writer_error": null
+}
