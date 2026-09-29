@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -54,4 +55,38 @@ test('short env values are not redacted from text artifacts', () => {
   writeFileSync(path.join(full, 'runner.log'), 'status=1 enabled=false');
   writeManifest(dir, relative, { tested_sha: 'a'.repeat(40) }, { TEST_TOKEN: '1', TEST_SECRET: 'false' });
   assert.equal(readFileSync(path.join(full, 'runner.log'), 'utf8'), 'status=1 enabled=false');
+});
+test('negative control rejects skipped O10 and retry even if all row outcomes pass', async () => {
+  const { validateOutboxResults } = await import('./outbox-run-record.mjs');
+  const dir = mkdtempSync(path.join(tmpdir(), 'outbox-validator-'));
+  const rows = Array.from({ length: 10 }, (_, i) => ({ id: `O${String(i + 1).padStart(2, '0')}`, status: 'pass' }));
+  const results = { stats: { expected: 10, skipped: 0, unexpected: 0, flaky: 0 }, suites: [{ specs: [{ tests: [{ status: 'expected', results: [{ retry: 0, status: 'passed' }] }] }] }] };
+  const save = () => { writeFileSync(path.join(dir, 'row-results.json'), JSON.stringify(rows)); writeFileSync(path.join(dir, 'results.json'), JSON.stringify(results)); };
+  save(); assert.doesNotThrow(() => validateOutboxResults(dir));
+  rows[9].status = 'skip'; save(); assert.throws(() => validateOutboxResults(dir), /O10/);
+  rows[9].status = 'pass'; results.suites[0].specs[0].tests[0].results[0].retry = 1; save(); assert.throws(() => validateOutboxResults(dir), /retried/);
+  results.suites[0].specs[0].tests[0].results[0].retry = 0; results.stats.skipped = 1; save(); assert.throws(() => validateOutboxResults(dir), /skipped/);
+});
+test('large raw file uses gzip -n -9 and hashes committed bytes', () => {
+  const dir = repo();
+  const relative = runPath('a'.repeat(40), 'pre-merge', 'compressed');
+  const full = path.join(dir, relative);
+  mkdirSync(full, { recursive: true });
+  const raw = Buffer.alloc(1024 * 1024 + 1, 0x61);
+  writeFileSync(path.join(full, 'raw.csv'), raw);
+  const manifest = writeManifest(dir, relative, { tested_sha: 'a'.repeat(40) }, {});
+  assert.equal(existsSync(path.join(full, 'raw.csv')), false);
+  assert.equal(existsSync(path.join(full, 'raw.csv.gz')), true);
+  assert.equal(manifest.raw_inflated_sha256['raw.csv'], sha256(raw));
+  assert.equal(manifest.artifacts['raw.csv.gz'], sha256(readFileSync(path.join(full, 'raw.csv.gz'))));
+});
+
+test('mutation-first producer refuses a run over 40 MiB', () => {
+  const dir = repo();
+  const relative = runPath('a'.repeat(40), 'pre-merge', 'over-cap');
+  const full = path.join(dir, relative);
+  mkdirSync(full, { recursive: true });
+  writeFileSync(path.join(full, 'raw.csv'), randomBytes(40 * 1024 * 1024 + 1024));
+  assert.throws(() => writeManifest(dir, relative, { tested_sha: 'a'.repeat(40) }, {}), /40 MiB/);
+  assert.equal(existsSync(path.join(full, 'manifest.json')), false);
 });
