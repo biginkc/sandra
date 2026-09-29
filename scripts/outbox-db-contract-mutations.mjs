@@ -32,10 +32,15 @@ const MUTATIONS = [
 function runContract(phase, extra = [], fixture = null) {
   const scratch = mkdtempSync(path.join(os.tmpdir(), 'w4w-contract-step-'));
   const env = { ...process.env, OUTBOX_CONTRACT_SCRATCH_DIR: scratch, ...(fixture ? { MUTATION_FIXTURE_JSON: JSON.stringify(fixture) } : {}) };
-  const result = spawnSync(process.execPath, ['scripts/outbox-db-contract.mjs', '--target', 'disposable', '--phase', phase, ...extra], { encoding: 'utf8', env, maxBuffer: 20 * 1024 * 1024 });
-  const line = result.stdout?.split('\n').find(value => value.startsWith('CONTRACT_RESULT '));
-  assert(line, `No contract result: ${result.stderr}\n${result.stdout}`);
-  return { exit: result.status, ...JSON.parse(line.slice('CONTRACT_RESULT '.length)) };
+  try {
+    const result = spawnSync(process.execPath, ['scripts/outbox-db-contract.mjs', '--target', 'disposable', '--phase', phase, ...extra], { encoding: 'utf8', env, maxBuffer: 20 * 1024 * 1024 });
+    const line = result.stdout?.split('\n').find(value => value.startsWith('CONTRACT_RESULT '));
+    assert(line, `No contract result: ${result.stderr}\n${result.stdout}`);
+    const parsed = JSON.parse(line.slice('CONTRACT_RESULT '.length));
+    const contracts = JSON.parse(readFileSync(path.join(scratch, 'contracts.json'), 'utf8'));
+    const fixtureRows = !fixture && result.status === 0 ? readFileSync(path.join(scratch, 'fixture-rows.json')) : undefined;
+    return { exit: result.status, ...parsed, contracts, fixtureRows };
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
 }
 
 async function prepareFixture() {
@@ -88,8 +93,7 @@ export async function runMutations(output, phase) {
             assert(!observed.error || observed.error.startsWith('Error: CONTRACT_FAILURE'), `${id}: ${observed.error}`);
             assert.deepEqual([...observed.failed].sort(), [...expected].sort(), `${id}: observed failures differ from pinned set`);
             if (id === 'M10') {
-              const contracts = JSON.parse(readFileSync(`${observed.runDir}/contracts.json`, 'utf8'));
-              const detail = contracts.find(check => check.id === 'D01')?.error ?? '';
+              const detail = observed.contracts.find(check => check.id === 'D01')?.error ?? '';
               const match = detail.match(/^ANON_ROW_EXPOSURE count=([1-9]\d*) fixture=true$/);
               assert(match, `${id}: anon did not read its own fixture row`);
               anonRowExposure = { count: Number(match[1]), fixture: true };
@@ -116,8 +120,8 @@ export async function runMutations(output, phase) {
   } catch (error) { failure = error; }
   finally {
     await db.end();
-    const checks = baseline ? JSON.parse(readFileSync(path.join(baseline.runDir, 'contracts.json'), 'utf8')) : [];
-    const fixtureRows = baseline ? readFileSync(path.join(baseline.runDir, 'fixture-rows.json')) : undefined;
+    const checks = baseline?.contracts ?? [];
+    const fixtureRows = baseline?.fixtureRows;
     const sealed = sealPhaseRecord({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, verdict: failure ? 'FAIL' : 'PASS', errorText: failure ? String(failure.stack ?? failure) : '' });
     if (sealed.verdict !== 'PASS' && !failure) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
   }
