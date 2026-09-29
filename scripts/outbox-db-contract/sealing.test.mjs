@@ -32,7 +32,7 @@ for (const phase of ['pre', 'post']) test(`db-contract ${phase} record is accept
       completed_at: new Date().toISOString(), artifacts: { 'contracts.json': sha256(contracts) },
     };
     writeFileSync(path.join(dir, 'manifest.json'), `${JSON.stringify(manifest)}\n`);
-    const run = { id: Number(id), run_attempt: 1, status: 'completed', event: 'workflow_dispatch',
+    const run = { id: Number(id), run_attempt: 1, status: 'completed', conclusion: 'success', event: 'workflow_dispatch',
       head_branch: 'main', path: manifest.workflow_path, head_sha: sha,
       display_title: `Inbox heavy ${lane} ${sha}` };
     const artifact = { name: artifactName, expired: false, size_in_bytes: 1 };

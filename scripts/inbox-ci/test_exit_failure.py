@@ -85,6 +85,34 @@ fi
 exit 7
 ''')
 
+    def test_existing_pass_cleanup_failure_stages_but_exits_failed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            tmp = Path(temporary)
+            sha = 'a' * 40
+            run_dir = tmp / 'docs/performance/inbox-redesign/evidence' / sha / 'pre-merge/901'
+            run_dir.mkdir(parents=True)
+            (run_dir / 'manifest.json').write_text('{"verdict":"PASS","exit_status":0}')
+            github_env = tmp / 'github-env'
+            github_env.touch()
+            bin_dir = tmp / 'bin'
+            bin_dir.mkdir()
+            node = bin_dir / 'node'
+            node.write_text('#!/bin/bash\nprintf called > "$FAIL_TEST_DIR/second-seal"\nexit 1\n')
+            node.chmod(0o755)
+            script = f'''source "{LANES / 'failure-exit.sh'}"
+cleanup_fails() {{ return 7; }}
+heavy_lane_exit 0 cleanup_fails
+'''
+            result = subprocess.run(['bash', '-c', script], cwd=tmp,
+                                    env={**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                                         'FAIL_TEST_DIR': temporary, 'HEAVY_TESTED_SHA': sha,
+                                         'GITHUB_RUN_ID': '901', 'GITHUB_ENV': str(github_env)},
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 7)
+            self.assertIn('HEAVY_RUN_DIR=docs/performance/inbox-redesign/evidence/', github_env.read_text())
+            self.assertEqual((run_dir / 'manifest.json').read_text(), '{"verdict":"PASS","exit_status":0}')
+            self.assertFalse((tmp / 'second-seal').exists())
+
     def test_perf_burst_and_120k_post_provision_guard(self):
         for lane in ('burst', 'perf-120k'):
             with self.subTest(lane=lane):

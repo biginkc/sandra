@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname "$0")/failure-exit.sh"
-perf_cleanup() { if declare -F perf_exit >/dev/null; then perf_exit; fi; }
+perf_cleaned=0
+perf_cleanup() { if [[ "$perf_cleaned" == 0 ]] && declare -F perf_exit >/dev/null; then perf_exit; fi; }
 trap 'heavy_lane_exit "$?" perf_cleanup' EXIT
 source "$(dirname "$0")/perf-common.sh"
 perf_preflight
@@ -17,6 +18,8 @@ psql "$PERF_DATABASE_URL" -X -v ON_ERROR_STOP=1 -At -F ',' -c "SELECT relname,re
 node "$PERF_SOURCE/bench.js" after > "$PERF_RUN_DIR/after.log"
 if python3 "$PERF_SOURCE/analyze_120k.py" "$PERF_RUN_DIR" > "$PERF_RUN_DIR/analysis.txt"; then verdict=PASS; else verdict=FAIL; fi
 perf_stop
+perf_exit
+perf_cleaned=1
 if [[ "${PERF_LOCAL_EXECUTION:-}" == 1 ]]; then
   echo "Local diagnostic: $PERF_RUN_DIR ($verdict). No approval record."
 else
