@@ -5,7 +5,25 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { artifactHashes, assertCleanStart, assertOnlyRunDirDirty, runPath, sha256, validateOutboxResults, writeManifest } from './outbox-run-record.mjs';
+import { artifactHashes, assertCleanStart, assertOnlyRunDirDirty, buildOutboxIdentityEnvironment, runPath, sha256, validateOutboxResults, writeManifest } from './outbox-run-record.mjs';
+import { ensureE2ERunEnvironment } from '../src/lib/supabase/e2e-identity-guard.ts';
+test('GitHub Outbox identity matches the real E2E guard', () => {
+  assert.throws(() => ensureE2ERunEnvironment({ GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '2', E2E_RUN_SLUG: 'local-123-abcdef123456', E2E_TEST_USER_EMAIL: 'e2e-ci+local-123-abcdef123456@bmhgroupkc.com', E2E_TEST_USER_PASSWORD: 'x'.repeat(32) }), /does not match this run ID and attempt/);
+  const env = buildOutboxIdentityEnvironment({ GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '2' });
+  assert.equal(env.E2E_RUN_SLUG, 'gha-36550350156-2');
+  assert.equal(env.E2E_TEST_USER_EMAIL, 'e2e-ci+gha-36550350156-2@bmhgroupkc.com');
+  assert.doesNotThrow(() => ensureE2ERunEnvironment(env));
+});
+test('CI=1 takes the same GitHub identity path as the real guard', () => {
+  const env = buildOutboxIdentityEnvironment({ CI: '1', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '3' });
+  assert.equal(env.E2E_RUN_SLUG, 'gha-36550350156-3');
+  assert.doesNotThrow(() => ensureE2ERunEnvironment(env));
+});
+test('local Outbox identity stays local and satisfies the real E2E guard', () => {
+  const env = buildOutboxIdentityEnvironment({});
+  assert.match(env.E2E_RUN_SLUG, /^local-[1-9][0-9]*-[a-f0-9]{12}$/);
+  assert.doesNotThrow(() => ensureE2ERunEnvironment(env));
+});
 function repo() { const dir = mkdtempSync(path.join(tmpdir(), 'outbox-record-')); execFileSync('git', ['init', '-q', dir]); execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.invalid']); execFileSync('git', ['-C', dir, 'config', 'user.name', 'Test']); writeFileSync(path.join(dir, 'tracked'), 'baseline'); execFileSync('git', ['-C', dir, 'add', '.']); execFileSync('git', ['-C', dir, 'commit', '-qm', 'baseline']); return dir; }
 test('layout and artifact hashes', () => { const dir = repo(); const sha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], {encoding:'utf8'}).trim(); const relative = runPath(sha, 'pre-merge', 'run_1'); const full = path.join(dir, relative); mkdirSync(full, {recursive:true}); writeFileSync(path.join(full,'results.json'), 'hello'); assert.deepEqual(artifactHashes(full), {'results.json':'2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'}); const manifest = writeManifest(dir, relative, { tested_sha:sha }); assert.equal(manifest.artifacts['results.json'], sha256('hello')); assert.equal(JSON.parse(readFileSync(path.join(full,'manifest.json'))).tested_sha, sha); assertOnlyRunDirDirty(dir, relative); });
 test('dirty tree refusal and exact run-dir exclusion', () => { const dir = repo(); assertCleanStart(dir); writeFileSync(path.join(dir,'stray'), 'x'); assert.throws(() => assertCleanStart(dir), /dirty tree/); assert.throws(() => assertOnlyRunDirDirty(dir, 'docs/performance/inbox-redesign/evidence/abc'), /Non-record/); });

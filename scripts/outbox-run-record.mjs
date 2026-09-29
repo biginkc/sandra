@@ -3,9 +3,28 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, lstatSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createGitHubRunEnvironment, ensureE2ERunEnvironment } from '../src/lib/supabase/e2e-identity-guard.ts';
 
 export const EVIDENCE_ROOT = 'docs/performance/inbox-redesign/evidence';
 export const TIERS = new Set(['pre-merge', 'test-env', 'prod-deploy']);
+export function buildOutboxIdentityEnvironment(baseEnv = process.env) {
+  const run = baseEnv.CI === '1' || baseEnv.GITHUB_ACTIONS === 'true'
+    ? createGitHubRunEnvironment(baseEnv)
+    : { runSlug: `local-${process.pid}-${randomUUID().replaceAll('-', '').slice(0, 12)}`, password: `${randomUUID()}${randomUUID()}` };
+  const env = {
+    ...baseEnv,
+    E2E_RUN_SLUG: run.runSlug,
+    E2E_TEST_USER_EMAIL: run.email ?? `e2e-ci+${run.runSlug}@bmhgroupkc.com`,
+    E2E_TEST_USER_PASSWORD: run.password,
+  };
+  ensureE2ERunEnvironment(env);
+  return env;
+}
+function runIdentityLifecycle(command, env, repo) {
+  const result = spawnSync('npx', ['tsx', 'scripts/e2e-identity-lifecycle.ts', command], { cwd: repo, env, encoding: 'utf8' });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`E2E identity ${command} failed: ${result.stderr || result.stdout || result.status}`);
+}
 const TEXT_ARTIFACT = /\.(?:json|log|txt|html|csv|md)$/i;
 const ALLOWED_ARTIFACT = /\.(?:json|log|txt|html|png|csv|gz|md)$/i;
 const MAX_RUN_BYTES = 40 * 1024 * 1024;
@@ -181,19 +200,27 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const absoluteDir = path.join(repo, relativeDir);
   const startedAt = new Date().toISOString();
   mkdirSync(absoluteDir, { recursive: true });
-  const identity = `local-${process.pid}-${randomUUID().replaceAll('-', '').slice(0, 12)}`;
   const token = `${randomUUID()}${randomUUID()}`;
-  const env = { ...process.env, OUTBOX_RUN_DIR: absoluteDir, OUTBOX_FAULT_TOKEN: token, INBOX_ACCEPTANCE_ORG_ID: '00000000-0000-0000-0000-000000000bbb', MESSAGING_PROVIDER: 'mock', E2E_RUN_SLUG: identity, E2E_TEST_USER_EMAIL: `e2e-ci+${identity}@bmhgroupkc.com`, E2E_TEST_USER_PASSWORD: `${randomUUID()}${randomUUID()}` };
-  const proxy = spawn(process.execPath, ['e2e/inbox-acceptance/fault-proxy.mjs'], { cwd: repo, env, stdio: 'ignore' });
-  let proxyError;
-  proxy.on('error', error => { proxyError = error; });
+  const env = buildOutboxIdentityEnvironment({ ...process.env, OUTBOX_RUN_DIR: absoluteDir, OUTBOX_FAULT_TOKEN: token, INBOX_ACCEPTANCE_ORG_ID: '00000000-0000-0000-0000-000000000bbb', MESSAGING_PROVIDER: 'mock' });
+  if (env.GITHUB_ACTIONS === 'true') {
+    if (!env.RUNNER_TEMP) throw new Error('GitHub Outbox identity requires RUNNER_TEMP');
+    env.E2E_QA_GUARD_STATE = path.join(env.RUNNER_TEMP, `sandra-e2e-browser-qa-${env.E2E_RUN_SLUG}.json`);
+    runIdentityLifecycle('preflight', env, repo);
+  }
   let result;
   try {
-    await waitForProxy(proxy, token);
-    if (proxyError) throw proxyError;
-    result = spawnSync('npx', ['playwright', 'test', '--config', 'playwright.outbox-regression.config.ts', '--reporter=json'], { cwd: repo, env, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
+    const proxy = spawn(process.execPath, ['e2e/inbox-acceptance/fault-proxy.mjs'], { cwd: repo, env, stdio: 'ignore' });
+    let proxyError;
+    proxy.on('error', error => { proxyError = error; });
+    try {
+      await waitForProxy(proxy, token);
+      if (proxyError) throw proxyError;
+      result = spawnSync('npx', ['playwright', 'test', '--config', 'playwright.outbox-regression.config.ts', '--reporter=json'], { cwd: repo, env, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
+    } finally {
+      await stopProxy(proxy);
+    }
   } finally {
-    await stopProxy(proxy);
+    if (env.GITHUB_ACTIONS === 'true') runIdentityLifecycle('cleanup', env, repo);
   }
   if (result.error) throw result.error;
   writeFileSync(path.join(absoluteDir, 'results.json'), redactResultsJson(result.stdout || '', env, repo));
