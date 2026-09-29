@@ -381,11 +381,28 @@ begin
          and previous_row.stream='exchange' and previous_row.seq=current_row.seq-1
        where current_row.capture_id=p_capture_id and current_row.epoch=p_epoch and current_row.stream='exchange'
          and (
-           (current_row.record->>'serverReceiveMonoMs')::numeric < (previous_row.record->>'serverReceiveMonoMs')::numeric
-           or (current_row.record->>'serverSendMonoMs')::numeric < (previous_row.record->>'serverSendMonoMs')::numeric
+           (current_row.record->>'serverReceiveMonoMs')::numeric > (current_row.record->>'serverSendMonoMs')::numeric
+           or (current_row.record->>'serverReceiveWallMs')::numeric > (current_row.record->>'serverSendWallMs')::numeric
+           or (current_row.record->>'serverReceiveMonoMs')::numeric < (previous_row.record->>'serverReceiveMonoMs')::numeric
+           or (current_row.record->>'serverReceiveMonoMs')::numeric < (previous_row.record->>'serverSendMonoMs')::numeric
            or (current_row.record->>'serverReceiveWallMs')::numeric < (previous_row.record->>'serverReceiveWallMs')::numeric
+           or (current_row.record->>'serverReceiveWallMs')::numeric < (previous_row.record->>'serverSendWallMs')::numeric
            or (current_row.record->>'serverSendWallMs')::numeric < (previous_row.record->>'serverSendWallMs')::numeric
          )
+    ) then
+      effective := 'incomplete';
+      canonical_reasons := canonical_reasons || '["clock_discontinuity"]'::jsonb;
+    end if;
+    if exists (
+      select 1
+        from public.dialpad_recording_timing_records c
+       where c.capture_id=p_capture_id and c.epoch=p_epoch
+         and c.stream in ('tab:context','mic:context')
+         and c.record->>'observation'='final'
+         and coalesce((select (e.record->>'browserReceiveMs')::numeric
+                         from public.dialpad_recording_timing_records e
+                        where e.capture_id=p_capture_id and e.epoch=p_epoch and e.stream='exchange'
+                        order by e.seq desc limit 1), -1) < (c.record->>'browserAfterMs')::numeric
     ) then
       effective := 'incomplete';
       canonical_reasons := canonical_reasons || '["clock_discontinuity"]'::jsonb;
