@@ -5697,6 +5697,16 @@ export type Database = {
       }
     }
     Functions: {
+      sequence_overview_stats: { Args: { p_org: string }; Returns: Array<{
+        id: string; name: string; description: string | null; active: boolean;
+        append_opt_out: boolean; archived_at: string | null; created_at: string;
+        created_by: string | null; step_count: number; active_enrollment_count: number;
+        waiting: number; replied: number; finished_no_reply: number;
+        couldnt_send: number; stopped: number; last_sent: string | null;
+      }> }
+      sequence_needs_person: { Args: { p_org: string }; Returns: Array<{
+        property_id: string; sequence_id: string | null; bucket: string; reason: string; sequence_created_by: string | null;
+      }> }
       fn_claim_dialpad_member_binding: { Args: { p_org_id: string; p_user_id: string; p_dialpad_user_id: string }; Returns: Json }
       fn_verify_dialpad_member_binding: { Args: { p_binding_id: string; p_verification_kind: string; p_verification_ref: string }; Returns: Json }
       fn_revoke_dialpad_member_binding: { Args: { p_binding_id: string; p_reason: string }; Returns: Json }
