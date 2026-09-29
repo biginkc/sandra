@@ -9,6 +9,10 @@ export async function openMenuByTestId(
   const item = page.getByTestId(itemTestId);
 
   await expect(trigger).toBeVisible({ timeout: 10_000 });
+  // Base UI installs aria-expanded when the menu trigger is initialized. Wait
+  // for that contract before the single click so a visible, pre-initialized
+  // trigger cannot lose the opening action.
+  await expect(trigger).toHaveAttribute("aria-expanded", /^(false|true)$/);
 
   // isVisible() does not wait, even when passed a timeout. Repeated trigger
   // actions can close a menu whose opening animation is still in progress.
