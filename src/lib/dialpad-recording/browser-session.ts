@@ -53,7 +53,7 @@ export type DialpadBrowserSessionOptions = {
   readonly endpoint: string;
   readonly token: string;
   readonly epoch: number;
-  readonly capture: PreparedDialpadCapture;
+  readonly capture: PreparedDialpadCapture | ActiveDialpadCapture;
   readonly socketFactory?: DialpadBrowserSocketFactory;
   readonly ackTimeoutMs?: number;
   readonly readyTimeoutMs?: number;
@@ -337,7 +337,14 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     };
     captureStartPromise = (async () => {
       try {
-        const startedCapture = await options.capture.start(sinks, options.epoch);
+        let startedCapture: ActiveDialpadCapture;
+        if ('attach' in options.capture && options.capture.attach) {
+          activeCapture = options.capture;
+          await options.capture.attach(sinks, options.epoch);
+          startedCapture = options.capture;
+        } else {
+          startedCapture = await (options.capture as PreparedDialpadCapture).start(sinks, options.epoch);
+        }
         if (failed || disposed || generation !== lifecycleGeneration || !mediaAdmissionOpen || stopPromise) {
           await startedCapture.dispose();
           return;
@@ -390,6 +397,9 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     let resolveAck!: () => void;
     let rejectAck!: (error: Error) => void;
     const ackPromise = new Promise<void>((resolve, reject) => { resolveAck = resolve; rejectAck = reject; });
+    // The send path can fail before its caller reaches the ACK await. Own the
+    // rejection immediately so socket/buffer failures never become unhandled.
+    void ackPromise.catch(() => undefined);
     const timer = setTimeout(() => {
       pendingChunkAcks.delete(ackKey);
       const timeout = new DialpadBrowserSessionError('timeout', 'Recording chunk acknowledgement timed out.');

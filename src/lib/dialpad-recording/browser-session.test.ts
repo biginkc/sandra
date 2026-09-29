@@ -43,6 +43,7 @@ function fakeCapture(onStart: (sinks: BrowserCaptureSinks) => void): PreparedDia
   return {
     proof: { handle: 'h', origin: 'https://app.example.test' },
     start: async (sinks) => {
+      if (!sinks) throw new Error('fake capture requires network sinks');
       onStart(sinks);
       return { state: () => 'recording', stop: async () => undefined, dispose: async () => undefined };
     },
@@ -200,5 +201,31 @@ describe('Dialpad browser session', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(session.state()).toBe('failed');
     expect(failures).toContain('protocol');
+  });
+
+  it('owns chunk ACK rejection when the native socket send throws', async () => {
+    const socket = new FakeSocket();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    socket.send = (data) => {
+      if (data instanceof Uint8Array) throw new Error('native send failed');
+      socket.sent.push(data);
+    };
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket,
+      capture: fakeCapture((sinks) => {
+        void sinks.onTrackFormat?.(format('tab'));
+        void sinks.onTrackFormat?.(format('mic'));
+        void sinks.onWebmChunk({ track: 'tab', epoch: 1, seq: 0, blob: new Blob([new Uint8Array([1])]), byteLength: 1 });
+      }),
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await expect(started).rejects.toMatchObject({ code: 'socket' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    process.removeListener('unhandledRejection', onUnhandled);
+    expect(unhandled).toEqual([]);
   });
 });
