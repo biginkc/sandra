@@ -1,0 +1,13 @@
+{
+  "file": "20260930040200_inbox_backend_operation_reply.sql",
+  "exit": 0,
+  "wall_ms": 386.245193,
+  "sample_interval_ms": 50,
+  "access_exclusive_messages_observed_ms": 0,
+  "access_exclusive_samples": 0,
+  "max_waiting_locks": 1,
+  "writer_count": 6,
+  "writer_max_ms": 231.656889,
+  "monitor_error": null,
+  "writer_error": null
+}
