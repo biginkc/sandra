@@ -3,6 +3,9 @@
 import sys
 import unittest
 
+# Keep noisy test diagnostics before unittest's final status in one stream.
+sys.stdout = sys.stderr
+
 
 def offline_tests(suite):
     for item in suite:
