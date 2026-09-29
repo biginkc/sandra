@@ -274,12 +274,14 @@ export function parseDialpadDispatchAuthorization(value: Json | null | undefined
   };
 }
 
-export const DIALPAD_CALL_STATES = ['prepared', 'awaiting_provider', 'in_progress', 'ended', 'cancelled', 'expired'] as const;
+export const DIALPAD_CALL_STATES = ['prepared', 'awaiting_provider', 'dialing', 'connected', 'ended', 'cancelled', 'expired'] as const;
 export type DialpadCallState = (typeof DIALPAD_CALL_STATES)[number];
 
 export interface DialpadCallStatus {
   intentId: string;
   state: DialpadCallState;
+  /** True only with signed connected/date_connected evidence, at any point in the call. */
+  connected: boolean;
   propertyId: string;
   expiresAt: string;
   dispatchAuthorizedAt: string | null;
@@ -302,6 +304,7 @@ export function parseDialpadCallStatus(value: Json | null | undefined): DialpadC
   return {
     intentId: str(data.intentId, 'intentId'),
     state: oneOf(data.state, DIALPAD_CALL_STATES, 'state'),
+    connected: bool(data.connected, 'connected'),
     propertyId: str(data.propertyId, 'propertyId'),
     expiresAt: str(data.expiresAt, 'expiresAt'),
     dispatchAuthorizedAt: nullableStr(data.dispatchAuthorizedAt, 'dispatchAuthorizedAt'),

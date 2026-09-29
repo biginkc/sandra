@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   loadMyLeadCallReferences: vi.fn(),
   targets: vi.fn(),
   recent: vi.fn(),
+  submit: vi.fn(),
 }));
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
@@ -20,7 +21,7 @@ vi.mock('./actions', () => ({
   loadMyLeadsStage: vi.fn(),
   loadMyLeadDetail: vi.fn(),
   loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
-  submitMyLeadCommand: vi.fn(),
+  submitMyLeadCommand: mocks.submit,
   changeAcquisitionDesignation: vi.fn(),
   changeAcquisitionSettings: vi.fn(),
 }));
@@ -31,9 +32,6 @@ vi.mock('./dialpad-actions', () => ({
   getDialpadCallStatusAction: vi.fn(),
   cancelDialpadCallAction: vi.fn(),
   listRecentDialpadCallsAction: mocks.recent,
-}));
-vi.mock('./_components/attempt-dialog', () => ({
-  AcquisitionAttemptDialog: ({ propertyId }: { propertyId: string }) => <div data-testid="attempt-dialog">{propertyId}</div>,
 }));
 vi.mock('./_components/queue', () => ({
   MyLeadsQueue: ({ onStageAction, stages }: { onStageAction: (kind: string, row: { propertyId: string }) => void; stages: { not_contacted?: { rows: Array<{ propertyId: string }> } } }) => (
@@ -96,13 +94,49 @@ describe('My Leads Dialpad wiring', () => {
     expect(mocks.targets).not.toHaveBeenCalled();
     expect(mocks.openLead).not.toHaveBeenCalled();
   });
-  it('opens the existing log-attempt dialog for an ended Dialpad call', async () => {
-    mocks.recent.mockResolvedValue({ ok: true, calls: [{
-      intentId: '66666666-6666-4666-8666-666666666666', state: 'ended', propertyId: 'property-1', expiresAt: 'x', dispatchAuthorizedAt: 'x', callActivityId: 'a', attemptId: 'b',
-      startedAt: null, endedAt: 'x', durationSeconds: 30, talkDurationSeconds: 20,
-    }] });
+  const ended = (intentId: string, callActivityId: string) => ({
+    intentId, state: 'ended', connected: true, propertyId: 'property-1', expiresAt: 'x', dispatchAuthorizedAt: 'x', callActivityId, attemptId: `attempt-${callActivityId}`,
+    startedAt: null, endedAt: 'x', durationSeconds: 30, talkDurationSeconds: 20,
+  });
+  it('finalizes the exact webhook-created attempt of the chosen completed call, not a new manual attempt', async () => {
+    mocks.recent.mockResolvedValue({ ok: true, calls: [
+      ended('66666666-6666-4666-8666-666666666666', 'activity-new'),
+      ended('77777777-7777-4777-8777-777777777777', 'activity-old'),
+    ] });
+    mocks.loadMyLeadCallReferences.mockResolvedValue({ ok: true, options: [{ id: 'activity-new', label: 'Sep 29, 9:00 AM Central' }, { id: 'activity-old', label: 'Sep 29, 8:00 AM Central' }] });
+    mocks.submit.mockResolvedValue({ ok: true, attemptRecorded: true });
     renderClient(bootstrap);
-    await userEvent.click(await screen.findByRole('button', { name: 'Log outcome' }));
-    await waitFor(() => expect(screen.getByTestId('attempt-dialog')).toHaveTextContent('property-1'));
+
+    const buttons = await screen.findAllByRole('button', { name: 'Log outcome' });
+    expect(buttons).toHaveLength(2);
+    await userEvent.click(buttons[1]!);
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByLabelText('Source')).toHaveValue('sandra');
+    await waitFor(() => expect(within(dialog).getByLabelText('Sandra call')).toHaveValue('activity-old'));
+    await userEvent.selectOptions(within(dialog).getByLabelText('External outcome'), 'reached');
+    fireEvent.change(within(dialog).getByLabelText(/When did the/), { target: { value: '2026-09-29T08:05' } });
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Save attempt' }));
+
+    await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(1));
+    expect(mocks.submit).toHaveBeenCalledWith('log-attempt', expect.objectContaining({ source: 'sandra', kind: 'call', callActivityId: 'activity-old', recordingUrl: null, propertyId: 'property-1' }));
+  });
+  it('selects the other call when its button is used, and keeps manual entry available', async () => {
+    mocks.recent.mockResolvedValue({ ok: true, calls: [
+      ended('66666666-6666-4666-8666-666666666666', 'activity-new'),
+      ended('77777777-7777-4777-8777-777777777777', 'activity-old'),
+    ] });
+    mocks.loadMyLeadCallReferences.mockResolvedValue({ ok: true, options: [{ id: 'activity-new', label: 'A' }, { id: 'activity-old', label: 'B' }] });
+    renderClient(bootstrap);
+    const buttons = await screen.findAllByRole('button', { name: 'Log outcome' });
+    await userEvent.click(buttons[0]!);
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(dialog).getByLabelText('Sandra call')).toHaveValue('activity-new'));
+    expect(within(dialog).getByRole('option', { name: 'Manual outreach' })).toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await userEvent.click(screen.getAllByRole('button', { name: 'Log outcome' })[1]!);
+    const reopened = await screen.findByRole('dialog');
+    await waitFor(() => expect(within(reopened).getByLabelText('Sandra call')).toHaveValue('activity-old'));
   });
 });

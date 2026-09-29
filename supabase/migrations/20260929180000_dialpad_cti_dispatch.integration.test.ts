@@ -499,22 +499,64 @@ describe("20260929180000 Dialpad CTI dispatch migration", () => {
       const start = NOW_MS + 1000;
       await deliver(payload("calling", start, String(intent.customData), { date_started: start }));
       const ringing = await statusOf(intent.intentId);
-      expect(ringing).toMatchObject({ state: "in_progress", endedAt: null });
+      expect(ringing).toMatchObject({ state: "dialing", connected: false, endedAt: null });
       expect(ringing.callActivityId).not.toBeNull();
 
       await deliver(payload("connected", start + 4000, String(intent.customData), { date_started: start, date_connected: start + 4000 }));
-      expect(await statusOf(intent.intentId)).toMatchObject({ state: "in_progress", endedAt: null });
+      expect(await statusOf(intent.intentId)).toMatchObject({ state: "connected", connected: true, endedAt: null });
 
       await deliver(
         payload("hangup", start + 64_000, String(intent.customData), { date_started: start, date_connected: start + 4000, date_ended: start + 64_000, talk_time: 60_000, was_recorded: true }),
       );
       const ended = await statusOf(intent.intentId);
-      expect(ended).toMatchObject({ state: "ended", durationSeconds: 64, talkDurationSeconds: 60 });
+      expect(ended).toMatchObject({ state: "ended", connected: true, durationSeconds: 64, talkDurationSeconds: 60 });
       expect(ended.endedAt).not.toBeNull();
       expect(ended.attemptId).not.toBeNull();
     });
 
-    it("reports cancelled and expired, and never reports in_progress for an unmatched intent", async () => {
+    it("does not report dialing or ringing as connected, and never invents a connect from other states", async () => {
+      const intent = await prepare();
+      await authorize(intent.intentId);
+      const start = NOW_MS + 1000;
+      await deliver(payload("calling", start, String(intent.customData), { date_started: start }));
+      await deliver(payload("ringing", start + 500, String(intent.customData), { date_started: start }));
+      await deliver(payload("hold", start + 900, String(intent.customData), { date_started: start }));
+      expect(await statusOf(intent.intentId)).toMatchObject({ state: "dialing", connected: false, endedAt: null });
+    });
+
+    it("reports a terminal call without connect evidence as ended and not connected", async () => {
+      const intent = await prepare();
+      await authorize(intent.intentId);
+      const start = NOW_MS + 1000;
+      await deliver(payload("calling", start, String(intent.customData), { date_started: start }));
+      await deliver(payload("hangup", start + 20_000, String(intent.customData), { date_started: start, date_ended: start + 20_000 }));
+      const ended = await statusOf(intent.intentId);
+      expect(ended).toMatchObject({ state: "ended", connected: false, talkDurationSeconds: 0 });
+      expect(ended.endedAt).not.toBeNull();
+    });
+
+    it("treats signed date_connected on a non-connected event as connect evidence, whatever the arrival order", async () => {
+      const intent = await prepare();
+      await authorize(intent.intentId);
+      const start = NOW_MS + 1000;
+      // hangup and connected arrive before the calling event that opened the call.
+      await deliver(payload("hangup", start + 64_000, String(intent.customData), { date_started: start, date_connected: start + 4000, date_ended: start + 64_000, talk_time: 60_000 }));
+      await deliver(payload("connected", start + 4000, String(intent.customData), { date_started: start, date_connected: start + 4000 }));
+      await deliver(payload("calling", start, String(intent.customData), { date_started: start }));
+      expect(await statusOf(intent.intentId)).toMatchObject({ state: "ended", connected: true, talkDurationSeconds: 60 });
+    });
+
+    it("keeps a connected call connected when a stale earlier-state event arrives afterwards", async () => {
+      const intent = await prepare();
+      await authorize(intent.intentId);
+      const start = NOW_MS + 1000;
+      await deliver(payload("connected", start + 4000, String(intent.customData), { date_started: start, date_connected: start + 4000 }));
+      expect(await statusOf(intent.intentId)).toMatchObject({ state: "connected", connected: true });
+      await deliver(payload("calling", start, String(intent.customData), { date_started: start }));
+      expect(await statusOf(intent.intentId)).toMatchObject({ state: "connected", connected: true });
+    });
+
+    it("reports cancelled and expired, and never reports connected or dialing for an unmatched intent", async () => {
       const cancelled = await prepare();
       await service(() => pg.query("select public.fn_cancel_dialpad_call_intent($1,$2,$3)", [orgId, repA, cancelled.intentId]));
       expect(await statusOf(cancelled.intentId)).toMatchObject({ state: "cancelled" });

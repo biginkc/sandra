@@ -32,7 +32,7 @@ const unboundBootstrap: DialpadPanelBootstrap = { ...verifiedBootstrap, binding:
 const request: DialpadCallRequest = { nonce: 1, propertyId: 'property-1', contactId: 'contact-1', label: 'Fixture Homeowner' };
 
 const status = (state: string, extra: Record<string, unknown> = {}) => ({
-  ok: true, status: { intentId: INTENT, state, propertyId: 'property-1', expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z', callActivityId: null, attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null, ...extra },
+  ok: true, status: { intentId: INTENT, state, connected: state === 'connected' || state === 'ended', propertyId: 'property-1', expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z', callActivityId: null, attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null, ...extra },
 });
 
 function iframeOf(container: HTMLElement): HTMLIFrameElement {
@@ -147,14 +147,17 @@ describe('DialpadPanel dialing', () => {
     expect(mocks.start.mock.calls[0]![0]).toMatchObject({ propertyId: 'property-1', contactId: 'contact-1', phoneSlot: 1, grantId: null });
     expect(mocks.start.mock.calls[0]![0].idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
     expect(await screen.findByText(/Waiting for Dialpad to confirm/)).toBeInTheDocument();
-    expect(screen.queryByText(/In call/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Connected/)).not.toBeInTheDocument();
 
-    mocks.status.mockResolvedValue(status('in_progress'));
-    expect(await screen.findByText(/In call. Confirmed by Dialpad/)).toBeInTheDocument();
-    mocks.status.mockResolvedValue(status('ended', { durationSeconds: 64, endedAt: '2026-09-29T10:01:10Z' }));
+    mocks.status.mockResolvedValue(status('dialing'));
+    expect(await screen.findByText(/Dialing. Not answered yet/)).toBeInTheDocument();
+    expect(screen.queryByText(/Connected/)).not.toBeInTheDocument();
+    mocks.status.mockResolvedValue(status('connected'));
+    expect(await screen.findByText(/Connected. Confirmed by Dialpad/)).toBeInTheDocument();
+    mocks.status.mockResolvedValue(status('ended', { durationSeconds: 64, endedAt: '2026-09-29T10:01:10Z', callActivityId: 'activity-1' }));
     expect(await screen.findByText(/Call ended. 1m 04s/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Log outcome' }));
-    expect(onLogOutcome).toHaveBeenCalledWith('property-1');
+    expect(onLogOutcome).toHaveBeenCalledWith('property-1', 'activity-1');
   });
   it('a double click sends a single start request with one idempotency key', async () => {
     let release!: (value: unknown) => void;
@@ -211,13 +214,109 @@ describe('DialpadPanel dialing', () => {
   });
 });
 
+describe('DialpadPanel authorization race', () => {
+  const released = { ok: true, dispatched: true, intentId: INTENT, expiresAt: 'x', dial: { phoneNumber: '+18165440196', customData: TOKEN, identityType: null, identityId: null, outboundCallerId: null } };
+  async function inFlight() {
+    let release!: (value: unknown) => void;
+    mocks.start.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    const ctx = await readyPanel({ callRequest: request });
+    fromDialpad(ctx.iframe, authMessage(5551234));
+    const call = await screen.findByRole('button', { name: 'Call' });
+    await waitFor(() => expect(call).toBeEnabled());
+    ctx.post.mockClear();
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    return { ...ctx, release: () => release(released) };
+  }
+  const initiateCalls = (post: { mock: { calls: unknown[][] } }) => post.mock.calls.filter(([message]) => (message as { method?: string }).method === 'initiate_call');
+
+  it('posts nothing and cancels the unsent authorization when the dialer signs out during the request', async () => {
+    const { iframe, post, release } = await inFlight();
+    fromDialpad(iframe, authMessage(null, false));
+    release();
+    await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith(INTENT));
+    expect(initiateCalls(post)).toHaveLength(0);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Nothing was dialed');
+    expect(screen.getByRole('button', { name: 'Call' })).toBeDisabled();
+  });
+  it('posts nothing when the dialer switches to another user during the request', async () => {
+    const { iframe, post, release } = await inFlight();
+    fromDialpad(iframe, authMessage(7770001));
+    release();
+    await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith(INTENT));
+    expect(initiateCalls(post)).toHaveLength(0);
+  });
+  it('posts nothing when the dialer signs out and back in as the same user during the request', async () => {
+    const { iframe, post, release } = await inFlight();
+    fromDialpad(iframe, authMessage(null, false));
+    fromDialpad(iframe, authMessage(5551234));
+    release();
+    await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith(INTENT));
+    expect(initiateCalls(post)).toHaveLength(0);
+  });
+  it('still dials when the dialer repeats the same authentication during the request', async () => {
+    const { iframe, post, release } = await inFlight();
+    fromDialpad(iframe, authMessage(5551234));
+    release();
+    await waitFor(() => expect(initiateCalls(post)).toHaveLength(1));
+    expect(mocks.cancel).not.toHaveBeenCalled();
+  });
+  it('posts nothing and cancels when the panel unmounts during the request', async () => {
+    const { view, post, release } = await inFlight();
+    view.unmount();
+    release();
+    await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith(INTENT));
+    expect(initiateCalls(post)).toHaveLength(0);
+  });
+  it('requires a fresh user start with a new idempotency key after a blocked authorization', async () => {
+    const { iframe, release } = await inFlight();
+    const firstKey = mocks.start.mock.calls[0]![0].idempotencyKey;
+    fromDialpad(iframe, authMessage(null, false));
+    release();
+    await screen.findByRole('alert');
+    fromDialpad(iframe, authMessage(5551234));
+    mocks.start.mockResolvedValue(released);
+    const call = screen.getByRole('button', { name: 'Call' });
+    await waitFor(() => expect(call).toBeEnabled());
+    expect(mocks.start).toHaveBeenCalledTimes(1);
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(2));
+    expect(mocks.start.mock.calls[1]![0].idempotencyKey).not.toBe(firstKey);
+  });
+});
+
 describe('DialpadPanel durability', () => {
   it('resumes recent calls after a reload and offers Log outcome for an ended call', async () => {
-    mocks.recent.mockResolvedValue({ ok: true, calls: [status('ended', { durationSeconds: 125 }).status] });
+    mocks.recent.mockResolvedValue({ ok: true, calls: [status('ended', { durationSeconds: 125, callActivityId: 'activity-1' }).status] });
     const { onLogOutcome } = await readyPanel();
     expect(await screen.findByText(/Call ended. 2m 05s/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Log outcome' }));
-    expect(onLogOutcome).toHaveBeenCalledWith('property-1');
+    expect(onLogOutcome).toHaveBeenCalledWith('property-1', 'activity-1');
+  });
+  it('gives each completed call on the same lead its own Log outcome button with its exact call activity', async () => {
+    const other = '77777777-7777-4777-8777-777777777777';
+    mocks.recent.mockResolvedValue({ ok: true, calls: [
+      { ...status('ended', { callActivityId: 'activity-new' }).status, intentId: other },
+      status('ended', { callActivityId: 'activity-old' }).status,
+    ] });
+    const { onLogOutcome } = await readyPanel();
+    const buttons = await screen.findAllByRole('button', { name: 'Log outcome' });
+    expect(buttons).toHaveLength(2);
+    await userEvent.click(buttons[1]!);
+    expect(onLogOutcome).toHaveBeenLastCalledWith('property-1', 'activity-old');
+    await userEvent.click(buttons[0]!);
+    expect(onLogOutcome).toHaveBeenLastCalledWith('property-1', 'activity-new');
+  });
+  it('does not offer Log outcome for an ended call with no projected call activity', async () => {
+    mocks.recent.mockResolvedValue({ ok: true, calls: [status('ended').status] });
+    await readyPanel();
+    expect(await screen.findByText(/Call ended/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Log outcome' })).not.toBeInTheDocument();
+  });
+  it('says an ended call that never connected was not answered, and a dialing call is not connected', async () => {
+    mocks.recent.mockResolvedValue({ ok: true, calls: [status('ended', { connected: false, callActivityId: 'a' }).status] });
+    await readyPanel();
+    expect(await screen.findByText(/Call ended. Not answered./)).toBeInTheDocument();
   });
   it('keeps polling an in-flight call and stops once it ends', async () => {
     mocks.recent.mockResolvedValue({ ok: true, calls: [status('awaiting_provider').status] });

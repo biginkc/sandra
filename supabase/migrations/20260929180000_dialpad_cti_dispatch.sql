@@ -204,8 +204,10 @@ $$;
 -- Webhook-derived call status
 -- ----------------------------------------------------------------------------
 -- States: prepared (not yet released), awaiting_provider (released, no signed
--- event yet), in_progress (signed event bound, not ended), ended, cancelled,
--- expired (window elapsed with no signed event bound).
+-- event yet), dialing (signed event bound, no evidence the call was answered),
+-- connected (signed connected/date_connected evidence, not ended), ended,
+-- cancelled, expired (window elapsed with no signed event bound). `connected`
+-- is also returned as a boolean so an ended call says whether it was answered.
 create or replace function public.fn_get_dialpad_call_status(
   p_org_id uuid, p_rep_user_id uuid, p_intent_id uuid
 ) returns jsonb
@@ -215,6 +217,7 @@ declare
   v_activity public.call_activities%rowtype;
   v_attempt_id uuid;
   v_state text;
+  v_connected boolean;
 begin
   if p_org_id is null or p_rep_user_id is null or p_intent_id is null then
     raise exception 'INVALID_INPUT' using errcode = '22023';
@@ -222,6 +225,15 @@ begin
   select * into v_intent from public.dialpad_call_intents
     where id = p_intent_id and org_id = p_org_id and rep_user_id = p_rep_user_id;
   if not found then raise exception 'NOT_FOUND' using errcode = 'P0002'; end if;
+
+  -- Connected only on signed evidence that both parties answered: a 'connected'
+  -- event or a date_connected timestamp (Dialpad documents it as present only
+  -- after answering) on any matched event. Any-event semantics make this
+  -- independent of arrival order, and identical to the A3 projection's rule.
+  select coalesce(bool_or(e.event_state = 'connected' or public.dialpad_cti_payload_ms(e.payload, 'date_connected') is not null), false)
+    into v_connected
+    from public.dialpad_call_events e
+    where e.org_id = p_org_id and e.matched_intent_id = v_intent.id and e.disposition = 'matched';
 
   select * into v_activity from public.call_activities
     where org_id = p_org_id and provider = 'dialpad' and jitter_attempt_id = 'dialpad-cti:' || v_intent.id::text;
@@ -231,14 +243,15 @@ begin
   v_state := case
     when v_intent.status = 'cancelled' then 'cancelled'
     when v_intent.status = 'matched' and v_activity.id is not null and v_activity.ended_at is not null then 'ended'
-    when v_intent.status = 'matched' then 'in_progress'
+    when v_intent.status = 'matched' and v_connected then 'connected'
+    when v_intent.status = 'matched' then 'dialing'
     when v_intent.expires_at <= now() then 'expired'
     when v_intent.dispatch_authorized_at is not null then 'awaiting_provider'
     else 'prepared'
   end;
 
   return jsonb_build_object(
-    'intentId', v_intent.id, 'state', v_state, 'propertyId', v_intent.property_id,
+    'intentId', v_intent.id, 'state', v_state, 'connected', v_connected, 'propertyId', v_intent.property_id,
     'expiresAt', v_intent.expires_at, 'dispatchAuthorizedAt', v_intent.dispatch_authorized_at,
     'callActivityId', v_activity.id, 'attemptId', v_attempt_id,
     'startedAt', v_activity.started_at, 'endedAt', v_activity.ended_at,

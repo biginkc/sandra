@@ -6,6 +6,10 @@
  * to belong to the org's Dialpad company and to carry the authenticated Sandra
  * user's verified email. Dialpad ids are int64, so the raw response text is
  * rewritten to quote them before JSON.parse can round them.
+ *
+ * Response fields used (official schema, all optional/nullable): id, company_id
+ * (int64), state (active | cancelled | deleted | pending | suspended) and
+ * emails (string[]). A null id, company_id or state fails closed.
  */
 
 export const DIALPAD_API_ORIGIN = 'https://dialpad.com';

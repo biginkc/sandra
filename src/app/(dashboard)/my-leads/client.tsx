@@ -39,8 +39,8 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [callRetry,setCallRetry]=useState(0);
   const [dialpadRequest,setDialpadRequest]=useState<DialpadCallRequest|null>(null);
   const dialpadNonce=useRef(0);
-  const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow}|null>(null);
-  type Opening = {action:MyLeadAction;row:QueueRow;scope:string};
+  const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow;callActivityId?:string|null}|null>(null);
+  type Opening = {action:MyLeadAction;row:QueueRow;scope:string;callActivityId?:string|null};
   type CurrentRead = Awaited<ReturnType<typeof loadMyLeads>> | null;
   const openingScope=JSON.stringify([member,search]);
   const activeScope=useRef(openingScope);activeScope.current=openingScope;
@@ -161,14 +161,14 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     if(!latest||latest.assignmentEpisodeId!==fresh.assignmentEpisodeId){setOpeningStatus({opening,message:'This lead assignment changed. Refresh the queue and reopen it.',busy:false});return;}
     const row=latest&&latest.queueVersion>=fresh.queueVersion?latest:fresh;
     pendingOpening.current=null;setOpeningStatus(null);submission.current=null;setCallOptions(null);
-    setDialog({action:opening.action,row});
+    setDialog({action:opening.action,row,callActivityId:opening.callActivityId});
   };
   const retryOpening=()=>{
     const opening=pendingOpening.current;if(!opening||openingStatus?.busy)return;
     const read=refresh();mutationReads.current.set(opening.row.propertyId,{scope:opening.scope,episodeId:opening.row.assignmentEpisodeId,requestId:request.current,read});
     void finishOpening(opening,read);
   };
-  const action=(kind:MyLeadAction,id:string)=>{
+  const action=(kind:MyLeadAction,id:string,callActivityId?:string|null)=>{
     const row=rawRow(id);if(!row)return;
     cancelOpening();
     if(kind==='start-call'&&dialpad){
@@ -184,9 +184,9 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     }
     const previous=mutationReads.current.get(id);
     if(previous?.scope===openingScope&&previous.episodeId===row.assignmentEpisodeId){
-      void finishOpening({action:kind,row,scope:openingScope},previous.read);return;
+      void finishOpening({action:kind,row,scope:openingScope,callActivityId},previous.read);return;
     }
-    cancelOpening();submission.current=null;setCallOptions(null);setDialog({action:kind,row});
+    cancelOpening();submission.current=null;setCallOptions(null);setDialog({action:kind,row,callActivityId});
 
   };
   useEffect(()=>{
@@ -279,7 +279,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
     {dialpad&&roster.settings.enabled&&<DialpadPanel bootstrap={dialpad} callRequest={dialpadRequest}
       onCallRequestHandled={nonce=>setDialpadRequest(current=>current?.nonce===nonce?null:current)}
-      onLogOutcome={propertyId=>{if(!rawRow(propertyId)){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId);}}/>}
+      onLogOutcome={(propertyId,callActivityId)=>{if(!rawRow(propertyId)){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId,callActivityId);}}/>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
       <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={tiles} search={search} selectedRepId={member}
         onReviewingChange={onReviewingChange}
@@ -311,7 +311,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       <p className="mt-3 text-xs text-muted-foreground">{kpis.firstCallPending} first calls pending · {kpis.pendingOutcomes} call outcomes pending{kpis.orgAppointmentsUnattributed?` · ${kpis.orgAppointmentsUnattributed} appointments in this organization have unknown historical attribution`:''}</p>
     </>}
     <WorkflowRecoveryContext.Provider value={recovery?.opening===dialog?{...recovery,refresh:()=>void recoverDialog()}:null}>
-    {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} key={dialog.row.propertyId} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]} callReferencesLoading={!callOptions} callReferencesError={callOptions?.error} onRetryCallReferences={()=>setCallRetry(value=>value+1)}/>}
+    {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} key={`${dialog.row.propertyId}:${dialog.callActivityId??''}`} initialCallActivityId={dialog.callActivityId??null} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]} callReferencesLoading={!callOptions} callReferencesError={callOptions?.error} onRetryCallReferences={()=>setCallRetry(value=>value+1)}/>}
     {common&&dialog?.action==='ready-for-offer'&&<AcquisitionReadinessDialog {...common} onSubmit={payload=>submit(payload)} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog?.action==='log-offer'&&<AcquisitionOfferDialog {...common} onSubmit={payload=>submit(payload)} motivationRequired={!motivation} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog&&['contract-signed','decline-offer','handoff','archive'].includes(dialog.action)&&<AcquisitionLifecycleDialog {...common} onSubmit={payload=>submit(payload)} mode={dialog.action as AcquisitionLifecycleMode}

@@ -51,6 +51,42 @@ describe('parseDialpadDirectoryUser', () => {
   });
 });
 
+// Shape per the official Dialpad "Get a user" reference (GET /api/v2/users/{id}): every field is optional and
+// nullable except voicemail and onboarding_completed; id/company_id/office_id are int64; state is one of
+// active | cancelled | deleted | pending | suspended; emails is an array of strings.
+describe('parseDialpadDirectoryUser against the documented user schema', () => {
+  const documented = (over: Record<string, string> = {}) => `{
+    "id": ${over.id ?? '5551234'}, "company_id": ${over.company_id ?? '9007199254740993'}, "office_id": 9007199254740995,
+    "state": ${over.state ?? '"active"'}, "emails": ${over.emails ?? '["Rep@Example.com"]'},
+    "first_name": "Maria", "last_name": null, "display_name": "Maria", "is_super_admin": false, "is_admin": false,
+    "job_title": null, "phone_numbers": ["+18165550100"], "extension": "1234", "do_not_disturb": false,
+    "is_on_duty": true, "on_duty_status": "available", "license": "talk",
+    "voicemail": {"bluetooth_voicemail": false, "voicemail_greeting": null}, "onboarding_completed": true
+  }`;
+  it('reads id, company_id, state and emails without rounding int64 values, ignoring the rest', () => {
+    expect(parseDialpadDirectoryUser(documented())).toEqual({ id: '5551234', companyId: '9007199254740993', state: 'active', emails: ['Rep@Example.com'] });
+  });
+  it.each(['cancelled', 'deleted', 'pending', 'suspended'])('parses the %s state so the identity check can refuse it', (state) => {
+    const user = parseDialpadDirectoryUser(documented({ state: JSON.stringify(state) }))!;
+    expect(user.state).toBe(state);
+    expect(assessDialpadDirectoryIdentity({ claimedDialpadUserId: '5551234', expectedCompanyId: '9007199254740993', sandraEmail: 'rep@example.com', sandraEmailConfirmed: true, user })).toEqual({ ok: false, reason: 'inactive' });
+  });
+  it('treats null emails as no emails, so a match is impossible', () => {
+    const user = parseDialpadDirectoryUser(documented({ emails: 'null' }))!;
+    expect(user.emails).toEqual([]);
+    expect(assessDialpadDirectoryIdentity({ claimedDialpadUserId: '5551234', expectedCompanyId: '9007199254740993', sandraEmail: 'rep@example.com', sandraEmailConfirmed: true, user })).toEqual({ ok: false, reason: 'email_mismatch' });
+  });
+  it('matches the confirmed Sandra email case-insensitively', () => {
+    const user = parseDialpadDirectoryUser(documented())!;
+    expect(assessDialpadDirectoryIdentity({ claimedDialpadUserId: '5551234', expectedCompanyId: '9007199254740993', sandraEmail: 'rep@example.com', sandraEmailConfirmed: true, user })).toEqual({ ok: true });
+  });
+  it('fails closed when the documented-nullable identity fields are null', () => {
+    expect(parseDialpadDirectoryUser(documented({ id: 'null' }))).toBeNull();
+    expect(parseDialpadDirectoryUser(documented({ company_id: 'null' }))).toBeNull();
+    expect(parseDialpadDirectoryUser(documented({ state: 'null' }))).toBeNull();
+  });
+});
+
 describe('fetchDialpadDirectoryUser', () => {
   it('calls the documented users endpoint with a bearer key, no redirects and no caching', async () => {
     let seen: { url: string; init: Parameters<DialpadDirectoryFetch>[1] } | null = null;

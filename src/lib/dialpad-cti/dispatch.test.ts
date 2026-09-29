@@ -56,7 +56,7 @@ function fakeDb(over: Partial<DialpadDispatchDb> = {}): DialpadDispatchDb & { ca
     prepareIntent: track('prepareIntent', async () => prepared()),
     authorizeDispatch: track('authorizeDispatch', async () => authorized()),
     cancelIntent: track('cancelIntent', async () => ({ intentId: INTENT, status: 'cancelled', replayed: false })),
-    getCallStatus: track('getCallStatus', async () => ({ intentId: INTENT, state: 'awaiting_provider', propertyId: PROPERTY, expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z' })),
+    getCallStatus: track('getCallStatus', async () => ({ intentId: INTENT, state: 'awaiting_provider', connected: false, propertyId: PROPERTY, expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z' })),
     ...over,
   };
   return Object.assign(db, { calls });
@@ -249,9 +249,9 @@ describe('call targets, status, cancel and recents', () => {
     expect(maskDialpadPhone('12')).toBe('••••');
   });
   it('derives status from the database, never from client input', async () => {
-    const getCallStatus = vi.fn(async () => ({ intentId: INTENT, state: 'in_progress', propertyId: PROPERTY, expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z', callActivityId: 'a', attemptId: 'b', startedAt: '2026-09-29T10:00:05Z', endedAt: null, durationSeconds: null, talkDurationSeconds: null }));
+    const getCallStatus = vi.fn(async () => ({ intentId: INTENT, state: 'connected', connected: true, propertyId: PROPERTY, expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z', callActivityId: 'a', attemptId: 'b', startedAt: '2026-09-29T10:00:05Z', endedAt: null, durationSeconds: null, talkDurationSeconds: null }));
     const result = await getDialpadCallStatus(fakeDb({ getCallStatus }), actor, INTENT);
-    expect(result).toMatchObject({ ok: true, status: { state: 'in_progress' } });
+    expect(result).toMatchObject({ ok: true, status: { state: 'connected', connected: true } });
     expect(getCallStatus).toHaveBeenCalledWith(ORG, REP, INTENT);
     expect(await getDialpadCallStatus(fakeDb(), actor, 'nope')).toMatchObject({ ok: false, code: 'invalid_input' });
     expect(await getDialpadCallStatus(fakeDb({ getCallStatus: async () => ({ intentId: INTENT, state: 'connected', propertyId: PROPERTY, expiresAt: 'x' }) }), actor, INTENT)).toMatchObject({ ok: false, code: 'unavailable' });
@@ -261,6 +261,10 @@ describe('call targets, status, cancel and recents', () => {
     expect(await cancelDialpadCall(fakeDb({ cancelIntent }), actor, INTENT)).toEqual({ ok: true });
     expect(cancelIntent).toHaveBeenCalledWith(ORG, REP, INTENT);
     expect(await cancelDialpadCall(fakeDb({ cancelIntent: async () => { throw new DialpadDbError({ kind: 'not_found' }, 'P0002'); } }), actor, INTENT)).toMatchObject({ ok: false, code: 'invalid_input' });
+  });
+  it('rejects a status that omits the connected flag rather than guessing', async () => {
+    const getCallStatus = vi.fn(async () => ({ intentId: INTENT, state: 'dialing', propertyId: PROPERTY, expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: null, callActivityId: null, attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null }) as never);
+    expect(await getDialpadCallStatus(fakeDb({ getCallStatus }), actor, INTENT)).toMatchObject({ ok: false });
   });
   it('resumes recent calls from the last hour', async () => {
     const listRecentIntentIds = vi.fn(async () => [INTENT]);

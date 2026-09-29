@@ -34,7 +34,7 @@ export interface DialpadCallRequest {
 type Props = {
   bootstrap: DialpadPanelBootstrap;
   callRequest: DialpadCallRequest | null;
-  onLogOutcome: (propertyId: string) => void;
+  onLogOutcome: (propertyId: string, callActivityId: string) => void;
   onCallRequestHandled?: (nonce: number) => void;
   pollMs?: number;
 };
@@ -56,12 +56,13 @@ type Chooser = {
   notice: string | null;
 };
 
-const ACTIVE_STATES: ReadonlySet<string> = new Set(['prepared', 'awaiting_provider', 'in_progress']);
+const ACTIVE_STATES: ReadonlySet<string> = new Set(['prepared', 'awaiting_provider', 'dialing', 'connected']);
 
 const STATE_LABEL: Record<DialpadCallStatus['state'], string> = {
   prepared: 'Preparing',
   awaiting_provider: 'Calling. Waiting for Dialpad to confirm.',
-  in_progress: 'In call. Confirmed by Dialpad.',
+  dialing: 'Dialing. Not answered yet.',
+  connected: 'Connected. Confirmed by Dialpad.',
   ended: 'Call ended.',
   cancelled: 'Cancelled. Nothing was dialed.',
   expired: 'No confirmation from Dialpad. Check the dialer before calling again.',
@@ -85,6 +86,16 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
   const attemptedUser = useRef<string | null>(null);
   const enabledTab = useRef(false);
   const startFired = useRef<string | null>(null);
+  // Live view of who the Dialpad iframe is signed in as. authGeneration bumps on every change (sign-out, switch, sign-in),
+  // so an authorization obtained under one sign-in can never be posted under another.
+  const iframeUserRef = useRef<string | null>(null);
+  const authGeneration = useRef(0);
+  const bindingRef = useRef(bootstrap.binding);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const callsRef = useRef(calls);
   useEffect(() => { callsRef.current = calls; }, [calls]);
   const [labelledRequest, setLabelledRequest] = useState<DialpadCallRequest | null>(null);
@@ -105,6 +116,8 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
     }
   }
 
+  useEffect(() => { bindingRef.current = binding; }, [binding]);
+
   const canDial = binding.status === 'verified' && iframeUser !== null && iframeUser === binding.dialpadUserId;
 
   useEffect(() => {
@@ -113,7 +126,14 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
         iframeWindow: iframeRef.current?.contentWindow ?? null,
         allowedOrigins: bootstrap.allowedOrigins,
       });
-      if (parsed.kind === 'user_authentication') setIframeUser(parsed.authenticated ? parsed.userId : null);
+      if (parsed.kind === 'user_authentication') {
+        const next = parsed.authenticated ? parsed.userId : null;
+        if (next !== iframeUserRef.current) {
+          iframeUserRef.current = next;
+          authGeneration.current += 1;
+        }
+        setIframeUser(next);
+      }
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
@@ -203,6 +223,12 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
   const startCall = async () => {
     const current = chooser;
     if (!current || !current.targets || current.slot === null || current.busy || !canDial) return;
+    const generation = authGeneration.current;
+    const stillDialable = () => {
+      const bound = bindingRef.current;
+      return mountedRef.current && authGeneration.current === generation && iframeUserRef.current !== null
+        && bound.status === 'verified' && bound.dialpadUserId === iframeUserRef.current;
+    };
     // One click, one key: a second click or a retry after a lost response re-sends the same key and can never dial again.
     if (startFired.current === current.idempotencyKey && !current.error) return;
     startFired.current = current.idempotencyKey;
@@ -233,6 +259,16 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
         : latest));
       return;
     }
+    if (!stillDialable()) {
+      // The iframe user changed, signed out, or the panel went away while Sandra authorized: never post this authorization.
+      void cancelDialpadCallAction(result.intentId).catch(() => undefined);
+      if (mountedRef.current) {
+        setChooser((latest) => (latest?.idempotencyKey === current.idempotencyKey
+          ? { ...latest, busy: false, idempotencyKey: crypto.randomUUID(), error: 'Your Dialpad sign-in changed while the call was starting. Nothing was dialed. Start the call again.' }
+          : latest));
+      }
+      return;
+    }
     let posted = false;
     try {
       posted = postToDialpad(iframeRef.current?.contentWindow, buildInitiateCallMessage(result.dial));
@@ -248,7 +284,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
     }
     const now = new Date().toISOString();
     const started: DialpadCallStatus = {
-        intentId: result.intentId, state: 'awaiting_provider', propertyId: current.request.propertyId, expiresAt: result.expiresAt, dispatchAuthorizedAt: now,
+        intentId: result.intentId, state: 'awaiting_provider', connected: false, propertyId: current.request.propertyId, expiresAt: result.expiresAt, dispatchAuthorizedAt: now,
         callActivityId: null, attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null,
     };
     setCalls((existing) => [started, ...existing.filter((entry) => entry.intentId !== started.intentId)].slice(0, 5));
@@ -317,9 +353,9 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
           {calls.map((call) => (
             <li key={call.intentId} className="rounded border p-2 text-sm">
               <span className="font-medium">{labels[call.propertyId] ?? 'Lead call'}</span>{' '}
-              <span>{STATE_LABEL[call.state]}{call.state === 'ended' ? duration(call.durationSeconds) : ''}</span>
-              {call.state === 'ended' && (
-                <Button type="button" variant="outline" className="ml-2" onClick={() => onLogOutcome(call.propertyId)}>Log outcome</Button>
+              <span>{call.state === 'ended' && !call.connected ? 'Call ended. Not answered.' : STATE_LABEL[call.state]}{call.state === 'ended' ? duration(call.durationSeconds) : ''}</span>
+              {call.state === 'ended' && call.callActivityId && (
+                <Button type="button" variant="outline" className="ml-2" onClick={() => onLogOutcome(call.propertyId, call.callActivityId!)}>Log outcome</Button>
               )}
             </li>
           ))}
