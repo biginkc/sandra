@@ -1,0 +1,613 @@
+{
+  "run_id": "204b06b6-be14-428c-bd45-fa918af2ea87",
+  "organization_id": "c15b3de8-1812-4b37-b761-f5cf8e45e3c9",
+  "batches": [
+    {
+      "start": 20000,
+      "end": 20100,
+      "seconds": 0.10099365199999966,
+      "canonical_messages": 125
+    },
+    {
+      "start": 20100,
+      "end": 20200,
+      "seconds": 0.09915192299999376,
+      "canonical_messages": 125
+    },
+    {
+      "start": 20200,
+      "end": 20300,
+      "seconds": 0.10713868299998808,
+      "canonical_messages": 125
+    },
+    {
+      "start": 20300,
+      "end": 20400,
+      "seconds": 0.09890768200000366,
+      "canonical_messages": 125
+    },
+    {
+      "start": 20400,
+      "end": 20500,
+      "seconds": 0.09970020500000487,
+      "canonical_messages": 125
+    },
+    {
+      "start": 20500,
+      "end": 20600,
+      "seconds": 0.11575644700002385,
+      "canonical_messages": 125
+    },
+    {
+      "start": 20600,
+      "end": 20700,
+      "seconds": 0.09864199699998721,
+      "canonical_messages": 125
+    },
+    {
+      "start": 20700,
+      "end": 20800,
+      "seconds": 0.0999975910000046,
+      "canonical_messages": 125
+    },
+    {
+      "start": 20800,
+      "end": 20900,
+      "seconds": 0.09848206300000584,
+      "canonical_messages": 125
+    },
+    {
+      "start": 20900,
+      "end": 21000,
+      "seconds": 0.09884568300000751,
+      "canonical_messages": 125
+    },
+    {
+      "start": 21000,
+      "end": 21100,
+      "seconds": 0.09876189999999951,
+      "canonical_messages": 125
+    },
+    {
+      "start": 21100,
+      "end": 21200,
+      "seconds": 0.09969266900000662,
+      "canonical_messages": 125
+    },
+    {
+      "start": 21200,
+      "end": 21300,
+      "seconds": 0.09939814999998475,
+      "canonical_messages": 125
+    },
+    {
+      "start": 21300,
+      "end": 21400,
+      "seconds": 0.0991888309999922,
+      "canonical_messages": 125
+    },
+    {
+      "start": 21400,
+      "end": 21500,
+      "seconds": 0.10067562000000407,
+      "canonical_messages": 125
+    },
+    {
+      "start": 21500,
+      "end": 21600,
+      "seconds": 0.10071470599999088,
+      "canonical_messages": 125
+    },
+    {
+      "start": 21600,
+      "end": 21700,
+      "seconds": 0.10125345900002003,
+      "canonical_messages": 125
+    },
+    {
+      "start": 21700,
+      "end": 21800,
+      "seconds": 0.11441472900000349,
+      "canonical_messages": 125
+    },
+    {
+      "start": 21800,
+      "end": 21900,
+      "seconds": 0.10075741899999002,
+      "canonical_messages": 125
+    },
+    {
+      "start": 21900,
+      "end": 22000,
+      "seconds": 0.09917330100000754,
+      "canonical_messages": 125
+    },
+    {
+      "start": 22000,
+      "end": 22100,
+      "seconds": 0.09997512300000722,
+      "canonical_messages": 125
+    },
+    {
+      "start": 22100,
+      "end": 22200,
+      "seconds": 0.10585200799999939,
+      "canonical_messages": 125
+    },
+    {
+      "start": 22200,
+      "end": 22300,
+      "seconds": 0.13640432500000088,
+      "canonical_messages": 125
+    },
+    {
+      "start": 22300,
+      "end": 22400,
+      "seconds": 0.1145785930000045,
+      "canonical_messages": 125
+    },
+    {
+      "start": 22400,
+      "end": 22500,
+      "seconds": 0.10119725599997764,
+      "canonical_messages": 125
+    },
+    {
+      "start": 22500,
+      "end": 22600,
+      "seconds": 0.09915810600000441,
+      "canonical_messages": 125
+    },
+    {
+      "start": 22600,
+      "end": 22700,
+      "seconds": 0.10001684999997451,
+      "canonical_messages": 125
+    },
+    {
+      "start": 22700,
+      "end": 22800,
+      "seconds": 0.10109287599999561,
+      "canonical_messages": 125
+    },
+    {
+      "start": 22800,
+      "end": 22900,
+      "seconds": 0.11402833799999712,
+      "canonical_messages": 125
+    },
+    {
+      "start": 22900,
+      "end": 23000,
+      "seconds": 0.11307252299999959,
+      "canonical_messages": 125
+    },
+    {
+      "start": 23000,
+      "end": 23100,
+      "seconds": 0.10187447500001667,
+      "canonical_messages": 125
+    },
+    {
+      "start": 23100,
+      "end": 23200,
+      "seconds": 0.10092118700001151,
+      "canonical_messages": 125
+    },
+    {
+      "start": 23200,
+      "end": 23300,
+      "seconds": 0.10058130300001267,
+      "canonical_messages": 125
+    },
+    {
+      "start": 23300,
+      "end": 23400,
+      "seconds": 0.10017120899999554,
+      "canonical_messages": 125
+    },
+    {
+      "start": 23400,
+      "end": 23500,
+      "seconds": 0.20941250999999284,
+      "canonical_messages": 125
+    },
+    {
+      "start": 23500,
+      "end": 23600,
+      "seconds": 0.10132944999998017,
+      "canonical_messages": 125
+    },
+    {
+      "start": 23600,
+      "end": 23700,
+      "seconds": 0.1295999419999987,
+      "canonical_messages": 125
+    },
+    {
+      "start": 23700,
+      "end": 23800,
+      "seconds": 0.10408465599999772,
+      "canonical_messages": 125
+    },
+    {
+      "start": 23800,
+      "end": 23900,
+      "seconds": 0.10072223200000963,
+      "canonical_messages": 125
+    },
+    {
+      "start": 23900,
+      "end": 24000,
+      "seconds": 0.09982040699998151,
+      "canonical_messages": 125
+    },
+    {
+      "start": 24000,
+      "end": 24100,
+      "seconds": 0.10020035000002281,
+      "canonical_messages": 125
+    },
+    {
+      "start": 24100,
+      "end": 24200,
+      "seconds": 0.10145361799999364,
+      "canonical_messages": 125
+    },
+    {
+      "start": 24200,
+      "end": 24300,
+      "seconds": 0.12111975199999847,
+      "canonical_messages": 125
+    },
+    {
+      "start": 24300,
+      "end": 24400,
+      "seconds": 0.1037638500000071,
+      "canonical_messages": 125
+    },
+    {
+      "start": 24400,
+      "end": 24500,
+      "seconds": 0.10214866999999117,
+      "canonical_messages": 125
+    },
+    {
+      "start": 24500,
+      "end": 24600,
+      "seconds": 0.10021867699998666,
+      "canonical_messages": 125
+    },
+    {
+      "start": 24600,
+      "end": 24700,
+      "seconds": 0.09928616299998794,
+      "canonical_messages": 125
+    },
+    {
+      "start": 24700,
+      "end": 24800,
+      "seconds": 0.0999660580000068,
+      "canonical_messages": 125
+    },
+    {
+      "start": 24800,
+      "end": 24900,
+      "seconds": 0.09981019199997831,
+      "canonical_messages": 125
+    },
+    {
+      "start": 24900,
+      "end": 25000,
+      "seconds": 0.09917671600001654,
+      "canonical_messages": 125
+    },
+    {
+      "start": 25000,
+      "end": 25100,
+      "seconds": 0.09996406300001581,
+      "canonical_messages": 125
+    },
+    {
+      "start": 25100,
+      "end": 25200,
+      "seconds": 0.09897149299999342,
+      "canonical_messages": 125
+    },
+    {
+      "start": 25200,
+      "end": 25300,
+      "seconds": 0.10867132000001334,
+      "canonical_messages": 125
+    },
+    {
+      "start": 25300,
+      "end": 25400,
+      "seconds": 0.09935447999998814,
+      "canonical_messages": 125
+    },
+    {
+      "start": 25400,
+      "end": 25500,
+      "seconds": 0.10003693900000599,
+      "canonical_messages": 125
+    },
+    {
+      "start": 25500,
+      "end": 25600,
+      "seconds": 0.1009524380000073,
+      "canonical_messages": 125
+    },
+    {
+      "start": 25600,
+      "end": 25700,
+      "seconds": 0.10088280600001553,
+      "canonical_messages": 125
+    },
+    {
+      "start": 25700,
+      "end": 25800,
+      "seconds": 0.09995943200001989,
+      "canonical_messages": 125
+    },
+    {
+      "start": 25800,
+      "end": 25900,
+      "seconds": 0.10064036599999326,
+      "canonical_messages": 125
+    },
+    {
+      "start": 25900,
+      "end": 26000,
+      "seconds": 0.09829256099999384,
+      "canonical_messages": 125
+    },
+    {
+      "start": 26000,
+      "end": 26100,
+      "seconds": 0.0982549219999953,
+      "canonical_messages": 125
+    },
+    {
+      "start": 26100,
+      "end": 26200,
+      "seconds": 0.10000078699999904,
+      "canonical_messages": 125
+    },
+    {
+      "start": 26200,
+      "end": 26300,
+      "seconds": 0.10028963000002022,
+      "canonical_messages": 125
+    },
+    {
+      "start": 26300,
+      "end": 26400,
+      "seconds": 0.0990453729999956,
+      "canonical_messages": 125
+    },
+    {
+      "start": 26400,
+      "end": 26500,
+      "seconds": 0.09875740600000427,
+      "canonical_messages": 125
+    },
+    {
+      "start": 26500,
+      "end": 26600,
+      "seconds": 0.13329336500001432,
+      "canonical_messages": 125
+    },
+    {
+      "start": 26600,
+      "end": 26700,
+      "seconds": 0.10087152400001287,
+      "canonical_messages": 125
+    },
+    {
+      "start": 26700,
+      "end": 26800,
+      "seconds": 0.10023517700000184,
+      "canonical_messages": 125
+    },
+    {
+      "start": 26800,
+      "end": 26900,
+      "seconds": 0.09969042299999842,
+      "canonical_messages": 125
+    },
+    {
+      "start": 26900,
+      "end": 27000,
+      "seconds": 0.09924702300000376,
+      "canonical_messages": 125
+    },
+    {
+      "start": 27000,
+      "end": 27100,
+      "seconds": 0.09800953800001366,
+      "canonical_messages": 125
+    },
+    {
+      "start": 27100,
+      "end": 27200,
+      "seconds": 0.10014694600002372,
+      "canonical_messages": 125
+    },
+    {
+      "start": 27200,
+      "end": 27300,
+      "seconds": 0.10268724499999848,
+      "canonical_messages": 125
+    },
+    {
+      "start": 27300,
+      "end": 27400,
+      "seconds": 0.13698901600000113,
+      "canonical_messages": 125
+    },
+    {
+      "start": 27400,
+      "end": 27500,
+      "seconds": 0.09612438099998144,
+      "canonical_messages": 125
+    },
+    {
+      "start": 27500,
+      "end": 27600,
+      "seconds": 0.0973512479999954,
+      "canonical_messages": 125
+    },
+    {
+      "start": 27600,
+      "end": 27700,
+      "seconds": 0.09772769799999992,
+      "canonical_messages": 125
+    },
+    {
+      "start": 27700,
+      "end": 27800,
+      "seconds": 0.09967568499999402,
+      "canonical_messages": 125
+    },
+    {
+      "start": 27800,
+      "end": 27900,
+      "seconds": 0.10960985699998105,
+      "canonical_messages": 125
+    },
+    {
+      "start": 27900,
+      "end": 28000,
+      "seconds": 0.09762428700000214,
+      "canonical_messages": 125
+    },
+    {
+      "start": 28000,
+      "end": 28100,
+      "seconds": 0.09597998299997812,
+      "canonical_messages": 125
+    },
+    {
+      "start": 28100,
+      "end": 28200,
+      "seconds": 0.09444294799999398,
+      "canonical_messages": 125
+    },
+    {
+      "start": 28200,
+      "end": 28300,
+      "seconds": 0.09759844000001294,
+      "canonical_messages": 125
+    },
+    {
+      "start": 28300,
+      "end": 28400,
+      "seconds": 0.12045263400000294,
+      "canonical_messages": 125
+    },
+    {
+      "start": 28400,
+      "end": 28500,
+      "seconds": 0.09630643599999189,
+      "canonical_messages": 125
+    },
+    {
+      "start": 28500,
+      "end": 28600,
+      "seconds": 0.09694114100000206,
+      "canonical_messages": 125
+    },
+    {
+      "start": 28600,
+      "end": 28700,
+      "seconds": 0.10578023700000472,
+      "canonical_messages": 125
+    },
+    {
+      "start": 28700,
+      "end": 28800,
+      "seconds": 0.0959041339999942,
+      "canonical_messages": 125
+    },
+    {
+      "start": 28800,
+      "end": 28900,
+      "seconds": 0.09780225500000483,
+      "canonical_messages": 125
+    },
+    {
+      "start": 28900,
+      "end": 29000,
+      "seconds": 0.09610435099997972,
+      "canonical_messages": 125
+    },
+    {
+      "start": 29000,
+      "end": 29100,
+      "seconds": 0.10841966500001377,
+      "canonical_messages": 125
+    },
+    {
+      "start": 29100,
+      "end": 29200,
+      "seconds": 0.09625575600000502,
+      "canonical_messages": 125
+    },
+    {
+      "start": 29200,
+      "end": 29300,
+      "seconds": 0.09745692399999939,
+      "canonical_messages": 125
+    },
+    {
+      "start": 29300,
+      "end": 29400,
+      "seconds": 0.0972188770000173,
+      "canonical_messages": 125
+    },
+    {
+      "start": 29400,
+      "end": 29500,
+      "seconds": 0.1138636629999894,
+      "canonical_messages": 125
+    },
+    {
+      "start": 29500,
+      "end": 29600,
+      "seconds": 0.09960525400001075,
+      "canonical_messages": 125
+    },
+    {
+      "start": 29600,
+      "end": 29700,
+      "seconds": 0.13192482100001257,
+      "canonical_messages": 125
+    },
+    {
+      "start": 29700,
+      "end": 29800,
+      "seconds": 0.09999141299999792,
+      "canonical_messages": 125
+    },
+    {
+      "start": 29800,
+      "end": 29900,
+      "seconds": 0.10068051700000069,
+      "canonical_messages": 125
+    },
+    {
+      "start": 29900,
+      "end": 30000,
+      "seconds": 0.10309180699999843,
+      "canonical_messages": 125
+    }
+  ],
+  "canonical_counts": {
+    "messages": 37500,
+    "conversations": 30000,
+    "unknown_senders": 0
+  },
+  "progress": 30000,
+  "scope": "Owned fixture canonical writes only; worker drain and summary reconciliation are separate"
+}

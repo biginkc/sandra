@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "run_id": "11e1a0c9-271e-42b9-b3c6-2b2011b21e3d",
+  "organization_id": "cceeb398-d517-4485-b0f5-83de5db42c49",
+  "as_of": "2026-09-29T20:34:39.201921+00:00",
+  "known": 108000,
+  "unknown": 12000,
+  "batch_size": 100,
+  "expected_messages": 147000,
+  "expected_summaries": 120000,
+  "creation_mode": "source-only-manifest"
+}
