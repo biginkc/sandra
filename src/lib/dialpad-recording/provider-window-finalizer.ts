@@ -43,7 +43,10 @@ export interface DialpadRecordingFinalResultRead {
   result: DialpadRecordingFinalResult | null;
 }
 
+export interface DialpadRecordingFinalizerCandidate { orgId: string; captureId: string; policyVersion: string; }
+
 export interface DialpadRecordingFinalizerDb {
+  listCandidates(limit?: number): Promise<DialpadRecordingFinalizerCandidate[]>;
   getInput(orgId: string, captureId: string, policyVersion: string): Promise<DialpadRecordingFinalInput>;
   finalize(orgId: string, captureId: string, policyVersion: string, expectedInputDigest: string): Promise<DialpadRecordingFinalization>;
   getResult(orgId: string, repUserId: string, captureId: string): Promise<DialpadRecordingFinalResultRead>;
@@ -77,6 +80,14 @@ function nullableInteger(value: unknown, label: string): number | null {
 function parseReasons(value: unknown): string[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 32 || value.some((reason) => typeof reason !== 'string' || reason.length === 0)) throw new Error('Invalid finalizer reasons');
   return value as string[];
+}
+
+function parseCandidates(value: unknown): DialpadRecordingFinalizerCandidate[] {
+  if (!Array.isArray(value)) throw new Error('Invalid finalizer candidates');
+  return value.map((entry) => {
+    if (!isRecord(entry)) throw new Error('Invalid finalizer candidate');
+    return { orgId: text(entry.orgId, 'candidate org id'), captureId: text(entry.captureId, 'candidate capture id'), policyVersion: text(entry.policyVersion, 'candidate policy version') };
+  });
 }
 
 function parseInput(value: unknown): DialpadRecordingFinalInput {
@@ -139,6 +150,9 @@ function unwrap<T>(result: { data: T; error: RpcError }): T {
 
 export function createSupabaseDialpadRecordingFinalizerDb(client: SupabaseClient<Database>): DialpadRecordingFinalizerDb {
   return {
+    async listCandidates(limit = 25) {
+      return parseCandidates(unwrap(await client.rpc('fn_list_dialpad_recording_provider_window_candidates', { p_limit: limit })));
+    },
     async getInput(orgId, captureId, policyVersion) {
       return parseInput(unwrap(await client.rpc('fn_get_dialpad_recording_final_input', { p_org_id: orgId, p_capture_id: captureId, p_policy_version: policyVersion })));
     },

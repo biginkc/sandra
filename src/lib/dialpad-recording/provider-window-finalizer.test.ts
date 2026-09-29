@@ -5,6 +5,17 @@ const digest = 'a'.repeat(64);
 const base = { algorithmVersion: 'provider-window-finalizer-v1', policyVersion: 'fixture-v1', policyHash: digest, epoch: 1, inputDigest: digest, observedSamples: 4_800_001, eligibleSamples: 4_800_001, status: 'eligible', reasons: ['eligible'], sampleWindow: { lowerSample: 0, upperSample: 4_800_001 }, selectedSummary: {} };
 
 describe('provider-window finalizer adapter', () => {
+  it('parses bounded durable reconciliation candidates', async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: [{ orgId: 'org', captureId: 'capture', policyVersion: 'fixture-v1' }],
+      error: null,
+    });
+    const db = createSupabaseDialpadRecordingFinalizerDb({ rpc } as never);
+
+    await expect(db.listCandidates(10)).resolves.toEqual([{ orgId: 'org', captureId: 'capture', policyVersion: 'fixture-v1' }]);
+    expect(rpc).toHaveBeenCalledWith('fn_list_dialpad_recording_provider_window_candidates', { p_limit: 10 });
+  });
+
   it('calls service RPCs and strictly parses the numeric result', async () => {
     const rpc = vi.fn()
       .mockResolvedValueOnce({ data: base, error: null })

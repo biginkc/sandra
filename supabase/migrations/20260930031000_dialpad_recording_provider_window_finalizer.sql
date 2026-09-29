@@ -275,6 +275,28 @@ begin
 end;
 $$;
 
+-- Bounded browser-independent reconciliation selection. It uses terminal
+-- capture/result state as the durable work signal; duplicate workers are safe
+-- because finalization is digest-fenced and replayable.
+create or replace function public.fn_list_dialpad_recording_provider_window_candidates(p_limit integer default 25)
+returns jsonb language sql stable security definer set search_path = '' as $$
+  select coalesce(jsonb_agg(jsonb_build_object('orgId',q.org_id,'captureId',q.capture_id,'policyVersion',q.policy_version) order by q.result_at,q.capture_id),'[]'::jsonb)
+    from (
+      select c.org_id,c.id as capture_id,c.result_at,p.policy_version
+        from public.dialpad_recording_captures c
+        join lateral (
+          select policy_version from public.dialpad_recording_provider_window_policies p
+           where p.org_id=c.org_id and p.accepted_at is not null and p.revoked_at is null
+           order by p.accepted_at desc,p.policy_version desc limit 1
+        ) p on true
+        left join public.dialpad_recording_provider_window_results r on r.capture_id=c.id and r.org_id=c.org_id
+       where c.status in ('sealed','partial','failed')
+         and (r.capture_id is null or r.input_digest is distinct from (public.dialpad_recording_provider_window_input(c.org_id,c.id,r.policy_version)->>'inputDigest') or r.policy_version is distinct from p.policy_version)
+       order by c.result_at,c.id
+       limit greatest(1,least(coalesce(p_limit,25),100))
+    ) q;
+$$;
+
 create or replace function public.fn_get_dialpad_recording_provider_window_result(p_org_id uuid,p_rep_user_id uuid,p_capture_id uuid)
 returns jsonb language plpgsql stable security definer set search_path = '' as $$
 declare r public.dialpad_recording_provider_window_results%rowtype; c public.dialpad_recording_captures%rowtype; current_digest text;
@@ -360,10 +382,12 @@ $$;
 
 revoke all on function public.dialpad_recording_provider_window_add_reason(text[],text) from public,anon,authenticated,service_role;
 revoke all on function public.dialpad_recording_provider_window_input(uuid,uuid,text) from public,anon,authenticated,service_role;
+revoke all on function public.fn_list_dialpad_recording_provider_window_candidates(integer) from public,anon,authenticated;
 revoke all on function public.fn_get_dialpad_recording_final_input(uuid,uuid,text) from public,anon,authenticated;
 revoke all on function public.fn_finalize_dialpad_recording_provider_window(uuid,uuid,text,text) from public,anon,authenticated;
 revoke all on function public.fn_get_dialpad_recording_provider_window_result(uuid,uuid,uuid) from public,anon,authenticated;
 revoke all on function public.dialpad_recording_provider_window_is_eligible(uuid,uuid,uuid) from public,anon,authenticated;
+grant execute on function public.fn_list_dialpad_recording_provider_window_candidates(integer) to service_role;
 grant execute on function public.fn_get_dialpad_recording_final_input(uuid,uuid,text) to service_role;
 grant execute on function public.fn_finalize_dialpad_recording_provider_window(uuid,uuid,text,text) to service_role;
 grant execute on function public.fn_get_dialpad_recording_provider_window_result(uuid,uuid,uuid) to service_role;

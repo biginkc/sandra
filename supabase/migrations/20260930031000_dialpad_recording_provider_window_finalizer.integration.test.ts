@@ -58,6 +58,8 @@ describe('provider-window finalizer migration', () => {
   beforeEach(async () => { await pg.query('truncate public.dialpad_recording_provider_window_results, public.dialpad_recording_provider_window_policies cascade'); await seedCapture(); });
 
   it('clips exact samples, finalizes through the real RPC, and replays without changing evaluated_at', async () => {
+    const candidatesBefore = await pg.query<{v:any}>('select public.fn_list_dialpad_recording_provider_window_candidates($1) v',[10]);
+    expect(candidatesBefore.rows[0]!.v).toEqual([{ orgId: ORG, captureId, policyVersion: POLICY }]);
     const input = await pg.query<{v:any}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
     expect(input.rows[0]!.v.status).toBe('eligible');
     expect(input.rows[0]!.v.observedSamples).toBe(4_800_001);
@@ -67,6 +69,7 @@ describe('provider-window finalizer migration', () => {
     expect(done.rows[0]!.v.replayed).toBe(false);
     const replay = await pg.query<{v:any}>('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4) v',[ORG,captureId,POLICY,input.rows[0]!.v.inputDigest]);
     expect(replay.rows[0]!.v.replayed).toBe(true);
+    expect((await pg.query<{v:any}>('select public.fn_list_dialpad_recording_provider_window_candidates($1) v',[10])).rows[0]!.v).toEqual([]);
     expect((await pg.query<{evaluated_at:string}>('select evaluated_at from public.dialpad_recording_provider_window_results where capture_id=$1',[captureId])).rows[0]!.evaluated_at.toString()).toBe(evaluated.rows[0]!.evaluated_at.toString());
     const browser = await pg.query<{v:any}>('select public.fn_get_dialpad_recording_browser_status($1,$2,$3) v',[ORG,OWNER,captureId]);
     expect(browser.rows[0]!.v.finalResult).toMatchObject({ status: 'eligible', eligibleSamples: 4_800_001 });
