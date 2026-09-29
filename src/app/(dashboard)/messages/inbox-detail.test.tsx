@@ -18,6 +18,9 @@ const refreshCalls: number[] = [];
 const pushCalls: string[] = [];
 let navigationSearch = "";
 const setOutreachDispoMock = vi.hoisted(() => vi.fn());
+const setInboxDispoAndStartDripMock = vi.hoisted(() => vi.fn());
+const listDripChoicesMock = vi.hoisted(() => vi.fn());
+const startDripForLeadsMock = vi.hoisted(() => vi.fn());
 const moveMessageThreadToLeadMock = vi.hoisted(() => vi.fn());
 const confirmAiDispositionReviewMock = vi.hoisted(() => vi.fn());
 const supabaseMock = vi.hoisted(() => {
@@ -76,7 +79,12 @@ vi.mock("next/navigation", () => ({
 vi.mock("./dispo-actions", () => ({
   confirmAiDispositionReview: confirmAiDispositionReviewMock,
   setOutreachDispo: setOutreachDispoMock,
+  setInboxDispoAndStartDrip: setInboxDispoAndStartDripMock,
   moveMessageThreadToLead: moveMessageThreadToLeadMock,
+}));
+vi.mock("@/app/(dashboard)/sequences/actions", () => ({
+  listDripChoices: listDripChoicesMock,
+  startDripForLeads: startDripForLeadsMock,
 }));
 
 // Server-action modules ("use server" at top) cannot be imported in jsdom —
@@ -249,6 +257,9 @@ describe("<InboxDetail />", () => {
     moveMessageThreadToLeadMock.mockClear();
     confirmAiDispositionReviewMock.mockClear();
     setOutreachDispoMock.mockResolvedValue({ ok: true });
+    setInboxDispoAndStartDripMock.mockResolvedValue({ ok: true, enrollment: { status: "enrolled", reason: "Enrolled" } });
+    listDripChoicesMock.mockResolvedValue({ ok: true, data: [{ id: "s1", name: "Seller follow-up", textCount: 2, days: 3, firstSend: "Monday, Sep 28, 8:00 AM CDT" }] });
+    startDripForLeadsMock.mockResolvedValue({ ok: true, data: { results: [{ propertyId: "prop-1", status: "enrolled", reason: "Enrolled" }] } });
     moveMessageThreadToLeadMock.mockResolvedValue({
       ok: true,
       alreadyQualified: false,
@@ -1454,15 +1465,22 @@ describe("<InboxDetail />", () => {
       <InboxDetail data={data} assigneeEmails={{}} currentUserId="user-1" />,
     );
 
-    await user.click(screen.getByTestId("dispo-needs-sequence"));
+    await user.click(screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
 
-    expect(setOutreachDispoMock).toHaveBeenCalledWith(
-      "prop-1",
-      "needs_sequence",
-    );
+    expect(setInboxDispoAndStartDripMock).toHaveBeenCalledWith("prop-1", "needs_sequence", "s1");
     await waitFor(() => {
       expect(screen.getAllByText("Needs sequence")).toHaveLength(2);
     });
+  });
+
+  it("leaves needs_sequence to the follow-up owner without enrollment", async () => {
+    const user = userEvent.setup();
+    render(<InboxDetail data={makeData({ contactId: "contact-leave" })} assigneeEmails={{}} currentUserId="user-1" />);
+    await user.click(screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
+    await user.click(await screen.findByRole("button", { name: "Leave it to the follow-up owner" }));
+    expect(setOutreachDispoMock).toHaveBeenCalledWith("prop-1", "needs_sequence");
+    expect(setInboxDispoAndStartDripMock).not.toHaveBeenCalled();
   });
 
   it("sets nurture (Follow up) from the picker button", async () => {
@@ -1497,6 +1515,33 @@ describe("<InboxDetail />", () => {
     expect(screen.getAllByText("Follow up")).toHaveLength(2);
     expect(screen.queryByText("Legacy follow-up")).not.toBeInTheDocument();
     expect(screen.queryByText("Nurture")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Also start a drip" })).not.toBeInTheDocument();
+  });
+
+  it("offers a drip after not interested and enrolls without changing the outcome", async () => {
+    const user = userEvent.setup();
+    render(<InboxDetail data={makeData({ contactId: "contact-not-now", outreachDispo: "not_interested" })} assigneeEmails={{}} currentUserId="user-1" />);
+    await user.click(screen.getByRole("button", { name: "Also start a drip" }));
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+    expect(startDripForLeadsMock).toHaveBeenCalledWith("s1", ["prop-1"]);
+    expect(setOutreachDispoMock).not.toHaveBeenCalled();
+  });
+
+  it("does not claim the outcome was saved when an additional drip is refused", async () => {
+    startDripForLeadsMock.mockResolvedValue({
+      ok: true,
+      data: { results: [{ propertyId: "prop-1", status: "skipped", reason: "A rep is handling this lead personally (Nurture)." }] },
+    });
+    const user = userEvent.setup();
+    render(<InboxDetail data={makeData({ contactId: "contact-not-now-refused", outreachDispo: "not_interested" })} assigneeEmails={{}} currentUserId="user-1" />);
+
+    await user.click(screen.getByRole("button", { name: "Also start a drip" }));
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Not enrolled: A rep is handling this lead personally (Nurture).");
+    expect(screen.queryByText(/Saved\. Not enrolled/)).not.toBeInTheDocument();
+    expect(setOutreachDispoMock).not.toHaveBeenCalled();
+    expect(setInboxDispoAndStartDripMock).not.toHaveBeenCalled();
   });
 
   it("keeps lead promotion out of the More outcome menu", async () => {

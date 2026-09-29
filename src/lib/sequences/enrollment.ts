@@ -3,6 +3,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getConsentState } from "@/lib/messaging/consent";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
+import { evaluateSuppression, HUMAN_OWNED_DISPOS } from "@/lib/messaging/suppression";
+import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 import {
   LEAD_EVENT_TYPES,
@@ -11,7 +13,7 @@ import {
 } from "@/lib/events";
 
 import { delayToDate } from "./delays";
-import type { PauseReason } from "./pause-rules";
+import { evaluatePause, type PauseReason } from "./pause-rules";
 
 export type SequenceEventActor =
   | { actorType: "user"; actorId: string }
@@ -29,6 +31,7 @@ export type EnrollmentOutcome =
   | { status: "no_phone"; message: string }
   | { status: "landline_phone"; message: string }
   | { status: "no_consent"; message: string }
+  | { status: "suppressed"; message: string }
   | { status: "sequence_not_found" }
   | { status: "sequence_inactive" }
   | { status: "property_not_found" }
@@ -68,9 +71,9 @@ export async function enrollLead(
   const { data: prop, error: propErr } = await client
     .from("properties")
     .select(
-      `id, org_id, homeowner_contact_id,
+      `id, org_id, homeowner_contact_id, outreach_dispo, status, is_dnc_locked,
        homeowner:contacts!properties_homeowner_contact_id_fkey(
-         id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type
+         id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out
        )`,
     )
     .eq("id", params.propertyId)
@@ -84,6 +87,14 @@ export async function enrollLead(
     };
   }
 
+  if (evaluatePause({ type: "status_change", newStatus: prop.status }).shouldPause) {
+    const label = prop.status.replaceAll("_", " ");
+    return {
+      status: "suppressed",
+      message: `This lead is marked ${label[0]!.toUpperCase()}${label.slice(1)}, so a drip can't start.`,
+    };
+  }
+
   // PostgREST may return the joined contact as an object or a
   // one-element array — normalize before reading.
   type HomeownerJoin = {
@@ -94,12 +105,42 @@ export async function enrollLead(
     phone_2_type: string | null;
     phone_3: string | null;
     phone_3_type: string | null;
+    do_not_contact: boolean;
+    sms_opted_out: boolean;
   };
   const rawHomeowner = prop.homeowner as unknown as
     HomeownerJoin | HomeownerJoin[] | null;
   const homeowner = Array.isArray(rawHomeowner)
     ? (rawHomeowner[0] ?? null)
     : rawHomeowner;
+  if (prop.is_dnc_locked) {
+    return { status: "suppressed", message: "This lead is locked as do not contact." };
+  }
+  const humanOwnedDispos: ReadonlySet<string> = HUMAN_OWNED_DISPOS;
+  if (prop.outreach_dispo && humanOwnedDispos.has(prop.outreach_dispo)) {
+    const label = prop.outreach_dispo.replaceAll("_", " ");
+    return {
+      status: "suppressed",
+      message: `A rep is handling this lead personally (${label[0]!.toUpperCase()}${label.slice(1)}). Change the outcome to start a drip.`,
+    };
+  }
+  if (!homeowner && prop.homeowner_contact_id) {
+    return { status: "suppressed", message: "Contact details could not be verified." };
+  }
+  const suppression = evaluateSuppression({
+    outreachDispo: prop.outreach_dispo,
+    doNotContact: homeowner?.do_not_contact,
+    smsOptedOut: homeowner?.sms_opted_out,
+  });
+  if (suppression.suppressed) {
+    const message = suppression.source === "outreach_dispo"
+      ? prop.outreach_dispo === "dnc" ? "This lead is marked do not contact."
+        : prop.outreach_dispo === "opted_out" ? "This lead has opted out of texts."
+          : "This lead's phone number is marked unusable."
+      : suppression.source === "do_not_contact" ? "This contact is marked do not contact."
+        : "This contact has opted out of texts.";
+    return { status: "suppressed", message };
+  }
   const destination = selectBestSmsPhone(homeowner);
   if (!homeowner || !destination) {
     return {
@@ -158,18 +199,22 @@ export async function enrollLead(
     const actor: SequenceEventActor = params.enrolledByUserId
       ? { actorType: "user", actorId: params.enrolledByUserId }
       : SYSTEM_ACTOR;
-    await recordLeadEvent({
-      propertyId: params.propertyId,
-      ...actor,
-      eventType: LEAD_EVENT_TYPES.SEQUENCE_ENROLLED,
-      payload: {
-        enrollment_id: inserted.id,
-        sequence_id: params.sequenceId,
-        label: seq.name,
-      },
-      sourceType: "sequence_enrollments.created",
-      sourceId: inserted.id,
-    });
+    try {
+      await recordLeadEvent({
+        propertyId: params.propertyId,
+        ...actor,
+        eventType: LEAD_EVENT_TYPES.SEQUENCE_ENROLLED,
+        payload: {
+          enrollment_id: inserted.id,
+          sequence_id: params.sequenceId,
+          label: seq.name,
+        },
+        sourceType: "sequence_enrollments.created",
+        sourceId: inserted.id,
+      });
+    } catch (error) {
+      reportError(error, { tags: { surface: "sequence_enrollment_event_after_commit" }, extra: { enrollmentId: inserted.id } });
+    }
   }
 
   return {

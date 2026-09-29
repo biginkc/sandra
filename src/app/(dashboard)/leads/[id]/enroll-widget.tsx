@@ -4,17 +4,16 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
+import { StartDripPicker, type PickResult } from "@/components/sequences/start-drip-picker";
 import { callAction } from "@/lib/errors/call-action";
 import {
   cancelEnrollment,
-  enrollLeadInSequence,
   listPropertyEnrollments,
-  listSequences,
+  startDripForLeads,
   retrySequenceStepAction,
   resumeEnrollmentAction,
 } from "@/app/(dashboard)/sequences/actions";
 
-type ActiveSequence = { id: string; name: string; active: boolean; step_count: number };
 type Enrollment = {
   id: string;
   status: string;
@@ -37,8 +36,6 @@ type Enrollment = {
  */
 export function EnrollInSequenceWidget({ propertyId }: { propertyId: string }) {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
-  const [sequences, setSequences] = useState<ActiveSequence[]>([]);
   const [enrollments, setEnrollments] = useState<Enrollment[]>([]);
   const [pending, startTransition] = useTransition();
 
@@ -60,37 +57,15 @@ export function EnrollInSequenceWidget({ propertyId }: { propertyId: string }) {
     if (r.ok) setEnrollments(r.data);
   };
 
-  const loadSequences = async () => {
-    const r = await listSequences();
-    if (r.ok) {
-      setSequences(
-        r.data
-          .filter((s) => s.active && !s.archived_at && s.step_count > 0)
-          .map((s) => ({
-            id: s.id,
-            name: s.name,
-            active: s.active,
-            step_count: s.step_count,
-          })),
-      );
+  const onEnroll = async (sequenceId: string): Promise<PickResult> => {
+    const result = await startDripForLeads(sequenceId, [propertyId]);
+    if (!result.ok) return { status: "failed", reason: result.error.message, saved: false };
+    const outcome = result.data.results[0];
+    if (outcome.status === "enrolled") {
+      await refreshEnrollments();
+      router.refresh();
     }
-  };
-
-  const onEnroll = (sequenceId: string) => {
-    startTransition(async () => {
-      const r = await callAction(
-        enrollLeadInSequence(sequenceId, propertyId),
-        {
-          successMessage: "Enrolled",
-          fallbackMessage: "Could not enroll",
-        },
-      );
-      if (r.ok) {
-        setOpen(false);
-        await refreshEnrollments();
-        router.refresh();
-      }
-    });
+    return { ...outcome, saved: false };
   };
 
   const onCancel = (enrollmentId: string) => {
@@ -131,44 +106,9 @@ export function EnrollInSequenceWidget({ propertyId }: { propertyId: string }) {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            setOpen(!open);
-            if (!open) void loadSequences();
-          }}
-          disabled={pending}
-          data-testid="enroll-in-sequence-button"
-        >
-          {activeOrPaused.length > 0
-            ? `🔄 Sequences (${activeOrPaused.length})`
-            : "Enroll in sequence"}
-        </Button>
-        {open && (
-          <div className="bg-popover absolute z-50 mt-1 flex w-64 flex-col gap-1 rounded-md border p-2 shadow-md">
-            {sequences.length === 0 ? (
-              <div className="text-muted-foreground p-2 text-xs">
-                No active sequences with steps. Ask an admin to create and
-                activate one before enrolling this lead.
-              </div>
-            ) : (
-              sequences.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => onEnroll(s.id)}
-                  className="hover:bg-accent rounded-md px-2 py-1.5 text-left text-sm"
-                  disabled={pending}
-                >
-                  {s.name}
-                  <span className="text-muted-foreground ml-1 text-xs">
-                    ({s.step_count} step{s.step_count === 1 ? "" : "s"})
-                  </span>
-                </button>
-              ))
-            )}
-          </div>
-        )}
+        <div data-testid="enroll-in-sequence-button">
+          <StartDripPicker triggerLabel={activeOrPaused.length > 0 ? `Drips (${activeOrPaused.length})` : "Start follow-up drip"} onChoose={onEnroll} disabled={pending} />
+        </div>
       </div>
 
       {activeOrPaused.length > 0 && (

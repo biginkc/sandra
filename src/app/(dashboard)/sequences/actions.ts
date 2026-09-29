@@ -11,6 +11,7 @@ import {
   retrySequenceStep,
 } from "@/lib/sequences/enrollment";
 import { getSequenceImpact } from "@/lib/sequences/impact";
+import { enrollmentReason, previewFirstSend, startFollowUpDrip, type DripResult } from "@/lib/sequences/start-drip";
 
 import { requireSequenceAdmin } from "./admin";
 
@@ -43,6 +44,59 @@ export type SequenceWithSteps = {
     target_status: string | null;
   }>;
 };
+
+export type DripChoice = { id: string; name: string; textCount: number; days: number; firstSend: string | null };
+
+export async function listDripChoices(): Promise<Result<DripChoice[]>> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+    const { data: sequences, error } = await supabase.from("sequences")
+      .select("id, name").eq("active", true).is("archived_at", null).order("name");
+    if (error) return { ok: false, error: { code: "SEQ_LIST_FAILED", message: error.message } };
+    if (!sequences?.length) return ok([]);
+    const { data: steps, error: stepError } = await supabase.from("sequence_steps")
+      .select("sequence_id, step_index, delay_after_previous_minutes, action_type")
+      .in("sequence_id", sequences.map((sequence) => sequence.id)).order("step_index");
+    if (stepError) return { ok: false, error: { code: "SEQ_LIST_FAILED", message: stepError.message } };
+    return ok(sequences.flatMap((sequence) => {
+      const own = (steps ?? []).filter((step) => step.sequence_id === sequence.id);
+      if (!own.length || own[0].step_index !== 0) return [];
+      const firstSmsIndex = own.findIndex((step) => step.action_type === "send_sms");
+      return [{
+        id: sequence.id,
+        name: sequence.name,
+        textCount: own.filter((step) => step.action_type === "send_sms").length,
+        days: Math.ceil(own.reduce((sum, step) => sum + step.delay_after_previous_minutes, 0) / 1440),
+        firstSend: firstSmsIndex < 0 ? null : previewFirstSend(
+          own.slice(0, firstSmsIndex + 1).reduce((sum, step) => sum + step.delay_after_previous_minutes, 0),
+          "America/Chicago",
+        ),
+      }];
+    }));
+  } catch (e) {
+    reportError(e, { tags: { surface: "list_drip_choices" } });
+    return errFromUnknown(e, "SEQ_LIST_FAILED");
+  }
+}
+
+export async function startDripForLeads(sequenceId: string, propertyIds: string[]): Promise<Result<{ results: DripResult[] }>> {
+  if (!Array.isArray(propertyIds) || propertyIds.length === 0 || propertyIds.length > 100) {
+    return { ok: false, error: { code: "VALIDATION", message: "Choose between 1 and 100 leads." } };
+  }
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+    const result = await startFollowUpDrip(supabase, { sequenceId, propertyIds, userId: user.id });
+    for (const path of ["/leads", "/messages", "/properties", ...propertyIds.map((id) => `/leads/${id}`)]) revalidatePath(path);
+    return ok(result);
+  } catch (e) {
+    reportError(e, { tags: { surface: "start_drip_for_leads" } });
+    return errFromUnknown(e, "ENROLL_FAILED");
+  }
+}
 
 export async function listSequences(): Promise<Result<SequenceRow[]>> {
   try {
@@ -498,6 +552,7 @@ export async function enrollLeadInSequence(
       case "no_phone":
       case "landline_phone":
       case "no_consent":
+      case "suppressed":
       case "sequence_not_found":
       case "sequence_inactive":
       case "property_not_found":
@@ -506,7 +561,7 @@ export async function enrollLeadInSequence(
           ok: false,
           error: {
             code: outcome.status.toUpperCase(),
-            message: formatEnrollError(outcome.status),
+            message: enrollmentReason(outcome),
           },
         };
       case "failed":
@@ -521,27 +576,6 @@ export async function enrollLeadInSequence(
       extra: { sequenceId, propertyId },
     });
     return errFromUnknown(e, "ENROLL_FAILED");
-  }
-}
-
-function formatEnrollError(status: string): string {
-  switch (status) {
-    case "no_phone":
-      return "Lead has no phone number.";
-    case "landline_phone":
-      return "Lead's primary phone is a landline — SMS can't be delivered.";
-    case "no_consent":
-      return "Contact has opted out of SMS.";
-    case "sequence_not_found":
-      return "Sequence not found.";
-    case "sequence_inactive":
-      return "Sequence is inactive or archived.";
-    case "property_not_found":
-      return "Lead not found.";
-    case "no_steps":
-      return "Sequence has no steps. Add one before enrolling.";
-    default:
-      return "Enrollment failed.";
   }
 }
 

@@ -8,6 +8,7 @@ import { reportError } from "@/lib/errors/report";
 import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import { qualifyProperty } from "@/lib/leads/qualify";
 import { pauseContactEnrollments } from "@/lib/sequences/enrollment";
+import { startFollowUpDrip, type DripResult } from "@/lib/sequences/start-drip";
 import { createClient } from "@/lib/supabase/server";
 
 import { assertMessagesWorkspaceAccess } from "./workspace-access";
@@ -46,7 +47,7 @@ const TRIGGERS_OPT_OUT: ReadonlySet<OutreachDispo> = new Set([
 ]);
 
 export type SetDispoResult =
-  | { ok: true }
+  | { ok: true; enrollment?: Pick<DripResult, "status" | "reason"> }
   | { ok: false; error: string };
 
 export type ConfirmAiDispositionReviewResult =
@@ -106,6 +107,24 @@ export async function setOutreachDispo(
   propertyId: string,
   dispo: OutreachDispo,
 ): Promise<SetDispoResult> {
+  return saveOutreachDispo(propertyId, dispo);
+}
+
+/** Only the inbox picker calls this action. Dialer callers remain label-only. */
+export async function setInboxDispoAndStartDrip(
+  propertyId: string,
+  dispo: "needs_sequence",
+  sequenceId: string,
+): Promise<SetDispoResult> {
+  if (!sequenceId) return { ok: false, error: "Choose a follow-up drip." };
+  return saveOutreachDispo(propertyId, dispo, sequenceId);
+}
+
+async function saveOutreachDispo(
+  propertyId: string,
+  dispo: OutreachDispo,
+  sequenceId?: string,
+): Promise<SetDispoResult> {
   if (!VALID_DISPOS.has(dispo)) {
     return { ok: false, error: `Unknown dispo: ${dispo}` };
   }
@@ -120,12 +139,16 @@ export async function setOutreachDispo(
 
   const { data: prop, error: propErr } = await supabase
     .from("properties")
-    .select("id, homeowner_contact_id, outreach_dispo")
+    .select("id, homeowner_contact_id, outreach_dispo, is_dnc_locked")
     .eq("id", propertyId)
     .maybeSingle();
 
   if (propErr || !prop) {
     return { ok: false, error: propErr?.message ?? "Property not found" };
+  }
+  if ((dispo === "needs_sequence" || dispo === "nurture" || dispo === "not_interested") &&
+      (prop.is_dnc_locked || prop.outreach_dispo === "dnc" || prop.outreach_dispo === "opted_out")) {
+    return { ok: false, error: "This lead is do not contact or opted out. Its follow-up outcome cannot be changed." };
   }
 
   try {
@@ -146,6 +169,7 @@ export async function setOutreachDispo(
   updateQuery = prop.outreach_dispo === null
     ? updateQuery.is("outreach_dispo", null)
     : updateQuery.eq("outreach_dispo", prop.outreach_dispo);
+  if (dispo === "needs_sequence" || dispo === "nurture" || dispo === "not_interested") updateQuery = updateQuery.eq("is_dnc_locked", false);
   const { error: updateErr, data: updated } = await updateQuery
     .select("id")
     .maybeSingle();
@@ -271,6 +295,15 @@ export async function setOutreachDispo(
     }
   }
 
+  if (sequenceId && dispo === "needs_sequence") {
+    try {
+      const { results } = await startFollowUpDrip(supabase, { propertyIds: [propertyId], sequenceId, userId: user.id });
+      return { ok: true, enrollment: { status: results[0].status, reason: results[0].reason } };
+    } catch (error) {
+      reportError(error, { tags: { surface: "manual_dispo_enroll_after_commit" }, extra: { propertyId, sequenceId } });
+      return { ok: true, enrollment: { status: "failed", reason: "Could not enroll this lead." } };
+    }
+  }
   return { ok: true };
 }
 
