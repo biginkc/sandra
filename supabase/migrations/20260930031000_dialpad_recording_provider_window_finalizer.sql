@@ -308,23 +308,45 @@ begin
   if selected_epoch is null or timing_status is distinct from 'collected' or timing_count=0 then
     reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_not_collected');
   else
-    -- Fold each canonical record into a fixed-size digest state. A complete
-    -- JSON/text aggregate here would make long calls scale with retained
-    -- timing bytes even though the finalizer only needs the deterministic
-    -- evidence digest.
-    with recursive ordered as (
-      select row_number() over (order by t.stream,t.seq)::bigint as n,
-             jsonb_build_object('stream', t.stream, 'seq', t.seq, 'record', t.record)::text as piece
-        from public.dialpad_recording_timing_records t
-       where t.capture_id=p_capture_id and t.org_id=p_org_id and t.epoch=selected_epoch
-    ), fold as (
-      select 0::bigint as n, encode(extensions.digest(convert_to('', 'utf8'), 'sha256'), 'hex') as h
-      union all
-      select o.n, encode(extensions.digest(convert_to(f.h || '|' || o.piece, 'utf8'), 'sha256'), 'hex')
-        from fold f
-        join ordered o on o.n=f.n+1
-    )
-    select h into timing_digest from fold order by n desc limit 1;
+    if timing_count <= 4096 then
+      -- Preserve the established digest bytes for ordinary captures. The
+      -- long-capture path below keeps every canonical row while avoiding the
+      -- quadratic state copies of this recursive fold.
+      with recursive ordered as (
+        select row_number() over (order by t.stream,t.seq)::bigint as n,
+               jsonb_build_object('stream', t.stream, 'seq', t.seq, 'record', t.record)::text as piece
+          from public.dialpad_recording_timing_records t
+         where t.capture_id=p_capture_id and t.org_id=p_org_id and t.epoch=selected_epoch
+      ), fold as (
+        select 0::bigint as n, encode(extensions.digest(convert_to('', 'utf8'), 'sha256'), 'hex') as h
+        union all
+        select o.n, encode(extensions.digest(convert_to(f.h || '|' || o.piece, 'utf8'), 'sha256'), 'hex')
+          from fold f
+          join ordered o on o.n=f.n+1
+      )
+      select h into timing_digest from fold order by n desc limit 1;
+    else
+      -- Hash the complete canonical, length-prefixed ordered byte stream in
+      -- one aggregate. Retaining every row preserves freshness without the
+      -- repeated-copy cost that made the recursive fold quadratic.
+      select encode(
+        extensions.digest(
+          convert_to('provider-window-finalizer-v1:timing-records', 'utf8') || coalesce(string_agg(
+            int4send(octet_length(piece)) || convert_to(piece, 'utf8'),
+            ''::bytea order by stream, seq
+          ), ''::bytea),
+          'sha256'
+        ),
+        'hex'
+      )
+        into timing_digest
+        from (
+          select stream, seq,
+                 jsonb_build_object('stream', stream, 'seq', seq, 'record', record)::text as piece
+            from public.dialpad_recording_timing_records
+           where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch
+        ) ordered_timing;
+    end if;
     select count(*) filter (where stream in ('tab:anchor','mic:anchor') and record->>'anchor'='start'),
            count(*) filter (where stream in ('tab:anchor','mic:anchor') and record->>'anchor'='final'),
            count(*) filter (where stream in ('tab:context','mic:context') and record->>'observation'='start'),
