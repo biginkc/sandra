@@ -18,7 +18,7 @@ class CatalogScope(unittest.TestCase):
         for key, value in f.created_name_scope().items():
             self.assertEqual(value, scope[key])
             self.assertTrue(value, key)
-        sources = [p.read_text() for p in f.MIGRATIONS.glob('2026093000*.sql')]
+        sources = [p.read_text() for p in f.MIGRATIONS.glob('2026093002*.sql')]
         self.assertEqual(len(scope['created_triggers']), sum(len(re.findall(r'^CREATE TRIGGER\b', source, re.M | re.I)) for source in sources))
         self.assertEqual(len(scope['created_indexes']), sum(len(re.findall(r'^CREATE (?:UNIQUE )?INDEX\b', source, re.M | re.I)) for source in sources))
     def test_missing_identifier_mutation_fails_coverage(self):

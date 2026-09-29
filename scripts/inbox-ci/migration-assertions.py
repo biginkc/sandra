@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSIONS = ('20260930000000', '20260930000100', '20260930000200')
+VERSIONS = ('20260930020000', '20260930020100', '20260930020200')
 NAMES = ('inbox_control_foundation', 'inbox_read_companion', 'inbox_backend_operation_reply')
 REFUSAL = 'Existing candidate: use validated forward upgrade, never reset'
 
@@ -27,17 +27,17 @@ def migration_files(root):
     directory = Path(root) / 'supabase/migrations'
     expected = [directory / f'{version}_{name}.sql' for version, name in zip(VERSIONS, NAMES)]
     candidate_suffixes = tuple(f'_{name}.sql' for name in NAMES)
-    actual = sorted(set(directory.glob('2026093000*.sql')) |
+    actual = sorted(set(directory.glob('2026093002*.sql')) |
                     {p for p in directory.glob('*.sql') if p.name.endswith(candidate_suffixes)})
     missing = [p.name for p in expected if not p.is_file()]
     if missing or actual != expected:
-        raise ValueError(f'Checkout must contain exactly the three reviewed 2026093000* migrations; missing={missing}; found={[p.name for p in actual]}')
+        raise ValueError(f'Checkout must contain exactly the three reviewed 2026093002* migrations; missing={missing}; found={[p.name for p in actual]}')
     return expected
 
 
 def assert_full_history(root, installed_versions):
     expected = {p.name.split('_', 1)[0] for p in (Path(root) / 'supabase/migrations').glob('*.sql')
-                if not p.name.startswith('2026093000')}
+                if not p.name.startswith('2026093002')}
     if not expected or set(installed_versions) != expected or len(installed_versions) != len(expected):
         raise ValueError(f'Pre-migration history incomplete: expected={len(expected)} installed={len(installed_versions)}')
 

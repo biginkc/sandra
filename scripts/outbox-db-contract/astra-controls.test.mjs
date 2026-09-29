@@ -25,7 +25,7 @@ const PIN_IDS = ['PIN_BASE_GRANTS','PIN_FUNCTIONS','PIN_RELATIONS','PIN_SCHEMAS_
 const M_IDS = ['M1','M2','M3','M3b','M4','M4b','M5','M5b','M5c','M5d','M6','M6b','M7','M10'];
 const completePost = () => ({
   checks: [...C_IDS, ...PIN_IDS].map(id => ({ id, verdict: 'PASS' })),
-  schemaState: { versions: ['20260930000000','20260930000100','20260930000200'], inboundHeadsPresent: true },
+  schemaState: { versions: ['20260930020000','20260930020100','20260930020200'], inboundHeadsPresent: true },
   mutations: M_IDS.map(id => ({ id, observed_exit: 1, observed_fail: true, exact_fail: true, restored: 'PASS' })),
 });
 

@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 import unittest
 
-MIGRATION = Path(__file__).resolve().parents[2] / 'supabase/migrations/20260930000200_inbox_backend_operation_reply.sql'
+MIGRATION = Path(__file__).resolve().parents[2] / 'supabase/migrations/20260930020200_inbox_backend_operation_reply.sql'
 
 
 def assert_private_grants(sql):
