@@ -196,12 +196,14 @@ export async function runContracts({ fixture, db, phase, provider }) {
     const failedState = await effects('m6b');
     const fail = await q('member', 'PATCH', `/rest/v1/messages?id=eq.${row('m6b').id}&status=eq.pending&select=id`, { status: 'failed', failed_at: new Date().toISOString(), error_message: 'contract failure', metadata: { providerStatus: 'failed' } }, { Prefer: 'return=representation' });
     const failedAfter = await effects('m6b');
-    const deferredPendingState = await effects('m6c');
-    const deferFailure = await q('member', 'PATCH', `/rest/v1/messages?id=eq.${row('m6c').id}&status=eq.pending&select=id`, { status: 'failed', failed_at: new Date().toISOString() }, { Prefer: 'return=representation' });
     const deferredState = await effects('m6c');
-    const defer = await q('member', 'PATCH', `/rest/v1/messages?id=eq.${row('m6c').id}&status=eq.failed&select=id`, { status: 'queued', scheduled_for: new Date(Date.now() + 6 * 3600000).toISOString() }, { Prefer: 'return=representation' });
+    const deferPath = `/rest/v1/messages?id=eq.${row('m6c').id}&status=eq.pending&select=id`;
+    const retryAt = new Date(Date.now() + 6 * 3600000).toISOString();
+    const deferPayload = { status: 'queued', scheduled_for: retryAt, error_message: 'contract retry', metadata: { providerStatus: 'retry', retryAt } };
+    const defer = await q('member', 'PATCH', deferPath, deferPayload, { Prefer: 'return=representation' });
     const deferredAfter = await effects('m6c');
-    assert.deepEqual(fail.data, [{ id: row('m6b').id }]); assert.deepEqual(deferFailure.data, [{ id: row('m6c').id }]); assert.deepEqual(defer.data, [{ id: row('m6c').id }]);
+    const deferRepeat = await q('member', 'PATCH', deferPath, deferPayload, { Prefer: 'return=representation' });
+    assert.deepEqual(fail.data, [{ id: row('m6b').id }]); assert.deepEqual(defer.data, [{ id: row('m6c').id }]); assert.deepEqual(deferRepeat.data, []);
     const repeat = await q('member', 'PATCH', `/rest/v1/messages?id=eq.${row('m6b').id}&status=eq.pending&select=id`, { status: 'sent' }, { Prefer: 'return=representation' });
     assert.deepEqual(repeat.data, []);
     const reordered = await q('member', 'GET', `${PAGE}&org_id=eq.${ids.O1}`);
@@ -215,14 +217,8 @@ export async function runContracts({ fixture, db, phase, provider }) {
       // 20260929000000:669-687: failed metadata changes both content and known_reply.
       // 20260929000200:444: pending and failed have the same target eligibility.
       for (const key of ['dirty','content','known']) increased(failedAfter, failedState, key);
-      // 20260929000000:669-687: status-only pending -> failed dirties the target,
-      // but changes neither content nor queued eligibility, so known_reply stays put.
-      increased(deferredState, deferredPendingState, 'dirty');
-      assert.equal(deferredState.known, deferredPendingState.known, 'deferred setup known delta');
-      assert.equal(deferredState.content, deferredPendingState.content, 'deferred setup content delta');
-      assert.equal(deferredState.target, deferredPendingState.target, 'deferred setup target delta');
-      // 20260929000000:684-687,700-702: failed -> queued changes eligibility,
-      // scheduled_for changes content, and queue entry changes known_reply.
+      // 20260929000000:684-687,700-702: pending -> queued changes eligibility;
+      // retry metadata changes content, and queue entry changes known_reply.
       increased(deferredAfter, deferredState, 'dirty'); increased(deferredAfter, deferredState, 'known');
       increased(deferredAfter, deferredState, 'content');
       assert.equal(failedAfter.target, failedState.target, 'failed target delta');
