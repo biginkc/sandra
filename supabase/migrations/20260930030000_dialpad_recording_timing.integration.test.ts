@@ -104,4 +104,12 @@ describe('Dialpad timing migration', () => {
       await expect(pg.query('select public.fn_finish_dialpad_recording_timing($1,$2,1,$3,$4,$5)', [orgId, fixture.captureId, JSON.stringify({ tabAnchor: 1, micAnchor: -1, tabContext: -1, micContext: -1, exchange: -1 }), 'incomplete', '[]'])).rejects.toMatchObject({ code: '22023' })
     } finally { await pg.query('reset role') }
   })
+
+  it('fences new evidence to the latest consumed epoch while allowing exact replay', async () => {
+    const fixture = await seed()
+    await pg.query('set session_replication_role = replica')
+    await pg.query('insert into public.dialpad_recording_ingest_grants(id,org_id,capture_id,rep_user_id,epoch,token_hash,created_at,expires_at,consumed_at,consumed_by) values ($1,$2,$3,$4,2,$5,now()-interval \'1 minute\',now()+interval \'1 minute\',now(),\'timing-test-next\')', [makeId(), orgId, fixture.captureId, makeId(), `${makeId().replaceAll('-', '')}${makeId().replaceAll('-', '')}`])
+    await pg.query('set session_replication_role = origin')
+    await expect(append(fixture, [anchor('tab', 0)], makeId())).rejects.toMatchObject({ code: '55000' })
+  })
 })

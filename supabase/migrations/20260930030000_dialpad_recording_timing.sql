@@ -145,6 +145,9 @@ begin
     if existing.content_hash <> batch_hash then raise exception 'timing batch replay conflict' using errcode = '40001'; end if;
     return jsonb_build_object('status','replayed','recordCount',existing.record_count,'captureRecordCount',(select count(*) from public.dialpad_recording_timing_records where capture_id=p_capture_id));
   end if;
+  if p_epoch <> (select max(epoch) from public.dialpad_recording_ingest_grants where capture_id=p_capture_id and org_id=p_org_id and consumed_at is not null) then
+    raise exception 'timing epoch is stale' using errcode = '55000';
+  end if;
   select count(*), coalesce(sum(r.payload_bytes),0) into capture_count, capture_bytes from public.dialpad_recording_timing_records r where r.capture_id=p_capture_id;
   if capture_count + count_in_batch > 8192 or capture_bytes + payload_bytes > 16777216 then raise exception 'timing observation capacity exceeded' using errcode = '22023'; end if;
   for item in select value from jsonb_array_elements(p_records) loop
@@ -218,6 +221,7 @@ begin
   end if;
   if cap.status not in ('open','closing') then raise exception 'timing capture is terminal' using errcode = '55000'; end if;
   if not exists (select 1 from public.dialpad_recording_ingest_grants where capture_id=p_capture_id and org_id=p_org_id and epoch=p_epoch and consumed_at is not null) then raise exception 'timing epoch is not consumed' using errcode = '55000'; end if;
+  if p_epoch <> (select max(epoch) from public.dialpad_recording_ingest_grants where capture_id=p_capture_id and org_id=p_org_id and consumed_at is not null) then raise exception 'timing epoch is stale' using errcode = '55000'; end if;
   if coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='tab:anchor'), -1) <> (p_last_sequences->>'tabAnchor')::integer
      or coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='mic:anchor'), -1) <> (p_last_sequences->>'micAnchor')::integer
      or coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='tab:context'), -1) <> (p_last_sequences->>'tabContext')::integer
