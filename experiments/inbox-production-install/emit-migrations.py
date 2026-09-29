@@ -338,6 +338,8 @@ def owned_filenames() -> list[str]:
 
 
 def stale_owned_paths() -> list[Path]:
+    # Any SQL file with an emitted migration's owned suffix is ours to delete
+    # when its full filename is no longer emitted, regardless of timestamp.
     owned = set(owned_filenames())
     suffixes = tuple(name.split("_", 1)[1] for name in owned)
     candidates = set(MIGRATIONS_DIR.glob("2026091912*.sql"))
