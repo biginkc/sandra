@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { hasExactKeys } from '../outbox-db-contract/catalog-sections.mjs';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 
@@ -62,7 +63,7 @@ export function verifyDownload(repo, root, run, artifact, expectedSha) {
   if (manifest.github_run_id !== id || String(manifest.github_run_attempt) !== attempt || manifest.event !== run.event || manifest.head_branch !== run.head_branch || manifest.workflow_path !== WORKFLOW || manifest.workflow_input_sha !== expectedSha) throw new Error('Manifest provenance or attempt mismatch');
   if (LANES[manifest.lane]?.[0] !== manifest.kind || LANES[manifest.lane]?.[1] !== manifest.phase || manifest.target !== 'disposable' || manifest.runner_script_sha256 !== SHA256(execFileSync('git', ['show', `${expectedSha}:scripts/inbox-ci/${manifest.lane}.sh`], { cwd: repo })) || (manifest.kind === 'browser' && manifest.fault_proxy_script_sha256 !== SHA256(execFileSync('git', ['show', `${expectedSha}:e2e/inbox-acceptance/fault-proxy.mjs`], { cwd: repo })))) throw new Error('Runner/proxy script hash mismatch');
   const actual = paths.filter(p => p !== `${prefix}manifest.json`).map(p => p.slice(prefix.length));
-  if (Object.keys(manifest.artifacts ?? {}).sort().join('\n') !== actual.join('\n')) throw new Error('Incomplete artifact inventory');
+  if (!hasExactKeys(manifest.artifacts, actual, digest => typeof digest === 'string' && /^[a-f0-9]{64}$/.test(digest))) throw new Error('Incomplete artifact inventory');
   for (const relative of actual) {
     if (!/\.(?:json|log|txt|html|png|csv|gz|md)$/i.test(relative) || forbiddenName(relative)) throw new Error('Forbidden artifact file');
     const bytes = readFileSync(path.join(dir, relative));

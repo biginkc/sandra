@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
+import { hasExactKeys } from '../outbox-db-contract/catalog-sections.mjs';
 
 const workflow = readFileSync('.github/workflows/inbox-heavy-verification.yml', 'utf8');
 // Update only after reviewing an intentional main workflow change: git show origin/main:.github/workflows/inbox-heavy-verification.yml | shasum -a 256
@@ -34,7 +35,8 @@ export function validateWorkflow(source) {
       entries.push(next.trim());
       index++;
     }
-    if (entries.sort().join('\n') !== 'contents: read\npackages: read') throw new Error('Workflow permissions must be contents: read and packages: read only');
+    const permissions = Object.fromEntries(entries.map(entry => [entry, true]));
+    if (entries.length !== 2 || !hasExactKeys(permissions, ['contents: read', 'packages: read'], value => value === true)) throw new Error('Workflow permissions must be contents: read and packages: read only');
   }
   if (!workflowPermissions) throw new Error('Workflow permissions must be contents: read and packages: read only');
   if (/pull_request_target\s*:/m.test(source)) throw new Error('pull_request_target forbidden');

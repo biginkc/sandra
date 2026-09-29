@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CATALOG_SECTIONS } from '../outbox-db-contract/catalog-sections.mjs';
+import { CATALOG_SECTIONS, hasExactKeys } from '../outbox-db-contract/catalog-sections.mjs';
 
 const ROOT = 'docs/performance/inbox-redesign/evidence';
 const REF = 'ncsngxlcyxylaeskiteu';
@@ -12,8 +12,7 @@ const HEX = /^[0-9a-f]{64}$/;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const git = (repo, ...args) => execFileSync('git', args, { cwd: repo });
 function keys(value, expected, label) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).sort().join(',') !== [...expected].sort().join(',')) throw new Error(`Unexpected ${label} fields`);
+  if (!hasExactKeys(value, expected)) throw new Error(`Unexpected ${label} fields`);
 }
 const forbidden = new Set(['access_token', 'refresh_token', 'apikey', 'service_role', 'sections', 'content']);
 function inspect(value) {
@@ -51,11 +50,9 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   if (source.comparisons?.catalog?.verdict !== 'PASS' || source.comparisons.catalog.input_sha256 !== catalog.sha256 || source.comparisons?.platform?.verdict !== 'PASS' || source.comparisons.platform.input_sha256 !== platform.sha256) throw new Error('Comparison input linkage mismatch');
   const expectedSections = catalog.data.section_sha256;
   const observedSections = source.comparisons.catalog.observed_section_sha256;
-  if (!expectedSections || typeof expectedSections !== 'object' || Array.isArray(expectedSections) ||
-      !observedSections || typeof observedSections !== 'object' || Array.isArray(observedSections) ||
-      Object.keys(expectedSections).sort().join() !== CATALOG_SECTIONS.join() ||
-      Object.keys(observedSections).sort().join() !== CATALOG_SECTIONS.join() ||
-      Object.keys(expectedSections).some(k => !HEX.test(expectedSections[k]) || observedSections[k] !== expectedSections[k])) throw new Error('Catalog comparison mismatch');
+  if (!hasExactKeys(expectedSections, CATALOG_SECTIONS, digest => typeof digest === 'string' && HEX.test(digest)) ||
+      !hasExactKeys(observedSections, CATALOG_SECTIONS, digest => typeof digest === 'string' && HEX.test(digest)) ||
+      CATALOG_SECTIONS.some(k => observedSections[k] !== expectedSections[k])) throw new Error('Catalog comparison mismatch');
   if (!HEX.test(source.comparisons.platform.observed_sha256)) throw new Error('Platform comparison digest missing');
   const platformKeys = ['postgres_major', 'postgrest_major', 'gotrue_major'];
   keys(platform.data, [...platformKeys, 'sha256'], 'consumed platform');

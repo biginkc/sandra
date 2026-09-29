@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { collect, reconcile, stabilityProbe } from './outbox-db-contract/readonly.mjs';
 import { platformFingerprint, comparePlatform } from './outbox-db-contract/platform.mjs';
-import { CATALOG_SECTIONS } from './outbox-db-contract/catalog-sections.mjs';
+import { CATALOG_SECTIONS, hasExactKeys } from './outbox-db-contract/catalog-sections.mjs';
 export { CATALOG_SECTIONS } from './outbox-db-contract/catalog-sections.mjs';
 
 export function parseArgs(argv) {
@@ -54,11 +54,9 @@ async function catalog(dsn) {
   return JSON.parse(run.stdout);
 }
 export function compareCatalog(pinned, observed) {
-  const required = CATALOG_SECTIONS.join(',');
   for (const [side, value] of [['expected', pinned], ['observed', observed]]) {
     const sections = value?.section_sha256;
-    if (!sections || typeof sections !== 'object' || Array.isArray(sections) || Object.keys(sections).sort().join(',') !== required ||
-        Object.values(sections).some(digest => typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest))) {
+    if (!hasExactKeys(sections, CATALOG_SECTIONS, digest => typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest))) {
       throw new Error(`CATALOG_MISMATCH ${side} sections`);
     }
   }

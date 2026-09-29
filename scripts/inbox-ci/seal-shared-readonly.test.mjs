@@ -69,6 +69,26 @@ test('sealer refuses every missing catalog section and an extra section', async 
     assert.throws(() => sealSharedReadonly(f.args), /Catalog comparison mismatch/, omitted ?? 'extra');
   }
 });
+for (const [label, combined] of [
+  ['entire joined catalog section list', { [CATALOG_SECTIONS.join(',')]: 'c'.repeat(64) }],
+  ['duplicate-looking joined catalog keys', Object.fromEntries([`${CATALOG_SECTIONS[0]},${CATALOG_SECTIONS[1]}`, ...CATALOG_SECTIONS.slice(2)].map(key => [key, 'c'.repeat(64)]))],
+]) test(`sealer refuses ${label}`, async () => {
+  const f = await fixture();
+  const file = path.join(f.repo, f.args.catalogRecord, 'catalog-pre.json');
+  const catalog = JSON.parse(readFileSync(file));
+  catalog.section_sha256 = combined;
+  const bytes = Buffer.from(JSON.stringify(catalog));
+  writeFileSync(file, bytes);
+  const manifestFile = path.join(f.repo, f.args.catalogRecord, 'manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestFile));
+  manifest.artifacts['catalog-pre.json'] = digest(bytes);
+  writeFileSync(manifestFile, JSON.stringify(manifest));
+  git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'mutate catalog');
+  f.source.comparisons.catalog.input_sha256 = digest(bytes);
+  f.source.comparisons.catalog.observed_section_sha256 = combined;
+  f.save();
+  assert.throws(() => sealSharedReadonly(f.args), /Catalog comparison mismatch/);
+});
 test('sealer requires the producer items map', async () => {
   const f = await fixture();
   delete f.source.items;
