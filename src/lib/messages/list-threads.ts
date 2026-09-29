@@ -33,6 +33,10 @@ export type Thread = {
   propertyAddress: string | null;
   propertyStatus: string | null;
   outreachDispo: string | null;
+  dripName: string | null;
+  dripStep: number | null;
+  dripStepsTotal: number | null;
+  dripReplied: boolean;
   /** Pending, conversation-scoped disposition decision made by Sandra AI.
    *  This is separate from the already-applied property outcome. */
   aiDispositionReview: AiDispositionReview | null;
@@ -139,7 +143,8 @@ export type ThreadPageFilter =
   | "unread"
   | "escalated"
   | "dispo"
-  | "needs_outcome";
+  | "needs_outcome"
+  | "drip_replied";
 
 export type ThreadPageCounts = Record<ThreadPageFilter, number>;
 
@@ -183,6 +188,10 @@ type ThreadSnapshotRow = {
   property_address: string | null;
   property_status: string | null;
   outreach_dispo: string | null;
+  drip_name?: string | null;
+  drip_step?: number | null;
+  drip_steps_total?: number | null;
+  drip_replied?: boolean;
   is_dnc_locked: boolean;
   assignee_id: string | null;
   last_message_body: string;
@@ -403,6 +412,10 @@ export async function listThreads(
         : null,
       propertyStatus: p?.status ?? null,
       outreachDispo: p?.outreach_dispo ?? null,
+      dripName: null,
+      dripStep: null,
+      dripStepsTotal: null,
+      dripReplied: false,
       aiDispositionReview: null,
       isDncLocked: p?.is_dnc_locked ?? false,
       assigneeId: p?.assigned_user_id ?? null,
@@ -496,10 +509,24 @@ export async function listThreadPage(
     throw new Error("sms_inbox_thread_page_snapshot: invalid response");
   }
 
+  // Old production RPCs treat an unknown filter as All. Until the migration
+  // lands, keep the new view empty instead of silently showing every thread.
+  if (opts.filter === "drip_replied" && !("drip_replied" in data.counts)) {
+    return {
+      degraded: true,
+      threads: [],
+      counts: { ...data.counts, drip_replied: 0 },
+      total: 0,
+      hiddenCount: 0,
+      page: 1,
+      pageSize,
+    };
+  }
+
   return {
     degraded,
     threads: mapThreadSnapshot(data.rows, {}),
-    counts: data.counts,
+    counts: { ...data.counts, drip_replied: data.counts.drip_replied ?? 0 },
     total: data.total,
     hiddenCount: data.hidden_count,
     page: Math.floor(data.offset / data.limit) + 1,
@@ -706,7 +733,7 @@ async function fetchThreadSnapshot(
 
 type ThreadPageDocument = {
   rows: ThreadSnapshotRow[];
-  counts: ThreadPageCounts;
+  counts: Omit<ThreadPageCounts, "drip_replied"> & { drip_replied?: number };
   total: number;
   hidden_count: number;
   limit: number;
@@ -752,6 +779,7 @@ function isThreadPageDocument(value: unknown): value is ThreadPageDocument {
       "dispo",
       "needs_outcome",
     ].every((key) => Number.isInteger(counts[key])) &&
+    (counts.drip_replied === undefined || Number.isInteger(counts.drip_replied)) &&
     document.rows.every(isThreadSnapshotRow)
   );
 }
@@ -773,6 +801,10 @@ function isThreadSnapshotRow(value: unknown): value is ThreadSnapshotRow {
     typeof row.is_dnc_locked === "boolean" &&
     typeof row.needs_human_attention === "boolean" &&
     typeof row.is_opted_out === "boolean" &&
+    (row.drip_name == null || typeof row.drip_name === "string") &&
+    (row.drip_step == null || Number.isInteger(row.drip_step)) &&
+    (row.drip_steps_total == null || Number.isInteger(row.drip_steps_total)) &&
+    (row.drip_replied === undefined || typeof row.drip_replied === "boolean") &&
     hasValidAiDispositionReviewFields(row)
   );
 }
@@ -838,6 +870,10 @@ function mapThreadSnapshot(
       propertyAddress: row.property_address,
       propertyStatus: row.property_status,
       outreachDispo: row.outreach_dispo,
+      dripName: row.drip_name ?? null,
+      dripStep: row.drip_step ?? null,
+      dripStepsTotal: row.drip_steps_total ?? null,
+      dripReplied: row.drip_replied ?? false,
       aiDispositionReview: mapAiDispositionReview(row),
       isDncLocked: row.is_dnc_locked,
       assigneeId: row.assignee_id,
