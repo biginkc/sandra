@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 
-from sealed_evidence import ROOT, EvidenceError, evaluate, evaluate_deploy
+from sealed_evidence import ROOT, EvidenceError, evaluate, evaluate_deploy, evaluate_migration, J5A, MIGRATION_VERSIONS
 
 
 class SealedEvidenceTests(unittest.TestCase):
@@ -32,7 +32,7 @@ class SealedEvidenceTests(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", message)
 
-    def record(self, name="one", *, sha=None, tier="pre-merge", exit_status=0, completed="2026-09-28T12:00:00Z", observed=None, commit=True) -> Path:
+    def record(self, name="one", *, sha=None, tier="pre-merge", exit_status=0, completed="2026-09-28T12:00:00Z", observed=None, commit=True, kind=None, phase="pre", target="n/a", verdict=None, extra=None) -> Path:
         sha = sha or self.sha
         directory = self.repo / ROOT / sha / tier / name
         directory.mkdir(parents=True)
@@ -41,13 +41,15 @@ class SealedEvidenceTests(unittest.TestCase):
         artifact.write_bytes(b"screenshot")
         relative = directory.relative_to(self.repo).as_posix()
         manifest = {
-            "tested_sha": self.sha, "tier": tier, "run_id": name,
+            "tested_sha": sha, "tier": tier, "kind": kind or ("app-deploy" if tier != "pre-merge" else "browser"), "phase": phase, "target": target, "verdict": verdict or ("PASS" if exit_status == 0 else "FAIL"), "run_id": name,
             "started_at": "2026-09-28T11:00:00Z", "completed_at": completed,
             "runner_script_sha256": "a" * 64, "fault_proxy_script_sha256": "b" * 64,
             "clean_tree": {"start": True, "end_excluding_run_dir": True, "excluded_path": relative},
             "exit_status": exit_status,
             "artifacts": {"screenshots/O01.png": hashlib.sha256(artifact.read_bytes()).hexdigest()},
         }
+        if extra:
+            manifest.update(extra)
         if observed is not None:
             manifest["observed_deployment"] = observed
         (directory / "manifest.json").write_text(json.dumps(manifest))
@@ -202,7 +204,7 @@ class SealedEvidenceTests(unittest.TestCase):
     def test_latest_fail_masks_older_pass(self) -> None:
         self.record("one")
         self.record("two", exit_status=1, completed="2026-09-28T13:00:00Z")
-        self.assert_fails("latest pre-merge run failed")
+        self.assert_fails("latest required check failed")
 
     def test_incomplete_run(self) -> None:
         self.record(completed=None)
@@ -224,6 +226,137 @@ class SealedEvidenceTests(unittest.TestCase):
         self.record("two", commit=False)
         self.commit("two at once")
         self.assert_fails("ambiguous")
+
+
+    def j5a_records(self, omit=None, bad=None):
+        for i, key in enumerate(J5A):
+            if key == omit:
+                continue
+            tier, kind, phase, target = key
+            failed = key == bad
+            provenance = ({"github_run_id": str(1000 + i), "github_run_attempt": "1", "lane": "outbox",
+                           "artifact_name": f"heavy-outbox-{self.sha}-{1000 + i}-1",
+                           "workflow_path": ".github/workflows/inbox-heavy-verification.yml",
+                           "workflow_input_sha": self.sha, "event": "workflow_dispatch", "head_branch": "main"}
+                          if target == "disposable" else None)
+            self.record(str(1000 + i), tier=tier, kind=kind, phase=phase, target=target,
+                        verdict="FAIL" if failed else "PASS", completed=f"2026-09-28T12:{i:02}:00Z", extra=provenance)
+
+    def test_j5a_required_key_missing_negative(self):
+        self.j5a_records(omit=J5A[3])
+        with self.assertRaisesRegex(EvidenceError, "missing required check"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def test_j5a_latest_post_fail_masks_older_pass_negative(self):
+        self.j5a_records()
+        self.record("post-fail", kind="db-contract", phase="post", target="disposable", verdict="FAIL", completed="2026-09-28T13:00:00Z")
+        with self.assertRaisesRegex(EvidenceError, "latest required check failed"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def test_j5a_browser_pass_cannot_mask_dry_run_fail_negative(self):
+        self.j5a_records(bad=J5A[0])
+        self.record("browser-pass", kind="browser", phase="post", target="disposable", completed="2026-09-28T13:00:00Z")
+        with self.assertRaisesRegex(EvidenceError, "migration-dry-run"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def test_j5a_disposable_record_without_runner_provenance_negative(self):
+        self.j5a_records()
+        self.record("local-browser", kind="browser", phase="post", target="disposable",
+                    completed="2026-09-28T13:00:00Z")
+        with self.assertRaisesRegex(EvidenceError, "missing runner provenance"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def test_j5a_passes_complete_matrix(self):
+        self.j5a_records()
+        self.assertEqual(evaluate(self.repo, "j5a", self.sha)["status"], "PASS")
+
+    def test_missing_kind_phase_target_negative(self):
+        for field in ("kind", "phase", "target"):
+            case = SealedEvidenceTests(methodName="test_valid_sealed_record")
+            case.setUp()
+            try:
+                directory = case.record(commit=False)
+                manifest_path = directory / "manifest.json"
+                manifest = json.loads(manifest_path.read_text())
+                del manifest[field]
+                manifest_path.write_text(json.dumps(manifest))
+                case.commit("missing field")
+                case.assert_fails(f"missing or unknown {field}")
+            finally:
+                case.doCleanups()
+
+    def test_run_attempt_artifact_mismatch_negative(self):
+        self.record(extra={"github_run_id": "123", "github_run_attempt": "2", "lane": "outbox",
+                           "artifact_name": f"heavy-outbox-{self.sha}-123-1"})
+        self.assert_fails("run_attempt/artifact mismatch")
+
+    def test_external_artifacts_negative(self):
+        self.record(extra={"external_artifacts": {}})
+        self.assert_fails("external_artifacts forbidden")
+
+    def test_artifact_listed_absent_negative(self):
+        directory = self.record(commit=False)
+        manifest_path = directory / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["artifacts"]["missing.log"] = "a" * 64
+        manifest_path.write_text(json.dumps(manifest))
+        self.commit("missing artifact")
+        self.assert_fails("artifact inventory mismatch")
+
+    def migration_record(self, *, head_sha=None, conclusion="success", after=None, fingerprint=None):
+        self.record("migration", tier="test-env", kind="migration-apply", phase="post", target="shared-test",
+                    extra={"target_binding": {"project_ref": "ncsngxlcyxylaeskiteu"},
+                           "workflow_run": {"workflow_path": ".github/workflows/db-migrate-test.yml", "run_id": "123", "run_attempt": 1,
+                                            "head_sha": head_sha or self.sha, "conclusion": conclusion},
+                           "migration_head_sha": self.sha, "schema_migrations_before": ["old"], "schema_migrations_after": after or ["old", *sorted(MIGRATION_VERSIONS)],
+                           "catalog_fingerprint_after": fingerprint or {"tables": "ok"}})
+
+    def test_migration_wrong_head_negative(self):
+        self.migration_record(head_sha="0" * 40)
+        with self.assertRaisesRegex(EvidenceError, "workflow identity"):
+            evaluate_migration(self.repo, self.sha, "shared-test")
+
+    def test_migration_failed_conclusion_negative(self):
+        self.migration_record(conclusion="failure")
+        with self.assertRaisesRegex(EvidenceError, "workflow identity"):
+            evaluate_migration(self.repo, self.sha, "shared-test")
+
+    def test_migration_missing_version_negative(self):
+        self.migration_record(after=["old", *sorted(MIGRATION_VERSIONS)[:2]])
+        with self.assertRaisesRegex(EvidenceError, "ledger versions"):
+            evaluate_migration(self.repo, self.sha, "shared-test")
+
+    def test_migration_fingerprint_section_mismatch_negative(self):
+        self.git("checkout", "-qb", "evidence", self.sha)
+        directory = self.record("catalog", kind="catalog-fingerprint", phase="n/a", target="disposable", commit=False)
+        fingerprint = directory / "catalog-fingerprint-post.json"
+        fingerprint.write_text(json.dumps({"tables": "expected", "policies": "same"}))
+        manifest_path = directory / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["artifacts"][fingerprint.name] = hashlib.sha256(fingerprint.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        self.commit("catalog")
+        self.git("checkout", "-q", self.base_branch)
+        (self.repo / "main.txt").write_text("main")
+        self.commit("main")
+        m = self.git("rev-parse", "HEAD")
+        self.record("migration", sha=m, tier="test-env", kind="migration-apply", phase="post", target="shared-test",
+                    extra={"target_binding": {"project_ref": "ncsngxlcyxylaeskiteu"},
+                           "workflow_run": {"workflow_path": ".github/workflows/db-migrate-test.yml", "run_id": "123", "run_attempt": 1,
+                                            "head_sha": m, "conclusion": "success"},
+                           "migration_head_sha": self.sha, "schema_migrations_before": ["old"], "schema_migrations_after": ["old", *sorted(MIGRATION_VERSIONS)],
+                           "catalog_fingerprint_after": {"tables": "mismatch", "policies": "same"}})
+        with self.assertRaisesRegex(EvidenceError, "catalog fingerprint section mismatch"):
+            evaluate_migration(self.repo, m, "shared-test", x_mig=self.sha)
+
+    def test_j5b_migration_diff_negative(self):
+        self.j5a_records()
+        (self.repo / "supabase/migrations").mkdir(parents=True)
+        (self.repo / "supabase/migrations/new.sql").write_text("SELECT 1")
+        self.commit("main migration change")
+        m = self.git("rev-parse", "HEAD")
+        with self.assertRaisesRegex(EvidenceError, "migration diff"):
+            evaluate(self.repo, "j5b", self.sha, m)
 
     def test_deploy_entrypoint_fails_closed(self) -> None:
         observed = {
