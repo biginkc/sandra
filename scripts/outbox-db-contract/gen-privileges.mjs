@@ -5,11 +5,11 @@ import path from 'node:path';
 
 const sourceCommit = 'e767bec7';
 const paths = [
-  'supabase/migrations/20260929000000_inbox_control_foundation.sql',
-  'supabase/migrations/20260929000100_inbox_read_companion.sql',
-  'supabase/migrations/20260929000200_inbox_backend_operation_reply.sql',
+  'supabase/migrations/20260930000000_inbox_control_foundation.sql',
+  'supabase/migrations/20260930000100_inbox_read_companion.sql',
+  'supabase/migrations/20260930000200_inbox_backend_operation_reply.sql',
 ];
-const read = file => execFileSync('git', ['show', `${sourceCommit}:${file}`], { encoding: 'utf8' });
+const read = file => execFileSync('git', ['show', `${sourceCommit}:${file.replace('20260930', '20260929')}`], { encoding: 'utf8' });
 const sha = text => createHash('sha256').update(text).digest('hex');
 const functions = {};
 const migrationSql = paths.map(read).join('\n');
