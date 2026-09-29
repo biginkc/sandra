@@ -83,7 +83,7 @@ it.each([
   if (stepError) throw stepError;
 
   expect(await setInboxDispoAndStartDrip(property.id, "needs_sequence", sequence.id))
-    .toEqual({ ok: true, enrollment: { propertyId: property.id, status: "skipped", reason: `This lead is marked ${label}, so a drip can't start.` } });
+    .toEqual({ ok: true, enrollment: { status: "skipped", reason: `This lead is marked ${label}, so a drip can't start.` } });
   const { data: savedProperty } = await testClient.from("properties").select("outreach_dispo")
     .eq("id", property.id).single();
   expect(savedProperty?.outreach_dispo).toBe("needs_sequence");
