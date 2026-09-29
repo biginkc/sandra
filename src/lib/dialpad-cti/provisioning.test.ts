@@ -25,6 +25,8 @@ const PAT = `sbp_${'P'.repeat(30)}`;
 const FRESH_SECRET = `whsec_${'c'.repeat(58)}`;
 const SMS_SECRET = `sms_secret_${'s'.repeat(30)}`;
 const CONNECTION_ID = 'c0000000-0000-4000-8000-000000000001';
+const RECORDING_ENDPOINT = 'wss://receiver.example.test/dialpad-browser-ingest';
+const OTHER_RECORDING_ENDPOINT = 'wss://other-receiver.example.test/dialpad-browser-ingest';
 const BIG_WEBHOOK_ID = '9007199254740993';
 const SECRETS = [API_KEY, CLIENT_ID, PAT, FRESH_SECRET, SMS_SECRET];
 
@@ -66,7 +68,7 @@ function makeWorld(): World {
       ['Dialpad - API', { count: 1, value: API_KEY }],
       ['Dialpad - CTI Client ID', { count: 1, value: CLIENT_ID }],
     ]),
-    schema: { a2Columns: true, customDataFunction: true },
+    schema: { a2Columns: true, customDataFunction: true, recordingEndpointColumn: true },
     orgExists: true,
     connection: null,
     env: new Set(['CRON_SECRET', 'DIALPAD_API_KEY']),
@@ -163,6 +165,7 @@ function makePorts(w: World): ProvisioningPorts {
           companyId: row.companyId,
           directoryKeyRef: row.directoryKeyRef,
           ctiClientIdMatches: row.ctiClientId === CLIENT_ID,
+          recordingIngestEndpoint: null,
         };
         w.log.push('db.insert');
         if (after) throw new Error('lost response');
@@ -171,10 +174,17 @@ function makePorts(w: World): ProvisioningPorts {
       async activateConnection(id, expected) {
         gate(w, 'db.activate');
         const c = w.connection;
-        if (!c || c.id !== id || c.status !== 'disabled' || c.webhookSecretRef !== expected.webhookSecretRef) return 0;
+        if (!c || c.id !== id || c.status !== 'disabled' || c.webhookSecretRef !== expected.webhookSecretRef || (expected.recordingIngestEndpoint !== undefined && c.recordingIngestEndpoint !== expected.recordingIngestEndpoint)) return 0;
         c.status = 'active';
         w.log.push('db.activate');
         return 1;
+      },
+      async configureRecordingEndpoint(expected) {
+        const c = w.connection;
+        if (!w.schema.recordingEndpointColumn || !c || c.id !== expected.connectionId || c.status !== 'disabled' || c.companyId !== expected.companyId || c.recordingIngestEndpoint !== expected.expectedPreviousEndpoint) return null;
+        c.recordingIngestEndpoint = expected.proposedEndpoint;
+        w.log.push('db.configure-recording-endpoint');
+        return { ...c };
       },
     },
     vercel: {
@@ -263,6 +273,7 @@ async function prepared(): Promise<World> {
   const w = makeWorld();
   const result = await execute(w);
   expect(result.exitCode).toBe(0);
+  w.connection!.recordingIngestEndpoint = RECORDING_ENDPOINT;
   w.log.length = 0;
   w.requests.length = 0;
   return w;
@@ -382,7 +393,7 @@ describe('dry run', () => {
 
   it('reports a missing A2 schema as a blocker instead of planning DDL', async () => {
     const w = makeWorld();
-    w.schema = { a2Columns: false, customDataFunction: false };
+    w.schema = { a2Columns: false, customDataFunction: false, recordingEndpointColumn: false };
     const result = await dryRun(w);
     expect(result.exitCode).toBe(3);
     expect(result.plan!.blockers.join(' ')).toContain('a2_columns_missing');
@@ -649,10 +660,47 @@ describe('activate mode', () => {
     expect(early.plan!.blockers.join(' ')).toContain('not_prepared');
 
     const ready = await prepared();
-    ready.schema = { a2Columns: true, customDataFunction: false };
+    ready.schema = { a2Columns: true, customDataFunction: false, recordingEndpointColumn: true };
     const noMigration = await dryRun(ready, activateInputs);
     expect(noMigration.exitCode).toBe(3);
     expect(noMigration.plan!.blockers.join(' ')).toContain('custom_data_migration_missing');
+  });
+
+  it('fails closed when the disabled connection has no configured recording endpoint', async () => {
+    const w = await prepared();
+    w.connection!.recordingIngestEndpoint = null;
+    const result = await dryRun(w, activateInputs);
+    expect(result.exitCode).toBe(3);
+    expect(result.plan!.blockers.join(' ')).toContain('recording ingest endpoint missing or invalid');
+  });
+
+  it('rechecks the endpoint before reusing an already-active connection', async () => {
+    const w = await prepared();
+    w.connection!.status = 'active';
+    for (const sub of w.subs) {
+      if (sub.webhook_id === '7000000000000001') sub.enabled = true;
+    }
+    const preview = await dryRun(w, activateInputs);
+    expect(preview.exitCode).toBe(0);
+
+    const ports = makePorts(w);
+    const originalFind = ports.db.findConnection.bind(ports.db);
+    let reads = 0;
+    ports.db.findConnection = async (orgId, clientId) => {
+      const current = await originalFind(orgId, clientId);
+      reads += 1;
+      if (reads === 2 && current) {
+        w.connection!.recordingIngestEndpoint = OTHER_RECORDING_ENDPOINT;
+        return { ...current, recordingIngestEndpoint: OTHER_RECORDING_ENDPOINT };
+      }
+      return current;
+    };
+    const result = await runProvisioning(ports, activateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain('activation_refused');
+    expect(w.log).toEqual([]);
+    expect(w.connection!.status).toBe('active');
+    expect(w.connection!.recordingIngestEndpoint).toBe(OTHER_RECORDING_ENDPOINT);
   });
 
   it('a dry run previews the activation and changes nothing', async () => {
@@ -704,6 +752,48 @@ describe('activate mode', () => {
     expect(resumed.exitCode).toBe(0);
     expect(w.connection?.status).toBe('active');
     expect(w.log).toEqual([`PATCH ${U1}`, `PATCH ${U2}`, 'db.activate']);
+  });
+
+  it('refuses before the first provider PATCH when the endpoint changed after preview', async () => {
+    const w = await prepared();
+    const preview = await dryRun(w, activateInputs);
+    w.connection!.recordingIngestEndpoint = OTHER_RECORDING_ENDPOINT;
+    const result = await runProvisioning(makePorts(w), activateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(3);
+    expect(w.log).toEqual([]);
+    expect(w.connection!.status).toBe('disabled');
+  });
+
+  it('leaves partial provider state disabled when the endpoint changes during a subscription PATCH', async () => {
+    const w = await prepared();
+    const ports = makePorts(w);
+    const original = ports.dialpad.request.bind(ports.dialpad);
+    ports.dialpad.request = async (method, path, body) => {
+      const response = await original(method, path, body);
+      if (method === 'PATCH' && path.endsWith(w.subs.find((entry) => entry.target_id === U1 && entry.webhook_id === '7000000000000001')!.id)) w.connection!.recordingIngestEndpoint = OTHER_RECORDING_ENDPOINT;
+      return response;
+    };
+    const preview = await runProvisioning(ports, activateInputs, { execute: false });
+    const result = await runProvisioning(ports, activateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(1);
+    expect(w.log).toEqual([`PATCH ${U1}`]);
+    expect(w.connection!.status).toBe('disabled');
+    expect(w.subs.find((entry) => entry.target_id === U1 && entry.webhook_id === '7000000000000001')!.enabled).toBe(true);
+  });
+
+  it('binds the final activation CAS to the endpoint after provider operations', async () => {
+    const w = await prepared();
+    const ports = makePorts(w);
+    const activate = ports.db.activateConnection.bind(ports.db);
+    ports.db.activateConnection = async (id, expected) => {
+      w.connection!.recordingIngestEndpoint = OTHER_RECORDING_ENDPOINT;
+      return activate(id, expected);
+    };
+    const preview = await runProvisioning(ports, activateInputs, { execute: false });
+    const result = await runProvisioning(ports, activateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(1);
+    expect(w.log).toEqual([`PATCH ${U1}`, `PATCH ${U2}`]);
+    expect(w.connection!.status).toBe('disabled');
   });
 
   it('leaves the connection disabled when the second subscription enable fails and resumes without duplicating', async () => {

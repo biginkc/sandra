@@ -42,6 +42,8 @@ const CLIENT_ID = /^[A-Za-z0-9_-]{1,200}$/;
 const PROJECT_REF = /^[a-z]{20}$/;
 const TARGET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const PLAN_DIGEST = /^[0-9a-f]{64}$/;
+const RECORDING_ENDPOINT_PATH = '/dialpad-browser-ingest';
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 export type ProvisioningMode = 'prepare' | 'activate';
 
@@ -50,6 +52,32 @@ export class ProvisioningError extends Error {
     super(message);
     this.name = 'ProvisioningError';
   }
+}
+
+export function isCanonicalRecordingHostname(value: string): boolean {
+  if (value.length < 3 || value.length > 253 || value !== value.toLowerCase() || value.includes('xn--')) return false;
+  const labels = value.split('.');
+  return labels.length >= 2 && !labels.every((label) => /^[0-9]+$/.test(label)) && labels.every((label) => label.length <= 63 && DNS_LABEL.test(label));
+}
+
+export function isCanonicalRecordingIngestEndpoint(value: string | null | undefined): value is string {
+  if (typeof value !== 'string' || value.length < 16 || value.length > 2048 || value !== value.trim()) return false;
+  if (!value.startsWith('wss://') || value.includes('%') || value.includes('\\') || /[\u0000-\u0020\u007f]/.test(value)) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return url.href === value
+    && url.protocol === 'wss:'
+    && url.username === ''
+    && url.password === ''
+    && url.port === ''
+    && url.search === ''
+    && url.hash === ''
+    && url.pathname === RECORDING_ENDPOINT_PATH
+    && isCanonicalRecordingHostname(url.hostname);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -158,6 +186,7 @@ export interface SecretStorePort {
 export interface SchemaState {
   a2Columns: boolean;
   customDataFunction: boolean;
+  recordingEndpointColumn: boolean;
 }
 
 export interface ConnectionObservation {
@@ -169,6 +198,7 @@ export interface ConnectionObservation {
   companyId: string | null;
   directoryKeyRef: string | null;
   ctiClientIdMatches: boolean;
+  recordingIngestEndpoint: string | null;
 }
 
 export interface ConnectionInsert {
@@ -177,16 +207,27 @@ export interface ConnectionInsert {
   webhookSecretRef: string;
   companyId: string;
   directoryKeyRef: string;
+  recordingIngestEndpoint?: string | null;
+}
+
+export interface RecordingEndpointUpdate {
+  orgId: string;
+  connectionId: string;
+  companyId: string;
+  expectedPreviousEndpoint: string | null;
+  proposedEndpoint: string;
 }
 
 export interface ConnectionDbPort {
   inspectSchema(): Promise<SchemaState>;
   organizationExists(orgId: string): Promise<boolean>;
-  findConnection(orgId: string, ctiClientId: string | null): Promise<ConnectionObservation | null>;
+  findConnection(orgId: string, ctiClientId: string | null, connectionId?: string): Promise<ConnectionObservation | null>;
   /** Insert status=disabled with the default origin, or do nothing on an existing org row. Returns the new id, or null when a row already existed. */
   insertDisabledConnection(row: ConnectionInsert): Promise<string | null>;
   /** Flip disabled to active only if every expected field still matches. Returns rows changed. */
   activateConnection(id: string, expected: ConnectionInsert): Promise<number>;
+  /** Atomically configure the endpoint on one disabled, identity-matched connection. */
+  configureRecordingEndpoint(expected: RecordingEndpointUpdate): Promise<ConnectionObservation | null>;
 }
 
 export interface VercelPort {
@@ -601,7 +642,9 @@ export function buildPlan(inputs: ProvisioningInputs, o: Observed): Plan {
   // Activation.
   if (!prepare) {
     need(o.schema.customDataFunction, 'custom_data_migration_missing: dialpad_cti_custom_data() absent (PR697 migration not applied)');
+    need(o.schema.recordingEndpointColumn, 'recording_endpoint_migration_missing: recording_ingest_endpoint absent (PR715 browser-session migration not applied)');
     need(connection !== null, 'not_prepared: connection row missing');
+    need(connection?.recordingIngestEndpoint !== null && isCanonicalRecordingIngestEndpoint(connection?.recordingIngestEndpoint), 'not_prepared: recording ingest endpoint missing or invalid');
     need(o.webhookSecret === 'ok', 'not_prepared: webhook secret item missing');
     need(o.vercelNames.includes(inputs.webhookSecretEnv) && o.vercelNames.includes(inputs.directoryKeyEnv), 'not_prepared: Vercel env names missing');
     need(wh.kind === 'owned', 'not_prepared: owned webhook missing');
@@ -619,7 +662,7 @@ export function buildPlan(inputs: ProvisioningInputs, o: Observed): Plan {
       steps.push({
         id: 'activate:connection',
         action: connection.status === 'active' ? 'reuse' : 'enable',
-        detail: connection.status === 'active' ? 'connection already active' : `set connection ${connection.id} status=active after every subscription is enabled and reverified`,
+        detail: connection.status === 'active' ? `connection already active with endpoint ${connection.recordingIngestEndpoint}` : `set connection ${connection.id} status=active with endpoint ${connection.recordingIngestEndpoint} after every subscription is enabled and reverified`,
       });
     }
   }
@@ -802,11 +845,22 @@ async function applyPrepare(ctx: ApplyContext, plan: Plan): Promise<void> {
 
 async function applyActivate(ctx: ApplyContext): Promise<void> {
   const { ports, inputs } = ctx;
+  const connection = ctx.observed.connection!;
+  const expectedEndpoint = connection.recordingIngestEndpoint;
+  const verifyConnectionState = async (): Promise<void> => {
+    const current = await ports.db.findConnection(inputs.orgId, ctx.secrets.clientId, connection.id);
+    if (!current || current.id !== connection.id || current.status !== connection.status || current.recordingIngestEndpoint !== expectedEndpoint || connectionConflicts(inputs, current).length > 0) {
+      throw new ProvisioningError('activation_refused', 'the connection identity, status, company, origins, credentials, or recording endpoint changed during activation');
+    }
+  };
+
+  await verifyConnectionState();
 
   // Enable and re-read every exact canary subscription before activating the
   // receiver. If any enable fails, the connection remains disabled and a
   // later rerun can resume from the subscriptions already verified.
   for (const canary of ctx.observed.canaries) {
+    await verifyConnectionState();
     const sub = canary.subscription;
     const id = `activate:subscription:${canary.userId}`;
     if (sub.kind !== 'owned') throw new ProvisioningError('not_prepared', 'subscription missing');
@@ -830,11 +884,12 @@ async function applyActivate(ctx: ApplyContext): Promise<void> {
       verifyEnabled,
     );
     if (!(await verifyEnabled())) throw new ProvisioningError('subscription_unverified', `subscription ${subId} did not verify as enabled`);
+    await verifyConnectionState();
   }
 
-  const connection = ctx.observed.connection!;
   if (connection.status !== 'active') {
-    const changed = await ports.db.activateConnection(connection.id, connectionRow(inputs, ctx.secrets.clientId!));
+    await verifyConnectionState();
+    const changed = await ports.db.activateConnection(connection.id, { ...connectionRow(inputs, ctx.secrets.clientId!), recordingIngestEndpoint: expectedEndpoint });
     if (changed !== 1) throw new ProvisioningError('activation_refused', 'the connection no longer matched the previewed state');
     ctx.results.push({ id: 'activate:connection', outcome: 'done' });
   } else ctx.results.push({ id: 'activate:connection', outcome: 'reused' });
