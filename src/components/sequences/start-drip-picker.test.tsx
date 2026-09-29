@@ -29,3 +29,12 @@ it("leaves enrollment to the follow-up owner", async () => {
   await user.click(await screen.findByRole("button", { name: "Leave it to the follow-up owner" }));
   expect(onLeave).toHaveBeenCalledOnce();
 });
+
+it("omits the first-text line when a drip has no SMS step", async () => {
+  listDripChoices.mockResolvedValue({ ok: true, data: [{ id: "status-only", name: "Status only", textCount: 0, days: 1, firstSend: null }] });
+  const user = userEvent.setup();
+  render(<StartDripPicker onChoose={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Start follow-up drip" }));
+  expect(await screen.findByRole("button", { name: /Status only/ })).toBeInTheDocument();
+  expect(screen.queryByText(/First text:/)).not.toBeInTheDocument();
+});

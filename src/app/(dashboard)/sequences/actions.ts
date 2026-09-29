@@ -45,7 +45,7 @@ export type SequenceWithSteps = {
   }>;
 };
 
-export type DripChoice = { id: string; name: string; textCount: number; days: number; firstSend: string };
+export type DripChoice = { id: string; name: string; textCount: number; days: number; firstSend: string | null };
 
 export async function listDripChoices(): Promise<Result<DripChoice[]>> {
   try {
@@ -63,12 +63,16 @@ export async function listDripChoices(): Promise<Result<DripChoice[]>> {
     return ok(sequences.flatMap((sequence) => {
       const own = (steps ?? []).filter((step) => step.sequence_id === sequence.id);
       if (!own.length || own[0].step_index !== 0) return [];
+      const firstSmsIndex = own.findIndex((step) => step.action_type === "send_sms");
       return [{
         id: sequence.id,
         name: sequence.name,
         textCount: own.filter((step) => step.action_type === "send_sms").length,
         days: Math.ceil(own.reduce((sum, step) => sum + step.delay_after_previous_minutes, 0) / 1440),
-        firstSend: previewFirstSend(own[0].delay_after_previous_minutes, "America/Chicago"),
+        firstSend: firstSmsIndex < 0 ? null : previewFirstSend(
+          own.slice(0, firstSmsIndex + 1).reduce((sum, step) => sum + step.delay_after_previous_minutes, 0),
+          "America/Chicago",
+        ),
       }];
     }));
   } catch (e) {

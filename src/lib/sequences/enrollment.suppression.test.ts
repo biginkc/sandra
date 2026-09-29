@@ -64,6 +64,18 @@ it.each([
   expect(insert).not.toHaveBeenCalled();
 });
 
+it.each([
+  ["dead", "Dead"],
+  ["closed", "Closed"],
+  ["offer_sent", "Offer sent"],
+  ["under_contract", "Under contract"],
+])("refuses enrollment for %s property status", async (status, label) => {
+  const { client, insert } = clientFor({ status });
+  expect(await enrollLead(client as never, { sequenceId: "sequence-1", propertyId: "property-1" }))
+    .toEqual({ status: "suppressed", message: `This lead is marked ${label}, so a drip can't start.` });
+  expect(insert).not.toHaveBeenCalled();
+});
+
 it("refuses a landline before inserting", async () => {
   selectBestSmsPhone.mockReturnValueOnce({ phone: "+18165550001", lineType: "landline" });
   const { client, insert } = clientFor({});

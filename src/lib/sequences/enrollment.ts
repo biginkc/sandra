@@ -13,7 +13,7 @@ import {
 } from "@/lib/events";
 
 import { delayToDate } from "./delays";
-import type { PauseReason } from "./pause-rules";
+import { evaluatePause, type PauseReason } from "./pause-rules";
 
 export type SequenceEventActor =
   | { actorType: "user"; actorId: string }
@@ -71,7 +71,7 @@ export async function enrollLead(
   const { data: prop, error: propErr } = await client
     .from("properties")
     .select(
-      `id, org_id, homeowner_contact_id, outreach_dispo, is_dnc_locked,
+      `id, org_id, homeowner_contact_id, outreach_dispo, status, is_dnc_locked,
        homeowner:contacts!properties_homeowner_contact_id_fkey(
          id, phone_1, phone_1_type, phone_2, phone_2_type, phone_3, phone_3_type, do_not_contact, sms_opted_out
        )`,
@@ -84,6 +84,14 @@ export async function enrollLead(
     return {
       status: "failed",
       message: "Sequence and property must belong to the same organization.",
+    };
+  }
+
+  if (evaluatePause({ type: "status_change", newStatus: prop.status }).shouldPause) {
+    const label = prop.status.replaceAll("_", " ");
+    return {
+      status: "suppressed",
+      message: `This lead is marked ${label[0]!.toUpperCase()}${label.slice(1)}, so a drip can't start.`,
     };
   }
 

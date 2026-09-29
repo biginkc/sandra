@@ -78,7 +78,7 @@ export function StartDripPicker({
             className="mb-2 block w-full rounded-md border p-2 text-left hover:bg-stone-50">
             <span className="block text-sm font-medium">{choice.name}</span>
             <span className="block text-xs text-stone-600">{choice.textCount} texts · over {choice.days} days</span>
-            <span className="block text-xs text-stone-600">First text: {choice.firstSend}</span>
+            {choice.firstSend && <span className="block text-xs text-stone-600">First text: {choice.firstSend}</span>}
             <span className="block text-xs text-stone-600">Stops when they reply</span>
           </button>
         ))}
