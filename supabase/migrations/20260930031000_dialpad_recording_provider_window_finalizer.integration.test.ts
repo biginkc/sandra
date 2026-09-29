@@ -190,6 +190,39 @@ describe('provider-window finalizer migration', () => {
     expect(browser.rows[0]!.v).not.toHaveProperty('selectedSummary');
   });
 
+  it('stales a short-path result when the long digest path takes over, then re-awards KPI after recompute', async () => {
+    const before = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
+    expect(before.rows[0]!.v.status).toBe('eligible');
+    await pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)', [ORG,captureId,POLICY,before.rows[0]!.v.inputDigest]);
+    const kpi = async () => {
+      await pg.query('set role authenticated');
+      await pg.query('select set_config(\'request.jwt.claim.sub\',$1,false)', [OWNER]);
+      try {
+        return (await pg.query<{v:FinalizerJson}>('select public.fn_get_acquisition_kpis($1,$2,now()-interval \'1 day\',now()+interval \'1 day\') v',[ORG,OWNER])).rows[0]!.v;
+      } finally {
+        await pg.query('reset role');
+      }
+    };
+    expect((await kpi()).conversationsOverFiveMinutes).toBe(1);
+
+    await replica(`insert into public.dialpad_recording_vad_batches(batch_id,capture_id,org_id,track,epoch,range_count,ranges_sha256)
+      select ('00000000-0000-4002-8000-'||lpad(batch_no::text,12,'0'))::uuid,$1,$2,'tab',1,256,repeat('e',64)
+      from generate_series(1,16) batch_no`, [captureId, ORG]);
+    await replica(`insert into public.dialpad_recording_vad_ranges(capture_id,org_id,track,epoch,batch_id,range_index,start_sample,end_sample,evidence_ref)
+      select $1,$2,'tab',1,('00000000-0000-4002-8000-'||lpad(batch_no::text,12,'0'))::uuid,range_index::smallint,
+        (batch_no*100000 + range_index*100)::bigint,(batch_no*100000 + range_index*100 + 1)::bigint,'long-path:'||batch_no::text||':'||range_index::text
+      from generate_series(1,16) batch_no cross join generate_series(0,255) range_index`, [captureId, ORG]);
+    const stale = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_provider_window_result($1,$2,$3) v',[ORG,OWNER,captureId]);
+    expect(stale.rows[0]!.v).toMatchObject({ status: 'stale', currentAtRead: false });
+    expect((await kpi()).conversationsOverFiveMinutes).toBe(0);
+
+    const refreshed = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
+    expect(refreshed.rows[0]!.v.status).toBe('eligible');
+    expect(refreshed.rows[0]!.v.inputDigest).not.toBe(before.rows[0]!.v.inputDigest);
+    await pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)', [ORG,captureId,POLICY,refreshed.rows[0]!.v.inputDigest]);
+    expect((await kpi()).conversationsOverFiveMinutes).toBe(1);
+  });
+
   it('invalidates the awarded KPI after a late provider conflict at a repeatable-read boundary', async () => {
     const input = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
     await pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,POLICY,input.rows[0]!.v.inputDigest]);
@@ -267,6 +300,56 @@ describe('provider-window finalizer migration', () => {
     const input = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,narrowPolicy]);
     expect(input.rows[0]!.v.reasons).not.toContain('timing_mapping_unsupported');
     expect(input.rows[0]!.v.selectedSummary!.mappingUpperInterceptUs! - input.rows[0]!.v.selectedSummary!.mappingLowerInterceptUs!).toBeGreaterThan(20_000);
+  });
+
+  it('includes late exchange and independently sampled context observations in drift distance', async () => {
+    const latePolicy = 'fixture-affine-late-observation-v1';
+    await seedCapture(4_800_000, {
+      driftPpm: 100,
+      domainStartSample: 0,
+      domainEndSample: 16,
+      exchangeCount: 1,
+      policyVersion: latePolicy,
+    });
+    const baseline = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,latePolicy]);
+    expect(baseline.rows[0]!.v.reasons).not.toContain('timing_mapping_unsupported');
+    const baselineSummary = baseline.rows[0]!.v.selectedSummary!;
+    const baselineWidth = baselineSummary.mappingUpperInterceptUs! - baselineSummary.mappingLowerInterceptUs!;
+
+    const lateContext = {
+      kind: 'context_clock',
+      track: 'tab',
+      seq: 2,
+      contextId: '00000000-0000-4000-8000-000000000001',
+      observation: 'post_flush',
+      browserBeforeMs: 301269.5625,
+      contextTimeMs: 301020.0625,
+      browserAfterMs: 301270.5625,
+      browserTimeOriginMs: 1700000000000,
+      state: 'closed',
+    };
+    await replica(`insert into public.dialpad_recording_timing_records(capture_id,org_id,epoch,stream,seq,content_hash,record,payload_bytes)
+      values ($1,$2,1,'tab:context',2,$3,$4,$5)`, [captureId, ORG, hash(JSON.stringify(lateContext)), JSON.stringify(lateContext), JSON.stringify(lateContext).length]);
+    const lateExchange = {
+      kind: 'exchange',
+      seq: 0,
+      serverClockId: '00000000-0000-4000-8000-000000000003',
+      browserSendMs: 300010,
+      browserReceiveMs: 300011,
+      serverReceiveMonoMs: 300010,
+      serverSendMonoMs: 300011,
+      serverReceiveWallMs: 1700000298761,
+      serverSendWallMs: 1700000298762,
+    };
+    await replica(`update public.dialpad_recording_timing_records set content_hash=$3, record=$4, payload_bytes=$5
+      where capture_id=$1 and org_id=$2 and stream='exchange' and seq=0`, [captureId, ORG, hash(JSON.stringify(lateExchange)), JSON.stringify(lateExchange), JSON.stringify(lateExchange).length]);
+
+    const late = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,latePolicy]);
+    expect(late.rows[0]!.v.reasons).not.toContain('timing_mapping_unsupported');
+    const lateSummary = late.rows[0]!.v.selectedSummary!;
+    const lateWidth = lateSummary.mappingUpperInterceptUs! - lateSummary.mappingLowerInterceptUs!;
+    expect(lateWidth).toBeGreaterThan(baselineWidth);
+    expect(lateWidth - baselineWidth).toBeGreaterThan(3);
   });
 
   it('rejects an interior context-clock discontinuity while preserving asynchronous brackets', async () => {

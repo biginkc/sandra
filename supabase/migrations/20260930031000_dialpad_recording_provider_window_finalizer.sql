@@ -481,20 +481,6 @@ begin
     source_rate := tab_start_rate;
     expected_final_output := floor(tab_final_source * 16000 / nullif(tab_final_rate, 0));
     mapping_domain_span_ms := (p.domain_end_sample - p.domain_start_sample)::numeric / 16;
-    -- Drift is an extrapolation error.  A policy-wide span is insufficient
-    -- for a narrow domain because observations may sit far outside either
-    -- supported endpoint.  Expand by the greatest observed-to-endpoint
-    -- distance, retaining the finite domain span as a conservative floor.
-    mapping_observation_span_ms := greatest(
-      mapping_domain_span_ms,
-      abs((p.domain_start_sample - tab_start_output)::numeric / 16),
-      abs((p.domain_end_sample - tab_start_output)::numeric / 16),
-      abs((p.domain_start_sample - tab_final_output)::numeric / 16),
-      abs((p.domain_end_sample - tab_final_output)::numeric / 16),
-      coalesce((timing_server_wall_max - timing_server_wall_min) / 1000, 0)
-    );
-    mapping_drift_margin_ms := mapping_observation_span_ms * p.supported_drift_ppm / 1000000;
-    mapping_capture_margin_ms := p.supported_capture_margin_us / 1000;
     -- Context observations are independent currentTime reads. Their own
     -- before/after brackets constrain browser-minus-context; they need not
     -- coincide with an anchor boundary. Expand each interval over the
@@ -504,8 +490,6 @@ begin
       into context_offset_lower, context_offset_upper
       from public.dialpad_recording_timing_records
      where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='tab:context';
-    context_browser_lower := context_offset_lower - mapping_drift_margin_ms - mapping_capture_margin_ms;
-    context_browser_upper := context_offset_upper + mapping_drift_margin_ms + mapping_capture_margin_ms;
     -- [serverReceive - browserReceive, serverSend - browserSend] is a
     -- conservative causal bracket; no RTT midpoint is treated as truth.
     select max((record->>'serverSendWallMs')::numeric - (record->>'browserReceiveMs')::numeric),
@@ -513,6 +497,57 @@ begin
       into exchange_offset_lower, exchange_offset_upper
       from public.dialpad_recording_timing_records
      where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange';
+    -- Drift is an extrapolation error. A policy-wide span is insufficient for
+    -- a narrow domain because observations may sit far outside either
+    -- supported endpoint. Include the joined output positions of every tab
+    -- context observation and both endpoints of every browser exchange
+    -- bracket, not only the anchor cursors and wall-clock span. This covers a
+    -- late final probe or an independently sampled context read after source
+    -- capture ended.
+    with observation_outputs as (
+      select tab_start_output +
+             (((record->>'contextTimeMs')::numeric - tab_start_context_time) * 16) as output_sample
+        from public.dialpad_recording_timing_records
+       where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='tab:context'
+      union all
+      select tab_start_output +
+             ((((record->>'browserSendMs')::numeric - context_offset_upper) - tab_start_context_time) * 16)
+        from public.dialpad_recording_timing_records
+       where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange'
+      union all
+      select tab_start_output +
+             ((((record->>'browserSendMs')::numeric - context_offset_lower) - tab_start_context_time) * 16)
+        from public.dialpad_recording_timing_records
+       where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange'
+      union all
+      select tab_start_output +
+             ((((record->>'browserReceiveMs')::numeric - context_offset_upper) - tab_start_context_time) * 16)
+        from public.dialpad_recording_timing_records
+       where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange'
+      union all
+      select tab_start_output +
+             ((((record->>'browserReceiveMs')::numeric - context_offset_lower) - tab_start_context_time) * 16)
+        from public.dialpad_recording_timing_records
+       where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange'
+    )
+    select greatest(
+      mapping_domain_span_ms,
+      abs((p.domain_start_sample - tab_start_output)::numeric / 16),
+      abs((p.domain_end_sample - tab_start_output)::numeric / 16),
+      abs((p.domain_start_sample - tab_final_output)::numeric / 16),
+      abs((p.domain_end_sample - tab_final_output)::numeric / 16),
+      coalesce(max(greatest(
+        abs((p.domain_start_sample - output_sample)::numeric / 16),
+        abs((p.domain_end_sample - output_sample)::numeric / 16)
+      )), 0),
+      coalesce((timing_server_wall_max - timing_server_wall_min) / 1000, 0)
+    )
+      into mapping_observation_span_ms
+      from observation_outputs;
+    mapping_drift_margin_ms := mapping_observation_span_ms * p.supported_drift_ppm / 1000000;
+    mapping_capture_margin_ms := p.supported_capture_margin_us / 1000;
+    context_browser_lower := context_offset_lower - mapping_drift_margin_ms - mapping_capture_margin_ms;
+    context_browser_upper := context_offset_upper + mapping_drift_margin_ms + mapping_capture_margin_ms;
     exchange_browser_lower := exchange_offset_lower - mapping_drift_margin_ms - mapping_capture_margin_ms;
     exchange_browser_upper := exchange_offset_upper + mapping_drift_margin_ms + mapping_capture_margin_ms;
     mapping_lower_slope_us := 1000000.0 / 16000.0;
