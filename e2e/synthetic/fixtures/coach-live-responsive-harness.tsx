@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { createRoot } from "react-dom/client";
 
 import { CoachLiveView } from "@/components/coach/coach-live-view";
+import { ObjectionPromptProvider } from "@/components/coach/objection-prompt-context";
 import { createCoachReducer, initialCoachState } from "@/lib/coach/event-reducer";
 import {
   getFirstCoachSectionIdForPhase,
@@ -32,7 +33,11 @@ const sampleContext: CoachCallContext = {
 };
 
 function harnessState(): CoachState {
-  const state = initialCoachState("introduction");
+  const state = createCoachReducer(closrOutbound123Bundle)(initialCoachState("introduction"), {
+    type: "objection_prompt", objectionId: "price", label: "Price concern", sellerTurn: 1,
+    classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: new Date().toISOString(),
+    scriptVersion: closrOutbound123Bundle.script.version, matcherVersion: "3",
+  });
   return {
     ...state,
     connected: true,
@@ -160,10 +165,10 @@ function Harness({ held: initialHeld = false, interrupted = false, unavailable =
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Missing #root for coach live responsive harness");
 createRoot(rootElement).render(
-  <Harness
+  <ObjectionPromptProvider enabled><Harness
     held={rootElement.dataset.held === "true"}
     interrupted={rootElement.dataset.interrupted === "true"}
     unavailable={rootElement.dataset.unavailable === "true"}
     emptyMotivation={rootElement.dataset.emptyMotivation === "true"}
-  />,
+  /></ObjectionPromptProvider>,
 );

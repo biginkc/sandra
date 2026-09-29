@@ -62,6 +62,7 @@ import { useCoachChannel as useRuntimeCoachChannel } from "./use-coach-channel";
  * the script artifact's version bumps. */
 const V = { scriptVersion: closrOutbound123Bundle.script.version, matcherVersion: "3" };
 const STRICT_V = { ...V, scriptDigest: closrOutbound123Ref.digest };
+const PROMPT = { type: "objection_prompt", objectionId: "price", label: "Price concern", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...STRICT_V };
 const binding = { ref: closrOutbound123Ref, bundle: closrOutbound123Bundle };
 
 function useCoachChannel(
@@ -93,6 +94,32 @@ async function flush() {
 }
 
 describe("useCoachChannel", () => {
+  it("buffers a prompt until binding resolves and rejects a wrong digest", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "1");
+    const { result, rerender } = renderHook(({ callBinding, pending }: { callBinding: typeof binding | null; pending: boolean }) =>
+      useRuntimeCoachChannel("prompt-call", callBinding, "introduction", true, "prompt-call", pending),
+      { initialProps: { callBinding: null as typeof binding | null, pending: true } },
+    );
+    await flush();
+    act(() => latestChannel()._broadcastHandler?.({ payload: PROMPT }));
+    expect(result.current.state.objectionPrompt).toBeNull();
+    rerender({ callBinding: binding, pending: false });
+    expect(result.current.state.objectionPrompt?.label).toBe("Price concern");
+    act(() => latestChannel()._broadcastHandler?.({ payload: { ...PROMPT, label: "Wrong", scriptDigest: "f".repeat(64) } }));
+    expect(result.current.state.objectionPrompt?.label).toBe("Price concern");
+  });
+  it("never logs the label from a malformed prompt", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      renderHook(() => useCoachChannel("privacy-call"));
+      await flush();
+      act(() => latestChannel()._broadcastHandler?.({ payload: { ...PROMPT, sellerTurn: 0, label: "PRIVATE SELLER WORDS" } }));
+      expect(warn).toHaveBeenCalled();
+      expect(JSON.stringify(warn.mock.calls)).not.toContain("PRIVATE SELLER WORDS");
+    } finally {
+      warn.mockRestore();
+    }
+  });
   beforeEach(() => {
     vi.useFakeTimers();
     vi.stubEnv("NEXT_PUBLIC_COACH_WIRE_DIGEST_STRICT", "");
