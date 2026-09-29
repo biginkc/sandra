@@ -35,7 +35,7 @@ const dispatchSql = readSql("20260929180000_dialpad_cti_dispatch.sql");
 const recordingSql = readSql("20260929210000_dialpad_recording_foundation.sql");
 const transportSql = readSql("20260929220000_dialpad_recording_transport_contract.sql");
 const playbackSql = readSql("20260929221000_dialpad_recording_playback.sql");
-const browserSessionSql = readSql("20260930000000_dialpad_recording_browser_session.sql");
+const browserSessionSql = readSql("20260930001000_dialpad_recording_browser_session.sql");
 
 const uuid = () => crypto.randomUUID();
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -1721,7 +1721,7 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
     });
   });
 
-  describe("20260930000000 browser session authority", () => {
+  describe("20260930001000 browser session authority", () => {
     const sessionOrg = () => orgs[0]!;
     const sessionRep = () => users[1]!;
     const sessionRpc = (name: string, args: unknown[]) => {
