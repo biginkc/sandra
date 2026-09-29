@@ -9,13 +9,14 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import copy
 from pathlib import Path
 import unittest
 
 
 HERE = Path(__file__).resolve().parent
 EXPECTED_COMMIT = "87e0a164294b7740c38b1ca926e3503e3f3ea7eb"
-EXPECTED_GRANT_FIX_COMMIT = "0b57b46e438689c2086488ab0f68b42c221bf162"
+EXPECTED_GRANT_FIX_SHA256 = "a935905bb86e545684f6414c4cced8d02d659b6fc60604537195b2a776534128"
 EXPECTED_PACKET_SHA256 = "c82750aecab9a2081f6a8ebbbfb1f6d7705c5649de481d8f666e1e2a881518bb"
 
 
@@ -39,9 +40,10 @@ class BackendPackagingTests(unittest.TestCase):
     def test_default_assembler_and_generated_packet_share_reviewed_pin(self) -> None:
         self.assertEqual(self.assembler.SOURCE_COMMIT, EXPECTED_COMMIT)
         self.assertEqual(self.backend["source_commit"], EXPECTED_COMMIT)
-        self.assertEqual(self.assembler.GRANT_FIX_COMMIT, EXPECTED_GRANT_FIX_COMMIT)
+        self.assertEqual(self.assembler.GRANT_FIX_SHA256, EXPECTED_GRANT_FIX_SHA256)
         correction = next(s for s in self.backend["sql_sources"] if s["name"] == "operation_domain_apply")["reviewed_correction"]
-        self.assertEqual(correction["source_commit"], EXPECTED_GRANT_FIX_COMMIT)
+        self.assertEqual(correction["base_commit"], EXPECTED_COMMIT)
+        self.assertEqual(correction["sha256"], EXPECTED_GRANT_FIX_SHA256)
         self.assertEqual(correction["sha256"], hashlib.sha256((HERE.parent / "inbox-operation-domain" / "restrictive-apply.sql").read_bytes()).hexdigest())
         packet = HERE.parent / "inbox-release" / "generated" / "backend-operation-reply.sql"
         packet_hash = hashlib.sha256(packet.read_bytes()).hexdigest()
@@ -69,6 +71,16 @@ class BackendPackagingTests(unittest.TestCase):
         execution_result = self.gate.verify_execution_stack_manifest()
         self.assertEqual(backend_result["status"], "PASS", backend_result)
         self.assertEqual(execution_result["status"], "PASS", execution_result)
+
+    def test_release_gate_rejects_changed_correction_pin(self) -> None:
+        packet = (HERE / "generated" / "backend-operation-reply.sql").read_text()
+        for field, value in (("base_commit", "0" * 40), ("sha256", "0" * 64)):
+            with self.subTest(field=field):
+                manifest = copy.deepcopy(self.backend)
+                correction = next(s for s in manifest["sql_sources"] if s["name"] == "operation_domain_apply")["reviewed_correction"]
+                correction[field] = value
+                result = self.gate.verify_backend_source_content(manifest, packet)
+                self.assertEqual(result["status"], "FAIL", result)
 
     def test_acceptance_gate_blocks_unbound_historical_rows(self) -> None:
         result = self.gate.check_acceptance_matrix("HEAD")
