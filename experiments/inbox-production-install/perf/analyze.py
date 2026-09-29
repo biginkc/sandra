@@ -20,6 +20,8 @@ def percentile(values, fraction):
 
 def evaluate(result, limits=THRESHOLDS['burst']):
     failures = []
+    if result.get('lock_logging') != {'log_lock_waits': 'on', 'deadlock_timeout': '10ms'}:
+        failures.append('lock logging not live at 10ms')
     counts = result['counts']
     for kind, expected in [('update', limits['updates_per_s'] * limits['duration_s']), ('inbound', limits['inbound_per_s'] * limits['duration_s'])]:
         for field in ('scheduled', 'completed'):
@@ -63,6 +65,9 @@ def evaluate(result, limits=THRESHOLDS['burst']):
 def analyze(directory):
     summary = json.loads((directory / 'burst-summary.json').read_text())
     before = json.loads((directory / 'before.json').read_text())
+    config_path = directory / 'lock-config-observed.txt'
+    config = config_path.read_text().splitlines() if config_path.exists() else []
+    lock_logging = dict(zip(('log_lock_waits', 'deadlock_timeout'), config)) if len(config) == 2 else None
     client = {'update': [], 'inbound': []}
     inbound = []
     with (directory / 'client-latencies.csv').open() as f:
@@ -104,6 +109,7 @@ def analyze(directory):
     result = {'final_db': final, 'pg_stat_calls': pg_stat_calls, 'counts': summary['counts'], 'error_count': len(summary['errors']), 'error_codes': {}, 'server': {}, 'client': {},
               'backlog': {'at_end': backlog[-1] if backlog else None, 'drain_first_zero_s': next((row['elapsed_s'] - 120 for row in after if row['dirty_pending'] == 0 and row['maintained_queue'] == 0), None)},
               'deadlocks_delta': (backlog[-1]['deadlocks'] - float(before['before']['deadlocks'])) if backlog else None,
+              'lock_logging': lock_logging,
               'max_lock_wait_log_ms': max(locks, default=0), 'lock_log_events': len(locks),
               'paired_gaps': {'n': len(pairs), 'max_ms': max(pairs, default=None), 'over_50ms': sum(gap > 50 for gap in pairs)}}
     for error in summary['errors']:

@@ -23,6 +23,7 @@ class AnalyzeTests(unittest.TestCase):
             'counts': {'scheduled': {'update': 10200, 'inbound': 2400}, 'completed': {'update': 10200, 'inbound': 2400}, 'failed': {'update': 0, 'inbound': 0}, 'worker': {'errors': 0, 'parent': 60, 'finish': 12000, 'parent_sources': 60}},
             'server': {'update': {'n': 10200, 'p95_ms': limits['server_p95_ms'], 'p99_ms': limits['server_p99_ms']}, 'inbound': {'n': 2400, 'p95_ms': 3, 'p99_ms': 5}},
             'error_count': 0, 'error_codes': {}, 'deadlocks_delta': 0, 'max_lock_wait_log_ms': 20,
+            'lock_logging': {'log_lock_waits': 'on', 'deadlock_timeout': '10ms'},
             'backlog': {'drain_first_zero_s': 2, 'at_end': {'dirty_pending': 0, 'maintained_queue': 0}},
             'final_db': {'inbound': 2400, 'unknown': 240, 'total': 149400},
             'pg_stat_calls': {'update': 10200, 'inbound': 2400},
@@ -45,6 +46,9 @@ class AnalyzeTests(unittest.TestCase):
             'deadlock': lambda x: x.update(deadlocks_delta=1),
             'serialization': lambda x: x['error_codes'].update({'40001': 1}),
             'lock_wait': lambda x: x.update(max_lock_wait_log_ms=501),
+            'missing_lock_logging': lambda x: x.pop('lock_logging'),
+            'disabled_lock_logging': lambda x: x['lock_logging'].update(log_lock_waits='off'),
+            'slow_lock_logging': lambda x: x['lock_logging'].update(deadlock_timeout='1s'),
             'undrained': lambda x: x['backlog'].update(drain_first_zero_s=None),
             'pair_cadence': lambda x: x['paired_gaps'].update(n=359),
         }

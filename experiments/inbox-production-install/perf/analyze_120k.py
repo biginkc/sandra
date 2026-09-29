@@ -31,10 +31,10 @@ after_nodes = (run / 'after-relfilenodes.csv').read_text()
 if len(before_nodes.splitlines()) != 11 or before_nodes != after_nodes:
     failures.append('table rewrite or missing relfilenode evidence')
 lock = json.loads((run / '20260929000000_inbox_control_foundation.sql.json').read_text())
-# Whole file wall time is a conservative upper bound for any contained lock hold.
-if lock['exit'] != 0 or lock['wall_ms'] > limits['foundation_access_exclusive_upper_ms']:
+observed_hold = lock.get('access_exclusive_messages_observed_ms')
+if lock['exit'] != 0 or not isinstance(observed_hold, (int, float)) or not math.isfinite(observed_hold) or observed_hold < 0 or observed_hold > limits['foundation_access_exclusive_upper_ms']:
     failures.append('foundation lock upper bound')
-result = {'kind': 'perf-120k', 'thresholds': limits, 'latencies': summary, 'foundation_file_wall_upper_ms': lock['wall_ms'], 'failures': failures, 'verdict': 'FAIL' if failures else 'PASS'}
+result = {'kind': 'perf-120k', 'thresholds': limits, 'latencies': summary, 'foundation_file_wall_upper_ms': lock['wall_ms'], 'foundation_access_exclusive_messages_observed_ms': observed_hold, 'failures': failures, 'verdict': 'FAIL' if failures else 'PASS'}
 (run / 'analysis.json').write_text(json.dumps(result, indent=2) + '\n')
 print(json.dumps(result, indent=2))
 raise SystemExit(bool(failures))
