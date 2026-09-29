@@ -38,3 +38,15 @@ it("omits the first-text line when a drip has no SMS step", async () => {
   expect(await screen.findByRole("button", { name: /Status only/ })).toBeInTheDocument();
   expect(screen.queryByText(/First text:/)).not.toBeInTheDocument();
 });
+
+it("selectionOnly selects without enrolling or reporting an enrollment result", async () => {
+  const onChoose = vi.fn().mockResolvedValue({ status: "enrolled", reason: "Enrolled" });
+  const onResult = vi.fn();
+  const onSelect = vi.fn();
+  const user = userEvent.setup();
+  render(<StartDripPicker inline selectionOnly previewChoices={[{ id: "s1", name: "Seller follow-up", textCount: 1, days: 1, firstSend: null }]} onChoose={onChoose} onResult={onResult} onSelect={onSelect} />);
+  await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+  expect(onSelect).toHaveBeenCalledWith("s1");
+  expect(onChoose).not.toHaveBeenCalled();
+  expect(onResult).not.toHaveBeenCalled();
+});

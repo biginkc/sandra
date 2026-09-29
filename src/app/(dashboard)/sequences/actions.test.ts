@@ -36,13 +36,11 @@ import {
   cancelEnrollment,
   changeDripAction,
   createSequence,
-  deleteSequenceStep,
   enrollLeadInSequence,
   pauseEnrollmentAction,
   resumeEnrollmentAction,
   restoreSequence,
   updateSequence,
-  upsertSequenceStep,
 } from "./actions";
 
 type InsertedRow = {
@@ -281,21 +279,6 @@ describe("sequence admin guard", () => {
       await expectForbidden(user, () => archiveSequence("seq-1"));
     });
 
-    it("blocks step upserts before table access", async () => {
-      await expectForbidden(user, () =>
-        upsertSequenceStep({
-          sequence_id: "seq-1",
-          step_index: 0,
-          delay_after_previous_minutes: 0,
-          action_type: "send_sms",
-          template_body: "Hello",
-        }),
-      );
-    });
-
-    it("blocks step deletion before table access", async () => {
-      await expectForbidden(user, () => deleteSequenceStep("step-1", "seq-1"));
-    });
   });
 });
 

@@ -178,6 +178,11 @@ export function normalizeTimeZone(timeZone: string | null | undefined): string {
   }
 }
 
+/** Stable server/client display for an instant in an explicitly chosen zone. */
+export function formatZonedDateTime(instant: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(instant);
+}
+
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const TIME_RE = /^(\d{2}):(\d{2})(?::(\d{2}))?$/;
 
