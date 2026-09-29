@@ -11,6 +11,7 @@ class ApprovalDecision(unittest.TestCase):
     def setUp(self):
         self.sha = 'a' * 40
         self.workflow = b'ref: ${{ github.event.workflow_run.head_sha }}\n'
+        self.main_workflow = self.workflow
         self.digest = __import__('hashlib').sha256(self.workflow).hexdigest()
         self.prod = {'id': 7, 'event': 'workflow_run', 'status': 'waiting', 'run_attempt': 1}
         self.upstream = {'id': 5, 'run_attempt': 2, 'head_sha': self.sha, 'event': 'push', 'head_branch': 'main', 'conclusion': 'success'}
@@ -19,7 +20,7 @@ class ApprovalDecision(unittest.TestCase):
         self.waiting = [{'id': 7}]
         self.protection = {'can_admins_bypass': False, 'protection_rules': [{'type': 'required_reviewers', 'reviewers': [{'reviewer': {'login': 'biginkc'}}]}]}
     def check(self):
-        return a.decision(7, self.sha, self.prod, self.binding, self.upstream, self.jobs, self.waiting, self.workflow, self.digest, self.protection)
+        return a.decision(7, self.sha, self.prod, self.binding, self.upstream, self.jobs, self.waiting, self.workflow, self.main_workflow, self.digest, self.protection)
     def test_valid(self): self.assertEqual(self.check(), [])
     def test_dispatch(self):
         self.upstream['event'] = self.binding['upstream_event'] = 'workflow_dispatch'
@@ -33,8 +34,11 @@ class ApprovalDecision(unittest.TestCase):
     def test_two_waiting(self):
         self.waiting.append({'id': 8})
         self.assertTrue(self.check())
-    def test_definition_drift(self):
+    def test_run_sha_drift_fails(self):
         self.workflow += b'# altered\n'
-        self.assertTrue(self.check())
+        self.assertIn('Production run SHA workflow definition hash mismatch', self.check())
+    def test_main_drift_fails(self):
+        self.main_workflow += b'# altered\n'
+        self.assertIn('origin/main workflow definition hash mismatch', self.check())
 
 if __name__ == '__main__': unittest.main()
