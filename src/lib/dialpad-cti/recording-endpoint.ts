@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  DEFAULT_SUPABASE_PROJECT_REF,
   ProvisioningError,
   isCanonicalRecordingHostname,
   isCanonicalRecordingIngestEndpoint,
@@ -12,6 +13,7 @@ import {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const COMPANY_ID = /^[1-9][0-9]{0,19}$/;
+const PROJECT_REF = /^[a-z]{20}$/;
 const PLAN_DIGEST = /^[0-9a-f]{64}$/;
 
 export interface RawRecordingEndpointInputs {
@@ -20,6 +22,7 @@ export interface RawRecordingEndpointInputs {
   companyId?: string;
   endpoint?: string;
   verifiedHostname?: string;
+  projectRef?: string;
   /** Must be present. `null` is the explicit first-setup value. */
   expectedPreviousEndpoint?: string | null;
 }
@@ -30,6 +33,7 @@ export interface RecordingEndpointInputs {
   companyId: string;
   endpoint: string;
   verifiedHostname: string;
+  projectRef: string;
   expectedPreviousEndpoint: string | null;
 }
 
@@ -37,8 +41,10 @@ export function parseRecordingEndpointInputs(raw: RawRecordingEndpointInputs): R
   const orgId = raw.orgId?.trim().toLowerCase() ?? '';
   const connectionId = raw.connectionId?.trim().toLowerCase() ?? '';
   const companyId = raw.companyId?.trim() ?? '';
+  const projectRef = (raw.projectRef ?? DEFAULT_SUPABASE_PROJECT_REF).trim().toLowerCase();
   if (!UUID.test(orgId) || !UUID.test(connectionId)) throw new ProvisioningError('invalid_input', 'typed organization and connection UUIDs are required');
   if (!COMPANY_ID.test(companyId)) throw new ProvisioningError('invalid_input', 'a typed Dialpad company id is required');
+  if (!PROJECT_REF.test(projectRef)) throw new ProvisioningError('invalid_input', 'project ref must be a 20-character lowercase Supabase ref');
   if (typeof raw.verifiedHostname !== 'string' || !isCanonicalRecordingHostname(raw.verifiedHostname)) {
     throw new ProvisioningError('invalid_input', 'verified hostname must be a canonical lowercase ASCII service hostname');
   }
@@ -54,7 +60,7 @@ export function parseRecordingEndpointInputs(raw: RawRecordingEndpointInputs): R
   if (expectedPreviousEndpoint !== null && !isCanonicalRecordingIngestEndpoint(expectedPreviousEndpoint)) {
     throw new ProvisioningError('invalid_input', 'expected previous endpoint must be null or canonical wss://.../dialpad-browser-ingest');
   }
-  return { orgId, connectionId, companyId, endpoint: raw.endpoint, verifiedHostname: raw.verifiedHostname, expectedPreviousEndpoint };
+  return { orgId, connectionId, companyId, endpoint: raw.endpoint, verifiedHostname: raw.verifiedHostname, projectRef, expectedPreviousEndpoint };
 }
 
 export interface RecordingEndpointObserved {
@@ -81,6 +87,7 @@ export interface RecordingEndpointPlan {
   newEndpoint: string;
   expectedPreviousEndpoint: string | null;
   verifiedHostname: string;
+  projectRef: string;
   steps: readonly RecordingEndpointPlanStep[];
   blockers: readonly string[];
   conflicts: readonly string[];
@@ -143,7 +150,7 @@ export function buildRecordingEndpointPlan(inputs: RecordingEndpointInputs, obse
         ? `disabled connection ${inputs.connectionId} already has endpoint ${inputs.endpoint}`
         : `endpoint configuration blocked for connection ${inputs.connectionId}`,
   }];
-  const body = { operation, orgId: inputs.orgId, connectionId: inputs.connectionId, companyId: inputs.companyId, status, oldEndpoint, newEndpoint: inputs.endpoint, expectedPreviousEndpoint: inputs.expectedPreviousEndpoint, verifiedHostname: inputs.verifiedHostname, steps, blockers, conflicts };
+  const body = { operation, orgId: inputs.orgId, connectionId: inputs.connectionId, companyId: inputs.companyId, projectRef: inputs.projectRef, status, oldEndpoint, newEndpoint: inputs.endpoint, expectedPreviousEndpoint: inputs.expectedPreviousEndpoint, verifiedHostname: inputs.verifiedHostname, steps, blockers, conflicts };
   return { ...body, digest: digestOf(body) };
 }
 
@@ -159,6 +166,7 @@ export function renderRecordingEndpointPlan(plan: RecordingEndpointPlan): string
     `organization ${plan.orgId}`,
     `connection ${plan.connectionId}`,
     `company ${plan.companyId}`,
+    `supabase project ref ${plan.projectRef}`,
     `status ${plan.status ?? 'missing'}`,
     `old endpoint ${displayEndpoint(plan.oldEndpoint)}`,
     `new endpoint ${displayEndpoint(plan.newEndpoint)}`,

@@ -58,6 +58,7 @@ async function main(): Promise<number> {
     companyId: values['company-id'],
     endpoint: values.endpoint,
     verifiedHostname: values['verified-hostname'],
+    projectRef: values['project-ref'] ?? DEFAULT_SUPABASE_PROJECT_REF,
     ...(previousRaw === 'null' ? { expectedPreviousEndpoint: null } : { expectedPreviousEndpoint: previousRaw }),
   });
 
@@ -77,7 +78,7 @@ async function main(): Promise<number> {
     }
     return pending;
   };
-  const db: ConnectionDbPort = createConnectionDbPort(createManagementQueryRunner(values['project-ref'] ?? DEFAULT_SUPABASE_PROJECT_REF, () => readOnce(MANAGEMENT_PAT_ITEM)));
+  const db: ConnectionDbPort = createConnectionDbPort(createManagementQueryRunner(inputs.projectRef, () => readOnce(MANAGEMENT_PAT_ITEM)));
   const result = await runRecordingEndpointConfiguration(db, inputs, { execute: values.execute === true, expectPlan: values['expect-plan'] });
   for (const line of result.lines) process.stdout.write(`${guard.scrub(line)}\n`);
   return result.exitCode;

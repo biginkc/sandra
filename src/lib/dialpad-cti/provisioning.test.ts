@@ -703,6 +703,61 @@ describe('activate mode', () => {
     expect(w.connection!.recordingIngestEndpoint).toBe(OTHER_RECORDING_ENDPOINT);
   });
 
+  it('rejects an endpoint change during the last already-enabled subscription read', async () => {
+    const w = await prepared();
+    w.connection!.status = 'active';
+    for (const sub of w.subs) {
+      if (sub.webhook_id === '7000000000000001') sub.enabled = true;
+    }
+    const preview = await dryRun(w, activateInputs);
+    const ports = makePorts(w);
+    const originalRequest = ports.dialpad.request.bind(ports.dialpad);
+    let subscriptionGets = 0;
+    ports.dialpad.request = async (method, path, body) => {
+      const response = await originalRequest(method, path, body);
+      if (method === 'GET' && path.startsWith('/api/v2/subscriptions/call')) {
+        subscriptionGets += 1;
+        if (subscriptionGets === 6) w.connection!.recordingIngestEndpoint = OTHER_RECORDING_ENDPOINT;
+      }
+      return response;
+    };
+    const result = await runProvisioning(ports, activateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain('activation_refused');
+    expect(subscriptionGets).toBe(6);
+    expect(w.log).toEqual([]);
+    expect(w.connection!.status).toBe('active');
+    expect(w.connection!.recordingIngestEndpoint).toBe(OTHER_RECORDING_ENDPOINT);
+  });
+
+  it('rejects an endpoint change observed during the final activation readback', async () => {
+    const w = await prepared();
+    w.connection!.status = 'active';
+    for (const sub of w.subs) {
+      if (sub.webhook_id === '7000000000000001') sub.enabled = true;
+    }
+    const preview = await dryRun(w, activateInputs);
+    const ports = makePorts(w);
+    const originalFind = ports.db.findConnection.bind(ports.db);
+    let reads = 0;
+    ports.db.findConnection = async (orgId, clientId) => {
+      const current = await originalFind(orgId, clientId);
+      reads += 1;
+      if (reads === 8 && current) {
+        w.connection!.recordingIngestEndpoint = OTHER_RECORDING_ENDPOINT;
+        return { ...current, recordingIngestEndpoint: OTHER_RECORDING_ENDPOINT };
+      }
+      return current;
+    };
+    const result = await runProvisioning(ports, activateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain('activation identity, status, credentials, or recording endpoint changed');
+    expect(reads).toBe(8);
+    expect(w.log).toEqual([]);
+    expect(w.connection!.status).toBe('active');
+    expect(w.connection!.recordingIngestEndpoint).toBe(OTHER_RECORDING_ENDPOINT);
+  });
+
   it('a dry run previews the activation and changes nothing', async () => {
     const w = await prepared();
     const result = await dryRun(w, activateInputs);

@@ -5,15 +5,15 @@ import { Client } from 'pg';
 
 import { requireLoopbackPostgresUrl } from '../../src/lib/testing/loopback-postgres-url';
 import { createConnectionDbPort } from '../../src/lib/dialpad-cti/provisioning-adapters';
-import { parseRecordingEndpointInputs } from '../../src/lib/dialpad-cti/recording-endpoint';
 
 const localDbUrl = 'postgresql://postgres:postgres@127.0.0.1:54329/postgres';
 const ENDPOINT = 'wss://receiver.example.up.railway.app/dialpad-browser-ingest';
+const OTHER_ENDPOINT = 'wss://other-receiver.example.up.railway.app/dialpad-browser-ingest';
 const dbUrl = requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? localDbUrl);
 
 const sql = (client: Client) => async (text: string, values: unknown[] = []) => client.query(text, values);
 
-describe('recording endpoint configuration local CAS', () => {
+describe('recording endpoint activation CAS local race', () => {
   let root: Client;
   let contender: Client;
   let orgId: string;
@@ -36,33 +36,58 @@ describe('recording endpoint configuration local CAS', () => {
     await Promise.all([root?.end(), contender?.end()]);
   });
 
-  it('serializes disabled endpoint CAS and refuses an active replay', async () => {
+  async function waitForActivationLock(): Promise<void> {
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      const result = await root.query<{ waiting: number }>(`select count(*)::int as waiting
+        from pg_stat_activity
+        where pid <> pg_backend_pid()
+          and datname = current_database()
+          and state = 'active'
+          and wait_event_type = 'Lock'
+          and query ilike '%dialpad_org_connections set status%'`);
+      if ((result.rows[0]?.waiting ?? 0) > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error('activation UPDATE never reached a confirmed row lock wait');
+  }
+
+  it('waits on the row lock, then refuses activation after the endpoint changes and rejects active configuration replay', async () => {
     orgId = randomUUID();
     connectionId = randomUUID();
     companyId = String(Math.floor(Math.random() * 9_000_000_000_000_000) + 1);
     const rootSql = sql(root);
-    await rootSql('insert into public.organizations(id,name) values ($1,$2)', [orgId, `endpoint CAS ${orgId}`]);
+    await rootSql('insert into public.organizations(id,name) values ($1,$2)', [orgId, `endpoint activation CAS ${orgId}`]);
+    const ctiClientId = `client_${orgId.replaceAll('-', '')}`;
     await rootSql(`insert into public.dialpad_org_connections
       (id,org_id,status,cti_client_id,allowed_origins,webhook_secret_ref,webhook_secret_version,dialpad_company_id,directory_api_key_ref,recording_ingest_endpoint)
-      values ($1,$2,'disabled',$3,array['https://dialpad.com']::text[],'env:DIALPAD_CTI_WEBHOOK_SECRET_CAS',1,$4,'env:DIALPAD_CTI_DIRECTORY_KEY_CAS',null)`, [connectionId, orgId, `client_${orgId.replaceAll('-', '')}`, companyId]);
+      values ($1,$2,'disabled',$3,array['https://dialpad.com']::text[],'env:DIALPAD_CTI_WEBHOOK_SECRET_CAS',1,$4,'env:DIALPAD_CTI_DIRECTORY_KEY_CAS',$5)`, [connectionId, orgId, ctiClientId, companyId, ENDPOINT]);
 
-    parseRecordingEndpointInputs({ orgId, connectionId, companyId, endpoint: ENDPOINT, verifiedHostname: 'receiver.example.up.railway.app', expectedPreviousEndpoint: null });
     const first = createConnectionDbPort(async (statement) => (await root.query(statement)).rows);
     const second = createConnectionDbPort(async (statement) => (await contender.query(statement)).rows);
     await first.inspectSchema();
     await second.inspectSchema();
+    const expected = {
+      orgId,
+      ctiClientId,
+      webhookSecretRef: 'env:DIALPAD_CTI_WEBHOOK_SECRET_CAS',
+      companyId,
+      directoryKeyRef: 'env:DIALPAD_CTI_DIRECTORY_KEY_CAS',
+      recordingIngestEndpoint: ENDPOINT,
+    };
+
     await root.query('begin');
-    const update = { orgId, connectionId, companyId, expectedPreviousEndpoint: null, proposedEndpoint: ENDPOINT };
-    const firstWrite = await first.configureRecordingEndpoint(update);
-    expect(firstWrite).toMatchObject({ id: connectionId, status: 'disabled', recordingIngestEndpoint: ENDPOINT });
-    const contenderWrite = second.configureRecordingEndpoint(update);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await root.query('select id from public.dialpad_org_connections where id=$1 for update', [connectionId]);
+    const activation = second.activateConnection(connectionId, expected);
+    await waitForActivationLock();
+    await root.query('update public.dialpad_org_connections set recording_ingest_endpoint=$1 where id=$2', [OTHER_ENDPOINT, connectionId]);
     await root.query('commit');
-    expect(await contenderWrite).toBeNull();
-    expect((await contender.query('select status, recording_ingest_endpoint from public.dialpad_org_connections where id=$1', [connectionId])).rows[0]).toEqual({ status: 'disabled', recording_ingest_endpoint: ENDPOINT });
+
+    expect(await activation).toBe(0);
+    expect((await contender.query('select status, recording_ingest_endpoint from public.dialpad_org_connections where id=$1', [connectionId])).rows[0]).toEqual({ status: 'disabled', recording_ingest_endpoint: OTHER_ENDPOINT });
 
     await rootSql("update public.dialpad_org_connections set status='active' where id=$1", [connectionId]);
-    expect(await second.configureRecordingEndpoint({ ...update, expectedPreviousEndpoint: ENDPOINT })).toBeNull();
-    expect((await contender.query('select status, recording_ingest_endpoint from public.dialpad_org_connections where id=$1', [connectionId])).rows[0]).toEqual({ status: 'active', recording_ingest_endpoint: ENDPOINT });
+    expect(await second.configureRecordingEndpoint({ orgId, connectionId, companyId, expectedPreviousEndpoint: OTHER_ENDPOINT, proposedEndpoint: OTHER_ENDPOINT })).toBeNull();
+    expect((await contender.query('select status, recording_ingest_endpoint from public.dialpad_org_connections where id=$1', [connectionId])).rows[0]).toEqual({ status: 'active', recording_ingest_endpoint: OTHER_ENDPOINT });
   });
 });

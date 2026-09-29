@@ -871,6 +871,7 @@ async function applyActivate(ctx: ApplyContext): Promise<void> {
     };
     if (sub.record.enabled === true) {
       if (!(await verifyEnabled())) throw new ProvisioningError('subscription_unverified', `subscription ${subId} no longer matches the expected enabled canary`);
+      await verifyConnectionState();
       ctx.results.push({ id, outcome: 'reused' });
       continue;
     }
@@ -887,6 +888,7 @@ async function applyActivate(ctx: ApplyContext): Promise<void> {
     await verifyConnectionState();
   }
 
+  await verifyConnectionState();
   if (connection.status !== 'active') {
     await verifyConnectionState();
     const changed = await ports.db.activateConnection(connection.id, { ...connectionRow(inputs, ctx.secrets.clientId!), recordingIngestEndpoint: expectedEndpoint });
@@ -959,6 +961,18 @@ export async function runProvisioning(ports: ProvisioningPorts, inputs: Provisio
     for (const result of results) emit(`  done ${result.id}: ${result.outcome}`);
 
     const after = await observe(ports, inputs, guard);
+    const expectedActivationConnection = inputs.mode === 'activate' ? first.observed.connection : null;
+    const finalActivationConnection = after.observed.connection;
+    if (expectedActivationConnection && (
+      !finalActivationConnection
+      || finalActivationConnection.id !== expectedActivationConnection.id
+      || finalActivationConnection.status !== 'active'
+      || finalActivationConnection.recordingIngestEndpoint !== expectedActivationConnection.recordingIngestEndpoint
+      || connectionConflicts(inputs, finalActivationConnection).length > 0
+    )) {
+      emit('post-check: activation identity, status, credentials, or recording endpoint changed; rerun the dry-run');
+      return { exitCode: 1, lines, plan, results };
+    }
     const post = buildPlan(inputs, after.observed);
     const pending = post.steps.filter((step) => step.action === 'create' || step.action === 'enable');
     if (pending.length > 0 || post.blockers.length > 0 || post.conflicts.length > 0) {

@@ -163,11 +163,12 @@ describe('connection db port', () => {
 
   it('activates only when every expected field still matches', async () => {
     const { port, statements } = capture(() => [{ id: 'x' }]);
-    expect(await port.activateConnection('c0000000-0000-4000-8000-000000000001', row)).toBe(1);
+    expect(await port.activateConnection('c0000000-0000-4000-8000-000000000001', { ...row, recordingIngestEndpoint: ENDPOINT })).toBe(1);
     expect(statements[0]).toContain("status = 'disabled'");
     expect(statements[0]).toContain('webhook_secret_ref =');
     expect(statements[0]).toContain('dialpad_company_id =');
     expect(statements[0]).toContain('cti_client_id =');
+    expect(statements[0]).toContain(`recording_ingest_endpoint is not distinct from '${ENDPOINT}'`);
     expect(await capture(() => []).port.activateConnection('c0000000-0000-4000-8000-000000000001', row)).toBe(0);
   });
 
