@@ -77,6 +77,9 @@ export function verifyDownload(repo, root, run, artifact, expectedSha) {
     } else if (relative.endsWith('.json')) inspectJson(JSON.parse(bytes));
   }
   if (new Date(manifest.completed_at).toString() === 'Invalid Date') throw new Error('Invalid completion time');
+  const validator = path.resolve(fileURLToPath(new URL('../../experiments/inbox-release/sealed_evidence.py', import.meta.url)));
+  const python = `import sys; from pathlib import Path; sys.path.insert(0, str(Path(sys.argv[1]).parent)); from sealed_evidence import validate_downloaded_manifest; validate_downloaded_manifest(Path(sys.argv[2]), sys.argv[3], set(sys.argv[5:]), sys.argv[4])`;
+  execFileSync('python3', ['-c', python, validator, root, prefix.slice(0, -1), expectedSha, ...paths], { stdio: 'pipe' });
   return { prefix: prefix.slice(0, -1), manifest, bytes: total };
 }
 export function seal(repo, source, verified, branch) {
