@@ -1344,14 +1344,15 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
     it("invalidates a snapshot for a same-key conflict even when the conflicting master call changes", async () => {
       const { call, captureId, token } = await sealedReady();
       await register(captureId, token, [decoded("tab"), decoded("mic")]);
-      const input = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
-      await rpc("fn_finalize_dialpad_recording_shadow", [orgId, captureId, input.inputDigest]);
       const childCallId = "98765432123456789";
       const eventTimestamp = call.start + 6000;
       const first = await service(() => pg.query<{ v: { eventId: string; disposition: string } }>(
         "select public.fn_ingest_dialpad_call_event($1,$2,1,$3) as v",
         [orgId, connectionId, payload("shadow-conflict", eventTimestamp, call.custom, { master_call_id: call.callId }, childCallId)],
       ));
+      const input = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
+      await rpc("fn_finalize_dialpad_recording_shadow", [orgId, captureId, input.inputDigest]);
+      expect(await rpc("fn_get_dialpad_recording_shadow_measurement", [orgId, captureId])).toMatchObject({ currentAtRead: true, currentInputDigest: input.inputDigest });
       const conflict = await service(() => pg.query<{ v: { eventId: string; disposition: string } }>(
         "select public.fn_ingest_dialpad_call_event($1,$2,1,$3) as v",
         [orgId, connectionId, payload("shadow-conflict", eventTimestamp, call.custom, { master_call_id: "99999999999999999" }, childCallId)],
@@ -1360,6 +1361,8 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       expect(conflict.rows[0]!.v.disposition).toBe("conflict");
       const conflictRow = await pg.query<{ disposition: string; conflicts_with_event_id: string }>("select disposition, conflicts_with_event_id from public.dialpad_call_events where id=$1", [conflict.rows[0]!.v.eventId]);
       expect(conflictRow.rows[0]).toMatchObject({ disposition: "conflict", conflicts_with_event_id: first.rows[0]!.v.eventId });
+      const afterConflict = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
+      expect(afterConflict.inputDigest).not.toBe(input.inputDigest);
       expect(await rpc("fn_get_dialpad_recording_shadow_measurement", [orgId, captureId])).toMatchObject({ currentAtRead: false, staleReason: "provider_evidence_changed" });
     });
 
@@ -1952,8 +1955,6 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
 
   it("does not deadlock finalization with standalone matching and resolver attribution", async () => {
     const { call, captureId } = await committedShadowCapture();
-    const input = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
-    await rpc("fn_finalize_dialpad_recording_shadow", [orgId, captureId, input.inputDigest]);
     const source = await session();
     const matcher = await session();
     const finalizer = await session();
@@ -1964,15 +1965,39 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
       payload("shadow-transfer", call.start + 8000, call.custom, { master_call_id: call.callId }, "98765432123456787"),
     ]);
     const eventId = String(ingested.eventId);
-    const [matched, finalized] = await Promise.allSettled([
-      clientRpc(matcher, "fn_match_dialpad_call_event", [eventId]),
-      clientRpc(finalizer, "fn_finalize_dialpad_recording_shadow", [orgId, captureId, input.inputDigest]),
-    ]);
-    expect(matched.status).toBe("fulfilled");
-    expect((matched as PromiseFulfilledResult<Json>).value.disposition).toBe("quarantined");
-    if (finalized.status === "rejected") expect((finalized.reason as PgError).code).toBe("40001");
+    const beforeMatcher = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
+    await rpc("fn_finalize_dialpad_recording_shadow", [orgId, captureId, beforeMatcher.inputDigest]);
+    expect(await rpc("fn_get_dialpad_recording_shadow_measurement", [orgId, captureId])).toMatchObject({ currentAtRead: true, currentInputDigest: beforeMatcher.inputDigest });
+
+    // Hold the matcher transaction open after its attribution update. The
+    // finalizer must still complete against the last committed snapshot, then
+    // the matcher commit must invalidate that snapshot through its marker.
+    await matcher.query("begin");
+    const matched = await clientRpc(matcher, "fn_match_dialpad_call_event", [eventId]);
+    expect(matched).toMatchObject({ disposition: "quarantined", reason: "intent_already_matched" });
+    const finalizedDuringMatch = await clientRpc(finalizer, "fn_finalize_dialpad_recording_shadow", [orgId, captureId, beforeMatcher.inputDigest]);
+    expect(finalizedDuringMatch).toMatchObject({ replayed: true, inputDigest: beforeMatcher.inputDigest });
+    const markersAfterMatch = await matcher.query<{ n: string }>("select count(*)::int as n from public.dialpad_recording_shadow_event_changes where event_id=$1", [eventId]);
+    expect(Number(markersAfterMatch.rows[0]!.n)).toBe(2);
+    await matcher.query("commit");
+    const afterMatcher = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
+    expect(afterMatcher.inputDigest).not.toBe(beforeMatcher.inputDigest);
+    expect(await rpc("fn_get_dialpad_recording_shadow_measurement", [orgId, captureId])).toMatchObject({ currentAtRead: false, staleReason: "provider_evidence_changed" });
+
+    // Establish a second committed baseline after quarantine, then hold the
+    // resolver transaction open while finalization runs against that baseline.
+    await rpc("fn_finalize_dialpad_recording_shadow", [orgId, captureId, afterMatcher.inputDigest]);
+    expect(await rpc("fn_get_dialpad_recording_shadow_measurement", [orgId, captureId])).toMatchObject({ currentAtRead: true, currentInputDigest: afterMatcher.inputDigest });
+    await matcher.query("begin");
     const resolved = await clientRpc(matcher, "dialpad_cti_resolve_event", [eventId]);
     expect(resolved).toMatchObject({ disposition: "matched", leg: true });
+    const finalizedDuringResolve = await clientRpc(finalizer, "fn_finalize_dialpad_recording_shadow", [orgId, captureId, afterMatcher.inputDigest]);
+    expect(finalizedDuringResolve).toMatchObject({ replayed: true, inputDigest: afterMatcher.inputDigest });
+    const markersAfterResolve = await matcher.query<{ n: string }>("select count(*)::int as n from public.dialpad_recording_shadow_event_changes where event_id=$1", [eventId]);
+    expect(Number(markersAfterResolve.rows[0]!.n)).toBe(3);
+    await matcher.query("commit");
+    const afterResolve = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
+    expect(afterResolve.inputDigest).not.toBe(afterMatcher.inputDigest);
     expect(await rpc("fn_get_dialpad_recording_shadow_measurement", [orgId, captureId])).toMatchObject({ currentAtRead: false, staleReason: "provider_evidence_changed" });
   });
 
