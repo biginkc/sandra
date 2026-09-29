@@ -1,0 +1,6 @@
+{
+  "postgres_major": "17",
+  "postgrest_major": "16",
+  "gotrue_major": "2",
+  "sha256": "720460ac84de66a1ae38f3f22ec17bb1d3947cfe3fb41fa2e2137e9e630c40dd"
+}
