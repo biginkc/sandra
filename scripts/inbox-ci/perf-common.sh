@@ -20,10 +20,16 @@ perf_preflight() {
 }
 perf_start() {
   local attempt="$1" key value
+  local -a local_ports=()
+  if [[ "${PERF_LOCAL_EXECUTION:-}" == 1 ]]; then
+    [[ -n "${PERF_LOCAL_API_PORT:-}" && -n "${PERF_LOCAL_DB_PORT:-}" ]] || { echo 'Local diagnostic ports required' >&2; return 1; }
+    local_ports=(--api-port "$PERF_LOCAL_API_PORT" --db-port "$PERF_LOCAL_DB_PORT")
+  fi
   PERF_STACK_ID="sandra-heavy-perf-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}"
   export PERF_STACK_ID
   node "$PERF_REPO/scripts/ci/provision-disposable-stack.mjs" \
     --no-baseline-owner \
+    "${local_ports[@]}" \
     --exclude-migrations 20260929000000_inbox_control_foundation.sql \
     --exclude-migrations 20260929000100_inbox_read_companion.sql \
     --exclude-migrations 20260929000200_inbox_backend_operation_reply.sql
