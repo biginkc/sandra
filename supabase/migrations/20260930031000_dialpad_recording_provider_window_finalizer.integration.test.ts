@@ -24,6 +24,9 @@ type SeedOptions = {
   captureMarginUs?: number;
   providerStartMarginUs?: number;
   providerEndMarginUs?: number;
+  domainStartSample?: number;
+  domainEndSample?: number;
+  exchangeCount?: number;
   policyVersion?: string;
 };
 type FinalizerSummary = Record<string, unknown> & {
@@ -98,19 +101,24 @@ async function seedCapture(vadEnd = 4_800_320, options: SeedOptions = {}) {
       { kind: 'context_clock', track, seq: 1, contextId, observation: 'final', browserBeforeMs: finalContextTimeMs + 249.5, contextTimeMs: finalContextTimeMs, browserAfterMs: finalContextTimeMs + 250.5, browserTimeOriginMs: contextOriginMs, state: 'closed' },
     ];
   });
-  timingRecords.push({ kind: 'exchange', seq: 0, serverClockId: '00000000-0000-4000-8000-000000000003', browserSendMs: 0, browserReceiveMs: 1, serverReceiveMonoMs: 0, serverSendMonoMs: 1, serverReceiveWallMs: exchangeWallOriginMs + 1, serverSendWallMs: exchangeWallOriginMs + 2 });
+  const exchangeCount = options.exchangeCount ?? 3;
+  for (let seq = 0; seq < exchangeCount; seq += 1) {
+    const browserSendMs = seq * 100;
+    const browserReceiveMs = browserSendMs + 1;
+    timingRecords.push({ kind: 'exchange', seq, serverClockId: '00000000-0000-4000-8000-000000000003', browserSendMs, browserReceiveMs, serverReceiveMonoMs: browserSendMs, serverSendMonoMs: browserSendMs + 1, serverReceiveWallMs: exchangeWallOriginMs + browserReceiveMs, serverSendWallMs: exchangeWallOriginMs + browserReceiveMs + 1 });
+  }
   for (const record of timingRecords) {
     const stream = record.kind === 'anchor' ? `${String(record.track)}:anchor` : record.kind === 'context_clock' ? `${String(record.track)}:context` : 'exchange';
     await replica(`insert into public.dialpad_recording_timing_records(capture_id,org_id,epoch,stream,seq,content_hash,record,payload_bytes) values ($1,$2,1,$3,$4,$5,$6,$7)`, [captureId,ORG,stream,record.seq,hash(JSON.stringify(record)),JSON.stringify(record),JSON.stringify(record).length]);
   }
-  await replica(`insert into public.dialpad_recording_timing_state(capture_id,org_id,epoch,status,persisted_sequences,last_sequences,reasons,final_request_hash,finalized_at) values ($1,$2,1,'collected',$3,$3,'[]',$4,now())`, [captureId,ORG,JSON.stringify({tabAnchor:1,micAnchor:1,tabContext:1,micContext:1,exchange:0}),hash('timing-final')]);
+  await replica(`insert into public.dialpad_recording_timing_state(capture_id,org_id,epoch,status,persisted_sequences,last_sequences,reasons,final_request_hash,finalized_at) values ($1,$2,1,'collected',$3,$3,'[]',$4,now())`, [captureId,ORG,JSON.stringify({tabAnchor:1,micAnchor:1,tabContext:1,micContext:1,exchange:exchangeCount - 1}),hash('timing-final')]);
   for (const [state, payload] of [['connected', {date_connected:String(providerConnectedMs)}], ['hangup', {date_ended:String(providerEndedMs), date_connected:String(providerConnectedMs)}]] as const) {
     await replica(`insert into public.dialpad_call_events(id,org_id,connection_id,provider_call_id,event_state,event_timestamp_ms,payload,payload_sha256,signature_alg,secret_version,disposition,matched_intent_id) values ($1,$2,$3,'${providerCallId}',$4,$5,$6,$7,'HS256',1,'matched',$8)`, [uuid(),ORG,uuid(),state,state === 'hangup' ? providerEndedMs : providerConnectedMs,JSON.stringify(payload),hash(state),intentId]);
   }
   const matchedEvent = await pg.query<{id:string}>(`select id from public.dialpad_call_events where org_id=$1 and provider_call_id='${providerCallId}' order by event_timestamp_ms desc limit 1`,[ORG]);
   await replica(`update public.dialpad_call_intents set status='matched',matched_provider_call_id='${providerCallId}',matched_event_id=$2,matched_at=now() where id=$1`, [intentId, matchedEvent.rows[0]!.id]);
   const fixturePolicy = options.policyVersion ?? POLICY;
-  await replica(`insert into public.dialpad_recording_provider_window_policies(org_id,policy_version,algorithm_version,policy_hash,mapping_method,time_unit,sample_rate_hz,domain_start_sample,domain_end_sample,lower_slope_us_per_sample,lower_intercept_us,upper_slope_us_per_sample,upper_intercept_us,classification_overcount_samples,supported_duration_max_seconds,supported_anchor_cadence_ms,supported_stall_max_ms,supported_drift_ppm,supported_capture_margin_us,supported_provider_start_margin_us,supported_provider_end_margin_us,evidence_digest,evidence_refs,acceptance_note,accepted_at,accepted_by) values ($1,$2,'fixture-affine-v1',$3,'affine_sample_support_v1','microseconds',16000,0,10000000,62.5,0,62.5,0,0,10800,600000,1000,$6,$7,$8,$9,$4,'["fixture"]','Measured fixture only',now(),$5) on conflict do nothing`, [ORG,fixturePolicy,hash(`policy-${fixturePolicy}`),hash('evidence'),OWNER,options.driftPpm ?? 0,options.captureMarginUs ?? 0,options.providerStartMarginUs ?? 0,options.providerEndMarginUs ?? 0]);
+  await replica(`insert into public.dialpad_recording_provider_window_policies(org_id,policy_version,algorithm_version,policy_hash,mapping_method,time_unit,sample_rate_hz,domain_start_sample,domain_end_sample,lower_slope_us_per_sample,lower_intercept_us,upper_slope_us_per_sample,upper_intercept_us,classification_overcount_samples,supported_duration_max_seconds,supported_anchor_cadence_ms,supported_stall_max_ms,supported_drift_ppm,supported_capture_margin_us,supported_provider_start_margin_us,supported_provider_end_margin_us,evidence_digest,evidence_refs,acceptance_note,accepted_at,accepted_by) values ($1,$2,'fixture-affine-v1',$3,'affine_sample_support_v1','microseconds',16000,$10,$11,62.5,0,62.5,0,0,10800,600000,1000,$6,$7,$8,$9,$4,'["fixture"]','Measured fixture only',now(),$5) on conflict do nothing`, [ORG,fixturePolicy,hash(`policy-${fixturePolicy}`),hash('evidence'),OWNER,options.driftPpm ?? 0,options.captureMarginUs ?? 0,options.providerStartMarginUs ?? 0,options.providerEndMarginUs ?? 0,options.domainStartSample ?? 0,options.domainEndSample ?? 10_000_000]);
   await replica(`insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner') on conflict do nothing`, [OWNER, ORG]);
   await replica(`insert into public.acquisition_org_settings(org_id,my_leads_enabled) values ($1,true) on conflict do nothing`, [ORG]);
   await replica(`insert into public.acquisition_attempts(org_id,property_id,actor_user_id,attempt_kind,source,outcome,occurred_at,call_activity_id,idempotency_key) values ($1,$2,$3,'call','dialpad','reached',now()-interval '1 minute',$4,$5)`, [ORG,property,OWNER,callActivityId,uuid()]);
@@ -248,6 +256,19 @@ describe('provider-window finalizer migration', () => {
     expect(input.rows[0]!.v.selectedSummary?.mappingLowerInterceptUs).not.toBe(input.rows[0]!.v.selectedSummary?.mappingUpperInterceptUs);
   });
 
+  it('expands drift for observations outside a narrow supported domain', async () => {
+    const narrowPolicy = 'fixture-affine-narrow-drift-v1';
+    await seedCapture(4_800_320, {
+      driftPpm: 50,
+      domainStartSample: 4_800_000,
+      domainEndSample: 4_800_016,
+      policyVersion: narrowPolicy,
+    });
+    const input = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,narrowPolicy]);
+    expect(input.rows[0]!.v.reasons).not.toContain('timing_mapping_unsupported');
+    expect(input.rows[0]!.v.selectedSummary!.mappingUpperInterceptUs! - input.rows[0]!.v.selectedSummary!.mappingLowerInterceptUs!).toBeGreaterThan(20_000);
+  });
+
   it('rejects an interior context-clock discontinuity while preserving asynchronous brackets', async () => {
     await replica(`update public.dialpad_recording_timing_records set record=record || '{"browserBeforeMs":999999,"browserAfterMs":999999}'::jsonb where capture_id=$1 and org_id=$2 and stream='tab:context' and seq=1`, [captureId, ORG]);
     const input = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
@@ -256,11 +277,22 @@ describe('provider-window finalizer migration', () => {
   });
 
   it('widens an asymmetric exchange bracket without inventing an RTT midpoint', async () => {
-    await seedCapture(4_900_320);
+    await seedCapture(4_900_320, { exchangeCount: 1 });
     await replica(`update public.dialpad_recording_timing_records set record=record || '{"browserReceiveMs":20,"serverReceiveWallMs":1700000000002,"serverSendWallMs":1700000000003}'::jsonb where capture_id=$1 and org_id=$2 and stream='exchange' and seq=0`, [captureId, ORG]);
     const input = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
     expect(input.rows[0]!.v.status).toBe('eligible');
     expect(input.rows[0]!.v.selectedSummary!.mappingLowerInterceptUs!).toBeLessThan(input.rows[0]!.v.selectedSummary!.mappingUpperInterceptUs!);
+  });
+
+  it('accepts repeated exchange brackets and rejects a genuinely disjoint jump', async () => {
+    const valid = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
+    expect(valid.rows[0]!.v.status).toBe('eligible');
+    await replica(`update public.dialpad_recording_timing_records
+      set record = jsonb_set(jsonb_set(record, '{serverReceiveWallMs}', to_jsonb((record->>'serverReceiveWallMs')::numeric + 5000)), '{serverSendWallMs}', to_jsonb((record->>'serverSendWallMs')::numeric + 5000))
+      where capture_id=$1 and org_id=$2 and stream='exchange' and seq=2`, [captureId, ORG]);
+    const jumped = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
+    expect(jumped.rows[0]!.v.status).toBe('unknown');
+    expect(jumped.rows[0]!.v.reasons).toContain('timing_mapping_unsupported');
   });
 
   it('returns exact threshold as ineligible and rejects stale finalization after evidence changes', async () => {
@@ -274,7 +306,7 @@ describe('provider-window finalizer migration', () => {
     expect(input.rows[0]!.v.sampleWindow).toEqual({ lowerSample: 0, upperSample: 4_800_000 });
     await expect(pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,'0'.repeat(64)])).rejects.toMatchObject({code:'40001'});
     await pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,input.rows[0]!.v.inputDigest]);
-    await replica(`update public.dialpad_recording_timing_records set record=record || '{"browserReceiveMs":300002}'::jsonb where capture_id=$1 and org_id=$2 and stream='exchange'`, [captureId, ORG]);
+    await replica(`update public.dialpad_recording_timing_records set record=record || '{"lateNote":"changed"}'::jsonb where capture_id=$1 and org_id=$2 and stream='exchange' and seq=0`, [captureId, ORG]);
     const timingChanged = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,thresholdPolicy]);
     expect(timingChanged.rows[0]!.v.inputDigest).not.toBe(input.rows[0]!.v.inputDigest);
     const stale = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_provider_window_result($1,$2,$3) v',[ORG,OWNER,captureId]);
@@ -282,6 +314,21 @@ describe('provider-window finalizer migration', () => {
     await expect(pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,input.rows[0]!.v.inputDigest])).rejects.toMatchObject({code:'40001'});
     await replica(`insert into public.dialpad_recording_vad_ranges(capture_id,org_id,track,epoch,batch_id,range_index,start_sample,end_sample,evidence_ref) select capture_id,org_id,'tab',epoch,batch_id,1,4_800_000,4_800_001,'late' from public.dialpad_recording_vad_ranges where capture_id=$1 limit 1`,[captureId]);
     await expect(pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,thresholdPolicy,input.rows[0]!.v.inputDigest])).rejects.toMatchObject({code:'40001'});
+  });
+
+  it('preserves the strict threshold for a valid 320-frame EOF at 4800001', async () => {
+    const thresholdPlusOnePolicy = 'fixture-threshold-plus-one-v1';
+    await seedCapture(4_800_320, {
+      providerDurationMs: 300_002,
+      providerEndMarginUs: 437.5,
+      policyVersion: thresholdPlusOnePolicy,
+    });
+    const input = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,thresholdPlusOnePolicy]);
+    expect(input.rows[0]!.v.status).toBe('eligible');
+    expect(input.rows[0]!.v.eligibleSamples).toBe(4_800_001);
+    expect(input.rows[0]!.v.sampleWindow.upperSample).toBe(4_800_001);
+    const eof = await pg.query<{pcm_eof_sample:string}>('select pcm_eof_sample from public.dialpad_recording_pcm_progress where capture_id=$1 and track=\'tab\'',[captureId]);
+    expect(eof.rows[0]!.pcm_eof_sample).toBe('4800320');
   });
 
   it('keeps unaccepted policy unknown and revocation removes eligibility', async () => {
@@ -292,6 +339,23 @@ describe('provider-window finalizer migration', () => {
     await pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)',[ORG,captureId,POLICY,accepted.rows[0]!.v.inputDigest]);
     await pg.query('update public.dialpad_recording_provider_window_policies set revoked_at=now() where org_id=$1',[ORG]);
     expect((await pg.query<{v:boolean}>('select public.dialpad_recording_provider_window_is_eligible($1,$2,$3) v',[ORG,captureId,callActivityId])).rows[0]!.v).toBe(false);
+  });
+
+  it('rejects nonfinite numeric policy values before they can be accepted', async () => {
+    await expect(pg.query(`insert into public.dialpad_recording_provider_window_policies(
+      org_id,policy_version,algorithm_version,policy_hash,mapping_method,time_unit,sample_rate_hz,
+      domain_start_sample,domain_end_sample,lower_slope_us_per_sample,lower_intercept_us,
+      upper_slope_us_per_sample,upper_intercept_us,classification_overcount_samples,
+      supported_duration_max_seconds,supported_anchor_cadence_ms,supported_stall_max_ms,
+      supported_drift_ppm,supported_capture_margin_us,supported_provider_start_margin_us,
+      supported_provider_end_margin_us,evidence_digest,evidence_refs,acceptance_note,accepted_at,accepted_by
+    ) select org_id,'fixture-infinite-v1',algorithm_version,repeat('c',64),mapping_method,time_unit,sample_rate_hz,
+      domain_start_sample,domain_end_sample,lower_slope_us_per_sample,lower_intercept_us,
+      upper_slope_us_per_sample,upper_intercept_us,classification_overcount_samples,
+      supported_duration_max_seconds,supported_anchor_cadence_ms,supported_stall_max_ms,
+      'Infinity'::numeric,supported_capture_margin_us,supported_provider_start_margin_us,
+      supported_provider_end_margin_us,evidence_digest,evidence_refs,acceptance_note,accepted_at,accepted_by
+      from public.dialpad_recording_provider_window_policies where org_id=$1 and policy_version=$2`, [ORG,POLICY])).rejects.toMatchObject({ code: '23514' });
   });
 
   it('rejects a per-capture timing sequence gap even when start and final records remain', async () => {
@@ -338,7 +402,9 @@ describe('provider-window finalizer migration', () => {
     // The authenticated exchange ACK must cover both final context brackets.
     // This fixture's mic context browser offset is 250 ms, so the ACK arrives
     // just after the final 302270.5625 ms observation on both tracks.
-    const records = existing.rows.map(({ record, stream: streamName }) => streamName === 'exchange' ? { ...record, browserReceiveMs: 302_271 } : record);
+    const records = existing.rows.map(({ record, stream: streamName, seq }) => streamName === 'exchange' && seq === 2
+      ? { ...record, browserSendMs: 302_270, browserReceiveMs: 302_271, serverReceiveMonoMs: 302_270, serverSendMonoMs: 302_271, serverReceiveWallMs: Number(record.serverReceiveWallMs) + 302_070, serverSendWallMs: Number(record.serverSendWallMs) + 302_070 }
+      : record);
     await replica('update public.dialpad_recording_captures set status=\'open\' where id=$1 and org_id=$2', [captureId, ORG]);
     await replica('delete from public.dialpad_recording_timing_state where capture_id=$1 and org_id=$2', [captureId, ORG]);
     await replica('delete from public.dialpad_recording_timing_batches where capture_id=$1 and org_id=$2', [captureId, ORG]);
@@ -347,12 +413,24 @@ describe('provider-window finalizer migration', () => {
     try {
       const appended = await pg.query<{v:FinalizerJson}>('select public.fn_append_dialpad_recording_timing($1,$2,$3,$4,$5) v', [ORG, captureId, 1, uuid(), JSON.stringify(records)]);
       expect(appended.rows[0]!.v.status).toBe('recorded');
-      const finished = await pg.query<{v:FinalizerJson}>('select public.fn_finish_dialpad_recording_timing($1,$2,$3,$4,$5,$6) v', [ORG, captureId, 1, JSON.stringify({ tabAnchor: 1, micAnchor: 1, tabContext: 1, micContext: 1, exchange: 0 }), 'collected', '[]']);
+      const finished = await pg.query<{v:FinalizerJson}>('select public.fn_finish_dialpad_recording_timing($1,$2,$3,$4,$5,$6) v', [ORG, captureId, 1, JSON.stringify({ tabAnchor: 1, micAnchor: 1, tabContext: 1, micContext: 1, exchange: 2 }), 'collected', '[]']);
       expect(finished.rows[0]!.v.status).toBe('collected');
     } finally {
       await pg.query('reset role');
     }
     await replica('update public.dialpad_recording_captures set status=\'sealed\' where id=$1 and org_id=$2', [captureId, ORG]);
+    const input = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
+    expect(input.rows[0]!.v.status).toBe('eligible');
+    expect(input.rows[0]!.v.eligibleSamples).toBe(4_800_320);
+    await pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)', [ORG,captureId,POLICY,input.rows[0]!.v.inputDigest]);
+    await pg.query('set role authenticated');
+    await pg.query('select set_config(\'request.jwt.claim.sub\',$1,false)', [OWNER]);
+    try {
+      const kpis = await pg.query<{v:FinalizerJson}>('select public.fn_get_acquisition_kpis($1,$2,now()-interval \'1 day\',now()+interval \'1 day\') v',[ORG,OWNER]);
+      expect(kpis.rows[0]!.v.conversationsOverFiveMinutes).toBe(1);
+    } finally {
+      await pg.query('reset role');
+    }
   });
 
   it('keeps the finalizer service-only and enforces representative ownership', async () => {

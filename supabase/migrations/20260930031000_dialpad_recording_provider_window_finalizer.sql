@@ -16,18 +16,18 @@ create table public.dialpad_recording_provider_window_policies (
   sample_rate_hz integer not null check (sample_rate_hz = 16000),
   domain_start_sample bigint not null check (domain_start_sample >= 0),
   domain_end_sample bigint not null check (domain_end_sample > domain_start_sample),
-  lower_slope_us_per_sample numeric not null check (lower_slope_us_per_sample > 0),
-  lower_intercept_us numeric not null,
-  upper_slope_us_per_sample numeric not null check (upper_slope_us_per_sample > 0),
-  upper_intercept_us numeric not null,
-  classification_overcount_samples numeric not null check (classification_overcount_samples >= 0),
+  lower_slope_us_per_sample numeric not null check (lower_slope_us_per_sample > 0 and lower_slope_us_per_sample not in ('Infinity'::numeric, '-Infinity'::numeric, 'NaN'::numeric)),
+  lower_intercept_us numeric not null check (lower_intercept_us not in ('Infinity'::numeric, '-Infinity'::numeric, 'NaN'::numeric)),
+  upper_slope_us_per_sample numeric not null check (upper_slope_us_per_sample > 0 and upper_slope_us_per_sample not in ('Infinity'::numeric, '-Infinity'::numeric, 'NaN'::numeric)),
+  upper_intercept_us numeric not null check (upper_intercept_us not in ('Infinity'::numeric, '-Infinity'::numeric, 'NaN'::numeric)),
+  classification_overcount_samples numeric not null check (classification_overcount_samples >= 0 and classification_overcount_samples not in ('Infinity'::numeric, '-Infinity'::numeric, 'NaN'::numeric)),
   supported_duration_max_seconds integer not null check (supported_duration_max_seconds > 0),
   supported_anchor_cadence_ms integer not null check (supported_anchor_cadence_ms > 0),
   supported_stall_max_ms integer not null check (supported_stall_max_ms >= 0),
-  supported_drift_ppm numeric not null check (supported_drift_ppm >= 0),
-  supported_capture_margin_us numeric not null check (supported_capture_margin_us >= 0),
-  supported_provider_start_margin_us numeric not null check (supported_provider_start_margin_us >= 0),
-  supported_provider_end_margin_us numeric not null check (supported_provider_end_margin_us >= 0),
+  supported_drift_ppm numeric not null check (supported_drift_ppm >= 0 and supported_drift_ppm not in ('Infinity'::numeric, '-Infinity'::numeric, 'NaN'::numeric)),
+  supported_capture_margin_us numeric not null check (supported_capture_margin_us >= 0 and supported_capture_margin_us not in ('Infinity'::numeric, '-Infinity'::numeric, 'NaN'::numeric)),
+  supported_provider_start_margin_us numeric not null check (supported_provider_start_margin_us >= 0 and supported_provider_start_margin_us not in ('Infinity'::numeric, '-Infinity'::numeric, 'NaN'::numeric)),
+  supported_provider_end_margin_us numeric not null check (supported_provider_end_margin_us >= 0 and supported_provider_end_margin_us not in ('Infinity'::numeric, '-Infinity'::numeric, 'NaN'::numeric)),
   evidence_digest text not null check (evidence_digest ~ '^[0-9a-f]{64}$'),
   evidence_refs jsonb not null check (jsonb_typeof(evidence_refs) = 'array' and jsonb_array_length(evidence_refs) between 1 and 32),
   acceptance_note text not null check (length(btrim(acceptance_note)) between 1 and 4000),
@@ -205,6 +205,7 @@ declare
   source_rate numeric;
   expected_final_output numeric;
   mapping_domain_span_ms numeric;
+  mapping_observation_span_ms numeric;
   mapping_drift_margin_ms numeric;
   mapping_capture_margin_ms numeric;
   provider_start_margin_us numeric;
@@ -458,7 +459,19 @@ begin
     source_rate := tab_start_rate;
     expected_final_output := floor(tab_final_source * 16000 / nullif(tab_final_rate, 0));
     mapping_domain_span_ms := (p.domain_end_sample - p.domain_start_sample)::numeric / 16;
-    mapping_drift_margin_ms := mapping_domain_span_ms * p.supported_drift_ppm / 1000000;
+    -- Drift is an extrapolation error.  A policy-wide span is insufficient
+    -- for a narrow domain because observations may sit far outside either
+    -- supported endpoint.  Expand by the greatest observed-to-endpoint
+    -- distance, retaining the finite domain span as a conservative floor.
+    mapping_observation_span_ms := greatest(
+      mapping_domain_span_ms,
+      abs((p.domain_start_sample - tab_start_output)::numeric / 16),
+      abs((p.domain_end_sample - tab_start_output)::numeric / 16),
+      abs((p.domain_start_sample - tab_final_output)::numeric / 16),
+      abs((p.domain_end_sample - tab_final_output)::numeric / 16),
+      coalesce((timing_server_wall_max - timing_server_wall_min) / 1000, 0)
+    );
+    mapping_drift_margin_ms := mapping_observation_span_ms * p.supported_drift_ppm / 1000000;
     mapping_capture_margin_ms := p.supported_capture_margin_us / 1000;
     -- Context observations are independent currentTime reads. Their own
     -- before/after brackets constrain browser-minus-context; they need not
@@ -541,10 +554,15 @@ begin
            and prev.stream=cur.stream and prev.seq=cur.seq-1
          where cur.capture_id=p_capture_id and cur.org_id=p_org_id and cur.epoch=selected_epoch
            and cur.stream='exchange'
-           and abs(
-             ((cur.record->>'serverReceiveWallMs')::numeric - (cur.record->>'browserSendMs')::numeric)
-             - ((prev.record->>'serverSendWallMs')::numeric - (prev.record->>'browserReceiveMs')::numeric)
-           ) > 2 * (mapping_drift_margin_ms + mapping_capture_margin_ms)
+           and (
+             ((cur.record->>'serverSendWallMs')::numeric - (cur.record->>'browserReceiveMs')::numeric)
+               > ((prev.record->>'serverReceiveWallMs')::numeric - (prev.record->>'browserSendMs')::numeric)
+                 + 2 * (mapping_drift_margin_ms + mapping_capture_margin_ms)
+             or
+             ((prev.record->>'serverSendWallMs')::numeric - (prev.record->>'browserReceiveMs')::numeric)
+               > ((cur.record->>'serverReceiveWallMs')::numeric - (cur.record->>'browserSendMs')::numeric)
+                 + 2 * (mapping_drift_margin_ms + mapping_capture_margin_ms)
+           )
       )
       and not exists (
         select 1
