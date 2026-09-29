@@ -296,10 +296,9 @@ function MessageBodyEditor({
             placeholder="Hi {{first_name}}, cash offer on {{property_address}}?"
           />
           <span className="text-muted-foreground text-xs">
-            Variables: first_name, last_name, property_address, city, state,
-            property_zip, market, my_first_name, company_name, opt_out. Wrap
-            with <code>{"{{#if var}}…{{/if}}"}</code> to skip a phrase when a
-            value is missing.
+            Type {"{{first_name}}"} or {"{{property_address}}"} and Sandra fills
+            them in for each lead. Also available: last name, city, state, zip,
+            market, your first name, company name.
           </span>
         </label>
       ) : (

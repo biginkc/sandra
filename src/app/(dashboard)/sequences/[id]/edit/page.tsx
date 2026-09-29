@@ -57,7 +57,9 @@ export default async function SequenceEditPage({
         ]}
         title={result.data.name}
         description={
-          impact.total_enrolled > 0
+          isNew
+            ? "Details saved. Add your first step."
+            : impact.total_enrolled > 0
             ? `${impact.total_enrolled} lead${impact.total_enrolled === 1 ? "" : "s"} enrolled · ${impact.scheduled_next_7d} due in the next 7 days`
             : "No leads enrolled yet."
         }
