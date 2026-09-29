@@ -44,6 +44,16 @@ test('each W2 lane produces a pullable record and the W1 gate selects both keys'
     writeFileSync(path.join(repo, 'unrelated.txt'), 'unexpected edit\n');
     assert.throws(() => invoke({}), error => error.stderr?.toString().includes('Non-record working-tree changes at end'));
     rmSync(path.join(repo, 'unrelated.txt'));
+    rmSync(path.join(repo, `docs/performance/inbox-redesign/evidence/${sha}/pre-merge/901`), { recursive: true, force: true });
+    writeFileSync(path.join(work, 'failure.log'), 'line=22\ncommand=false\nexit_status=17\n');
+    assert.throws(() => execFileSync('node', [writer, work, '--fail', '0'], { cwd: repo, env: { ...baseEnv, GITHUB_RUN_ID: '903' }, stdio: 'pipe' }), error => error.stderr?.toString().includes('Invalid lane failure status'));
+    execFileSync('node', [writer, work, '--fail', '17'], { cwd: repo, env: { ...baseEnv, GITHUB_RUN_ID: '903', HEAVY_LANE: 'catalog-fingerprint' } });
+    const failPath = `docs/performance/inbox-redesign/evidence/${sha}/pre-merge/903/manifest.json`;
+    const failManifest = JSON.parse(readFileSync(path.join(repo, failPath)));
+    assert.equal(failManifest.verdict, 'FAIL');
+    assert.equal(failManifest.exit_status, 17);
+    assert.ok(failManifest.artifacts['failure.log']);
+    rmSync(path.dirname(path.join(repo, failPath)), { recursive: true, force: true });
     for (const [lane, id] of [['migration-dry-run', '901'], ['catalog-fingerprint', '902']]) {
       invoke({ HEAVY_LANE: lane, GITHUB_RUN_ID: id });
       const prefix = `docs/performance/inbox-redesign/evidence/${sha}/pre-merge/${id}`;
