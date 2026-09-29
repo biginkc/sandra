@@ -151,8 +151,24 @@ async function createSequence(page: Page, name: string): Promise<string> {
   await expect(descriptionInput).toHaveValue("Local browser persistence contract");
   await expect(createButton).toBeEnabled();
   await createButton.click();
-  await page.waitForURL(/\/sequences\/[0-9a-f-]+\/edit$/, { timeout: 15_000 });
-  return new URL(page.url()).pathname.split("/")[2]!;
+  await page.waitForURL(/\/sequences\/[0-9a-f-]+\/edit\?new=1$/, { timeout: 15_000 });
+  await expect(page.getByRole("heading", { name: "Step 1", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^Step \d+$/ })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Save all steps" })).toBeDisabled();
+  const sequenceId = new URL(page.url()).pathname.split("/")[2]!;
+  const admin = adminClient();
+  const { data: sequence, error: sequenceError } = await admin.from("sequences")
+    .select("name, description")
+    .eq("id", sequenceId)
+    .single();
+  if (sequenceError) throw sequenceError;
+  expect(sequence).toMatchObject({ name, description: "Local browser persistence contract" });
+  const { count, error: stepsError } = await admin.from("sequence_steps")
+    .select("id", { count: "exact", head: true })
+    .eq("sequence_id", sequenceId);
+  if (stepsError) throw stepsError;
+  expect(count).toBe(0);
+  return sequenceId;
 }
 
 async function gotoLeadPage(page: Page, propertyId: string): Promise<void> {
@@ -245,28 +261,26 @@ async function addStatusStep(
   sequenceId: string,
   expectedStepNumber = 1,
 ): Promise<void> {
-  await page.getByRole("button", { name: /^add step$/i }).click();
-  const dialog = page.getByRole("dialog");
-  const selects = dialog.getByRole("combobox");
-  await selects.nth(1).selectOption("change_status");
-  await selects.nth(2).selectOption("contacted");
-  await clickAndAwaitActionResponse(
-    page,
-    dialog.getByRole("button", { name: /^add step$/i }),
-  );
-  await expect(dialog).toBeHidden({ timeout: 10_000 });
+  if (expectedStepNumber > 1) {
+    await page.getByRole("button", { name: /^add step$/i }).click();
+  }
+  const heading = page.getByRole("heading", {
+    name: `Step ${expectedStepNumber}`,
+    exact: true,
+  });
+  await expect(heading).toBeVisible();
+  const step = heading.locator("xpath=../..");
+  await step.getByRole("combobox", { name: "Action" }).selectOption("change_status");
+  await step.getByRole("combobox", { name: "Target status" }).selectOption("contacted");
+  await clickAndAwaitActionResponse(page, page.getByRole("button", { name: "Save all steps" }));
+  await page.waitForURL(/\/sequences\/[0-9a-f-]+\/edit$/, { timeout: 15_000 });
   await waitForPersistedStep(
     adminClient(),
     sequenceId,
     expectedStepNumber - 1,
     "change_status",
   );
-  await expect(
-    page.getByRole("heading", {
-      name: `Step ${expectedStepNumber}`,
-      exact: true,
-    }),
-  ).toBeVisible();
+  await expect(heading).toBeVisible();
 }
 
 async function addSmsStep(
@@ -274,16 +288,11 @@ async function addSmsStep(
   sequenceId: string,
   body: string,
 ): Promise<void> {
-  await page.getByRole("button", { name: /^add step$/i }).click();
-  const dialog = page.getByRole("dialog");
-  const selects = dialog.getByRole("combobox");
-  await selects.nth(1).selectOption("send_sms");
-  await dialog.getByLabel("Message body").fill(body);
-  await clickAndAwaitActionResponse(
-    page,
-    dialog.getByRole("button", { name: /^add step$/i }),
-  );
-  await expect(dialog).toBeHidden({ timeout: 10_000 });
+  const heading = page.getByRole("heading", { name: "Step 1", exact: true });
+  await expect(heading).toBeVisible();
+  await heading.locator("xpath=../..").getByLabel("Message body").fill(body);
+  await clickAndAwaitActionResponse(page, page.getByRole("button", { name: "Save all steps" }));
+  await page.waitForURL(/\/sequences\/[0-9a-f-]+\/edit$/, { timeout: 15_000 });
   await waitForPersistedStep(adminClient(), sequenceId, 0, "send_sms");
   await expect(
     page.getByRole("heading", { name: "Step 1", exact: true }),
@@ -609,7 +618,7 @@ test.describe("sequence readiness — local browser contract", () => {
     // below is the authoritative completion check before reload/navigation.
     await clickAndAwaitActionResponse(
       page,
-      page.getByRole("button", { name: /^save$/i }).first(),
+      page.getByRole("button", { name: "Save all steps" }),
     );
     await expect(page.getByLabel("Description")).toHaveValue(
       "Edited local description",

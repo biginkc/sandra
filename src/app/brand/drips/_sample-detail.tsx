@@ -10,7 +10,7 @@ const steps = Array.from({ length: 6 }, (_, index) => ({
     "Is now a better time to talk about your plans for the property?",
     "Just checking whether the timing has changed for you.",
     "Last check-in from me. Reply any time if you'd like to revisit this.",
-  ][index], template_id: null, target_status: null,
+  ][index], template_id: null, template_category: null, target_status: null,
 }));
 const names = ["Marisol Vega", "Terrence Okafor", "Beverly Hanks", "Ray Delacroix", "June Castellano", "Harold Nkemelu", "Angela Whitcomb", "Dwayne Ferris"];
 const addresses = ["4127 Hollister Ave", "918 Linwood Blvd", "2203 S 47th St", "7011 Ward Pkwy", "510 E 31st St", "1440 Quindaro Blvd", "3320 Gillham Rd", "85 N Elmwood Ave"];
