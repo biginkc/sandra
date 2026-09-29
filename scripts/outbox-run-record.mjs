@@ -27,17 +27,21 @@ function runIdentityLifecycle(command, env, repo) {
   if (result.status !== 0) throw new Error(`E2E identity ${command} failed: ${result.stderr || result.stdout || result.status}`);
 }
 export function runOutboxPlaywright(env, repo, { lifecycle = runIdentityLifecycle, playwright = () => spawnSync('npx', ['playwright', 'test', '--config', 'playwright.outbox-regression.config.ts', '--reporter=json'], { cwd: repo, env, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 }) } = {}) {
-  if (isGitHubE2ERun(env)) lifecycle('preflight', env, repo);
   let result;
   let cleanupError;
+  const failures = [];
+  let preflightPassed = false;
   try {
+    if (isGitHubE2ERun(env)) { lifecycle('preflight', env, repo); preflightPassed = true; }
     result = playwright();
+  } catch (error) {
+    failures.push(`${preflightPassed ? 'Playwright spawn' : 'identity preflight'} failed: ${error}`);
   } finally {
-    if (isGitHubE2ERun(env)) {
+    if (preflightPassed) {
       try { lifecycle('cleanup', env, repo); } catch (error) { cleanupError = error; }
     }
   }
-  return { result, cleanupError };
+  return { result: result ?? { status: 1, stdout: '', stderr: '' }, cleanupError, failures };
 }
 const TEXT_ARTIFACT = /\.(?:json|log|txt|html|csv|md)$/i;
 const ALLOWED_ARTIFACT = /\.(?:json|log|txt|html|png|csv|gz|md)$/i;
@@ -180,6 +184,7 @@ export function writeManifest(repo, relativeDir, fields, env = process.env) {
 
 async function waitForProxy(proxy, token) {
   for (let attempt = 0; attempt < 50; attempt++) {
+    if (proxy.spawnError) throw proxy.spawnError;
     if (proxy.exitCode !== null || proxy.signalCode !== null) throw new Error('Outbox fault proxy exited before becoming ready');
     try {
       const response = await fetch('http://127.0.0.1:54321/__outbox_fault/status', {
@@ -203,14 +208,18 @@ async function stopProxy(proxy) {
   });
 }
 
-export function recordOutboxResult({ repo, relativeDir, sha, tier, runId, startedAt, env, result, cleanupError }) {
+export function recordOutboxResult({ repo, relativeDir, sha, tier, runId, startedAt, env, result, cleanupError, failures: stageFailures = [] }) {
   const absoluteDir = path.join(repo, relativeDir);
+  result ??= { status: 1, stdout: '', stderr: '' };
   writeFileSync(path.join(absoluteDir, 'results.json'), redactResultsJson(result.stdout || '', env, repo));
   writeFileSync(path.join(absoluteDir, 'runner.log'), redactText(`${result.stderr || ''}\nexit_status=${result.status ?? 'signal'}\n`, env));
-  const failures = [];
+  const failures = [...stageFailures];
   if (result.error) failures.push(`Playwright execution failed: ${result.error}`);
   if (cleanupError) failures.push(`Exact-run cleanup failed: ${cleanupError}`);
-  try { validateOutboxResults(absoluteDir); } catch (error) { failures.push(String(error)); }
+  if (!failures.length && result.status === 0) {
+    try { validateOutboxResults(absoluteDir); } catch (error) { failures.push(String(error)); }
+  }
+  if (result.status !== 0 && !failures.length) failures.push(`Playwright exited with status ${result.status ?? 'signal'}`);
   const verdict = failures.length || result.status !== 0 ? 'FAIL' : 'PASS';
   if (failures.length) writeFileSync(path.join(absoluteDir, 'validation.log'), failures.join('\n'));
   const status = assertOnlyRunDirDirty(repo, relativeDir);
@@ -233,6 +242,46 @@ export function recordOutboxResult({ repo, relativeDir, sha, tier, runId, starte
   return exitStatus;
 }
 
+export async function executeOutboxRun({ repo, relativeDir, sha, tier, runId, startedAt, baseEnv = process.env, identity = buildOutboxIdentityEnvironment, lifecycle = runIdentityLifecycle, startProxy = (env) => spawn(process.execPath, ['e2e/inbox-acceptance/fault-proxy.mjs'], { cwd: repo, env, stdio: 'ignore' }), ready = waitForProxy, stop = stopProxy, playwright = env => spawnSync('npx', ['playwright', 'test', '--config', 'playwright.outbox-regression.config.ts', '--reporter=json'], { cwd: repo, env, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 }), record = recordOutboxResult }) {
+  const absoluteDir = path.join(repo, relativeDir);
+  const token = `${randomUUID()}${randomUUID()}`;
+  let env = { ...baseEnv, OUTBOX_RUN_DIR: absoluteDir, OUTBOX_FAULT_TOKEN: token, INBOX_ACCEPTANCE_ORG_ID: '00000000-0000-0000-0000-000000000bbb', MESSAGING_PROVIDER: 'mock' };
+  let proxy;
+  let preflightPassed = false;
+  let result = { status: 1, stdout: '', stderr: '' };
+  let stage = 'identity emit';
+  const failures = [];
+  let cleanupError;
+  try {
+    env = identity(env);
+    if (isGitHubE2ERun(env)) {
+      if (!env.RUNNER_TEMP) throw new Error('GitHub Outbox identity requires RUNNER_TEMP');
+      env.E2E_QA_GUARD_STATE = path.join(env.RUNNER_TEMP, `sandra-e2e-browser-qa-${env.E2E_RUN_SLUG}.json`);
+    }
+    stage = 'proxy start';
+    proxy = startProxy(env);
+    proxy.on?.('error', error => { proxy.spawnError = error; });
+    await ready(proxy, token);
+    if (proxy.spawnError) throw proxy.spawnError;
+    stage = 'identity preflight';
+    if (isGitHubE2ERun(env)) { lifecycle('preflight', env, repo); preflightPassed = true; }
+    stage = 'Playwright spawn';
+    result = playwright(env);
+    if (result.error) failures.push(`Playwright spawn failed: ${result.error}`);
+    else if (result.status !== 0) failures.push(`Playwright failed with status ${result.status ?? 'signal'}`);
+  } catch (error) {
+    failures.push(`${stage} failed: ${error}`);
+  } finally {
+    if (preflightPassed) {
+      try { lifecycle('cleanup', env, repo); } catch (error) { cleanupError = error; }
+    }
+    if (proxy) {
+      try { await stop(proxy); } catch (error) { failures.push(`proxy cleanup failed: ${error}`); }
+    }
+  }
+  return record({ repo, relativeDir, sha, tier, runId, startedAt, env, result, cleanupError, failures });
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const repo = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
   const tier = process.argv[2] ?? 'pre-merge';
@@ -244,22 +293,5 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const absoluteDir = path.join(repo, relativeDir);
   const startedAt = new Date().toISOString();
   mkdirSync(absoluteDir, { recursive: true });
-  const token = `${randomUUID()}${randomUUID()}`;
-  const env = buildOutboxIdentityEnvironment({ ...process.env, OUTBOX_RUN_DIR: absoluteDir, OUTBOX_FAULT_TOKEN: token, INBOX_ACCEPTANCE_ORG_ID: '00000000-0000-0000-0000-000000000bbb', MESSAGING_PROVIDER: 'mock' });
-  if (isGitHubE2ERun(env)) {
-    if (!env.RUNNER_TEMP) throw new Error('GitHub Outbox identity requires RUNNER_TEMP');
-    env.E2E_QA_GUARD_STATE = path.join(env.RUNNER_TEMP, `sandra-e2e-browser-qa-${env.E2E_RUN_SLUG}.json`);
-  }
-  let outcome;
-  const proxy = spawn(process.execPath, ['e2e/inbox-acceptance/fault-proxy.mjs'], { cwd: repo, env, stdio: 'ignore' });
-  let proxyError;
-  proxy.on('error', error => { proxyError = error; });
-  try {
-    await waitForProxy(proxy, token);
-    if (proxyError) throw proxyError;
-    outcome = runOutboxPlaywright(env, repo);
-  } finally {
-    await stopProxy(proxy);
-  }
-  process.exitCode = recordOutboxResult({ repo, relativeDir, sha, tier, runId, startedAt, env, ...outcome });
+  process.exitCode = await executeOutboxRun({ repo, relativeDir, sha, tier, runId, startedAt });
 }

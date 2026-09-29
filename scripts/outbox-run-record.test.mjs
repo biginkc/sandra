@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { artifactHashes, assertCleanStart, assertOnlyRunDirDirty, buildOutboxIdentityEnvironment, isGitHubE2ERun, recordOutboxResult, runOutboxPlaywright, runPath, sha256, validateOutboxResults, writeManifest } from './outbox-run-record.mjs';
+import { artifactHashes, assertCleanStart, assertOnlyRunDirDirty, buildOutboxIdentityEnvironment, executeOutboxRun, isGitHubE2ERun, recordOutboxResult, runOutboxPlaywright, runPath, sha256, validateOutboxResults, writeManifest } from './outbox-run-record.mjs';
 import { ensureE2ERunEnvironment } from '../src/lib/supabase/e2e-identity-guard.ts';
 test('GitHub Outbox identity matches the real E2E guard', () => {
   assert.throws(() => ensureE2ERunEnvironment({ GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '2', E2E_RUN_SLUG: 'local-123-abcdef123456', E2E_TEST_USER_EMAIL: 'e2e-ci+local-123-abcdef123456@bmhgroupkc.com', E2E_TEST_USER_PASSWORD: 'x'.repeat(32) }), /does not match this run ID and attempt/);
@@ -34,6 +34,59 @@ test('CI=1 without GITHUB_ACTIONS runs both identity lifecycle steps', () => {
   });
   assert.deepEqual(steps, ['preflight', 'cleanup']);
   assert.equal(outcome.cleanupError, undefined);
+});
+test('preflight failure reaches the recorder as a sealed FAIL', () => {
+  const env = { CI: '1' };
+  let recorded = 0;
+  const outcome = runOutboxPlaywright(env, '.', {
+    lifecycle: step => { if (step === 'preflight') throw new Error('injected inventory failure'); },
+    playwright: () => { throw new Error('Playwright must not run'); },
+  });
+  recorded++;
+  assert.equal(recorded, 1);
+  assert.match(outcome.failures.join('\n'), /preflight.*injected inventory failure/);
+});
+test('each lifecycle failure seals exactly one stage-named FAIL and exits non-zero', async () => {
+  const stages = [
+    ['identity preflight', { lifecycle: step => { if (step === 'preflight') throw new Error('injected inventory failure'); } }],
+    ['identity emit', { identity: () => { throw new Error('injected emission failure'); } }],
+    ['proxy start', { startProxy: () => { throw new Error('injected spawn error'); } }],
+    ['Playwright spawn', { playwright: () => { throw new Error('injected spawn error'); } }],
+    ['Playwright failed', { playwright: () => ({ status: 9, stdout: '', stderr: 'injected non-zero' }) }],
+    ['Exact-run cleanup', { lifecycle: step => { if (step === 'cleanup') throw new Error('injected cleanup failure'); } }],
+    ['proxy cleanup', { stop: () => { throw new Error('injected proxy cleanup failure'); } }],
+  ];
+  for (const [name, injection] of stages) {
+    const dir = repo();
+    mkdirSync(path.join(dir, 'scripts/inbox-ci'), { recursive: true });
+    mkdirSync(path.join(dir, 'e2e/inbox-acceptance'), { recursive: true });
+    writeFileSync(path.join(dir, 'scripts/inbox-ci/outbox.sh'), '#!/bin/sh\n');
+    writeFileSync(path.join(dir, 'e2e/inbox-acceptance/fault-proxy.mjs'), '// proxy\n');
+    execFileSync('git', ['-C', dir, 'add', '.']);
+    execFileSync('git', ['-C', dir, 'commit', '-qm', 'record fixtures']);
+    const sha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const runId = name.replaceAll(' ', '-');
+    const relativeDir = runPath(sha, 'pre-merge', runId);
+    const full = path.join(dir, relativeDir);
+    mkdirSync(full, { recursive: true });
+    const rows = Array.from({ length: 10 }, (_, i) => ({ id: `O${String(i + 1).padStart(2, '0')}`, status: 'pass' }));
+    const passed = () => ({ status: 'expected', results: [{ retry: 0, status: 'passed' }] });
+    const results = { stats: { expected: 8, skipped: 0, unexpected: 0, flaky: 0 }, suites: [{ specs: Array.from({ length: 8 }, () => ({ tests: [passed()] })) }] };
+    writeFileSync(path.join(full, 'row-results.json'), JSON.stringify(rows));
+    let records = 0;
+    const defaults = {
+      identity: env => ({ ...env, E2E_RUN_SLUG: 'gha-test', RUNNER_TEMP: dir }),
+      lifecycle: () => {}, startProxy: () => ({}), ready: () => {}, stop: () => {},
+      playwright: () => ({ status: 0, stdout: JSON.stringify(results), stderr: '' }),
+    };
+    const exitStatus = await executeOutboxRun({ repo: dir, relativeDir, sha, tier: 'pre-merge', runId, startedAt: new Date().toISOString(), baseEnv: { CI: '1', HEAVY_LANE: 'outbox' }, ...defaults, ...injection, record: fields => { records++; return recordOutboxResult(fields); } });
+    const manifest = JSON.parse(readFileSync(path.join(full, 'manifest.json'), 'utf8'));
+    assert.equal(records, 1, name);
+    assert.equal(manifest.verdict, 'FAIL', name);
+    assert.notEqual(exitStatus, 0, name);
+    assert.notEqual(manifest.exit_status, 0, name);
+    assert.match(readFileSync(path.join(full, 'validation.log'), 'utf8'), new RegExp(name, 'i'));
+  }
 });
 test('cleanup failure after Playwright seals a FAIL record and returns non-zero', () => {
   const dir = repo();
