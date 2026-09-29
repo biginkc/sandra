@@ -37,7 +37,7 @@ function fixture() {
     artifacts: { 'results.json': hash('{}') },
   };
   writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
-  const run = { head_sha: sha, id: 123, run_attempt: 2, event: 'workflow_dispatch', head_branch: 'main', path: manifest.workflow_path, conclusion: 'success', inputs: { sha, lane: 'outbox' }, display_title: `Inbox heavy outbox ${sha}` };
+  const run = { head_sha: sha, id: 123, run_attempt: 2, event: 'workflow_dispatch', head_branch: 'main', path: manifest.workflow_path, status: 'completed', conclusion: 'success', inputs: { sha, lane: 'outbox' }, display_title: `Inbox heavy outbox ${sha}` };
   const artifact = { name: `heavy-outbox-${sha}-123-2`, expired: false, size_in_bytes: 100 };
   return { repo, root, dir, sha, manifest, run, artifact, save() { writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest)); }, check() { return verifyDownload(repo, root, run, artifact, sha); } };
 }
@@ -62,6 +62,7 @@ test('outbox record requires its fault proxy hash', () => {
 for (const [label, mutate] of [
   ['non-dispatch', f => { f.run.event = 'pull_request'; }],
   ['non-main', f => { f.run.head_branch = 'feature'; }],
+  ['in-progress run', f => { f.run.status = 'in_progress'; }],
   ['wrong workflow', f => { f.run.path = 'other.yml'; }],
   ['wrong workflow definition SHA', f => { f.run.head_sha = '0'.repeat(40); }],
   ['wrong input sha', f => { f.run.display_title = `Inbox heavy outbox ${'0'.repeat(40)}`; }],

@@ -37,7 +37,7 @@ function filesUnder(root) {
   return result.sort();
 }
 export function verifyDownload(repo, root, run, artifact, expectedSha) {
-  if (!HEX.test(expectedSha) || run.event !== 'workflow_dispatch' || run.head_branch !== 'main' || run.path !== WORKFLOW) throw new Error('Run provenance mismatch');
+  if (!HEX.test(expectedSha) || run.status !== 'completed' || run.event !== 'workflow_dispatch' || run.head_branch !== 'main' || run.path !== WORKFLOW) throw new Error('Run provenance mismatch');
   if (!HEX.test(run.head_sha ?? '') || SHA256(execFileSync('git', ['show', `${run.head_sha}:${WORKFLOW}`], { cwd: repo })) !== SHA256(execFileSync('git', ['show', `${expectedSha}:${WORKFLOW}`], { cwd: repo }))) throw new Error('Workflow definition hash mismatch');
   const attempt = String(run.run_attempt);
   const id = String(run.id);
