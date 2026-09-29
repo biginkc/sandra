@@ -6,6 +6,7 @@ ASSERT=scripts/inbox-ci/migration-assertions.py
 INSTALL=experiments/inbox-production-install
 LOCAL=${MIGRATION_LOCAL_EXECUTION:-0}
 [[ "$LOCAL" == 0 || "$LOCAL" == 1 ]] || { echo 'Invalid local diagnostic mode' >&2; exit 3; }
+[[ "$LOCAL" != 1 || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]] || { echo 'Local diagnostic refused on github-hosted runner' >&2; exit 3; }
 if [[ "$LOCAL" == 1 ]]; then
   [[ "${DOCKER_HOST:-}" == unix:///* && "$DOCKER_HOST" != unix:///var/run/docker.sock && -S "${DOCKER_HOST#unix://}" ]] || { echo 'Local diagnostic requires a Colima Unix DOCKER_HOST' >&2; exit 3; }
   [[ "${MIGRATION_LOCAL_API_PORT:-}" =~ ^[0-9]{4,5}$ && "${MIGRATION_LOCAL_DB_PORT:-}" =~ ^[0-9]{4,5}$ ]] || { echo 'Local diagnostic ports required' >&2; exit 3; }
@@ -34,7 +35,7 @@ p.write_text(s)
 PY
 fi
 python3 "$ASSERT" preflight
-for required in "$INSTALL/catalog_fingerprint.py" "$INSTALL/catalog-scope.json" "$INSTALL/test_catalog_fingerprint.py" "$INSTALL/test_catalog_fingerprint_live.py" "$INSTALL/operator/concurrent-indexes.sql" "$INSTALL/operator/precondition-check.sql"; do
+for required in "$INSTALL/catalog_fingerprint.py" "$INSTALL/catalog-scope.json" "$INSTALL/test_catalog_fingerprint.py" "$INSTALL/test_catalog_fingerprint_live.py" "$INSTALL/operator/concurrent-indexes.sql" "$INSTALL/operator/precondition-check.sql" "$INSTALL/operator/validate-constraints.sql"; do
   test -f "$required" || { echo "Missing checkout input: $required" >&2; exit 3; }
 done
 if [[ "${1:-}" == --preflight-only ]]; then exit 0; fi
@@ -119,9 +120,9 @@ SQL
 python3 "$ASSERT" indexes > "$WORK/indexes.txt"
 psql -X -At -v ON_ERROR_STOP=1 -f "$INSTALL/operator/precondition-check.sql" > "$WORK/index-preconditions.txt"
 python3 "$ASSERT" index-preconditions "$WORK/index-preconditions.txt"
-# Foundation adds this check NOT VALID to keep its ACCESS EXCLUSIVE window
-# short. The reviewed installer validates it after concurrent index work.
-psql -X -v ON_ERROR_STOP=1 -c 'ALTER TABLE public.messages VALIDATE CONSTRAINT messages_inbox_inbound_revision_nonnegative' > "$WORK/constraint-validation.txt"
+# Foundation adds this check NOT VALID; execute the reviewed operator step
+# after the concurrent index preconditions have passed.
+psql -X -v ON_ERROR_STOP=1 -f "$INSTALL/operator/validate-constraints.sql" > "$WORK/constraint-validation.txt"
 export INBOX_CATALOG_EVIDENCE_PATH="$WORK/installed-catalog.json"
 python3 "$INSTALL/verify.py" --installed > "$WORK/verify-installed.txt"
 python3 "$ASSERT" verify "$WORK/verify-installed.txt"
@@ -136,11 +137,20 @@ python3 "$ASSERT" second-apply "$second_status" "$WORK/second-apply.stderr.txt" 
 export INBOX_MUTATION_EVIDENCE_PATH="$WORK/mutation-cases.json"
 # The reviewed fixture had this non-browser role. A fresh Supabase stack does
 # not, but mutation 17c needs it to prove an unexpected direct EXECUTE grant.
+# TEST and Production obtain it from the worker-role packet at
+# experiments/inbox-release/generated/projection-worker-role.sql, not migrations.
 psql -X -v ON_ERROR_STOP=1 <<'SQL' > "$WORK/mutation-role.txt"
 DO $body$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'inbox_projection_worker') THEN
-    CREATE ROLE inbox_projection_worker NOLOGIN;
+    CREATE ROLE inbox_projection_worker NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname = 'inbox_projection_worker'
+      AND NOT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb
+      AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls
+  ) THEN
+    RAISE EXCEPTION 'Fixture projection worker role has unexpected privileges';
   END IF;
 END
 $body$;

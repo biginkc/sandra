@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Run the install unit suite without the separately run live catalog module."""
+"""Run install unit tests, excluding the separately run live catalog module.
+
+Send stdout to stderr so noisy diagnostics precede unittest's final status
+in the lane's combined log; the assertion checks its last line for ``OK``.
+"""
 import sys
 import unittest
 
-# Keep noisy test diagnostics before unittest's final status in one stream.
 sys.stdout = sys.stderr
 
 
