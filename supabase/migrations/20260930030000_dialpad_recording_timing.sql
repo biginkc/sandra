@@ -36,6 +36,7 @@ create table public.dialpad_recording_timing_state (
   org_id uuid not null,
   epoch smallint not null check (epoch between 1 and 16),
   status text not null default 'open' check (status in ('open','collected','incomplete')),
+  persisted_sequences jsonb,
   last_sequences jsonb,
   reasons jsonb not null default '[]'::jsonb,
   final_request_hash text check (final_request_hash is null or final_request_hash ~ '^[0-9a-f]{64}$'),
@@ -43,8 +44,10 @@ create table public.dialpad_recording_timing_state (
   primary key (capture_id, epoch),
   foreign key (capture_id, org_id) references public.dialpad_recording_captures(id, org_id),
   check (jsonb_typeof(reasons) = 'array'),
-  check (status = 'open' or (last_sequences is not null and finalized_at is not null))
+  check (status = 'open' or (persisted_sequences is not null and last_sequences is not null and finalized_at is not null)),
+  check (persisted_sequences is null or jsonb_typeof(persisted_sequences) = 'object')
 );
+alter table public.dialpad_recording_timing_state add column if not exists persisted_sequences jsonb;
 alter table public.dialpad_recording_timing_state add column if not exists final_request_hash text;
 
 alter table public.dialpad_recording_timing_batches enable row level security;
@@ -91,20 +94,24 @@ begin
   if key_count <> cardinality(required) or exists (select 1 from jsonb_object_keys(p_record) kx where not (kx = any(required))) then
     raise exception 'timing record keys are not exact' using errcode = '22023';
   end if;
-  if jsonb_typeof(p_record->'seq') <> 'number' or (p_record->>'seq')::numeric < 0 or (p_record->>'seq')::numeric > 2147483647 or (p_record->>'seq')::numeric <> trunc((p_record->>'seq')::numeric) then raise exception 'invalid timing sequence' using errcode = '22023'; end if;
+  if jsonb_typeof(p_record->'seq') is distinct from 'number' or (p_record->>'seq')::numeric < 0 or (p_record->>'seq')::numeric > 2147483647 or (p_record->>'seq')::numeric <> trunc((p_record->>'seq')::numeric) then raise exception 'invalid timing sequence' using errcode = '22023'; end if;
   if k = 'anchor' then
-    if p_record->>'track' not in ('tab','mic') or p_record->>'contextId' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' or p_record->>'anchor' not in ('start','periodic','discontinuity','final') or p_record->>'continuity' not in ('continuous','empty_input_gap','context_frame_gap','channel_change','unknown') then raise exception 'invalid timing anchor identity' using errcode = '22023'; end if;
-    if exists (select 1 from unnest(array['contextFrame','sourceCursor','blockLength','sourceRateHz','outputCursor','outputFrameIndex','phaseNumerator']) field where jsonb_typeof(p_record->field) <> 'number') then raise exception 'invalid timing anchor number' using errcode = '22023'; end if;
+    if jsonb_typeof(p_record->'track') is distinct from 'string' or p_record->>'track' not in ('tab','mic') or jsonb_typeof(p_record->'contextId') is distinct from 'string' or p_record->>'contextId' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' or jsonb_typeof(p_record->'anchor') is distinct from 'string' or p_record->>'anchor' not in ('start','periodic','discontinuity','final') or jsonb_typeof(p_record->'continuity') is distinct from 'string' or p_record->>'continuity' not in ('continuous','empty_input_gap','context_frame_gap','channel_change','unknown') then raise exception 'invalid timing anchor identity' using errcode = '22023'; end if;
+    if exists (select 1 from unnest(array['contextFrame','sourceCursor','blockLength','sourceRateHz','outputCursor','outputFrameIndex','phaseNumerator']) field where jsonb_typeof(p_record->field) is distinct from 'number') then raise exception 'invalid timing anchor number' using errcode = '22023'; end if;
     if exists (select 1 from unnest(array['previousContextEndFrame','discardedTailSamples']) field where jsonb_typeof(p_record->field) not in ('number','null')) then raise exception 'invalid timing anchor nullable number' using errcode = '22023'; end if;
-    if (p_record->>'contextFrame')::numeric < 0 or (p_record->>'sourceCursor')::numeric < 0 or (p_record->>'blockLength')::numeric < 0 or (p_record->>'sourceRateHz')::numeric < 8000 or (p_record->>'sourceRateHz')::numeric > 192000 or (p_record->>'outputCursor')::numeric < 0 or (p_record->>'outputFrameIndex')::numeric < 0 or (p_record->>'phaseNumerator')::numeric < 0 or (p_record->>'phaseNumerator')::numeric >= 16000 or (p_record->>'contextFrame')::numeric > 9007199254740991 or (p_record->>'sourceCursor')::numeric > 9007199254740991 or (p_record->>'blockLength')::numeric > 9007199254740991 or (p_record->>'outputCursor')::numeric > 9007199254740991 or (p_record->>'outputFrameIndex')::numeric > 9007199254740991 or (p_record->>'contextFrame')::numeric <> trunc((p_record->>'contextFrame')::numeric) or (p_record->>'sourceCursor')::numeric <> trunc((p_record->>'sourceCursor')::numeric) or (p_record->>'blockLength')::numeric <> trunc((p_record->>'blockLength')::numeric) or (p_record->>'sourceRateHz')::numeric <> trunc((p_record->>'sourceRateHz')::numeric) or (p_record->>'outputCursor')::numeric <> trunc((p_record->>'outputCursor')::numeric) or (p_record->>'outputFrameIndex')::numeric <> trunc((p_record->>'outputFrameIndex')::numeric) or (p_record->>'phaseNumerator')::numeric <> trunc((p_record->>'phaseNumerator')::numeric) then raise exception 'invalid timing anchor range' using errcode = '22023'; end if;
+    if exists (select 1 from unnest(array['contextFrame','sourceCursor','blockLength','sourceRateHz','outputCursor','outputFrameIndex','phaseNumerator']) field where (p_record->>field)::numeric > 9007199254740991 or (p_record->>field)::numeric <> trunc((p_record->>field)::numeric)) then raise exception 'unsafe timing anchor number' using errcode = '22023'; end if;
+    if (p_record->>'contextFrame')::numeric < 0 or (p_record->>'sourceCursor')::numeric < 0 or (p_record->>'blockLength')::numeric < 0 or (p_record->>'sourceRateHz')::numeric < 8000 or (p_record->>'sourceRateHz')::numeric > 192000 or (p_record->>'outputCursor')::numeric < 0 or (p_record->>'outputFrameIndex')::numeric < 0 or (p_record->>'phaseNumerator')::numeric < 0 or (p_record->>'phaseNumerator')::numeric >= 16000 then raise exception 'invalid timing anchor range' using errcode = '22023'; end if;
+    if exists (select 1 from unnest(array['previousContextEndFrame','discardedTailSamples']) field where jsonb_typeof(p_record->field) = 'number' and ((p_record->>field)::numeric > 9007199254740991 or (p_record->>field)::numeric <> trunc((p_record->>field)::numeric) or (p_record->>field)::numeric < 0)) then raise exception 'invalid timing anchor nullable range' using errcode = '22023'; end if;
     if p_record->>'anchor' = 'final' and (p_record->>'blockLength')::numeric <> 0 then raise exception 'invalid timing final anchor' using errcode = '22023'; end if;
   elsif k = 'context_clock' then
-    if p_record->>'track' not in ('tab','mic') or p_record->>'contextId' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' or p_record->>'observation' not in ('start','periodic','state_change','final') or p_record->>'state' not in ('running','suspended','closed') then raise exception 'invalid timing clock identity' using errcode = '22023'; end if;
-    if exists (select 1 from unnest(array['browserBeforeMs','contextTimeMs','browserAfterMs','browserTimeOriginMs']) field where jsonb_typeof(p_record->field) <> 'number') then raise exception 'invalid timing clock number' using errcode = '22023'; end if;
+    if jsonb_typeof(p_record->'track') is distinct from 'string' or p_record->>'track' not in ('tab','mic') or jsonb_typeof(p_record->'contextId') is distinct from 'string' or p_record->>'contextId' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' or jsonb_typeof(p_record->'observation') is distinct from 'string' or p_record->>'observation' not in ('start','periodic','state_change','final') or jsonb_typeof(p_record->'state') is distinct from 'string' or p_record->>'state' not in ('running','suspended','closed') then raise exception 'invalid timing clock identity' using errcode = '22023'; end if;
+    if exists (select 1 from unnest(array['browserBeforeMs','contextTimeMs','browserAfterMs','browserTimeOriginMs']) field where jsonb_typeof(p_record->field) is distinct from 'number') then raise exception 'invalid timing clock number' using errcode = '22023'; end if;
+    if exists (select 1 from unnest(array['browserBeforeMs','contextTimeMs','browserAfterMs','browserTimeOriginMs']) field where abs((p_record->>field)::numeric) > 9007199254740991) then raise exception 'unsafe timing clock number' using errcode = '22023'; end if;
     if (p_record->>'browserBeforeMs')::numeric > (p_record->>'browserAfterMs')::numeric then raise exception 'invalid timing clock bracket' using errcode = '22023'; end if;
   elsif k = 'exchange' then
-    if p_record->>'serverClockId' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then raise exception 'invalid timing exchange identity' using errcode = '22023'; end if;
-    if exists (select 1 from unnest(array['browserSendMs','browserReceiveMs','serverReceiveMonoMs','serverSendMonoMs','serverReceiveWallMs','serverSendWallMs']) field where jsonb_typeof(p_record->field) <> 'number') then raise exception 'invalid timing exchange number' using errcode = '22023'; end if;
+    if jsonb_typeof(p_record->'serverClockId') is distinct from 'string' or p_record->>'serverClockId' !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then raise exception 'invalid timing exchange identity' using errcode = '22023'; end if;
+    if exists (select 1 from unnest(array['browserSendMs','browserReceiveMs','serverReceiveMonoMs','serverSendMonoMs','serverReceiveWallMs','serverSendWallMs']) field where jsonb_typeof(p_record->field) is distinct from 'number') then raise exception 'invalid timing exchange number' using errcode = '22023'; end if;
+    if exists (select 1 from unnest(array['browserSendMs','browserReceiveMs','serverReceiveMonoMs','serverSendMonoMs','serverReceiveWallMs','serverSendWallMs']) field where abs((p_record->>field)::numeric) > 9007199254740991) then raise exception 'unsafe timing exchange number' using errcode = '22023'; end if;
     if (p_record->>'browserReceiveMs')::numeric < (p_record->>'browserSendMs')::numeric or (p_record->>'serverSendMonoMs')::numeric < (p_record->>'serverReceiveMonoMs')::numeric then raise exception 'invalid timing exchange ordering' using errcode = '22023'; end if;
   end if;
   if octet_length(p_record::text) > 2048 then raise exception 'timing record exceeds bound' using errcode = '22023'; end if;
@@ -125,6 +132,7 @@ declare
   capture_count integer;
   batch_count integer;
   new_record_count integer := 0;
+  new_record_bytes bigint := 0;
   capture_bytes bigint;
   batch_bytes bigint;
   distinct_count integer;
@@ -193,7 +201,10 @@ begin
     if not exists (
       select 1 from public.dialpad_recording_timing_records
        where capture_id=p_capture_id and epoch=p_epoch and stream=stream_name and seq=(item->>'seq')::integer
-    ) then new_record_count := new_record_count + 1; end if;
+    ) then
+      new_record_count := new_record_count + 1;
+      new_record_bytes := new_record_bytes + octet_length(item::text);
+    end if;
   end loop;
   if exists (
     select 1 from (
@@ -208,7 +219,7 @@ begin
   select coalesce(sum(r.payload_bytes),0) into capture_bytes from public.dialpad_recording_timing_records r where r.capture_id=p_capture_id;
   select count(*) into batch_count from public.dialpad_recording_timing_batches where capture_id=p_capture_id;
   select coalesce(sum(b.payload_bytes),0) into batch_bytes from public.dialpad_recording_timing_batches b where b.capture_id=p_capture_id;
-  if capture_count + new_record_count > 8192 or batch_count + 1 > 8192 or capture_bytes + batch_bytes + payload_bytes > 16777216 then
+  if capture_count + new_record_count > 8192 or batch_count + 1 > 8192 or capture_bytes + batch_bytes + new_record_bytes + payload_bytes > 16777216 then
     raise exception 'timing observation capacity exceeded' using errcode = '22023';
   end if;
 
@@ -238,6 +249,7 @@ declare
   effective text;
   final_request_hash text;
   canonical_reasons jsonb;
+  persisted_sequences jsonb;
 begin
   if p_org_id is null or p_capture_id is null or p_epoch not between 1 and 16 or p_outcome not in ('collected','incomplete') or jsonb_typeof(p_last_sequences) <> 'object' or (select count(*) from jsonb_object_keys(p_last_sequences)) <> 5 or jsonb_typeof(p_reasons) <> 'array' then
     raise exception 'invalid timing finish input' using errcode = '22023';
@@ -268,7 +280,7 @@ begin
   select * into current_state from public.dialpad_recording_timing_state where capture_id=p_capture_id and epoch=p_epoch for update;
   if current_state.status <> 'open' then
     if current_state.final_request_hash = final_request_hash then
-      return jsonb_build_object('status',current_state.status,'reasons',current_state.reasons);
+      return jsonb_build_object('status',current_state.status,'persistedSequences',current_state.persisted_sequences,'lastSequences',current_state.last_sequences,'reasons',current_state.reasons);
     end if;
     raise exception 'timing finish replay conflict' using errcode = '40001';
   end if;
@@ -276,12 +288,22 @@ begin
   if cap.status = 'closing' and cap.drain_deadline_at is not null and cap.drain_deadline_at <= now() then raise exception 'timing drain expired' using errcode = '55000'; end if;
   if not exists (select 1 from public.dialpad_recording_ingest_grants where capture_id=p_capture_id and org_id=p_org_id and epoch=p_epoch and consumed_at is not null) then raise exception 'timing epoch is not consumed' using errcode = '55000'; end if;
   if p_epoch <> (select max(epoch) from public.dialpad_recording_ingest_grants where capture_id=p_capture_id and org_id=p_org_id and consumed_at is not null) then raise exception 'timing epoch is stale' using errcode = '55000'; end if;
-  if coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='tab:anchor'), -1) <> (p_last_sequences->>'tabAnchor')::integer
-     or coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='mic:anchor'), -1) <> (p_last_sequences->>'micAnchor')::integer
-     or coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='tab:context'), -1) <> (p_last_sequences->>'tabContext')::integer
-     or coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='mic:context'), -1) <> (p_last_sequences->>'micContext')::integer
-     or coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='exchange'), -1) <> (p_last_sequences->>'exchange')::integer then
-    raise exception 'timing finish sequences do not match persisted records' using errcode = '22023';
+  persisted_sequences := jsonb_build_object(
+    'tabAnchor', coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='tab:anchor'), -1),
+    'micAnchor', coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='mic:anchor'), -1),
+    'tabContext', coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='tab:context'), -1),
+    'micContext', coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='mic:context'), -1),
+    'exchange', coalesce((select max(seq) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='exchange'), -1)
+  );
+  if exists (
+    select 1
+      from jsonb_each(p_last_sequences) requested
+     where (requested.value::text)::integer > (persisted_sequences->requested.key)::integer
+  ) then
+    raise exception 'timing finish sequences exceed persisted records' using errcode = '22023';
+  end if;
+  if p_outcome = 'collected' and p_last_sequences is distinct from persisted_sequences then
+    raise exception 'collected timing finish requires durable watermark' using errcode = '22023';
   end if;
 
   effective := case when p_outcome='collected' and jsonb_array_length(p_reasons)=0 then 'collected' else 'incomplete' end;
@@ -310,6 +332,49 @@ begin
       effective := 'incomplete';
       canonical_reasons := canonical_reasons || '["clock_discontinuity"]'::jsonb;
     end if;
+    if (select count(*) from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='exchange') > 0
+       and (select count(distinct record->>'serverClockId') from public.dialpad_recording_timing_records where capture_id=p_capture_id and epoch=p_epoch and stream='exchange') <> 1 then
+      effective := 'incomplete';
+      canonical_reasons := canonical_reasons || '["clock_discontinuity"]'::jsonb;
+    end if;
+    if exists (
+      select 1
+        from public.dialpad_recording_timing_records r
+       where r.capture_id=p_capture_id and r.epoch=p_epoch and r.stream in ('tab:anchor','mic:anchor')
+         and (
+           (r.record->>'outputFrameIndex')::numeric <> trunc((r.record->>'outputCursor')::numeric / 320)
+           or mod((r.record->>'outputCursor')::numeric * (r.record->>'sourceRateHz')::numeric, 16000) <> (r.record->>'phaseNumerator')::numeric
+         )
+    ) then
+      effective := 'incomplete';
+      canonical_reasons := canonical_reasons || '["sequence_gap"]'::jsonb;
+    end if;
+    if exists (
+      select 1
+        from (
+          select stream,
+                 max(seq) as max_seq,
+                 max(seq) filter (where record->>'anchor' = 'final') as final_seq
+            from public.dialpad_recording_timing_records
+           where capture_id=p_capture_id and epoch=p_epoch and stream in ('tab:anchor','mic:anchor')
+           group by stream
+        ) anchors
+       where anchors.final_seq is null or anchors.final_seq <> anchors.max_seq
+    ) or exists (
+      select 1
+        from (
+          select stream,
+                 max(seq) as max_seq,
+                 max(seq) filter (where record->>'observation' = 'final') as final_seq
+            from public.dialpad_recording_timing_records
+           where capture_id=p_capture_id and epoch=p_epoch and stream in ('tab:context','mic:context')
+           group by stream
+        ) clocks
+       where clocks.final_seq is null or clocks.final_seq <> clocks.max_seq
+    ) then
+      effective := 'incomplete';
+      canonical_reasons := canonical_reasons || '["sequence_gap"]'::jsonb;
+    end if;
     if exists (
       select 1 from (
         select stream, count(distinct record->>'contextId') as context_count
@@ -334,7 +399,14 @@ begin
            order by p.seq desc limit 1
         ) previous on true
        where f.capture_id=p_capture_id and f.epoch=p_epoch and f.stream in ('tab:anchor','mic:anchor') and f.record->>'anchor'='final'
-         and (previous.record is null or (f.record->>'sourceCursor')::numeric <> (previous.record->>'sourceCursor')::numeric + (previous.record->>'blockLength')::numeric)
+         and (
+           previous.record is null
+           or (f.record->>'contextFrame')::numeric < (previous.record->>'contextFrame')::numeric + (previous.record->>'blockLength')::numeric
+           or (f.record->>'sourceCursor')::numeric < (previous.record->>'sourceCursor')::numeric + (previous.record->>'blockLength')::numeric
+           or (f.record->>'outputCursor')::numeric < (previous.record->>'outputCursor')::numeric
+           or f.record->>'previousContextEndFrame' is null
+           or (f.record->>'previousContextEndFrame')::numeric <> (f.record->>'contextFrame')::numeric
+         )
     ) then
       effective := 'incomplete';
       canonical_reasons := canonical_reasons || '["sequence_gap"]'::jsonb;
@@ -350,10 +422,10 @@ begin
   select coalesce(jsonb_agg(to_jsonb(reason) order by reason), '[]'::jsonb)
     into canonical_reasons
     from (select distinct reason from jsonb_array_elements_text(canonical_reasons) as reasons(reason)) unique_reasons;
-  insert into public.dialpad_recording_timing_state(capture_id,org_id,epoch,status,last_sequences,reasons,final_request_hash,finalized_at)
-  values (p_capture_id,p_org_id,p_epoch,effective,p_last_sequences,canonical_reasons,final_request_hash,now())
-    on conflict (capture_id,epoch) do update set status=excluded.status,last_sequences=excluded.last_sequences,reasons=excluded.reasons,final_request_hash=excluded.final_request_hash,finalized_at=excluded.finalized_at;
-  return jsonb_build_object('status',effective,'reasons',canonical_reasons);
+  insert into public.dialpad_recording_timing_state(capture_id,org_id,epoch,status,persisted_sequences,last_sequences,reasons,final_request_hash,finalized_at)
+  values (p_capture_id,p_org_id,p_epoch,effective,persisted_sequences,p_last_sequences,canonical_reasons,final_request_hash,now())
+    on conflict (capture_id,epoch) do update set status=excluded.status,persisted_sequences=excluded.persisted_sequences,last_sequences=excluded.last_sequences,reasons=excluded.reasons,final_request_hash=excluded.final_request_hash,finalized_at=excluded.finalized_at;
+  return jsonb_build_object('status',effective,'persistedSequences',persisted_sequences,'lastSequences',p_last_sequences,'reasons',canonical_reasons);
 end $$;
 
 revoke all on function public.dialpad_recording_timing_stream(jsonb) from public, anon, authenticated, service_role;
@@ -382,7 +454,7 @@ with base as materialized (
    where r.capture_id = p_capture_id and r.org_id = p_org_id
 ), timing_states as (
   select coalesce(jsonb_agg(jsonb_build_object(
-           'epoch', s.epoch, 'status', s.status, 'lastSequences', s.last_sequences, 'reasons', s.reasons
+           'epoch', s.epoch, 'status', s.status, 'persistedSequences', s.persisted_sequences, 'lastSequences', s.last_sequences, 'reasons', s.reasons
          ) order by s.epoch), '[]'::jsonb) as rows
     from public.dialpad_recording_timing_state s
    where s.capture_id = p_capture_id and s.org_id = p_org_id

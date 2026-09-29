@@ -27,6 +27,8 @@ describe('Dialpad timing evidence', () => {
     expect(() => parseDialpadTimingRecord({ kind: 'exchange', seq: 0, serverClockId: contextId, browserSendMs: 1, browserReceiveMs: 2, serverReceiveMonoMs: 3, serverSendMonoMs: 4, serverReceiveWallMs: 100, serverSendWallMs: 5, nonce: 'a'.repeat(64) })).toThrow('Invalid Dialpad timing exchange')
     expect(() => parseDialpadTimingRecord({ ...anchor, continuity: 'empty_input_gap', previousContextEndFrame: null })).not.toThrow()
     expect(() => parseDialpadTimingRecord({ ...anchor, continuity: 'context_frame_gap', previousContextEndFrame: 128 })).not.toThrow()
+    expect(() => parseDialpadTimingRecord({ kind: 'context_clock', track: 'tab', seq: 0, contextId, observation: 'start', browserBeforeMs: Number.MAX_SAFE_INTEGER + 2, contextTimeMs: 1, browserAfterMs: 2, browserTimeOriginMs: 3, state: 'running' })).toThrow('Invalid Dialpad timing context clock')
+    expect(() => parseDialpadTimingRecord({ ...anchor, track: null })).toThrow('Invalid Dialpad timing anchor')
   })
 
   it('uses only the two service RPCs and rejects invented terminal status', async () => {

@@ -141,7 +141,7 @@ export type Database = {
       }
 
       dialpad_recording_timing_state: {
-        Row: { capture_id: string; org_id: string; epoch: number; status: string; last_sequences: Json | null; reasons: Json; final_request_hash: string | null; finalized_at: string | null }
+        Row: { capture_id: string; org_id: string; epoch: number; status: string; persisted_sequences: Json | null; last_sequences: Json | null; reasons: Json; final_request_hash: string | null; finalized_at: string | null }
         Insert: Record<string, never>
         Update: Record<string, never>
         Relationships: []

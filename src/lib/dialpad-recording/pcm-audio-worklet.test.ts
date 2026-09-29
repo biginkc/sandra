@@ -10,7 +10,7 @@ import {
   startPcmWorkletSession,
 } from "./pcm-audio-worklet";
 
-type HarnessMessage = { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number };
+type HarnessMessage = { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number; record?: Record<string, unknown> };
 
 function generatedProcessor(sourceRateHz: number): { processor: { port: PcmWorkletPort; process(inputs: Float32Array[][]): boolean }; messages: HarnessMessage[] } {
   let Processor!: new () => { port: PcmWorkletPort; process(inputs: Float32Array[][]): boolean };
@@ -90,6 +90,21 @@ describe("stateful Dialpad PCM capture", () => {
     expect(oneBlock480.frames).toHaveLength(10);
     expect(manyBlocks441.frames.map((frame) => [...frame])).toEqual(oneBlock441.frames.map((frame) => [...frame]));
     expect(manyBlocks480.frames.map((frame) => [...frame])).toEqual(oneBlock480.frames.map((frame) => [...frame]));
+  });
+
+  it("emits sparse periodic anchors and a final anchor with monotonic source geometry", () => {
+    const harness = generatedProcessor(48_000);
+    harness.processor.process([[inputSamples(128)]]);
+    harness.processor.process([[inputSamples(480_000)]]);
+    harness.processor.process([[inputSamples(128)]]);
+    harness.processor.port.onmessage?.({ data: { type: "flush" } } as MessageEvent);
+    const anchors = harness.messages.filter((message) => message.type === "anchor").map((message) => message.record!);
+    expect(anchors.map((record) => record.anchor)).toEqual(["start", "periodic", "final"]);
+    const periodic = anchors[1]!;
+    const final = anchors[2]!;
+    expect(Number(final.sourceCursor)).toBeGreaterThanOrEqual(Number(periodic.sourceCursor) + Number(periodic.blockLength));
+    expect(final.contextFrame).toBe(final.previousContextEndFrame);
+    expect(final.blockLength).toBe(0);
   });
 
   it("reports the observed input layout and stops on a channel-layout change", () => {
