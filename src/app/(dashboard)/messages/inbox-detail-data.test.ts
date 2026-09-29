@@ -1018,6 +1018,12 @@ describe("fetchInboxDetail", () => {
     seed.sequence_enrollments![0].pause_reason = "manual";
     const manuallyPaused = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
     expect(manuallyPaused?.drip).toMatchObject({ status: "paused", replied: false });
+    seed.sequence_enrollments![0].status = "active";
+    seed.sequence_enrollments![0].pause_reason = null;
+    const resumed = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+    expect(resumed?.drip).toMatchObject({ status: "active", step: 2, total: 2, replied: false, stoppedAt: null });
+    expect(resumed?.dripReplyMessageIds).toEqual(["reply"]);
+    expect(resumed?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
   });
 
   it.each(["dispo", "logged attempt", ...DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS])(

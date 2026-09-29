@@ -56,7 +56,7 @@ export const brandDetail: InboxDetail = {
 
 export const brandCantStartDetail: InboxDetail = {
   ...brandDetail,
-  drip: { enrollmentId: "00000000-0000-4000-8000-000000000005", sequenceId: "00000000-0000-4000-8000-000000000007", name: "Current seller check-in", step: 1, total: 3, replied: false, stoppedAt: null },
+  drip: { enrollmentId: "00000000-0000-4000-8000-000000000005", sequenceId: "00000000-0000-4000-8000-000000000007", name: "Current seller check-in", step: 1, total: 3, replied: false, status: "active", stoppedAt: null },
   dripMessageLabels: {}, dripReplyMessageIds: [], initialMessages: [brandMessages[0]],
 };
 

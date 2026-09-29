@@ -1493,6 +1493,9 @@ describe("<InboxDetail />", () => {
     rerender(<InboxDetail data={makeData({ contactId: "drip-ui", drip: { ...drip, replied: true, stoppedAt: "2026-04-29T12:02:00Z" }, initialMessages: [sent, manual, reply], dripMessageLabels: { "drip-sent": "Drip · Seller follow-up · text 1 of 4" }, dripReplyMessageIds: ["seller-reply"], dripReplyLabels: { "seller-reply": "Reply to drip text 1" } })} assigneeEmails={{}} currentUserId="user-1" />);
     expect(screen.getByTestId("inbox-detail-drip-line")).toHaveTextContent("Was in Seller follow-up · stopped Apr 29 when they replied");
     expect(screen.getByTestId("messages-thread-drip-reply")).toHaveTextContent("Reply to drip text 1");
+    rerender(<InboxDetail data={makeData({ contactId: "drip-ui", drip: { ...drip, status: "active", replied: false, stoppedAt: "2026-04-29T12:02:00Z" }, initialMessages: [sent, manual, reply], dripReplyMessageIds: ["seller-reply"], dripReplyLabels: { "seller-reply": "Reply to drip text 1" } })} assigneeEmails={{}} currentUserId="user-1" />);
+    expect(screen.getByTestId("inbox-detail-drip-line")).toHaveTextContent("In Seller follow-up · text 2 of 4");
+    expect(screen.getByTestId("messages-thread-drip-reply")).toHaveTextContent("Reply to drip text 1");
     rerender(<InboxDetail data={makeData({ contactId: "drip-ui", drip: { ...drip, status: "completed", replied: false, stoppedAt: "2026-04-29T12:02:00Z" }, initialMessages: [sent, manual, reply], dripReplyMessageIds: ["seller-reply"], dripReplyLabels: { "seller-reply": "Reply to drip text 1" } })} assigneeEmails={{}} currentUserId="user-1" />);
     expect(screen.getByTestId("inbox-detail-drip-line")).toHaveTextContent("Was in Seller follow-up · finished, then they replied");
     expect(screen.getByTestId("messages-thread-drip-reply")).toHaveTextContent("Reply to drip text 1");

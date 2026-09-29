@@ -775,7 +775,9 @@ export function InboxDetail({
               </p>
               {data.drip ? <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-teal-800" data-testid="inbox-detail-drip-line">
                 <Droplet aria-hidden="true" className="h-3.5 w-3.5" />
-                {data.drip.status === "completed" && data.drip.stoppedAt
+                {data.drip.status === "active"
+                  ? `In ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`
+                  : data.drip.status === "completed" && data.drip.stoppedAt
                   ? `Was in ${data.drip.name} · finished, then they replied`
                   : data.drip.stoppedAt
                   ? `Was in ${data.drip.name} · stopped ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: data.drip.timeZone ?? "America/Chicago" }).format(new Date(data.drip.stoppedAt))} when they replied`
