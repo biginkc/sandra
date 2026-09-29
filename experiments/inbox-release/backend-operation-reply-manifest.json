@@ -2,7 +2,7 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": ".",
-  "source_commit": "f64a5c7f3cb16bc981649a1830181e96cc8ac6be",
+  "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",

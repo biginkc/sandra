@@ -3,7 +3,7 @@
   "status": "BLOCKED_UNBUILT_CURRENT_SOURCE",
   "owner": "release-infra",
   "source_repository": ".",
-  "source_commit": "f64a5c7f3cb16bc981649a1830181e96cc8ac6be",
+  "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70",
   "services": {
     "operation-worker": {
       "Dockerfile": "253488776860278dd5abd1eb2a2f6babb4f6760d706f37ea837262948913afaf",
@@ -20,7 +20,7 @@
         "login": "inbox_action_worker",
         "status": "SOURCE_ONLY_UNBUILT"
       },
-      "source_commit": "f64a5c7f3cb16bc981649a1830181e96cc8ac6be"
+      "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70"
     },
     "reply-send-worker": {
       "Dockerfile": "98ec0bc8335b2db7b5ef40eb1237a37fc3350896a385c7762d06ee0c6fd04c66",
@@ -42,27 +42,27 @@
         "login": "inbox_reply_send_worker",
         "status": "SOURCE_ONLY_UNBUILT"
       },
-      "source_commit": "f64a5c7f3cb16bc981649a1830181e96cc8ac6be"
+      "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70"
     },
     "sync-relay": {
       "Dockerfile": "1e33ec793747bee85f0e390017074658da88b027a273c944faeda6625b0e5bbe",
       "server.mjs": "7c8e7d73dd69045676bce17aaad6479739ef129b89157a02b144b7207c9f5e2b",
       "railway.json": "b551f369a14ae01cb3c2b0ebaed8946ad939cb40c4981ab9d4c7abe901a5e221",
-      "source_commit": "f64a5c7f3cb16bc981649a1830181e96cc8ac6be"
+      "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70"
     },
     "projection-worker": {
-      "source_commit": "f64a5c7f3cb16bc981649a1830181e96cc8ac6be",
+      "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70",
       "Dockerfile": "f30e4fe8a1db80724fb8355c2f1eebe9a6ef40dc55fcc4fcbdc1af3cbd083091",
       "package.json": "93c75a66175e33248b6c6869d3b7881a3c23064168c532bdfd063a3c866a6050",
       "package-lock.json": "ce33cf8eabdd72dd596204ecad3612df265bf471766f478aa806123acec1c2da",
       "core.mjs": "c6f69dcb87044eadbfa1db6363919125f1927d7f63595f7f1951db80d5962810",
-      "config.mjs": "03c621a1f9af0990dccb2bc23df356203f0f73a08948b8a09bbcc8811b3c7e38",
+      "config.mjs": "ea5aa432d3b666cdadfd3a2c490d1849a311522b626840c24c13f95c1363f687",
       "server.mjs": "62327570590cae707314f1bca4b689876e407b31df78bf9e1e29cd12da17c0d9",
       "worker-role.sql": "e44f574ff5fc11eb3f5a47ef95778798a01260d756022228967dcc439922df30",
-      "config.test.mjs": "51253097f5a28e61b6f9bab64ec51b7a96a74c1ee23b59fe711805d41fdcb81e",
+      "config.test.mjs": "3f4677d7f90e3ddc5c648d5b7f9466adeab211190171cdcc076a6704c1634ca2",
       "release_http_fixture_profile_overlay": {
-        "config.mjs": "03c621a1f9af0990dccb2bc23df356203f0f73a08948b8a09bbcc8811b3c7e38",
-        "config.test.mjs": "51253097f5a28e61b6f9bab64ec51b7a96a74c1ee23b59fe711805d41fdcb81e",
+        "config.mjs": "ea5aa432d3b666cdadfd3a2c490d1849a311522b626840c24c13f95c1363f687",
+        "config.test.mjs": "3f4677d7f90e3ddc5c648d5b7f9466adeab211190171cdcc076a6704c1634ca2",
         "target": "127.0.0.1:54322/postgres",
         "database_marker": "sandra-inbox-http-owned-synthetic-20260917",
         "container_label_marker": "sandra-inbox-release-http-owned-20260917",
@@ -188,8 +188,8 @@
         "status": "PINNED_REFERENCE_UNRAN_COMPATIBILITY_UNPROVEN"
       },
       "operation-worker": {
-        "image": "sandra-inbox-action-worker:release-f64a5c7",
-        "source_commit": "f64a5c7f3cb16bc981649a1830181e96cc8ac6be",
+        "image": "sandra-inbox-action-worker:release-724c74e",
+        "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70",
         "build_context": "experiments/inbox-operation-worker",
         "current_image_digest": null,
         "role_packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
@@ -199,8 +199,8 @@
         "status": "SOURCE_ONLY_UNBUILT"
       },
       "reply-send-worker": {
-        "image": "sandra-inbox-reply-send-worker:release-f64a5c7",
-        "source_commit": "f64a5c7f3cb16bc981649a1830181e96cc8ac6be",
+        "image": "sandra-inbox-reply-send-worker:release-724c74e",
+        "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70",
         "build_context": "experiments/inbox-reply-send-worker",
         "current_image_digest": null,
         "role_packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
@@ -211,8 +211,8 @@
         "status": "SOURCE_ONLY_UNBUILT"
       },
       "projection-worker": {
-        "image": "sandra-inbox-projection-worker:release-f64a5c7",
-        "source_commit": "f64a5c7f3cb16bc981649a1830181e96cc8ac6be",
+        "image": "sandra-inbox-projection-worker:release-724c74e",
+        "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70",
         "build_context": "services/inbox-projection-worker",
         "current_image_digest": null,
         "role_packet": "experiments/inbox-release/generated/projection-worker-role.sql",
@@ -232,8 +232,8 @@
         "memory_bytes": 536870912,
         "cpus": 0.5,
         "status": "SOURCE_PACKAGED_UNRUN",
-        "source_commit": "f64a5c7f3cb16bc981649a1830181e96cc8ac6be",
-        "image": "sandra-inbox-sync-relay:release-f64a5c7"
+        "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70",
+        "image": "sandra-inbox-sync-relay:release-724c74e"
       }
     },
     "preflight_order": [
