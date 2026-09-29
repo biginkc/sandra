@@ -33,6 +33,7 @@ export default defineConfig({
       "supabase/migrations/20260929034021_dialpad_cti_foundation.integration.test.ts",
       "supabase/migrations/20260929120000_dialpad_cti_call_projection.integration.test.ts",
       "supabase/migrations/20260929180000_dialpad_cti_dispatch.integration.test.ts",
+      "supabase/migrations/20260929200000_dialpad_cti_custom_data.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],
