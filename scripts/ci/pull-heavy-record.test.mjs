@@ -7,6 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { verifyDownload, seal } from './pull-heavy-record.mjs';
+import { validateOutboxResults, writeManifest } from '../outbox-run-record.mjs';
 const hash = b => createHash('sha256').update(b).digest('hex');
 function fixture() {
   const repo = mkdtempSync(path.join(tmpdir(), 'heavy-pull-repo-'));
@@ -101,9 +102,13 @@ test('seal creates one-parent evidence-only commit on an owned branch', () => {
 test('FAIL run seals and sealed gate rejects its latest result', () => {
   const f = fixture();
   f.run.conclusion = 'failure';
-  f.manifest.verdict = 'FAIL';
-  f.manifest.exit_status = 1;
-  f.save();
+  const relative = path.relative(f.root, f.dir);
+  mkdirSync(path.join(f.dir, 'playwright', 'x'), { recursive: true });
+  writeFileSync(path.join(f.dir, 'playwright', 'x', 'error-context.md'), 'Playwright failure context\n');
+  writeFileSync(path.join(f.dir, 'row-results.json'), JSON.stringify([{ id: 'O01', status: 'fail' }]));
+  assert.throws(() => validateOutboxResults(f.dir), /Outbox O01/);
+  writeManifest(f.root, relative, { ...f.manifest, verdict: 'FAIL', exit_status: 1 }, {});
+  assert.equal(f.check().manifest.artifacts['playwright/x/error-context.md'], hash('Playwright failure context\n'));
   const remote = mkdtempSync(path.join(tmpdir(), 'heavy-seal-remote-'));
   execFileSync('git', ['init', '--bare', '-q', remote]);
   execFileSync('git', ['-C', f.repo, 'remote', 'add', 'origin', remote]);

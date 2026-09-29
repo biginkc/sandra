@@ -21,7 +21,9 @@ test('results remove webServer env and every text artifact is redacted before ha
   const jwt = 'eyJabcdefghij.payload.signature';
   const results = { config: { webServer: { env: { NEXT_PUBLIC_SUPABASE_ANON_KEY: anon, SUPABASE_SERVICE_ROLE_KEY: service } }, rootDir: dir, configFile: `${dir}/playwright.outbox-regression.config.ts`, globalSetup: `${dir}/e2e/inbox-acceptance/outbox-global-setup.ts`, externalPath: '/Users/another/private/config.ts' }, suites: [{ title: 'passing test', specs: [], file: `${dir}/e2e/inbox-acceptance/outbox.spec.ts` }] };
   writeFileSync(path.join(full, 'results.json'), JSON.stringify(results));
-  for (const extension of ['log', 'txt', 'html', 'json']) writeFileSync(path.join(full, `extra.${extension}`), `${anon} ${service} ${jwt} sb_secret_sample sb_publishable_sample`);
+  for (const extension of ['log', 'txt', 'html', 'json', 'md']) writeFileSync(path.join(full, `extra.${extension}`), `${anon} ${service} ${jwt} sb_secret_sample sb_publishable_sample`);
+  mkdirSync(path.join(full, 'playwright', 'x'), { recursive: true });
+  writeFileSync(path.join(full, 'playwright', 'x', 'error-context.md'), `${anon} ${service} ${jwt} sb_secret_sample sb_publishable_sample`);
   const manifest = writeManifest(dir, relative, { tested_sha: 'a'.repeat(40) }, { NEXT_PUBLIC_SUPABASE_ANON_KEY: anon, SUPABASE_SERVICE_ROLE_KEY: service });
   const safeResults = JSON.parse(readFileSync(path.join(full, 'results.json'), 'utf8'));
   assert.equal(safeResults.config.webServer, undefined);
@@ -31,11 +33,14 @@ test('results remove webServer env and every text artifact is redacted before ha
   assert.equal(safeResults.config.externalPath, '[LOCAL_PATH]');
   assert.equal(safeResults.suites[0].file, './e2e/inbox-acceptance/outbox.spec.ts');
   assert.doesNotMatch(JSON.stringify(safeResults), /\/Users\//);
-  for (const extension of ['log', 'txt', 'html', 'json']) {
+  for (const extension of ['log', 'txt', 'html', 'json', 'md']) {
     const safe = readFileSync(path.join(full, `extra.${extension}`), 'utf8');
     assert.equal(safe, '[REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]');
     assert.equal(manifest.artifacts[`extra.${extension}`], sha256(safe));
   }
+  const safeContext = readFileSync(path.join(full, 'playwright', 'x', 'error-context.md'), 'utf8');
+  assert.equal(safeContext, '[REDACTED] [REDACTED] [REDACTED] [REDACTED] [REDACTED]');
+  assert.equal(manifest.artifacts['playwright/x/error-context.md'], sha256(safeContext));
   assert.equal(manifest.artifacts['results.json'], sha256(readFileSync(path.join(full, 'results.json'))));
 });
 test('stray zip fails closed without a manifest, even without recognizable secret text', () => {

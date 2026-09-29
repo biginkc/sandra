@@ -58,7 +58,7 @@ export function verifyDownload(repo, root, run, artifact, expectedSha) {
   const actual = paths.filter(p => p !== `${prefix}manifest.json`).map(p => p.slice(prefix.length));
   if (Object.keys(manifest.artifacts ?? {}).sort().join('\n') !== actual.join('\n')) throw new Error('Incomplete artifact inventory');
   for (const relative of actual) {
-    if (!/\.(?:json|log|txt|html|png|csv|gz)$/i.test(relative) || forbiddenName(relative)) throw new Error('Forbidden artifact file');
+    if (!/\.(?:json|log|txt|html|png|csv|gz|md)$/i.test(relative) || forbiddenName(relative)) throw new Error('Forbidden artifact file');
     const bytes = readFileSync(path.join(dir, relative));
     if (SHA256(bytes) !== manifest.artifacts[relative]) throw new Error(`Artifact hash mismatch: ${relative}`);
     if (relative.endsWith('.gz')) {

@@ -6,8 +6,8 @@ import { fileURLToPath } from 'node:url';
 
 export const EVIDENCE_ROOT = 'docs/performance/inbox-redesign/evidence';
 export const TIERS = new Set(['pre-merge', 'test-env', 'prod-deploy']);
-const TEXT_ARTIFACT = /\.(?:json|log|txt|html|csv)$/i;
-const ALLOWED_ARTIFACT = /\.(?:json|log|txt|html|png|csv|gz)$/i;
+const TEXT_ARTIFACT = /\.(?:json|log|txt|html|csv|md)$/i;
+const ALLOWED_ARTIFACT = /\.(?:json|log|txt|html|png|csv|gz|md)$/i;
 const MAX_RUN_BYTES = 40 * 1024 * 1024;
 const O_IDS = Array.from({length: 10}, (_, i) => `O${String(i + 1).padStart(2, '0')}`);
 // Seven Outbox specs plus the auth setup dependency; the source test pins both spec sets.
