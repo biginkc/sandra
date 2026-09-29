@@ -17,7 +17,16 @@ if lane != 'burst':
     raise RuntimeError('Only burst is a sealed approval kind')
 verdict = sys.argv[3]
 sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
-run_id = f"{os.environ['GITHUB_RUN_ID']}_{os.environ['GITHUB_RUN_ATTEMPT']}_{lane}"
+if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch' or os.environ.get('GITHUB_REF_NAME') != 'main':
+    raise RuntimeError('Burst record requires a main-branch workflow dispatch')
+if os.environ.get('HEAVY_TESTED_SHA') != sha or os.environ.get('HEAVY_LANE') != lane:
+    raise RuntimeError('Burst record checkout/lane mismatch')
+workflow = '.github/workflows/inbox-heavy-verification.yml'
+if os.environ.get('GITHUB_WORKFLOW_REF', '').split('@')[0] != f'biginkc/sandra/{workflow}':
+    raise RuntimeError('Burst record workflow mismatch')
+if not os.environ.get('GITHUB_RUN_ID', '').isdigit() or not os.environ.get('GITHUB_RUN_ATTEMPT', '').isdigit():
+    raise RuntimeError('Burst record run identity missing')
+run_id = os.environ['GITHUB_RUN_ID']
 relative = Path('docs/performance/inbox-redesign/evidence') / sha / 'pre-merge' / run_id
 dest = repo / relative
 if dest.exists():
@@ -50,6 +59,10 @@ if size > 40 * 1024 * 1024:
     raise RuntimeError(f'Perf run exceeds 40 MiB ({size} bytes)')
 now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 attempts = [(source / f'attempt-{n}' / 'verdict.txt').read_text().strip() for n in range(1, 4)]
+if any(value not in ('PASS', 'FAIL') for value in attempts):
+    raise RuntimeError('Burst attempt verdict missing or invalid')
+if any(not (source / f'attempt-{n}' / 'runner-hardware.txt').is_file() for n in range(1, 4)):
+    raise RuntimeError('Burst attempt hardware missing')
 if (verdict == 'PASS') != all(value == 'PASS' for value in attempts):
     raise RuntimeError('Burst aggregate verdict disagrees with attempts')
 script = repo / 'scripts/inbox-ci' / f'{lane}.sh'
@@ -60,6 +73,9 @@ manifest = {
     'runner_script_sha256': hashlib.sha256(script.read_bytes()).hexdigest(),
     'fault_proxy_script_sha256': hashlib.sha256((repo / 'e2e/inbox-acceptance/fault-proxy.mjs').read_bytes()).hexdigest(),
     'github_run_id': os.environ['GITHUB_RUN_ID'], 'github_run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+    'workflow_path': workflow, 'workflow_input_sha': sha,
+    'event': os.environ['GITHUB_EVENT_NAME'], 'head_branch': os.environ['GITHUB_REF_NAME'], 'lane': lane,
+    'artifact_name': f"heavy-{lane}-{sha}-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}",
     'clean_tree': {'start': True, 'end_excluding_run_dir': True, 'excluded_path': str(relative)},
     'exit_status': 0 if verdict == 'PASS' else 1, 'verdict': verdict,
     'raw_inflated_sha256': raw_inflated, 'artifacts': artifacts,
