@@ -63,6 +63,10 @@ jobs:
         env:
           TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
         run: npx vitest run --config vitest.integration.config.ts supabase/migrations/20260928120000_messages_drip_snapshot.integration.test.ts
+      - name: Verify needs-person counts and latest enrollment on disposable database
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+        run: npx vitest run --config vitest.integration.config.ts supabase/migrations/20260929190000_sequence_stats.integration.test.ts
       - name: Verify Chrome browser
         run: |
           google-chrome --version

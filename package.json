@@ -89,6 +89,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@1password/sdk": "0.5.0",
     "@mswjs/interceptors": "0.41.4",
     "@playwright/test": "^1.59.1",
     "@tailwindcss/postcss": "^4",

@@ -16,6 +16,7 @@ export function StartDripPicker({
   selectionOnly = false,
   selectedSequenceId,
   previewChoices,
+  onResult,
 }: {
   triggerLabel?: string;
   onChoose?: (sequenceId: string) => Promise<PickResult>;
@@ -26,6 +27,7 @@ export function StartDripPicker({
   selectionOnly?: boolean;
   selectedSequenceId?: string | null;
   previewChoices?: DripChoice[];
+  onResult?: (result: PickResult, sequenceId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [choices, setChoices] = useState<DripChoice[]>([]);
@@ -62,6 +64,7 @@ export function StartDripPicker({
     setBusy(true);
     try {
       const result = await onChoose(id);
+      onResult?.(result, id);
       setMessage(result.status === "enrolled" ? "Drip started." : `${result.saved === false ? "Not enrolled" : "Saved. Not enrolled"}: ${result.reason}`);
       if (result.status === "enrolled") setOpen(false);
     } catch {

@@ -178,6 +178,9 @@ function makeDetail(contactId: string, body: string): InboxDetailData {
     phoneSuppressed: false,
     smsSafetyReadFailed: false,
     isDncLocked: false,
+    drip: null,
+    dripMessageLabels: {},
+    dripReplyMessageIds: [],
     initialMessages: [
       makeMessage({
         id: `m-${contactId}`,
@@ -354,11 +357,11 @@ describe("<CockpitView /> URL deep-linking", () => {
     );
   });
 
-  it("treats the replied-to-drip URL filter as an inbox thread list without adding a chip", () => {
+  it("treats the replied-to-drip URL filter as an inbox thread list with its chip active", () => {
     const thread = makeThread({ contactId: "drip-contact" });
     render(<CockpitView {...baseProps} activeTab="inbox" filter="drip_replied" threads={[thread]} />);
     expect(screen.getByTestId(`inbox-thread-${thread.threadId}`)).toBeVisible();
-    expect(screen.queryByRole("button", { name: /Replied to drip/i })).not.toBeInTheDocument();
+    expect(screen.getByTestId("filter-drip-replied")).toHaveAttribute("aria-pressed", "true");
   });
 
   it("keeps an unsent draft mounted when its loaded conversation is clicked again", async () => {
