@@ -33,6 +33,7 @@ APPROVALS = {
 MIGRATION_VERSIONS = {"20260929000000", "20260929000100", "20260929000200"}
 PROJECT_REFS = {"shared-test": "ncsngxlcyxylaeskiteu", "production": "copflsklaefwzipsrjqz"}
 MIGRATION_WORKFLOWS = {"shared-test": ".github/workflows/db-migrate-test.yml", "production": ".github/workflows/db-migrate-prod.yml"}
+MIGRATION_APPLY_JOBS = {"shared-test": "Apply migrations to test", "production": "Apply migrations to prod"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -318,6 +319,20 @@ def evaluate_migration(repo: Path, m: str, target: str, head: str = "HEAD", x_mi
     workflow = manifest.get("workflow_run", {})
     if workflow.get("workflow_path") != MIGRATION_WORKFLOWS[target] or workflow.get("head_sha") != m or workflow.get("conclusion") != "success" or not str(workflow.get("run_id", "")).isdigit() or not str(workflow.get("run_attempt", "")).isdigit():
         raise EvidenceError("migration workflow identity mismatch")
+    def require_job(field: str, name: str, label: str, *, allow_prior_attempt: bool = False) -> None:
+        job = workflow.get(field)
+        if (not isinstance(job, dict) or job.get("name") != name or job.get("conclusion") != "success"
+                or not str(job.get("id", "")).isdigit() or int(job["id"]) <= 0
+                or str(job.get("run_id")) != str(workflow["run_id"])
+                or not str(job.get("run_attempt", "")).isdigit()
+                or int(job["run_attempt"]) < 1
+                or (int(job["run_attempt"]) > int(workflow["run_attempt"]) if allow_prior_attempt
+                    else int(job["run_attempt"]) != int(workflow["run_attempt"]))):
+            raise EvidenceError(f"migration {label} evidence mismatch")
+
+    require_job("apply_job", MIGRATION_APPLY_JOBS[target], "apply job")
+    if target == "production":
+        require_job("bind_upstream_job", "Bind upstream test run", "bind upstream job", allow_prior_attempt=True)
     before = set(map(str, manifest.get("schema_migrations_before", [])))
     after = set(map(str, manifest.get("schema_migrations_after", [])))
     if (len(before) != len(manifest.get("schema_migrations_before", [])) or len(after) != len(manifest.get("schema_migrations_after", []))

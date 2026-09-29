@@ -346,9 +346,69 @@ class SealedEvidenceTests(unittest.TestCase):
         self.record("migration", tier="test-env", kind="migration-apply", phase="post", target="shared-test",
                     extra={"target_binding": {"project_ref": "ncsngxlcyxylaeskiteu"},
                            "workflow_run": {"workflow_path": ".github/workflows/db-migrate-test.yml", "run_id": "123", "run_attempt": 1,
-                                            "head_sha": head_sha or self.sha, "conclusion": conclusion},
+                                            "head_sha": head_sha or self.sha, "conclusion": conclusion,
+                                            "apply_job": {"name": "Apply migrations to test", "id": "456", "run_id": "123",
+                                                          "run_attempt": 1, "conclusion": "success"}},
                            "migration_head_sha": self.sha, "schema_migrations_before": ["old"], "schema_migrations_after": after or ["old", *sorted(MIGRATION_VERSIONS)],
                            "catalog_fingerprint_after": fingerprint or {"tables": "ok"}})
+
+    def complete_migration_record(self, *, target="shared-test", apply_conclusion="success", apply_attempt=2,
+                                  include_apply=True, bind_conclusion="success", bind_attempt=2):
+        catalog = self.record("catalog", kind="catalog-fingerprint", phase="n/a", target="disposable",
+                              commit=False, extra=self.perf_provenance())
+        artifact = catalog / "catalog-fingerprint-post.json"
+        artifact.write_text(json.dumps({"tables": "ok"}))
+        manifest_path = catalog / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["artifacts"][artifact.name] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        self.commit("catalog")
+        production = target == "production"
+        workflow = {"workflow_path": f".github/workflows/db-migrate-{'prod' if production else 'test'}.yml",
+                    "run_id": "123", "run_attempt": 2, "head_sha": self.sha, "conclusion": "success"}
+        if include_apply:
+            workflow["apply_job"] = {"name": f"Apply migrations to {'prod' if production else 'test'}",
+                                     "id": "456", "run_id": "123", "run_attempt": apply_attempt,
+                                     "conclusion": apply_conclusion}
+        if production:
+            workflow["bind_upstream_job"] = {"name": "Bind upstream test run", "id": "789",
+                                             "run_id": "123", "run_attempt": bind_attempt, "conclusion": bind_conclusion}
+        self.record("migration", tier="prod-deploy" if production else "test-env", kind="migration-apply",
+                    phase="post", target=target,
+                    extra={"target_binding": {"project_ref": "copflsklaefwzipsrjqz" if production else "ncsngxlcyxylaeskiteu"},
+                           "workflow_run": workflow, "migration_head_sha": self.sha,
+                           "schema_migrations_before": ["old"],
+                           "schema_migrations_after": ["old", *sorted(MIGRATION_VERSIONS)],
+                           "catalog_fingerprint_after": {"tables": "ok"}})
+
+    def test_migration_skipped_apply_job_negative(self):
+        self.complete_migration_record(apply_conclusion="skipped")
+        with self.assertRaisesRegex(EvidenceError, "apply job"):
+            evaluate_migration(self.repo, self.sha, "shared-test")
+
+    def test_migration_apply_job_other_attempt_negative(self):
+        self.complete_migration_record(apply_attempt=1)
+        with self.assertRaisesRegex(EvidenceError, "apply job"):
+            evaluate_migration(self.repo, self.sha, "shared-test")
+
+    def test_migration_missing_apply_job_negative(self):
+        self.complete_migration_record(include_apply=False)
+        with self.assertRaisesRegex(EvidenceError, "apply job"):
+            evaluate_migration(self.repo, self.sha, "shared-test")
+
+    def test_production_failed_bind_job_negative(self):
+        self.complete_migration_record(target="production", bind_conclusion="failure")
+        with self.assertRaisesRegex(EvidenceError, "bind upstream job"):
+            evaluate_migration(self.repo, self.sha, "production")
+
+    def test_migration_jobs_succeed_for_same_run_and_attempt(self):
+        self.complete_migration_record(apply_attempt=2)
+        self.assertEqual(evaluate_migration(self.repo, self.sha, "shared-test")["status"], "PASS")
+
+    def test_production_prior_bind_job_succeeds_for_job_only_rerun(self):
+        self.complete_migration_record(target="production", apply_attempt=2, bind_attempt=1)
+        # GitHub retains the successful binding job when only the gated job is rerun.
+        self.assertEqual(evaluate_migration(self.repo, self.sha, "production")["status"], "PASS")
 
     def test_migration_wrong_head_negative(self):
         self.migration_record(head_sha="0" * 40)
@@ -382,7 +442,9 @@ class SealedEvidenceTests(unittest.TestCase):
         self.record("migration", sha=m, tier="test-env", kind="migration-apply", phase="post", target="shared-test",
                     extra={"target_binding": {"project_ref": "ncsngxlcyxylaeskiteu"},
                            "workflow_run": {"workflow_path": ".github/workflows/db-migrate-test.yml", "run_id": "123", "run_attempt": 1,
-                                            "head_sha": m, "conclusion": "success"},
+                                            "head_sha": m, "conclusion": "success",
+                                            "apply_job": {"name": "Apply migrations to test", "id": "456", "run_id": "123",
+                                                          "run_attempt": 1, "conclusion": "success"}},
                            "migration_head_sha": self.sha, "schema_migrations_before": ["old"], "schema_migrations_after": ["old", *sorted(MIGRATION_VERSIONS)],
                            "catalog_fingerprint_after": {"tables": "mismatch", "policies": "same"}})
         with self.assertRaisesRegex(EvidenceError, "catalog fingerprint section mismatch"):
