@@ -250,7 +250,7 @@ describe("20260929034021 Dialpad CTI foundation migration", () => {
       );
       const names = columns.rows.map((row) => row.column_name);
       expect(names).toContain("webhook_secret_ref");
-      expect(names.filter((name) => /secret|token|password|key/i.test(name) && name !== "webhook_secret_ref" && name !== "webhook_secret_version")).toEqual([]);
+      expect(names.filter((name) => /secret|token|password|key/i.test(name) && name !== "webhook_secret_ref" && name !== "webhook_secret_version" && name !== "directory_api_key_ref")).toEqual([]);
     });
 
     it("lets active members read only non-secret connection columns", async () => {

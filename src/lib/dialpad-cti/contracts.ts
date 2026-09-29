@@ -235,3 +235,84 @@ export function parseDialpadEventMatchResult(value: Json | null | undefined): Di
     replayed: bool(data.replayed, 'replayed'),
   };
 }
+
+export interface DialpadDialRelease {
+  phoneNumber: string;
+  customData: string;
+  identityType: DialpadIdentityType | null;
+  /** Dialpad ids are int64; kept as text until the caller proves it is a JS-safe integer. */
+  identityId: string | null;
+  outboundCallerId: string | null;
+}
+
+export type DialpadDispatchAuthorization =
+  | { status: 'authorized'; intentId: string; expiresAt: string; dispatchAuthorizedAt: string; dial: DialpadDialRelease }
+  | { status: 'already_dispatched' | 'cancelled' | 'matched' | 'expired'; intentId: string }
+  | { status: 'denied'; intentId: string; denial: DialpadDenialDetail };
+
+export function parseDialpadDispatchAuthorization(value: Json | null | undefined): DialpadDispatchAuthorization {
+  const data = record(value, 'dispatch authorization');
+  const status = oneOf(data.status, ['authorized', 'already_dispatched', 'cancelled', 'matched', 'expired', 'denied'] as const, 'status');
+  const intentId = str(data.intentId, 'intentId');
+  if (status === 'denied') return { status, intentId, denial: oneOf(data.denial, DIALPAD_DENIAL_DETAILS, 'denial') };
+  if (status !== 'authorized') return { status, intentId };
+  const dial = record(data.dial, 'dial release');
+  const customData = str(dial.customData, 'customData');
+  if (!DIALPAD_CTI_CUSTOM_DATA_PATTERN.test(customData)) throw new Error('Invalid customData.');
+  const identityType = dial.identityType === null || dial.identityType === undefined
+    ? null
+    : oneOf(dial.identityType, DIALPAD_IDENTITY_TYPES, 'identityType');
+  const identityId = nullableStr(dial.identityId, 'identityId');
+  if (identityId !== null && !DIALPAD_CALL_ID_PATTERN.test(identityId)) throw new Error('Invalid identityId.');
+  if ((identityType === null) !== (identityId === null)) throw new Error('Invalid caller identity.');
+  return {
+    status,
+    intentId,
+    expiresAt: str(data.expiresAt, 'expiresAt'),
+    dispatchAuthorizedAt: str(data.dispatchAuthorizedAt, 'dispatchAuthorizedAt'),
+    dial: { phoneNumber: str(dial.phoneNumber, 'phoneNumber'), customData, identityType, identityId, outboundCallerId: nullableStr(dial.outboundCallerId, 'outboundCallerId') },
+  };
+}
+
+export const DIALPAD_CALL_STATES = ['prepared', 'awaiting_provider', 'dialing', 'connected', 'ended', 'cancelled', 'expired'] as const;
+export type DialpadCallState = (typeof DIALPAD_CALL_STATES)[number];
+
+export interface DialpadCallStatus {
+  intentId: string;
+  state: DialpadCallState;
+  /** True only with signed connected/date_connected evidence, at any point in the call. */
+  connected: boolean;
+  propertyId: string;
+  expiresAt: string;
+  dispatchAuthorizedAt: string | null;
+  callActivityId: string | null;
+  attemptId: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  durationSeconds: number | null;
+  talkDurationSeconds: number | null;
+}
+
+function nullableNumber(value: Json | undefined, label: string): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`Invalid ${label}.`);
+  return value;
+}
+
+export function parseDialpadCallStatus(value: Json | null | undefined): DialpadCallStatus {
+  const data = record(value, 'call status');
+  return {
+    intentId: str(data.intentId, 'intentId'),
+    state: oneOf(data.state, DIALPAD_CALL_STATES, 'state'),
+    connected: bool(data.connected, 'connected'),
+    propertyId: str(data.propertyId, 'propertyId'),
+    expiresAt: str(data.expiresAt, 'expiresAt'),
+    dispatchAuthorizedAt: nullableStr(data.dispatchAuthorizedAt, 'dispatchAuthorizedAt'),
+    callActivityId: nullableStr(data.callActivityId, 'callActivityId'),
+    attemptId: nullableStr(data.attemptId, 'attemptId'),
+    startedAt: nullableStr(data.startedAt, 'startedAt'),
+    endedAt: nullableStr(data.endedAt, 'endedAt'),
+    durationSeconds: nullableNumber(data.durationSeconds, 'durationSeconds'),
+    talkDurationSeconds: nullableNumber(data.talkDurationSeconds, 'talkDurationSeconds'),
+  };
+}

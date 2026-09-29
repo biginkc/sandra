@@ -15,9 +15,9 @@ export type Database = {
   public: {
     Tables: {
       dialpad_org_connections: {
-        Row: { id: string; org_id: string; status: string; cti_client_id: string; allowed_origins: string[]; webhook_secret_ref: string; webhook_secret_version: number; created_at: string; updated_at: string }
-        Insert: { id?: string; org_id: string; status?: string; cti_client_id: string; allowed_origins?: string[]; webhook_secret_ref: string; webhook_secret_version?: number; created_at?: string; updated_at?: string }
-        Update: { status?: string; cti_client_id?: string; allowed_origins?: string[]; webhook_secret_ref?: string; webhook_secret_version?: number; updated_at?: string }
+        Row: { id: string; org_id: string; status: string; cti_client_id: string; allowed_origins: string[]; webhook_secret_ref: string; webhook_secret_version: number; dialpad_company_id: string | null; directory_api_key_ref: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; org_id: string; status?: string; cti_client_id: string; allowed_origins?: string[]; webhook_secret_ref: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; created_at?: string; updated_at?: string }
+        Update: { status?: string; cti_client_id?: string; allowed_origins?: string[]; webhook_secret_ref?: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; updated_at?: string }
         Relationships: []
       }
 
@@ -36,9 +36,9 @@ export type Database = {
       }
 
       dialpad_call_intents: {
-        Row: { id: string; org_id: string; connection_id: string; rep_user_id: string; binding_id: string; dialpad_user_id: string; property_id: string; contact_id: string; phone_slot: number; destination_e164: string; assignment_episode_id: string; number_grant_id: string | null; caller_number_e164: string | null; caller_identity_type: string | null; caller_identity_id: string | null; custom_data: string; idempotency_key: string; request_hash: string; status: string; prepared_at: string; expires_at: string; matched_provider_call_id: string | null; matched_event_id: string | null; matched_at: string | null; cancelled_at: string | null }
+        Row: { id: string; org_id: string; connection_id: string; rep_user_id: string; binding_id: string; dialpad_user_id: string; property_id: string; contact_id: string; phone_slot: number; destination_e164: string; assignment_episode_id: string; number_grant_id: string | null; caller_number_e164: string | null; caller_identity_type: string | null; caller_identity_id: string | null; custom_data: string; idempotency_key: string; request_hash: string; status: string; prepared_at: string; expires_at: string; matched_provider_call_id: string | null; matched_event_id: string | null; matched_at: string | null; cancelled_at: string | null; dispatch_authorized_at: string | null }
         Insert: { id?: string; org_id: string; connection_id: string; rep_user_id: string; binding_id: string; dialpad_user_id: string; property_id: string; contact_id: string; phone_slot: number; destination_e164: string; assignment_episode_id: string; number_grant_id?: string | null; caller_number_e164?: string | null; caller_identity_type?: string | null; caller_identity_id?: string | null; custom_data: string; idempotency_key: string; request_hash: string; prepared_at?: string; expires_at: string }
-        Update: { status?: string; matched_provider_call_id?: string | null; matched_event_id?: string | null; matched_at?: string | null; cancelled_at?: string | null }
+        Update: { status?: string; matched_provider_call_id?: string | null; matched_event_id?: string | null; matched_at?: string | null; cancelled_at?: string | null; dispatch_authorized_at?: string | null }
         Relationships: []
       }
 
@@ -5713,6 +5713,8 @@ export type Database = {
       fn_grant_dialpad_caller: { Args: { p_org_id: string; p_user_id: string; p_caller_number_e164: string; p_identity_type: string | null; p_identity_id: string | null; p_granted_by: string }; Returns: Json }
       fn_revoke_dialpad_caller_grant: { Args: { p_grant_id: string; p_revoked_by: string }; Returns: Json }
       fn_prepare_dialpad_call_intent: { Args: { p_org_id: string; p_rep_user_id: string; p_property_id: string; p_contact_id: string; p_phone_slot: number; p_idempotency_key: string; p_number_grant_id?: string | null; p_ttl_seconds?: number }; Returns: Json }
+      fn_authorize_dialpad_dispatch: { Args: { p_org_id: string; p_rep_user_id: string; p_intent_id: string }; Returns: Json }
+      fn_get_dialpad_call_status: { Args: { p_org_id: string; p_rep_user_id: string; p_intent_id: string }; Returns: Json }
       fn_cancel_dialpad_call_intent: { Args: { p_org_id: string; p_rep_user_id: string; p_intent_id: string }; Returns: Json }
       fn_ingest_dialpad_call_event: { Args: { p_org_id: string; p_connection_id: string; p_secret_version: number; p_payload: string }; Returns: Json }
       fn_match_dialpad_call_event: { Args: { p_event_id: string }; Returns: Json }
