@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
 import { readonlyGet, comparePlatform, platformFingerprint } from './outbox-db-contract/platform.mjs';
-import { assertTarget, parseArgs, compareCatalog, assertSealedPre } from './outbox-db-contract-readonly.mjs';
+import { assertTarget, parseArgs, compareCatalog, assertSealedPre, catalogChildEnv } from './outbox-db-contract-readonly.mjs';
 import { connectionConfig, assertBackendTls } from './outbox-db-contract/connection.mjs';
 import { describePlan, comparePlans, catalogIndexes, compareIndexes, OPERATOR_INDEXES, OPERATOR_RELATIONS } from './outbox-db-contract/plan-contract.mjs';
 
@@ -17,6 +17,18 @@ const TEST_REF='ncsngxlcyxylaeskiteu';
 const PROD_REF='copflsklaefwzipsrjqz';
 const hosted=ref=>`postgres://postgres.${ref}:unused@aws-0-us-east-1.pooler.supabase.com:5432/postgres`;
 const api=ref=>`https://${ref}.supabase.co`;
+
+test('catalog child env drops root certificate for disposable and verifies hosted TLS', () => {
+  const dsn = 'postgres://catalog:unused@127.0.0.1:5432/postgres';
+  const parentEnv = { PGSSLROOTCERT: 'inherited.pem', NODE_EXTRA_CA_CERTS: 'hosted.pem' };
+  const disposable = catalogChildEnv(dsn, { ...parentEnv, INBOX_CATALOG_TLS_MODE: 'disable' });
+  assert.equal(disposable.PGSSLMODE, 'disable');
+  assert.equal(Object.hasOwn(disposable, 'PGSSLROOTCERT'), false);
+  const hostedEnv = catalogChildEnv(dsn, { ...parentEnv, INBOX_CATALOG_TLS_MODE: 'verify-full' });
+  assert.equal(hostedEnv.PGSSLMODE, 'verify-full');
+  assert.equal(hostedEnv.PGSSLROOTCERT, 'hosted.pem');
+  assert.equal(catalogChildEnv(dsn, { INBOX_CATALOG_TLS_MODE: 'verify-full' }).PGSSLROOTCERT, 'system');
+});
 
 // Read the DDL, rather than treating the synthetic local tables as the schema.
 // The three 2026093004* files are the Inbox install and define the POST phase.
