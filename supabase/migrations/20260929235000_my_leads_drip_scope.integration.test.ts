@@ -20,12 +20,23 @@ it('keeps a reply flag until a human text, logged attempt, or outcome, while ope
     await db.query("insert into public.memberships(user_id,org_id,role,acquisitions_enabled) values ($1,$2,'owner',true)",[rep,org]);
     await db.query('insert into public.acquisition_org_settings(org_id,my_leads_enabled) values ($1,true)',[org]);
     await db.query("insert into public.sequences(id,org_id,name) values ($1,$2,'Follow-up')",[sequence,org]);
-    const ids=Object.fromEntries(['active','open','sms','ai','attempt','outcome','command','loggedAttempt'].map(key=>[key,randomUUID()]));
+    const step=randomUUID();
+    await db.query("insert into public.sequence_steps(id,sequence_id,step_index,action_type,template_body) values ($1,$2,0,'send_sms','Follow up')",[step,sequence]);
+    const ids=Object.fromEntries(['active','open','sms','ai','attempt','outcome','command','loggedAttempt','takeover','completed','resumed','otherEnrollment'].map(key=>[key,randomUUID()]));
     for(const [key,id] of Object.entries(ids)) {
       await db.query("insert into public.properties(id,org_id,address,state,status,assigned_user_id) values ($1,$2,$3,'MO','new_lead',$4)",[id,org,`${key} Main`,rep]);
-      await db.query("insert into public.sequence_enrollments(org_id,sequence_id,property_id,status,pause_reason,enrolled_at) values ($1,$2,$3,$4,$5,'2026-09-02T00:00:00Z')",
-        [org,sequence,id,key==='active'?'active':'paused',key==='active'?null:'inbound_reply']);
+      const status=['active','completed'].includes(key)?'active':'paused';
+      const pauseReason=status==='paused'?(key==='takeover'?'rep_sms_human_takeover':'inbound_reply'):null;
+      const enrollment=(await db.query("insert into public.sequence_enrollments(org_id,sequence_id,property_id,status,pause_reason,enrolled_at) values ($1,$2,$3,$4,$5,'2026-09-02T00:00:00Z') returning id",
+        [org,sequence,id,status,pauseReason])).rows[0].id;
+      const drip=(await db.query("insert into public.messages(org_id,property_id,channel,direction,body,status,created_at) values ($1,$2,'sms','outbound','Drip text','sent','2026-09-02T01:00:00Z') returning id",[org,id])).rows[0].id;
+      await db.query("insert into public.sequence_step_runs(enrollment_id,step_id,message_id,scheduled_for) values ($1,$2,$3,'2026-09-02T01:00:00Z')",[enrollment,step,drip]);
+      if(key==='completed') await db.query("update public.sequence_enrollments set status='completed',completed_at='2026-09-02T02:00:00Z' where id=$1",[enrollment]);
       if(key!=='active') await db.query("insert into public.messages(org_id,property_id,channel,direction,body,status,created_at) values ($1,$2,'sms','inbound','Reply','received','2026-09-03T00:00:00Z')",[org,id]);
+      if(key==='resumed') await db.query("update public.sequence_enrollments set status='active',pause_reason=null where id=$1",[enrollment]);
+      if(key==='otherEnrollment') {
+        await db.query("insert into public.sequence_enrollments(org_id,sequence_id,property_id,status,enrolled_at) values ($1,$2,$3,'completed','2026-09-04T00:00:00Z')",[org,sequence,id]);
+      }
     }
     const read=async()=>{
       await db.query('set local role authenticated');
@@ -38,6 +49,11 @@ it('keeps a reply flag until a human text, logged attempt, or outcome, while ope
     const before=await read();
     expect(before.get(ids.active).in_drip).toBe(true);
     expect(before.get(ids.open).replied_at).toBeTruthy();
+    expect(before.get(ids.takeover).replied_at).toBeTruthy();
+    expect(before.get(ids.completed).replied_at).toBeTruthy();
+    expect(before.get(ids.resumed).in_drip).toBe(true);
+    expect(before.get(ids.resumed).replied_at).toBeNull();
+    expect(before.has(ids.otherEnrollment)).toBe(false);
     // Reading/opening the lead writes no action and therefore leaves the flag.
     expect((await read()).get(ids.open).replied_at).toBeTruthy();
     await db.query("insert into public.messages(org_id,property_id,channel,direction,body,status,created_at) values ($1,$2,'sms','outbound','Human reply','sent','2026-09-04T00:00:00Z')",[org,ids.sms]);

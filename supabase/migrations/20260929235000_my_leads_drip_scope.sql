@@ -15,15 +15,31 @@ begin
   ), newest as (
     select distinct on (e.property_id) e.property_id, e.id, e.status, e.pause_reason
     from public.sequence_enrollments e join owned o on o.id = e.property_id
-    where e.org_id = p_org_id
-    order by e.property_id,
-      case when e.status in ('active', 'paused') then 0 else 1 end,
-      e.enrolled_at desc, e.id desc
+    where e.org_id = p_org_id and e.status in ('active', 'paused', 'completed')
+    order by e.property_id, e.enrolled_at desc, e.id desc
   ), facts as (
     select o.id, o.queue_stage, o.search_value, o.row_data, (n.status = 'active') as active_drip,
-      case when n.status = 'paused' and n.pause_reason = 'inbound_reply'
-        then (select max(m.created_at) from public.messages m
-          where m.org_id = p_org_id and m.property_id = o.id and m.direction = 'inbound')
+      case when (n.status = 'paused' and n.pause_reason in ('inbound_reply', 'rep_sms_human_takeover'))
+        or n.status = 'completed' then (
+          select max(reply.created_at) from public.messages reply
+          join lateral (
+            -- The immediately preceding relevant message must be a drip text
+            -- from this enrollment. An earlier inbound consumes that text;
+            -- a human outbound ends the pending attribution. AI replies do not.
+            select prior.id, prior.direction from public.messages prior
+            where prior.org_id = p_org_id and prior.property_id = o.id
+              and (prior.created_at, prior.id) < (reply.created_at, reply.id)
+              and (prior.direction = 'inbound' or (prior.direction = 'outbound'
+                and (prior.metadata->>'generated_by' is distinct from 'ai_responder_v1'
+                  or exists (select 1 from public.sequence_step_runs drip_run
+                    where drip_run.message_id = prior.id))))
+            order by prior.created_at desc, prior.id desc limit 1
+          ) prior on prior.direction = 'outbound'
+          join public.sequence_step_runs run on run.message_id = prior.id
+            and run.enrollment_id = n.id
+          where reply.org_id = p_org_id and reply.property_id = o.id
+            and reply.direction = 'inbound'
+        )
       end as latest_reply
     from owned o join newest n on n.property_id = o.id
   )
