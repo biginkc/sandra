@@ -9,7 +9,6 @@ import {
   parseDialpadRecordingCapture,
   parseDialpadRecordingChunkResult,
   parseDialpadRecordingClaimResult,
-  parseDialpadRecordingCloseResult,
   parseDialpadRecordingConsumeResult,
   parseDialpadRecordingGrantResult,
   parseDialpadRecordingOpenResult,
@@ -271,7 +270,10 @@ async function sealedReady(): Promise<{ call: Call; captureId: string; token: st
   await authorizedEpoch(captureId);
   await fullTrack(captureId, "tab");
   await fullTrack(captureId, "mic");
-  await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, repA, null]);
+  // A complete seal requires the provider's signed hangup. A rep close while
+  // the call is still connected is an explicit early stop and remains partial
+  // even when both streams happen to have EOF.
+  await endCall(call);
   const claimed = await claim();
   expect(claimed.status).toBe("claimed");
   return { call, captureId, token: String(claimed.claimToken) };
@@ -716,10 +718,11 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       await authorizedEpoch(captureId);
       await chunk(captureId, "tab", 1, 0);
       await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, repA, null]);
-      expect((await chunk(captureId, "tab", 1, 1)).status).toBe("recorded");
+      expect((await chunk(captureId, "tab", 1, 1, { eof: true })).status).toBe("recorded");
+      expect((await chunk(captureId, "mic", 1, 0, { eof: true })).status).toBe("recorded");
       await claim();
       expect((await failure(() => chunk(captureId, "tab", 1, 2))).code).toBe("55000");
-      expect(await chunk(captureId, "tab", 1, 1)).toMatchObject({ status: "replayed" });
+      expect(await chunk(captureId, "tab", 1, 1, { eof: true })).toMatchObject({ status: "replayed" });
     });
 
     it("keeps ledger tables service-read-only for direct writes", async () => {
@@ -731,13 +734,15 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
   });
 
   describe("sealing: claim, recovery and result", () => {
-    it("moves an ended call's capture to closing without any grace period and claims it with a fenced lease", async () => {
+    it("waits for final MediaRecorder chunks after signed hangup, then claims with a fenced lease", async () => {
       const { call, captureId } = await openedCapture();
       await authorizedEpoch(captureId);
-      await fullTrack(captureId, "tab");
-      await fullTrack(captureId, "mic");
-      expect(await claim()).toEqual({ status: "none" });
+      await chunk(captureId, "tab", 1, 0);
+      await chunk(captureId, "mic", 1, 0);
       await endCall(call);
+      expect(await claim()).toEqual({ status: "none" });
+      await chunk(captureId, "tab", 1, 1, { eof: true });
+      await chunk(captureId, "mic", 1, 1, { eof: true });
       const claimed = await claim("worker-a", 120);
       expect(claimed).toMatchObject({ status: "claimed", attempt: 1, capture: { captureId, status: "sealing", closeReason: "call_ended" } });
       expect(await captureRow(captureId)).toMatchObject({ status: "sealing", claimed_by: "worker-a", seal_attempts: 1, close_reason: "call_ended" });
@@ -748,6 +753,47 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       expect(await claim("worker-b")).toEqual({ status: "none" });
       expect((await failure(() => rpc("fn_claim_dialpad_recording_seal_work", ["", 300]))).code).toBe("22023");
       expect((await failure(() => rpc("fn_claim_dialpad_recording_seal_work", ["w", 5]))).code).toBe("22023");
+    });
+
+    it("uses the bounded drain deadline to classify incomplete signed-call evidence as partial", async () => {
+      const { call, captureId } = await openedCapture();
+      await authorizedEpoch(captureId);
+      await fullTrack(captureId, "tab");
+      await endCall(call);
+      expect(await claim()).toEqual({ status: "none" });
+      await withoutTriggers("update public.dialpad_recording_captures set drain_deadline_at=now()-interval '1 second' where id=$1", [captureId]);
+      const claimed = await claim("worker-drain");
+      expect(claimed).toMatchObject({ status: "claimed", capture: { captureId, closeReason: "call_ended" } });
+      const result = await register(captureId, claimed.claimToken, [decoded("tab")]);
+      expect(result).toMatchObject({ status: "registered", outcome: "partial", capture: { status: "partial" } });
+      expect((await captureRow(captureId)).failure_code).toBeNull();
+    });
+
+    it("keeps an early rep close partial even when both streams have EOF, and later hangup cannot upgrade it", async () => {
+      const { call, captureId } = await openedCapture();
+      await authorizedEpoch(captureId);
+      await fullTrack(captureId, "tab");
+      await fullTrack(captureId, "mic");
+      await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, repA, null]);
+      const claimed = await claim("worker-early");
+      expect(claimed.status).toBe("claimed");
+      const result = await register(captureId, claimed.claimToken, [decoded("tab"), decoded("mic")]);
+      expect(result).toMatchObject({ outcome: "partial", capture: { status: "partial", closeReason: "rep_closed", failureCode: "capture_stopped_before_call_end" } });
+      const activity = (await captureRow(captureId)).call_activity_id;
+      expect(await callRecording(activity)).toMatchObject({ status: "failed", error_code: "partial_capture" });
+      await endCall(call);
+      expect(await captureRow(captureId)).toMatchObject({ status: "partial", failure_code: "capture_stopped_before_call_end" });
+    });
+
+    it("keeps a trusted service close partial before the signed call end", async () => {
+      const { captureId } = await openedCapture();
+      await authorizedEpoch(captureId);
+      await fullTrack(captureId, "tab");
+      await fullTrack(captureId, "mic");
+      await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, null, "service_closed"]);
+      const claimed = await claim("worker-service-close");
+      const result = await register(captureId, claimed.claimToken, [decoded("tab"), decoded("mic")]);
+      expect(result).toMatchObject({ outcome: "partial", capture: { status: "partial", closeReason: "service_closed", failureCode: "capture_stopped_before_call_end" } });
     });
 
     it("recovers an expired lease with a new token, fences the old holder and exhausts after five attempts", async () => {
@@ -796,7 +842,8 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       expect(parseDialpadRecordingChunkResult((await chunk(captureId, "tab", 1, 0)) as never)).toEqual({ status: "recorded", storagePath: `${orgId}/${captureId}/chunks/1/tab/00000000` });
       await fullTrack(captureId, "mic");
       for (let seq = 1; seq < 3; seq += 1) await chunk(captureId, "tab", 1, seq, { eof: seq === 2 });
-      expect(parseDialpadRecordingCloseResult((await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, repA, null])) as never)).toMatchObject({ status: "closed" });
+      await endCall(call);
+      expect(await captureRow(captureId)).toMatchObject({ status: "open" });
       const claimed = parseDialpadRecordingClaimResult((await claim()) as never);
       if (claimed.status !== "claimed") throw new Error("expected claim");
       expect(claimed.finalPaths).toHaveLength(2);
@@ -812,8 +859,11 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       const tracks = [decoded("tab"), decoded("mic")];
       await register(captureId, token, tracks);
       expect(await register(captureId, token, tracks)).toMatchObject({ status: "replayed", outcome: "sealed" });
+      expect(await register(captureId, token, [decoded("mic"), decoded("tab")])).toMatchObject({ status: "replayed", outcome: "sealed" });
+      expect((await failure(() => register(captureId, token, tracks, "derived_elsewhere"))).code).toBe("40001");
       expect((await failure(() => register(captureId, token, [decoded("tab", 1, { sha256: sha("other") }), decoded("mic")]))).code).toBe("40001");
       expect((await failure(() => register(captureId, token, [decoded("tab")]))).code).toBe("40001");
+      expect((await failure(() => register(captureId, token, [decoded("tab"), decoded("tab")]))).code).toBe("22023");
       expect((await failure(() => register(captureId, uuid(), tracks))).code).toBe("42501");
     });
 
@@ -850,6 +900,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       expect((await failure(() => register(captureId, token, [decoded("tab")]))).code).toBe("22023");
       expect((await failure(() => register(captureId, token, [decoded("tab"), decoded("mic"), decoded("mic", 2)]))).code).toBe("22023");
       expect((await failure(() => register(captureId, token, [decoded("tab"), decoded("tab"), decoded("mic")]))).code).toBe("22023");
+      expect((await failure(() => register(captureId, token, [decoded("tab"), decoded("tab")], "worker_gave_up"))).code).toBe("22023");
       expect((await failure(() => register(captureId, token, "not-an-array" as never))).code).toBe("22023");
       expect((await pg.query("select count(*)::int as n from public.dialpad_recording_track_finals")).rows[0]!.n).toBe(0);
       expect((await captureRow(captureId)).status).toBe("sealing");
@@ -862,9 +913,10 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       await chunk(captureId, "tab", 1, 0);
       await chunk(captureId, "tab", 1, 1);
       await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, repA, null]);
+      await withoutTriggers("update public.dialpad_recording_captures set drain_deadline_at=now()-interval '1 second' where id=$1", [captureId]);
       const token = String((await claim()).claimToken);
       const result = await register(captureId, token, [decoded("tab"), decoded("mic")]);
-      expect(result).toMatchObject({ outcome: "partial", capture: { status: "partial", failureCode: null } });
+      expect(result).toMatchObject({ outcome: "partial", capture: { status: "partial", failureCode: "capture_stopped_before_call_end" } });
       const tab = (await pg.query("select completeness, partial_reason, eof_verified from public.dialpad_recording_track_finals where track='tab'")).rows[0];
       expect(tab).toEqual({ completeness: "partial", partial_reason: "missing_eof", eof_verified: false });
       const activity = (await captureRow(captureId)).call_activity_id;
@@ -878,6 +930,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       await chunk(captureId, "tab", 1, 0);
       await chunk(captureId, "tab", 1, 2, { eof: true });
       await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, repA, null]);
+      await withoutTriggers("update public.dialpad_recording_captures set drain_deadline_at=now()-interval '1 second' where id=$1", [captureId]);
       const token = String((await claim()).claimToken);
       expect(await register(captureId, token, [decoded("tab"), decoded("mic")])).toMatchObject({ outcome: "partial" });
       expect((await pg.query("select completeness, partial_reason, contiguous from public.dialpad_recording_track_finals where track='tab'")).rows[0]).toEqual({
@@ -892,6 +945,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       await authorizedEpoch(captureId);
       await fullTrack(captureId, "tab");
       await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, repA, null]);
+      await withoutTriggers("update public.dialpad_recording_captures set drain_deadline_at=now()-interval '1 second' where id=$1", [captureId]);
       const token = String((await claim()).claimToken);
       expect(await register(captureId, token, [decoded("tab")])).toMatchObject({ outcome: "partial" });
       expect(await callRecording((await captureRow(captureId)).call_activity_id)).toMatchObject({ status: "failed", error_code: "partial_capture" });
@@ -931,16 +985,21 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
     });
 
     it("fails a capture that captured nothing, with the worker's or a derived code", async () => {
-      const { captureId } = await openedCapture();
+      const { call, captureId } = await openedCapture();
       await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, repA, null]);
+      await endCall(call);
+      await withoutTriggers("update public.dialpad_recording_captures set drain_deadline_at=now()-interval '1 second' where id=$1", [captureId]);
       const token = String((await claim()).claimToken);
       expect((await failure(() => register(captureId, token, [], "BAD CODE"))).code).toBe("22023");
       expect(await register(captureId, token, [], "worker_gave_up")).toMatchObject({ outcome: "failed", capture: { failureCode: "worker_gave_up" } });
 
       const empty = await openedCapture();
       await rpc("fn_close_dialpad_recording_capture", [orgId, empty.captureId, repA, null]);
+      await endCall(empty.call);
+      await withoutTriggers("update public.dialpad_recording_captures set drain_deadline_at=now()-interval '1 second' where id=$1", [empty.captureId]);
       const emptyToken = String((await claim()).claimToken);
       expect(await register(empty.captureId, emptyToken, [])).toMatchObject({ outcome: "failed", capture: { failureCode: "no_audio_captured" } });
+      expect((await failure(() => register(empty.captureId, emptyToken, [], "no_audio_captured"))).code).toBe("40001");
       expect(await callRecording((await captureRow(empty.captureId)).call_activity_id)).toMatchObject({ status: "failed", storage_path: null, error_code: "no_audio_captured" });
     });
 

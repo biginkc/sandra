@@ -50,7 +50,7 @@ export type Database = {
       }
 
       dialpad_recording_captures: {
-        Row: { id: string; org_id: string; intent_id: string; rep_user_id: string; call_activity_id: string; provider_call_id: string; status: string; opened_at: string; closed_at: string | null; close_reason: string | null; claim_token: string | null; claimed_by: string | null; claimed_at: string | null; lease_expires_at: string | null; seal_attempts: number; result_at: string | null; failure_code: string | null; created_at: string; updated_at: string }
+        Row: { id: string; org_id: string; intent_id: string; rep_user_id: string; call_activity_id: string; provider_call_id: string; status: string; opened_at: string; closed_at: string | null; close_reason: string | null; claim_token: string | null; claimed_by: string | null; claimed_at: string | null; lease_expires_at: string | null; drain_deadline_at: string | null; seal_attempts: number; result_at: string | null; failure_code: string | null; result_identity: Json | null; created_at: string; updated_at: string }
         Insert: Record<string, never>
         Update: Record<string, never>
         Relationships: []

@@ -13,7 +13,7 @@ import {
 
 const capture = (over: Record<string, unknown> = {}) => ({
   captureId: 'c', orgId: 'o', repUserId: 'r', intentId: 'i', callActivityId: 'a', providerCallId: 'p',
-  status: 'open', openedAt: '2026-09-29T00:00:00Z', closedAt: null, closeReason: null, resultAt: null, failureCode: null,
+  status: 'open', openedAt: '2026-09-29T00:00:00Z', closedAt: null, closeReason: null, drainDeadlineAt: null, resultAt: null, failureCode: null,
   sealAttempts: 0,
   segments: [{ track: 'tab', epoch: 1, chunkCount: 2, totalBytes: '2000', maxSeq: 1, eofSeq: null, final: null }],
   ...over,
@@ -38,6 +38,7 @@ describe('recording contracts', () => {
   it('parses a capture and accepts bigint totals as strings', () => {
     const parsed = parseDialpadRecordingCapture(capture() as never);
     expect(parsed.status).toBe('open');
+    expect(parsed.drainDeadlineAt).toBeNull();
     expect(parsed.segments[0]).toMatchObject({ totalBytes: 2000, eofSeq: null, final: null });
   });
 

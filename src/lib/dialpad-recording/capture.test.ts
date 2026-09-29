@@ -25,7 +25,7 @@ const SHA = 'a'.repeat(64);
 
 const captureJson = (over: Record<string, unknown> = {}) => ({
   captureId: ID, orgId: ACTOR.orgId, repUserId: ACTOR.userId, intentId: ID, callActivityId: ID, providerCallId: 'p',
-  status: 'open', openedAt: '2026-09-29T00:00:00Z', closedAt: null, closeReason: null, resultAt: null, failureCode: null,
+  status: 'open', openedAt: '2026-09-29T00:00:00Z', closedAt: null, closeReason: null, drainDeadlineAt: null, resultAt: null, failureCode: null,
   sealAttempts: 0, segments: [], ...over,
 });
 

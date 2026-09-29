@@ -14,12 +14,19 @@
 --     stitched into epoch 1 and can only make a capture 'partial'.
 --   * dialpad_recording_track_finals hold the trusted per-track seal result.
 --     completeness is a database-derived value (decode + EOF + contiguity), and
---     a CHECK forbids 'complete' without all three.
+--     a CHECK forbids 'complete' without all three. A capture is sealed only
+--     after the actual signed call end; a rep/service early stop stays partial.
 --   * dialpad_recording_ingest_grants store only SHA-256 token hashes. A grant
 --     is consumed atomically once, bound to capture and rep; an epoch can be
 --     authorized at most once per capture.
 --   * Every mutation is a service-role-only SECURITY DEFINER function. Storage
 --     paths are derived here, never accepted from a caller.
+--   * Closing starts a bounded operational drain window (30 seconds). A seal
+--     claim is ready immediately only after both expected tracks have ledger
+--     EOF and contiguous chunks for every consumed epoch; the deadline is a
+--     crash/abandonment bound, never a measurement tolerance or completeness
+--     assertion. Deadline claims remain partial unless the ledger proves the
+--     complete signed call.
 --
 -- Capacity note: the bucket and final-object CHECKs allow 512 MiB per track
 -- object. A 600 s sample remuxed to about 9.2 MiB (tab) and 5.6 MiB (mic)
@@ -68,12 +75,19 @@ create table if not exists public.dialpad_recording_captures (
   claimed_by text check (claimed_by is null or length(claimed_by) between 1 and 200),
   claimed_at timestamptz,
   lease_expires_at timestamptz,
+  -- Operational MediaRecorder flush/drain deadline. This is intentionally
+  -- separate from provider timing and never upgrades incomplete evidence.
+  drain_deadline_at timestamptz,
   seal_attempts integer not null default 0 check (seal_attempts between 0 and 100),
   result_at timestamptz,
   failure_code text check (failure_code is null or failure_code ~ '^[a-z0-9_]{1,64}$'),
+  -- Canonical submitted seal input, including a JSON null failureCode. This
+  -- makes an explicit derived-looking failure distinct from omitted input and
+  -- prevents terminal replay from masking a missing or duplicated track.
+  result_identity jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  check (status not in ('closing', 'sealing', 'sealed', 'partial') or (closed_at is not null and close_reason is not null)),
+  check (status not in ('closing', 'sealing', 'sealed', 'partial') or (closed_at is not null and close_reason is not null and drain_deadline_at is not null)),
   check (status <> 'sealing' or (claim_token is not null and claimed_by is not null and claimed_at is not null and lease_expires_at is not null)),
   check (status not in ('sealed', 'partial', 'failed') or result_at is not null),
   check (status <> 'failed' or failure_code is not null),
@@ -85,11 +99,17 @@ create table if not exists public.dialpad_recording_captures (
   foreign key (intent_id, org_id) references public.dialpad_call_intents (id, org_id)
 );
 
+-- The R1 migration was unmerged while this repair was reviewed. Keep reruns
+-- safe for a scratch database that already has the first candidate applied.
+alter table public.dialpad_recording_captures
+  add column if not exists drain_deadline_at timestamptz,
+  add column if not exists result_identity jsonb;
+
 create index if not exists dialpad_recording_captures_work_idx
   on public.dialpad_recording_captures (status, closed_at) where status in ('open', 'closing', 'sealing');
 
 comment on table public.dialpad_recording_captures is
-  'One private recording capture per matched Dialpad call. Org, rep, intent and call activity are frozen when the capture is opened; only lifecycle columns move, forward only. sealed requires both tracks of epoch 1 with complete decode/EOF/contiguity evidence and no later epoch. Service role only.';
+  'One private recording capture per matched Dialpad call. Org, rep, intent and call activity are frozen when the capture is opened; only lifecycle columns move, forward only. sealed requires both tracks of epoch 1 with complete decode/EOF/contiguity evidence, no later epoch, and the signed call end; a rep/service early stop is partial. Service role only.';
 
 create table if not exists public.dialpad_recording_segments (
   capture_id uuid not null,
@@ -203,7 +223,8 @@ create or replace function public.dialpad_recording_guard_capture()
 returns trigger language plpgsql set search_path = '' as $$
 declare
   v_mutable constant text[] := array['status', 'closed_at', 'close_reason', 'claim_token', 'claimed_by', 'claimed_at',
-                                     'lease_expires_at', 'seal_attempts', 'result_at', 'failure_code', 'updated_at'];
+                                     'lease_expires_at', 'drain_deadline_at', 'seal_attempts', 'result_at', 'failure_code',
+                                     'result_identity', 'updated_at'];
 begin
   if tg_op = 'DELETE' then
     raise exception 'dialpad recording captures are immutable evidence' using errcode = '42501';
@@ -211,7 +232,8 @@ begin
   if tg_op = 'INSERT' then
     if new.status <> 'open' or new.closed_at is not null or new.close_reason is not null or new.claim_token is not null
        or new.claimed_by is not null or new.claimed_at is not null or new.lease_expires_at is not null
-       or new.seal_attempts <> 0 or new.result_at is not null or new.failure_code is not null then
+       or new.drain_deadline_at is not null or new.seal_attempts <> 0 or new.result_at is not null
+       or new.failure_code is not null or new.result_identity is not null then
       raise exception 'a recording capture must be opened in the open state' using errcode = '42501';
     end if;
     return new;
@@ -221,6 +243,12 @@ begin
   end if;
   if old.status in ('sealed', 'partial', 'failed') then
     raise exception 'a % capture is terminal', old.status using errcode = '42501';
+  end if;
+  if old.status <> 'open' and new.drain_deadline_at is distinct from old.drain_deadline_at then
+    raise exception 'recording drain deadline is immutable after close' using errcode = '42501';
+  end if;
+  if old.status = 'open' and new.status = 'closing' and new.drain_deadline_at is null then
+    raise exception 'a closing capture must have an operational drain deadline' using errcode = '42501';
   end if;
   if not (
     (old.status = 'open' and new.status in ('closing', 'failed'))
@@ -329,6 +357,7 @@ returns jsonb language sql stable security definer set search_path = '' as $$
     'captureId', c.id, 'orgId', c.org_id, 'repUserId', c.rep_user_id, 'intentId', c.intent_id,
     'callActivityId', c.call_activity_id, 'providerCallId', c.provider_call_id,
     'status', c.status, 'openedAt', c.opened_at, 'closedAt', c.closed_at, 'closeReason', c.close_reason,
+    'drainDeadlineAt', c.drain_deadline_at,
     'resultAt', c.result_at, 'failureCode', c.failure_code, 'sealAttempts', c.seal_attempts,
     'segments', coalesce((
       select jsonb_agg(jsonb_build_object(
@@ -456,7 +485,13 @@ begin
     return jsonb_build_object('status', 'replayed', 'capture', public.dialpad_recording_capture_json(v_capture.id));
   end if;
   v_reason := case when p_rep_user_id is not null then 'rep_closed' else coalesce(p_reason, 'service_closed') end;
-  update public.dialpad_recording_captures set status = 'closing', closed_at = now(), close_reason = v_reason where id = v_capture.id;
+  -- This deadline is an operational bound for an abandoned/incomplete
+  -- MediaRecorder flush. It is not a timing tolerance and cannot establish
+  -- stream completeness or provider-call duration.
+  update public.dialpad_recording_captures
+     set status = 'closing', closed_at = now(), close_reason = v_reason,
+         drain_deadline_at = now() + interval '30 seconds'
+   where id = v_capture.id;
   return jsonb_build_object('status', 'closed', 'capture', public.dialpad_recording_capture_json(v_capture.id));
 end;
 $$;
@@ -650,10 +685,14 @@ $$;
 -- ----------------------------------------------------------------------------
 -- Sealing work: claim and recovery
 -- ----------------------------------------------------------------------------
--- Open captures whose call activity has ended are moved to closing first (no
--- grace period is invented). Then one closing capture, or one sealing capture
--- whose lease expired, is claimed with a fresh fencing token. After five
--- claims a capture that still has not registered a result is failed.
+-- Open captures whose call activity has ended are moved to closing first.
+-- Closing captures are claimable immediately only when both expected tracks
+-- have ledger EOF and contiguous chunks for every consumed epoch. Otherwise
+-- the bounded operational drain deadline (30 seconds after close) allows a
+-- worker to classify the incomplete evidence. The deadline is never a
+-- measurement tolerance and never makes incomplete streams complete.
+-- A sealing capture whose lease expired is also claimable with a fresh token.
+-- After five claims a capture that still has not registered a result is failed.
 create or replace function public.fn_claim_dialpad_recording_seal_work(
   p_worker_id text, p_lease_seconds integer default 300
 ) returns jsonb
@@ -668,15 +707,45 @@ begin
   end if;
 
   update public.dialpad_recording_captures c
-    set status = 'closing', closed_at = now(), close_reason = 'call_ended'
+    set status = 'closing', closed_at = now(), close_reason = 'call_ended',
+        drain_deadline_at = now() + interval '30 seconds'
     where c.status = 'open'
       and exists (select 1 from public.call_activities a where a.id = c.call_activity_id and a.ended_at is not null);
 
   loop
     v_guard := v_guard + 1;
     exit when v_guard > 25;
-    select * into v_capture from public.dialpad_recording_captures
-      where status = 'closing' or (status = 'sealing' and lease_expires_at <= now())
+    select * into v_capture from public.dialpad_recording_captures c
+      where (
+        c.status = 'closing'
+        and (
+          coalesce(c.drain_deadline_at, c.closed_at + interval '30 seconds') <= now()
+          or (
+            exists (
+              select 1 from public.dialpad_recording_ingest_grants g
+               where g.capture_id = c.id and g.consumed_at is not null
+            )
+            and not exists (
+              select 1
+                from (
+                  select distinct g.epoch
+                    from public.dialpad_recording_ingest_grants g
+                   where g.capture_id = c.id and g.consumed_at is not null
+                ) epochs
+                cross join (values ('tab'::text), ('mic'::text)) expected(track)
+                left join public.dialpad_recording_segments s
+                  on s.capture_id = c.id and s.epoch = epochs.epoch and s.track = expected.track
+               where s.capture_id is null
+                  or s.chunk_count < 1
+                  or s.max_seq is null
+                  or s.eof_seq is null
+                  or s.eof_seq <> s.max_seq
+                  or s.chunk_count <> s.max_seq + 1
+            )
+          )
+        )
+      )
+      or (c.status = 'sealing' and c.lease_expires_at <= now())
       order by coalesce(closed_at, opened_at), id
       for update skip locked limit 1;
     if not found then return jsonb_build_object('status', 'none'); end if;
@@ -741,7 +810,6 @@ declare
   v_contig boolean;
   v_completeness text;
   v_reason text;
-  v_stored public.dialpad_recording_track_finals%rowtype;
   v_segments integer;
   v_reported integer := 0;
   v_complete_first integer;
@@ -749,6 +817,8 @@ declare
   v_outcome text;
   v_fcode text;
   v_duration_seconds integer;
+  v_call_end_confirmed boolean;
+  v_result_identity jsonb;
 begin
   if p_capture_id is null or p_claim_token is null or p_tracks is null or jsonb_typeof(p_tracks) <> 'array'
      or jsonb_array_length(p_tracks) > 32 or (p_failure_code is not null and p_failure_code !~ '^[a-z0-9_]{1,64}$') then
@@ -787,21 +857,57 @@ begin
     end if;
   end loop;
 
+  -- A submitted result is a set of unique (track, epoch) reports. Validate
+  -- uniqueness before any insert and retain a canonical, order-independent
+  -- identity so terminal replay cannot replace a missing track with a
+  -- duplicate report. The failure input is part of the identity, including
+  -- the distinction between SQL NULL and an explicit derived-looking code.
+  if exists (
+    select 1
+      from (
+        select value ->> 'track' as track, (value ->> 'epoch')::integer as epoch, count(*) as n
+          from jsonb_array_elements(p_tracks)
+         group by value ->> 'track', (value ->> 'epoch')::integer
+        having count(*) > 1
+      ) duplicates
+  ) then
+    raise exception 'DUPLICATE_TRACK_REPORT' using errcode = '22023', detail = 'duplicate_track_report';
+  end if;
+
+  select jsonb_build_object(
+           'failureCode', p_failure_code,
+           'tracks', coalesce(jsonb_agg(report order by track, epoch), '[]'::jsonb)
+         )
+    into v_result_identity
+    from (
+      select value ->> 'track' as track,
+             (value ->> 'epoch')::integer as epoch,
+             case when (value ->> 'decodeOk')::boolean then
+               jsonb_build_object(
+                 'track', value ->> 'track',
+                 'epoch', (value ->> 'epoch')::integer,
+                 'decodeOk', true,
+                 'sizeBytes', (value ->> 'sizeBytes')::bigint,
+                 'sha256', value ->> 'sha256',
+                 'codec', value ->> 'codec',
+                 'sampleRateHz', (value ->> 'sampleRateHz')::integer,
+                 'channels', (value ->> 'channels')::integer,
+                 'decodedDurationMs', (value ->> 'decodedDurationMs')::integer
+               )
+             else
+               jsonb_build_object(
+                 'track', value ->> 'track',
+                 'epoch', (value ->> 'epoch')::integer,
+                 'decodeOk', false
+               )
+             end as report
+        from jsonb_array_elements(p_tracks)
+    ) reports;
+
   if v_capture.status in ('sealed', 'partial', 'failed') then
-    if (select count(*) from public.dialpad_recording_track_finals where capture_id = p_capture_id) <> jsonb_array_length(p_tracks) then
+    if v_capture.result_identity is null or v_capture.result_identity is distinct from v_result_identity then
       raise exception 'RESULT_CONFLICT' using errcode = '40001', detail = 'result_conflict';
     end if;
-    for v_el in select value from jsonb_array_elements(p_tracks) loop
-      select * into v_stored from public.dialpad_recording_track_finals
-        where capture_id = p_capture_id and track = v_el->>'track' and epoch = (v_el->>'epoch')::integer;
-      if not found or v_stored.decode_ok <> (v_el->>'decodeOk')::boolean
-         or (v_stored.decode_ok and (
-              v_stored.size_bytes <> (v_el->>'sizeBytes')::bigint or v_stored.sha256 <> v_el->>'sha256'
-              or v_stored.codec <> v_el->>'codec' or v_stored.sample_rate_hz <> (v_el->>'sampleRateHz')::integer
-              or v_stored.channels <> (v_el->>'channels')::integer or v_stored.decoded_duration_ms <> (v_el->>'decodedDurationMs')::integer)) then
-        raise exception 'RESULT_CONFLICT' using errcode = '40001', detail = 'result_conflict';
-      end if;
-    end loop;
     return jsonb_build_object('status', 'replayed', 'outcome', v_capture.status, 'capture', public.dialpad_recording_capture_json(p_capture_id));
   end if;
 
@@ -862,18 +968,48 @@ begin
   select count(*) into v_usable from public.dialpad_recording_track_finals
     where capture_id = p_capture_id and decode_ok;
 
-  if p_failure_code is null and v_segments = 2 and v_complete_first = 2 then
+  select exists (
+    select 1 from public.call_activities a
+     where a.id = v_capture.call_activity_id and a.ended_at is not null
+  ) into v_call_end_confirmed;
+
+  -- Stream completeness is necessary but not sufficient for a complete
+  -- recording: a rep/service close while the provider call is still connected
+  -- is an explicit early stop, even if both streams have EOF. A signed call
+  -- end must already be projected, and later hangup events cannot rewrite a
+  -- terminal partial result.
+  if p_failure_code is null and v_segments = 2 and v_complete_first = 2
+     and v_capture.close_reason = 'call_ended' and v_call_end_confirmed then
     v_outcome := 'sealed';
   elsif v_usable > 0 then
     v_outcome := 'partial';
   else
     v_outcome := 'failed';
   end if;
-  v_fcode := case when v_outcome = 'sealed' then null
-                  when v_outcome = 'failed' then coalesce(p_failure_code, case when v_segments = 0 then 'no_audio_captured' else 'no_usable_audio' end)
-                  else p_failure_code end;
+  v_fcode := case
+    when v_outcome = 'sealed' then null
+    when v_outcome = 'failed' then coalesce(
+      p_failure_code,
+      case
+        when v_segments = 0 then 'no_audio_captured'
+        when v_capture.close_reason <> 'call_ended' then 'capture_stopped_before_call_end'
+        when not v_call_end_confirmed then 'call_end_not_confirmed'
+        else 'no_usable_audio'
+      end
+    )
+    else coalesce(
+      p_failure_code,
+      case
+        when v_capture.close_reason <> 'call_ended' then 'capture_stopped_before_call_end'
+        when not v_call_end_confirmed then 'call_end_not_confirmed'
+      end
+    )
+  end;
 
-  update public.dialpad_recording_captures set status = v_outcome, result_at = now(), failure_code = v_fcode where id = p_capture_id;
+  update public.dialpad_recording_captures
+     set status = v_outcome, result_at = now(), failure_code = v_fcode,
+         result_identity = v_result_identity
+   where id = p_capture_id;
 
   if v_outcome = 'sealed' then
     select round(decoded_duration_ms / 1000.0)::integer into v_duration_seconds from public.dialpad_recording_track_finals

@@ -112,6 +112,7 @@ export interface DialpadRecordingCapture {
   openedAt: string;
   closedAt: string | null;
   closeReason: DialpadCaptureCloseReason | null;
+  drainDeadlineAt: string | null;
   resultAt: string | null;
   failureCode: string | null;
   sealAttempts: number;
@@ -202,6 +203,7 @@ export function parseDialpadRecordingCapture(value: Json | null | undefined): Di
     openedAt: str(data.openedAt, 'openedAt'),
     closedAt: nullableStr(data.closedAt, 'closedAt'),
     closeReason: nullableOneOf(data.closeReason, DIALPAD_CAPTURE_CLOSE_REASONS, 'closeReason'),
+    drainDeadlineAt: nullableStr(data.drainDeadlineAt, 'drainDeadlineAt'),
     resultAt: nullableStr(data.resultAt, 'resultAt'),
     failureCode: nullableStr(data.failureCode, 'failureCode'),
     sealAttempts: int(data.sealAttempts, 'sealAttempts'),
