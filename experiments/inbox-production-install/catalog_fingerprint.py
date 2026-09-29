@@ -13,6 +13,9 @@ MIGRATIONS = ROOT / 'supabase/migrations'
 MANIFEST = Path(__file__).with_name('catalog-scope.json')
 IDENT = re.compile(r'\b(?:public|auth|storage|inbox_[a-z_]+|supabase_migrations)\.[a-z_][a-z_0-9]*\b', re.I)
 CREATED = re.compile(r'\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|FUNCTION|TYPE|VIEW|MATERIALIZED\s+VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:public|inbox_[a-z_]+)\.[a-z_][a-z_0-9]*)', re.I)
+CREATED_SCHEMA = re.compile(r'\bCREATE\s+SCHEMA\s+(?:IF\s+NOT\s+EXISTS\s+)?(inbox_[a-z_]+)\b', re.I)
+CREATED_TRIGGER = re.compile(r'\bCREATE\s+TRIGGER\s+([a-z_][a-z_0-9]*)\b(?:(?!;).)*?\bON\s+((?:public|auth|inbox_[a-z_]+)\.[a-z_][a-z_0-9]*)\b', re.I | re.S)
+CREATED_INDEX = re.compile(r'\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z_0-9]*)\s+ON\s+((?:public|inbox_[a-z_]+)\.[a-z_][a-z_0-9]*)\b', re.I)
 
 
 def migration_identifiers():
@@ -24,6 +27,23 @@ def migration_identifiers():
 
 def created_identifiers():
     return sorted({m.group(1).lower() for p in MIGRATIONS.glob('2026092900*.sql') for m in CREATED.finditer(p.read_text())})
+
+
+def created_name_scope():
+    sources = [p.read_text() for p in MIGRATIONS.glob('2026092900*.sql')]
+    return {
+        'created_schemas': sorted({m.group(1).lower() for source in sources for m in CREATED_SCHEMA.finditer(source)}),
+        'created_triggers': sorted({f'{m.group(2).lower()}.{m.group(1).lower()}' for source in sources for m in CREATED_TRIGGER.finditer(source)}),
+        'created_indexes': sorted({f'{m.group(2).split(".")[0].lower()}.{m.group(1).lower()}' for source in sources for m in CREATED_INDEX.finditer(source)}),
+    }
+
+
+def created_objects_present(sections, scope):
+    present = set(scope['created_objects']) & {x['identity'] for kind in ('relations', 'functions', 'types') for x in sections[kind]}
+    present.update(set(scope['created_schemas']) & {x['name'] for x in sections['schemas']})
+    present.update(set(scope['created_triggers']) & set(sections['trigger_names']))
+    present.update(set(scope['created_indexes']) & set(sections['index_names']))
+    return sorted(present)
 
 
 def canonical(value):
@@ -45,10 +65,12 @@ def normalize(value, key=''):
     return value
 
 
-def read_catalog(identifiers):
+def read_catalog(identifiers, scope):
     # The only non-pg_catalog data read is the explicitly required migration
     # ledger. Everything else comes from pg_catalog, in one read-only txn.
     ids = canonical(identifiers).replace("'", "''")
+    index_names = canonical(scope['created_indexes']).replace("'", "''")
+    trigger_names = canonical(scope['created_triggers']).replace("'", "''")
     sql = f"""BEGIN READ ONLY;
 SHOW transaction_read_only;
 WITH wanted AS (SELECT split_part(x, '.', 1) AS schema_name, split_part(x, '.', 2) AS object_name
@@ -75,6 +97,8 @@ SELECT jsonb_build_object(
  'types',(SELECT coalesce(jsonb_agg(jsonb_build_object('identity',t.identity,'kind',y.typtype,'definition',pg_catalog.format_type(y.oid,NULL),'acl',y.typacl::text) ORDER BY t.identity),'[]'::jsonb) FROM types t JOIN pg_catalog.pg_type y ON y.oid=t.oid),
  'extensions',(SELECT coalesce(jsonb_agg(jsonb_build_object('name',e.extname,'version',e.extversion) ORDER BY e.extname),'[]'::jsonb) FROM pg_catalog.pg_extension e),
  'schemas',(SELECT coalesce(jsonb_agg(jsonb_build_object('name',n.nspname,'acl',n.nspacl::text) ORDER BY n.nspname),'[]'::jsonb) FROM pg_catalog.pg_namespace n WHERE n.nspname IN (SELECT schema_name FROM wanted)),
+ 'index_names',(SELECT coalesce(jsonb_agg(n.nspname||'.'||c.relname ORDER BY n.nspname,c.relname),'[]'::jsonb) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind IN ('i','I') AND n.nspname||'.'||c.relname IN (SELECT jsonb_array_elements_text('{index_names}'::jsonb))),
+ 'trigger_names',(SELECT coalesce(jsonb_agg(n.nspname||'.'||c.relname||'.'||t.tgname ORDER BY n.nspname,c.relname,t.tgname),'[]'::jsonb) FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE NOT t.tgisinternal AND n.nspname||'.'||c.relname||'.'||t.tgname IN (SELECT jsonb_array_elements_text('{trigger_names}'::jsonb))),
  'schema_migrations',(SELECT coalesce(jsonb_agg(version ORDER BY version),'[]'::jsonb) FROM supabase_migrations.schema_migrations)
 )::text;
 COMMIT;
@@ -94,21 +118,22 @@ def main():
     parser.add_argument('--compare', type=Path, help='compare against a saved TEST fingerprint; any section mismatch fails')
     args = parser.parse_args()
     current = migration_identifiers()
+    generated_scope = {'qualified_identifiers': current, 'created_objects': created_identifiers(), **created_name_scope()}
     if args.write_manifest:
-        MANIFEST.write_text(json.dumps({'qualified_identifiers': current, 'created_objects': created_identifiers()}, indent=2) + '\n')
+        MANIFEST.write_text(json.dumps(generated_scope, indent=2) + '\n')
         return
-    pinned = json.loads(MANIFEST.read_text())['qualified_identifiers']
+    scope = json.loads(MANIFEST.read_text())
+    pinned = scope['qualified_identifiers']
     missing = sorted(set(current) - set(pinned))
     if missing:
         raise SystemExit('Missing migration identifiers from catalog manifest: ' + ', '.join(missing))
-    if sorted(json.loads(MANIFEST.read_text()).get('created_objects', [])) != created_identifiers():
+    if any(scope.get(key) != value for key, value in generated_scope.items() if key != 'qualified_identifiers'):
         raise SystemExit('Created-object manifest drift')
     if args.check_manifest:
         print(f'PASS: {len(current)} migration identifiers covered')
         return
-    sections = normalize(read_catalog(pinned))
-    created = set(json.loads(MANIFEST.read_text())['created_objects'])
-    existing = sorted(created & {x['identity'] for kind in ('relations', 'functions', 'types') for x in sections[kind]})
+    sections = normalize(read_catalog(pinned, scope))
+    existing = created_objects_present(sections, scope)
     sections['created_objects_present'] = existing
     if args.preflight and existing:
         raise SystemExit('Migration-created objects already exist: ' + ', '.join(existing))
