@@ -34,12 +34,16 @@ const projectionSql = readSql("20260929120000_dialpad_cti_call_projection.sql");
 const dispatchSql = readSql("20260929180000_dialpad_cti_dispatch.sql");
 const recordingSql = readSql("20260929210000_dialpad_recording_foundation.sql");
 const transportSql = readSql("20260929220000_dialpad_recording_transport_contract.sql");
+const playbackSql = readSql("20260929221000_dialpad_recording_playback.sql");
 
 const uuid = () => crypto.randomUUID();
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const DIALPAD_REP_A = "5150000000000001";
 const ROOT_CALL = "6543210987654321098";
 const HASH_A = "a".repeat(64);
+const SANDRA_ORG_ID = "00000000-0000-0000-0000-000000000bbb";
+let dialpadRepId = DIALPAD_REP_A;
+let dialpadExternalNumber = "+18165550142";
 let NOW_MS = Date.now();
 let dbUrl = "";
 
@@ -134,6 +138,8 @@ async function seedFixture(): Promise<void> {
   repA = uuid();
   repB = uuid();
   otherRep = uuid();
+  dialpadRepId = DIALPAD_REP_A;
+  dialpadExternalNumber = "+18165550142";
   contactId = uuid();
   propertyId = uuid();
   for (const id of [ownerId, repA, repB, otherRep]) await pg.query("insert into auth.users(id) values ($1)", [id]);
@@ -161,7 +167,47 @@ async function seedFixture(): Promise<void> {
     ),
   );
   connectionId = connection.rows[0]!.id;
-  await verifiedBinding(orgId, repA, DIALPAD_REP_A);
+  await verifiedBinding(orgId, repA, dialpadRepId);
+}
+
+async function seedSandraLibraryFixture(): Promise<void> {
+  orgId = SANDRA_ORG_ID;
+  contactId = uuid();
+  propertyId = uuid();
+  dialpadRepId = `9${BigInt(`0x${contactId.replaceAll("-", "").slice(-15)}`).toString().padStart(18, "0")}`;
+  dialpadExternalNumber = `+1816${BigInt(`0x${contactId.replaceAll("-", "").slice(-15)}`).toString().padStart(7, "0").slice(-7)}`;
+  await service(async () => {
+    await pg.query("insert into public.organizations(id,name) values ($1,'Sandra playback test org') on conflict (id) do nothing", [orgId]);
+    await pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner') on conflict (user_id,org_id) do update set role='owner', access_status='active', deletion_prepared_at=null, access_expires_at=null", [ownerId, orgId]);
+    await pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member') on conflict (user_id,org_id) do update set access_status='active', deletion_prepared_at=null, access_expires_at=null", [repA, orgId]);
+  });
+  // The projection test seeds its member directly inside the surrounding
+  // transaction; the owner designation RPC is covered by the acquisition
+  // migration tests. Disable only this fixture guard while setting the test
+  // member, then restore it before any capture work runs.
+  await pg.query("alter table public.memberships disable trigger trg_my_leads_designation_guard");
+  try {
+    await pg.query("update public.memberships set acquisitions_enabled=true where org_id=$1 and user_id=$2", [orgId, repA]);
+  } finally {
+    await pg.query("alter table public.memberships enable trigger trg_my_leads_designation_guard");
+  }
+  await pg.query("insert into public.acquisition_org_settings(org_id,my_leads_enabled) values ($1,true) on conflict (org_id) do update set my_leads_enabled=true", [orgId]);
+  await pg.query(
+    "insert into public.contacts(id,org_id,first_name,phone_1,phone_1_type) values ($1,$2,'Sandra playback seller',$3,'mobile')",
+    [contactId, orgId, dialpadExternalNumber],
+  );
+  await pg.query(
+    "insert into public.properties(id,org_id,address,state,homeowner_contact_id,assigned_user_id) values ($1,$2,concat('Sandra Playback Way ',right($1::uuid::text,8)),'MO',$3,$4)",
+    [propertyId, orgId, contactId, repA],
+  );
+  const connection = await service(() =>
+    pg.query<{ id: string }>(
+      "insert into public.dialpad_org_connections(org_id,status,cti_client_id,webhook_secret_ref,dialpad_company_id,directory_api_key_ref) values ($1,'active',$2,'env:DIALPAD_CTI_WEBHOOK_SECRET_SEARCH','4040404040404041','env:DIALPAD_CTI_DIRECTORY_KEY_SEARCH') on conflict (org_id) do update set status='active',cti_client_id=excluded.cti_client_id,webhook_secret_ref=excluded.webhook_secret_ref,dialpad_company_id=excluded.dialpad_company_id,directory_api_key_ref=excluded.directory_api_key_ref returning id",
+      [orgId, `client_search_${uuid()}`],
+    ),
+  );
+  connectionId = connection.rows[0]!.id;
+  await verifiedBinding(orgId, repA, dialpadRepId);
 }
 
 async function prepare(ttl = 600): Promise<Json> {
@@ -178,8 +224,8 @@ async function authorize(intentId: unknown): Promise<Json> {
 
 let callCounter = 0;
 function payload(state: string, at: number, custom: string, extra: Record<string, unknown> = {}, callId = ROOT_CALL): string {
-  const body = { state, event_timestamp: at, external_number: "+18165550142", internal_number: "+18165550100", direction: "outbound", target: { type: "user", id: "__T__" }, custom_data: custom, ...extra };
-  return JSON.stringify(body).replace('"__T__"', DIALPAD_REP_A).replace(/^\{/, `{"call_id":${callId},`);
+  const body = { state, event_timestamp: at, external_number: dialpadExternalNumber, internal_number: "+18165550100", direction: "outbound", target: { type: "user", id: "__T__" }, custom_data: custom, ...extra };
+  return JSON.stringify(body).replace('"__T__"', dialpadRepId).replace(/^\{/, `{"call_id":${callId},`);
 }
 
 async function deliver(text: string): Promise<Json> {
@@ -204,9 +250,9 @@ async function ringingCall(callId = ROOT_CALL): Promise<Call> {
   return { intentId: String(intent.intentId), custom, start, callId };
 }
 
-async function connectedCall(): Promise<Call> {
+async function connectedCall(providerCallId?: string): Promise<Call> {
   callCounter += 1;
-  const call = await ringingCall(callCounter === 1 ? ROOT_CALL : `65432109876543${String(callCounter).padStart(5, "0")}`);
+  const call = await ringingCall(providerCallId ?? (callCounter === 1 ? ROOT_CALL : `65432109876543${String(callCounter).padStart(5, "0")}`));
   await deliver(payload("connected", call.start + 4000, call.custom, { date_started: call.start, date_connected: call.start + 4000 }, call.callId));
   return call;
 }
@@ -238,6 +284,7 @@ const chunk = (captureId: unknown, track: string, epoch: number, seq: number, op
 async function publishPcmEofForClaim(): Promise<void> {
   const rows = await pg.query<{
     capture_id: string;
+    org_id: string;
     epoch: number;
     track: "tab" | "mic";
     processed_through_sample: number;
@@ -247,7 +294,7 @@ async function publishPcmEofForClaim(): Promise<void> {
     source_codec: string | null;
     degraded_reasons: unknown;
   }>(
-    `select c.id as capture_id, g.epoch, s.track,
+    `select c.id as capture_id, c.org_id, g.epoch, s.track,
             coalesce(p.processed_through_sample, 0) as processed_through_sample,
             p.pcm_eof_sample, p.source_sample_rate_hz, p.source_channels, p.source_codec,
             coalesce(p.degraded_reasons, '[]'::jsonb) as degraded_reasons
@@ -260,7 +307,7 @@ async function publishPcmEofForClaim(): Promise<void> {
          on p.capture_id = c.id and p.epoch = g.epoch and p.track = s.track
       where c.status = 'open'
          or (c.status = 'closing' and c.drain_deadline_at is not null and c.drain_deadline_at > now())
-      group by c.id, g.epoch, s.track, p.processed_through_sample, p.pcm_eof_sample,
+      group by c.id, c.org_id, g.epoch, s.track, p.processed_through_sample, p.pcm_eof_sample,
                p.source_sample_rate_hz, p.source_channels, p.source_codec, p.degraded_reasons
       order by c.opened_at, c.id, g.epoch, s.track`,
   );
@@ -268,7 +315,7 @@ async function publishPcmEofForClaim(): Promise<void> {
     const processed = Number(row.processed_through_sample);
     const reasons = Array.isArray(row.degraded_reasons) ? row.degraded_reasons : [];
     await rpc("fn_record_dialpad_recording_pcm_progress", [
-      orgId,
+      row.org_id,
       row.capture_id,
       row.track,
       row.epoch,
@@ -292,9 +339,11 @@ const register = (captureId: unknown, token: unknown, tracks: unknown[], failure
 
 let tokenCounter = 0;
 const nextHash = () => sha(`token-${Date.now()}-${(tokenCounter += 1)}-${uuid()}`);
+let playbackCallCounter = 0;
+const nextPlaybackCallId = () => String(Date.now() * 1000 + (playbackCallCounter += 1));
 
-async function openedCapture(): Promise<{ call: Call; captureId: string }> {
-  const call = await connectedCall();
+async function openedCapture(providerCallId?: string): Promise<{ call: Call; captureId: string }> {
+  const call = await connectedCall(providerCallId);
   const opened = await open(call.intentId);
   expect(opened.status).toBe("opened");
   return { call, captureId: String((opened.capture as Json).captureId) };
@@ -331,8 +380,8 @@ const decoded = (track: string, epoch = 1, extra: Json = {}) => ({
   ...extra,
 });
 
-async function sealedReady(): Promise<{ call: Call; captureId: string; token: string }> {
-  const { call, captureId } = await openedCapture();
+async function sealedReady(providerCallId?: string): Promise<{ call: Call; captureId: string; token: string }> {
+  const { call, captureId } = await openedCapture(providerCallId);
   await authorizedEpoch(captureId);
   await fullTrack(captureId, "tab");
   await fullTrack(captureId, "mic");
@@ -365,6 +414,8 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
     await pg.query(recordingSql);
     await pg.query(transportSql);
     await pg.query(transportSql);
+    await pg.query(playbackSql);
+    await pg.query(playbackSql);
   });
 
   afterAll(async () => {
@@ -409,6 +460,8 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
           "fn_record_dialpad_recording_vad_ranges",
           "fn_record_dialpad_recording_pcm_progress",
           "fn_register_dialpad_recording_result",
+          "fn_dialpad_recording_library_sources",
+          "fn_dialpad_recording_playback_file",
         ].sort(),
       );
       const { captureId } = await openedCapture();
@@ -459,6 +512,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       await pg.query("update storage.buckets set public=true, file_size_limit=1 where id='dialpad-recordings'");
       await pg.query(recordingSql);
       await pg.query(transportSql);
+      await pg.query(playbackSql);
       const bucket = await pg.query("select public, file_size_limit from storage.buckets where id='dialpad-recordings'");
       expect(bucket.rowCount).toBe(1);
       expect(bucket.rows[0]).toMatchObject({ public: false, file_size_limit: "536870912" });
@@ -1554,6 +1608,84 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
       const snapshot = parseDialpadRecordingVadSnapshot(await rpc("fn_get_dialpad_recording_vad_snapshot", [orgId, captureId]) as never);
       expect(snapshot).toMatchObject({ version: 1, totalSamples: 0, epoch: null, epochCreditedThrough: null, degradedReasons: ["gap", "reconnect"] });
       expect(snapshot.processedPcm).toEqual([expect.objectContaining({ track: "tab", epoch: 1, processedThroughSample: 640, pcmEofSample: 640, sourceSampleRateHz: 48000, sourceChannels: 1, sourceCodec: "opus", normalizedSampleRateHz: 16000, normalizedChannels: 1, degradedReasons: ["gap", "reconnect"] })]);
+    });
+  });
+
+  describe("20260929221000 Dialpad playback projection", () => {
+    beforeEach(async () => {
+      await pg.query("begin");
+      NOW_MS = Date.now();
+      callCounter = 0;
+      await seedFixture();
+    });
+
+    afterEach(async () => {
+      await pg.query("rollback");
+      await pg.query("reset role");
+    });
+
+    it("publishes two opaque track files and preserves sealed metadata in the library projection", async () => {
+      const { captureId, token } = await sealedReady(nextPlaybackCallId());
+      await register(captureId, token, [decoded("tab"), decoded("mic")]);
+      const activityId = (await captureRow(captureId)).call_activity_id;
+      const sources = await rpc("fn_dialpad_recording_library_sources", [ownerId, "owner"]);
+      const source = (sources as unknown as Array<Json>).find((item) => item.id === String(activityId));
+      expect(source).toMatchObject({ source: "dialpad", actorId: repA });
+      const files = (source?.files ?? []) as Array<Json>;
+      expect(files).toHaveLength(2);
+      expect(files.map((file) => file.track)).toEqual(["mic", "tab"]);
+      expect(files.every((file) => typeof file.id === "string" && /^dpf_[0-9a-f]{64}$/.test(String(file.id)))).toBe(true);
+      expect(files.every((file) => file.completeness === "complete" && file.recordingStatus === "sealed")).toBe(true);
+      const playback = await rpc("fn_dialpad_recording_playback_file", [ownerId, "owner", files[0]!.id]);
+      expect(playback).toMatchObject({ source: "dialpad", file: { track: files[0]!.track, epoch: 1, completeness: "complete", recordingStatus: "sealed", bucket: "dialpad-recordings" } });
+      expect(String((playback.file as Json).storagePath)).toBe(`${orgId}/${captureId}/final/1/${files[0]!.track}`);
+    });
+
+    it("executes the real Sandra search RPC with canonical UUIDs and fractional duration bounds", async () => {
+      await seedSandraLibraryFixture();
+      const { captureId, token } = await sealedReady(String(Date.now()));
+      await register(captureId, token, [decoded("tab", 1, { decodedDurationMs: 4250 }), decoded("mic", 1, { decodedDurationMs: 4250 })]);
+      const activityId = (await captureRow(captureId)).call_activity_id;
+      const sources = await rpc("fn_dialpad_recording_library_sources", [ownerId, "owner"]);
+      const source = (sources as unknown as Array<Json>).find((item) => item.id === String(activityId));
+      expect(source).toMatchObject({ source: "dialpad", recordingStatus: "sealed" });
+      const audio = JSON.stringify([source]);
+      const exact = await rpc("fn_recording_library_search", [ownerId, "owner", JSON.stringify({ status: "all", min: "4.25", max: "4.25" }), audio]);
+      expect((exact.rows as unknown[])).toHaveLength(1);
+      expect(((exact.rows as Array<Json>)[0]!.files as Array<Json>).every((file) => file.duration === 4.25)).toBe(true);
+      const outside = await rpc("fn_recording_library_search", [ownerId, "owner", JSON.stringify({ status: "all", min: "4.251", max: "4.251" }), audio]);
+      expect(outside.rows).toEqual([]);
+    });
+
+    it("keeps a usable partial final playable while marking the capture partial", async () => {
+      const { call, captureId } = await openedCapture(nextPlaybackCallId());
+      await authorizedEpoch(captureId);
+      await fullTrack(captureId, "tab");
+      await endCall(call);
+      await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, null, "service_closed"]);
+      const claimToken = uuid();
+      await withoutTriggers("update public.dialpad_recording_captures set status='sealing', claim_token=$2, claimed_by='partial-playback', claimed_at=now(), lease_expires_at=now()+interval '5 minutes' where id=$1", [captureId, claimToken]);
+      await register(captureId, claimToken, [decoded("tab")]);
+      const activityId = (await captureRow(captureId)).call_activity_id;
+      const sources = await rpc("fn_dialpad_recording_library_sources", [ownerId, "owner"]);
+      const source = (sources as unknown as Array<Json>).find((item) => item.id === String(activityId));
+      expect(source).toMatchObject({ source: "dialpad", recordingStatus: "partial" });
+      expect(source?.files).toEqual([expect.objectContaining({ status: "available", track: "tab", completeness: "complete", recordingStatus: "partial" })]);
+      const playback = await rpc("fn_dialpad_recording_playback_file", [ownerId, "owner", (source?.files as Array<Json>)[0]!.id]);
+      expect(playback).toMatchObject({ file: { status: "available", completeness: "complete", recordingStatus: "partial" } });
+    });
+
+    it("denies guessed IDs, other reps and cross-org access", async () => {
+      const { captureId, token } = await sealedReady(nextPlaybackCallId());
+      await register(captureId, token, [decoded("tab"), decoded("mic")]);
+      const activityId = (await captureRow(captureId)).call_activity_id;
+      const sources = await rpc("fn_dialpad_recording_library_sources", [ownerId, "owner"]);
+      const source = (sources as unknown as Array<Json>).find((item) => item.id === String(activityId))!;
+      const fileId = ((source.files ?? []) as Array<Json>)[0]!.id;
+      expect(await rpc("fn_dialpad_recording_playback_file", [repB, "mine", fileId])).toBeNull();
+      expect(await rpc("fn_dialpad_recording_playback_file", [otherRep, "mine", fileId])).toBeNull();
+      expect(await rpc("fn_dialpad_recording_playback_file", [ownerId, "owner", `dpf_${"f".repeat(64)}`])).toBeNull();
+      expect((await pg.query("select count(*)::int as n from public.dialpad_recording_track_finals where capture_id=$1", [captureId])).rows[0]!.n).toBe(2);
     });
   });
 });
