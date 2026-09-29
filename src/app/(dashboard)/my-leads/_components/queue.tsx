@@ -363,7 +363,7 @@ function MyLeadStageSection({
         {stage === 'in_drip' && <Droplet className="size-3 shrink-0" aria-hidden="true" />}
         <span className="text-xs font-bold uppercase tracking-widest text-white">{label}</span>
         <span
-          aria-label={`${page.totalCount} leads`}
+          aria-label={`${page.totalCount} ${page.totalCount === 1 ? "lead" : "leads"}`}
           className="inline-flex min-w-[22px] items-center justify-center rounded-full bg-black/20 px-2 py-0.5 font-mono text-[11px] font-semibold text-white"
         >
           {page.totalCount}

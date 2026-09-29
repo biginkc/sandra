@@ -1054,7 +1054,8 @@ def installed_gate(run_installed: bool, manifest: dict[str, Any]) -> tuple[dict[
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sealed-evidence-sha", help="evaluate committed run records for this full tested SHA")
-    parser.add_argument("--sealed-tier", choices=("pre-merge",), help="pre-merge seal check; use --deploy-tier for deployment tiers")
+    parser.add_argument("--approval", choices=("j5a", "j5b"), help="approval matrix for sealed evidence")
+    parser.add_argument("--main-sha", help="explicit main commit for j5b")
     parser.add_argument("--deploy-tier", choices=("test-env", "prod-deploy"), help="separate, fail-closed deploy evaluation")
     parser.add_argument("--repo", type=Path, default=ROOT)
     parser.add_argument("--head", default="HEAD")
@@ -1066,13 +1067,19 @@ def main() -> int:
     args = parser.parse_args()
     if args.deploy_tier and not args.sealed_evidence_sha:
         parser.error("--deploy-tier requires --sealed-evidence-sha")
+    if args.sealed_evidence_sha and not args.approval:
+        parser.error("--approval j5a|j5b is required with --sealed-evidence-sha")
+    if args.approval == "j5b" and not args.main_sha:
+        parser.error("--main-sha is required for --approval j5b")
+    if args.approval and not args.sealed_evidence_sha:
+        parser.error("--approval requires --sealed-evidence-sha")
 
     if args.sealed_evidence_sha:
         try:
             if args.deploy_tier:
                 report = evaluate_deploy(args.repo, args.sealed_evidence_sha, args.deploy_tier, args.head)
             else:
-                report = evaluate_sealed_evidence(args.repo, args.sealed_evidence_sha, args.sealed_tier or "pre-merge", args.head)
+                report = evaluate_sealed_evidence(args.repo, args.approval, args.sealed_evidence_sha, m=args.main_sha, head=args.head)
         except EvidenceError as exc:
             print(json.dumps({"status": "FAIL", "detail": str(exc)}))
             return 1

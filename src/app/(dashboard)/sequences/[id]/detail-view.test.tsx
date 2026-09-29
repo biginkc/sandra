@@ -34,6 +34,19 @@ it("keeps the step position visible when using the arrows", async () => {
   expect(screen.getByText("6 steps · showing 2–5 of 6")).toBeVisible();
 });
 
+it("uses singular labels and identifies sampled filter counts", () => {
+  const detail = { ...sampleDetail, sequence: { ...sampleDetail.sequence, steps: [sampleDetail.sequence.steps[0]] }, peopleCount: 201, people: [sampleDetail.people[0]] };
+  render(<DripDetailView detail={detail} sources={[]} isAdmin />);
+  expect(screen.getByText(/1 step · 201 people enrolled/)).toBeVisible();
+  expect(screen.getByText("1 step · showing 1–1 of 1")).toBeVisible();
+  expect(screen.getByText(/counts from latest 200/i)).toBeVisible();
+});
+
+it("uses a singular person label for one enrollment", () => {
+  render(<DripDetailView detail={{ ...sampleDetail, peopleCount: 1, people: [sampleDetail.people[0]] }} sources={[]} isAdmin />);
+  expect(screen.getByText(/1 person enrolled/)).toBeVisible();
+});
+
 it("offers only unarchived drips with steps as copy sources", async () => {
   const user = userEvent.setup();
   const empty = { ...sampleDetail, sequence: { ...sampleDetail.sequence, steps: [] } };

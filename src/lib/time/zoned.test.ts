@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   addDaysInZone,
+  formatZonedDateTime,
   formatRelativeDay,
   getDayBoundsInZone,
   normalizeTimeZone,
@@ -9,6 +10,10 @@ import {
 } from "./zoned";
 
 const CHI = "America/Chicago";
+
+it("formats an instant in the specified zone across the UTC date boundary", () => {
+  expect(formatZonedDateTime(new Date("2026-01-01T00:30:00Z"), CHI)).toBe("Dec 31, 2025, 6:30 PM");
+});
 
 describe("wallTimeToUtc", () => {
   it("converts an ordinary (non-DST) wall time correctly", () => {

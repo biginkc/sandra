@@ -208,10 +208,10 @@ export function SequenceEditor({ sequence, initialImpact, templates, isNew = fal
       <div className="flex items-center justify-between"><h2 className="font-semibold">Steps <span className="text-muted-foreground text-sm font-normal">· {steps.length} {steps.length === 1 ? "step" : "steps"}</span></h2>
         <Button variant="outline" onClick={() => setSteps((old) => [...old, blankStep(old.length)])}>Add step</Button>
       </div>
-      {initialImpact.total_enrolled > 0 ? <p className="text-muted-foreground text-xs">Move and delete are unavailable while leads are enrolled. You can edit text or add a step.</p> : null}
+      {initialImpact.total_enrolled > 0 ? <p className="text-muted-foreground text-xs">Saved steps cannot be moved or deleted while leads are enrolled. You can edit text, add a step, or remove an unsaved step.</p> : null}
       {steps.length === 0 ? <div className="text-muted-foreground rounded-md border border-dashed p-6 text-sm">No steps yet. Add a step to start this drip.</div> :
         steps.map((step, index) => <StepEditor key={step.key} step={step} index={index}
-          count={steps.length} locked={initialImpact.total_enrolled > 0} templates={templates} onChange={(patch) => patchStep(step.key, patch)}
+          count={steps.length} locked={initialImpact.total_enrolled > 0} canDelete={!step.id} templates={templates} onChange={(patch) => patchStep(step.key, patch)}
           onMove={(delta) => moveStep(index, delta)} onDelete={() => removeStep(step.key)} />)}
     </section>
     <div><Button onClick={onSave} disabled={pending || !valid}>Save all steps</Button></div>
@@ -341,11 +341,12 @@ function MessageBodyEditor({
   );
 }
 
-function StepEditor({ step, index, count, locked, templates, onChange, onMove, onDelete }: {
+function StepEditor({ step, index, count, locked, canDelete, templates, onChange, onMove, onDelete }: {
   step: DraftStep;
   index: number;
   count: number;
   locked: boolean;
+  canDelete: boolean;
   templates: TemplateRow[];
   onChange: (patch: Partial<DraftStep>) => void;
   onMove: (delta: number) => void;
@@ -355,7 +356,7 @@ function StepEditor({ step, index, count, locked, templates, onChange, onMove, o
     <div className="flex items-center justify-between"><h3 className="text-sm font-semibold">Step {index + 1}</h3>
       <div className="flex items-center gap-1"><Button variant="ghost" size="sm" disabled={locked || index === 0} onClick={() => onMove(-1)}>Move up</Button>
         <Button variant="ghost" size="sm" disabled={locked || index === count - 1} onClick={() => onMove(1)}>Move down</Button>
-        <Button variant="ghost" size="sm" disabled={locked} onClick={onDelete}>Delete</Button></div></div>
+        <Button variant="ghost" size="sm" disabled={locked && !canDelete} onClick={onDelete}>Delete</Button></div></div>
     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
       <div className="flex flex-1 flex-col gap-1 text-sm"><span className="font-medium">Delay</span>
         <DelayInput value={step.delay_after_previous_minutes} onChange={(value) => onChange({ delay_after_previous_minutes: value })} />

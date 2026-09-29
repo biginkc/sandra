@@ -22,6 +22,7 @@ export default defineConfig({
       "supabase/migrations/20260929237000_sequence_detail.integration.test.ts",
       "supabase/migrations/20260929239000_drips_followups.integration.test.ts",
       "supabase/migrations/20260929239000_drips_snapshot_isolation.integration.test.ts",
+      "supabase/migrations/20260930001000_recording_endpoint_configuration.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],

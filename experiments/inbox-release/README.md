@@ -346,7 +346,7 @@ and registration receipts exist.
 
 After committing a pre-merge run under
 `docs/performance/inbox-redesign/evidence/<tested-sha>/pre-merge/<run-id>/`, run
-`python3 experiments/inbox-release/release_gate.py --sealed-evidence-sha <tested-sha> --sealed-tier pre-merge`.
+`python3 experiments/inbox-release/release_gate.py --sealed-evidence-sha <tested-sha> --approval j5a`.
 The index and working tree must be fully clean. The gate reads committed blobs,
 requires every intervening commit to add only new evidence records, verifies all
 artifact hashes, and evaluates the latest added run. It cannot authorize a

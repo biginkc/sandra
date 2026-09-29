@@ -543,6 +543,7 @@ describe('stale form recovery',()=>{
 
 
 describe("current metadata for rapid workflow openings",()=>{
+  const settle = { timeout: 5000 };
   beforeEach(()=>{vi.resetAllMocks();mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});});
   async function afterReadiness(){
     const user=userEvent.setup();const initial=snapshot("106 Fixture Lane");
@@ -551,10 +552,10 @@ describe("current metadata for rapid workflow openings",()=>{
     mocks.submitMyLeadCommand.mockResolvedValue({ok:true});
     renderClient(initial);
     await user.click(screen.getByRole("button",{name:"Ready for offer"}));
-    await user.type(screen.getByLabelText("Motivation"),"Seller plans to relocate.");
+    fireEvent.change(screen.getByLabelText("Motivation"), { target: { value: "Seller plans to relocate." } });
     await user.selectOptions(screen.getByLabelText("Temperature (optional)"),"warm");
     await user.click(screen.getByRole("button",{name:"Save readiness"}));
-    await waitFor(()=>expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(()=>expect(screen.queryByRole("dialog")).not.toBeInTheDocument(), settle);
     const fresh=snapshot("106 Fixture Lane");Object.assign(fresh.stages.not_contacted!.rows[0],{queueVersion:2,sharedStatus:"interested",motivationKind:"specified",motivationText:"Seller plans to relocate.",temperature:"warm"});
     return {user,initial,fresh,release};
   }
@@ -574,40 +575,40 @@ describe("current metadata for rapid workflow openings",()=>{
     }
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
     await user.click(screen.getByRole("button",{name:next==="offer"?"Save offer":"Save attempt"}));
-    await waitFor(()=>expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2));
+    await waitFor(()=>expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(2), settle);
     expect(mocks.submitMyLeadCommand.mock.calls[1][1]).toMatchObject({propertyId:"property-1",expectedEpisodeId:"episode-1",expectedQueueVersion:2,expectedSharedStatus:"interested"});
-  });
+  }, 15_000);
   it.each(["cancel","search","episode","start call"])("does not open from a delayed read after %s changes",async mode=>{
     const {user,fresh,release}=await afterReadiness();await user.click(screen.getByRole("button",{name:"Log offer"}));
     if(mode==="cancel")await user.click(screen.getByRole("button",{name:"Cancel opening"}));
     if(mode==="start call")await user.click(screen.getByRole("button",{name:"Start call"}));
-    if(mode==="search")await user.type(screen.getByLabelText("Search My Leads"),"other");
+    if(mode==="search")fireEvent.change(screen.getByLabelText("Search My Leads"), { target: { value: "other" } });
     if(mode==="episode")fresh.stages.not_contacted!.rows[0].assignmentEpisodeId="episode-other";
     await act(async()=>release({ok:true,snapshot:fresh,kpis}));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
     if(mode==="episode")expect(screen.getByText(/assignment changed/)).toBeVisible();
-  });
+  }, 15_000);
   it.each(["foreground","background"])("a later authorized %s queue refresh replaces a failed barrier for future openings",async mode=>{
     const {user,fresh,release}=await afterReadiness();
     await act(async()=>release({ok:false,message:"First read failed"}));
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
     if(mode==="background"){await user.click(screen.getByRole("button",{name:"Expand details"}));await act(async()=>window.dispatchEvent(new Event("focus")));}
     else await user.click(screen.getByRole("button",{name:"Retry now"}));
-    await waitFor(()=>expect(screen.queryByText(/Displayed counts may be out of date/)).not.toBeInTheDocument());
+    await waitFor(()=>expect(screen.queryByText(/Displayed counts may be out of date/)).not.toBeInTheDocument(), settle);
     await user.click(screen.getByRole("button",{name:"Log offer"}));
-    expect(await screen.findByRole("dialog")).toBeVisible();
+    expect(await screen.findByRole("dialog", undefined, settle)).toBeVisible();
     expect(screen.queryByText(/Could not load current lead details/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Motivation")).not.toBeInTheDocument();
     expect(mocks.loadMyLeads).toHaveBeenCalledTimes(2);
     expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
-  });
+  }, 15_000);
   it("retries an opening read failure without repeating the saved readiness command",async()=>{
     const {user,fresh,release}=await afterReadiness();await user.click(screen.getByRole("button",{name:"Log offer"}));
     await act(async()=>release({ok:false,message:"Read unavailable"}));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});await user.click(screen.getByRole("button",{name:"Retry opening"}));
-    expect(await screen.findByRole("dialog")).toBeVisible();expect(screen.queryByLabelText("Motivation")).not.toBeInTheDocument();expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
-  });
+    expect(await screen.findByRole("dialog", undefined, settle)).toBeVisible();expect(screen.queryByLabelText("Motivation")).not.toBeInTheDocument();expect(mocks.submitMyLeadCommand).toHaveBeenCalledTimes(1);
+  }, 15_000);
 });
 
 

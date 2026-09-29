@@ -75,7 +75,8 @@ export function DripCard({ propertyId, initialProgress }: { propertyId: string; 
   }
 
   const live = progress && ["active", "paused"].includes(progress.enrollmentStatus);
-  const needsRetry = progress?.enrollmentStatus === "paused" && ["provider_failed", "reconciliation_required"].includes(progress.pauseReason ?? "");
+  const needsRetry = progress?.enrollmentStatus === "paused" && progress.pauseReason === "provider_failed";
+  const needsReconciliation = progress?.enrollmentStatus === "paused" && progress.pauseReason === "reconciliation_required";
 
   return (
     <section className="rounded-xl border border-sky-200 bg-card p-3.5" aria-label="Drip" data-testid="lead-drip-card">
@@ -90,7 +91,7 @@ export function DripCard({ propertyId, initialProgress }: { propertyId: string; 
           <div className="flex justify-between gap-3"><span className="text-muted-foreground">Last text sent</span><span>{progress.lastText ? dateLabel(progress.lastText.sentAt) : "—"}</span></div>
           <div className="flex flex-wrap gap-1.5 pt-1">
             {progress.enrollmentStatus === "active" ? <Button variant="outline" size="sm" disabled={pending} onClick={() => mutate("pause")}>Pause</Button> : null}
-            {progress.enrollmentStatus === "paused" ? <Button variant="outline" size="sm" disabled={pending} onClick={() => mutate(needsRetry ? "retry" : "resume")}>{needsRetry ? "Retry" : "Resume"}</Button> : null}
+            {progress.enrollmentStatus === "paused" && !needsReconciliation ? <Button variant="outline" size="sm" disabled={pending} onClick={() => mutate(needsRetry ? "retry" : "resume")}>{needsRetry ? "Retry" : "Resume"}</Button> : null}
             <StartDripPicker triggerLabel={live ? "Switch drip" : "Start drip"} triggerTone={live ? "outline" : "primary"} onChoose={choose} disabled={pending} />
             {live ? <Button variant="outline" size="sm" className="text-destructive" disabled={pending} onClick={() => mutate("stop")}>Stop</Button> : null}
           </div>

@@ -50,6 +50,6 @@ export function DripsOverview({ archived, isAdmin, sequencesResult, needsResult 
         <TableCell><span title={row.archived_at ? "Archived" : row.active ? "Open to new leads" : "Closed to new leads"}>{row.archived_at ? "Archived" : row.active ? "Open" : "Closed"}</span></TableCell>
         <TableCell className="text-right">{isAdmin && <SequenceRowActions sequenceId={row.id} isArchived={!!row.archived_at} isActive={row.active} />}</TableCell>
       </TableRow>)}
-    </TableBody></Table><DataTableFooter><span className="text-sm text-muted-foreground">Showing {rows.length} {archived ? "archived" : "current"} drips</span></DataTableFooter></DataTableShell>}
+    </TableBody></Table><DataTableFooter><span className="text-sm text-muted-foreground">Showing {rows.length} {archived ? "archived" : "current"} {rows.length === 1 ? "drip" : "drips"}</span></DataTableFooter></DataTableShell>}
   </Page>;
 }

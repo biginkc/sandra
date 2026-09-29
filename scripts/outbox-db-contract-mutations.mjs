@@ -8,6 +8,7 @@ import { assertWriteMode } from './outbox-db-contract/guards.mjs';
 import { makeRest } from './outbox-db-contract/postgrest.mjs';
 import { createFixture } from './outbox-db-contract/fixture.mjs';
 import { sealPhaseRecord } from './outbox-db-contract.mjs';
+import { platformFingerprint } from './outbox-db-contract/platform.mjs';
 
 const MUTATIONS = [
   ['M1', 'REVOKE SELECT ON public.messages FROM authenticated', 'GRANT SELECT ON public.messages TO authenticated', ['PIN_BASE_GRANTS', 'C00', 'C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07', 'C08', 'C08b', 'C09', 'D02', 'D03']],
@@ -47,7 +48,8 @@ async function prepareFixture() {
   const runDir = mkdtempSync(path.join(os.tmpdir(), 'w4w-fixture-'));
   try {
     const rest = makeRest(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, process.env.TEST_SUPABASE_SERVICE_ROLE_KEY);
-    const { rest: ignored, ...fixture } = await createFixture({ apiUrl: process.env.TEST_SUPABASE_URL, serviceKey: process.env.TEST_SUPABASE_SERVICE_ROLE_KEY, anonKey: process.env.TEST_SUPABASE_ANON_KEY, rest, runDir });
+    const fixture = await createFixture({ apiUrl: process.env.TEST_SUPABASE_URL, serviceKey: process.env.TEST_SUPABASE_SERVICE_ROLE_KEY, anonKey: process.env.TEST_SUPABASE_ANON_KEY, rest, runDir });
+    delete fixture.rest;
     return fixture;
   } finally { rmSync(runDir, { recursive: true, force: true }); }
 }
@@ -68,7 +70,7 @@ export async function runMutations(output, phase) {
     assert.equal(baseline.exit, 0, `baseline: ${baseline.error}`);
     assert.equal(baseline.verdict, 'PASS');
     inject('after-baseline');
-    for (const [id, apply, fixedRevert, expected, phases = ['post']] of MUTATIONS.filter(item => (item[4] ?? ['post']).includes(phase))) {
+    for (const [id, apply, fixedRevert, expected] of MUTATIONS.filter(item => (item[4] ?? ['post']).includes(phase))) {
       let revert = fixedRevert;
       if (id === 'M3' || id === 'M3b') {
         const column = id === 'M3' ? 'polqual' : 'polwithcheck';
@@ -119,10 +121,17 @@ export async function runMutations(output, phase) {
     inject('aggregate');
   } catch (error) { failure = error; }
   finally {
+    let platformConfig;
+    if (!failure && phase === 'pre') {
+      try {
+        const version = (await db.query('SHOW server_version_num')).rows[0].server_version_num;
+        platformConfig = await platformFingerprint(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, String(Math.floor(Number(version) / 10000)));
+      } catch (error) { failure = error; }
+    }
     await db.end();
     const checks = baseline?.contracts ?? [];
     const fixtureRows = baseline?.fixtureRows;
-    const sealed = sealPhaseRecord({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, verdict: failure ? 'FAIL' : 'PASS', errorText: failure ? String(failure.stack ?? failure) : '' });
+    const sealed = sealPhaseRecord({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, platformConfig, verdict: failure ? 'FAIL' : 'PASS', errorText: failure ? String(failure.stack ?? failure) : '' });
     if (sealed.verdict !== 'PASS' && !failure) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
   }
   if (failure) throw failure;

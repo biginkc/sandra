@@ -70,7 +70,7 @@ describe("drip editor", () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     const user = userEvent.setup(); mount({ total: 3 });
     expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
-    expect(screen.getByText(/Move and delete are unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/Saved steps cannot be moved or deleted/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Save all steps" }));
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(replace).not.toHaveBeenCalled();
@@ -80,6 +80,17 @@ describe("drip editor", () => {
     const user = userEvent.setup(); mount();
     await user.click(screen.getByRole("button", { name: "Delete" }));
     expect(screen.queryByRole("heading", { name: "Step 1" })).not.toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("deletes an unsaved step on an enrolled drip while retaining the persisted step lock", async () => {
+    const user = userEvent.setup(); mount({ total: 3 });
+    expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Add step" }));
+    const draft = screen.getByRole("heading", { name: "Step 2" }).closest("div.rounded-md.border") as HTMLElement;
+    expect(within(draft).getByRole("button", { name: "Delete" })).toBeEnabled();
+    await user.click(within(draft).getByRole("button", { name: "Delete" }));
+    expect(screen.queryByRole("heading", { name: "Step 2" })).not.toBeInTheDocument();
     expect(replace).not.toHaveBeenCalled();
   });
 

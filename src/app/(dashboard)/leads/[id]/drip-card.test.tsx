@@ -59,13 +59,20 @@ describe("DripCard", () => {
     expect(retrySequenceStepAction).not.toHaveBeenCalled();
   });
 
-  it.each(["provider_failed", "reconciliation_required"])("retries a paused %s step instead of resuming", async (pauseReason) => {
+  it("retries a paused provider_failed step instead of resuming", async () => {
     const user = userEvent.setup();
-    render(<DripCard propertyId="lead-1" initialProgress={{ ...progress, enrollmentStatus: "paused", status: "Couldn’t send", pauseReason }} />);
+    render(<DripCard propertyId="lead-1" initialProgress={{ ...progress, enrollmentStatus: "paused", status: "Couldn’t send", pauseReason: "provider_failed" }} />);
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(retrySequenceStepAction).toHaveBeenCalledWith("enrollment-1"));
     expect(resumeEnrollmentAction).not.toHaveBeenCalled();
+  });
+
+  it("shows reconciliation reason without offering retry or resume", () => {
+    render(<DripCard propertyId="lead-1" initialProgress={{ ...progress, enrollmentStatus: "paused", status: "Couldn’t send", pauseReason: "reconciliation_required", reason: "Text delivery needs review before this drip can continue." }} />);
+    expect(screen.getByText("Text delivery needs review before this drip can continue.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
   });
 
   it("shows the empty state", () => {

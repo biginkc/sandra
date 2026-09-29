@@ -936,7 +936,6 @@ export function Kanban({
       </div>
       {bulkDripOpen ? <BulkStartDripDialog open leads={bulkDripLeads} onClose={() => setBulkDripOpen(false)} onComplete={() => {
         setSelectedIds(new Set());
-        setDripRefreshToken((token) => token + 1);
         void refreshBoard();
         router.refresh();
       }} /> : null}

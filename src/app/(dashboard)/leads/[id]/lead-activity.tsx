@@ -142,7 +142,8 @@ export function LeadActivityTimeline(props: Props) {
     },
   });
   const [dripLabels, setDripLabels] = useState<Record<string, string>>({});
-  const outboundMessageKey = messages.filter((message) => message.direction === "outbound").map((message) => `${message.id}:${message.status}`).join(",");
+  const outboundMessages = messages.filter((message) => message.direction === "outbound");
+  const outboundMessageKey = outboundMessages.map((message) => `${message.id}:${message.status}:${message.created_at}`).join(",");
   useEffect(() => {
     let current = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -150,7 +151,13 @@ export function LeadActivityTimeline(props: Props) {
       setDripLabels({});
       return;
     }
-    const ids = outboundMessageKey.split(",").map((entry) => entry.split(":")[0]);
+    const ids = outboundMessages.map((message) => message.id);
+    // A sent message can acquire its step-run association shortly after send.
+    // Old ordinary SMS still gets one lookup, but never repeated polling.
+    const retryable = new Set(outboundMessages.filter((message) =>
+      message.status === "queued" || message.status === "sending" ||
+      (Date.now() - Date.parse(message.created_at) < 5 * 60_000 && Date.now() >= Date.parse(message.created_at))
+    ).map((message) => message.id));
     let unresolved = ids;
     let attempts = 0;
     const reconcile = async () => {
@@ -159,14 +166,16 @@ export function LeadActivityTimeline(props: Props) {
         const labels = await messageDripLabels(createClient(), unresolved);
         if (!current) return;
         if (Object.keys(labels).length) setDripLabels((previous) => ({ ...previous, ...labels }));
-        unresolved = unresolved.filter((id) => !labels[id]);
+        unresolved = unresolved.filter((id) => !labels[id] && retryable.has(id));
       } catch {
         if (!current) return;
       }
-      if (unresolved.length && attempts < 4) timer = setTimeout(() => void reconcile(), 10_000);
+      if (unresolved.some((id) => retryable.has(id)) && attempts < 4) timer = setTimeout(() => void reconcile(), 10_000);
     };
     void reconcile();
     return () => { current = false; if (timer) clearTimeout(timer); };
+    // The key captures the fields used above without retriggering on a new array identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [outboundMessageKey, propertyId]);
   const { notes, authorEmails: liveAuthorEmails } = useLeadNotes({
     propertyId,

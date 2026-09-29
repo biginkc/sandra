@@ -30,12 +30,13 @@ APPROVALS = {
                     ("test-env", "migration-apply", "post", "shared-test"),
                     ("test-env", "shared-readonly", "post", "shared-test")),
 }
-MIGRATION_VERSIONS = {"20260929000000", "20260929000100", "20260929000200"}
+MIGRATION_VERSIONS = {"20260930020000", "20260930020100", "20260930020200"}
 PROJECT_REFS = {"shared-test": "ncsngxlcyxylaeskiteu", "production": "copflsklaefwzipsrjqz"}
 MIGRATION_WORKFLOWS = {"shared-test": ".github/workflows/db-migrate-test.yml", "production": ".github/workflows/db-migrate-prod.yml"}
 MIGRATION_APPLY_JOBS = {"shared-test": "Apply migrations to test", "production": "Apply migrations to prod"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
+CATALOG_SECTIONS = ("created_objects_present", "extensions", "functions", "index_names", "relations", "schema_migrations", "schemas", "trigger_names", "types")
 
 
 class EvidenceError(RuntimeError):
@@ -132,11 +133,29 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
     completed = timestamp(manifest.get("completed_at"))
     if timestamp(manifest.get("started_at")) > completed:
         raise EvidenceError(f"completed_at precedes started_at: {directory}")
-    if (not HASH.fullmatch(str(manifest.get("runner_script_sha256", "")))
-            or (manifest.get("lane") == "outbox" and not HASH.fullmatch(str(manifest.get("fault_proxy_script_sha256", ""))))):
+    if manifest["kind"] == "shared-readonly":
+        expected_fields = {"tested_sha", "tier", "kind", "phase", "target", "verdict", "exit_status", "run_id",
+                           "started_at", "completed_at", "clean_tree", "artifacts", "target_binding", "inputs",
+                           "operator_script_sha256", "event", "workflow_path", "github_run_id", "github_run_attempt", "items"}
+        if set(manifest) != expected_fields:
+            raise EvidenceError(f"unexpected shared-readonly manifest field: {directory}")
+        completed_text = manifest["completed_at"]
+        if (not isinstance(completed_text, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", completed_text)
+                or manifest["started_at"] != completed_text
+                or manifest["run_id"] != "shared-readonly-" + manifest["phase"] + "-" + completed_text.replace("-", "").replace(":", "").replace(".", "")):
+            raise EvidenceError(f"shared-readonly run metadata mismatch: {directory}")
+        scripts = ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs", "scripts/outbox-db-contract/catalog-sections.mjs")
+        operator = manifest.get("operator_script_sha256")
+        if (not isinstance(operator, dict) or set(operator) != set(scripts) or any(
+                operator[script] != hashlib.sha256(blob(repo, tested_sha, script)).hexdigest() for script in scripts)):
+            raise EvidenceError(f"operator provenance mismatch: {directory}")
+        if (manifest.get("event") != "operator" or manifest.get("workflow_path") != "" or manifest.get("github_run_id") != "" or manifest.get("github_run_attempt") != ""):
+            raise EvidenceError(f"operator event provenance mismatch: {directory}")
+    elif (not HASH.fullmatch(str(manifest.get("runner_script_sha256", "")))
+          or (manifest["kind"] == "browser" and not HASH.fullmatch(str(manifest.get("fault_proxy_script_sha256", ""))))):
         raise EvidenceError(f"missing runner/proxy hashes: {directory}")
     clean = manifest.get("clean_tree")
-    if not isinstance(clean, dict) or clean.get("start") is not True or clean.get("end_excluding_run_dir") is not True or clean.get("excluded_path") != directory:
+    if not isinstance(clean, dict) or (manifest["kind"] == "shared-readonly" and set(clean) != {"start", "end_excluding_run_dir", "excluded_path"}) or clean.get("start") is not True or clean.get("end_excluding_run_dir") is not True or clean.get("excluded_path") != directory:
         raise EvidenceError(f"invalid collection clean-tree attestation: {directory}")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or not artifacts:
@@ -223,7 +242,7 @@ def collect(repo: Path, tested_sha: str, head: str = "HEAD") -> dict:
     return {"tested_sha": tested_sha, "head_sha": head_sha, "runs": runs, "selected": selected}
 
 
-def _require(selected: dict, keys: tuple) -> dict:
+def _require(selected: dict, keys: tuple, repo: Path | None = None) -> dict:
     result = {}
     for key in keys:
         run = selected.get(key)
@@ -232,6 +251,10 @@ def _require(selected: dict, keys: tuple) -> dict:
         manifest = run["manifest"]
         if run["exit_status"] != 0 or manifest.get("verdict") != "PASS":
             raise EvidenceError(f"latest required check failed {key}: {run['directory']}")
+        if key[1] == "shared-readonly":
+            if repo is None:
+                raise EvidenceError("repository required for shared-test linkage")
+            _check_shared_readonly(repo, run, selected)
         if key[0] == "pre-merge" and key[3] == "disposable":
             if not (str(manifest.get("github_run_id", "")).isdigit()
                     and str(manifest.get("github_run_attempt", "")).isdigit()
@@ -248,6 +271,86 @@ def _require(selected: dict, keys: tuple) -> dict:
         else:
             result[str(key)] = {"directory": run["directory"]}
     return result
+
+
+def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
+    manifest = run["manifest"]
+    directory = run["directory"]
+    def reject_raw(value: object) -> None:
+        if isinstance(value, dict):
+            for name, child in value.items():
+                if name.lower() in {"sections", "content", "access_token", "refresh_token", "apikey", "service_role"}:
+                    raise EvidenceError(f"raw catalog/content or token key: {directory}")
+                reject_raw(child)
+        elif isinstance(value, list):
+            for child in value:
+                reject_raw(child)
+    reject_raw(manifest)
+    if manifest.get("target_binding") != {"project_ref": PROJECT_REFS["shared-test"], "pooler_user": "postgres." + PROJECT_REFS["shared-test"]}:
+        raise EvidenceError(f"shared-test project_ref mismatch: {directory}")
+    if set(manifest.get("artifacts", {})) != {"readonly.json"}:
+        raise EvidenceError(f"shared-readonly artifact inventory mismatch: {directory}")
+    try:
+        output = json.loads(blob(repo, run["commit"], directory + "/readonly.json"), object_pairs_hook=unique_object_pairs)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise EvidenceError(f"invalid shared-readonly output: {directory}: {exc}") from exc
+    if not isinstance(output, dict) or set(output) != {"verdict", "target", "phase", "comparisons", "items"} or output["verdict"] != "PASS" or output["target"] != "shared-test" or output["phase"] != manifest["phase"]:
+        raise EvidenceError(f"raw or malformed shared-readonly output: {directory}")
+    reject_raw(output)
+    items = output["items"]
+    if not isinstance(items, dict) or set(items) - {"queued_invariants"}:
+        raise EvidenceError(f"raw or malformed shared-readonly items: {directory}")
+    if manifest.get("items") != items:
+        raise EvidenceError(f"queued item linkage mismatch: {directory}")
+    if "queued_invariants" in items:
+        queued = items["queued_invariants"]
+        if (not isinstance(queued, dict) or not {"verdict", "diff"} <= set(queued) <= {"verdict", "diff", "stability_probe"}
+                or queued.get("verdict") not in {"PASS", "INCONCLUSIVE"} or not isinstance(queued["diff"], str)
+                or not HASH.fullmatch(queued["diff"])
+                or (queued["verdict"] == "PASS") != (queued["diff"] == hashlib.sha256(b"[]").hexdigest())
+                or ("stability_probe" in queued and queued["stability_probe"] != "identical")):
+            raise EvidenceError(f"invalid queued digest: {directory}")
+    comparisons = output.get("comparisons")
+    if (not isinstance(comparisons, dict) or set(comparisons) != {"catalog", "platform"}
+            or any(not isinstance(comparisons.get(label), dict) for label in ("catalog", "platform"))
+            or set(comparisons["catalog"]) != {"verdict", "input_sha256", "observed_section_sha256"}
+            or set(comparisons["platform"]) != {"verdict", "input_sha256", "observed_sha256"}):
+        raise EvidenceError(f"comparison linkage missing: {directory}")
+    for label, key, artifact in (("catalog_record", ("pre-merge", "catalog-fingerprint", "n/a", "disposable"), "catalog-pre.json"),
+                                 ("platform_record", ("pre-merge", "db-contract", "pre", "disposable"), "platform-config.json")):
+        source = selected.get(key)
+        inputs = manifest.get("inputs")
+        if not isinstance(inputs, dict) or set(inputs) != {"catalog_record", "platform_record"}:
+            raise EvidenceError(f"unexpected shared-readonly input field: {directory}")
+        ref = inputs.get(label)
+        if source is None or source["manifest"].get("verdict") != "PASS" or source["exit_status"] != 0 or not isinstance(ref, dict) or ref != {"directory": source["directory"], "artifact": artifact, "sha256": source["manifest"].get("artifacts", {}).get(artifact)}:
+            raise EvidenceError(f"{label} identity or phase mismatch: {directory}")
+        if (source["commit"] == run["commit"] or (manifest["phase"] == "pre" and subprocess.run(["git", "merge-base", "--is-ancestor", source["commit"], run["commit"]], cwd=repo).returncode != 0)
+                or not HASH.fullmatch(str(ref["sha256"]))):
+            raise EvidenceError(f"{label} not previously sealed: {directory}")
+        if output["comparisons"]["catalog" if label == "catalog_record" else "platform"].get("input_sha256") != ref["sha256"]:
+            raise EvidenceError(f"{label} consumed hash mismatch: {directory}")
+        data = json.loads(blob(repo, source["commit"], source["directory"] + "/" + artifact))
+        if label == "catalog_record":
+            sections = data.get("section_sha256")
+            if (not isinstance(sections, dict) or set(sections) != set(CATALOG_SECTIONS)
+                    or any(not isinstance(v, str) or not HASH.fullmatch(v) for v in sections.values())
+                    or output["comparisons"]["catalog"].get("observed_section_sha256") != sections
+                    or output["comparisons"]["catalog"].get("verdict") != "PASS"):
+                raise EvidenceError(f"catalog mismatch: {directory}")
+        else:
+            platform_keys = ("postgres_major", "postgrest_major", "gotrue_major")
+            if (not isinstance(data, dict) or set(data) != {*platform_keys, "sha256"}
+                    or any(not isinstance(data[key], str) or not re.fullmatch(r"[0-9]+", data[key]) for key in platform_keys)):
+                raise EvidenceError(f"invalid consumed platform data: {directory}")
+            # platform.mjs hashes JSON.stringify of these fields in this exact insertion order.
+            canonical = {key: data[key] for key in platform_keys}
+            digest = hashlib.sha256(json.dumps(canonical, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            if (not isinstance(data["sha256"], str) or not HASH.fullmatch(data["sha256"])
+                    or data["sha256"] != digest
+                    or output["comparisons"]["platform"].get("verdict") != "PASS"
+                    or output["comparisons"]["platform"].get("observed_sha256") != digest):
+                raise EvidenceError(f"platform mismatch: {directory}")
 
 
 def _find_migration_chain(repo: Path, x_mig: str) -> dict:
@@ -291,7 +394,7 @@ def evaluate(repo: Path, approval: str, x_mig: str | None = None, m: str | None 
         raise EvidenceError("migration SHA required")
     if approval == "j5a":
         chain = collect(repo, x_mig, head)
-        selected = _require(chain["selected"], APPROVALS["j5a"])
+        selected = _require(chain["selected"], APPROVALS["j5a"], repo)
     else:
         if not m or not SHA.fullmatch(m):
             raise EvidenceError("main SHA required for j5b")
@@ -301,7 +404,7 @@ def evaluate(repo: Path, approval: str, x_mig: str | None = None, m: str | None 
         main_chain = collect(repo, m, head)
         combined = {key: run for key, run in mig_chain["selected"].items() if key[0] == "pre-merge"}
         combined.update({key: run for key, run in main_chain["selected"].items() if key[0] == "test-env"})
-        selected = _require(combined, APPROVALS["j5b"])
+        selected = _require(combined, APPROVALS["j5b"], repo)
         evaluate_migration(repo, m, "shared-test", head=head, x_mig=x_mig)
     return {"status": "PASS", "approval": approval, "selected": selected}
 

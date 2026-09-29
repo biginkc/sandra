@@ -117,6 +117,19 @@ test('NC catalog extra section fails', () => {
   fails('extra observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:{...catalogMap(), unexpected:'f'.repeat(64)}}), /CATALOG_MISMATCH/);
   fails('extra expected', () => compareCatalog({section_sha256:{...catalogMap(), unexpected:'f'.repeat(64)}}, {section_sha256:catalogMap()}), /CATALOG_MISMATCH/);
 });
+test('NC catalog refuses a single key containing the entire joined section list', () => {
+  const combined = { [catalogSections.slice().sort().join(',')]: 'f'.repeat(64) };
+  fails('combined expected', () => compareCatalog({section_sha256:combined}, {section_sha256:combined}), /CATALOG_MISMATCH/);
+  fails('combined observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:combined}), /CATALOG_MISMATCH/);
+});
+test('NC catalog refuses duplicate-looking keys that collide when joined', () => {
+  const sections = catalogSections.slice().sort();
+  const keys = [`${sections[0]},${sections[1]}`, ...sections.slice(2)];
+  const collided = Object.fromEntries(keys.map(key => [key, 'f'.repeat(64)]));
+  assert.equal(keys.join(','), sections.join(','));
+  fails('joined collision expected', () => compareCatalog({section_sha256:collided}, {section_sha256:collided}), /CATALOG_MISMATCH/);
+  fails('joined collision observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:collided}), /CATALOG_MISMATCH/);
+});
 test('NC catalog malformed digest fails on either side', () => {
   fails('malformed expected', () => compareCatalog({section_sha256:{...catalogMap(), relations:'x'}}, {section_sha256:{...catalogMap(), relations:'x'}}), /CATALOG_MISMATCH/);
   fails('malformed observed', () => compareCatalog({section_sha256:catalogMap()}, {section_sha256:{...catalogMap(), relations:'x'}}), /CATALOG_MISMATCH/);
