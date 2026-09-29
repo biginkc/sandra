@@ -1,0 +1,186 @@
+[
+  {
+    "id": "M1",
+    "expected_fail": [
+      "PIN_BASE_GRANTS",
+      "C00",
+      "C01",
+      "C02",
+      "C03",
+      "C04",
+      "C05",
+      "C06",
+      "C07",
+      "C08",
+      "C08b",
+      "C09",
+      "D02",
+      "D03"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M2",
+    "expected_fail": [
+      "PIN_TRIGGERS",
+      "C00",
+      "C05",
+      "C06",
+      "C07",
+      "C08",
+      "C08b"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M3",
+    "expected_fail": [
+      "C01",
+      "C02",
+      "C03",
+      "D02",
+      "D03"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M3b",
+    "expected_fail": [
+      "D02",
+      "D03"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M4",
+    "expected_fail": [
+      "PIN_FUNCTIONS",
+      "C00",
+      "C05",
+      "C06",
+      "C07",
+      "C08",
+      "C08b"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M4b",
+    "expected_fail": [
+      "PIN_FUNCTIONS",
+      "D04"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M5",
+    "expected_fail": [
+      "PIN_RELATIONS"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M5b",
+    "expected_fail": [
+      "PIN_FUNCTIONS"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M5c",
+    "expected_fail": [
+      "PIN_FUNCTIONS"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M5d",
+    "expected_fail": [
+      "PIN_RELATIONS"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M6",
+    "expected_fail": [
+      "PIN_TRIGGERS",
+      "D04"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M6b",
+    "expected_fail": [
+      "PIN_TRIGGERS",
+      "C00"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M7",
+    "expected_fail": [
+      "PIN_SCHEMAS_ROLLOUT_ROLES"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS"
+  },
+  {
+    "id": "M10",
+    "expected_fail": [
+      "PIN_BASE_GRANTS",
+      "C00",
+      "C01",
+      "C02",
+      "C03",
+      "D01",
+      "D02",
+      "D03"
+    ],
+    "observed_exit": 1,
+    "observed_fail": true,
+    "exact_fail": true,
+    "restored": "PASS",
+    "anon_row_exposure": {
+      "count": 101,
+      "fixture": true
+    }
+  }
+]
