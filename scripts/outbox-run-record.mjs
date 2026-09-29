@@ -26,23 +26,6 @@ function runIdentityLifecycle(command, env, repo) {
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`E2E identity ${command} failed: ${result.stderr || result.stdout || result.status}`);
 }
-export function runOutboxPlaywright(env, repo, { lifecycle = runIdentityLifecycle, playwright = () => spawnSync('npx', ['playwright', 'test', '--config', 'playwright.outbox-regression.config.ts', '--reporter=json'], { cwd: repo, env, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 }) } = {}) {
-  let result;
-  let cleanupError;
-  const failures = [];
-  let preflightPassed = false;
-  try {
-    if (isGitHubE2ERun(env)) { lifecycle('preflight', env, repo); preflightPassed = true; }
-    result = playwright();
-  } catch (error) {
-    failures.push(`${preflightPassed ? 'Playwright spawn' : 'identity preflight'} failed: ${error}`);
-  } finally {
-    if (preflightPassed) {
-      try { lifecycle('cleanup', env, repo); } catch (error) { cleanupError = error; }
-    }
-  }
-  return { result: result ?? { status: 1, stdout: '', stderr: '' }, cleanupError, failures };
-}
 const TEXT_ARTIFACT = /\.(?:json|log|txt|html|csv|md)$/i;
 const ALLOWED_ARTIFACT = /\.(?:json|log|txt|html|png|csv|gz|md)$/i;
 const MAX_RUN_BYTES = 40 * 1024 * 1024;
