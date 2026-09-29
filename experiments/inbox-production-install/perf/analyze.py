@@ -32,6 +32,8 @@ def evaluate(result, limits=THRESHOLDS['burst']):
         observed = result['server'].get(kind, {})
         if observed.get('n') != expected:
             failures.append(f'server.{kind}.n != {expected}')
+        if result['client'].get(kind, {}).get('n') != expected:
+            failures.append(f'client.{kind}.n != {expected}')
         for key, limit in [('p95_ms', limits['server_p95_ms']), ('p99_ms', limits['server_p99_ms'])]:
             value = observed.get(key)
             if value is None or value > limit:
@@ -48,9 +50,19 @@ def evaluate(result, limits=THRESHOLDS['burst']):
     wait = result['max_lock_wait_log_ms']
     if wait is None or wait > limits['max_lock_wait_ms']:
         failures.append('lock wait unmeasured or over limit')
+    coverage = result['backlog'].get('coverage', {})
+    end = result['backlog'].get('at_end')
+    observation_end = limits['duration_s'] + limits['drain_s']
+    if (coverage.get('start_s') is None or coverage['start_s'] < 0 or coverage['start_s'] > 2
+            or coverage.get('end_s') is None or coverage['end_s'] < observation_end
+            or coverage.get('max_gap_s') is None or coverage['max_gap_s'] > 2
+            or not end or end.get('elapsed_s', -1) < observation_end):
+        failures.append('backlog observation coverage incomplete')
     drain = result['backlog']['drain_first_zero_s']
-    if drain is None or drain > limits['drain_s'] or result['backlog']['at_end']['dirty_pending'] != 0 or result['backlog']['at_end']['maintained_queue'] != 0:
+    if drain is None or drain > limits['drain_s'] or not end or end['dirty_pending'] != 0 or end['maintained_queue'] != 0:
         failures.append('capture backlog did not drain')
+    if not result.get('writer_distribution_match', True):
+        failures.append('writer distribution mismatch')
     if result.get('final_db') != {'inbound': limits['inbound_per_s'] * limits['duration_s'], 'unknown': 2 * limits['duration_s'], 'total': 147000 + limits['inbound_per_s'] * limits['duration_s']}:
         failures.append('final database reconciliation')
     if result.get('pg_stat_calls') != {'update': limits['updates_per_s'] * limits['duration_s'], 'inbound': limits['inbound_per_s'] * limits['duration_s']}:
@@ -69,28 +81,40 @@ def analyze(directory):
     config = config_path.read_text().splitlines() if config_path.exists() else []
     lock_logging = dict(zip(('log_lock_waits', 'deadlock_timeout'), config)) if len(config) == 2 else None
     client = {'update': [], 'inbound': []}
+    writer_distribution = {'update': {}, 'inbound': {}}
     inbound = []
     with (directory / 'client-latencies.csv').open() as f:
         for row in csv.DictReader(f):
             client[row['kind']].append(float(row['wall_ms']))
+            writer = str(int(row['writer']))
+            writer_distribution[row['kind']][writer] = writer_distribution[row['kind']].get(writer, 0) + 1
             if row['kind'] == 'inbound':
                 inbound.append(row)
     server = {'update': [], 'inbound': []}
     locks = []
-    for line in (directory / 'pg-server.log').open(errors='replace'):
-        match = re.search(r'duration: ([0-9.]+) ms\s+execute <unnamed>: (.+)', line)
-        if match:
-            query = match.group(2)
-            kind = 'update' if query.startswith('UPDATE public.messages SET status=') else 'inbound' if query.startswith('INSERT INTO public.messages(id,org_id,conversation_id') else None
-            if kind:
-                server[kind].append(float(match.group(1)))
-        match = re.search(r'acquired .* after ([0-9.]+) ms', line)
-        if match:
-            locks.append(float(match.group(1)))
+    with (directory / 'pg-server.log').open(errors='replace') as log:
+        for line in log:
+            match = re.search(r'duration: ([0-9.]+) ms\s+execute <unnamed>: (.+)', line)
+            if match:
+                query = match.group(2)
+                kind = 'update' if query.startswith('UPDATE public.messages SET status=') else 'inbound' if query.startswith('INSERT INTO public.messages(id,org_id,conversation_id') else None
+                if kind:
+                    server[kind].append(float(match.group(1)))
+            match = re.search(r'acquired .* after ([0-9.]+) ms', line)
+            if match:
+                locks.append(float(match.group(1)))
     backlog = []
     with (directory / 'backlog.csv').open() as f:
         backlog = [{key: float(value) for key, value in row.items()} for row in csv.DictReader(f)]
+    if not backlog:
+        raise ValueError('No backlog samples')
+    times = [row['elapsed_s'] for row in backlog]
+    coverage = {'start_s': times[0], 'end_s': times[-1],
+                'max_gap_s': max((right - left for left, right in zip(times, times[1:])), default=None)}
+    if any(not math.isfinite(value) for value in times) or any(right <= left for left, right in zip(times, times[1:])):
+        coverage['max_gap_s'] = math.inf
     after = [row for row in backlog if row['elapsed_s'] >= THRESHOLDS['burst']['duration_s']]
+    end_observation = next((row for row in after if row['elapsed_s'] >= THRESHOLDS['burst']['duration_s'] + THRESHOLDS['burst']['drain_s']), None)
     pairs = []
     for second in range(THRESHOLDS['burst']['duration_s']):
         for base in (0, 200, 400):
@@ -107,19 +131,18 @@ def analyze(directory):
         elif query.startswith('INSERT INTO public.messages(id,org_id,conversation_id'):
             pg_stat_calls['inbound'] += int(statement['calls'])
     result = {'final_db': final, 'pg_stat_calls': pg_stat_calls, 'counts': summary['counts'], 'error_count': len(summary['errors']), 'error_codes': {}, 'server': {}, 'client': {},
-              'backlog': {'at_end': backlog[-1] if backlog else None, 'drain_first_zero_s': next((row['elapsed_s'] - 120 for row in after if row['dirty_pending'] == 0 and row['maintained_queue'] == 0), None)},
+              'backlog': {'at_end': end_observation, 'coverage': coverage, 'drain_first_zero_s': next((row['elapsed_s'] - THRESHOLDS['burst']['duration_s'] for row in after if row['dirty_pending'] == 0 and row['maintained_queue'] == 0), None)},
               'deadlocks_delta': (backlog[-1]['deadlocks'] - float(before['before']['deadlocks'])) if backlog else None,
               'lock_logging': lock_logging,
               'max_lock_wait_log_ms': max(locks, default=0), 'lock_log_events': len(locks),
-              'paired_gaps': {'n': len(pairs), 'max_ms': max(pairs, default=None), 'over_50ms': sum(gap > 50 for gap in pairs)}}
+              'paired_gaps': {'n': len(pairs), 'max_ms': max(pairs, default=None), 'over_50ms': sum(gap > 50 for gap in pairs)},
+              'writer_distribution_match': json.loads((directory / 'writer-distribution.json').read_text()) == writer_distribution}
     for error in summary['errors']:
         code = error['code']
         result['error_codes'][code] = result['error_codes'].get(code, 0) + 1
     for label, values in [('server', server), ('client', client)]:
         for kind, samples in values.items():
             result[label][kind] = {'n': len(samples), 'p50_ms': percentile(samples, .5) if samples else None, 'p95_ms': percentile(samples, .95) if samples else None, 'p99_ms': percentile(samples, .99) if samples else None}
-    if not backlog:
-        raise ValueError('No backlog samples')
     return evaluate(result)
 
 

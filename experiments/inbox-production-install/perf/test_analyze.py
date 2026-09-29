@@ -1,8 +1,12 @@
 import copy
+import csv
+import json
 import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
-from analyze import evaluate, percentile, THRESHOLDS
+from analyze import analyze, evaluate, percentile, THRESHOLDS
 from perf_db import guard
 
 
@@ -22,9 +26,10 @@ class AnalyzeTests(unittest.TestCase):
         return {
             'counts': {'scheduled': {'update': 10200, 'inbound': 2400}, 'completed': {'update': 10200, 'inbound': 2400}, 'failed': {'update': 0, 'inbound': 0}, 'worker': {'errors': 0, 'parent': 60, 'finish': 12000, 'parent_sources': 60}},
             'server': {'update': {'n': 10200, 'p95_ms': limits['server_p95_ms'], 'p99_ms': limits['server_p99_ms']}, 'inbound': {'n': 2400, 'p95_ms': 3, 'p99_ms': 5}},
+            'client': {'update': {'n': 10200}, 'inbound': {'n': 2400}},
             'error_count': 0, 'error_codes': {}, 'deadlocks_delta': 0, 'max_lock_wait_log_ms': 20,
             'lock_logging': {'log_lock_waits': 'on', 'deadlock_timeout': '10ms'},
-            'backlog': {'drain_first_zero_s': 2, 'at_end': {'dirty_pending': 0, 'maintained_queue': 0}},
+            'backlog': {'drain_first_zero_s': 2, 'at_end': {'elapsed_s': 180, 'dirty_pending': 0, 'maintained_queue': 0}, 'coverage': {'start_s': 0, 'end_s': 180, 'max_gap_s': 1}},
             'final_db': {'inbound': 2400, 'unknown': 240, 'total': 149400},
             'pg_stat_calls': {'update': 10200, 'inbound': 2400},
             'paired_gaps': {'n': 360, 'over_50ms': 0},
@@ -59,6 +64,22 @@ class AnalyzeTests(unittest.TestCase):
                 actual = evaluate(sample)
                 print(f'NEGATIVE CONTROL {name}: {actual["verdict"]} {actual["failures"]}')
                 self.assertEqual(actual['verdict'], 'FAIL')
+
+    def test_incomplete_client_and_backlog_controls(self):
+        mutations = {
+            'missing_update_client_samples': lambda x: x['client']['update'].update(n=0),
+            'missing_inbound_client_samples': lambda x: x['client']['inbound'].update(n=2399),
+            'truncated_backlog': lambda x: x['backlog']['coverage'].update(end_s=121),
+            'backlog_gap': lambda x: x['backlog']['coverage'].update(max_gap_s=3),
+            'missing_end_observation': lambda x: x['backlog']['at_end'].update(elapsed_s=179),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                result = self.good()
+                mutate(result)
+                scored = evaluate(result)
+                print(f'NEGATIVE CONTROL {name}: {scored["verdict"]} {scored["failures"]}')
+                self.assertEqual(scored['verdict'], 'FAIL')
 
 
 if __name__ == '__main__':
