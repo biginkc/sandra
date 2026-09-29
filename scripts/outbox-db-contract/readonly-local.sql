@@ -14,7 +14,9 @@ CREATE TABLE public.organizations(id uuid PRIMARY KEY);
 CREATE TABLE public.memberships(user_id uuid, org_id uuid, access_status text, access_expires_at timestamptz, deletion_prepared_at timestamptz, created_at timestamptz DEFAULT now());
 CREATE TABLE public.properties(id uuid PRIMARY KEY,address text,city text,state text);
 CREATE TABLE public.contacts(id uuid PRIMARY KEY,first_name text,last_name text,entity_name text,phone_1 text);
-CREATE TABLE public.messages(id uuid PRIMARY KEY, org_id uuid, body text, from_address text, to_address text, created_at timestamptz DEFAULT now(), scheduled_for timestamptz, property_id uuid, contact_id uuid, status text, updated_at timestamptz DEFAULT now());
+-- Checker-facing columns are verified against migration-derived PRE and POST schemas
+-- by outbox-db-contract-readonly.test.mjs. messages has no update timestamp.
+CREATE TABLE public.messages(id uuid PRIMARY KEY, org_id uuid, body text, from_address text, to_address text, created_at timestamptz DEFAULT now(), scheduled_for timestamptz, property_id uuid, contact_id uuid, status text);
 CREATE INDEX messages_queue_idx ON public.messages(status,org_id,scheduled_for,id);
 CREATE INDEX messages_queue_shape_idx ON public.messages(status,scheduled_for,id);
 CREATE POLICY messages_org_select ON public.messages FOR SELECT TO authenticated USING (org_id IN (SELECT org_id FROM public.memberships WHERE user_id=auth.uid()));
