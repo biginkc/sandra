@@ -51,10 +51,10 @@ export async function run(args = process.argv.slice(2), env = process.env) {
     if (opts.phase === 'pre' && (versions.length || head)) throw new Error('SCHEMA_PHASE_MISMATCH pre');
     if (opts.phase === 'post' && (versions.length !== 3 || !head)) throw new Error('SCHEMA_PHASE_MISMATCH post');
     const rest = makeRest(apiUrl, env.TEST_SUPABASE_ANON_KEY, env.TEST_SUPABASE_SERVICE_ROLE_KEY);
-    const fixture = env.MUTATION_FIXTURE_JSON
-      ? { ...JSON.parse(env.MUTATION_FIXTURE_JSON), rest }
+    const fixture = env.MUTATION_FIXTURE_PATH
+      ? { ...JSON.parse(readFileSync(env.MUTATION_FIXTURE_PATH, 'utf8')), rest }
       : await createFixture({ apiUrl, serviceKey: env.TEST_SUPABASE_SERVICE_ROLE_KEY, anonKey: env.TEST_SUPABASE_ANON_KEY, rest, runDir });
-    if (env.MUTATION_FIXTURE_JSON) for (const [name, user] of Object.entries(fixture.users)) rest.setToken(name, user.token);
+    if (env.MUTATION_FIXTURE_PATH) for (const [name, user] of Object.entries(fixture.users)) rest.setToken(name, user.token);
     checks.push(...await checkPrivileges(db, opts.phase));
     checks.push(...await runContracts({ fixture, db, phase: opts.phase, provider: env.MESSAGING_PROVIDER }));
     const got = new Set(checks.filter(check => check.verdict === 'FAIL').map(check => check.id));
