@@ -138,6 +138,30 @@ test('NC platform accepts only identifiable PostgREST versions', async () => {
   assert.equal((await probe('PostgREST/12.2.0', null)).postgrest_major, '12');
   assert.equal((await probe(null, '12.2.0')).postgrest_major, '12');
 });
+test('NC platform identifies PostgREST from an OpenAPI body behind Cloudflare', async () => {
+  const probe = body => platformFingerprint('http://127.0.0.1:55421', 'anon', 17, async url => ({
+    ok: true,
+    headers: {get: name => name === 'server' ? 'cloudflare' : null},
+    json: async () => new URL(url).pathname === '/rest/v1/' ? body : {version: '2.1.0'},
+  }));
+  assert.equal((await probe({swagger: '2.0', info: {version: '12.2.3 (abcdef)'}})).postgrest_major, '12');
+  await assert.rejects(probe({openapi: '3.0.0', info: {}}), /PLATFORM_UNIDENTIFIED/);
+  await assert.rejects(probe({openapi: '3.0.0', info: {version: 'nginx'}}), /PLATFORM_UNIDENTIFIED/);
+  await assert.rejects(probe({info: {version: '12.2.3'}}), /PLATFORM_UNIDENTIFIED/);
+  await assert.rejects(probe({swagger: '2.0', info: {version: '12.2.3 nginx'}}), /PLATFORM_UNIDENTIFIED/);
+  await assert.rejects(probe({swagger: '2.0', info: {version: 'nginx 12.2.3'}}), /PLATFORM_UNIDENTIFIED/);
+});
+test('NC platform rejects a non-JSON PostgREST body', async () => {
+  const transport = async url => ({
+    ok: true,
+    headers: {get: name => name === 'server' ? 'cloudflare' : null},
+    json: async () => {
+      if (new URL(url).pathname === '/rest/v1/') throw new SyntaxError('Unexpected token');
+      return {version: '2.1.0'};
+    },
+  });
+  await assert.rejects(platformFingerprint('http://127.0.0.1:55421', 'anon', 17, transport), /PLATFORM_UNIDENTIFIED/);
+});
 test('Outbox source shape and claim pin', () => {
   const actions=readFileSync(new URL('../src/app/(dashboard)/messages/actions.ts',import.meta.url),'utf8');
   const cursor=readFileSync(new URL('../src/app/(dashboard)/messages/queued-cursor.ts',import.meta.url),'utf8');

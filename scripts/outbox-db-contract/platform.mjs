@@ -18,9 +18,17 @@ export async function platformFingerprint(apiUrl, anonKey, postgresMajor, transp
   const version = String(health.version ?? '');
   const versionHeader = rest.headers.get('x-postgrest-version');
   const serverHeader = rest.headers.get('server');
-  const postgrest = versionHeader === null
-    ? /^PostgREST\/(\d+)\.\d+(?:\.\d+)?$/i.exec(serverHeader ?? '')
-    : /^(?:PostgREST\/)?(\d+)\.\d+(?:\.\d+)?$/i.exec(versionHeader);
+  let postgrest = versionHeader === null ? null : /^(?:PostgREST\/)?(\d+)\.\d+(?:\.\d+)?$/i.exec(versionHeader);
+  postgrest ??= /^PostgREST\/(\d+)\.\d+(?:\.\d+)?$/i.exec(serverHeader ?? '');
+  if (!postgrest) {
+    let body;
+    try { body = await rest.json(); } catch { throw new Error('PLATFORM_UNIDENTIFIED'); }
+    if (body && typeof body === 'object' &&
+        (typeof body.swagger === 'string' || typeof body.openapi === 'string') &&
+        typeof body.info?.version === 'string') {
+      postgrest = /^(\d+)\.\d+(?:\.\d+)?(?: \([0-9a-f]+\))?$/.exec(body.info.version);
+    }
+  }
   if (!postgrest) throw new Error('PLATFORM_UNIDENTIFIED');
   if (!version) throw new Error('PLATFORM_VERSION_MISSING');
   const result = { postgres_major: String(postgresMajor), postgrest_major: postgrest[1], gotrue_major: version.match(/\d+/)?.[0] };
