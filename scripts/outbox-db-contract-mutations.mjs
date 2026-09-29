@@ -36,7 +36,7 @@ function runContract(phase, extra = [], fixture = null) {
   try {
     const result = spawnSync(process.execPath, ['scripts/outbox-db-contract.mjs', '--target', 'disposable', '--phase', phase, ...extra], { encoding: 'utf8', env, maxBuffer: 20 * 1024 * 1024 });
     const line = result.stdout?.split('\n').find(value => value.startsWith('CONTRACT_RESULT '));
-    assert(line, `No contract result: ${result.stderr}\n${result.stdout}`);
+    assert(line, `No contract result: spawn=${result.error?.stack ?? 'none'} status=${result.status} signal=${result.signal} stderr=${result.stderr} stdout=${result.stdout}`);
     const parsed = JSON.parse(line.slice('CONTRACT_RESULT '.length));
     const contracts = JSON.parse(readFileSync(path.join(scratch, 'contracts.json'), 'utf8'));
     const fixtureRows = !fixture && result.status === 0 ? readFileSync(path.join(scratch, 'fixture-rows.json')) : undefined;
