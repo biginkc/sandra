@@ -72,7 +72,7 @@ INBOX_LANE_STARTED_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
 # It must leave the disposable stack running; no hosted URL is accepted.
 ORIGINAL_GITHUB_ENV=${GITHUB_ENV:-}
 export GITHUB_ENV="$WORK/provision.env"
-node scripts/ci/provision-disposable-stack.mjs --api-port "$API_PORT" --db-port "$DB_PORT" --exclude-migrations '2026092900*' --no-baseline-owner
+node scripts/ci/provision-disposable-stack.mjs --api-port "$API_PORT" --db-port "$DB_PORT" --exclude-migrations '2026093000*' --no-baseline-owner
 if [[ -f "$GITHUB_ENV" ]]; then
   while IFS='=' read -r key value; do
     if [[ "$key" == E2E_LOCAL_WORKDIR ]]; then export E2E_LOCAL_WORKDIR="$value"; fi
@@ -95,7 +95,7 @@ DB_URL=$(sed -n 's/^E2E_CI_SUPABASE_DB_URL=//p' "$WORK/provision.env")
 PORT=$DB_PORT
 export PGHOST=127.0.0.1 PGPORT="$PORT" PGUSER=postgres PGDATABASE=postgres PGPASSWORD=postgres
 [[ "$(psql -X -At -v ON_ERROR_STOP=1 -c 'SHOW server_version' )" == 17.* ]] || { echo 'Disposable database must run PostgreSQL 17' >&2; exit 3; }
-[[ "$(psql -X -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version LIKE '2026092900%'" )" == 0 ]] || { echo 'Inbox migration versions already applied before rehearsal' >&2; exit 3; }
+[[ "$(psql -X -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version LIKE '2026093000%'" )" == 0 ]] || { echo 'Inbox migration versions already applied before rehearsal' >&2; exit 3; }
 psql -X -At -v ON_ERROR_STOP=1 -c 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version' > "$WORK/pre-migration-ledger.txt"
 python3 "$ASSERT" history "$WORK/pre-migration-ledger.txt"
 export INBOX_SCRATCH_MODE=1 INBOX_SCRATCH_DOCKER_SOCKET="$DOCKER_SOCKET" INBOX_SCRATCH_CONTAINER="$CONTAINER" INBOX_SCRATCH_DATABASE=postgres
@@ -109,7 +109,7 @@ SQL
 python3 -c 'import sys; sys.path.insert(0,"experiments/inbox-production-install"); from fixture_db import guard; guard()'
 python3 "$INSTALL/catalog_fingerprint.py" --check-manifest > "$WORK/catalog-manifest-check.txt"
 python3 "$INSTALL/catalog_fingerprint.py" --preflight > "$WORK/catalog-pre.json"
-for file in supabase/migrations/2026092900*.sql; do
+for file in supabase/migrations/2026093000*.sql; do
   version=$(basename "$file" | cut -d_ -f1)
   name=$(basename "$file" .sql | cut -d_ -f2-)
   docker --host "$DOCKER_SOCKET" exec -i "$CONTAINER" psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 < "$file" > "$WORK/apply-$version.txt"
@@ -128,11 +128,11 @@ python3 "$INSTALL/verify.py" --installed > "$WORK/verify-installed.txt"
 python3 "$ASSERT" verify "$WORK/verify-installed.txt"
 python3 "$INSTALL/catalog_fingerprint.py" > "$WORK/catalog-post.json"
 set +e
-docker --host "$DOCKER_SOCKET" exec -i "$CONTAINER" psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 -v VERBOSITY=verbose < supabase/migrations/20260929000000_inbox_control_foundation.sql > "$WORK/second-apply.stdout.txt" 2> "$WORK/second-apply.stderr.txt"
+docker --host "$DOCKER_SOCKET" exec -i "$CONTAINER" psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 -v VERBOSITY=verbose < supabase/migrations/20260930000000_inbox_control_foundation.sql > "$WORK/second-apply.stdout.txt" 2> "$WORK/second-apply.stderr.txt"
 second_status=$?
 set -e
 ledger=()
-while IFS= read -r version; do ledger+=("$version"); done < <(psql -X -At -v ON_ERROR_STOP=1 -c "SELECT version FROM supabase_migrations.schema_migrations WHERE version LIKE '2026092900%' ORDER BY version")
+while IFS= read -r version; do ledger+=("$version"); done < <(psql -X -At -v ON_ERROR_STOP=1 -c "SELECT version FROM supabase_migrations.schema_migrations WHERE version LIKE '2026093000%' ORDER BY version")
 python3 "$ASSERT" second-apply "$second_status" "$WORK/second-apply.stderr.txt" "${ledger[@]}"
 export INBOX_MUTATION_EVIDENCE_PATH="$WORK/mutation-cases.json"
 # The reviewed fixture had this non-browser role. A fresh Supabase stack does
