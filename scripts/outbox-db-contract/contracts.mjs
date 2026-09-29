@@ -36,11 +36,22 @@ export async function runContracts({ fixture, db, phase, provider }) {
       assert.equal(versions.length, 2);
       const head = await sql('select revision from public.inbox_inbound_heads where org_id=$1 and conversation_id=$2', [ids.O1, row('m11').conversation_id]);
       assert.equal(head[0]?.revision, '1');
+      const freshDirtyBefore = await sql('select generation from inbox_message_capture.dirty where org_id=$1 and target_kind=$2 and target_id=$3', [ids.O1, 'known_conversation', row('m11').conversation_id]);
+      const freshVersionBefore = await sql('select revision from inbox_message_capture.versions where org_id=$1 and namespace=$2 and target_id=$3', [ids.O1, 'known_reply', row('m11').conversation_id]);
       const fresh = await q('member', 'POST', '/rest/v1/messages', { ...payload('m11'), id: randomUUID(), body: `contract-${fixture.slug}-fresh-inbound` }, { Prefer: 'return=representation' });
       assert.equal(fresh.status, 201, JSON.stringify(fresh));
       assert.equal(fresh.data?.[0]?.inbox_inbound_revision, 0);
       const freshRead = await q('member', 'GET', `/rest/v1/messages?id=eq.${fresh.data[0].id}&select=id,inbox_inbound_revision`);
       assert.equal(freshRead.data?.[0]?.inbox_inbound_revision, 2);
+      const freshDirty = await sql('select generation from inbox_message_capture.dirty where org_id=$1 and target_kind=$2 and target_id=$3', [ids.O1, 'known_conversation', row('m11').conversation_id]);
+      assert(freshDirty[0]?.generation > (freshDirtyBefore[0]?.generation ?? 0), 'fresh dirty capture missing');
+      const freshQueue = await sql('select claim_token from inbox_maintained.queue where org_id=$1 and target_kind=$2 and target_id=$3', [ids.O1, 'known_conversation', row('m11').conversation_id]);
+      assert.equal(freshQueue.length, 1); assert.equal(freshQueue[0].claim_token, null);
+      const freshEdge = await sql('select phone_e164 from inbox_message_capture.route_edges where org_id=$1 and message_id=$2', [ids.O1, fresh.data[0].id]);
+      assert.equal(freshEdge[0]?.phone_e164, row('m11').from_address);
+      const freshVersions = await sql('select namespace,target_id,revision from inbox_message_capture.versions where org_id=$1 and ((namespace=$2 and target_id=$3) or (namespace=$4 and target_id=$5))', [ids.O1, 'message_content', fresh.data[0].id, 'known_reply', row('m11').conversation_id]);
+      assert.equal(freshVersions.length, 2);
+      assert(freshVersions.find(v => v.namespace === 'known_reply')?.revision > (freshVersionBefore[0]?.revision ?? 0));
     }
     return { inserted: Object.keys(ids.messages).length, crossTenantStatus: cross.status };
   });

@@ -6,6 +6,7 @@ function url(value, label) {
 }
 
 export function assertDisposableTarget({ apiUrl, dbUrl, env = process.env }) {
+  assertNoProductionRef('disposable', apiUrl, dbUrl);
   if (env.E2E_DISPOSABLE_DATABASE !== '1') throw new Error('DISPOSABLE_REQUIRED');
   if (!apiUrl || !dbUrl || `${apiUrl} ${dbUrl}`.includes(PROD_REF)) throw new Error('HOSTED_TARGET_REFUSED');
   const api = url(apiUrl, 'API');
@@ -23,7 +24,7 @@ export function assertWriteMode(target, options) {
 }
 
 export function assertNoProductionRef(target, ...values) {
-  if (target !== 'production' && values.some(value => String(value ?? '').includes(PROD_REF))) throw new Error('PRODUCTION_REF_REFUSED');
+  if (target !== 'production' && values.some(value => String(value ?? '').includes(PROD_REF))) throw new Error('HOSTED_TARGET_REFUSED');
 }
 
 export { PROD_REF, TEST_REF };

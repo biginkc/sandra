@@ -34,7 +34,7 @@ export async function run(args = process.argv.slice(2), env = process.env) {
   if (env.MESSAGING_PROVIDER !== 'mock') throw new Error('Mock provider required');
   const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
   if (env.HEAVY_TESTED_SHA && env.HEAVY_TESTED_SHA !== sha) throw new Error('Tested SHA mismatch');
-  const runId = env.GITHUB_ACTIONS === 'true' ? `${env.GITHUB_RUN_ID}-${opts.phase}` : `${Date.now()}-${randomUUID().slice(0, 8)}-${opts.phase}`;
+  const runId = env.GITHUB_ACTIONS === 'true' ? env.GITHUB_RUN_ID : `${Date.now()}-${randomUUID().slice(0, 8)}-${opts.phase}`;
   const relative = runPath(sha, 'pre-merge', runId);
   const runDir = path.join(repo, relative);
   mkdirSync(runDir, { recursive: true });
@@ -70,7 +70,7 @@ export async function run(args = process.argv.slice(2), env = process.env) {
   writeFileSync(path.join(runDir, 'contracts.json'), `${JSON.stringify(checks, null, 2)}\n`);
   if (opts['mutations-file']) writeFileSync(path.join(runDir, 'mutations.json'), readFileSync(opts['mutations-file']));
   if (errorText) writeFileSync(path.join(runDir, 'failure.log'), `${errorText}\n`);
-  const lane = env.HEAVY_LANE || 'db-contract';
+  const lane = env.HEAVY_LANE || `db-contract-${opts.phase}`;
   writeManifest(repo, relative, {
     tested_sha: sha, tier: 'pre-merge', kind: 'db-contract', phase: opts.phase, target: 'disposable', verdict, exit_status: status,
     run_id: runId, started_at: startedAt, completed_at: new Date().toISOString(), target_binding: binding, schema_state: schemaState,

@@ -22,12 +22,12 @@ const MUTATIONS = [
   ['M6', 'ALTER TABLE public.messages DISABLE TRIGGER zzz_inbox_guard_inbound_revision_update', 'ALTER TABLE public.messages ENABLE TRIGGER zzz_inbox_guard_inbound_revision_update', ['PIN_TRIGGERS', 'D04']],
   ['M6b', 'ALTER TABLE public.messages DISABLE TRIGGER inbox_capture_inbound_head', 'ALTER TABLE public.messages ENABLE TRIGGER inbox_capture_inbound_head', ['PIN_TRIGGERS', 'C00']],
   ['M7', 'UPDATE inbox_control.rollout SET serving_enabled=true', 'UPDATE inbox_control.rollout SET serving_enabled=false', ['PIN_SCHEMAS_ROLLOUT_ROLES']],
-  ['M10', 'ALTER TABLE public.messages DISABLE ROW LEVEL SECURITY', 'ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY', ['PIN_BASE_GRANTS', 'D01']],
+  ['M10', 'ALTER TABLE public.messages DISABLE ROW LEVEL SECURITY', 'ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY', ['PIN_BASE_GRANTS', 'D01'], ['pre', 'post']],
 ];
 
-function runContract(extra = [], fixture = null) {
+function runContract(phase, extra = [], fixture = null) {
   const env = fixture ? { ...process.env, MUTATION_FIXTURE_JSON: JSON.stringify(fixture) } : process.env;
-  const result = spawnSync(process.execPath, ['scripts/outbox-db-contract.mjs', '--target', 'disposable', '--phase', 'post', ...extra], { encoding: 'utf8', env, maxBuffer: 20 * 1024 * 1024 });
+  const result = spawnSync(process.execPath, ['scripts/outbox-db-contract.mjs', '--target', 'disposable', '--phase', phase, ...extra], { encoding: 'utf8', env, maxBuffer: 20 * 1024 * 1024 });
   const line = result.stdout?.split('\n').find(value => value.startsWith('CONTRACT_RESULT '));
   assert(line, `No contract result: ${result.stderr}\n${result.stdout}`);
   return { exit: result.status, ...JSON.parse(line.slice('CONTRACT_RESULT '.length)) };
@@ -42,13 +42,14 @@ async function prepareFixture() {
   } finally { rmSync(runDir, { recursive: true, force: true }); }
 }
 
-export async function runMutations(output) {
+export async function runMutations(output, phase) {
+  assert(['pre', 'post'].includes(phase), 'Usage: outbox-db-contract-mutations.mjs <output> --phase pre|post');
   assertWriteMode('disposable', { apiUrl: process.env.TEST_SUPABASE_URL, dbUrl: process.env.E2E_CI_SUPABASE_DB_URL, env: process.env });
   const db = new pg.Client({ connectionString: process.env.E2E_CI_SUPABASE_DB_URL });
   await db.connect();
   const results = [];
   try {
-    for (const [id, apply, fixedRevert, required] of MUTATIONS) {
+    for (const [id, apply, fixedRevert, expected, phases = ['post']] of MUTATIONS.filter(item => (item[4] ?? ['post']).includes(phase))) {
       let revert = fixedRevert;
       if (id === 'M3' || id === 'M3b') {
         const column = id === 'M3' ? 'polqual' : 'polwithcheck';
@@ -63,13 +64,13 @@ export async function runMutations(output) {
         const fixture = await prepareFixture();
         await db.query(apply);
         try {
-          if (mode === 'observe') observed = runContract([], fixture);
-          else exact = runContract(['--expect-fail', observed.failed.join(',')], fixture);
+          if (mode === 'observe') observed = runContract(phase, [], fixture);
+          else exact = runContract(phase, ['--expect-fail', expected.join(',')], fixture);
           if (mode === 'observe') {
             assert.equal(observed.exit, 1, `${id}: mutated run did not fail`);
             assert.equal(observed.verdict, 'FAIL');
             assert(!observed.error || observed.error.startsWith('Error: CONTRACT_FAILURE'), `${id}: ${observed.error}`);
-            for (const check of required) assert(observed.failed.includes(check), `${id}: ${check} did not fail; got ${observed.failed}`);
+            assert.deepEqual([...observed.failed].sort(), [...expected].sort(), `${id}: observed failures differ from pinned set`);
             if (id === 'M10') {
               const contracts = JSON.parse(readFileSync(`${observed.runDir}/contracts.json`, 'utf8'));
               const detail = contracts.find(check => check.id === 'D01')?.error ?? '';
@@ -81,14 +82,14 @@ export async function runMutations(output) {
             assert.equal(exact.exit, 1, `${id}: --expect-fail must exit nonzero`);
             assert.equal(exact.verdict, 'FAIL');
             assert.equal(exact.error, '', `${id}: expected-fail mismatch: ${exact.error}`);
-            assert.deepEqual(new Set(exact.failed), new Set(observed.failed), `${id}: failed IDs drifted`);
+            assert.deepEqual([...exact.failed].sort(), [...expected].sort(), `${id}: failed IDs drifted`);
           }
         } finally { await db.query(revert); }
       }
-      const restored = runContract();
+      const restored = runContract(phase);
       assert.equal(restored.exit, 0, `${id}: restore run: ${restored.error}; failed=${restored.failed}`);
       assert.equal(restored.verdict, 'PASS');
-      results.push({ id, expected_fail: observed.failed, observed_exit: exact.exit, restored: restored.verdict, ...(anonRowExposure ? { anon_row_exposure: anonRowExposure } : {}) });
+      results.push({ id, expected_fail: expected, observed_exit: exact.exit, restored: restored.verdict, ...(anonRowExposure ? { anon_row_exposure: anonRowExposure } : {}) });
       writeFileSync(output, `${JSON.stringify(results, null, 2)}\n`);
       console.log(`MUTATION ${id} FAIL ${observed.failed.join(',')} RESTORED PASS`);
     }
@@ -96,4 +97,4 @@ export async function runMutations(output) {
   return results;
 }
 
-if (process.argv[1]?.endsWith('outbox-db-contract-mutations.mjs')) runMutations(process.argv[2]).catch(error => { console.error(error); process.exitCode = 1; });
+if (process.argv[1]?.endsWith('outbox-db-contract-mutations.mjs')) runMutations(process.argv[2], process.argv[3] === '--phase' ? process.argv[4] : null).catch(error => { console.error(error); process.exitCode = 1; });

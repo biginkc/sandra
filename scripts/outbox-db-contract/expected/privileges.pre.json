@@ -1,9 +1,4 @@
 {
-  "message_triggers": [
-    "trg_messages_fill_sms_conversation_id",
-    "guard_training_messages",
-    "messages_reject_dnc_locked_read"
-  ],
   "base_relacl": {
     "contacts": [
       "anon=arwdDxtm/postgres",
