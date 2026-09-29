@@ -12,7 +12,7 @@ import subprocess
 
 ROOT = "docs/performance/inbox-redesign/evidence"
 TIERS = {"pre-merge", "test-env", "prod-deploy"}
-KINDS = {"migration-dry-run", "catalog-fingerprint", "burst", "db-contract", "browser", "shared-readonly", "migration-apply", "app-deploy"}
+KINDS = {"migration-dry-run", "catalog-fingerprint", "burst", "perf-120k", "db-contract", "browser", "shared-readonly", "migration-apply", "app-deploy"}
 PHASES = {"pre", "post", "n/a"}
 TARGETS = {"disposable", "shared-test", "production", "n/a"}
 J5A = (
@@ -111,6 +111,17 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
     for field, allowed in (("kind", KINDS), ("phase", PHASES), ("target", TARGETS)):
         if manifest.get(field) not in allowed:
             raise EvidenceError(f"missing or unknown {field}: {directory}")
+    if manifest["kind"] == "perf-120k":
+        if parts[5] != "pre-merge" or manifest["phase"] != "n/a" or manifest["target"] != "disposable":
+            raise EvidenceError(f"perf-120k requires phase n/a and target disposable in pre-merge: {directory}")
+        if not (str(manifest.get("github_run_id", "")).isdigit()
+                and str(manifest.get("github_run_attempt", "")).isdigit()
+                and manifest.get("workflow_path") == ".github/workflows/inbox-heavy-verification.yml"
+                and manifest.get("workflow_input_sha") == tested_sha
+                and manifest.get("event") == "workflow_dispatch"
+                and manifest.get("head_branch") == "main"
+                and manifest.get("lane") == "perf-120k"):
+            raise EvidenceError(f"missing runner provenance: {directory}")
     if "external_artifacts" in manifest:
         raise EvidenceError(f"external_artifacts forbidden: {directory}")
     if manifest.get("github_run_id"):

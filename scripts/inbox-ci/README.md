@@ -11,3 +11,5 @@ Each run directory must contain `manifest.json` and every artifact named by its 
 - Compressed raw artifacts only: `raw_inflated_sha256` mapping the original filename to the SHA-256 of its uncompressed bytes.
 
 Keep complete FAIL and INCONCLUSIVE records: the downloader can seal them, and the approval gate rejects a latest required check unless its `exit_status` is zero and `verdict` is `PASS`. Never include `external_artifacts` or credentials in a record.
+
+`perf-120k.sh` is a dispatchable measurement lane. Its sealed manifest uses `kind: perf-120k`, `phase: n/a`, `target: disposable`, and `tier: pre-merge`, with the same workflow and runner provenance as other heavy lanes. Record the absolute §17 thresholds and measured values in `summary`. This kind appears in no J5a or J5b approval matrix; a PASS cannot replace a missing required check. The `burst` kind remains required for J5b.

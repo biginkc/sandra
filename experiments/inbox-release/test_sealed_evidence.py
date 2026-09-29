@@ -248,6 +248,44 @@ class SealedEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceError, "missing required check"):
             evaluate(self.repo, "j5a", self.sha)
 
+    def test_perf_120k_cannot_replace_missing_dry_run(self):
+        self.j5a_records(omit=J5A[0])
+        self.record("perf", kind="perf-120k", phase="n/a", target="disposable",
+                    completed="2026-09-28T13:00:00Z", extra=self.perf_provenance())
+        with self.assertRaisesRegex(EvidenceError, "missing required check.*migration-dry-run"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def perf_provenance(self):
+        return {"github_run_id": "2000", "github_run_attempt": "1", "lane": "perf-120k",
+                "artifact_name": f"heavy-perf-120k-{self.sha}-2000-1",
+                "workflow_path": ".github/workflows/inbox-heavy-verification.yml",
+                "workflow_input_sha": self.sha, "event": "workflow_dispatch", "head_branch": "main"}
+
+    def test_unknown_kind_rejected(self):
+        self.record(kind="outside-enum")
+        self.assert_fails("missing or unknown kind")
+
+    def test_perf_120k_wrong_phase_or_target_rejected(self):
+        for phase, target in (("pre", "disposable"), ("n/a", "shared-test")):
+            with self.subTest(phase=phase, target=target):
+                case = SealedEvidenceTests(methodName="test_valid_sealed_record")
+                case.setUp()
+                try:
+                    case.record(kind="perf-120k", phase=phase, target=target,
+                                extra=case.perf_provenance())
+                    case.assert_fails("perf-120k requires phase n/a and target disposable")
+                finally:
+                    case.doCleanups()
+
+    def test_perf_120k_requires_runner_provenance(self):
+        self.record(kind="perf-120k", phase="n/a", target="disposable")
+        self.assert_fails("missing runner provenance")
+
+    def test_perf_120k_sealable_with_provenance(self):
+        self.record(kind="perf-120k", phase="n/a", target="disposable",
+                    extra=self.perf_provenance())
+        self.assertEqual(evaluate(self.repo, self.sha, "pre-merge")["status"], "PASS")
+
     def test_j5a_latest_post_fail_masks_older_pass_negative(self):
         self.j5a_records()
         self.record("post-fail", kind="db-contract", phase="post", target="disposable", verdict="FAIL", completed="2026-09-28T13:00:00Z")
