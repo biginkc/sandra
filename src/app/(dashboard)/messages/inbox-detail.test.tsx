@@ -1515,6 +1515,16 @@ describe("<InboxDetail />", () => {
     expect(screen.getAllByText("Follow up")).toHaveLength(2);
     expect(screen.queryByText("Legacy follow-up")).not.toBeInTheDocument();
     expect(screen.queryByText("Nurture")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Also start a drip" })).not.toBeInTheDocument();
+  });
+
+  it("offers a drip after not interested and enrolls without changing the outcome", async () => {
+    const user = userEvent.setup();
+    render(<InboxDetail data={makeData({ contactId: "contact-not-now", outreachDispo: "not_interested" })} assigneeEmails={{}} currentUserId="user-1" />);
+    await user.click(screen.getByRole("button", { name: "Also start a drip" }));
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+    expect(startDripForLeadsMock).toHaveBeenCalledWith("s1", ["prop-1"]);
+    expect(setOutreachDispoMock).not.toHaveBeenCalled();
   });
 
   it("keeps lead promotion out of the More outcome menu", async () => {

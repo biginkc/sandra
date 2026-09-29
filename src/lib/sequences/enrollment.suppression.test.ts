@@ -70,3 +70,12 @@ it("reports enrollment as active when activity logging fails after insertion", a
   expect((await enrollLead(client as never, { sequenceId: "sequence-1", propertyId: "property-1" })).status).toBe("enrolled");
   expect(insert).toHaveBeenCalledOnce();
 });
+
+it("creates an active enrollment after not_interested", async () => {
+  const { client, insert } = clientFor({ outreach_dispo: "not_interested" });
+  expect(await enrollLead(client as never, { sequenceId: "sequence-1", propertyId: "property-1" }))
+    .toMatchObject({ status: "enrolled", enrollmentId: "enrollment-1" });
+  expect(insert).toHaveBeenCalledWith(expect.objectContaining({
+    property_id: "property-1", sequence_id: "sequence-1", status: "active",
+  }));
+});

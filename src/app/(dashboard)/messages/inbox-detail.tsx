@@ -148,8 +148,8 @@ function DispoBar({
     });
   }
 
-  async function chooseDrip(sequenceId: string, afterNurture = false): Promise<PickResult> {
-    if (afterNurture) {
+  async function chooseDrip(sequenceId: string, afterSavedOutcome = false): Promise<PickResult> {
+    if (afterSavedOutcome) {
       const result = await startDripForLeads(sequenceId, [propertyId]);
       if (!result.ok) return { status: "failed", reason: result.error.message, saved: false };
       return result.data.results[0];
@@ -209,6 +209,7 @@ function DispoBar({
       >
         Not interested
       </button>
+      {dispo === "not_interested" && <StartDripPicker triggerLabel="Also start a drip" onChoose={(id) => chooseDrip(id, true)} disabled={pending} />}
 
       <button
         onClick={() => apply("nurture")}
@@ -221,7 +222,6 @@ function DispoBar({
       >
         Follow up
       </button>
-      {dispo === "nurture" && <StartDripPicker triggerLabel="Also start a drip" onChoose={(id) => chooseDrip(id, true)} disabled={pending} />}
 
       <button
         type="button"

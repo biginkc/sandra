@@ -193,6 +193,21 @@ describe("setOutreachDispo", () => {
     expect(updatePayloads).toEqual([]);
   });
 
+  it.each(["dnc", "opted_out"])("refuses to overwrite %s with not_interested", async (dispo) => {
+    responseQueue = [{ data: property(dispo), error: null }];
+    expect(await setOutreachDispo("property-1", "not_interested"))
+      .toEqual({ ok: false, error: expect.stringContaining("cannot be changed") });
+    expect(updatePayloads).toEqual([]);
+    expect(startFollowUpDrip).not.toHaveBeenCalled();
+  });
+
+  it("refuses to overwrite a DNC-locked lead with not_interested", async () => {
+    responseQueue = [{ data: { ...property(), is_dnc_locked: true }, error: null }];
+    expect(await setOutreachDispo("property-1", "not_interested"))
+      .toEqual({ ok: false, error: expect.stringContaining("cannot be changed") });
+    expect(updatePayloads).toEqual([]);
+  });
+
   it("keeps the saved disposition when enrollment fails", async () => {
     responseQueue = [{ data: property(), error: null }, { data: { id: "property-1" }, error: null }];
     startFollowUpDrip.mockResolvedValueOnce({ results: [{ propertyId: "property-1", status: "failed", reason: "Lead only has a landline." }] });

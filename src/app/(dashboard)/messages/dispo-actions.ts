@@ -146,7 +146,7 @@ async function saveOutreachDispo(
   if (propErr || !prop) {
     return { ok: false, error: propErr?.message ?? "Property not found" };
   }
-  if ((dispo === "needs_sequence" || dispo === "nurture") &&
+  if ((dispo === "needs_sequence" || dispo === "nurture" || dispo === "not_interested") &&
       (prop.is_dnc_locked || prop.outreach_dispo === "dnc" || prop.outreach_dispo === "opted_out")) {
     return { ok: false, error: "This lead is do not contact or opted out. Its follow-up outcome cannot be changed." };
   }
@@ -169,7 +169,7 @@ async function saveOutreachDispo(
   updateQuery = prop.outreach_dispo === null
     ? updateQuery.is("outreach_dispo", null)
     : updateQuery.eq("outreach_dispo", prop.outreach_dispo);
-  if (dispo === "needs_sequence" || dispo === "nurture") updateQuery = updateQuery.eq("is_dnc_locked", false);
+  if (dispo === "needs_sequence" || dispo === "nurture" || dispo === "not_interested") updateQuery = updateQuery.eq("is_dnc_locked", false);
   const { error: updateErr, data: updated } = await updateQuery
     .select("id")
     .maybeSingle();
