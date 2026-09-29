@@ -14,6 +14,8 @@ import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import { BookAppointmentPopover } from "@/components/appointments/book-appointment-popover";
+import { StartDripPicker, type PickResult } from "@/components/sequences/start-drip-picker";
+import { startDripForLeads } from "@/app/(dashboard)/sequences/actions";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -38,6 +40,7 @@ import { AssignDropdown } from "./assign-dropdown";
 import {
   confirmAiDispositionReview,
   moveMessageThreadToLead,
+  setInboxDispoAndStartDrip,
   setOutreachDispo,
   type OutreachDispo,
 } from "./dispo-actions";
@@ -145,6 +148,26 @@ function DispoBar({
     });
   }
 
+  async function chooseDrip(sequenceId: string, afterNurture = false): Promise<PickResult> {
+    if (afterNurture) {
+      const result = await startDripForLeads(sequenceId, [propertyId]);
+      if (!result.ok) return { status: "failed", reason: result.error.message, saved: false };
+      return result.data.results[0];
+    }
+    const result = await setInboxDispoAndStartDrip(propertyId, "needs_sequence", sequenceId);
+    if (!result.ok) return { status: "failed", reason: result.error, saved: false };
+    setDispo("needs_sequence");
+    onDispositionChanged?.();
+    return result.enrollment ?? { status: "failed", reason: "Could not enroll this lead." };
+  }
+
+  async function leaveToOwner() {
+    const result = await setOutreachDispo(propertyId, "needs_sequence");
+    if (!result.ok) throw new Error(result.error);
+    setDispo("needs_sequence");
+    onDispositionChanged?.();
+  }
+
   function moveToLead() {
     startTransition(async () => {
       const result = await moveMessageThreadToLead(propertyId);
@@ -198,6 +221,7 @@ function DispoBar({
       >
         Follow up
       </button>
+      {dispo === "nurture" && <StartDripPicker triggerLabel="Also start a drip" onChoose={(id) => chooseDrip(id, true)} disabled={pending} />}
 
       <button
         type="button"
@@ -212,17 +236,9 @@ function DispoBar({
         Permanent DNC unavailable here
       </button>
 
-      <button
-        onClick={() => apply("needs_sequence")}
-        disabled={pending}
-        className={outcomeButtonClass(
-          dispo === "needs_sequence",
-          "bg-teal-50 border-teal-200 text-teal-800",
-        )}
-        data-testid="dispo-needs-sequence"
-      >
-        Needs sequence
-      </button>
+      <div data-testid="dispo-needs-sequence">
+        <StartDripPicker triggerLabel="Needs sequence" onChoose={chooseDrip} onLeave={leaveToOwner} disabled={pending} />
+      </div>
 
       <button
         onClick={moveToLead}
