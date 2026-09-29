@@ -209,6 +209,26 @@ describe("Leads Kanban foundation", () => {
     await user.click(screen.getByRole("button", { name: "Start drip" }));
     expect(screen.getByRole("dialog", { name: "" })).toHaveTextContent("Drip choices");
   });
+  it("drops hidden selections when search changes so they do not reappear", async () => {
+    const user = userEvent.setup();
+    renderBoard([makeLead(), makeLead({ id: "lead-b", address: "456 Oak St" })]);
+
+    await user.click(screen.getByRole("button", { name: /Select all 2 loaded leads/ }));
+    expect(screen.getByText("2 selected")).toBeVisible();
+
+    const search = screen.getByRole("textbox", { name: "Search leads" });
+    await user.type(search, "Main");
+    expect(screen.getByText("1 selected")).toBeVisible();
+    await user.clear(search);
+    expect(screen.getByRole("checkbox", { name: "Select 123 Main St" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select 456 Oak St" })).not.toBeChecked();
+
+    await user.type(search, "Oak");
+    expect(screen.queryByRole("button", { name: "Start drip" })).not.toBeInTheDocument();
+    await user.clear(search);
+    expect(screen.getByRole("checkbox", { name: "Select 123 Main St" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select 456 Oak St" })).not.toBeChecked();
+  });
   it("renders exactly one latest-contract badge in the first badge row", () => {
     renderBoard([
       makeLead({

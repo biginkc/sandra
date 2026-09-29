@@ -288,6 +288,14 @@ export function Kanban({
       ),
     [dayEnd, dayStart, motivationFiltered, search, urgency],
   );
+  useEffect(() => {
+    const visibleIds = new Set(filteredLeads.map((lead) => lead.id));
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- discard selections hidden by a changed board view.
+    setSelectedIds((previous) => {
+      if ([...previous].every((id) => visibleIds.has(id))) return previous;
+      return new Set([...previous].filter((id) => visibleIds.has(id)));
+    });
+  }, [filteredLeads]);
   const selectedLeads = filteredLeads.filter((lead) => selectedIds.has(lead.id));
   const allVisibleSelected = filteredLeads.length > 0 && filteredLeads.every((lead) => selectedIds.has(lead.id));
 
