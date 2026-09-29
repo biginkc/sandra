@@ -323,8 +323,10 @@ describe("lead sequence lifecycle actions", () => {
     expect(await changeDripAction("e1", "new")).toEqual({ ok: true, data: { propertyId: "p1", status: "enrolled", reason: "Enrolled" } });
     expect(order).toEqual(["cancel", "enroll"]);
     expect(enrollLead).toHaveBeenCalledWith(client, { propertyId: "p1", sequenceId: "new", enrolledByUserId: "u1" });
+    enrollLead.mockResolvedValueOnce({ status: "no_phone" });
+    expect(await changeDripAction("e1", "new")).toEqual({ ok: true, data: { propertyId: "p1", status: "skipped", reason: "Previous drip stopped. Lead has no phone number." } });
     enrollLead.mockRejectedValueOnce(new Error("enroll failed"));
-    expect(await changeDripAction("e1", "new")).toEqual({ ok: true, data: { propertyId: "p1", status: "failed", reason: "Could not enroll this lead." } });
+    expect(await changeDripAction("e1", "new")).toEqual({ ok: true, data: { propertyId: "p1", status: "failed", reason: "Previous drip stopped. Could not enroll this lead." } });
     client.rpc.mockResolvedValueOnce({ data: [{ outcome: "not_active" }], error: null });
     order.length = 0;
     expect(await changeDripAction("e1", "new")).toMatchObject({ ok: false, error: { code: "CANCEL_FAILED" } });

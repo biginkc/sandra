@@ -122,9 +122,9 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
       .sort((a, b) => b.run_at!.localeCompare(a.run_at!))[0];
     const message = lastSent?.message_id ? messages.get(lastSent.message_id) : null;
     const steps = (stepsBySequence.get(row.sequence_id) ?? []).sort((a, b) => a.step_index - b.step_index);
-    const textSteps = steps.filter((step) => step.action_type === "send_sms");
-    const totalSteps = textSteps.length;
-    const step = Math.min(totalSteps, Math.max(1, textSteps.filter((item) => item.step_index <= row.current_step_index).length));
+    const totalSteps = steps.length;
+    // Match the inbox: current_step_index is the zero-based next step to run.
+    const step = Math.min(totalSteps, Math.max(1, row.current_step_index + 1));
     const nextText = steps.find((item) => item.step_index >= row.current_step_index && item.action_type === "send_sms");
     const delay = nextText && row.next_run_at ? steps.filter((item) => item.step_index > row.current_step_index && item.step_index <= nextText.step_index)
       .reduce((sum, item) => sum + item.delay_after_previous_minutes, 0) : 0;

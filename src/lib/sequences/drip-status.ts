@@ -15,6 +15,9 @@ const REASONS: Record<string, string> = {
   dnc: "Lead is marked do not contact.",
   terminal_dispo: "Lead reached a final disposition.",
   template_missing: "The text template is missing.",
+  step_misconfigured: "This drip step is not set up to send a text.",
+  no_phone: "Lead has no phone number for texts.",
+  not_interested: "Lead is not interested.",
   "no approved sender for first-touch sequence send": "No approved sender is available for the first text.",
 };
 
@@ -28,6 +31,6 @@ export function dripStatus(status: string, pauseReason: string | null, canceled:
   if (status === "opted_out" || (status === "completed" && canceled)) return "Stopped";
   if (status === "completed") return repliedAfterLast ? "Replied" : "Finished, no reply";
   if (pauseReason === "inbound_reply" || pauseReason === "rep_sms_human_takeover") return "Replied";
-  if (pauseReason === "provider_failed" || pauseReason === "reconciliation_required" || pauseReason === "template_missing" || pauseReason === "no approved sender for first-touch sequence send") return "Couldn't send";
+  if (pauseReason === "provider_failed" || pauseReason === "reconciliation_required" || pauseReason === "template_missing" || pauseReason === "step_misconfigured" || pauseReason === "no_phone" || pauseReason === "no approved sender for first-touch sequence send") return "Couldn't send";
   return "Stopped";
 }
