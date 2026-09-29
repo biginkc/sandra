@@ -4,16 +4,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DripProgress } from "@/lib/sequences/drip-progress";
 import { DripCard } from "./drip-card";
 
-const { pauseEnrollmentAction, resumeEnrollmentAction, cancelEnrollment, changeDripAction, listDripProgress, pickResult } = vi.hoisted(() => ({
+const { pauseEnrollmentAction, resumeEnrollmentAction, retrySequenceStepAction, cancelEnrollment, changeDripAction, listDripProgress, pickResult } = vi.hoisted(() => ({
   pauseEnrollmentAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
   resumeEnrollmentAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
+  retrySequenceStepAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
   cancelEnrollment: vi.fn().mockResolvedValue({ ok: true, data: null }),
   changeDripAction: vi.fn().mockResolvedValue({ ok: true, data: { status: "skipped", reason: "Already enrolled" } }),
   listDripProgress: vi.fn().mockResolvedValue([]),
   pickResult: vi.fn(),
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
-vi.mock("@/app/(dashboard)/sequences/actions", () => ({ pauseEnrollmentAction, resumeEnrollmentAction, cancelEnrollment, changeDripAction, startDripForLeads: vi.fn() }));
+vi.mock("@/app/(dashboard)/sequences/actions", () => ({ pauseEnrollmentAction, resumeEnrollmentAction, retrySequenceStepAction, cancelEnrollment, changeDripAction, startDripForLeads: vi.fn() }));
 vi.mock("@/lib/sequences/drip-progress", () => ({ listDripProgress }));
 vi.mock("@/lib/supabase/client", () => ({ createClient: () => ({}) }));
 vi.mock("@/lib/errors/call-action", () => ({ callAction: (promise: Promise<unknown>) => promise }));
@@ -55,6 +56,16 @@ describe("DripCard", () => {
     render(<DripCard propertyId="lead-1" initialProgress={{ ...progress, enrollmentStatus: "paused", status: null }} />);
     await user.click(screen.getByRole("button", { name: "Resume" }));
     await waitFor(() => expect(resumeEnrollmentAction).toHaveBeenCalledWith("enrollment-1"));
+    expect(retrySequenceStepAction).not.toHaveBeenCalled();
+  });
+
+  it.each(["provider_failed", "reconciliation_required"])("retries a paused %s step instead of resuming", async (pauseReason) => {
+    const user = userEvent.setup();
+    render(<DripCard propertyId="lead-1" initialProgress={{ ...progress, enrollmentStatus: "paused", status: "Couldn't send", pauseReason }} />);
+    expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(retrySequenceStepAction).toHaveBeenCalledWith("enrollment-1"));
+    expect(resumeEnrollmentAction).not.toHaveBeenCalled();
   });
 
   it("shows the empty state", () => {

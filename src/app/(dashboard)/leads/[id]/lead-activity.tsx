@@ -142,20 +142,32 @@ export function LeadActivityTimeline(props: Props) {
     },
   });
   const [dripLabels, setDripLabels] = useState<Record<string, string>>({});
-  const outboundMessageIds = messages.filter((message) => message.direction === "outbound").map((message) => message.id).join(",");
+  const outboundMessageKey = messages.filter((message) => message.direction === "outbound").map((message) => `${message.id}:${message.status}`).join(",");
   useEffect(() => {
     let current = true;
-    if (!outboundMessageIds) return;
-    void (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (!outboundMessageKey) {
+      setDripLabels({});
+      return;
+    }
+    const ids = outboundMessageKey.split(",").map((entry) => entry.split(":")[0]);
+    let unresolved = ids;
+    let attempts = 0;
+    const reconcile = async () => {
+      attempts += 1;
       try {
-        const labels = await messageDripLabels(createClient(), outboundMessageIds.split(","));
-        if (current) setDripLabels(labels);
+        const labels = await messageDripLabels(createClient(), unresolved);
+        if (!current) return;
+        if (Object.keys(labels).length) setDripLabels((previous) => ({ ...previous, ...labels }));
+        unresolved = unresolved.filter((id) => !labels[id]);
       } catch {
-        if (current) setDripLabels((previous) => Object.keys(previous).length ? {} : previous);
+        if (!current) return;
       }
-    })();
-    return () => { current = false; };
-  }, [outboundMessageIds]);
+      if (unresolved.length && attempts < 4) timer = setTimeout(() => void reconcile(), 10_000);
+    };
+    void reconcile();
+    return () => { current = false; if (timer) clearTimeout(timer); };
+  }, [outboundMessageKey, propertyId]);
   const { notes, authorEmails: liveAuthorEmails } = useLeadNotes({
     propertyId,
     initial: noteSnapshot,

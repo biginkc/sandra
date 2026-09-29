@@ -207,6 +207,7 @@ export function Kanban({
   const [tagsByLead, setTagsByLead] = useState(customTags);
   const [messagesByLead, setMessagesByLead] = useState(lastMessageByPropertyId);
   const [dripsByLead, setDripsByLead] = useState<Record<string, DripProgress>>(initialDripsByLead ?? {});
+  const [dripRefreshToken, setDripRefreshToken] = useState(0);
   const [contractsByLead, setContractsByLead] = useState<
     Record<string, ContractStatusRecord>
   >(() => contractsFromLeads(initialLeads));
@@ -310,7 +311,7 @@ export function Kanban({
       });
     }).catch(() => { if (current) setDripsByLead((previous) => Object.keys(previous).length ? {} : previous); });
     return () => { current = false; };
-  }, [loadedDripIds, initialDripsByLead]);
+  }, [loadedDripIds, initialDripsByLead, dripRefreshToken]);
   useEffect(() => {
     const visibleIds = new Set(filteredLeads.map((lead) => lead.id));
     // eslint-disable-next-line react-hooks/set-state-in-effect -- discard selections hidden by a changed board view.
@@ -436,6 +437,7 @@ export function Kanban({
       return;
     }
     applyReplacement(result.data, filterKey);
+    setDripRefreshToken((token) => token + 1);
   };
 
   useEffect(() => {
@@ -934,6 +936,7 @@ export function Kanban({
       </div>
       {bulkDripOpen ? <BulkStartDripDialog open leads={bulkDripLeads} onClose={() => setBulkDripOpen(false)} onComplete={() => {
         setSelectedIds(new Set());
+        setDripRefreshToken((token) => token + 1);
         void refreshBoard();
         router.refresh();
       }} /> : null}

@@ -1,4 +1,3 @@
-import path from "node:path";
 import { expect, test } from "@playwright/test";
 
 const screens = [
@@ -17,5 +16,5 @@ for (const screen of screens) test(`PR-4 ${screen.route} fixture`, async ({ page
     await page.getByRole("checkbox", { name: "Select 12 Oak Hill Cluster" }).click();
     await expect(page.getByText("1 selected")).toBeVisible({ timeout: 15_000 });
   }
-  await page.screenshot({ path: path.resolve("docs/design/screenshots/drips", screen.file), fullPage: true });
+  await expect(page).toHaveScreenshot(screen.file, { fullPage: true });
 });

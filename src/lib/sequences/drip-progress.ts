@@ -14,6 +14,7 @@ export type DripProgress = {
   lastText: { sentAt: string; preview: string } | null;
   status: DripStatus | null;
   reason: string | null;
+  pauseReason?: string | null;
 };
 
 const CHUNK_SIZE = 100;
@@ -164,6 +165,7 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
       reason: row.status === "active" && missingCurrentStep
         ? "Drip will end — next step is missing."
         : pauseReasonText(row.pause_reason),
+      pauseReason: row.pause_reason,
     };
   });
 }

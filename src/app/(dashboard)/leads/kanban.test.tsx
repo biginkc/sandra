@@ -34,9 +34,9 @@ vi.mock("./board-actions", () => ({
 }));
 
 vi.mock("./bulk-start-drip-dialog", () => ({
-  BulkStartDripDialog: ({ leads, onClose }: { leads: { id: string; address: string }[]; onClose: () => void }) => <div role="dialog">
+  BulkStartDripDialog: ({ leads, onClose, onComplete }: { leads: { id: string; address: string }[]; onClose: () => void; onComplete: () => void }) => <div role="dialog">
     Drip choices
-    <button onClick={() => { enrollPropertyIds(leads.map((lead) => lead.id)); onClose(); }}>Enroll selected leads</button>
+    <button onClick={() => { enrollPropertyIds(leads.map((lead) => lead.id)); onComplete(); onClose(); }}>Enroll selected leads</button>
   </div>,
 }));
 
@@ -193,6 +193,20 @@ it("loads drip progress for all loaded leads in one read without fetching per ca
   expect(listDripProgress).toHaveBeenCalledTimes(1);
 });
 
+it("shows a drip chip after bulk enrollment when the only lead ID is unchanged", async () => {
+  const user = userEvent.setup();
+  listDripProgress.mockResolvedValueOnce([]).mockResolvedValueOnce([
+    { propertyId: "lead-a", status: "Waiting", step: 1, totalSteps: 4 },
+  ]);
+  renderBoard([makeLead()]);
+  await waitFor(() => expect(listDripProgress).toHaveBeenCalledTimes(1));
+  await user.click(screen.getByRole("checkbox", { name: "Select 123 Main St" }));
+  await user.click(screen.getByRole("button", { name: "Start drip" }));
+  await user.click(screen.getByRole("button", { name: "Enroll selected leads" }));
+  expect(await screen.findByTestId("lead-drip-chip-lead-a")).toHaveTextContent("Drip · 1 of 4");
+  expect(listDripProgress).toHaveBeenNthCalledWith(2, expect.anything(), ["lead-a"]);
+});
+
 function column(status: string): HTMLElement {
   const element = document.querySelector(`[data-status="${status}"]`);
   if (!(element instanceof HTMLElement)) {
@@ -249,7 +263,7 @@ describe("Leads Kanban foundation", () => {
     await user.click(screen.getByRole("button", { name: "Enroll selected leads" }));
     expect(enrollPropertyIds).toHaveBeenCalledExactlyOnceWith(["lead-a"]);
     await user.clear(search);
-    expect(screen.getByRole("checkbox", { name: "Select 123 Main St" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select 123 Main St" })).not.toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Select 456 Oak St" })).not.toBeChecked();
 
     await user.type(search, "Oak");

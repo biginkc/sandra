@@ -88,6 +88,10 @@ describe("drip status", () => {
 });
 
 describe("listDripProgress", () => {
+  it("preserves the pause code for reason-specific recovery", async () => {
+    const result = await listDripProgress(client() as never, ["p1"]);
+    expect(result[0]).toMatchObject({ pauseReason: "inbound_reply", reason: "Lead replied to a drip text." });
+  });
   it.each([
     ["matching source and property", "p2", "e2", "Stopped"],
     ["different source", "p2", "e3", "Finished, no reply"],
