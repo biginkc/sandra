@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 import { loadTestEnv } from "@tests/integration/env";
 
 const sql = readFileSync("supabase/migrations/20260929190000_sequence_stats.sql", "utf8");
+const hideDeadSql = readFileSync("supabase/migrations/20260929230000_sequence_needs_person_hide_dead.sql", "utf8");
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 if (!url) throw new Error("Missing TEST_SUPABASE_DB_URL");
 const pg = new Client({ connectionString: url });
@@ -25,6 +26,8 @@ beforeAll(async () => {
   await pg.connect();
   await pg.query(sql);
   await pg.query(sql); // idempotency is part of the contract.
+  await pg.query(hideDeadSql);
+  await pg.query(hideDeadSql);
 });
 afterAll(async () => { await pg.end(); });
 beforeEach(async () => {
@@ -110,6 +113,16 @@ it("returns finished, failed, and unassigned needs-sequence leads", async () => 
   expect(byProperty[ids.needs]).toBe("needs_sequence");
   expect(byProperty[ids.answered]).toBeUndefined();
   expect(byProperty[ids.canceled]).toBeUndefined();
+});
+
+it("removes a lead from needs-person triage after it is marked Dead", async () => {
+  await pg.query("update public.properties set status='dead' where id in ($1,$2,$3)", [ids.finished, ids.failed, ids.needs]);
+  await role(actor);
+  const result = await pg.query("select property_id from public.sequence_needs_person($1)", [org]);
+  const listed = result.rows.map((row) => row.property_id);
+  expect(listed).not.toContain(ids.finished);
+  expect(listed).not.toContain(ids.failed);
+  expect(listed).not.toContain(ids.needs);
 });
 
 it("rejects an org without active membership", async () => {
