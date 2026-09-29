@@ -403,7 +403,11 @@ export class JitterCallTransport implements CallTransport {
       // ready event can settle registerRtc(). If connect rejects or ready
       // times out, retire that exact failed client locally; leaving it owned
       // would make the next manual reconnect take the same-client path.
-      if (recoveryClient && this.rtcClient === recoveryClient)
+      if (
+        recoveryClient &&
+        this.rtcClient === recoveryClient &&
+        !this.hasLiveMediaCapability()
+      )
         this.releaseRecoveryClient(recoveryClient, recoveryAudio);
       else recoveryAudio?.remove();
       if (!this.isRecoverySetupCurrent(recoveryGeneration, handle.id))
@@ -1119,7 +1123,8 @@ export class JitterCallTransport implements CallTransport {
         this.recoveryAttachCandidates.clear();
         this.recoveryAttachAuthority = null;
         this.expectedIncoming = false;
-        if (staleClient) this.releaseRecoveryClient(staleClient, staleAudio);
+        if (staleClient && !this.hasLiveMediaCapability())
+          this.releaseRecoveryClient(staleClient, staleAudio);
         if (!this.terminal && !this.hangupRequested)
           this.requireAudioReconnect(
             new Error("Telnyx recovery generation became stale."),
@@ -1910,6 +1915,18 @@ export class JitterCallTransport implements CallTransport {
     this.clearRecoveryTimer();
     this.audioRecoveryRequired = true;
     this.emit("audio_reconnect_required");
+    // A browser-media failure has no authority over the provider leg. Keep
+    // the retained call's exact provider-status loop alive so only Jitter can
+    // settle its terminal lifecycle while the operator reconnects audio.
+    if (this.retainedCall && this.callId)
+      void this.reconcileRetainedProviderProof(this.callId);
+  }
+
+  private hasLiveMediaCapability(): boolean {
+    // A retained call has a historical live timestamp before its new browser
+    // session connects. Require a bound browser call as well, so registration
+    // failures before any Attach remain eligible for local cleanup.
+    return this.liveAt !== null && this.currentCall !== null;
   }
 
   private async markAudioRecovered(call: TelnyxCallLike): Promise<boolean> {

@@ -3322,6 +3322,114 @@ describe("JitterCallTransport", () => {
     },
   );
 
+  it("keeps recovered live RTC and provider polling when registration expires after RTP advances", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakeRtcClient();
+      client.connect.mockResolvedValue(undefined);
+      const getProviderStatus = vi.fn(async () => ({
+        ok: true as const,
+        data: { state: "active" as const },
+      }));
+      const harness = transportHarness({
+        createRtcClient: vi.fn(async () => client),
+        getProviderStatus,
+        registrationTimeoutMs: 100,
+      });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+
+      const recovery = harness.transport.recover?.(
+        { id: "call-1" },
+        "2026-08-21T20:00:00.000Z",
+      );
+      await flush();
+      expect(client.connect).toHaveBeenCalledTimes(1);
+      const attach = new FakeCall();
+      attach.state = "active";
+      attachConnectedPeer(attach);
+      client.emit("telnyx.notification", {
+        type: "callUpdate",
+        call: attach,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(states.at(-1)).toBe("live");
+
+      await vi.advanceTimersByTimeAsync(100);
+      await recovery;
+
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+      expect(client.serverDisconnect).not.toHaveBeenCalled();
+      expect(
+        (harness.transport as unknown as { rtcClient: unknown }).rtcClient,
+      ).toBe(client);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(getProviderStatus).toHaveBeenCalledTimes(3);
+      await expect(harness.transport.reconnectAudio()).resolves.toBe(true);
+      await expect(harness.transport.hangup()).resolves.toMatchObject({
+        outcome: "connected_human",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a live client when a stale recovery generation receives its existing-call update", async () => {
+    vi.useFakeTimers();
+    try {
+      const secondRecovery = deferred<
+        JitterProxyResult<{ recovering: true }>
+      >();
+      const recoverAudio = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: true as const,
+          data: { recovering: true as const },
+        })
+        .mockImplementationOnce(() => secondRecovery.promise);
+      const harness = transportHarness({
+        recoverAudio,
+        registrationTimeoutMs: 100,
+      });
+      const states: string[] = [];
+      harness.transport.onStateChange((state) => states.push(state));
+      await harness.transport.recover?.(
+        { id: "call-1" },
+        "2026-08-21T20:00:00.000Z",
+      );
+      const attach = new FakeCall();
+      attach.state = "active";
+      attachConnectedPeer(attach);
+      harness.rtc.emit("telnyx.notification", {
+        type: "callUpdate",
+        call: attach,
+      });
+      await vi.waitFor(() => expect(states.at(-1)).toBe("live"));
+
+      harness.rtc.emit("telnyx.error", { error: { code: 45_003 } });
+      await expect(harness.transport.reconnectAudio()).resolves.toBe(true);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+
+      const reconnect = harness.transport.reconnectAudio();
+      await vi.waitFor(() => expect(recoverAudio).toHaveBeenCalledTimes(2));
+      harness.rtc.emit("telnyx.notification", {
+        type: "callUpdate",
+        call: attach,
+      });
+
+      expect(harness.rtc.serverDisconnect).not.toHaveBeenCalled();
+      expect(
+        (harness.transport as unknown as { rtcClient: unknown }).rtcClient,
+      ).toBe(harness.rtc);
+      expect(states.at(-1)).toBe("audio_reconnect_required");
+      secondRecovery.resolve({ ok: true, data: { recovering: true } });
+      await expect(reconnect).resolves.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rebuilds RTC setup when the first retained client setup failed before construction", async () => {
     const prepareMicrophone = vi
       .fn()
