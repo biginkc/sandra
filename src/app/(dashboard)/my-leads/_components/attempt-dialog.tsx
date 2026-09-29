@@ -9,7 +9,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { StartDripPicker } from "@/components/sequences/start-drip-picker"
-import { startDripForLeads } from "@/app/(dashboard)/sequences/actions"
+import { startDripForLeads, type DripChoice } from "@/app/(dashboard)/sequences/actions"
 import { Textarea } from "@/components/ui/textarea"
 import {
   DIALOG_CONTENT_CLASS,
@@ -74,6 +74,7 @@ export type AcquisitionAttemptDialogProps = {
   callReferencesError?: string | null
   onRetryCallReferences?: () => void
   onDripChanged?: () => void
+  previewDripChoices?: DripChoice[]
   onOpenChange: (open: boolean) => void
   onSubmit: AcquisitionSubmit<AcquisitionAttemptFormPayload>
 }
@@ -88,6 +89,7 @@ export function AcquisitionAttemptDialog({
   callReferencesError = null,
   onRetryCallReferences,
   onDripChanged,
+  previewDripChoices,
   onOpenChange,
   onSubmit,
 }: AcquisitionAttemptDialogProps) {
@@ -296,7 +298,7 @@ export function AcquisitionAttemptDialog({
         />
         {savedForDrip ? <div className="space-y-4 overflow-y-auto">
           <p role="status" className="text-sm text-teal-800">Attempt saved. Add to a drip (optional).</p>
-          <StartDripPicker inline onChoose={async sequenceId => {
+          <StartDripPicker inline previewChoices={previewDripChoices} onChoose={async sequenceId => {
             const result = await startDripForLeads(sequenceId, [propertyId]);
             if (!result.ok) return {status:'failed',reason:result.error.message};
             const item=result.data.results[0];

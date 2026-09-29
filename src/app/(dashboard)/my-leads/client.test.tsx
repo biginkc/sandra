@@ -95,6 +95,7 @@ vi.mock("./_components/lifecycle-dialog", () => ({
 }))
 
 import type { AcquisitionKpis, AcquisitionRoster, QueueSnapshot } from "@/lib/my-leads/queries"
+import type { MyLeadDripSnapshot } from "@/lib/my-leads/drip-queries"
 import { MyLeadsClient } from "./client"
 
 const viewer = {
@@ -180,7 +181,7 @@ function snapshot(address: string): QueueSnapshot {
   }
 }
 
-function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis) {
+function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initialDrips:MyLeadDripSnapshot|null=null) {
   return render(
     <MyLeadsClient
       viewer={viewer}
@@ -188,6 +189,7 @@ function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis) {
       initialMemberId={viewer.userId}
       initialSnapshot={initialSnapshot}
       initialKpis={initialKpis}
+      initialDrips={initialDrips}
     />,
   )
 }
@@ -198,6 +200,24 @@ describe("MyLeadsClient", () => {
     mocks.submitMyLeadCommand.mockReset()
     mocks.loadMyLeadCallReferences.mockReset()
   })
+
+  it("opens Log attempt for a pinned reply outside the first 20 rows", async()=>{
+    const first=snapshot("Loaded Lane");
+    const template=first.stages.not_contacted!.rows[0];
+    first.stages.not_contacted!.rows=Array.from({length:20},(_,index)=>({...template,propertyId:`loaded-${index}`}));
+    first.stages.not_contacted!.totalCount=21;
+    const pinned={...template,propertyId:'pinned-reply',address:'Pinned Reply Lane'};
+    const drips:MyLeadDripSnapshot={active:[],replied:[{propertyId:pinned.propertyId,enrollmentId:'enrollment',
+      sequenceId:'sequence',sequenceName:'Follow-up',step:1,totalSteps:2,nextTextAt:null,lastText:null,
+      status:'Replied',reason:null,stage:'not_contacted',repliedAt:'2026-09-11T14:00:00Z',queueRow:pinned}],
+      repliedCount:1,counts:{not_contacted:0,contacted:0,needs_offer:0,offer_sent:0,under_contract:0}};
+    mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});
+    renderClient(first,kpis,drips);
+    expect(screen.getByTestId('queue-address')).toHaveTextContent('Pinned Reply Lane');
+    await userEvent.setup().click(screen.getByRole('button',{name:'Log attempt'}));
+    expect(screen.getByRole('dialog',{name:/Log an attempt/i})).toBeVisible();
+    expect(mocks.loadMyLeadCallReferences).toHaveBeenCalledWith('pinned-reply','rep-1');
+  });
 
   it("updates the visible check time every 30 seconds even when attempts do not change", async () => {
     vi.useFakeTimers()

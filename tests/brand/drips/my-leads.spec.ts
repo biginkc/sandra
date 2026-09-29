@@ -1,7 +1,4 @@
-import path from 'node:path';
 import { expect, test } from '@playwright/test';
-
-const screenshot = (name:string) => path.resolve('docs/design/screenshots/drips', `${name}.png`);
 
 test('My Leads drip grouping and replied flag', async ({page}) => {
   test.setTimeout(90_000);
@@ -11,7 +8,7 @@ test('My Leads drip grouping and replied flag', async ({page}) => {
   await expect(page.getByTestId('my-lead-drip-fixture-drip-1')).toContainText('text 2 of 4');
   await expect(page.getByTestId('kpi-replied-to-drip')).toContainText('1');
   await expect(page.getByTestId('my-lead-row-fixture-replied')).toContainText('Replied to drip');
-  await page.screenshot({path:screenshot('my-leads-main'),fullPage:true});
+  await expect(page).toHaveScreenshot('my-leads-main.png', {fullPage:true});
 });
 
 test('Log attempt fixture', async ({page}) => {
@@ -19,7 +16,14 @@ test('Log attempt fixture', async ({page}) => {
   await page.goto('/brand/drips/log-attempt');
   await page.getByRole('button',{name:'Open fixture dialog'}).click();
   await expect(page.getByRole('dialog', {name:/Log an attempt/i})).toBeVisible();
-  await page.screenshot({path:screenshot('my-leads-log-attempt')});
+  await expect(page).toHaveScreenshot('my-leads-log-attempt.png');
+  await page.getByLabel('Source').selectOption('manual');
+  await page.getByLabel('External outcome').selectOption('reached');
+  await page.getByLabel('When did the outreach occur?').fill('2026-09-29T09:00');
+  await page.getByRole('button',{name:'Save attempt'}).click();
+  await expect(page.getByText('Attempt saved. Add to a drip (optional).')).toBeVisible();
+  await expect(page.getByRole('button',{name:/Seller follow-up/})).toBeVisible();
+  await expect(page).toHaveScreenshot('my-leads-post-save-picker.png');
 });
 
 test('Handoff fixture', async ({page}) => {
@@ -31,5 +35,5 @@ test('Handoff fixture', async ({page}) => {
   await expect(page.getByText('Add to a drip (optional)')).toBeVisible();
   await page.getByRole('button',{name:/Seller follow-up/}).click();
   await expect(page.getByLabel('Reassign to')).toHaveCount(0);
-  await page.screenshot({path:screenshot('my-leads-handoff')});
+  await expect(page).toHaveScreenshot('my-leads-handoff.png');
 });

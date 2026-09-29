@@ -38,11 +38,23 @@ export function groupMyLeadDrips(rows: ScopeRow[], progress: DripProgress[], sea
 export async function listMyLeadsInDrip(repId: string, search = ''): Promise<MyLeadDripSnapshot> {
   const viewer = await myLeadsViewer();
   if (!viewer.isOwner && viewer.userId !== repId) throw new MyLeadsReadError('FORBIDDEN', 'You can view only your own queue.');
-  const { data, error } = await viewer.client.rpc('fn_list_my_leads_drip_scope', {
-    p_org_id: viewer.orgId, p_member_id: repId,
-  });
-  if (error || !Array.isArray(data)) throw new MyLeadsReadError('READ_FAILED', 'Drip status could not load. Please retry.');
-  const rows = data as unknown as ScopeRow[];
+  const rows: ScopeRow[] = [];
+  const pageSize = 1000;
+  let offset = 0;
+  let expectedCount: number | null = null;
+  for (;;) {
+    const { data, error, count } = await viewer.client.rpc('fn_list_my_leads_drip_scope', {
+      p_org_id: viewer.orgId, p_member_id: repId,
+    }, { count: 'exact' }).order('property_id').range(offset, offset + pageSize - 1);
+    if (error || !Array.isArray(data) || count === null || count === undefined ||
+        (expectedCount !== null && count !== expectedCount) || count < rows.length + data.length)
+      throw new MyLeadsReadError('READ_FAILED', 'Drip status could not load completely. Please retry.');
+    expectedCount = count;
+    rows.push(...data as ScopeRow[]);
+    if (rows.length === count) break;
+    if (data.length === 0) throw new MyLeadsReadError('READ_FAILED', 'Drip status could not load completely. Please retry.');
+    offset += data.length;
+  }
   const progress = await listDripProgress(viewer.client, rows.map(row => row.property_id));
   return groupMyLeadDrips(rows, progress, search);
 }

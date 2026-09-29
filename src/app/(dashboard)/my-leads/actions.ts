@@ -3,7 +3,6 @@ import { revalidatePath } from 'next/cache';
 import { reportError } from '@/lib/errors/report';
 import type { Json } from '@/lib/supabase/types';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { setOutreachDispo } from '@/app/(dashboard)/messages/dispo-actions';
 import { startDripForLeads } from '@/app/(dashboard)/sequences/actions';
 import { composeRepSms, type RepSmsComposition, type RepSmsCompositionInput } from '@/lib/messaging/rep-sms-composition';
 import { createRepSmsObligationFence, dispatchRepSms } from '@/lib/messaging/rep-sms';
@@ -24,31 +23,20 @@ export async function loadMyLeadsStage(input:{memberId:string;search:string;stag
   catch(error){reportMyLeadsReadFailure('my_leads_stage');return {ok:false as const,message:error instanceof Error?error.message:'Could not load this section.'};}
 }
 /** Handoff with a drip records the outcome while keeping the current owner. */
-export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:string;sequenceId:string;reason:'not_interested';expectedEpisodeId:string;expectedQueueVersion:number;expectedSharedStatus:string}) {
+export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:string;sequenceId:string;reason:'not_interested';expectedEpisodeId:string;expectedQueueVersion:number;expectedSharedStatus:string;idempotencyKey:string}) {
   try {
-    if(input.reason!=='not_interested'||!input.sequenceId) return {ok:false as const,message:'Choose an eligible handoff reason and drip.'};
+    if(input.reason!=='not_interested'||!input.sequenceId||!input.idempotencyKey) return {ok:false as const,message:'Choose an eligible handoff reason and drip.'};
     const viewer=await myLeadsViewer();
     if(!viewer.isOwner&&viewer.userId!==input.memberId) return {ok:false as const,message:'You can update only your own queue.'};
-    const admin=createAdminClient();
-    const [settings,member,property,episode,queue]=await Promise.all([
-      admin.from('acquisition_org_settings').select('my_leads_enabled').eq('org_id',viewer.orgId).maybeSingle(),
-      admin.from('memberships').select('user_id,access_status,deletion_prepared_at,access_expires_at').eq('org_id',viewer.orgId).eq('user_id',input.memberId).maybeSingle(),
-      admin.from('properties').select('id,status,assigned_user_id,is_dnc_locked,deleted_at').eq('org_id',viewer.orgId).eq('id',input.propertyId).maybeSingle(),
-      admin.from('acquisition_assignment_episodes').select('id').eq('org_id',viewer.orgId).eq('property_id',input.propertyId).eq('assignee_user_id',input.memberId).is('ended_at',null).maybeSingle(),
-      admin.from('acquisition_queue_states').select('version,archived_at').eq('org_id',viewer.orgId).eq('property_id',input.propertyId).maybeSingle(),
-    ]);
-    if(settings.error||member.error||property.error||episode.error||queue.error||!settings.data?.my_leads_enabled||
-      !member.data||member.data.access_status!=='active'||member.data.deletion_prepared_at||
-      (member.data.access_expires_at&&new Date(member.data.access_expires_at)<=new Date())||
-      !property.data||!episode.data) return {ok:false as const,message:'This lead is unavailable. Refresh and try again.'};
-    if(property.data.assigned_user_id!==input.memberId||property.data.deleted_at||property.data.is_dnc_locked||
-      ['closed','dead','dnc'].includes(property.data.status)||queue.data?.archived_at||
-      property.data.status!==input.expectedSharedStatus||episode.data.id!==input.expectedEpisodeId||
-      (queue.data?.version??0)!==input.expectedQueueVersion) return {ok:false as const,message:'This lead changed. Refresh before trying again.'};
-    const saved=await setOutreachDispo(input.propertyId,'needs_sequence');
-    if(!saved.ok) return {ok:false as const,message:saved.error};
-    // Dispo uses a compare-and-swap on the current value. On a retry after a
-    // saved outcome, enrollLead checks for an existing active enrollment.
+    const {data,error}=await (viewer.client as unknown as {rpc(name:string,args:Record<string,string|number>):Promise<{data:{ok?:boolean}|null;error:{message:string}|null}>}).rpc('fn_handoff_acquisition_lead_to_drip',{
+      p_org_id:viewer.orgId,p_member_id:input.memberId,p_property_id:input.propertyId,
+      p_expected_episode_id:input.expectedEpisodeId,p_expected_queue_version:input.expectedQueueVersion,
+      p_expected_shared_status:input.expectedSharedStatus,p_idempotency_key:input.idempotencyKey,
+    });
+    if(error||data?.ok!==true) return {ok:false as const,message:error?.message?.includes('STALE_')
+      ? 'This lead changed. Refresh before trying again.':'This lead is unavailable. Refresh and try again.'};
+    revalidatePath('/my-leads');revalidatePath('/leads');revalidatePath(`/leads/${input.propertyId}`);
+    // The RPC commits the guarded outcome before enrollment starts.
     const enrolled=await startDripForLeads(input.sequenceId,[input.propertyId]);
     if(!enrolled.ok) return {ok:true as const,dripFailure:enrolled.error.message};
     const item=enrolled.data.results[0];

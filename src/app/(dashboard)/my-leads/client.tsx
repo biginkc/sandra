@@ -47,6 +47,11 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const openingScope=JSON.stringify([member,search]);
   const activeScope=useRef(openingScope);activeScope.current=openingScope;
   const currentSnapshot=useRef(snapshot);currentSnapshot.current=snapshot;
+  const currentDrips=useRef(drips);
+  useEffect(()=>{currentDrips.current=drips;},[drips]);
+  const findRow=(readSnapshot:QueueSnapshot|null,readDrips:MyLeadDripSnapshot|null|undefined,id:string)=>
+    Object.values(readSnapshot?.stages??{}).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===id)??
+    [...(readDrips?.replied??[]),...(readDrips?.active??[])].find(row=>row.propertyId===id)?.queueRow??null;
   const mutationReads=useRef(new Map<string,{scope:string;episodeId:string|null;requestId:number;read:Promise<CurrentRead>}>());
   const renderedRead=useRef<{snapshot:QueueSnapshot;requestId:number;scope:string}|null>(null);
   useEffect(()=>{
@@ -70,7 +75,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       const result=await loadMyLeads({memberId:member,search,period:'today'});
       if(activeDialog.current!==opening)return;
       if(!result.ok)throw new Error('read failed');
-      const row=Object.values(result.snapshot.stages).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===opening.row.propertyId);
+      const row=findRow(result.snapshot,result.drips,opening.row.propertyId);
       // Never move a retained draft into a different assignment episode.
       if(!row||row.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
         setRecovery({opening,message:'This lead is unavailable in this queue or its assignment changed. Your draft is retained; copy it before closing. Reopen the lead from the current queue to start a new update.',blocked:true,busy:false});return;
@@ -147,18 +152,18 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     document.addEventListener('visibilitychange',onVisible);window.addEventListener('focus',onVisible);
     return()=>{cancelled=true;clearTimeout(timer);document.removeEventListener('visibilitychange',onVisible);window.removeEventListener('focus',onVisible);};
   },[snapshot,refresh,roster.settings.enabled]);
-  const rawRow=(id:string)=>Object.values(snapshot?.stages??{}).flatMap(p=>p?.rows??[]).find(r=>r.propertyId===id);
+  const rawRow=(id:string)=>findRow(snapshot,drips,id);
   const finishOpening=async(opening:Opening,read:Promise<CurrentRead>)=>{
     pendingOpening.current=opening;
     setOpeningStatus({opening,message:'Loading current lead…',busy:true});
     const result=await read;
     if(pendingOpening.current!==opening||activeScope.current!==opening.scope)return;
     if(!result?.ok){setOpeningStatus({opening,message:'Could not load current lead details. Retry to continue.',busy:false});return;}
-    const fresh=Object.values(result.snapshot.stages).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===opening.row.propertyId);
+    const fresh=findRow(result.snapshot,result.drips,opening.row.propertyId);
     if(!fresh||fresh.assignmentEpisodeId!==opening.row.assignmentEpisodeId){
       setOpeningStatus({opening,message:'This lead is unavailable or its assignment changed. Refresh the queue and reopen it.',busy:false});return;
     }
-    const latest=Object.values(currentSnapshot.current?.stages??{}).flatMap(page=>page?.rows??[]).find(row=>row.propertyId===fresh.propertyId);
+    const latest=findRow(currentSnapshot.current,currentDrips.current,fresh.propertyId);
     // Do not rewind an even newer rendered snapshot, or silently change episodes.
     if(!latest||latest.assignmentEpisodeId!==fresh.assignmentEpisodeId){setOpeningStatus({opening,message:'This lead assignment changed. Refresh the queue and reopen it.',busy:false});return;}
     const row=latest&&latest.queueVersion>=fresh.queueVersion?latest:fresh;
@@ -229,7 +234,10 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     try {
       result=command==='handoff'&&typeof input.sequenceId==='string'&&input.sequenceId
         ? await submitMyLeadHandoffDrip({memberId:member,propertyId:row.propertyId,sequenceId:input.sequenceId,
-            reason:'not_interested',expectedEpisodeId:row.assignmentEpisodeId,expectedQueueVersion:row.queueVersion,expectedSharedStatus:row.sharedStatus})
+            reason:'not_interested',expectedEpisodeId:typeof input.expectedEpisodeId==='string'?input.expectedEpisodeId:row.assignmentEpisodeId,
+            expectedQueueVersion:typeof input.expectedQueueVersion==='number'?input.expectedQueueVersion:row.queueVersion,
+            expectedSharedStatus:typeof input.expectedSharedStatus==='string'?input.expectedSharedStatus:row.sharedStatus,
+            idempotencyKey:submission.current.key})
         : await submitMyLeadCommand(command,input);
     } catch(error) {
       // A rejected server action can mean the request reached Postgres but its
@@ -267,7 +275,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       else {await read;router.refresh();}
     }
     return result;
-  },[dialog,refresh,router,recovery,openingScope]);
+  },[dialog,refresh,router,recovery,openingScope,member]);
   const pages=snapshot?stagePages(snapshot,drips):null;
   if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
   const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;

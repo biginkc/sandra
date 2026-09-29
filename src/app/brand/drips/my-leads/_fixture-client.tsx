@@ -55,7 +55,9 @@ export function MyLeadsBrandFixture({view}:{view:'main'|'log-attempt'|'handoff'}
       onLoadDetail={async()=>({ok:true,detail:blankDetail})} onStageAction={()=>{}} />
     {view!=='main'&&<button type="button" onClick={()=>setOpen(true)} className="mt-4 rounded border px-3 py-2">Open fixture dialog</button>}
     {view==='log-attempt'&&<AcquisitionAttemptDialog open={open} onOpenChange={setOpen}
-      propertyId="fixture-new" propertyLabel="19 Pine Road" callReferenceOptions={[]} onSubmit={async()=>({ok:true})}/>}
+      propertyId="fixture-new" propertyLabel="19 Pine Road" callReferenceOptions={[]}
+      previewDripChoices={[{id:'drip-1',name:'Seller follow-up',textCount:4,days:90,firstSend:'Today'}]}
+      onSubmit={async()=>({ok:true})}/>}
     {view==='handoff'&&<AcquisitionLifecycleDialog open={open} onOpenChange={setOpen} mode="handoff"
       propertyId="fixture-new" propertyLabel="19 Pine Road" recipientOptions={[{id:'fixture-recipient',label:'Follow-up owner'}]}
       initialRecipientUserId="fixture-recipient" previewDripChoices={[{id:'drip-1',name:'Seller follow-up',textCount:4,days:90,firstSend:'Today'},

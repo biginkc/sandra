@@ -50,4 +50,105 @@ end;
 $$;
 revoke all on function public.fn_list_my_leads_drip_scope(uuid, uuid) from public, anon;
 grant execute on function public.fn_list_my_leads_drip_scope(uuid, uuid) to authenticated;
+
+-- Keep the same lock order as acquisition workflow commands. A preflight
+-- read cannot authorize a later disposition write after reassignment.
+create or replace function public.fn_handoff_acquisition_lead_to_drip(
+  p_org_id uuid, p_member_id uuid, p_property_id uuid,
+  p_expected_episode_id uuid, p_expected_queue_version bigint,
+  p_expected_shared_status text, p_idempotency_key uuid
+)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_actor uuid := public.my_leads_workflow_require_actor(p_org_id);
+  v_property public.properties%rowtype;
+  v_queue public.acquisition_queue_states%rowtype;
+  v_episode public.acquisition_assignment_episodes%rowtype;
+  v_queue_exists boolean;
+  v_hash text;
+  v_replay jsonb;
+  v_command_id uuid := extensions.gen_random_uuid();
+  v_result jsonb;
+begin
+  if p_member_id is null or p_property_id is null or p_expected_episode_id is null
+    or p_expected_queue_version is null or p_expected_queue_version < 0
+    or p_expected_shared_status is null or p_idempotency_key is null then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
+  end if;
+  if v_actor <> p_member_id and not exists (
+    select 1 from public.memberships m where m.org_id = p_org_id and m.user_id = v_actor
+      and m.role = 'owner' and m.access_status = 'active'
+  ) then raise exception 'FORBIDDEN' using errcode = '42501'; end if;
+  if not exists (select 1 from public.acquisition_org_settings s
+    where s.org_id = p_org_id and s.my_leads_enabled) or not exists (
+    select 1 from public.memberships m where m.org_id = p_org_id and m.user_id = p_member_id
+      and m.access_status = 'active' and m.deletion_prepared_at is null
+      and (m.access_expires_at is null or m.access_expires_at > statement_timestamp())
+  ) then raise exception 'FORBIDDEN' using errcode = '42501'; end if;
+  v_hash := public.my_leads_command_hash('handoff_acquisition_lead_to_drip',p_org_id,v_actor,
+    jsonb_build_object('memberId',p_member_id,'propertyId',p_property_id,
+      'expectedEpisodeId',p_expected_episode_id,'expectedQueueVersion',p_expected_queue_version,
+      'expectedSharedStatus',p_expected_shared_status));
+  perform pg_advisory_xact_lock(hashtextextended(format('my-leads:%s:%s:%s',
+    p_org_id,'handoff_acquisition_lead_to_drip',p_idempotency_key),0));
+  v_replay := public.my_leads_workflow_replay(p_org_id,'handoff_acquisition_lead_to_drip',
+    p_idempotency_key,v_actor,v_hash);
+  if v_replay is not null then return v_replay; end if;
+
+  select * into v_property from public.properties p
+    where p.org_id = p_org_id and p.id = p_property_id for update;
+  if not found then raise exception 'NOT_FOUND' using errcode = 'P0002'; end if;
+  if v_property.assigned_user_id is distinct from p_member_id then
+    raise exception 'STALE_ASSIGNMENT' using errcode = '40001'; end if;
+  if v_property.deleted_at is not null or v_property.is_dnc_locked
+    or v_property.outreach_dispo in ('dnc','opted_out') then
+    raise exception 'FORBIDDEN' using errcode = '42501'; end if;
+  if v_property.status is distinct from p_expected_shared_status
+    or v_property.status in ('closed','dead','dnc','under_contract') then
+    raise exception 'STALE_STATE' using errcode = '40001'; end if;
+  select * into v_queue from public.acquisition_queue_states q
+    where q.org_id = p_org_id and q.property_id = p_property_id for update;
+  v_queue_exists := found;
+  if coalesce(v_queue.version,0) is distinct from p_expected_queue_version
+    or v_queue.archived_at is not null then
+    raise exception 'STALE_STATE' using errcode = '40001'; end if;
+  select * into v_episode from public.acquisition_assignment_episodes e
+    where e.org_id = p_org_id and e.property_id = p_property_id and e.ended_at is null for update;
+  if not found or v_episode.id is distinct from p_expected_episode_id
+    or v_episode.assignee_user_id is distinct from p_member_id then
+    raise exception 'STALE_ASSIGNMENT' using errcode = '40001'; end if;
+
+  insert into public.acquisition_commands(id,org_id,actor_user_id,actor_kind,operation,
+    idempotency_key,request_hash,result)
+    values(v_command_id,p_org_id,v_actor,'user','handoff_acquisition_lead_to_drip',
+      p_idempotency_key,v_hash,'{}');
+  update public.properties set outreach_dispo = 'needs_sequence',follow_up_at = null,
+    updated_at = statement_timestamp()
+    where org_id = p_org_id and id = p_property_id and assigned_user_id = p_member_id;
+  if not found then raise exception 'STALE_ASSIGNMENT' using errcode = '40001'; end if;
+  if v_queue_exists then
+    update public.acquisition_queue_states q set version = q.version + 1,
+      updated_at = statement_timestamp()
+      where q.org_id = p_org_id and q.property_id = p_property_id and q.version = p_expected_queue_version;
+    if not found then raise exception 'STALE_STATE' using errcode = '40001'; end if;
+  else
+    insert into public.acquisition_queue_states(property_id,org_id,stage,stage_entered_at,version)
+      values(p_property_id,p_org_id,'contacted',statement_timestamp(),1);
+  end if;
+  v_result := jsonb_build_object('ok',true,'propertyId',p_property_id,
+    'queueVersion',p_expected_queue_version + 1);
+  update public.acquisition_commands set result = v_result
+    where id = v_command_id and org_id = p_org_id;
+  if v_property.outreach_dispo is distinct from 'needs_sequence' then
+    insert into public.lead_events(org_id,property_id,actor_type,actor_id,event_type,
+      payload,source_type,source_id)
+      values(p_org_id,p_property_id,'user',v_actor,'dispo_set',
+        jsonb_build_object('from',v_property.outreach_dispo,'to','needs_sequence'),
+        'acquisition_command',v_command_id);
+  end if;
+  return v_result;
+end;
+$$;
+revoke all on function public.fn_handoff_acquisition_lead_to_drip(uuid,uuid,uuid,uuid,bigint,text,uuid) from public, anon;
+grant execute on function public.fn_handoff_acquisition_lead_to_drip(uuid,uuid,uuid,uuid,bigint,text,uuid) to authenticated;
 commit;

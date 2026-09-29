@@ -17,7 +17,7 @@ it('keeps a reply flag until a human text, logged attempt, or outcome, while ope
     const org=randomUUID(), rep=randomUUID(), sequence=randomUUID();
     await db.query('insert into auth.users(id) values ($1)',[rep]);
     await db.query("insert into public.organizations(id,name) values ($1,'Drip scope')",[org]);
-    await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner')",[rep,org]);
+    await db.query("insert into public.memberships(user_id,org_id,role,acquisitions_enabled) values ($1,$2,'owner',true)",[rep,org]);
     await db.query('insert into public.acquisition_org_settings(org_id,my_leads_enabled) values ($1,true)',[org]);
     await db.query("insert into public.sequences(id,org_id,name) values ($1,$2,'Follow-up')",[sequence,org]);
     const ids=Object.fromEntries(['active','open','sms','ai','attempt','outcome','command','loggedAttempt'].map(key=>[key,randomUUID()]));
@@ -51,5 +51,35 @@ it('keeps a reply flag until a human text, logged attempt, or outcome, while ope
     for(const key of ['sms','attempt','outcome','command','loggedAttempt']) expect(after.get(ids[key]).replied_at).toBeNull();
     expect(after.get(ids.ai).replied_at).toBeTruthy();
     expect(after.get(ids.open).replied_at).toBeTruthy();
+    const openEpisode=await db.query('select id from public.acquisition_assignment_episodes where org_id=$1 and property_id=$2 and ended_at is null',[org,ids.open]);
+    expect(openEpisode.rows).toHaveLength(1);
+    const commandKey=randomUUID();
+    await db.query('set local role authenticated');
+    await db.query("select set_config('request.jwt.claim.role','authenticated',true)");
+    await db.query("select set_config('request.jwt.claim.sub',$1,true)",[rep]);
+    const args=[org,rep,ids.open,openEpisode.rows[0].id,0,'new_lead',commandKey];
+    const saved=await db.query('select public.fn_handoff_acquisition_lead_to_drip($1,$2,$3,$4,$5,$6,$7) as result',args);
+    expect(saved.rows[0].result.ok).toBe(true);
+    expect((await db.query('select public.fn_handoff_acquisition_lead_to_drip($1,$2,$3,$4,$5,$6,$7) as result',args)).rows[0].result).toEqual(saved.rows[0].result);
+    await db.query('reset role');
+    expect((await db.query('select outreach_dispo from public.properties where id=$1',[ids.open])).rows[0].outreach_dispo).toBe('needs_sequence');
+    expect((await db.query('select version from public.acquisition_queue_states where property_id=$1',[ids.open])).rows[0].version).toBe('1');
+    // The old queue read must lose when reassignment commits before its write.
+    const prior=await db.query('select e.id as episode_id,coalesce(q.version,0) as queue_version from public.acquisition_assignment_episodes e left join public.acquisition_queue_states q on q.org_id=e.org_id and q.property_id=e.property_id where e.org_id=$1 and e.property_id=$2 and e.ended_at is null',[org,ids.active]);
+    expect(prior.rows).toHaveLength(1);
+    const nextRep=randomUUID();
+    await db.query('insert into auth.users(id) values ($1)',[nextRep]);
+    await db.query("insert into public.memberships(user_id,org_id,role,acquisitions_enabled) values ($1,$2,'member',true)",[nextRep,org]);
+    await db.query('update public.properties set assigned_user_id=$1 where id=$2 and org_id=$3',[nextRep,ids.active,org]);
+    await db.query('savepoint stale_handoff');
+    await db.query('set local role authenticated');
+    await db.query("select set_config('request.jwt.claim.role','authenticated',true)");
+    await db.query("select set_config('request.jwt.claim.sub',$1,true)",[rep]);
+    await expect(db.query('select public.fn_handoff_acquisition_lead_to_drip($1,$2,$3,$4,$5,$6,$7)',
+      [org,rep,ids.active,prior.rows[0].episode_id,prior.rows[0].queue_version,'new_lead',randomUUID()])).rejects.toThrow(/STALE_ASSIGNMENT/);
+    await db.query('rollback to savepoint stale_handoff');
+    await db.query('reset role');
+    const unchanged=await db.query('select assigned_user_id,outreach_dispo from public.properties where id=$1',[ids.active]);
+    expect(unchanged.rows[0]).toMatchObject({assigned_user_id:nextRep,outreach_dispo:null});
   } finally {await db.query('rollback').catch(()=>{});await db.end();}
 });
