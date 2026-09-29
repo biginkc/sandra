@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { verifyDownload } from '../ci/pull-heavy-record.mjs';
 
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const lanes = ['catalog-fingerprint', 'db-contract-pre', 'db-contract-post', 'burst', 'perf-120k', 'outbox'];
+const lanes = ['catalog-fingerprint', 'db-contract-pre', 'db-contract-post', 'burst', 'perf-120k', 'outbox-pre', 'outbox-post'];
 
 test('early failure writer seals stageable FAIL manifests for each non-migration lane', () => {
   const temporary = mkdtempSync(path.join(os.tmpdir(), 'heavy-failure-record-'));
@@ -17,6 +17,7 @@ test('early failure writer seals stageable FAIL manifests for each non-migration
   try {
     for (const file of [
       'scripts/outbox-run-record.mjs', 'src/lib/supabase/e2e-identity-guard.ts',
+      'scripts/outbox-db-contract/catalog-sections.mjs',
       'scripts/inbox-ci/write-failure-record.mjs',
       'e2e/inbox-acceptance/fault-proxy.mjs',
       '.github/workflows/inbox-heavy-verification.yml',
@@ -41,6 +42,9 @@ test('early failure writer seals stageable FAIL manifests for each non-migration
       assert.equal(record.verdict, 'FAIL');
       assert.equal(record.exit_status, 3);
       assert.equal(record.lane, lane);
+      assert.equal(record.kind, lane.startsWith('outbox-') ? 'browser' : lane.startsWith('db-contract-') ? 'db-contract' : lane);
+      assert.equal(record.phase, lane.endsWith('-pre') ? 'pre' : lane.endsWith('-post') ? 'post' : 'n/a');
+      assert.equal('fault_proxy_script_sha256' in record, lane.startsWith('outbox-'));
       assert.ok(record.artifacts['failure.log']);
       const run = { id: Number(runId), run_attempt: 1, status: 'completed', event: 'workflow_dispatch',
         head_branch: 'main', path: '.github/workflows/inbox-heavy-verification.yml', head_sha: sha,

@@ -43,6 +43,7 @@ else:
                 source = "\n".join(line for line in source.splitlines() if not line.startswith(("export TEST_SUPABASE_URL=", "export E2E_CI_SUPABASE_DB_URL="))) + "\n"
             lane = directory / "lane.sh"
             lane.write_text(source)
+            (directory / "failure-exit.sh").write_text((HERE / "failure-exit.sh").read_text())
             env = dict(os.environ, PATH=f"{directory}:{os.environ['PATH']}", HEAVY_LANE=f"outbox-{phase}", CI="", HEAVY_TESTED_SHA=SHA, GITHUB_RUN_ID="123", GITHUB_ENV=str(directory / "github-env"), PROVISION_ARGS=str(directory / "provision-args"), RUNNER_ENV=str(directory / "runner-env"))
             env.pop("E2E_DISPOSABLE_DATABASE", None)
             result = subprocess.run(["bash", str(lane)], cwd=ROOT, env=env, text=True, capture_output=True)
