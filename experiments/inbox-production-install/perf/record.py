@@ -13,19 +13,19 @@ from pathlib import Path
 repo = Path(__file__).resolve().parents[3]
 source = Path(sys.argv[1])
 lane = sys.argv[2]
-if lane != 'burst':
-    raise RuntimeError('Only burst is a sealed approval kind')
+if lane not in ('burst', 'perf-120k'):
+    raise RuntimeError('Unknown perf lane')
 verdict = sys.argv[3]
 sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
 if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch' or os.environ.get('GITHUB_REF_NAME') != 'main':
-    raise RuntimeError('Burst record requires a main-branch workflow dispatch')
+    raise RuntimeError('Perf record requires a main-branch workflow dispatch')
 if os.environ.get('HEAVY_TESTED_SHA') != sha or os.environ.get('HEAVY_LANE') != lane:
-    raise RuntimeError('Burst record checkout/lane mismatch')
+    raise RuntimeError('Perf record checkout/lane mismatch')
 workflow = '.github/workflows/inbox-heavy-verification.yml'
 if os.environ.get('GITHUB_WORKFLOW_REF', '').split('@')[0] != f'biginkc/sandra/{workflow}':
-    raise RuntimeError('Burst record workflow mismatch')
+    raise RuntimeError('Perf record workflow mismatch')
 if not os.environ.get('GITHUB_RUN_ID', '').isdigit() or not os.environ.get('GITHUB_RUN_ATTEMPT', '').isdigit():
-    raise RuntimeError('Burst record run identity missing')
+    raise RuntimeError('Perf record run identity missing')
 run_id = os.environ['GITHUB_RUN_ID']
 relative = Path('docs/performance/inbox-redesign/evidence') / sha / 'pre-merge' / run_id
 dest = repo / relative
@@ -58,20 +58,25 @@ size = sum(f.stat().st_size for f in dest.rglob('*') if f.is_file())
 if size > 40 * 1024 * 1024:
     raise RuntimeError(f'Perf run exceeds 40 MiB ({size} bytes)')
 now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-attempts = [(source / f'attempt-{n}' / 'verdict.txt').read_text().strip() for n in range(1, 4)]
-if any(value not in ('PASS', 'FAIL') for value in attempts):
-    raise RuntimeError('Burst attempt verdict missing or invalid')
-if any(not (source / f'attempt-{n}' / 'runner-hardware.txt').is_file() for n in range(1, 4)):
-    raise RuntimeError('Burst attempt hardware missing')
-if (verdict == 'PASS') != all(value == 'PASS' for value in attempts):
-    raise RuntimeError('Burst aggregate verdict disagrees with attempts')
+attempts = []
+if lane == 'burst':
+    attempts = [(source / f'attempt-{n}' / 'verdict.txt').read_text().strip() for n in range(1, 4)]
+    if any(value not in ('PASS', 'FAIL') for value in attempts):
+        raise RuntimeError('Burst attempt verdict missing or invalid')
+    if any(not (source / f'attempt-{n}' / 'runner-hardware.txt').is_file() for n in range(1, 4)):
+        raise RuntimeError('Burst attempt hardware missing')
+    if (verdict == 'PASS') != all(value == 'PASS' for value in attempts):
+        raise RuntimeError('Burst aggregate verdict disagrees with attempts')
+else:
+    analysis = json.loads((source / 'analysis.json').read_text())
+    if analysis.get('kind') != lane or analysis.get('verdict') != verdict or not all(k in analysis for k in ('thresholds', 'latencies', 'foundation_file_wall_upper_ms')):
+        raise RuntimeError('120k analysis/verdict mismatch')
 script = repo / 'scripts/inbox-ci' / f'{lane}.sh'
 manifest = {
-    'tested_sha': sha, 'tier': 'pre-merge', 'kind': 'burst',
+    'tested_sha': sha, 'tier': 'pre-merge', 'kind': lane,
     'phase': 'n/a', 'target': 'disposable', 'run_id': run_id,
     'started_at': os.environ.get('PERF_STARTED_AT', now), 'completed_at': now,
     'runner_script_sha256': hashlib.sha256(script.read_bytes()).hexdigest(),
-    'fault_proxy_script_sha256': hashlib.sha256((repo / 'e2e/inbox-acceptance/fault-proxy.mjs').read_bytes()).hexdigest(),
     'github_run_id': os.environ['GITHUB_RUN_ID'], 'github_run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
     'workflow_path': workflow, 'workflow_input_sha': sha,
     'event': os.environ['GITHUB_EVENT_NAME'], 'head_branch': os.environ['GITHUB_REF_NAME'], 'lane': lane,
@@ -79,9 +84,13 @@ manifest = {
     'clean_tree': {'start': True, 'end_excluding_run_dir': True, 'excluded_path': str(relative)},
     'exit_status': 0 if verdict == 'PASS' else 1, 'verdict': verdict,
     'raw_inflated_sha256': raw_inflated, 'artifacts': artifacts,
-    'attempts': attempts,
-    'summary': 'Three synthetic disposable PostgreSQL attempts with runner hardware recorded per attempt. No production equivalence is claimed.'
+    'summary': ('Three synthetic disposable PostgreSQL attempts with runner hardware recorded per attempt. No production equivalence is claimed.'
+                if lane == 'burst' else {'thresholds': analysis['thresholds'], 'latencies': analysis['latencies'],
+                                         'foundation_file_wall_upper_ms': analysis['foundation_file_wall_upper_ms'],
+                                         'informational': True, 'production_equivalence': False})
 }
+if lane == 'burst':
+    manifest['attempts'] = attempts
 (dest / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 other = subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=all'], cwd=repo, text=True).splitlines()
 if any(not line[3:].startswith(str(relative) + '/') for line in other):

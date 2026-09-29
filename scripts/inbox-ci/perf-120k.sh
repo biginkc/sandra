@@ -15,5 +15,6 @@ psql "$PERF_DATABASE_URL" -X -v ON_ERROR_STOP=1 -At -F ',' -c "SELECT relname,re
 node "$PERF_SOURCE/bench.js" after > "$PERF_RUN_DIR/after.log"
 if python3 "$PERF_SOURCE/analyze_120k.py" "$PERF_RUN_DIR" > "$PERF_RUN_DIR/analysis.txt"; then verdict=PASS; else verdict=FAIL; fi
 perf_stop
+python3 "$PERF_SOURCE/record.py" "$PERF_RUN_DIR" perf-120k "$verdict"
 echo "120k synthetic measurements: $PERF_RUN_DIR ($verdict)"
 [[ "$verdict" == PASS ]]

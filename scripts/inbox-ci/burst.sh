@@ -6,7 +6,9 @@ export PERF_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 export PERF_RUN_ROOT="$(mktemp -d "$RUNNER_TEMP/perf-burst.XXXXXX")"
 verdict=PASS
 trap perf_exit EXIT
-for attempt in 1 2 3; do
+attempt_count=3
+if [[ "${PERF_LOCAL_EXECUTION:-}" == 1 && "${PERF_LOCAL_ATTEMPTS:-}" == 1 ]]; then attempt_count=1; fi
+for attempt in $(seq 1 "$attempt_count"); do
   export PERF_RUN_DIR="$PERF_RUN_ROOT/attempt-$attempt"
   mkdir -p "$PERF_RUN_DIR"
   perf_start "$attempt"
@@ -35,5 +37,9 @@ for attempt in 1 2 3; do
   fi
   perf_stop
 done
-python3 "$PERF_SOURCE/record.py" "$PERF_RUN_ROOT" burst "$verdict"
+if [[ "${PERF_LOCAL_EXECUTION:-}" == 1 ]]; then
+  echo "Local diagnostic: $PERF_RUN_ROOT ($verdict, $attempt_count attempt). No approval record."
+else
+  python3 "$PERF_SOURCE/record.py" "$PERF_RUN_ROOT" burst "$verdict"
+fi
 [[ "$verdict" == PASS ]]

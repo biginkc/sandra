@@ -7,10 +7,14 @@ PERF_MIGRATIONS_DIR="$PERF_REPO/supabase/migrations"
 export PERF_REPO PERF_SOURCE PERF_MIGRATIONS_DIR
 perf_preflight() {
   [[ "$(git rev-parse HEAD)" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid checkout SHA' >&2; return 1; }
-  [[ -z "$(git status --porcelain)" ]] || { echo 'Dirty checkout' >&2; return 1; }
+  if [[ "${PERF_LOCAL_EXECUTION:-}" != 1 ]]; then
+    [[ -z "$(git status --porcelain)" ]] || { echo 'Dirty checkout' >&2; return 1; }
+  fi
   for file in 20260929000000_inbox_control_foundation.sql 20260929000100_inbox_read_companion.sql 20260929000200_inbox_backend_operation_reply.sql; do
     test -s "$PERF_MIGRATIONS_DIR/$file" || { echo "Missing required checked-out migration: $file" >&2; return 1; }
-    git ls-files --error-unmatch "supabase/migrations/$file" >/dev/null || return 1
+    if [[ "${PERF_LOCAL_EXECUTION:-}" != 1 ]]; then
+      git ls-files --error-unmatch "supabase/migrations/$file" >/dev/null || return 1
+    fi
   done
   [[ -n "${RUNNER_TEMP:-}" && -n "${GITHUB_ENV:-}" && "${GITHUB_ACTIONS:-}" == true ]] || { echo 'GitHub runner required' >&2; return 1; }
 }
