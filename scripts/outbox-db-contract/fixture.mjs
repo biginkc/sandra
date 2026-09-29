@@ -57,7 +57,10 @@ export async function createFixture({ apiUrl, serviceKey, anonKey, rest, runDir 
   const otherBase = await makeBase(ids.O2, 'other');
   const now = Date.now();
   const message = (name, baseRow = base, orgId = ids.O1, override = {}) => ({
-    id: randomUUID(), org_id: orgId, channel: 'sms', direction: 'outbound', status: 'queued', provider: 'mock',
+    // Keep the foreign null-tail row after every owned id so RLS leak probes
+    // cannot pass or fail based on random UUID ordering.
+    id: orgId === ids.O2 ? `ffffffff-ffff-4fff-8fff-${randomUUID().slice(-12)}` : `0${randomUUID().slice(1)}`,
+    org_id: orgId, channel: 'sms', direction: 'outbound', status: 'queued', provider: 'mock',
     property_id: baseRow.property.id, contact_id: baseRow.contact.id, conversation_id: baseRow.thread.conversation_id,
     from_address: BUSINESS, to_address: baseRow.contact.phone_1, body: `contract-${slug}-${name}`,
     scheduled_for: new Date(now + 6 * 3600000).toISOString(), ...override,
@@ -67,7 +70,7 @@ export async function createFixture({ apiUrl, serviceKey, anonKey, rest, runDir 
   for (let n = 1; n <= 5; n++) specs[`m6${String.fromCharCode(96 + n)}`] = message(`m6${n}`);
   specs.m11 = message('m11', base, ids.O1, { direction: 'inbound', status: 'received', from_address: base.contact.phone_1, to_address: BUSINESS, scheduled_for: null });
   for (let n = 0; n < 101; n++) specs[`p${n}`] = message(`p${n}`, base, ids.O1, { scheduled_for: new Date(now + (8 * 60 + n) * 60000).toISOString() });
-  specs.other = message('other', otherBase, ids.O2);
+  specs.other = message('other', otherBase, ids.O2, { scheduled_for: null });
   for (const [name, value] of Object.entries(specs)) {
     const actor = name === 'other' ? 'other' : 'member';
     const returned = await record('messages', value.id, async () => {
