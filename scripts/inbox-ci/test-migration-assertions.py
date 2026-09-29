@@ -62,6 +62,12 @@ class MigrationAssertionsTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 a.index_statements(source)
 
+    def test_catalog_live_skip_fails(self):
+        a.assert_catalog_live('Ran 5 tests in 0.100s\n\nOK\n')
+        for output in ('Ran 5 tests in 0.100s\n\nOK (skipped=5)\n', 'Ran 4 tests in 0.100s\n\nOK\n', 'Ran 5 tests in 0.100s\n\nFAILED (failures=1)\n'):
+            with self.assertRaisesRegex(ValueError, 'Five live catalog'):
+                a.assert_catalog_live(output)
+
 
 if __name__ == '__main__':
     unittest.main()

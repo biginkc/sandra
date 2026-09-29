@@ -40,7 +40,7 @@ INBOX_LANE_STARTED_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
 # It must leave the disposable stack running; no hosted URL is accepted.
 ORIGINAL_GITHUB_ENV=${GITHUB_ENV:-}
 export GITHUB_ENV="$WORK/provision.env"
-node scripts/ci/provision-disposable-stack.mjs --project-id "inboxheavy${GITHUB_RUN_ID}" --exclude-migrations '2026092900*' --no-baseline-owner
+node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --exclude-migrations '2026092900*' --no-baseline-owner
 if [[ -f "$GITHUB_ENV" ]]; then
   while IFS='=' read -r key value; do
     if [[ "$key" == E2E_LOCAL_WORKDIR ]]; then export E2E_LOCAL_WORKDIR="$value"; fi
@@ -121,5 +121,6 @@ done
 docker --host unix:///var/run/docker.sock exec "$CATALOG_CONTAINER" pg_isready -U postgres -d postgres >/dev/null
 export PGPORT="$CATALOG_PORT" CATALOG_FINGERPRINT_SCRATCH=sandra-mig-r7
 python3 -m unittest "$INSTALL/test_catalog_fingerprint_live.py" > "$WORK/catalog-live.txt" 2>&1
+python3 "$ASSERT" catalog-live "$WORK/catalog-live.txt"
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || { echo 'Rehearsal left checkout dirty before record sealing' >&2; exit 3; }
 node scripts/inbox-ci/write-migration-record.mjs "$WORK"

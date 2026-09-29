@@ -56,6 +56,11 @@ def assert_mutations(path):
         raise ValueError('41-case mutation proof incomplete')
 
 
+def assert_catalog_live(output):
+    if not re.search(r'Ran 5 tests? in ', output) or re.search(r'\bskipped\b|\bfailures\b|\berrors\b', output, re.I) or not output.rstrip().endswith('OK'):
+        raise ValueError('Five live catalog mutation tests did not run without skips')
+
+
 if __name__ == '__main__':
     root = Path(__file__).resolve().parents[2]
     try:
@@ -70,6 +75,8 @@ if __name__ == '__main__':
             assert_verify(Path(sys.argv[2]).read_text())
         elif command == 'mutations':
             assert_mutations(sys.argv[2])
+        elif command == 'catalog-live':
+            assert_catalog_live(Path(sys.argv[2]).read_text())
         elif command == 'history':
             assert_full_history(root, Path(sys.argv[2]).read_text().splitlines())
         elif command != 'preflight':
