@@ -79,7 +79,7 @@ export async function listSequenceNeedsPersonCounts(): Promise<Result<NeedsPerso
     const orgId = await activeOrgId(supabase, user.id);
     if (!orgId) return ok({ finished_no_reply: 0, couldnt_send: 0, needs_sequence: 0 });
     const { data, error } = await supabase.rpc("sequence_needs_person_counts", {
-      p_org: orgId, p_exclude_created_by: process.env.SEQUENCE_CANARY_USER_ID ?? null,
+      p_org: orgId, p_exclude_created_by: process.env.SEQUENCE_CANARY_USER_ID || null,
     });
     if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Drip stats are being prepared." : error.message } };
     const counts = data?.[0];
@@ -99,7 +99,7 @@ export async function listSequenceNeedsPersonPage(bucket: NeedsPersonBucket, pag
     if (!orgId) return ok([]);
     const { data, error } = await supabase.rpc("sequence_needs_person_page", {
       p_org: orgId, p_bucket: bucket, p_offset: (page - 1) * NEEDS_PERSON_PAGE_SIZE,
-      p_limit: NEEDS_PERSON_PAGE_SIZE, p_exclude_created_by: process.env.SEQUENCE_CANARY_USER_ID ?? null,
+      p_limit: NEEDS_PERSON_PAGE_SIZE, p_exclude_created_by: process.env.SEQUENCE_CANARY_USER_ID || null,
     });
     if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Drip stats are being prepared." : error.message } };
     return ok((data ?? []).map((row) => ({

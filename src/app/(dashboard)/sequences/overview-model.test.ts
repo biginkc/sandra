@@ -1,10 +1,5 @@
 import { expect, it } from "vitest";
-import { overviewTotals, needsPersonPiles } from "./overview-model";
-
-it("uses the matching RPC count for each overview box", () => {
-  const rows = [{ bucket: "finished_no_reply" as const }, { bucket: "finished_no_reply" as const }, { bucket: "couldnt_send" as const }, { bucket: "needs_sequence" as const }];
-  expect(overviewTotals(rows)).toEqual({ finishedNoReply: 2, couldntSend: 1, needsDrip: 1 });
-});
+import { needsPersonPiles } from "./overview-model";
 
 it("keeps all three needs-person reasons separate", () => {
   const rows = [

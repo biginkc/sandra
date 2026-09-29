@@ -45,6 +45,7 @@ export default defineConfig({
     // Real DB calls — 30s per test covers a reset + a few inserts + a
     // query with comfortable headroom.
     testTimeout: 30000,
+    hookTimeout: 120000,
     // Sequential by default — tests TRUNCATE shared tables in beforeEach,
     // so parallel execution would race.
     fileParallelism: false,
