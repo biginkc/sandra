@@ -5881,7 +5881,7 @@ export type Database = {
       fn_get_dialpad_recording_shadow_input: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
       fn_finalize_dialpad_recording_shadow: { Args: { p_org_id: string; p_capture_id: string; p_expected_input_digest: string }; Returns: Json }
       fn_get_dialpad_recording_shadow_measurement: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
-      fn_list_dialpad_recording_provider_window_candidates: { Args: { p_limit?: number }; Returns: Json }
+      fn_list_dialpad_recording_provider_window_candidates: { Args: { p_limit?: number; p_after_result_at?: string | null; p_after_capture_id?: string | null }; Returns: Json }
       fn_get_dialpad_recording_final_input: { Args: { p_org_id: string; p_capture_id: string; p_policy_version: string }; Returns: Json }
       fn_finalize_dialpad_recording_provider_window: { Args: { p_org_id: string; p_capture_id: string; p_policy_version: string; p_expected_input_digest: string }; Returns: Json }
       fn_get_dialpad_recording_provider_window_result: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string }; Returns: Json }

@@ -43,7 +43,7 @@ export function MyLeadsMetrics({ kpis, repliedToDrip = 0 }: { kpis: MyLeadsKpis;
         <Metric id="offers-sent" label="Offers sent">{kpis.offersSent}</Metric>
         <Metric id="missing-recordings" label="Missing recordings" detail={recordingCoverage}>{count(kpis.missingRecordings)}</Metric>
         <Metric id="average-talk-time" label="Average talk time" detail={coverage}>{kpis.averageTalkSeconds === null ? "—" : formatDuration(kpis.averageTalkSeconds)}</Metric>
-        <Metric id="conversations-over-five-minutes" label="Conversations > 5 minutes" detail="Reached calls with known talk time">{count(kpis.conversationsOverFiveMinutes)}</Metric>
+        <Metric id="conversations-over-five-minutes" label="Conversations > 5 minutes" detail="Dialpad: verified seller speech · other providers: known connected duration">{count(kpis.conversationsOverFiveMinutes)}</Metric>
       </dl>
     </section>
   </div>

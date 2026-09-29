@@ -16,6 +16,21 @@ describe('provider-window finalizer adapter', () => {
     expect(rpc).toHaveBeenCalledWith('fn_list_dialpad_recording_provider_window_candidates', { p_limit: 10 });
   });
 
+  it('parses a keyset cursor page for deferred reconciliation', async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      data: { candidates: [{ orgId: 'org', captureId: 'capture', policyVersion: 'fixture-v1' }], nextCursor: { resultAt: '2026-09-29T00:00:00.000Z', captureId: 'capture' } },
+      error: null,
+    });
+    const db = createSupabaseDialpadRecordingFinalizerDb({ rpc } as never);
+    await expect(db.listCandidatePage(10, { resultAt: '2026-09-28T00:00:00.000Z', captureId: 'before' })).resolves.toEqual({
+      candidates: [{ orgId: 'org', captureId: 'capture', policyVersion: 'fixture-v1' }],
+      nextCursor: { resultAt: '2026-09-29T00:00:00.000Z', captureId: 'capture' },
+    });
+    expect(rpc).toHaveBeenCalledWith('fn_list_dialpad_recording_provider_window_candidates', {
+      p_limit: 10, p_after_result_at: '2026-09-28T00:00:00.000Z', p_after_capture_id: 'before',
+    });
+  });
+
   it('calls service RPCs and strictly parses the numeric result', async () => {
     const rpc = vi.fn()
       .mockResolvedValueOnce({ data: base, error: null })

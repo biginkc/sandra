@@ -45,8 +45,16 @@ export interface DialpadRecordingFinalResultRead {
 
 export interface DialpadRecordingFinalizerCandidate { orgId: string; captureId: string; policyVersion: string; }
 
+export interface DialpadRecordingFinalizerCursor { resultAt: string; captureId: string; }
+
+export interface DialpadRecordingFinalizerCandidatePage {
+  candidates: DialpadRecordingFinalizerCandidate[];
+  nextCursor: DialpadRecordingFinalizerCursor | null;
+}
+
 export interface DialpadRecordingFinalizerDb {
   listCandidates(limit?: number): Promise<DialpadRecordingFinalizerCandidate[]>;
+  listCandidatePage(limit?: number, cursor?: DialpadRecordingFinalizerCursor | null): Promise<DialpadRecordingFinalizerCandidatePage>;
   getInput(orgId: string, captureId: string, policyVersion: string): Promise<DialpadRecordingFinalInput>;
   finalize(orgId: string, captureId: string, policyVersion: string, expectedInputDigest: string): Promise<DialpadRecordingFinalization>;
   getResult(orgId: string, repUserId: string, captureId: string): Promise<DialpadRecordingFinalResultRead>;
@@ -88,6 +96,19 @@ function parseCandidates(value: unknown): DialpadRecordingFinalizerCandidate[] {
     if (!isRecord(entry)) throw new Error('Invalid finalizer candidate');
     return { orgId: text(entry.orgId, 'candidate org id'), captureId: text(entry.captureId, 'candidate capture id'), policyVersion: text(entry.policyVersion, 'candidate policy version') };
   });
+}
+
+function parseCandidatePage(value: unknown): DialpadRecordingFinalizerCandidatePage {
+  if (!isRecord(value) || !Array.isArray(value.candidates)) throw new Error('Invalid finalizer candidate page');
+  const cursor = value.nextCursor;
+  if (cursor !== null && cursor !== undefined) {
+    if (!isRecord(cursor)) throw new Error('Invalid finalizer candidate cursor');
+    return {
+      candidates: parseCandidates(value.candidates),
+      nextCursor: { resultAt: text(cursor.resultAt, 'candidate cursor result time'), captureId: text(cursor.captureId, 'candidate cursor capture id') },
+    };
+  }
+  return { candidates: parseCandidates(value.candidates), nextCursor: null };
 }
 
 function parseInput(value: unknown): DialpadRecordingFinalInput {
@@ -152,6 +173,13 @@ export function createSupabaseDialpadRecordingFinalizerDb(client: SupabaseClient
   return {
     async listCandidates(limit = 25) {
       return parseCandidates(unwrap(await client.rpc('fn_list_dialpad_recording_provider_window_candidates', { p_limit: limit })));
+    },
+    async listCandidatePage(limit = 25, cursor = null) {
+      return parseCandidatePage(unwrap(await client.rpc('fn_list_dialpad_recording_provider_window_candidates', {
+        p_limit: limit,
+        p_after_result_at: cursor?.resultAt ?? null,
+        p_after_capture_id: cursor?.captureId ?? null,
+      })));
     },
     async getInput(orgId, captureId, policyVersion) {
       return parseInput(unwrap(await client.rpc('fn_get_dialpad_recording_final_input', { p_org_id: orgId, p_capture_id: captureId, p_policy_version: policyVersion })));

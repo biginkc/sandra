@@ -146,6 +146,24 @@ declare
   summary jsonb := '{}'::jsonb;
   base jsonb;
   manifest jsonb;
+  shadow jsonb := '{}'::jsonb;
+  shadow_digest text;
+  policy_manifest jsonb := '{}'::jsonb;
+  timing_status text;
+  timing_start_count bigint := 0;
+  timing_final_count bigint := 0;
+  timing_context_start_count bigint := 0;
+  timing_context_final_count bigint := 0;
+  timing_exchange_count bigint := 0;
+  timing_server_clock_count bigint := 0;
+  timing_server_wall_min numeric;
+  timing_server_wall_max numeric;
+  timing_max_stall numeric;
+  timing_max_anchor_gap numeric;
+  timing_max_drift_ppm numeric;
+  timing_output_mismatch boolean := false;
+  timing_support boolean := false;
+  timing_digest text;
   digest text;
   r record;
 begin
@@ -154,6 +172,17 @@ begin
   end if;
   select * into c from public.dialpad_recording_captures where id=p_capture_id and org_id=p_org_id;
   if not found then raise exception 'NOT_FOUND' using errcode = 'P0002'; end if;
+  shadow := public.dialpad_recording_shadow_input(p_org_id, p_capture_id);
+  shadow_digest := shadow->>'inputDigest';
+  if shadow->>'evidenceStatus' = 'conflicting' then
+    reason_list := public.dialpad_recording_provider_window_add_reason(reason_list, 'provider_evidence_conflict');
+  end if;
+  if exists (
+    select 1 from jsonb_array_elements_text(coalesce(shadow->'reasons', '[]'::jsonb)) reason
+     where reason in ('recording_incomplete','pcm_incomplete','pcm_degraded','vad_totals_mismatch')
+  ) then
+    reason_list := public.dialpad_recording_provider_window_add_reason(reason_list, 'evidence_incomplete');
+  end if;
   if c.status not in ('sealed','partial','failed') then
     reason_list := public.dialpad_recording_provider_window_add_reason(reason_list, 'capture_not_terminal');
   end if;
@@ -165,6 +194,20 @@ begin
     reason_list := public.dialpad_recording_provider_window_add_reason(reason_list, 'policy_not_accepted');
   elsif p.revoked_at is not null then
     reason_list := public.dialpad_recording_provider_window_add_reason(reason_list, 'policy_revoked');
+  end if;
+  if p.policy_version is not null then
+    policy_manifest := jsonb_build_object(
+      'algorithmVersion', p.algorithm_version, 'policyHash', p.policy_hash,
+      'mappingMethod', p.mapping_method, 'timeUnit', p.time_unit, 'sampleRateHz', p.sample_rate_hz,
+      'domainStartSample', p.domain_start_sample, 'domainEndSample', p.domain_end_sample,
+      'lowerSlope', p.lower_slope_us_per_sample, 'lowerIntercept', p.lower_intercept_us,
+      'upperSlope', p.upper_slope_us_per_sample, 'upperIntercept', p.upper_intercept_us,
+      'classificationOvercountSamples', p.classification_overcount_samples,
+      'supportedDurationMaxSeconds', p.supported_duration_max_seconds,
+      'supportedAnchorCadenceMs', p.supported_anchor_cadence_ms,
+      'supportedStallMaxMs', p.supported_stall_max_ms, 'supportedDriftPpm', p.supported_drift_ppm,
+      'evidenceDigest', p.evidence_digest, 'evidenceRefs', p.evidence_refs
+    );
   end if;
 
   select count(distinct epoch), min(epoch)::smallint into epoch_count, selected_epoch
@@ -200,8 +243,8 @@ begin
   select count(distinct public.dialpad_cti_payload_ms(e.payload,'date_connected')) filter (where public.dialpad_cti_payload_ms(e.payload,'date_connected') is not null),
          count(distinct public.dialpad_cti_payload_ms(e.payload,'date_ended')) filter (where public.dialpad_cti_payload_ms(e.payload,'date_ended') is not null),
          count(distinct e.provider_call_id),
-         min(public.dialpad_cti_payload_ms(e.payload,'date_connected')),
-         max(public.dialpad_cti_payload_ms(e.payload,'date_ended'))
+         min(public.dialpad_cti_payload_ms(e.payload,'date_connected')) * 1000,
+         max(public.dialpad_cti_payload_ms(e.payload,'date_ended')) * 1000
     into connected_count, ended_count, provider_count, connected_us, ended_us
     from public.dialpad_call_events e
    where e.org_id=p_org_id and e.disposition='matched'
@@ -216,11 +259,95 @@ begin
   end if;
 
   select count(*) into timing_count from public.dialpad_recording_timing_records where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch;
-  if selected_epoch is null or not exists (select 1 from public.dialpad_recording_timing_state where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and status='collected') or timing_count=0 then
+  select s.status into timing_status from public.dialpad_recording_timing_state s where s.capture_id=p_capture_id and s.org_id=p_org_id and s.epoch=selected_epoch;
+  if selected_epoch is null or timing_status is distinct from 'collected' or timing_count=0 then
     reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_not_collected');
+  else
+    select encode(extensions.digest(convert_to(coalesce(jsonb_agg(jsonb_build_object('stream', t.stream, 'seq', t.seq, 'record', t.record) order by t.stream, t.seq)::text, '[]'), 'utf8'), 'sha256'), 'hex')
+      into timing_digest
+      from public.dialpad_recording_timing_records t
+     where t.capture_id=p_capture_id and t.org_id=p_org_id and t.epoch=selected_epoch;
+    select count(*) filter (where stream in ('tab:anchor','mic:anchor') and record->>'anchor'='start'),
+           count(*) filter (where stream in ('tab:anchor','mic:anchor') and record->>'anchor'='final'),
+           count(*) filter (where stream in ('tab:context','mic:context') and record->>'observation'='start'),
+           count(*) filter (where stream in ('tab:context','mic:context') and record->>'observation'='final'),
+           count(*) filter (where stream='exchange'),
+           count(distinct record->>'serverClockId') filter (where stream='exchange'),
+           min((record->>'serverReceiveWallMs')::numeric) filter (where stream='exchange'),
+           max((record->>'serverSendWallMs')::numeric) filter (where stream='exchange'),
+           coalesce(max((record->>'serverSendMonoMs')::numeric - (record->>'serverReceiveMonoMs')::numeric) filter (where stream='exchange'), 0),
+           0
+      into timing_start_count,timing_final_count,timing_context_start_count,timing_context_final_count,
+           timing_exchange_count,timing_server_clock_count,timing_server_wall_min,timing_server_wall_max,
+           timing_max_stall,timing_max_anchor_gap
+      from public.dialpad_recording_timing_records
+     where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch;
+    -- Anchor cadence is measured from the immutable source cursor geometry,
+    -- rather than the browser observation duration. This keeps the policy
+    -- gate tied to the stream's actual capture coverage and catches sparse
+    -- anchors even when context clock observations are frequent.
+    select coalesce(max(
+      ((current_row.record->>'sourceCursor')::numeric - (previous_row.record->>'sourceCursor')::numeric)
+      / nullif((current_row.record->>'sourceRateHz')::numeric, 0) * 1000
+    ), 0)
+      into timing_max_anchor_gap
+      from public.dialpad_recording_timing_records current_row
+      join public.dialpad_recording_timing_records previous_row
+        on previous_row.capture_id=current_row.capture_id
+       and previous_row.org_id=current_row.org_id
+       and previous_row.epoch=current_row.epoch
+       and previous_row.stream=current_row.stream
+       and previous_row.seq=current_row.seq-1
+     where current_row.capture_id=p_capture_id
+       and current_row.org_id=p_org_id
+       and current_row.epoch=selected_epoch
+       and current_row.stream in ('tab:anchor','mic:anchor')
+       and current_row.record->>'anchor' <> 'start';
+    if timing_start_count < 2 or timing_final_count < 2 or timing_context_start_count < 2 or timing_context_final_count < 2 or timing_exchange_count < 1 or timing_server_clock_count <> 1 then
+      reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_mapping_missing');
+    end if;
+    if exists (select 1 from public.dialpad_recording_timing_records where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream in ('tab:anchor','mic:anchor') and record->>'continuity' <> 'continuous') then
+      reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_discontinuity');
+    end if;
+    if exists (select 1 from public.dialpad_recording_timing_records where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream in ('tab:context','mic:context') and record->>'state' = 'suspended') then
+      reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_discontinuity');
+    end if;
+    if timing_max_stall > p.supported_stall_max_ms or timing_max_anchor_gap > p.supported_anchor_cadence_ms then
+      reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_scope_unsupported');
+    end if;
+    select coalesce(max(abs((context_delta - browser_delta) / nullif(browser_delta,0) * 1000000)),0)
+      into timing_max_drift_ppm
+      from (
+        select stream,
+               max((record->>'contextTimeMs')::numeric) - min((record->>'contextTimeMs')::numeric) as context_delta,
+               max((record->>'browserAfterMs')::numeric) - min((record->>'browserBeforeMs')::numeric) as browser_delta
+          from public.dialpad_recording_timing_records
+         where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream in ('tab:context','mic:context')
+         group by stream
+      ) drift;
+    if coalesce(timing_max_drift_ppm,0) > p.supported_drift_ppm then
+      reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_scope_unsupported');
+    end if;
+    if timing_server_wall_min is null or timing_server_wall_max is null or connected_us < timing_server_wall_min - (p.supported_anchor_cadence_ms * 1000) or ended_us > timing_server_wall_max + (p.supported_anchor_cadence_ms * 1000) then
+      reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_provider_window_unsupported');
+    end if;
+    if exists (
+      select 1
+        from public.dialpad_recording_timing_records a
+        join public.dialpad_recording_pcm_progress pcm on pcm.capture_id=a.capture_id and pcm.org_id=a.org_id and pcm.epoch=a.epoch and pcm.track=(a.record->>'track')
+       where a.capture_id=p_capture_id and a.org_id=p_org_id and a.epoch=selected_epoch and a.stream in ('tab:anchor','mic:anchor') and a.record->>'anchor'='final'
+         and (a.record->>'outputCursor')::numeric <> pcm.pcm_eof_sample
+    ) then
+      timing_output_mismatch := true;
+      reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_output_tail_mismatch');
+    end if;
+    if timing_server_wall_max - timing_server_wall_min > p.supported_duration_max_seconds::numeric * 1000000 then
+      reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_scope_unsupported');
+    end if;
+    timing_support := timing_start_count >= 2 and timing_final_count >= 2 and timing_context_start_count >= 2 and timing_context_final_count >= 2 and timing_exchange_count >= 1 and timing_server_clock_count = 1 and timing_max_stall <= p.supported_stall_max_ms and timing_max_anchor_gap <= p.supported_anchor_cadence_ms and coalesce(timing_max_drift_ppm,0) <= p.supported_drift_ppm and not timing_output_mismatch;
   end if;
 
-  if p.accepted_at is not null and p.revoked_at is null and selected_epoch is not null and connected_count=1 and ended_count=1 and provider_count=1 and connected_us is not null and ended_us is not null and ended_us >= connected_us and tab_eof > 0 and epoch_count=1 then
+  if p.accepted_at is not null and p.revoked_at is null and selected_epoch is not null and connected_count=1 and ended_count=1 and provider_count=1 and connected_us is not null and ended_us is not null and ended_us >= connected_us and tab_eof > 0 and epoch_count=1 and timing_support then
     lower_sample := greatest(0::bigint, p.domain_start_sample, ceil((connected_us::numeric - p.lower_intercept_us) / p.lower_slope_us_per_sample)::bigint);
     upper_sample := least(tab_eof, p.domain_end_sample, floor((ended_us::numeric - p.upper_intercept_us) / p.upper_slope_us_per_sample)::bigint);
     if upper_sample < lower_sample then upper_sample := lower_sample; end if;
@@ -236,8 +363,8 @@ begin
   elsif cardinality(reason_list) = 0 then
     reason_list := array['unsupported'];
   end if;
-  summary := jsonb_build_object('providerCallId', c.provider_call_id, 'connectedUs', connected_us, 'endedUs', ended_us, 'timingRecords', timing_count);
-  manifest := jsonb_build_object('captureId',p_capture_id,'orgId',p_org_id,'epoch',selected_epoch,'policyVersion',p_policy_version,'policyHash',coalesce(p.policy_hash,repeat('0',64)),'observedSamples',observed,'sampleWindow',jsonb_build_object('lowerSample',lower_sample,'upperSample',upper_sample),'ranges',ranges,'summary',summary,'reasons',to_jsonb(reason_list));
+  summary := jsonb_build_object('providerCallId', c.provider_call_id, 'connectedUs', connected_us, 'endedUs', ended_us, 'timingRecords', timing_count, 'timingStatus', timing_status, 'timingDigest', timing_digest, 'timingMaxStallMs', timing_max_stall, 'timingMaxAnchorGapMs', timing_max_anchor_gap, 'timingMaxDriftPpm', timing_max_drift_ppm, 'shadowDigest', shadow_digest);
+  manifest := jsonb_build_object('captureId',p_capture_id,'orgId',p_org_id,'epoch',selected_epoch,'policyVersion',p_policy_version,'policy',policy_manifest,'shadowDigest',shadow_digest,'timingDigest',timing_digest,'observedSamples',observed,'sampleWindow',jsonb_build_object('lowerSample',lower_sample,'upperSample',upper_sample),'ranges',jsonb_build_object('digest',shadow->'manifest'->'relations'->'vadRanges'->>'digest','count',shadow->'manifest'->'relations'->'vadRanges'->>'count'),'summary',summary,'reasons',to_jsonb(reason_list));
   digest := encode(extensions.digest(convert_to(manifest::text,'utf8'),'sha256'),'hex');
   return jsonb_build_object('algorithmVersion','provider-window-finalizer-v1','policyVersion',p_policy_version,'policyHash',coalesce(p.policy_hash,repeat('0',64)),'epoch',selected_epoch,'inputDigest',digest,'observedSamples',observed,'eligibleSamples',case when cardinality(reason_list)=1 and (reason_list[1] in ('eligible','below_threshold')) then eligible else null end,'status',case when cardinality(reason_list)=1 and reason_list[1]='eligible' then 'eligible' when cardinality(reason_list)=1 and reason_list[1]='below_threshold' then 'ineligible' else 'unknown' end,'reasons',to_jsonb(reason_list),'sampleWindow',jsonb_build_object('lowerSample',lower_sample,'upperSample',upper_sample),'selectedSummary',summary);
 end;
@@ -297,6 +424,57 @@ returns jsonb language sql stable security definer set search_path = '' as $$
     ) q;
 $$;
 
+-- Keyset-paginated variant for a bounded reconciliation worker. The cursor is
+-- the last terminal capture examined, rather than the last candidate returned;
+-- this lets a worker defer a repeatedly failing oldest capture and continue
+-- making progress without a generic jobs table. The workset is bounded before
+-- digest evaluation, and the page is bounded again before it is returned.
+create or replace function public.fn_list_dialpad_recording_provider_window_candidates(
+  p_limit integer,
+  p_after_result_at timestamptz,
+  p_after_capture_id uuid
+)
+returns jsonb language sql stable security definer set search_path = '' as $$
+  with workset as materialized (
+    select c.org_id, c.id as capture_id, c.result_at, p.policy_version,
+           r.policy_version as result_policy_version, r.input_digest as result_input_digest
+      from public.dialpad_recording_captures c
+      join lateral (
+        select policy_version
+          from public.dialpad_recording_provider_window_policies p
+         where p.org_id=c.org_id and p.accepted_at is not null and p.revoked_at is null
+         order by p.accepted_at desc,p.policy_version desc
+         limit 1
+      ) p on true
+      left join public.dialpad_recording_provider_window_results r
+        on r.capture_id=c.id and r.org_id=c.org_id
+     where c.status in ('sealed','partial','failed')
+       and (p_after_result_at is null or p_after_capture_id is null
+         or c.result_at > p_after_result_at
+         or (c.result_at = p_after_result_at and c.id > p_after_capture_id))
+     order by c.result_at,c.id
+     limit greatest(1, least(coalesce(p_limit,25)::numeric * 4, 400))::integer
+  ), evaluated as (
+    select w.*,
+           case when w.result_policy_version is null then null
+                else public.dialpad_recording_provider_window_input(w.org_id,w.capture_id,w.result_policy_version)->>'inputDigest'
+           end as current_input_digest
+      from workset w
+  ), candidates as (
+    select e.*
+      from evaluated e
+     where e.result_policy_version is null
+        or e.result_input_digest is distinct from e.current_input_digest
+        or e.result_policy_version is distinct from e.policy_version
+     order by e.result_at,e.capture_id
+     limit greatest(1, least(coalesce(p_limit,25), 100))
+  )
+  select jsonb_build_object(
+    'candidates', coalesce((select jsonb_agg(jsonb_build_object('orgId',c.org_id,'captureId',c.capture_id,'policyVersion',c.policy_version) order by c.result_at,c.capture_id) from candidates c), '[]'::jsonb),
+    'nextCursor', coalesce((select jsonb_build_object('resultAt',w.result_at,'captureId',w.capture_id) from workset w order by w.result_at desc,w.capture_id desc limit 1), 'null'::jsonb)
+  );
+$$;
+
 create or replace function public.fn_get_dialpad_recording_provider_window_result(p_org_id uuid,p_rep_user_id uuid,p_capture_id uuid)
 returns jsonb language plpgsql stable security definer set search_path = '' as $$
 declare r public.dialpad_recording_provider_window_results%rowtype; c public.dialpad_recording_captures%rowtype; current_digest text;
@@ -307,6 +485,58 @@ begin
   if not found then return jsonb_build_object('status','pending','currentAtRead',false,'result',null); end if;
   current_digest := public.dialpad_recording_provider_window_input(p_org_id,p_capture_id,r.policy_version)->>'inputDigest';
   return jsonb_build_object('status',case when current_digest=r.input_digest then r.status else 'stale' end,'currentAtRead',current_digest=r.input_digest,'currentInputDigest',current_digest,'result',jsonb_build_object('captureId',r.capture_id,'observedSamples',r.observed_samples,'eligibleSamples',r.eligible_samples,'status',r.status,'reasons',r.reasons,'evaluatedAt',r.evaluated_at));
+end;
+$$;
+
+-- Extend the existing call projection with the latest owned capture id so a
+-- remounted panel can hydrate its durable recording state. The capture is
+-- looked up through the same intent/org/rep authorization boundary as the
+-- call status itself; raw recording evidence remains behind its own RPC.
+create or replace function public.fn_get_dialpad_call_status(
+  p_org_id uuid, p_rep_user_id uuid, p_intent_id uuid
+) returns jsonb
+language plpgsql stable security definer set search_path = '' as $$
+declare
+  v_intent public.dialpad_call_intents%rowtype;
+  v_activity public.call_activities%rowtype;
+  v_attempt_id uuid;
+  v_state text;
+  v_connected boolean;
+  v_recording_capture_id uuid;
+begin
+  if p_org_id is null or p_rep_user_id is null or p_intent_id is null then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
+  end if;
+  select * into v_intent from public.dialpad_call_intents
+    where id = p_intent_id and org_id = p_org_id and rep_user_id = p_rep_user_id;
+  if not found then raise exception 'NOT_FOUND' using errcode = 'P0002'; end if;
+  select coalesce(bool_or(e.event_state = 'connected' or public.dialpad_cti_payload_ms(e.payload, 'date_connected') is not null), false)
+    into v_connected
+    from public.dialpad_call_events e
+   where e.org_id = p_org_id and e.matched_intent_id = v_intent.id and e.disposition = 'matched';
+  select * into v_activity from public.call_activities
+   where org_id = p_org_id and provider = 'dialpad' and jitter_attempt_id = 'dialpad-cti:' || v_intent.id::text;
+  select id into v_attempt_id from public.acquisition_attempts
+   where org_id = p_org_id and source = 'dialpad' and provider_attempt_key = 'dialpad-cti:' || v_intent.id::text;
+  select id into v_recording_capture_id from public.dialpad_recording_captures
+   where org_id = p_org_id and rep_user_id = p_rep_user_id and intent_id = v_intent.id
+   order by created_at desc limit 1;
+  v_state := case
+    when v_intent.status = 'cancelled' then 'cancelled'
+    when v_intent.status = 'matched' and v_activity.id is not null and v_activity.ended_at is not null then 'ended'
+    when v_intent.status = 'matched' and v_connected then 'connected'
+    when v_intent.status = 'matched' then 'dialing'
+    when v_intent.expires_at <= now() then 'expired'
+    when v_intent.dispatch_authorized_at is not null then 'awaiting_provider'
+    else 'prepared'
+  end;
+  return jsonb_build_object(
+    'intentId', v_intent.id, 'state', v_state, 'connected', v_connected, 'propertyId', v_intent.property_id,
+    'expiresAt', v_intent.expires_at, 'dispatchAuthorizedAt', v_intent.dispatch_authorized_at,
+    'callActivityId', v_activity.id, 'attemptId', v_attempt_id,
+    'startedAt', v_activity.started_at, 'endedAt', v_activity.ended_at,
+    'durationSeconds', v_activity.duration_seconds, 'talkDurationSeconds', v_activity.talk_duration_seconds,
+    'recordingCaptureId', v_recording_capture_id);
 end;
 $$;
 
@@ -332,7 +562,7 @@ begin
   if not found then raise exception 'NOT_FOUND' using errcode='P0002'; end if;
   select con.recording_ingest_endpoint into endpoint from public.dialpad_call_intents i join public.dialpad_org_connections con on con.id=i.connection_id and con.org_id=i.org_id where i.id=c.intent_id and i.org_id=p_org_id;
   select coalesce(max(g.epoch),0) into epoch from public.dialpad_recording_ingest_grants g where g.capture_id=p_capture_id and g.consumed_at is not null;
-  select coalesce(t.voiced_samples,0),coalesce(t.measurement_status,'provisional') into total_samples,measurement_status from public.dialpad_recording_vad_totals t where t.capture_id=p_capture_id and t.org_id=p_org_id;
+  select coalesce(max(t.voiced_samples),0),coalesce(max(t.measurement_status),'provisional') into total_samples,measurement_status from public.dialpad_recording_vad_totals t where t.capture_id=p_capture_id and t.org_id=p_org_id;
   select * into latch from public.dialpad_recording_vad_threshold_latches where capture_id=p_capture_id and org_id=p_org_id;
   select * into result_row from public.dialpad_recording_provider_window_results where capture_id=p_capture_id and org_id=p_org_id;
   if result_row.capture_id is not null then current_digest := public.dialpad_recording_provider_window_input(p_org_id,p_capture_id,result_row.policy_version)->>'inputDigest'; end if;
@@ -383,11 +613,13 @@ $$;
 revoke all on function public.dialpad_recording_provider_window_add_reason(text[],text) from public,anon,authenticated,service_role;
 revoke all on function public.dialpad_recording_provider_window_input(uuid,uuid,text) from public,anon,authenticated,service_role;
 revoke all on function public.fn_list_dialpad_recording_provider_window_candidates(integer) from public,anon,authenticated;
+revoke all on function public.fn_list_dialpad_recording_provider_window_candidates(integer,timestamptz,uuid) from public,anon,authenticated;
 revoke all on function public.fn_get_dialpad_recording_final_input(uuid,uuid,text) from public,anon,authenticated;
 revoke all on function public.fn_finalize_dialpad_recording_provider_window(uuid,uuid,text,text) from public,anon,authenticated;
 revoke all on function public.fn_get_dialpad_recording_provider_window_result(uuid,uuid,uuid) from public,anon,authenticated;
 revoke all on function public.dialpad_recording_provider_window_is_eligible(uuid,uuid,uuid) from public,anon,authenticated;
 grant execute on function public.fn_list_dialpad_recording_provider_window_candidates(integer) to service_role;
+grant execute on function public.fn_list_dialpad_recording_provider_window_candidates(integer,timestamptz,uuid) to service_role;
 grant execute on function public.fn_get_dialpad_recording_final_input(uuid,uuid,text) to service_role;
 grant execute on function public.fn_finalize_dialpad_recording_provider_window(uuid,uuid,text,text) to service_role;
 grant execute on function public.fn_get_dialpad_recording_provider_window_result(uuid,uuid,uuid) to service_role;
