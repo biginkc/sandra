@@ -75,14 +75,14 @@ export async function listSequenceNeedsPerson(): Promise<Result<NeedsPersonRow[]
     const orgId = await activeOrgId(supabase, user.id);
     if (!orgId) return ok([]);
     const { data, error } = await supabase.rpc("sequence_needs_person", { p_org: orgId });
-    if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Sequence stats are being prepared." : error.message } };
+    if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Drip stats are being prepared." : error.message } };
     return ok((data ?? []).filter((row) =>
       !process.env.SEQUENCE_CANARY_USER_ID || row.sequence_created_by !== process.env.SEQUENCE_CANARY_USER_ID)
       .map((row) => ({
         property_id: row.property_id,
         sequence_id: row.sequence_id,
         bucket: row.bucket as NeedsPersonRow["bucket"],
-        reason: row.bucket === "needs_sequence" ? "Needs a sequence" :
+        reason: row.bucket === "needs_sequence" ? "Needs a drip" :
           DRIP_BUCKET_LABELS[row.bucket as "finished_no_reply" | "couldnt_send"],
       })));
   } catch (error) {
@@ -335,7 +335,7 @@ export async function createSequence(input: {
           ok: false,
           error: {
             code: "DUPLICATE_NAME",
-            message: `A sequence named "${name}" already exists.`,
+            message: `A drip named "${name}" already exists.`,
           },
         };
       }
@@ -563,7 +563,7 @@ export async function deleteSequenceStep(
         error: {
           code: "STEP_DELETE_HAS_HISTORY",
           message:
-            "This step has execution history and cannot be deleted. Archive the sequence or create a replacement step.",
+            "This step has execution history and cannot be deleted. Archive the drip or create a replacement step.",
         },
       };
     }
@@ -579,7 +579,7 @@ export async function deleteSequenceStep(
           error: {
             code: "STEP_DELETE_HAS_HISTORY",
             message:
-              "This step has execution history and cannot be deleted. Archive the sequence or create a replacement step.",
+              "This step has execution history and cannot be deleted. Archive the drip or create a replacement step.",
           },
         };
       }
@@ -806,7 +806,7 @@ export async function getImpactAction(
 
 /**
  * Listed sequences for a given property's lead detail page — the drip
- * chip + "Sequences" panel need both names and enrollment states.
+ * chip + "Drips" panel need both names and enrollment states.
  */
 export async function listPropertyEnrollments(propertyId: string): Promise<
   Result<

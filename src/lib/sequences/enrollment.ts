@@ -83,7 +83,7 @@ export async function enrollLead(
   if (prop.org_id !== seq.org_id) {
     return {
       status: "failed",
-      message: "Sequence and property must belong to the same organization.",
+      message: "Drip and property must belong to the same organization.",
     };
   }
 

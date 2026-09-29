@@ -25,10 +25,10 @@ export default async function SequenceEditPage({
         <PageHeader
           breadcrumb={[
             { label: "Workspace" },
-            { label: "Sequences", href: "/sequences" },
+            { label: "Drips", href: "/sequences" },
             { label: "Edit" },
           ]}
-          title="Sequence editor"
+          title="Drip editor"
         />
         <div className="text-destructive text-sm">
           Failed to load sequence: {result.error.message}
@@ -49,7 +49,7 @@ export default async function SequenceEditPage({
       <PageHeader
         breadcrumb={[
           { label: "Workspace" },
-          { label: "Sequences", href: "/sequences" },
+          { label: "Drips", href: "/sequences" },
           { label: result.data.name },
         ]}
         title={result.data.name}

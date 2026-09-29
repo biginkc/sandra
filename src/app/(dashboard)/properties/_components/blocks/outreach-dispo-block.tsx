@@ -13,7 +13,7 @@ const OUTREACH_DISPO_LABELS: Record<string, string> = {
   dnc: "Do not call",
   nurture: "Follow up",
   callback_requested: "Callback requested",
-  needs_sequence: "Needs sequence",
+  needs_sequence: "Needs drip",
 };
 
 export default function OutreachDispoBlock({

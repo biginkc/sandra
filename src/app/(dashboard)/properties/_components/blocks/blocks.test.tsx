@@ -221,7 +221,7 @@ describe("outreach-dispo-block", () => {
   it("renders operator labels for non-obvious disposition values", () => {
     wrap(<OutreachDispoBlock block={base} onChange={vi.fn()} onRemove={vi.fn()} />);
     expect(screen.getByRole("checkbox", { name: "Follow up" })).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "Needs sequence" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Needs drip" })).toBeInTheDocument();
     expect(screen.queryByText("nurture")).not.toBeInTheDocument();
     expect(screen.queryByText("needs_sequence")).not.toBeInTheDocument();
   });

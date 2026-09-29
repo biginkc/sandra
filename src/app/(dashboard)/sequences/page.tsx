@@ -21,12 +21,12 @@ export default async function SequencesIndexPage() {
   return (
     <Page>
       <PageHeader
-        breadcrumb={[{ label: "Workspace" }, { label: "Sequences" }]}
-        title="Sequences"
-        description="Multi-step outreach recipes. V1: manual enrollment, `send_sms` + `change_status` actions, live-read templates."
+        breadcrumb={[{ label: "Workspace" }, { label: "Drips" }]}
+        title="Drips"
+        description="Create scheduled follow-up steps for leads."
         actions={isAdmin ? (
           <Link href="/sequences/new">
-            <Button>New sequence</Button>
+            <Button>New drip</Button>
           </Link>
         ) : undefined}
       />
@@ -40,8 +40,8 @@ export default async function SequencesIndexPage() {
       {active.length === 0 && archived.length === 0 && result.ok ? (
         <div className="text-muted-foreground text-sm">
           {isAdmin
-            ? "No sequences yet. Click \"New sequence\" to author one, or apply migration 018's starter library."
-            : "No sequences are available yet. Ask an admin to create one before enrolling leads."}
+            ? "No drips yet. Create one to get started."
+            : "No drips are available yet. Ask an admin to create one before enrolling leads."}
         </div>
       ) : null}
 
@@ -82,7 +82,7 @@ function SequenceTable({
             <th className="px-3 py-2">Steps</th>
             <th className="px-3 py-2">Enrolled (active/paused)</th>
             <th className="px-3 py-2">Opt-out append</th>
-            <th className="px-3 py-2">Active</th>
+            <th className="px-3 py-2">New leads</th>
             <th className="px-3 py-2 text-right">Actions</th>
           </tr>
         </thead>
@@ -117,9 +117,9 @@ function SequenceTable({
               </td>
               <td className="px-3 py-2">
                 {s.active && !s.archived_at ? (
-                  <Badge>active</Badge>
+                  <Badge>open to new leads</Badge>
                 ) : (
-                  <Badge variant="outline">paused</Badge>
+                  <Badge variant="outline">closed to new leads</Badge>
                 )}
               </td>
               <td className="px-3 py-2 text-right">

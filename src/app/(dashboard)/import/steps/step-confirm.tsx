@@ -84,13 +84,13 @@ export function StepConfirm({
           />
           <Label htmlFor="sms-consent" className="cursor-pointer text-sm leading-snug">
             I attest that every contact in this file has given written SMS consent.
-            Without this, no SMS sequence can be enrolled from this import.
+            Without this, no SMS drip can be started from this import.
           </Label>
         </div>
 
         {state.smsConsent && (
           <div className="flex flex-col gap-1.5 pl-7">
-            <Label htmlFor="sequence-picker">Auto-enroll in sequence (optional)</Label>
+            <Label htmlFor="sequence-picker">Auto-enroll in drip (optional)</Label>
             <select
               id="sequence-picker"
               value={state.sequenceId ?? ""}
