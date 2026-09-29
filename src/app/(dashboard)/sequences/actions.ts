@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import {
   enrollLead,
   resumeEnrollment,
@@ -628,6 +629,63 @@ export async function cancelEnrollment(
       extra: { enrollmentId },
     });
     return errFromUnknown(e, "CANCEL_FAILED");
+  }
+}
+
+export async function pauseEnrollmentAction(enrollmentId: string): Promise<Result<null>> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+    const { data, error } = await supabase.from("sequence_enrollments")
+      .update({ status: "paused", pause_reason: "manual", updated_at: new Date().toISOString() })
+      .eq("id", enrollmentId).eq("status", "active")
+      .select("property_id, sequence_id");
+    if (error) return { ok: false, error: { code: "PAUSE_FAILED", message: error.message } };
+    if (!data?.length) return { ok: false, error: { code: "NOT_ACTIVE", message: "Enrollment is no longer active." } };
+    await recordLeadEvent({ propertyId: data[0].property_id, actorType: "user", actorId: user.id,
+      eventType: LEAD_EVENT_TYPES.SEQUENCE_PAUSED,
+      payload: { enrollment_id: enrollmentId, sequence_id: data[0].sequence_id, reason: "manual" } });
+    revalidatePath(`/leads/${data[0].property_id}`);
+    revalidatePath("/sequences");
+    return ok(null);
+  } catch (e) {
+    reportError(e, { tags: { surface: "pause_enrollment" }, extra: { enrollmentId } });
+    return errFromUnknown(e, "PAUSE_FAILED");
+  }
+}
+
+/** Stop the old enrollment before invoking the normal guarded enrollment path. */
+export async function changeDripAction(enrollmentId: string, sequenceId: string): Promise<Result<DripResult>> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+    const { data: old, error: loadError } = await supabase.from("sequence_enrollments")
+      .select("property_id, sequence_id, status").eq("id", enrollmentId).maybeSingle();
+    if (loadError) return { ok: false, error: { code: "CHANGE_FAILED", message: loadError.message } };
+    if (!old || !["active", "paused"].includes(old.status)) return { ok: false, error: { code: "NOT_ACTIVE", message: "Enrollment is no longer active." } };
+    if (old.sequence_id === sequenceId) return { ok: false, error: { code: "SAME_DRIP", message: "Choose a different drip." } };
+    const { data: canceled, error: cancelError } = await supabase.rpc("cancel_sequence_enrollment", {
+      p_enrollment_id: enrollmentId, p_actor_user_id: user.id,
+    });
+    if (cancelError || canceled?.[0]?.outcome !== "canceled") return { ok: false, error: { code: "CANCEL_FAILED", message: cancelError?.message ?? "Enrollment could not be canceled." } };
+    let result: DripResult;
+    try {
+      const outcome = await enrollLead(supabase, { propertyId: old.property_id, sequenceId, enrolledByUserId: user.id });
+      result = { propertyId: old.property_id,
+        status: outcome.status === "enrolled" ? "enrolled" : ["duplicate_active", "no_phone", "landline_phone", "no_consent", "suppressed"].includes(outcome.status) ? "skipped" : "failed",
+        reason: enrollmentReason(outcome) };
+    } catch (error) {
+      reportError(error, { tags: { surface: "change_drip_enroll" }, extra: { enrollmentId, sequenceId } });
+      result = { propertyId: old.property_id, status: "failed", reason: "Could not enroll this lead." };
+    }
+    revalidatePath(`/leads/${old.property_id}`);
+    revalidatePath("/sequences");
+    return ok(result);
+  } catch (e) {
+    reportError(e, { tags: { surface: "change_drip" }, extra: { enrollmentId, sequenceId } });
+    return errFromUnknown(e, "CHANGE_FAILED");
   }
 }
 
