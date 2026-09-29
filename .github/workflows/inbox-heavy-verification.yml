@@ -24,9 +24,10 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
-  group: inbox-heavy-${{ github.event_name }}-${{ github.ref }}-${{ github.run_id }}
+  group: inbox-heavy-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

@@ -11,11 +11,14 @@ const hash = b => createHash('sha256').update(b).digest('hex');
 function fixture() {
   const repo = mkdtempSync(path.join(tmpdir(), 'heavy-pull-repo-'));
   execFileSync('git', ['init', '-q', repo]);
+  execFileSync('git', ['-C', repo, 'config', 'user.name', 'Evidence Test']);
+  execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.invalid']);
   mkdirSync(path.join(repo, '.github/workflows'), { recursive: true });
   writeFileSync(path.join(repo, '.github/workflows/inbox-heavy-verification.yml'), 'safe: true\n');
   mkdirSync(path.join(repo, 'scripts/inbox-ci'), { recursive: true });
   mkdirSync(path.join(repo, 'e2e/inbox-acceptance'), { recursive: true });
   writeFileSync(path.join(repo, 'scripts/inbox-ci/outbox.sh'), 'echo safe\n');
+  writeFileSync(path.join(repo, 'scripts/inbox-ci/migration.sh'), 'echo migration\n');
   writeFileSync(path.join(repo, 'e2e/inbox-acceptance/fault-proxy.mjs'), 'safe\n');
   execFileSync('git', ['-C', repo, 'add', '.']);
   execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base']);
@@ -26,10 +29,11 @@ function fixture() {
   writeFileSync(path.join(dir, 'results.json'), '{}');
   const manifest = {
     tested_sha: sha, tier: 'pre-merge', kind: 'browser', phase: 'pre', target: 'disposable', verdict: 'PASS', run_id: '123',
-    exit_status: 0, completed_at: '2026-09-29T00:00:00Z', lane: 'outbox',
+    exit_status: 0, started_at: '2026-09-28T23:00:00Z', completed_at: '2026-09-29T00:00:00Z', lane: 'outbox',
     workflow_path: '.github/workflows/inbox-heavy-verification.yml', workflow_input_sha: sha,
     github_run_id: '123', github_run_attempt: '2', artifact_name: `heavy-outbox-${sha}-123-2`, event: 'workflow_dispatch', head_branch: 'main',
     runner_script_sha256: hash('echo safe\n'), fault_proxy_script_sha256: hash('safe\n'),
+    clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: `docs/performance/inbox-redesign/evidence/${sha}/pre-merge/123` },
     artifacts: { 'results.json': hash('{}') },
   };
   writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
@@ -38,6 +42,23 @@ function fixture() {
   return { repo, root, dir, sha, manifest, run, artifact, save() { writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest)); }, check() { return verifyDownload(repo, root, run, artifact, sha); } };
 }
 test('valid downloaded evidence verifies', () => assert.equal(fixture().check().manifest.verdict, 'PASS'));
+test('non-outbox record does not require a fault proxy hash', () => {
+  const f = fixture();
+  f.manifest.lane = 'migration';
+  f.manifest.runner_script_sha256 = hash('echo migration\n');
+  delete f.manifest.fault_proxy_script_sha256;
+  f.manifest.artifact_name = `heavy-migration-${f.sha}-123-2`;
+  f.artifact.name = f.manifest.artifact_name;
+  f.run.display_title = `Inbox heavy migration ${f.sha}`;
+  f.save();
+  assert.equal(f.check().manifest.lane, 'migration');
+});
+test('outbox record requires its fault proxy hash', () => {
+  const f = fixture();
+  delete f.manifest.fault_proxy_script_sha256;
+  f.save();
+  assert.throws(() => f.check(), /Runner\/proxy script hash mismatch/);
+});
 for (const [label, mutate] of [
   ['non-dispatch', f => { f.run.event = 'pull_request'; }],
   ['non-main', f => { f.run.head_branch = 'feature'; }],
@@ -71,4 +92,22 @@ test('seal creates one-parent evidence-only commit on an owned branch', () => {
   assert.deepEqual(parent, [sealed, f.sha]);
   const files = execFileSync('git', ['-C', f.repo, 'diff-tree', '--no-commit-id', '--name-only', '-r', f.sha, sealed], { encoding: 'utf8' }).trim().split('\n');
   assert(files.every(file => file.startsWith(`docs/performance/inbox-redesign/evidence/${f.sha}/pre-merge/123/`)));
+  const identity = execFileSync('git', ['-C', f.repo, 'show', '-s', '--format=%an <%ae>%n%B', sealed], { encoding: 'utf8' });
+  assert.match(identity, /^Evidence Test <test@example\.invalid>/);
+  assert.match(identity, /Co-Authored-By: Claude Opus 5\.5 <noreply@anthropic\.com>/);
+});
+
+test('FAIL run seals and sealed gate rejects its latest result', () => {
+  const f = fixture();
+  f.run.conclusion = 'failure';
+  f.manifest.verdict = 'FAIL';
+  f.manifest.exit_status = 1;
+  f.save();
+  const remote = mkdtempSync(path.join(tmpdir(), 'heavy-seal-remote-'));
+  execFileSync('git', ['init', '--bare', '-q', remote]);
+  execFileSync('git', ['-C', f.repo, 'remote', 'add', 'origin', remote]);
+  const sealed = seal(f.repo, f.root, f.check(), 'evidence-fail');
+  const script = `import sys; sys.path.insert(0, ${JSON.stringify(path.resolve('experiments/inbox-release'))}); from sealed_evidence import evaluate, EvidenceError; evaluate(${JSON.stringify(f.repo)}, ${JSON.stringify(f.sha)}, 'pre-merge', ${JSON.stringify('evidence-fail')})`;
+  assert.throws(() => execFileSync('python3', ['-c', script], { encoding: 'utf8', stdio: 'pipe' }), error => /latest required check failed/.test(error.stderr));
+  assert.match(sealed, /^[a-f0-9]{40}$/);
 });

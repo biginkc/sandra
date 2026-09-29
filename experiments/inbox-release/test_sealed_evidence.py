@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from sealed_evidence import ROOT, EvidenceError, evaluate, evaluate_deploy, evaluate_migration, J5A, MIGRATION_VERSIONS
 
@@ -357,6 +358,31 @@ class SealedEvidenceTests(unittest.TestCase):
         m = self.git("rev-parse", "HEAD")
         with self.assertRaisesRegex(EvidenceError, "migration diff"):
             evaluate(self.repo, "j5b", self.sha, m)
+
+    def test_j5b_main_chain_cannot_mask_migration_chain_fail(self):
+        self.git("checkout", "-qb", "migration-evidence", self.sha)
+        self.j5a_records(bad=J5A[3])
+        self.record("burst", kind="burst", phase="n/a", target="disposable", completed="2026-09-28T12:08:00Z",
+                    extra={"github_run_id": "2000", "github_run_attempt": "1", "lane": "outbox",
+                           "artifact_name": f"heavy-outbox-{self.sha}-2000-1",
+                           "workflow_path": ".github/workflows/inbox-heavy-verification.yml",
+                           "workflow_input_sha": self.sha, "event": "workflow_dispatch", "head_branch": "main"})
+        self.git("checkout", "-q", self.base_branch)
+        (self.repo / "main.txt").write_text("main")
+        self.commit("main")
+        m = self.git("rev-parse", "HEAD")
+        self.record("masked-post", sha=m, kind="db-contract", phase="post", target="disposable",
+                    extra={"github_run_id": "3000", "github_run_attempt": "1", "lane": "outbox",
+                           "artifact_name": f"heavy-outbox-{m}-3000-1",
+                           "workflow_path": ".github/workflows/inbox-heavy-verification.yml",
+                           "workflow_input_sha": m, "event": "workflow_dispatch", "head_branch": "main"})
+        self.record("migration", sha=m, tier="test-env", kind="migration-apply", phase="post", target="shared-test",
+                    completed="2026-09-28T12:01:00Z")
+        self.record("readonly", sha=m, tier="test-env", kind="shared-readonly", phase="post", target="shared-test",
+                    completed="2026-09-28T12:02:00Z")
+        with patch("sealed_evidence.evaluate_migration", return_value={"status": "PASS"}):
+            with self.assertRaisesRegex(EvidenceError, "latest required check failed.*db-contract"):
+                evaluate(self.repo, "j5b", self.sha, m)
 
     def test_deploy_entrypoint_fails_closed(self) -> None:
         observed = {

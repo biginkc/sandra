@@ -120,7 +120,8 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
     completed = timestamp(manifest.get("completed_at"))
     if timestamp(manifest.get("started_at")) > completed:
         raise EvidenceError(f"completed_at precedes started_at: {directory}")
-    if not HASH.fullmatch(str(manifest.get("runner_script_sha256", ""))) or not HASH.fullmatch(str(manifest.get("fault_proxy_script_sha256", ""))):
+    if (not HASH.fullmatch(str(manifest.get("runner_script_sha256", "")))
+            or (manifest.get("lane") == "outbox" and not HASH.fullmatch(str(manifest.get("fault_proxy_script_sha256", ""))))):
         raise EvidenceError(f"missing runner/proxy hashes: {directory}")
     clean = manifest.get("clean_tree")
     if not isinstance(clean, dict) or clean.get("start") is not True or clean.get("end_excluding_run_dir") is not True or clean.get("excluded_path") != directory:
@@ -286,7 +287,8 @@ def evaluate(repo: Path, approval: str, x_mig: str | None = None, m: str | None 
             raise EvidenceError("migration diff between X_mig and M")
         mig_chain = _find_migration_chain(repo, x_mig)
         main_chain = collect(repo, m, head)
-        combined = {**mig_chain["selected"], **main_chain["selected"]}
+        combined = {key: run for key, run in mig_chain["selected"].items() if key[0] == "pre-merge"}
+        combined.update({key: run for key, run in main_chain["selected"].items() if key[0] == "test-env"})
         selected = _require(combined, APPROVALS["j5b"])
         evaluate_migration(repo, m, "shared-test", head=head, x_mig=x_mig)
     return {"status": "PASS", "approval": approval, "selected": selected}

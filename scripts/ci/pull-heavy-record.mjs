@@ -37,7 +37,7 @@ function filesUnder(root) {
   return result.sort();
 }
 export function verifyDownload(repo, root, run, artifact, expectedSha) {
-  if (!HEX.test(expectedSha) || run.event !== 'workflow_dispatch' || run.head_branch !== 'main' || run.path !== WORKFLOW || run.conclusion !== 'success') throw new Error('Run provenance mismatch');
+  if (!HEX.test(expectedSha) || run.event !== 'workflow_dispatch' || run.head_branch !== 'main' || run.path !== WORKFLOW) throw new Error('Run provenance mismatch');
   if (!HEX.test(run.head_sha ?? '') || SHA256(execFileSync('git', ['show', `${run.head_sha}:${WORKFLOW}`], { cwd: repo })) !== SHA256(execFileSync('git', ['show', `${expectedSha}:${WORKFLOW}`], { cwd: repo }))) throw new Error('Workflow definition hash mismatch');
   const attempt = String(run.run_attempt);
   const id = String(run.id);
@@ -51,10 +51,10 @@ export function verifyDownload(repo, root, run, artifact, expectedSha) {
   const manifest = JSON.parse(readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
   inspectJson(manifest);
   if ('external_artifacts' in manifest) throw new Error('External artifacts forbidden');
-  if (manifest.tested_sha !== expectedSha || manifest.tier !== 'pre-merge' || manifest.run_id !== id || manifest.exit_status !== 0 || manifest.verdict !== 'PASS') throw new Error('Manifest identity or verdict mismatch');
+  if (manifest.tested_sha !== expectedSha || manifest.tier !== 'pre-merge' || manifest.run_id !== id || !Number.isInteger(manifest.exit_status) || !['PASS', 'FAIL', 'INCONCLUSIVE'].includes(manifest.verdict)) throw new Error('Manifest identity or verdict mismatch');
   if (run.display_title !== `Inbox heavy ${manifest.lane} ${expectedSha}` || artifact.name !== `heavy-${manifest.lane}-${expectedSha}-${id}-${attempt}` || manifest.artifact_name !== artifact.name) throw new Error('Dispatch title/artifact identity mismatch');
   if (manifest.github_run_id !== id || String(manifest.github_run_attempt) !== attempt || manifest.event !== run.event || manifest.head_branch !== run.head_branch || manifest.workflow_path !== WORKFLOW || manifest.workflow_input_sha !== expectedSha) throw new Error('Manifest provenance or attempt mismatch');
-  if (!/^[a-z0-9-]+$/.test(manifest.lane) || manifest.runner_script_sha256 !== SHA256(execFileSync('git', ['show', `${expectedSha}:scripts/inbox-ci/${manifest.lane}.sh`], { cwd: repo })) || manifest.fault_proxy_script_sha256 !== SHA256(execFileSync('git', ['show', `${expectedSha}:e2e/inbox-acceptance/fault-proxy.mjs`], { cwd: repo }))) throw new Error('Runner/proxy script hash mismatch');
+  if (!/^[a-z0-9-]+$/.test(manifest.lane) || manifest.runner_script_sha256 !== SHA256(execFileSync('git', ['show', `${expectedSha}:scripts/inbox-ci/${manifest.lane}.sh`], { cwd: repo })) || (manifest.lane === 'outbox' && manifest.fault_proxy_script_sha256 !== SHA256(execFileSync('git', ['show', `${expectedSha}:e2e/inbox-acceptance/fault-proxy.mjs`], { cwd: repo })))) throw new Error('Runner/proxy script hash mismatch');
   const actual = paths.filter(p => p !== `${prefix}manifest.json`).map(p => p.slice(prefix.length));
   if (Object.keys(manifest.artifacts ?? {}).sort().join('\n') !== actual.join('\n')) throw new Error('Incomplete artifact inventory');
   for (const relative of actual) {
@@ -95,7 +95,7 @@ export function seal(repo, source, verified, branch) {
     const changed = git(scratch, 'status', '--porcelain', '--untracked-files=all').split('\n').filter(Boolean);
     if (!changed.length || changed.some(line => !line.slice(3).startsWith(`${verified.prefix}/`))) throw new Error('Evidence-only commit check failed');
     git(scratch, 'add', '--', verified.prefix);
-    git(scratch, '-c', 'user.name=Codex', '-c', 'user.email=noreply@openai.com', 'commit', '-m', `Seal heavy evidence ${verified.manifest.github_run_id}`, '-m', 'Co-Authored-By: Codex <noreply@openai.com>');
+    git(scratch, 'commit', '-m', `Seal heavy evidence ${verified.manifest.github_run_id}`, '-m', 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>');
     const sealed = git(scratch, 'rev-parse', 'HEAD');
     if (git(scratch, 'rev-list', '--parents', '-n', '1', sealed).split(' ').length !== 2) throw new Error('Evidence commit must have one parent');
     git(scratch, 'push', 'origin', `${sealed}:refs/heads/${branch}`, ...(existing ? [`--force-with-lease=refs/heads/${branch}:${base}`] : []));
@@ -115,7 +115,7 @@ async function main() {
   if (!artifact) throw new Error('Artifact for exact attempt missing');
   const download = mkdtempSync(path.join(tmpdir(), 'sandra-heavy-download-'));
   try {
-    gh('run', 'download', runId, '-n', artifact.name, '-D', path.join(download, ROOT));
+    gh('run', 'download', runId, '-R', 'biginkc/sandra', '-n', artifact.name, '-D', path.join(download, ROOT));
     const verified = verifyDownload(repo, download, run, artifact, sha);
     console.log(seal(repo, download, verified, branch));
   } finally { rmSync(download, { recursive: true, force: true }); }
