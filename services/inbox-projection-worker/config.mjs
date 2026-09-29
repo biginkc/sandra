@@ -8,6 +8,7 @@ export function databaseConfig(env){
  if([...url.searchParams.keys()].some(key=>key!=='sslmode'))throw Error('Unsupported projection database option');
  const fixture=env.INBOX_PROJECTION_OWNED_FIXTURE_PLAINTEXT==='true';
  if(fixture){
+  if(env.NODE_ENV!=='test')throw Error('Unapproved plaintext fixture database');
   const database=url.pathname.slice(1);
   const releaseHttp=url.hostname==='127.0.0.1'&&url.port==='54322'&&database==='postgres';
   const historical=url.hostname==='127.0.0.1'&&url.port==='5432'&&fixtures.has(database);
