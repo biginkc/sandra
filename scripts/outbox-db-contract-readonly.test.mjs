@@ -1,17 +1,87 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
 import { readonlyGet, comparePlatform, platformFingerprint } from './outbox-db-contract/platform.mjs';
 import { assertTarget, parseArgs, compareCatalog } from './outbox-db-contract-readonly.mjs';
 
-const row = (id, body='a') => ({ id, body, status:'queued', updated_at:'2026-01-01', from_address:'x', to_address:'y', created_at:'2026-01-01', scheduled_for:null, property_id:null, contact_id:null });
+const row = (id, body='a') => ({ id, body, status:'queued', from_address:'x', to_address:'y', created_at:'2026-01-01', scheduled_for:null, property_id:null, contact_id:null });
 function fails(label, fn, pattern) { assert.throws(fn, pattern, label); }
 const TEST_REF='ncsngxlcyxylaeskiteu';
 const PROD_REF='copflsklaefwzipsrjqz';
 const hosted=ref=>`postgres://postgres.${ref}:unused@aws-0-us-east-1.pooler.supabase.com:5432/postgres`;
 const api=ref=>`https://${ref}.supabase.co`;
+
+// Read the DDL, rather than treating the synthetic local tables as the schema.
+// The three 2026093004* files are the Inbox install and define the POST phase.
+const tableNames = ['messages', 'memberships', 'organizations', 'properties', 'contacts'];
+const migrationsDir = new URL('../supabase/migrations/', import.meta.url);
+function migrationColumns(includeInbox) {
+  const columns = Object.fromEntries(tableNames.map(name => [name, new Map()]));
+  for (const file of readdirSync(migrationsDir).filter(name => name.endsWith('.sql')).sort()) {
+    if (!includeInbox && /^2026093004\d+_inbox_/.test(file)) continue;
+    const sql = readFileSync(new URL(file, migrationsDir), 'utf8').replace(/--[^\n]*/g, '');
+    for (const name of tableNames) {
+      const create = new RegExp(`\\bcreate\\s+table\\s+(?:if\\s+not\\s+exists\\s+)?(?:public\\.)?${name}\\s*\\(([\\s\\S]*?)^\\);`, 'gim');
+      for (const match of sql.matchAll(create)) {
+        for (const line of match[1].split('\n')) {
+          const column = /^\s*([a-z_][\w]*)\s+(uuid|text|timestamptz|boolean|integer|int|bigint|numeric|jsonb|date|time|interval)\b/i.exec(line);
+          if (column) columns[name].set(column[1].toLowerCase(), column[2].toLowerCase());
+        }
+      }
+      const alter = new RegExp(`\\balter\\s+table\\s+(?:if\\s+exists\\s+)?(?:public\\.)?${name}\\b([\\s\\S]*?);`, 'gi');
+      for (const match of sql.matchAll(alter)) {
+        for (const add of match[1].matchAll(/\badd\s+column\s+(?:if\s+not\s+exists\s+)?([a-z_][\w]*)\s+(uuid|text|timestamptz|boolean|integer|int|bigint|numeric|jsonb|date|time|interval)\b/gi)) {
+          columns[name].set(add[1].toLowerCase(), add[2].toLowerCase());
+        }
+        for (const drop of match[1].matchAll(/\bdrop\s+column\s+(?:if\s+exists\s+)?([a-z_][\w]*)\b/gi)) columns[name].delete(drop[1].toLowerCase());
+      }
+    }
+  }
+  return columns;
+}
+function checkerColumns(source) {
+  const refs = [];
+  const aliases = { m: 'messages', msg: 'messages', mb: 'memberships', p: 'properties', c: 'contacts' };
+  for (const [, alias, column] of source.matchAll(/\b(m|msg|mb|p|c)\.([a-z_][\w]*)\b/g)) refs.push([aliases[alias], column]);
+  // Fail if a public-table query regresses to an unqualified column. A dot
+  // between an alias and its column is required in every SELECT/WHERE/ORDER.
+  const sql = source.match(/(?:`[^`]*`|'[^'\n]*'|"[^"\n]*")/g)?.join(' ') ?? '';
+  for (const [, list] of sql.matchAll(/\bSELECT\s+([a-z_][\w]*(?:\s*,\s*[a-z_][\w]*)*)\s+FROM\s+public\./gi)) {
+    assert.fail(`unqualified SELECT list: ${list}`);
+  }
+  return [...new Map(refs.map(ref => [ref.join('.'), ref])).values()];
+}
+test('checker SQL and local fixture use migration-defined PRE and POST columns', () => {
+  const pre = migrationColumns(false), post = migrationColumns(true);
+  const source = readFileSync(new URL('./outbox-db-contract/readonly.mjs', import.meta.url), 'utf8');
+  const refs = checkerColumns(source);
+  assert.ok(refs.length > 20, 'the scanner must cover joined and unaliased reads');
+  for (const [table, column] of refs) {
+    assert.ok(pre[table].has(column), `PRE lacks ${table}.${column}`);
+    assert.ok(post[table].has(column), `POST lacks ${table}.${column}`);
+  }
+  assert.throws(() => {
+    for (const [table, column] of checkerColumns(source + " SELECT m.updated_at FROM public.messages m")) {
+      assert.ok(pre[table].has(column), `PRE lacks ${table}.${column}`);
+    }
+  }, /PRE lacks messages\.updated_at/);
+  const fixture = readFileSync(new URL('./outbox-db-contract/readonly-local.sql', import.meta.url), 'utf8');
+  for (const name of tableNames) {
+    const body = new RegExp(`CREATE TABLE public\\.${name}\\(([^;]+)\\);`, 'i').exec(fixture)?.[1];
+    assert.ok(body, `local fixture lacks ${name}`);
+    const local = [...body.matchAll(/(?:^|,)\s*([a-z_][\w]*)\s+(uuid|text|timestamptz|boolean|integer|int|bigint|numeric|jsonb)\b/gi)];
+    assert.ok(local.length, `local fixture has no parsed columns for ${name}`);
+    for (const [, column, type] of local) {
+      assert.equal(pre[name].get(column), type.toLowerCase(), `local ${name}.${column} differs from PRE DDL`);
+      assert.equal(post[name].get(column), type.toLowerCase(), `local ${name}.${column} differs from POST DDL`);
+    }
+    for (const [table, column] of refs.filter(([table]) => table === name)) {
+      assert.ok(local.some(([, field]) => field === column), `local fixture lacks ${table}.${column}`);
+    }
+  }
+});
 test('NC-T5a, NC-A5 target boundary', () => {
   fails('shared loopback', () => assertTarget('shared-readonly','postgres://postgres@127.0.0.1:55422/test'), /TARGET_REFUSED/);
   fails('disposable hosted', () => assertTarget('disposable-readonly','postgres://postgres@db.example.supabase.co/test'), /TARGET_REFUSED/);
@@ -79,8 +149,9 @@ test('NC-B1/B2/B3/C4/C5/C6 set oracle', () => {
 test('NC-Q1/Q2/Q3/Q4/Q5 reconciliation', async () => {
   const before=snapshot([row('1'),row('2')]);
   assert.equal(reconcile(before,snapshot([row('1'),row('2')])).verdict,'PASS');
-  const mixed=reconcile(before,snapshot([row('2','changed')]),{'1':{status:'sent',updated_at:'2026-01-02'}});
+  const mixed=reconcile(before,snapshot([row('2','changed')]),{'1':{status:'sent',created_at:'2026-01-01'}});
   assert.equal(mixed.verdict,'INCONCLUSIVE'); assert.deepEqual(mixed.diff.map(x=>x.kind),['departed','content_changed']);
+  assert.equal(reconcile(before,snapshot([{...row('1'),created_at:'2026-01-02'},row('2')])).diff[0].kind,'content_changed');
   assert.equal(reconcile(before,snapshot([row('1'),row('2'),row('3')])).verdict,'INCONCLUSIVE');
   const forged=snapshot([row('1'),row('2','changed')]); forged.aggregate_sha256=before.aggregate_sha256;
   assert.equal(reconcile(before,forged).verdict,'INCONCLUSIVE');

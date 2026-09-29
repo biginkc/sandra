@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 
 const CLAIM_PIN = JSON.parse(readFileSync(new URL('./expected/claims-shape.json', import.meta.url), 'utf8'));
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export const ACTIVE = "access_status='active' AND (access_expires_at IS NULL OR access_expires_at > now()) AND deletion_prepared_at IS NULL";
+export const ACTIVE = "mb.access_status='active' AND (mb.access_expires_at IS NULL OR mb.access_expires_at > now()) AND mb.deletion_prepared_at IS NULL";
 const COLS = `m.id, m.body, m.from_address, m.to_address, m.created_at, m.scheduled_for, m.property_id, m.contact_id,
   CASE WHEN p.id IS NULL THEN NULL ELSE jsonb_build_object('id',p.id,'address',p.address,'city',p.city,'state',p.state) END AS property,
   CASE WHEN c.id IS NULL THEN NULL ELSE jsonb_build_object('id',c.id,'first_name',c.first_name,'last_name',c.last_name,'entity_name',c.entity_name,'phone_1',c.phone_1) END AS contact`;
@@ -28,22 +28,24 @@ export async function observe(client, org) {
   await openReadTxn(client);
   try {
     await preconditions(client);
-    const { rows } = await client.query(`SELECT ${COLS},m.status,m.updated_at ${JOIN} WHERE m.status='queued' AND m.org_id=$1 ORDER BY m.id`, [org]);
+    const { rows } = await client.query(`SELECT ${COLS},m.status ${JOIN} WHERE m.status='queued' AND m.org_id=$1 ORDER BY m.id`, [org]);
     await client.query('COMMIT');
     return snapshot(rows);
   } catch (e) { await client.query('ROLLBACK'); throw e; }
 }
 export function snapshot(rows) {
-  const per_row = Object.fromEntries(rows.map(({ id, status, updated_at, ...content }) => [id, { hash: hash(content), status, updated_at }]));
+  // created_at is already in content. The nonexistent modification timestamp was excluded
+  // from the old hash, so removing it cannot hide a change to hashed content.
+  const per_row = Object.fromEntries(rows.map(({ id, status, ...content }) => [id, { hash: hash(content), status, created_at: content.created_at }]));
   return { count: rows.length, aggregate_sha256: hash(rows.map(row => [row.id, per_row[row.id].hash])), per_row };
 }
 export function reconcile(pre, post, current = {}) {
   const diff = [];
   for (const [id, value] of Object.entries(pre.per_row)) {
-    if (!post.per_row[id]) diff.push({ id, hash: value.hash, status: current[id]?.status ?? 'unknown', updated_at: current[id]?.updated_at ?? null, kind: 'departed' });
-    else if (post.per_row[id].hash !== value.hash) diff.push({ id, hash: post.per_row[id].hash, status: 'queued', updated_at: post.per_row[id].updated_at, kind: 'content_changed' });
+    if (!post.per_row[id]) diff.push({ id, hash: value.hash, status: current[id]?.status ?? 'unknown', created_at: current[id]?.created_at ?? null, kind: 'departed' });
+    else if (post.per_row[id].hash !== value.hash) diff.push({ id, hash: post.per_row[id].hash, status: 'queued', created_at: post.per_row[id].created_at, kind: 'content_changed' });
   }
-  for (const [id, value] of Object.entries(post.per_row)) if (!pre.per_row[id]) diff.push({ id, hash: value.hash, status: 'queued', updated_at: value.updated_at, kind: 'added' });
+  for (const [id, value] of Object.entries(post.per_row)) if (!pre.per_row[id]) diff.push({ id, hash: value.hash, status: 'queued', created_at: value.created_at, kind: 'added' });
   return { verdict: diff.length ? 'INCONCLUSIVE' : 'PASS', diff };
 }
 export function compareSets(reference, visible) {
@@ -81,12 +83,12 @@ export async function collect(client, org, options = {}) {
     await preconditions(client);
     await client.query("SET LOCAL statement_timeout='60s'");
     const now = (await client.query('SELECT now() AS at')).rows[0].at;
-    const member = (await client.query(`SELECT user_id FROM public.memberships WHERE org_id=$1 AND ${ACTIVE} ORDER BY created_at,user_id LIMIT 1`, [org])).rows[0]?.user_id;
+    const member = (await client.query(`SELECT mb.user_id FROM public.memberships mb WHERE mb.org_id=$1 AND ${ACTIVE} ORDER BY mb.created_at,mb.user_id LIMIT 1`, [org])).rows[0]?.user_id;
     if (!member) throw new Error('INCONCLUSIVE EMPTY_SCOPE');
-    const orgs = (await client.query(`SELECT org_id FROM public.memberships WHERE user_id=$1 AND ${ACTIVE} ORDER BY org_id`, [member])).rows.map(r => r.org_id);
-    const queued = await client.query(`SELECT ${COLS},m.status,m.updated_at ${JOIN} WHERE m.status='queued' AND m.org_id=$1 ORDER BY m.id`, [org]);
-    const reference = (await client.query(`SELECT id,org_id FROM public.messages WHERE status='queued' AND org_id IN (SELECT org_id FROM public.memberships WHERE user_id=$1 AND ${ACTIVE}) ORDER BY id LIMIT 200001`, [member])).rows;
-    const currentStatus = options.previousIds?.length ? Object.fromEntries((await client.query('SELECT id,status,updated_at FROM public.messages WHERE id=ANY($1::uuid[])', [options.previousIds])).rows.map(r => [r.id, {status:r.status, updated_at:r.updated_at}])) : {};
+    const orgs = (await client.query(`SELECT mb.org_id FROM public.memberships mb WHERE mb.user_id=$1 AND ${ACTIVE} ORDER BY mb.org_id`, [member])).rows.map(r => r.org_id);
+    const queued = await client.query(`SELECT ${COLS},m.status ${JOIN} WHERE m.status='queued' AND m.org_id=$1 ORDER BY m.id`, [org]);
+    const reference = (await client.query(`SELECT msg.id,msg.org_id FROM public.messages msg WHERE msg.status='queued' AND msg.org_id IN (SELECT mb.org_id FROM public.memberships mb WHERE mb.user_id=$1 AND ${ACTIVE}) ORDER BY msg.id LIMIT 200001`, [member])).rows;
+    const currentStatus = options.previousIds?.length ? Object.fromEntries((await client.query('SELECT msg.id,msg.status,msg.created_at FROM public.messages msg WHERE msg.id=ANY($1::uuid[])', [options.previousIds])).rows.map(r => [r.id, {status:r.status, created_at:r.created_at}])) : {};
     if (!queued.rows.length) throw new Error('INCONCLUSIVE EMPTY_ORG');
     if (reference.length > 200000) throw new Error('INCONCLUSIVE PROBE_BUDGET');
     const privilegedFirst = (await client.query(SHAPES.first)).rows;
@@ -103,7 +105,7 @@ export async function collect(client, org, options = {}) {
     const cursor = first.find(r => r.scheduled_for) ?? { scheduled_for: new Date(0), id: '00000000-0000-0000-0000-000000000000' };
     const tail = first.find(r => r.scheduled_for === null) ?? { id: '00000000-0000-0000-0000-000000000000' };
     const shapes = { first: first.length, keyset: (await client.query(SHAPES.keyset, [cursor.scheduled_for, cursor.id])).rowCount, null_tail: (await client.query(SHAPES.null_tail, [tail.id])).rowCount };
-    const visible = (await client.query("SELECT id,org_id FROM public.messages WHERE status='queued' ORDER BY id LIMIT 200001")).rows;
+    const visible = (await client.query("SELECT msg.id,msg.org_id FROM public.messages msg WHERE msg.status='queued' ORDER BY msg.id LIMIT 200001")).rows;
     const rls = compareSets(reference, visible);
     const memberPlan = await explainShapes(client, cursor, tail);
     await client.query('RESET ROLE');
