@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -144,8 +145,15 @@ describe("MediaRecorderCollector", () => {
     await collector.stop();
     expect(chunks.map((chunk) => chunk.seq)).toEqual([0, 1, 2, 3]);
     const bytes = new Uint8Array(await new Blob(chunks.map((chunk) => chunk.blob)).arrayBuffer());
-    const expected = new Uint8Array([...first, ...final]);
-    expect(bytes).toEqual(expected);
+    const expected = new Uint8Array(first.length + final.length);
+    expected.set(first);
+    expected.set(final, first.length);
+    // Compare a native digest rather than asking the matcher to materialize
+    // millions of per-index entries under constrained CI workers. This still
+    // covers every byte and keeps the assertion bounded in diagnostic size.
+    const digest = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
+    expect(bytes.byteLength).toBe(expected.byteLength);
+    expect(digest(bytes)).toBe(digest(expected));
     expect(collector.state).toBe("stopped");
     expect(requestedMimeType).toBe(MEDIA_RECORDER_MIME_TYPE);
   });
