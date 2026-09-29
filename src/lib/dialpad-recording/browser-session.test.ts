@@ -343,9 +343,12 @@ describe('Dialpad browser session', () => {
     await prepared.dispose();
   });
 
-  it('gracefully drains an authenticated prefix when the provider closes mid-attachment', async () => {
+  it('gracefully drains a long authenticated prefix when the provider closes after PCM starts', async () => {
     const { active, callbacks, recorders, prepared } = await realLocalCapture();
-    for (let index = 0; index < 64; index += 1) {
+    const expectedFrames = 1_000;
+    const sentSequences = { tab: [] as number[], mic: [] as number[] };
+    const sentRecordings = { tab: [] as Array<{ sequence: number; payloadLength: number }>, mic: [] as Array<{ sequence: number; payloadLength: number }> };
+    for (let index = 0; index < expectedFrames; index += 1) {
       await callbacks.tab?.(pcmFrame('tab', index));
       await callbacks.mic?.(pcmFrame('mic', index));
     }
@@ -362,28 +365,33 @@ describe('Dialpad browser session', () => {
       if (data instanceof Uint8Array) {
         const binary = decodeDialpadBrowserBinary(data);
         if (binary.kind === 'recording') {
-          setTimeout(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })), 10);
+          sentRecordings[binary.track].push({ sequence: binary.sequence, payloadLength: binary.payloadLength });
+          setTimeout(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })), 50);
+        } else {
+          sentSequences[binary.track].push(binary.sequence);
+          setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: binary.track, seq: binary.sequence })), 50);
           if (!closingSent) {
             closingSent = true;
-            setTimeout(() => socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(Date.now() + 1_000).toISOString() })), 0);
+            setTimeout(() => socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(Date.now() + 8_000).toISOString() })), 0);
           }
-        } else {
-          setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: binary.track, seq: binary.sequence })), 10);
         }
         return;
       }
       if (typeof data !== 'string') return;
       const message = JSON.parse(data) as { type?: string; track?: 'tab' | 'mic'; lastSeq?: number; endSample?: number };
       events.push(`send:${message.type ?? 'unknown'}`);
-      if (message.type === 'recording_eof') setTimeout(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })), 10);
-      if (message.type === 'pcm_eof') setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })), 10);
+      if (message.type === 'recording_eof') setTimeout(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })), 50);
+      if (message.type === 'pcm_eof') setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })), 50);
     };
-    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 500, attachmentTimeoutMs: 500, capture: active });
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 2_000, attachmentTimeoutMs: 10_000, capture: active });
     const started = session.start();
     socket.open();
     serverHydrate(socket);
     await started.catch((error) => expect(error).toMatchObject({ code: 'interrupted' }));
-    await waitUntil(() => session.state() === 'stopped', 2_000);
+    await waitUntil(() => session.state() === 'stopped', 15_000);
+    expect(sentSequences.tab).toEqual(Array.from({ length: expectedFrames }, (_, index) => index));
+    expect(sentSequences.mic).toEqual(Array.from({ length: expectedFrames }, (_, index) => index));
+    expect(sentRecordings).toEqual({ tab: [{ sequence: 0, payloadLength: 3 }], mic: [{ sequence: 0, payloadLength: 3 }] });
     expect(events).toContain('send:recording_eof');
     expect(events).toContain('send:pcm_eof');
     expect(session.state()).toBe('stopped');

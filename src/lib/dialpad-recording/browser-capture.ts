@@ -544,8 +544,16 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
             fail(new BrowserCaptureError("timeout", "PCM capture did not drain within the stop deadline."));
           }
         }
-        const drained = await Promise.race([pcmDeliveryQueue.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))]);
-        if (!drained && !failed) fail(new BrowserCaptureError("timeout", "PCM frame sink did not drain within the stop deadline."));
+        // Once authenticated sinks are attached, their network delivery queue is
+        // governed by the session's receipt/attachment deadlines. The short
+        // local cleanup watchdog must cover acquisition/worklet teardown only;
+        // racing it against the authenticated prefix would interrupt a healthy
+        // prefix when the server is processing a bounded batch of receipts.
+        const networkDeliveryActive = Boolean(attachedSinks) && spoolMode !== "buffering";
+        if (!networkDeliveryActive) {
+          const drained = await Promise.race([pcmDeliveryQueue.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))]);
+          if (!drained && !failed) fail(new BrowserCaptureError("timeout", "PCM frame sink did not drain within the stop deadline."));
+        }
         pcmAdmissionOpen = false;
         startupPcmFrames.length = 0;
         stopTracks(tabStream);
