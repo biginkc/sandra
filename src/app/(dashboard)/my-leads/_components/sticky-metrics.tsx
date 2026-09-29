@@ -5,10 +5,11 @@ import { DailyCallClock, formatDuration } from "./daily-call-clock"
 import type { MyLeadsKpis } from "./types"
 
 /** Mirrors the expanded cards only after they scroll behind the dashboard navigation. */
-export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel }: {
+export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel, repliedToDrip = 0 }: {
   kpis: MyLeadsKpis
   expandedRef: RefObject<HTMLDivElement | null>
   repLabel?: string | null
+  repliedToDrip?: number
 }) {
   const [visible, setVisible] = useState(false)
   const stripRef = useRef<HTMLDivElement>(null)
@@ -40,6 +41,7 @@ export function StickyMyLeadsMetrics({ kpis, expandedRef, repLabel }: {
     ["No follow-up", count(kpis.contactWithoutFollowUp), "Active Contact leads without a future follow-up appointment"],
     ["Needs offer", count(kpis.needsOffers), "Active leads needing offers"],
     ["Overdue", count(kpis.appointmentsOverdue), "Outstanding overdue appointments, including previous days"],
+    ["Replied to drip", repliedToDrip, "Leads that replied to a drip and still need a rep response"],
     ["Last attempt", <DailyCallClock key="daily-clock" kpis={kpis} />, "Today’s calls · Mon–Fri, 9am–5pm Central"],
     ["Reaches / attempts", `${count(kpis.reached)} / ${count(kpis.attempts)}`, "Today’s reaches / attempts · Central time"],
     ["Offers sent", count(kpis.offersSent), "Today’s offers sent · Central time"],

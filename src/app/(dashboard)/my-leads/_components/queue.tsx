@@ -255,7 +255,7 @@ export function MyLeadsQueue({
       />
 
       <div ref={expandedMetricsRef}><MyLeadsMetrics kpis={kpis} repliedToDrip={drips?.repliedCount ?? 0} /></div>
-      <StickyMyLeadsMetrics kpis={kpis} expandedRef={expandedMetricsRef} repLabel={selectedRepLabel} />
+      <StickyMyLeadsMetrics kpis={kpis} expandedRef={expandedMetricsRef} repLabel={selectedRepLabel} repliedToDrip={drips?.repliedCount ?? 0} />
 
       <div className="flex flex-wrap items-center justify-between gap-3" aria-label="Queue controls">
         <label className="relative block w-full sm:max-w-xs">
