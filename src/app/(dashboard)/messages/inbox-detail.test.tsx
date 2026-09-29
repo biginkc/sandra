@@ -1527,6 +1527,23 @@ describe("<InboxDetail />", () => {
     expect(setOutreachDispoMock).not.toHaveBeenCalled();
   });
 
+  it("does not claim the outcome was saved when an additional drip is refused", async () => {
+    startDripForLeadsMock.mockResolvedValue({
+      ok: true,
+      data: { results: [{ propertyId: "prop-1", status: "skipped", reason: "A rep is handling this lead personally (Nurture)." }] },
+    });
+    const user = userEvent.setup();
+    render(<InboxDetail data={makeData({ contactId: "contact-not-now-refused", outreachDispo: "not_interested" })} assigneeEmails={{}} currentUserId="user-1" />);
+
+    await user.click(screen.getByRole("button", { name: "Also start a drip" }));
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Not enrolled: A rep is handling this lead personally (Nurture).");
+    expect(screen.queryByText(/Saved\. Not enrolled/)).not.toBeInTheDocument();
+    expect(setOutreachDispoMock).not.toHaveBeenCalled();
+    expect(setInboxDispoAndStartDripMock).not.toHaveBeenCalled();
+  });
+
   it("keeps lead promotion out of the More outcome menu", async () => {
     const user = userEvent.setup();
     const data = makeData({

@@ -152,7 +152,8 @@ function DispoBar({
     if (afterSavedOutcome) {
       const result = await startDripForLeads(sequenceId, [propertyId]);
       if (!result.ok) return { status: "failed", reason: result.error.message, saved: false };
-      return result.data.results[0];
+      const enrollment = result.data.results[0];
+      return enrollment.status === "enrolled" ? enrollment : { ...enrollment, saved: false };
     }
     const result = await setInboxDispoAndStartDrip(propertyId, "needs_sequence", sequenceId);
     if (!result.ok) return { status: "failed", reason: result.error, saved: false };

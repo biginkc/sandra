@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getConsentState } from "@/lib/messaging/consent";
 import { selectBestSmsPhone } from "@/lib/messaging/sms-phone";
-import { evaluateSuppression } from "@/lib/messaging/suppression";
+import { evaluateSuppression, HUMAN_OWNED_DISPOS } from "@/lib/messaging/suppression";
 import { reportError } from "@/lib/errors/report";
 import type { Database } from "@/lib/supabase/types";
 import {
@@ -107,6 +107,14 @@ export async function enrollLead(
     : rawHomeowner;
   if (prop.is_dnc_locked) {
     return { status: "suppressed", message: "This lead is locked as do not contact." };
+  }
+  const humanOwnedDispos: ReadonlySet<string> = HUMAN_OWNED_DISPOS;
+  if (prop.outreach_dispo && humanOwnedDispos.has(prop.outreach_dispo)) {
+    const label = prop.outreach_dispo.replaceAll("_", " ");
+    return {
+      status: "suppressed",
+      message: `A rep is handling this lead personally (${label[0]!.toUpperCase()}${label.slice(1)}). Change the outcome to start a drip.`,
+    };
   }
   if (!homeowner && prop.homeowner_contact_id) {
     return { status: "suppressed", message: "Contact details could not be verified." };

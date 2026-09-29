@@ -50,6 +50,20 @@ it.each([
   expect(insert).not.toHaveBeenCalled();
 });
 
+it.each([
+  ["nurture", "Nurture"],
+  ["callback_requested", "Callback requested"],
+  ["booked_appointment", "Booked appointment"],
+])("refuses enrollment for human-owned %s", async (dispo, label) => {
+  const { client, insert } = clientFor({ outreach_dispo: dispo });
+  const outcome = await enrollLead(client as never, { sequenceId: "sequence-1", propertyId: "property-1" });
+  expect(outcome).toEqual({
+    status: "suppressed",
+    message: `A rep is handling this lead personally (${label}). Change the outcome to start a drip.`,
+  });
+  expect(insert).not.toHaveBeenCalled();
+});
+
 it("refuses a landline before inserting", async () => {
   selectBestSmsPhone.mockReturnValueOnce({ phone: "+18165550001", lineType: "landline" });
   const { client, insert } = clientFor({});
