@@ -70,6 +70,13 @@ def run(*args, cwd, env=None):
 
 
 class RecordContractTests(unittest.TestCase):
+    def test_perf_lanes_export_sealed_run_dir_for_artifact_staging(self):
+        for lane in ('burst', 'perf-120k'):
+            script = (ROOT / f'scripts/inbox-ci/{lane}.sh').read_text()
+            with self.subTest(lane=lane):
+                self.assertIn('HEAVY_RUN_DIR=', script)
+                self.assertIn('>> "$GITHUB_ENV"', script)
+
     def test_raw_truncation_controls(self):
         with tempfile.TemporaryDirectory() as temp:
             attempt = Path(temp)
