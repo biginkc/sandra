@@ -830,7 +830,7 @@ export function Kanban({
           >
             {attention === "stale"
               ? "Stale conversations"
-              : "Sequence ended without follow-up"}{" "}
+              : "Drip ended without follow-up"}{" "}
             <XIcon data-icon="inline-end" />
           </Button>
         ) : null}
@@ -1103,7 +1103,7 @@ function FilteredEmptyState({
           <Button variant="outline" size="sm" onClick={onClearAttention}>
             {attention === "stale"
               ? "Stale conversations"
-              : "Sequence ended without follow-up"}{" "}
+              : "Drip ended without follow-up"}{" "}
             <XIcon data-icon="inline-end" />
           </Button>
         ) : null}

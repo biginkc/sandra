@@ -157,7 +157,7 @@ describe("<LeadEventPill />", () => {
         {},
         null,
       ),
-    ).toBe("System paused 2 sequences with 4 others");
+    ).toBe("System paused 2 drips with 4 others");
   });
 
   it("labels actors and assignment transitions without exposing user ids", () => {
@@ -319,7 +319,7 @@ describe("<LeadEventPill />", () => {
         {},
         null,
       ),
-    ).toBe("System resumed a sequence");
+    ).toBe("System resumed a drip");
     expect(
       formatLeadEventSentence(
         makeEvent("bulk-resume", "2026-08-25T17:00:00.000Z", {
@@ -331,7 +331,7 @@ describe("<LeadEventPill />", () => {
         {},
         null,
       ),
-    ).toBe("System resumed 2 sequences");
+    ).toBe("System resumed 2 drips");
   });
 
   it.each([

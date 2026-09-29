@@ -51,7 +51,7 @@ export const OUTREACH_DISPOSITION_LABELS: Readonly<Record<string, string>> = {
   dnc: "Do not call",
   nurture: "Follow up",
   callback_requested: "Callback requested",
-  needs_sequence: "Needs sequence",
+  needs_sequence: "Needs drip",
 };
 
 export const JOB_TYPE_LABELS: Readonly<Record<string, string>> = {

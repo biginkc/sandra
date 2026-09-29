@@ -131,7 +131,7 @@ function formatEvent(
         icon: CheckCircle2,
         iconBg: "bg-emerald-50",
         iconColor: "text-emerald-700",
-        summary: `Sequence completed — "${event.sequence_name}"`,
+        summary: `Drip completed — "${event.sequence_name}"`,
         href: event.property_id ? `/leads/${event.property_id}` : undefined,
       };
     case "import_done":

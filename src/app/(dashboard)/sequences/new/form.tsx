@@ -26,8 +26,8 @@ export function CreateSequenceForm() {
           append_opt_out: appendOptOut,
         }),
         {
-          successMessage: "Sequence created",
-          fallbackMessage: "Could not create sequence",
+          successMessage: "Drip created",
+          fallbackMessage: "Could not create drip",
         },
       );
       if (r.ok) router.push(`/sequences/${r.data.id}/edit`);
@@ -52,7 +52,7 @@ export function CreateSequenceForm() {
         <Input
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          placeholder="What this sequence is for (internal only, sellers never see this)"
+          placeholder="What this drip is for (internal only, sellers never see this)"
         />
       </label>
 

@@ -159,8 +159,8 @@ export function SequenceEditor({
           active,
         }),
         {
-          successMessage: "Sequence saved",
-          fallbackMessage: "Could not save sequence",
+          successMessage: "Drip saved",
+          fallbackMessage: "Could not save drip",
         },
       );
       router.refresh();
@@ -176,7 +176,7 @@ export function SequenceEditor({
       </div>
 
       <section className="flex max-w-2xl flex-col gap-4 rounded-md border p-4">
-        <h2 className="font-semibold">Sequence details</h2>
+        <h2 className="font-semibold">Drip details</h2>
         <label htmlFor="seq-name" className="flex flex-col gap-1 text-sm">
           <span>Name</span>
           <Input
@@ -213,7 +213,7 @@ export function SequenceEditor({
             checked={active}
             onChange={(e) => setActive(e.target.checked)}
           />
-          <span>Active — new enrollments can start</span>
+          <span>{active ? "Open to new leads — uncheck to close" : "Closed to new leads — check to reopen"}</span>
         </label>
         <div>
           <Button onClick={onSaveMeta} disabled={pending}>

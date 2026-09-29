@@ -371,7 +371,7 @@ function sideEffectLabel(key: string): string {
         cass: "Address verification",
         lineTypeClassification: "Line-type classification",
         consent: "Consent recording",
-        sequenceEnrollment: "Sequence enrollment",
+        sequenceEnrollment: "Drip enrollment",
         skipTrace: "Skip trace",
       } as Record<string, string>
     )[key] ?? key

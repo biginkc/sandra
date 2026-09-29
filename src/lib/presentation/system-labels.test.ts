@@ -5,10 +5,14 @@ import {
   MEMBERSHIP_ROLE_LABELS,
   PROPERTY_STATUS_LABELS,
   SEQUENCE_ACTION_LABELS,
+  OUTREACH_DISPOSITION_LABELS,
   systemLabel,
 } from "./system-labels";
 
 describe("system value labels", () => {
+  it("shows the stored needs_sequence outcome as Needs drip", () => {
+    expect(OUTREACH_DISPOSITION_LABELS.needs_sequence).toBe("Needs drip");
+  });
   it("presents known machine values as human-readable text", () => {
     expect(systemLabel(SEQUENCE_ACTION_LABELS, "send_sms")).toBe("Send SMS");
     expect(systemLabel(PROPERTY_STATUS_LABELS, "under_contract")).toBe(

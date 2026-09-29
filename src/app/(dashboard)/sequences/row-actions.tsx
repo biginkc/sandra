@@ -20,13 +20,13 @@ export function SequenceRowActions({
   const [pending, startTransition] = useTransition();
 
   const onArchive = () => {
-    if (!window.confirm("Archive this sequence? Active enrollments finish on schedule.")) {
+    if (!window.confirm("Archive this drip? Active enrollments finish on schedule.")) {
       return;
     }
     startTransition(async () => {
       const r = await callAction(archiveSequence(sequenceId), {
-        successMessage: "Sequence archived",
-        fallbackMessage: "Could not archive sequence",
+        successMessage: "Drip archived",
+        fallbackMessage: "Could not archive drip",
       });
       if (r.ok) router.refresh();
     });
@@ -37,8 +37,8 @@ export function SequenceRowActions({
       const r = await callAction(
         updateSequence(sequenceId, { active: true }),
         {
-          successMessage: "Sequence restored",
-          fallbackMessage: "Could not restore sequence",
+          successMessage: "Drip restored",
+          fallbackMessage: "Could not restore drip",
         },
       );
       if (r.ok) router.refresh();

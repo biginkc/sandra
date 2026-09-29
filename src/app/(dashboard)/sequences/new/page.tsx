@@ -13,10 +13,10 @@ export default async function NewSequencePage() {
     <Page>
       <PageHeader
         breadcrumb={[
-          { label: "Sequences", href: "/sequences" },
+          { label: "Drips", href: "/sequences" },
           { label: "New" },
         ]}
-        title="New sequence"
+        title="New drip"
         description="Name it and describe what it's for. You'll add steps on the next screen."
       />
       <CreateSequenceForm />

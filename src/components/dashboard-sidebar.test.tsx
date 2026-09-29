@@ -6,12 +6,27 @@ const usePathname = vi.hoisted(() => vi.fn());
 vi.mock("next/navigation", () => ({ usePathname }));
 
 import { DashboardMobileNav, DashboardSidebar } from "./dashboard-sidebar";
+import { SOFTPHONE_DISPOSITIONS } from "@/lib/dialer/dispositions";
+import { OUTREACH_DISPOSITION_LABELS } from "@/lib/presentation/system-labels";
 
 beforeEach(() => {
   usePathname.mockReturnValue("/dashboard");
 });
 
 describe("DashboardMobileNav", () => {
+  it("calls the sequence route Drips in both navigation variants", () => {
+    const { unmount } = render(<DashboardSidebar />);
+    expect(screen.getByRole("link", { name: "Drips" })).toHaveAttribute("href", "/sequences");
+    expect(screen.queryByRole("link", { name: /sequences/i })).not.toBeInTheDocument();
+    unmount();
+    render(<DashboardMobileNav />);
+    expect(screen.getByRole("link", { name: "Drips" })).toHaveAttribute("href", "/sequences");
+  });
+
+  it("keeps disposition display labels on drip wording", () => {
+    expect(SOFTPHONE_DISPOSITIONS.find((item) => item.value === "needs_sequence")?.label).toBe("Needs drip");
+    expect(OUTREACH_DISPOSITION_LABELS.needs_sequence).toBe("Needs drip");
+  });
   it("keeps the Primary nav contract and gives every narrow link a 44px target", () => {
     render(<DashboardMobileNav />);
 
