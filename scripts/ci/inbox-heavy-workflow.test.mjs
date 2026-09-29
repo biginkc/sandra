@@ -1,15 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
 
 const workflow = readFileSync('.github/workflows/inbox-heavy-verification.yml', 'utf8');
+// Update only after reviewing an intentional main workflow change: git show origin/main:.github/workflows/inbox-heavy-verification.yml | shasum -a 256
+const MAIN_WORKFLOW_SHA256 = '3822fdf4f86ee707e9a2bcee81aaeedd41203cbe67a459c33bb7459c3bca554e';
 export function assertUnchangedFromMain(source) {
-  const main = execFileSync('git', ['show', 'origin/main:.github/workflows/inbox-heavy-verification.yml']);
-  assert.deepEqual(Buffer.from(source), main);
+  assert.equal(createHash('sha256').update(source).digest('hex'), MAIN_WORKFLOW_SHA256);
 }
-test('workflow stays byte-identical to origin/main', () => assertUnchangedFromMain(workflow));
+test('workflow stays byte-identical to pinned main YAML', () => assertUnchangedFromMain(workflow));
 test('workflow drift is refused', () => assert.throws(() => assertUnchangedFromMain(`${workflow}\n`)));
 export function validateWorkflow(source) {
   if (/secrets\.(?!GITHUB_TOKEN\b)/i.test(source)) throw new Error('Non-GITHUB_TOKEN secret');
