@@ -1,5 +1,7 @@
 import importlib.util
+import hashlib
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +12,23 @@ spec.loader.exec_module(a)
 
 
 class MigrationAssertionsTest(unittest.TestCase):
+    def test_source_manifest_matches_checkout_files(self):
+        install = Path(__file__).resolve().parents[2] / 'experiments/inbox-production-install'
+        manifest = json.loads((install / 'source-manifest.json').read_text())
+        self.assertTrue(manifest)
+        for name, expected in manifest.items():
+            with self.subTest(name=name):
+                self.assertEqual(hashlib.sha256((install / name).read_bytes()).hexdigest(), expected)
+
+    def test_github_hosted_refuses_local_diagnostic(self):
+        lane = Path(__file__).with_name('migration-dry-run.sh')
+        result = subprocess.run(['bash', str(lane), '--preflight-only'],
+                                env={'PATH': '/usr/bin:/bin', 'RUNNER_ENVIRONMENT': 'github-hosted',
+                                     'MIGRATION_LOCAL_EXECUTION': '1'},
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn('Local diagnostic refused on github-hosted runner', result.stderr)
+
     def test_runner_socket_requires_system_docker_socket(self):
         self.assertEqual(a.docker_socket({'GITHUB_ACTIONS': 'true'}), 'unix:///var/run/docker.sock')
         with self.assertRaisesRegex(ValueError, 'Runner requires'):

@@ -2,7 +2,7 @@
   "build.py": "3115fd8904087b65f1a2309cdc6b78eb995396910ba0dc0689122ddb23998ce3",
   "command-admission.sql": "466dcbf7f7e2f69073291a1f55c86cc01ace5f93f57e10f5c80d6024a1351b99",
   "components.json": "db107ff336a10809a1b7b46ba45113141bb95e6eee4caf59cfc6131bc08990f6",
-  "fixture_db.py": "75d0234e4fa7c700e0757a5566a97440462d4db00fdfdfaaa966a8f610d127d3",
+  "fixture_db.py": "c53037a3d5718cef4a01553490a3e93a96c47bed6cac09a32f042a1f69752c15",
   "harden-private.sql": "4a1d6a89d263ff2b40949e313b14d90529eba69c38a9839b6fb3d0820f99944a",
   "install-unknown-companion.py": "449dd4face96e841476b239b9d79f6bb934de81648590bc1192ccbe11241c33b",
   "maintenance-test.py": "6ef8b437401d7b7ad053af4a59dad0e28f53991cb54db6530aff5ce80bcfc0a2",
