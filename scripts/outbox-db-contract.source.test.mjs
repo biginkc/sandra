@@ -23,6 +23,16 @@ const sources = {
   D05: ['supabase/migrations/20260930000000_inbox_control_foundation.sql', 'CREATE TABLE public.inbox_inbound_heads'],
 };
 
+test('every post-privilege source hash matches the checked-out migration', () => {
+  const pins = JSON.parse(readFileSync('scripts/outbox-db-contract/expected/privileges.post.json', 'utf8'));
+  assert.equal(Object.keys(pins.source_sha256).length, 3);
+  for (const [file, expected] of Object.entries(pins.source_sha256)) {
+    assert.match(file, /^supabase\/migrations\/2026093000\d{4}_inbox_[a-z_]+\.sql$/);
+    assert(existsSync(file), `post-privilege source missing: ${file}`);
+    assert.equal(createHash('sha256').update(readFileSync(file)).digest('hex'), expected, `stale source hash: ${file}`);
+  }
+});
+
 test('every executable contract has one anchored application or schema source', () => {
   const pins = JSON.parse(readFileSync('scripts/outbox-db-contract/expected/privileges.post.json', 'utf8'));
   for (const [id, [file, snippet]] of Object.entries(sources)) {
