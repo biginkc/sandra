@@ -2,11 +2,11 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": ".",
-  "source_commit": "724c74e4c5c1ba7dbd9d3894e72d67e4f4d57c70",
+  "source_commit": "87e0a164294b7740c38b1ca926e3503e3f3ea7eb",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
-    "sha256": "2577f8e04224549f9d102061c088d27e28ca3f96436ceec17594943e8e85fdf9"
+    "sha256": "e895bd6fe1f7c0eb58ca467122bda792a0191353cec40fa8218d20b25eb96064"
   },
   "sql_sources": [
     {
@@ -21,9 +21,9 @@
       "name": "saved_actions_setup",
       "kind": "sql",
       "path": "experiments/inbox-saved-actions/setup.sql",
-      "sha256": "bbe17876c87e5192665b43f0cbafadd2668a56904f25d463308218392b5b7b6d",
-      "bytes": 12689,
-      "transformed_sha256": "9322adc3e77a3baf84c72f71c9cea9557bb882365c93224f93de79b48095953d"
+      "sha256": "11219f96df6cc1e44d50135a1a7707d184c53aab0f6dff4e27d307fe32678bb1",
+      "bytes": 12972,
+      "transformed_sha256": "991a42c7c8ab010afd634032584fea352d4af34200807aaad4ba9b303ad95190"
     },
     {
       "name": "saved_actions_public_api",
