@@ -56,3 +56,14 @@ export function dripBucket(input: {
   if (input.status === "completed" && !input.inboundAfterLastRun) return "finished_no_reply";
   return null;
 }
+
+/** Needs-person triage examines the newest enrollment, even when it is not actionable. */
+export function latestEnrollmentBucket(enrollments: Array<Parameters<typeof dripBucket>[0] & {
+  id: string;
+  enrolled_at: string;
+}>): DripBucket | null {
+  const latest = enrollments.reduce<(typeof enrollments)[number] | null>((newest, enrollment) =>
+    !newest || enrollment.enrolled_at > newest.enrolled_at ||
+      (enrollment.enrolled_at === newest.enrolled_at && enrollment.id > newest.id) ? enrollment : newest, null);
+  return latest ? dripBucket(latest) : null;
+}

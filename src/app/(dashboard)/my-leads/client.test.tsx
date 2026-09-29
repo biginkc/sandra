@@ -7,8 +7,10 @@ import { DailyCallClock } from "./_components/daily-call-clock"
 const mocks = vi.hoisted(() => ({
   routerRefresh: vi.fn(),
   submitMyLeadCommand: vi.fn(),
+  submitMyLeadHandoffDrip: vi.fn(),
   loadMyLeads: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
+  listDripChoices: vi.fn(async () => ({ ok: true, data: [{ id: 'drip-1', name: 'Seller follow-up', textCount: 4, days: 90, firstSend: 'Today' }] })),
 }))
 
 vi.mock("next/navigation", () => ({
@@ -29,8 +31,14 @@ vi.mock("./actions", () => ({
   loadMyLeadDetail: vi.fn(),
   loadMyLeadCallReferences: mocks.loadMyLeadCallReferences,
   submitMyLeadCommand: mocks.submitMyLeadCommand,
+  submitMyLeadHandoffDrip: mocks.submitMyLeadHandoffDrip,
   changeAcquisitionDesignation: vi.fn(),
   changeAcquisitionSettings: vi.fn(),
+}))
+
+vi.mock("@/app/(dashboard)/sequences/actions", () => ({
+  listDripChoices: mocks.listDripChoices,
+  startDripForLeads: vi.fn(),
 }))
 
 vi.mock("./_components/queue", () => ({
@@ -67,6 +75,7 @@ vi.mock("./_components/queue", () => ({
         <button onClick={() => row && onStageAction("log-offer", row)}>Log offer</button>
         <button onClick={() => row && onStageAction("start-call", row)}>Start call</button>
         <button onClick={() => row && onStageAction("ready-for-offer", row)}>Ready for offer</button>
+        <button onClick={() => row && onStageAction("handoff", row)}>Handoff</button>
         <span data-testid="queue-address">{row?.address}</span>
         <input aria-label="Search My Leads" value={search} onChange={(event) => onSearchChange(event.target.value)} />
         {canSelectRep && (
@@ -85,11 +94,8 @@ vi.mock("./_components/queue", () => ({
 
 
 
-vi.mock("./_components/lifecycle-dialog", () => ({
-  AcquisitionLifecycleDialog: () => null,
-}))
-
 import type { AcquisitionKpis, AcquisitionRoster, QueueSnapshot } from "@/lib/my-leads/queries"
+import type { MyLeadDripSnapshot } from "@/lib/my-leads/drip-queries"
 import { MyLeadsClient } from "./client"
 
 const viewer = {
@@ -175,7 +181,7 @@ function snapshot(address: string): QueueSnapshot {
   }
 }
 
-function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis) {
+function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initialDrips:MyLeadDripSnapshot|null=null) {
   return render(
     <MyLeadsClient
       viewer={viewer}
@@ -183,6 +189,7 @@ function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis) {
       initialMemberId={viewer.userId}
       initialSnapshot={initialSnapshot}
       initialKpis={initialKpis}
+      initialDrips={initialDrips}
     />,
   )
 }
@@ -193,6 +200,24 @@ describe("MyLeadsClient", () => {
     mocks.submitMyLeadCommand.mockReset()
     mocks.loadMyLeadCallReferences.mockReset()
   })
+
+  it("opens Log attempt for a pinned reply outside the first 20 rows", async()=>{
+    const first=snapshot("Loaded Lane");
+    const template=first.stages.not_contacted!.rows[0];
+    first.stages.not_contacted!.rows=Array.from({length:20},(_,index)=>({...template,propertyId:`loaded-${index}`}));
+    first.stages.not_contacted!.totalCount=21;
+    const pinned={...template,propertyId:'pinned-reply',address:'Pinned Reply Lane'};
+    const drips:MyLeadDripSnapshot={active:[],replied:[{propertyId:pinned.propertyId,enrollmentId:'enrollment',
+      sequenceId:'sequence',sequenceName:'Follow-up',step:1,totalSteps:2,nextTextAt:null,lastText:null,
+      status:'Replied',reason:null,stage:'not_contacted',repliedAt:'2026-09-11T14:00:00Z',queueRow:pinned}],
+      repliedCount:1,counts:{not_contacted:0,contacted:0,needs_offer:0,offer_sent:0,under_contract:0}};
+    mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});
+    renderClient(first,kpis,drips);
+    expect(screen.getByTestId('queue-address')).toHaveTextContent('Pinned Reply Lane');
+    await userEvent.setup().click(screen.getByRole('button',{name:'Log attempt'}));
+    expect(screen.getByRole('dialog',{name:/Log an attempt/i})).toBeVisible();
+    expect(mocks.loadMyLeadCallReferences).toHaveBeenCalledWith('pinned-reply','rep-1');
+  });
 
   it("updates the visible check time every 30 seconds even when attempts do not change", async () => {
     vi.useFakeTimers()
@@ -378,6 +403,7 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
   await user.selectOptions(screen.getByLabelText("External outcome"),"reached");
   fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T09:00"}});
   await user.click(screen.getByRole("button",{name:"Save attempt"}));
+  await user.click(await screen.findByRole('button',{name:'Done without a drip'}));
   await waitFor(()=>expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(mocks.loadMyLeads).toHaveBeenCalledTimes(1);
   await user.click(screen.getByRole("button",{name:nextAction==="log-offer"?"Log offer":"Log attempt"}));
@@ -409,6 +435,27 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
 
 describe('stale form recovery',()=>{
   beforeEach(()=>{vi.resetAllMocks();mocks.loadMyLeadCallReferences.mockResolvedValue({ok:true,options:[]});});
+  it('refreshes a stale drip handoff and retries with the current queue version',async()=>{
+    const user=userEvent.setup();
+    mocks.listDripChoices.mockResolvedValue({ok:true,data:[{id:'drip-1',name:'Seller follow-up',textCount:4,days:90,firstSend:'Today'}]});
+    mocks.submitMyLeadHandoffDrip.mockResolvedValueOnce({ok:false,code:'STALE_STATE',message:'This lead changed. Refresh before trying again.'})
+      .mockResolvedValueOnce({ok:true});
+    renderClient(snapshot('106 Fixture Lane'));
+    await user.click(screen.getByRole('button',{name:'Handoff'}));
+    await user.selectOptions(screen.getByLabelText('Handoff reason'),'not_interested');
+    await user.click(await screen.findByRole('button',{name:/Seller follow-up/}));
+    await user.click(screen.getByRole('button',{name:'Hand off lead'}));
+    await screen.findByRole('button',{name:'Refresh'});
+    expect(mocks.submitMyLeadHandoffDrip.mock.calls[0][0]).toMatchObject({expectedQueueVersion:1,sequenceId:'drip-1'});
+    const fresh=snapshot('106 Fixture Lane');fresh.stages.not_contacted!.rows[0].queueVersion=2;
+    mocks.loadMyLeads.mockResolvedValue({ok:true,snapshot:fresh,kpis});
+    await user.click(screen.getByRole('button',{name:'Refresh'}));
+    await screen.findByText('Lead refreshed. Your draft is retained. Review it before saving.');
+    expect(screen.getByLabelText('Handoff reason')).toHaveValue('not_interested');
+    await user.click(screen.getByRole('button',{name:'Hand off lead'}));
+    await waitFor(()=>expect(mocks.submitMyLeadHandoffDrip).toHaveBeenCalledTimes(2));
+    expect(mocks.submitMyLeadHandoffDrip.mock.calls[1][0]).toMatchObject({expectedQueueVersion:2,sequenceId:'drip-1'});
+  });
   async function rejectedDraft(code='STALE_STATE'){
     const user=userEvent.setup();
     mocks.submitMyLeadCommand.mockResolvedValueOnce({ok:false,code,message:'This lead changed. Refresh before trying again.'});

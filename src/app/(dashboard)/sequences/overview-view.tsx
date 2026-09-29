@@ -6,28 +6,27 @@ import { Button } from "@/components/ui/button";
 import { DataTableFooter, DataTableShell } from "@/components/ui/data-table-shell";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { Result } from "@/lib/errors/result";
-import type { NeedsPersonRow, SequenceRow } from "./actions";
-import { overviewTotals } from "./overview-model";
+import type { NeedsPersonCounts, SequenceRow } from "./actions";
 import { SequenceRowActions } from "./row-actions";
 
 export function DripsOverview({ archived, isAdmin, sequencesResult, needsResult }: {
   archived: boolean;
   isAdmin: boolean;
   sequencesResult: Result<SequenceRow[]>;
-  needsResult: Result<NeedsPersonRow[]>;
+  needsResult: Result<NeedsPersonCounts>;
 }) {
   const sequences = sequencesResult.ok ? sequencesResult.data : [];
   const rows = sequences.filter((row) => archived ? !!row.archived_at : !row.archived_at);
-  const totals = overviewTotals(needsResult.ok ? needsResult.data : []);
+  const totals = needsResult.ok ? needsResult.data : { finished_no_reply: 0, couldnt_send: 0, needs_sequence: 0 };
 
   return <Page>
     <PageHeader breadcrumb={[{ label: "Workspace" }, { label: "Drips" }]} title="Drips" description="Follow-up texts that run on a schedule."
       actions={isAdmin ? <Link href="/sequences/new"><Button><Plus className="size-4" /> New drip</Button></Link> : undefined} />
     <div className="grid gap-3 md:grid-cols-3" aria-label="Drip overview">
       {([
-        ["Finished, no reply", totals.finishedNoReply, "/sequences/needs-person#finished-no-reply"],
-        ["Texts couldn’t send", totals.couldntSend, "/sequences/needs-person#couldnt-send"],
-        ["Needs a drip, none picked yet", totals.needsDrip, "/sequences/needs-person#needs-drip"],
+        ["Finished, no reply", totals.finished_no_reply, "/sequences/needs-person#finished-no-reply"],
+        ["Texts couldn’t send", totals.couldnt_send, "/sequences/needs-person#couldnt-send"],
+        ["Needs a drip, none picked yet", totals.needs_sequence, "/sequences/needs-person#needs-drip"],
       ] as const).map(([label, count, href]) => <Link key={label} href={href} className="rounded-2xl border bg-card p-5 hover:border-primary/50">
         <span className="text-muted-foreground text-sm">{label}</span><strong className="mt-2 block font-heading text-3xl">{count}</strong>
       </Link>)}
@@ -46,7 +45,7 @@ export function DripsOverview({ archived, isAdmin, sequencesResult, needsResult 
       <TableHead>Finished, no reply</TableHead><TableHead>Couldn’t send</TableHead><TableHead>Status</TableHead><TableHead className="text-right">Actions</TableHead>
     </TableRow></TableHeader><TableBody>
       {rows.map((row) => <TableRow key={row.id}>
-        <TableCell><div className="flex items-center gap-2"><Droplet className="size-4 text-primary" /><div><Link href={`/sequences/${row.id}/edit`} className="font-medium hover:underline">{row.name}</Link>{row.description && <p className="text-muted-foreground max-w-64 truncate text-xs">{row.description}</p>}</div></div></TableCell>
+        <TableCell><div className="flex items-center gap-2"><Droplet className="size-4 text-primary" /><div>{isAdmin ? <Link href={`/sequences/${row.id}/edit`} className="font-medium hover:underline">{row.name}</Link> : <span className="font-medium">{row.name}</span>}{row.description && <p className="text-muted-foreground max-w-64 truncate text-xs">{row.description}</p>}</div></div></TableCell>
         <TableCell>{row.step_count}</TableCell><TableCell>{row.active_enrollment_count}</TableCell><TableCell>{row.replied ?? 0}</TableCell><TableCell>{row.finished_no_reply ?? 0}</TableCell><TableCell>{row.couldnt_send ?? 0}</TableCell>
         <TableCell><span title={row.archived_at ? "Archived" : row.active ? "Open to new leads" : "Closed to new leads"}>{row.archived_at ? "Archived" : row.active ? "Open" : "Closed"}</span></TableCell>
         <TableCell className="text-right">{isAdmin && <SequenceRowActions sequenceId={row.id} isArchived={!!row.archived_at} isActive={row.active} />}</TableCell>

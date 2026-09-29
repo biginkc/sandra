@@ -29,3 +29,15 @@ it('preserves listening position and speed when a signed link is refreshed',asyn
  const renewed=container.querySelector('audio')!;fireEvent.loadedMetadata(renewed);
  expect(renewed.currentTime).toBe(12);expect(renewed.playbackRate).toBe(1.5);
 });
+it('labels each Dialpad track and keeps usable partial finals playable',()=>{
+ const dialpadResult={...result,rows:[{...result.rows[0],source:'dialpad',status:'partial',files:[
+   {id:'dpf_'+'a'.repeat(64),duration:8,status:'available',kind:'stored',source:'dialpad',track:'tab' as const,epoch:1,completeness:'partial' as const,partialReason:'missing_eof',recordingStatus:'partial'},
+   {id:'dpf_'+'b'.repeat(64),duration:8,status:'available',kind:'stored',source:'dialpad',track:'mic' as const,epoch:1,completeness:'complete' as const,partialReason:null,recordingStatus:'partial'},
+ ]}]};
+ render(<RecordingLibrary result={dialpadResult} scope="mine" values={{}}/>);
+ fireEvent.click(screen.getByText('2 recording files'));
+ expect(screen.getByText('Tab audio · 0:08 · Available')).toBeInTheDocument();
+ expect(screen.getByText('Mic audio · 0:08 · Available')).toBeInTheDocument();
+ expect(screen.getAllByText('Partial recording')).toHaveLength(2);
+ expect(screen.getAllByRole('button',{name:'Play recording'})).toHaveLength(2);
+});

@@ -239,6 +239,23 @@ describe("enrollLead (integration)", () => {
     expect(count).toBe(1);
   });
 
+  it("atomically allows only one of two concurrent drips on one lead", async () => {
+    const seqA = await seedSequence({ name: "Race A", steps: [{ delay: 0, body: "a" }] });
+    const seqB = await seedSequence({ name: "Race B", steps: [{ delay: 0, body: "b" }] });
+    const { propertyId } = await seedPropertyWithConsent({ phone: "+18165550033" });
+    const outcomes = await Promise.all([
+      enrollLead(supabase, { sequenceId: seqA, propertyId }),
+      enrollLead(supabase, { sequenceId: seqB, propertyId }),
+    ]);
+    expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(["already_in_drip", "enrolled"]);
+    expect(outcomes.find((outcome) => outcome.status === "already_in_drip"))
+      .toMatchObject({ message: expect.stringMatching(/^Already in Race [AB], text 1 of 1\. Stop it or switch\.$/) });
+    const { count } = await supabase.from("sequence_enrollments")
+      .select("id", { count: "exact", head: true }).eq("property_id", propertyId)
+      .in("status", ["active", "paused"]);
+    expect(count).toBe(1);
+  });
+
   it("rejects enrollment on an archived sequence", async () => {
     const seqId = await seedSequence({
       name: "Archived",
@@ -399,7 +416,7 @@ describe("pausePropertyEnrollments (integration)", () => {
     await resetTenantTables(supabase);
   });
 
-  it("pauses all active enrollments on a property with the given reason", async () => {
+  it("pauses the one live enrollment on a property with the given reason", async () => {
     const seqA = await seedSequence({
       name: "SeqA",
       steps: [{ delay: 0, body: "a" }],
@@ -411,14 +428,14 @@ describe("pausePropertyEnrollments (integration)", () => {
     const { propertyId } = await seedPropertyWithConsent({
       phone: "+18165550020",
     });
-    await enrollLead(supabase, { sequenceId: seqA, propertyId });
-    await enrollLead(supabase, { sequenceId: seqB, propertyId });
+    expect((await enrollLead(supabase, { sequenceId: seqA, propertyId })).status).toBe("enrolled");
+    expect((await enrollLead(supabase, { sequenceId: seqB, propertyId })).status).toBe("already_in_drip");
 
     const outcome = await pausePropertyEnrollments(supabase, {
       propertyId,
       reason: "inbound_reply",
     });
-    expect(outcome.paused).toBe(2);
+    expect(outcome.paused).toBe(1);
 
     const { data } = await supabase
       .from("sequence_enrollments")
@@ -445,12 +462,12 @@ describe("pausePropertyEnrollments (integration)", () => {
       "sequence_ids",
     ]);
     expect(pausedPayload).toMatchObject({
-      count: 2,
+      count: 1,
       reason: "inbound_reply",
       permanent: false,
     });
     expect([...(pausedPayload.sequence_ids as string[])].sort()).toEqual(
-      [seqA, seqB].sort(),
+      [seqA],
     );
 
     const retry = await pausePropertyEnrollments(supabase, {

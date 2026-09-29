@@ -206,9 +206,11 @@ export function MyLeadQueueRow({
               </Badge>
             )}
             {row.archived && <Badge variant="secondary">Archived</Badge>}
+            {row.dripReply && <Badge variant="secondary" className="border-amber-300 bg-amber-50 text-amber-900">Replied to drip</Badge>}
           </span>
           <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px] font-semibold text-muted-foreground">
             <span className="font-mono tabular-nums">{row.attemptsCount} {row.attemptsCount === 1 ? "attempt" : "attempts"}</span>
+            {row.dripReply && <span>Was in {row.dripReply.sequenceName} · stopped at text {row.dripReply.step} of {row.dripReply.totalSteps}</span>}
             <span title={row.assignment.exactLabel} className="font-mono tabular-nums">{row.assignment.state === "known" ? `assigned ${row.assignment.label}` : row.assignment.state === "launch_initialized" ? "existing lead · assignment unknown" : "assignment unavailable"}</span>
             {row.warningReasons.map((warning) => (
               <span key={warning} className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-[#fecaca] bg-[#fee2e2] px-2.5 py-1 text-[11.5px] font-bold text-[#b91c1c] dark:border-red-900 dark:bg-red-950 dark:text-red-300">

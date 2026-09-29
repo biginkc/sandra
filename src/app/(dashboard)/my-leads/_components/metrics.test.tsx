@@ -5,9 +5,10 @@ import type { MyLeadsKpis } from "./types"
 
 const kpis: MyLeadsKpis = { attempts: 0, reached: 0, offersSent: 0, contactWithoutFollowUp: 2, needsOffers: 3, appointmentsOverdue: 4, lastAttemptAt: null, lastAttemptClockVersion: 1, asOf: "2026-09-14T15:00:00Z", missingRecordings: 1, recordingExpectationUnknown: 2, averageTalkSeconds: null, talkTimeSamples: 0, talkTimeUnknown: 3, conversationsOverFiveMinutes: 0 }
 afterEach(() => {cleanup(); vi.useRealTimers()})
-it("renders the nine agreed cards and discloses excluded duration and recording evidence", () => {
+it("renders the ten agreed cards and discloses excluded duration and recording evidence", () => {
   render(<MyLeadsMetrics kpis={kpis} />)
-  expect(screen.getAllByTestId(/^kpi-/)).toHaveLength(9)
+  expect(screen.getAllByTestId(/^kpi-/)).toHaveLength(10)
+  expect(screen.getByTestId('kpi-replied-to-drip')).toHaveTextContent('0')
   expect(screen.getByTestId("kpi-contacts")).toHaveTextContent("0 / 0")
   expect(screen.getByTestId("kpi-average-talk-time")).toHaveTextContent("—")
   expect(screen.getByTestId("kpi-average-talk-time")).toHaveTextContent("3 without duration excluded")

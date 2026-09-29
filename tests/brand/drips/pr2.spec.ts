@@ -1,4 +1,3 @@
-import path from "node:path";
 import { expect, test } from "@playwright/test";
 
 for (const [route, file, title] of [
@@ -11,6 +10,6 @@ for (const [route, file, title] of [
     await page.setViewportSize({ width: 1440, height: 1120 });
     await page.goto(`/brand/drips/${route}`, { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
-    await page.screenshot({ path: path.resolve(`docs/design/screenshots/drips/${file}`), fullPage: true, animations: "disabled" });
+    await expect(page).toHaveScreenshot(file, { fullPage: true, animations: "disabled" });
   });
 }

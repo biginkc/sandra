@@ -36,6 +36,7 @@ export default defineConfig({
       "supabase/migrations/20260929180000_dialpad_cti_dispatch.integration.test.ts",
       "supabase/migrations/20260929210000_dialpad_recording_foundation.integration.test.ts",
       "supabase/migrations/20260929200000_dialpad_cti_custom_data.integration.test.ts",
+      "supabase/migrations/20260929236500_my_leads_drip_scope.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],
@@ -46,6 +47,7 @@ export default defineConfig({
     // Real DB calls — 30s per test covers a reset + a few inserts + a
     // query with comfortable headroom.
     testTimeout: 30000,
+    hookTimeout: 120000,
     // Sequential by default — tests TRUNCATE shared tables in beforeEach,
     // so parallel execution would race.
     fileParallelism: false,

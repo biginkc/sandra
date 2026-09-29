@@ -13,6 +13,7 @@ import {
 } from "@/lib/sequences/enrollment";
 import { getSequenceImpact } from "@/lib/sequences/impact";
 import { DRIP_BUCKET_LABELS } from "@/lib/sequences/drip-status";
+import { NEEDS_PERSON_PAGE_SIZE } from "./overview-model";
 import { enrollmentReason, previewFirstSend, startFollowUpDrip, type DripResult } from "@/lib/sequences/start-drip";
 
 import { requireSequenceAdmin } from "./admin";
@@ -97,6 +98,8 @@ export type NeedsPersonRow = {
   bucket: "finished_no_reply" | "couldnt_send" | "needs_sequence";
   reason: string;
 };
+export type NeedsPersonBucket = NeedsPersonRow["bucket"];
+export type NeedsPersonCounts = Record<NeedsPersonBucket, number>;
 
 async function activeOrgId(supabase: Awaited<ReturnType<typeof createClient>>, userId: string) {
   const { data, error } = await supabase.from("memberships").select("org_id")
@@ -106,18 +109,38 @@ async function activeOrgId(supabase: Awaited<ReturnType<typeof createClient>>, u
   return data?.org_id ?? null;
 }
 
-export async function listSequenceNeedsPerson(): Promise<Result<NeedsPersonRow[]>> {
+export async function listSequenceNeedsPersonCounts(): Promise<Result<NeedsPersonCounts>> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+    const orgId = await activeOrgId(supabase, user.id);
+    if (!orgId) return ok({ finished_no_reply: 0, couldnt_send: 0, needs_sequence: 0 });
+    const { data, error } = await supabase.rpc("sequence_needs_person_counts", {
+      p_org: orgId, p_exclude_created_by: process.env.SEQUENCE_CANARY_USER_ID || null,
+    });
+    if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Drip stats are being prepared." : error.message } };
+    const counts = data?.[0];
+    return ok({ finished_no_reply: Number(counts?.finished_no_reply ?? 0), couldnt_send: Number(counts?.couldnt_send ?? 0), needs_sequence: Number(counts?.needs_sequence ?? 0) });
+  } catch (error) {
+    reportError(error, { tags: { surface: "sequence_needs_person_counts" } });
+    return errFromUnknown(error, "SEQ_STATS_FAILED");
+  }
+}
+
+export async function listSequenceNeedsPersonPage(bucket: NeedsPersonBucket, page: number): Promise<Result<NeedsPersonRow[]>> {
   try {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
     const orgId = await activeOrgId(supabase, user.id);
     if (!orgId) return ok([]);
-    const { data, error } = await supabase.rpc("sequence_needs_person", { p_org: orgId });
+    const { data, error } = await supabase.rpc("sequence_needs_person_page", {
+      p_org: orgId, p_bucket: bucket, p_offset: (page - 1) * NEEDS_PERSON_PAGE_SIZE,
+      p_limit: NEEDS_PERSON_PAGE_SIZE, p_exclude_created_by: process.env.SEQUENCE_CANARY_USER_ID || null,
+    });
     if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Drip stats are being prepared." : error.message } };
-    return ok((data ?? []).filter((row) =>
-      !process.env.SEQUENCE_CANARY_USER_ID || row.sequence_created_by !== process.env.SEQUENCE_CANARY_USER_ID)
-      .map((row) => ({
+    return ok((data ?? []).map((row) => ({
         property_id: row.property_id,
         sequence_id: row.sequence_id,
         bucket: row.bucket as NeedsPersonRow["bucket"],
@@ -125,7 +148,7 @@ export async function listSequenceNeedsPerson(): Promise<Result<NeedsPersonRow[]
           DRIP_BUCKET_LABELS[row.bucket as "finished_no_reply" | "couldnt_send"],
       })));
   } catch (error) {
-    reportError(error, { tags: { surface: "sequence_needs_person" } });
+    reportError(error, { tags: { surface: "sequence_needs_person_page" } });
     return errFromUnknown(error, "SEQ_STATS_FAILED");
   }
 }
@@ -679,6 +702,7 @@ export async function enrollLeadInSequence(
         return ok({ enrollmentId: outcome.enrollmentId });
       case "duplicate_active":
         return ok({ duplicate: true });
+      case "already_in_drip":
       case "no_phone":
       case "landline_phone":
       case "no_consent":
@@ -803,7 +827,7 @@ export async function changeDripAction(enrollmentId: string, sequenceId: string)
     try {
       const outcome = await enrollLead(supabase, { propertyId: old.property_id, sequenceId, enrolledByUserId: user.id });
       result = { propertyId: old.property_id,
-        status: outcome.status === "enrolled" ? "enrolled" : ["duplicate_active", "no_phone", "landline_phone", "no_consent", "suppressed"].includes(outcome.status) ? "skipped" : "failed",
+        status: outcome.status === "enrolled" ? "enrolled" : ["duplicate_active", "already_in_drip", "no_phone", "landline_phone", "no_consent", "suppressed"].includes(outcome.status) ? "skipped" : "failed",
         reason: outcome.status === "enrolled" ? enrollmentReason(outcome) : `Previous drip stopped. ${enrollmentReason(outcome)}` };
     } catch (error) {
       reportError(error, { tags: { surface: "change_drip_enroll" }, extra: { enrollmentId, sequenceId } });
