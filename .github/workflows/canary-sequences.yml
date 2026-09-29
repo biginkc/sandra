@@ -30,8 +30,12 @@ on:
 jobs:
   canary:
     name: Sequences V1 Prod Canary
+    if: ${{ github.event_name != 'schedule' || vars.SEQUENCE_CANARY_SCHEDULE_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    concurrency:
+      group: sequence-canary-prod
+      cancel-in-progress: false
 
     env:
       NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -43,6 +47,7 @@ jobs:
       SEQUENCE_CANARY_USER_ID: ${{ secrets.SEQUENCE_CANARY_USER_ID }}
       SEQUENCE_CANARY_PROPERTY_ID: ${{ secrets.SEQUENCE_CANARY_PROPERTY_ID }}
       SEQUENCE_CANARY_CONTACT_ID: ${{ secrets.SEQUENCE_CANARY_CONTACT_ID }}
+      SEQUENCE_CANARY_EXPECTED_SENDER: ${{ secrets.SEQUENCE_CANARY_EXPECTED_SENDER }}
       CI: "1"
 
     steps:

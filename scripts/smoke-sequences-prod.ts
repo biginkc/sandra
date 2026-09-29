@@ -5,10 +5,11 @@ import { createClient } from "@supabase/supabase-js";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
 
 import type { Database } from "../src/lib/supabase/types";
 import { cleanupAllCanaries, cleanupCanary } from "./sequence-canary-cleanup";
-import { fixtureIds, preflightFixture, type FixtureIds } from "./sequence-canary-fixture";
+import { assertCanaryReceipt, fixtureIds, preflightFixture, type FixtureIds } from "./sequence-canary-fixture";
 
 // ---------- env bootstrap ---------------------------------------------------
 
@@ -34,14 +35,18 @@ function loadLocalEnv(file: string): Record<string, string> {
 
 // ---------- run ------------------------------------------------------------
 
-export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<Database>>, ids: FixtureIds, cleanupOnly = false) {
+export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<Database>>, ids: FixtureIds, cleanupOnly = false, expectedSender = process.env.SEQUENCE_CANARY_EXPECTED_SENDER) {
   const orgId = await preflightFixture(supabase, ids);
   if (cleanupOnly) {
     console.log(`[smoke] cleaned ${await cleanupAllCanaries(supabase, ids.userId, ids.propertyId)} canary sequences`);
     return;
   }
+  if (!expectedSender || !/^\+1\d{10}$/.test(expectedSender)) {
+    throw new Error("SEQUENCE_CANARY_EXPECTED_SENDER must be an E.164 US number");
+  }
   const TS = new Date().toISOString().replace(/[:.]/g, "-");
-  const UNIQUE_BODY = `PROD-SMOKE ${TS}`;
+  const UNIQUE_BODY = `PROD-SMOKE ${TS} ${randomUUID()}`;
+  const sentBody = `Mel with BMH. ${UNIQUE_BODY} - Reply STOP.`;
   let sequenceId: string | null = null;
   try {
     console.log(`[smoke] start   ${TS}`);
@@ -71,7 +76,7 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
         step_index: 0,
         delay_after_previous_minutes: 0,
         action_type: "send_sms",
-        template_body: `Mel with BMH. ${UNIQUE_BODY} - Reply STOP.`,
+        template_body: sentBody,
       })
       .select("id")
       .single();
@@ -93,17 +98,18 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
       .single();
     if (enrErr || !enrollment) throw enrErr ?? new Error("enrollment insert failed");
     console.log(`[smoke] enrol   ${enrollment.id}`);
+    console.log(`[smoke] sent body = ${sentBody}`);
     console.log(
       `[smoke] waiting up to 6 min for the Vercel cron to fire and deliver to Twilio...`,
     );
 
     // Poll test_sms_log for the specific body.
     const deadline = Date.now() + 6 * 60_000;
-    let matched: { id: string; received_at: string } | null = null;
+    let matched: Database["public"]["Tables"]["test_sms_log"]["Row"] | null = null;
     while (Date.now() < deadline) {
       const { data: rows, error: pollError } = await supabase
         .from("test_sms_log")
-        .select("id, received_at, body")
+        .select("id, received_at, body, to_number, from_number, provider, external_id, signature_verified, raw_payload")
         .ilike("body", `%${UNIQUE_BODY}%`)
         .order("received_at", { ascending: false })
         .limit(1);
@@ -122,7 +128,8 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
       throw new Error("No matching test_sms_log row");
     }
 
-    console.log(`[smoke] PASS    test_sms_log row ${matched.id}`);
+    const matchedRowId = assertCanaryReceipt(matched, sentBody, expectedSender);
+    console.log(`[smoke] PASS    test_sms_log row ${matchedRowId}`);
     console.log(`[smoke]         received_at = ${matched.received_at}`);
 
     // Verify enrollment advanced
@@ -157,7 +164,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const supabase = createClient<Database>(URL, KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  runSequenceSmoke(supabase, ids, process.argv.includes("--cleanup-only")).catch((err) => {
+  runSequenceSmoke(supabase, ids, process.argv.includes("--cleanup-only"), env.SEQUENCE_CANARY_EXPECTED_SENDER).catch((err) => {
     console.error("[smoke] ERROR", err);
     process.exitCode = 1;
   });

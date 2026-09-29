@@ -4,7 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import fs from "node:fs";
 import path from "node:path";
 import type { Database } from "../src/lib/supabase/types";
-import { TWILIO_NUMBER } from "./sequence-canary-fixture";
+import { assertFreshCanaryFixture, TWILIO_NUMBER } from "./sequence-canary-fixture";
 
 const localPath = path.resolve(process.cwd(), ".env.local");
 const local: Record<string, string> = {};
@@ -32,53 +32,34 @@ async function main() {
   const { data: organization, error: orgError } = await client.from("organizations").select("id").eq("id", orgId).maybeSingle();
   if (orgError || !organization) throw new Error(`Organization missing: ${orgError?.message ?? orgId}`);
   const { data: contacts, error: contactError } = await client.from("contacts")
-    .select("id,org_id,first_name,last_name,phone_1_type,do_not_contact,sms_opted_out").eq("phone_1", TWILIO_NUMBER);
+    .select("id").or(`phone_1.eq.${TWILIO_NUMBER},phone_2.eq.${TWILIO_NUMBER},phone_3.eq.${TWILIO_NUMBER}`);
   if (contactError) throw contactError;
-  if ((contacts?.length ?? 0) > 1 || contacts?.some((c) => c.org_id !== orgId ||
-    c.first_name !== "Sequence" || c.last_name !== "Canary" || !c.phone_1_type ||
-    c.do_not_contact || c.sms_opted_out)) throw new Error("Phone belongs to a non-fixture or ineligible contact");
+  const { data: namedContacts, error: namedError } = await client.from("contacts")
+    .select("id").eq("first_name", "Sequence").eq("last_name", "Canary");
+  if (namedError) throw namedError;
+  const matchingContacts = [...new Map([...(contacts ?? []), ...(namedContacts ?? [])].map((row) => [row.id, row])).values()];
   const { data: properties, error: propertyError } = await client.from("properties")
-    .select("id,org_id,homeowner_contact_id,is_training,is_dnc_locked,deleted_at,status").eq("address", address).eq("org_id", orgId);
+    .select("id").eq("address", address);
   if (propertyError) throw propertyError;
-  if ((properties?.length ?? 0) > 1 || properties?.some((p) => p.is_training || p.is_dnc_locked || p.deleted_at || p.status !== "new_lead" ||
-    (contacts?.[0] && p.homeowner_contact_id !== contacts[0].id))) throw new Error("Existing property conflicts with fixture contract");
-  if (properties?.length && !contacts?.length) throw new Error("Fixture property exists without expected contact");
-  const existingContactId = contacts?.[0]?.id;
-  const existingPropertyId = properties?.[0]?.id;
-  let hasConsent = false;
-  if (existingContactId) {
-    const { data: consent, error } = await client.from("consent_events").select("id")
-      .eq("org_id", orgId).eq("contact_id", existingContactId).eq("channel", "sms")
-      .eq("event_type", "opt_in_marketing_written").limit(1);
-    if (error) throw error;
-    hasConsent = Boolean(consent?.length);
-  }
-  console.log(JSON.stringify({ dryRun: !apply, orgId, contactId: existingContactId ?? null,
-    propertyId: existingPropertyId ?? null, wouldCreate: {
-      contact: !existingContactId, property: !existingPropertyId, consent: !hasConsent,
+  console.log(JSON.stringify({ dryRun: !apply, orgId, contactId: matchingContacts[0]?.id ?? null,
+    propertyId: properties?.[0]?.id ?? null, wouldCreate: {
+      contact: !matchingContacts.length, property: !properties?.length, consent: !matchingContacts.length,
     } }, null, 2));
   if (!apply) return;
-  let contactId = existingContactId;
-  if (!contactId) {
-    const { data, error } = await client.from("contacts").insert({ org_id: orgId,
-      first_name: "Sequence", last_name: "Canary", phone_1: TWILIO_NUMBER, phone_1_type: "mobile" })
-      .select("id").single();
-    if (error || !data) throw error ?? new Error("Contact insert failed");
-    contactId = data.id;
-  }
-  let propertyId = existingPropertyId;
-  if (!propertyId) {
-    const { data, error } = await client.from("properties").insert({ org_id: orgId, address,
-      state: "MO", status: "new_lead", homeowner_contact_id: contactId, is_training: false })
-      .select("id").single();
-    if (error || !data) throw error ?? new Error("Property insert failed");
-    propertyId = data.id;
-  }
-  if (!hasConsent) {
-    const { error } = await client.from("consent_events").insert({ org_id: orgId, contact_id: contactId,
-      channel: "sms", event_type: "opt_in_marketing_written", source: "sequence-canary-provision" });
-    if (error) throw error;
-  }
+  assertFreshCanaryFixture(matchingContacts, properties ?? []);
+  const { data: contact, error: contactInsertError } = await client.from("contacts").insert({ org_id: orgId,
+    first_name: "Sequence", last_name: "Canary", phone_1: TWILIO_NUMBER, phone_1_type: "mobile" })
+    .select("id").single();
+  if (contactInsertError || !contact) throw contactInsertError ?? new Error("Contact insert failed");
+  const contactId = contact.id;
+  const { data: property, error: propertyInsertError } = await client.from("properties").insert({ org_id: orgId, address,
+    state: "MO", status: "new_lead", homeowner_contact_id: contactId, is_training: false })
+    .select("id").single();
+  if (propertyInsertError || !property) throw propertyInsertError ?? new Error("Property insert failed");
+  const propertyId = property.id;
+  const { error: consentInsertError } = await client.from("consent_events").insert({ org_id: orgId, contact_id: contactId,
+    channel: "sms", event_type: "opt_in_marketing_written", source: "sequence-canary-provision" });
+  if (consentInsertError) throw consentInsertError;
   console.log(`SEQUENCE_CANARY_PROPERTY_ID=${propertyId}`);
   console.log(`SEQUENCE_CANARY_CONTACT_ID=${contactId}`);
 }
