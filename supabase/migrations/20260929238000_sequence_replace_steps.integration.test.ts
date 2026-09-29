@@ -54,13 +54,13 @@ it("replaces all steps and details atomically while preserving existing IDs", as
 });
 
 it.each([
-  ["both body and template", [{ ...step(0, first), template_id: randomUUID() }]],
-  ["neither body nor template", [{ ...step(0, first), template_body: null }]],
-  ["out of order index", [step(1, first)]],
-  ["index gap", [step(0, first), step(2)]],
-])("rejects %s without changing existing data", async (_label, invalid) => {
+  ["both body and template", [{ ...step(0, first), template_id: randomUUID() }], /Invalid step body, template, status, or delay/],
+  ["neither body nor template", [{ ...step(0, first), template_body: null }], /Invalid step body, template, status, or delay/],
+  ["out of order index", [step(1, first)], /Step indexes must be contiguous from zero/],
+  ["index gap", [step(0, first), step(2)], /Step indexes must be contiguous from zero/],
+])("rejects %s without changing existing data", async (_label, invalid, message) => {
   await pg.query("savepoint invalid_payload");
-  await expect(call(invalid)).rejects.toThrow();
+  await expect(call(invalid)).rejects.toThrow(message);
   await pg.query("rollback to savepoint invalid_payload");
   expect((await pg.query("select name from public.sequences where id=$1", [sequence])).rows[0].name).toBe("Original");
   expect((await pg.query("select template_body from public.sequence_steps where id=$1", [first])).rows[0].template_body).toBe("Original");
