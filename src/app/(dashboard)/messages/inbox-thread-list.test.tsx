@@ -73,6 +73,7 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     dripStep: overrides.dripStep ?? null,
     dripStepsTotal: overrides.dripStepsTotal ?? null,
     dripReplied: overrides.dripReplied ?? false,
+    inDrip: overrides.inDrip ?? false,
     aiDispositionReview: overrides.aiDispositionReview ?? null,
     isDncLocked: overrides.isDncLocked ?? false,
     needsOutcome: overrides.needsOutcome ?? false,
@@ -160,8 +161,8 @@ describe("applyThreadUpdates — recency-only ordering", () => {
 describe("<InboxThreadList /> realtime subscriptions", () => {
   it("distinguishes in a drip and replied rows from the snapshot", () => {
     render(<InboxThreadList initial={[
-      makeThread({ threadId: "running", dripName: "Seller follow-up" }),
-      makeThread({ threadId: "sent", dripName: "Seller follow-up", lastMessageDirection: "outbound" }),
+      makeThread({ threadId: "running", dripName: "Seller follow-up", inDrip: true }),
+      makeThread({ threadId: "sent", dripName: "Seller follow-up", inDrip: true, lastMessageDirection: "outbound" }),
       makeThread({ threadId: "replied", dripName: "Seller follow-up", dripReplied: true }),
       makeThread({ threadId: "plain", dripReplied: false }),
     ]} selectedThreadId={null} currentUserId={null} onSelectThread={vi.fn()} />);
@@ -169,6 +170,12 @@ describe("<InboxThreadList /> realtime subscriptions", () => {
     expect(screen.getByTestId("inbox-thread-sent-drip-status")).toHaveAttribute("aria-label", "In a drip");
     expect(screen.getByTestId("inbox-thread-replied-drip-status")).toHaveAttribute("aria-label", "Replied to drip");
     expect(screen.queryByTestId("inbox-thread-plain-drip-status")).not.toBeInTheDocument();
+  });
+  it("does not show a drip icon for a completed enrollment with its reply cleared", () => {
+    render(<InboxThreadList initial={[
+      makeThread({ threadId: "completed-cleared", dripName: "Seller follow-up", inDrip: false, dripReplied: false }),
+    ]} selectedThreadId={null} currentUserId={null} onSelectThread={vi.fn()} />);
+    expect(screen.queryByTestId("inbox-thread-completed-cleared-drip-status")).not.toBeInTheDocument();
   });
   it("shows the active thread phone in the row before the thread is opened", () => {
     render(

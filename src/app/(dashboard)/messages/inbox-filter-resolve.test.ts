@@ -18,6 +18,7 @@ describe("parseInboxFilter", () => {
       "dispo",
       "needs_outcome",
       "drip_replied",
+      "in_drip",
     ] as const) {
       expect(parseInboxFilter(filter)).toBe(filter);
     }
@@ -47,6 +48,7 @@ describe("isThreadFilter", () => {
       "dispo",
       "needs_outcome",
       "drip_replied",
+      "in_drip",
     ] as const) {
       expect(isThreadFilter(filter)).toBe(true);
     }
