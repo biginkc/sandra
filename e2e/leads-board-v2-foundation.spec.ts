@@ -297,7 +297,7 @@ test("Leads board v2 foundation is usable at desktop and narrow widths", async (
 
   await page.goto("/leads?sequence_ended=true");
   await expect(
-    page.getByRole("button", { name: /Sequence ended without follow-up/ }),
+    page.getByRole("button", { name: /Drip ended without follow-up/ }),
   ).toBeVisible();
   await expect(page.getByText("789 Unassigned Lead Rd")).toBeVisible();
   await expect(page.getByText("123 Foundation Ave")).toHaveCount(0);

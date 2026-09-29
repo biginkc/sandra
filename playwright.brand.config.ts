@@ -7,6 +7,7 @@ export default defineConfig({
   testDir: "./tests/brand/drips",
   outputDir: "/private/tmp/sandra-drips-brand-playwright",
   reporter: "list",
+  expect: { toHaveScreenshot: { pathTemplate: "docs/design/screenshots/drips/{arg}{ext}" } },
   use: { baseURL, ...devices["Desktop Chrome"] },
   webServer: {
     command: `pnpm exec next dev --webpack -p ${port}`,

@@ -6,11 +6,13 @@ const {
   enrollLead,
   resumeEnrollment,
   revalidatePath,
+  recordLeadEvent,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
   enrollLead: vi.fn(),
   resumeEnrollment: vi.fn(),
   revalidatePath: vi.fn(),
+  recordLeadEvent: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -24,6 +26,7 @@ vi.mock("next/cache", () => ({
 vi.mock("@/lib/errors/report", () => ({
   reportError: vi.fn(),
 }));
+vi.mock("@/lib/events", () => ({ LEAD_EVENT_TYPES: { SEQUENCE_PAUSED: "sequence_paused" }, recordLeadEvent }));
 vi.mock("@/lib/sequences/enrollment", () => ({
   enrollLead,
   resumeEnrollment,
@@ -31,9 +34,11 @@ vi.mock("@/lib/sequences/enrollment", () => ({
 import {
   archiveSequence,
   cancelEnrollment,
+  changeDripAction,
   createSequence,
   deleteSequenceStep,
   enrollLeadInSequence,
+  pauseEnrollmentAction,
   resumeEnrollmentAction,
   restoreSequence,
   updateSequence,
@@ -320,6 +325,39 @@ describe("archive and restore sequence", () => {
 });
 
 describe("lead sequence lifecycle actions", () => {
+  it("pauses only the targeted active enrollment with manual reason", async () => {
+    const select = vi.fn().mockResolvedValue({ data: [{ property_id: "p1", sequence_id: "s1" }], error: null });
+    const status = vi.fn(() => ({ select }));
+    const id = vi.fn(() => ({ eq: status }));
+    const update = vi.fn(() => ({ eq: id }));
+    const client = { auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u1" } } }) }, from: vi.fn(() => ({ update })) };
+    createClient.mockResolvedValue(client);
+    expect(await pauseEnrollmentAction("e1")).toEqual({ ok: true, data: null });
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: "paused", pause_reason: "manual" }));
+    expect(id).toHaveBeenCalledWith("id", "e1");
+    expect(status).toHaveBeenCalledWith("status", "active");
+    expect(recordLeadEvent).toHaveBeenCalledWith(expect.objectContaining({ propertyId: "p1", actorId: "u1", eventType: "sequence_paused" }));
+  });
+
+  it("changes drips only after an audited cancel and uses enrollLead guards", async () => {
+    const order: string[] = [];
+    const client = { auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { id: "u1" } } }) },
+      from: vi.fn(() => ({ select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { property_id: "p1", sequence_id: "old", status: "active" }, error: null }) }) }) })),
+      rpc: vi.fn().mockImplementation(() => { order.push("cancel"); return Promise.resolve({ data: [{ outcome: "canceled" }], error: null }); }) };
+    createClient.mockResolvedValue(client);
+    enrollLead.mockImplementation(() => { order.push("enroll"); return Promise.resolve({ status: "enrolled", enrollmentId: "e2", sequenceLabel: "New" }); });
+    expect(await changeDripAction("e1", "new")).toEqual({ ok: true, data: { propertyId: "p1", status: "enrolled", reason: "Enrolled" } });
+    expect(order).toEqual(["cancel", "enroll"]);
+    expect(enrollLead).toHaveBeenCalledWith(client, { propertyId: "p1", sequenceId: "new", enrolledByUserId: "u1" });
+    enrollLead.mockResolvedValueOnce({ status: "no_phone" });
+    expect(await changeDripAction("e1", "new")).toEqual({ ok: true, data: { propertyId: "p1", status: "skipped", reason: "Previous drip stopped. Lead has no phone number." } });
+    enrollLead.mockRejectedValueOnce(new Error("enroll failed"));
+    expect(await changeDripAction("e1", "new")).toEqual({ ok: true, data: { propertyId: "p1", status: "failed", reason: "Previous drip stopped. Could not enroll this lead." } });
+    client.rpc.mockResolvedValueOnce({ data: [{ outcome: "not_active" }], error: null });
+    order.length = 0;
+    expect(await changeDripAction("e1", "new")).toMatchObject({ ok: false, error: { code: "CANCEL_FAILED" } });
+    expect(order).toEqual([]);
+  });
   function makeLifecycleClient(opts: {
     userId?: string | null;
     enrollment?: {

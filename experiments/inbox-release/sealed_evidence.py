@@ -12,6 +12,28 @@ import subprocess
 
 ROOT = "docs/performance/inbox-redesign/evidence"
 TIERS = {"pre-merge", "test-env", "prod-deploy"}
+KINDS = {"migration-dry-run", "catalog-fingerprint", "burst", "perf-120k", "db-contract", "browser", "shared-readonly", "migration-apply", "app-deploy"}
+PHASES = {"pre", "post", "n/a"}
+TARGETS = {"disposable", "shared-test", "production", "n/a"}
+J5A = (
+    ("pre-merge", "migration-dry-run", "n/a", "disposable"),
+    ("pre-merge", "catalog-fingerprint", "n/a", "disposable"),
+    ("pre-merge", "db-contract", "pre", "disposable"),
+    ("pre-merge", "db-contract", "post", "disposable"),
+    ("pre-merge", "browser", "pre", "disposable"),
+    ("pre-merge", "browser", "post", "disposable"),
+    ("pre-merge", "shared-readonly", "pre", "shared-test"),
+)
+APPROVALS = {
+    "j5a": J5A,
+    "j5b": J5A + (("pre-merge", "burst", "n/a", "disposable"),
+                    ("test-env", "migration-apply", "post", "shared-test"),
+                    ("test-env", "shared-readonly", "post", "shared-test")),
+}
+MIGRATION_VERSIONS = {"20260929000000", "20260929000100", "20260929000200"}
+PROJECT_REFS = {"shared-test": "ncsngxlcyxylaeskiteu", "production": "copflsklaefwzipsrjqz"}
+MIGRATION_WORKFLOWS = {"shared-test": ".github/workflows/db-migrate-test.yml", "production": ".github/workflows/db-migrate-prod.yml"}
+MIGRATION_APPLY_JOBS = {"shared-test": "Apply migrations to test", "production": "Apply migrations to prod"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -87,10 +109,31 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
     manifest = parse_manifest(repo, commit, manifest_path)
     if not isinstance(manifest, dict) or manifest.get("tested_sha") != tested_sha or manifest.get("tier") != parts[5] or manifest.get("run_id") != parts[6]:
         raise EvidenceError(f"manifest identity mismatch: {directory}")
+    for field, allowed in (("kind", KINDS), ("phase", PHASES), ("target", TARGETS)):
+        if manifest.get(field) not in allowed:
+            raise EvidenceError(f"missing or unknown {field}: {directory}")
+    if manifest["kind"] == "perf-120k":
+        if parts[5] != "pre-merge" or manifest["phase"] != "n/a" or manifest["target"] != "disposable":
+            raise EvidenceError(f"perf-120k requires phase n/a and target disposable in pre-merge: {directory}")
+        if not (str(manifest.get("github_run_id", "")).isdigit()
+                and str(manifest.get("github_run_attempt", "")).isdigit()
+                and manifest.get("workflow_path") == ".github/workflows/inbox-heavy-verification.yml"
+                and manifest.get("workflow_input_sha") == tested_sha
+                and manifest.get("event") == "workflow_dispatch"
+                and manifest.get("head_branch") == "main"
+                and manifest.get("lane") == "perf-120k"):
+            raise EvidenceError(f"missing runner provenance: {directory}")
+    if "external_artifacts" in manifest:
+        raise EvidenceError(f"external_artifacts forbidden: {directory}")
+    if manifest.get("github_run_id"):
+        expected_artifact = f"heavy-{manifest.get('lane')}-{tested_sha}-{manifest['github_run_id']}-{manifest.get('github_run_attempt')}"
+        if manifest.get("artifact_name") != expected_artifact:
+            raise EvidenceError(f"run_attempt/artifact mismatch: {directory}")
     completed = timestamp(manifest.get("completed_at"))
     if timestamp(manifest.get("started_at")) > completed:
         raise EvidenceError(f"completed_at precedes started_at: {directory}")
-    if not HASH.fullmatch(str(manifest.get("runner_script_sha256", ""))) or not HASH.fullmatch(str(manifest.get("fault_proxy_script_sha256", ""))):
+    if (not HASH.fullmatch(str(manifest.get("runner_script_sha256", "")))
+            or (manifest.get("lane") == "outbox" and not HASH.fullmatch(str(manifest.get("fault_proxy_script_sha256", ""))))):
         raise EvidenceError(f"missing runner/proxy hashes: {directory}")
     clean = manifest.get("clean_tree")
     if not isinstance(clean, dict) or clean.get("start") is not True or clean.get("end_excluding_run_dir") is not True or clean.get("excluded_path") != directory:
@@ -115,15 +158,13 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
             raise EvidenceError(f"artifact hash mismatch: {directory}/{relative}")
     if type(manifest.get("exit_status")) is not int:
         raise EvidenceError(f"missing numeric exit_status: {directory}")
-    return {"directory": directory, "tier": parts[5], "commit": commit, "completed_at": completed.isoformat(), "exit_status": manifest.get("exit_status"), "manifest": manifest}
+    return {"directory": directory, "tier": parts[5], "key": (parts[5], manifest["kind"], manifest["phase"], manifest["target"]), "commit": commit, "completed_at": completed.isoformat(), "exit_status": manifest.get("exit_status"), "manifest": manifest}
 
 
-def evaluate(repo: Path, tested_sha: str, tier: str | None = None, head: str = "HEAD") -> dict:
+def collect(repo: Path, tested_sha: str, head: str = "HEAD") -> dict:
     repo = Path(repo)
     if not SHA.fullmatch(tested_sha):
         raise EvidenceError("tested SHA must be a full 40-character commit SHA")
-    if tier is not None and tier not in TIERS:
-        raise EvidenceError(f"unknown tier: {tier}")
     if git(repo, "status", "--porcelain", "--untracked-files=all").strip():
         raise EvidenceError("working tree and index must be fully clean at evaluation")
     head_sha = git(repo, "rev-parse", f"{head}^{{commit}}").decode().strip()
@@ -160,14 +201,14 @@ def evaluate(repo: Path, tested_sha: str, tier: str | None = None, head: str = "
                 raise EvidenceError(f"addition inside already sealed run dir: {path}")
             added_by_dir.setdefault(directory, set()).add(path)
             seen_paths.add(path)
-        tiers_in_commit: set[str] = set()
+        keys_in_commit: set[tuple] = set()
         commit_completed: list[datetime] = []
         for directory, paths in added_by_dir.items():
             check_run_modes(repo, commit, directory, paths)
             run = validate_manifest(repo, commit, directory, paths, tested_sha)
-            if run["tier"] in tiers_in_commit:
-                raise EvidenceError(f"ambiguous same-commit run ordering for {run['tier']}: {commit}")
-            tiers_in_commit.add(run["tier"])
+            if run["key"] in keys_in_commit:
+                raise EvidenceError(f"ambiguous same-commit run ordering for {run['key']}: {commit}")
+            keys_in_commit.add(run["key"])
             completed = timestamp(run["completed_at"])
             if last_commit_completed is not None and completed < last_commit_completed:
                 raise EvidenceError(f"completed_at is non-monotonic at {directory}")
@@ -176,16 +217,143 @@ def evaluate(repo: Path, tested_sha: str, tier: str | None = None, head: str = "
             runs.append(run)
         if commit_completed:
             last_commit_completed = max(commit_completed)
-    selected: dict[str, dict] = {}
+    selected: dict[tuple, dict] = {}
     for run in runs:
-        selected[run["tier"]] = run
-    required = [tier] if tier else sorted(TIERS)
-    if not any(t in selected for t in required):
-        raise EvidenceError(f"no sealed run for tested SHA {tested_sha} and tier {tier or 'any'}")
-    failures = [f"latest {t} run failed: {selected[t]['directory']}" for t in required if t in selected and selected[t]["exit_status"] != 0]
-    if failures:
-        raise EvidenceError("; ".join(failures))
-    return {"status": "PASS", "scope": "sealed-evidence-only", "deployment": "forbidden", "tested_sha": tested_sha, "head_sha": head_sha, "runs": [{k: v for k, v in run.items() if k != "manifest"} for run in runs], "selected": {t: selected[t]["directory"] for t in required if t in selected}}
+        selected[run["key"]] = run
+    return {"tested_sha": tested_sha, "head_sha": head_sha, "runs": runs, "selected": selected}
+
+
+def _require(selected: dict, keys: tuple) -> dict:
+    result = {}
+    for key in keys:
+        run = selected.get(key)
+        if run is None:
+            raise EvidenceError(f"missing required check {key}")
+        manifest = run["manifest"]
+        if run["exit_status"] != 0 or manifest.get("verdict") != "PASS":
+            raise EvidenceError(f"latest required check failed {key}: {run['directory']}")
+        if key[0] == "pre-merge" and key[3] == "disposable":
+            if not (str(manifest.get("github_run_id", "")).isdigit()
+                    and str(manifest.get("github_run_attempt", "")).isdigit()
+                    and manifest.get("workflow_path") == ".github/workflows/inbox-heavy-verification.yml"
+                    and manifest.get("workflow_input_sha") == manifest.get("tested_sha")
+                    and manifest.get("event") == "workflow_dispatch"
+                    and manifest.get("head_branch") == "main"):
+                raise EvidenceError(f"missing runner provenance: {run['directory']}")
+        queued = manifest.get("items", {}).get("queued_invariants", {})
+        if key[1] == "shared-readonly" and queued.get("verdict") == "INCONCLUSIVE":
+            if key[3] != "shared-test" or not queued.get("diff") or (key[2] == "post" and queued.get("stability_probe") != "identical"):
+                raise EvidenceError(f"unadmitted queued invariants: {run['directory']}")
+            result[str(key)] = {"directory": run["directory"], "queued_diff": queued["diff"]}
+        else:
+            result[str(key)] = {"directory": run["directory"]}
+    return result
+
+
+def _find_migration_chain(repo: Path, x_mig: str) -> dict:
+    refs = git(repo, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes").decode().splitlines()
+    chains = []
+    for ref in refs:
+        if subprocess.run(["git", "merge-base", "--is-ancestor", x_mig, ref], cwd=repo).returncode == 0:
+            try:
+                chain = collect(repo, x_mig, ref)
+                if chain["runs"]:
+                    chains.append(chain)
+            except EvidenceError:
+                continue
+    if not chains:
+        raise EvidenceError(f"no sealed migration evidence chain at {x_mig}")
+    unique = {chain["head_sha"]: chain for chain in chains}
+    if len(unique) != 1:
+        raise EvidenceError(f"ambiguous sealed migration evidence chains at {x_mig}")
+    return next(iter(unique.values()))
+
+
+def evaluate(repo: Path, approval: str, x_mig: str | None = None, m: str | None = None, head: str = "HEAD") -> dict:
+    """Evaluate required checks at X; J5b also reads the M-keyed evidence branch."""
+    repo = Path(repo)
+    if approval not in APPROVALS:
+        # Legacy release gate entrypoint: inspect every latest check in the tier.
+        tested_sha, tier = approval, x_mig
+        if m is not None and head == "HEAD":
+            head = m
+        if tier not in TIERS:
+            raise EvidenceError(f"unknown approval or tier: {approval}")
+        chain = collect(repo, tested_sha, head)
+        keys = tuple(key for key in chain["selected"] if key[0] == tier)
+        if not keys:
+            raise EvidenceError(f"no sealed run for {tested_sha} and {tier}")
+        selected = _require(chain["selected"], keys)
+        return {"status": "PASS", "scope": "sealed-evidence-only", "deployment": "forbidden", "tested_sha": tested_sha,
+                "head_sha": chain["head_sha"], "runs": [{k: v for k, v in run.items() if k != "manifest"} for run in chain["runs"]],
+                "selected": {tier: list(selected.values())[-1]["directory"]}}
+    if not x_mig or not SHA.fullmatch(x_mig):
+        raise EvidenceError("migration SHA required")
+    if approval == "j5a":
+        chain = collect(repo, x_mig, head)
+        selected = _require(chain["selected"], APPROVALS["j5a"])
+    else:
+        if not m or not SHA.fullmatch(m):
+            raise EvidenceError("main SHA required for j5b")
+        if git(repo, "diff", "--name-only", x_mig, m, "--", "supabase/migrations", "experiments/inbox-production-install").strip():
+            raise EvidenceError("migration diff between X_mig and M")
+        mig_chain = _find_migration_chain(repo, x_mig)
+        main_chain = collect(repo, m, head)
+        combined = {key: run for key, run in mig_chain["selected"].items() if key[0] == "pre-merge"}
+        combined.update({key: run for key, run in main_chain["selected"].items() if key[0] == "test-env"})
+        selected = _require(combined, APPROVALS["j5b"])
+        evaluate_migration(repo, m, "shared-test", head=head, x_mig=x_mig)
+    return {"status": "PASS", "approval": approval, "selected": selected}
+
+
+def evaluate_migration(repo: Path, m: str, target: str, head: str = "HEAD", x_mig: str | None = None) -> dict:
+    if target not in MIGRATION_WORKFLOWS:
+        raise EvidenceError("unknown migration target")
+    chain = collect(Path(repo), m, head)
+    key = ("test-env" if target == "shared-test" else "prod-deploy", "migration-apply", "post", target)
+    selected = _require(chain["selected"], (key,))
+    run = chain["selected"][key]
+    manifest = run["manifest"]
+    if manifest.get("target_binding", {}).get("project_ref") != PROJECT_REFS[target]:
+        raise EvidenceError("migration target binding mismatch")
+    workflow = manifest.get("workflow_run", {})
+    if workflow.get("workflow_path") != MIGRATION_WORKFLOWS[target] or workflow.get("head_sha") != m or workflow.get("conclusion") != "success" or not str(workflow.get("run_id", "")).isdigit() or not str(workflow.get("run_attempt", "")).isdigit():
+        raise EvidenceError("migration workflow identity mismatch")
+    def require_job(field: str, name: str, label: str, *, allow_prior_attempt: bool = False) -> None:
+        job = workflow.get(field)
+        if (not isinstance(job, dict) or job.get("name") != name or job.get("conclusion") != "success"
+                or not str(job.get("id", "")).isdigit() or int(job["id"]) <= 0
+                or str(job.get("run_id")) != str(workflow["run_id"])
+                or not str(job.get("run_attempt", "")).isdigit()
+                or int(job["run_attempt"]) < 1
+                or (int(job["run_attempt"]) > int(workflow["run_attempt"]) if allow_prior_attempt
+                    else int(job["run_attempt"]) != int(workflow["run_attempt"]))):
+            raise EvidenceError(f"migration {label} evidence mismatch")
+
+    require_job("apply_job", MIGRATION_APPLY_JOBS[target], "apply job")
+    if target == "production":
+        require_job("bind_upstream_job", "Bind upstream test run", "bind upstream job", allow_prior_attempt=True)
+    before = set(map(str, manifest.get("schema_migrations_before", [])))
+    after = set(map(str, manifest.get("schema_migrations_after", [])))
+    if (len(before) != len(manifest.get("schema_migrations_before", [])) or len(after) != len(manifest.get("schema_migrations_after", []))
+            or after - before != MIGRATION_VERSIONS or before - after):
+        raise EvidenceError("migration ledger versions mismatch")
+    bound_x = manifest.get("migration_head_sha")
+    if not isinstance(bound_x, str) or not SHA.fullmatch(bound_x) or (x_mig and bound_x != x_mig):
+        raise EvidenceError("migration head binding mismatch")
+    x_mig = bound_x
+    if x_mig:
+        pre = _find_migration_chain(Path(repo), x_mig)["selected"].get(("pre-merge", "catalog-fingerprint", "n/a", "disposable"))
+        if pre is None:
+            raise EvidenceError("missing committed catalog fingerprint")
+        fingerprint_path = pre["manifest"].get("catalog_fingerprint_post_artifact", "catalog-fingerprint-post.json")
+        if fingerprint_path not in pre["manifest"]["artifacts"]:
+            raise EvidenceError("missing committed catalog fingerprint artifact")
+        expected = json.loads(blob(Path(repo), pre["commit"], pre["directory"] + "/" + fingerprint_path))
+        observed = manifest.get("catalog_fingerprint_after")
+        if not isinstance(expected, dict) or not isinstance(observed, dict) or expected.keys() != observed.keys() or any(expected[k] != observed[k] for k in expected):
+            raise EvidenceError("catalog fingerprint section mismatch")
+    return {"status": "PASS", "selected": selected}
 
 
 def evaluate_deploy(repo: Path, tested_sha: str, tier: str, head: str = "HEAD") -> dict:

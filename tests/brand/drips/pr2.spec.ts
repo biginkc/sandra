@@ -7,9 +7,10 @@ for (const [route, file, title] of [
   ["needs-person", "needs-person.png", "Needs a person"],
 ] as const) {
   test(`PR-2 ${route} fixture`, async ({ page }) => {
+    test.setTimeout(120_000);
     await page.setViewportSize({ width: 1440, height: 1120 });
-    await page.goto(`/brand/drips/${route}`);
+    await page.goto(`/brand/drips/${route}`, { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible();
-    await page.screenshot({ path: path.resolve(`docs/design/screenshots/drips/${file}`), fullPage: true });
+    await page.screenshot({ path: path.resolve(`docs/design/screenshots/drips/${file}`), fullPage: true, animations: "disabled" });
   });
 }

@@ -163,7 +163,7 @@ export async function enrollLead(
     return {
       status: "no_consent",
       message:
-        "Contact has opted out of SMS. Can't enroll in a send_sms sequence.",
+        "Contact has opted out of SMS. Can't enroll in a drip that sends SMS.",
     };
   }
 
