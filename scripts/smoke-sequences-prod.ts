@@ -4,10 +4,11 @@
 import { createClient } from "@supabase/supabase-js";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import type { Database } from "../src/lib/supabase/types";
 import { cleanupAllCanaries, cleanupCanary } from "./sequence-canary-cleanup";
-import { fixtureIds, preflightFixture } from "./sequence-canary-fixture";
+import { fixtureIds, preflightFixture, type FixtureIds } from "./sequence-canary-fixture";
 
 // ---------- env bootstrap ---------------------------------------------------
 
@@ -31,36 +32,16 @@ function loadLocalEnv(file: string): Record<string, string> {
   return out;
 }
 
-const env = { ...loadLocalEnv(".env.local"), ...process.env };
-const URL = env.NEXT_PUBLIC_SUPABASE_URL;
-const KEY = env.SUPABASE_SERVICE_ROLE_KEY;
-const ids = fixtureIds(env);
-if (!URL || !KEY) {
-  console.error("Missing URL or service key");
-  process.exit(2);
-}
-if (URL.includes("ncsngxlcyxylaeskiteu")) {
-  console.error(
-    "URL points at the TEST project — this smoke is meant for prod. Aborting.",
-  );
-  process.exit(2);
-}
-
-const supabase = createClient<Database>(URL, KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
-
 // ---------- run ------------------------------------------------------------
 
-const TS = new Date().toISOString().replace(/[:.]/g, "-");
-const UNIQUE_BODY = `PROD-SMOKE ${TS}`;
-
-async function main() {
+export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<Database>>, ids: FixtureIds, cleanupOnly = false) {
   const orgId = await preflightFixture(supabase, ids);
-  if (process.argv.includes("--cleanup-only")) {
+  if (cleanupOnly) {
     console.log(`[smoke] cleaned ${await cleanupAllCanaries(supabase, ids.userId, ids.propertyId)} canary sequences`);
     return;
   }
+  const TS = new Date().toISOString().replace(/[:.]/g, "-");
+  const UNIQUE_BODY = `PROD-SMOKE ${TS}`;
   let sequenceId: string | null = null;
   try {
     console.log(`[smoke] start   ${TS}`);
@@ -160,7 +141,24 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("[smoke] ERROR", err);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  const env = { ...loadLocalEnv(".env.local"), ...process.env };
+  const URL = env.NEXT_PUBLIC_SUPABASE_URL;
+  const KEY = env.SUPABASE_SERVICE_ROLE_KEY;
+  const ids = fixtureIds(env);
+  if (!URL || !KEY) {
+    console.error("Missing URL or service key");
+    process.exit(2);
+  }
+  if (URL.includes("ncsngxlcyxylaeskiteu")) {
+    console.error("URL points at the TEST project — this smoke is meant for prod. Aborting.");
+    process.exit(2);
+  }
+  const supabase = createClient<Database>(URL, KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  runSequenceSmoke(supabase, ids, process.argv.includes("--cleanup-only")).catch((err) => {
+    console.error("[smoke] ERROR", err);
+    process.exitCode = 1;
+  });
+}

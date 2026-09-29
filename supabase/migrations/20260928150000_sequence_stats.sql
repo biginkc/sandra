@@ -39,7 +39,7 @@ begin
       and not exists (select 1 from public.messages msg where msg.org_id = p_org
         and msg.property_id = e.property_id and msg.direction = 'inbound'
         and msg.created_at > coalesce((select max(sr.run_at) from public.sequence_step_runs sr
-          where sr.enrollment_id = e.id), e.enrolled_at))),
+          where sr.enrollment_id = e.id and sr.message_id is not null), e.enrolled_at))),
     (select count(*) from public.sequence_enrollments e where e.sequence_id = s.id
       and e.org_id = p_org and e.status = 'paused'
       and e.pause_reason in ('provider_failed','reconciliation_required')),
@@ -80,7 +80,7 @@ begin
       and not exists (select 1 from public.messages msg where msg.org_id = p_org
         and msg.property_id = e.property_id and msg.direction = 'inbound'
         and msg.created_at > coalesce((select max(sr.run_at) from public.sequence_step_runs sr
-          where sr.enrollment_id = e.id), e.enrolled_at))
+          where sr.enrollment_id = e.id and sr.message_id is not null), e.enrolled_at))
     union all
     select e.property_id, e.sequence_id, 'couldnt_send'::text, 'Couldn''t send'::text, 2
     from public.sequence_enrollments e where e.org_id = p_org and e.status = 'paused'
