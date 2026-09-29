@@ -8,7 +8,7 @@ const sql = readFileSync("supabase/migrations/20260929237000_sequence_detail.sql
 // Replays function DDL, so this suite runs only against the local scratch database.
 const url = requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres");
 const pg = new Client({ connectionString: url });
-const preservedFunctions = ["sequence_overview_stats(uuid)", "sequence_needs_person(uuid)"];
+const preservedFunctions = ["sequence_overview_stats(uuid)", "sequence_needs_person(uuid)", "sequence_needs_person_counts(uuid,uuid)", "sequence_needs_person_page(uuid,text,integer,integer,uuid)"];
 let originalDefinitions: string[];
 let org: string;
 let otherOrg: string;
@@ -159,8 +159,8 @@ it("counts distinct sends, replies after send, and active waiters for each step"
   const overview = await pg.query("select finished_no_reply from public.sequence_overview_stats($1) where id=$2", [org, source]);
   expect(overview.rows[0].finished_no_reply).toBe("1");
   const needsPerson = await pg.query("select property_id from public.sequence_needs_person($1) where bucket='finished_no_reply'", [org]);
-  // #704 still uses run_at here, so the 11:00 reply clears this bucket.
-  expect(needsPerson.rows.map((row) => row.property_id)).not.toContain(noReply.property);
+  // The 11:00 reply predates the 12:00 send, so this lead still needs a person.
+  expect(needsPerson.rows.map((row) => row.property_id)).toContain(noReply.property);
   expect(needsPerson.rows.map((row) => row.property_id)).not.toContain(replied.property);
   await pg.query("reset role");
   await rejected("select * from public.sequence_step_stats($1,$2)", [otherOrg, source], "42501");

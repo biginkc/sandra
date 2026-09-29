@@ -113,7 +113,7 @@ it("applies twice, preserves old snapshot values, aligns replied counts, and use
     await db.query("drop index public.idx_enrollments_unique_active");
     await db.query("drop index if exists public.idx_sequence_enrollments_latest_per_property");
     await db.query("drop index if exists public.idx_enrollments_one_live_per_property");
-    expect(await explain()).not.toContain("Index Cond: (property_id =");
+    expect(await explain()).not.toMatch(/Index Cond: \([^\n]*property_id =/);
     await db.query("rollback to savepoint without_index");
   } finally {
     await db.query("rollback").catch(() => {});

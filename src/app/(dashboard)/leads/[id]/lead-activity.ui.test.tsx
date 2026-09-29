@@ -138,6 +138,22 @@ describe("<LeadActivityTimeline /> with lead events", () => {
       vi.useRealTimers();
     }
   });
+  it("does not retry label lookup for an old sent outbound message", async () => {
+    vi.useFakeTimers();
+    try {
+      const props = {
+        propertyId: "property-1", contactId: "contact-1", initialNotes: [], initialCalls: [], initialEvents: [],
+        messageError: null, noteError: null, callError: null, eventError: null,
+        authorEmails: {}, currentUserId: null, currentUserEmail: null, jitterHost: "",
+      };
+      const view = render(<LeadActivityTimeline {...props} initialMessages={[message({ id: "old", body: "Hello", createdAt: "2025-01-01T14:00:00Z", status: "sent" })]} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+      expect(messageDripLabels).toHaveBeenCalledTimes(1);
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it("interleaves compact events without changing the existing SMS bubble", () => {
     render(
       <LeadActivityTimeline
