@@ -17,6 +17,7 @@ describe("parseInboxFilter", () => {
       "escalated",
       "dispo",
       "needs_outcome",
+      "drip_replied",
     ] as const) {
       expect(parseInboxFilter(filter)).toBe(filter);
     }
@@ -36,7 +37,7 @@ describe("parseInboxFilter", () => {
 });
 
 describe("isThreadFilter", () => {
-  it("treats the seven conversation buckets as thread filters", () => {
+  it("treats the conversation buckets as thread filters", () => {
     for (const filter of [
       "all",
       "mine",
@@ -45,6 +46,7 @@ describe("isThreadFilter", () => {
       "escalated",
       "dispo",
       "needs_outcome",
+      "drip_replied",
     ] as const) {
       expect(isThreadFilter(filter)).toBe(true);
     }

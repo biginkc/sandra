@@ -1,0 +1,58 @@
+name: QUAL Downstream
+
+on:
+  workflow_run:
+    workflows: ["QUAL Upstream"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  bind-upstream:
+    name: Bind upstream run
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record workflow trigger
+        run: |
+          python3 - <<'PY'
+          import json, os
+          upstream = json.load(open(os.environ['GITHUB_EVENT_PATH']))['workflow_run']
+          binding = {
+              'upstream_run_id': upstream['id'],
+              'upstream_run_attempt': upstream['run_attempt'],
+              'upstream_head_sha': upstream['head_sha'],
+              'upstream_event': upstream['event'],
+              'upstream_head_branch': upstream['head_branch'],
+              'upstream_conclusion': upstream['conclusion'],
+              'run_id': int(os.environ['GITHUB_RUN_ID']),
+              'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+          }
+          body = json.dumps(binding, sort_keys=True, indent=2) + '\n'
+          open('upstream-binding.json', 'w').write(body)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('### Upstream binding\n```json\n' + body + '```\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upstream-binding
+          path: upstream-binding.json
+
+  qual-gated:
+    name: QUAL gated job
+    needs: bind-upstream
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'workflow_dispatch'
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: qual-gate
+    steps:
+      - name: Print harmless QUAL result
+        run: |
+          echo 'QUAL gated job approved and started'
+          printf 'QUAL gated job completed\n' > qual-result.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qual-result
+          path: qual-result.txt

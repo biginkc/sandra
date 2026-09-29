@@ -260,7 +260,7 @@ export async function processEnrollmentTick(
       const pauseError = await pauseEnrollment(
         client,
         enrollment.id,
-        "inbound_reply",
+        "no_phone",
         false,
       );
       if (pauseError) {
@@ -566,7 +566,7 @@ export async function processEnrollmentTick(
         const pauseError = await pauseEnrollment(
           client,
           enrollment.id,
-          "inbound_reply",
+          "no_phone",
           false,
         );
         if (pauseError) {

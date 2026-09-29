@@ -11,7 +11,8 @@ export type InboxFilter =
   | "unread"
   | "escalated"
   | "dispo"
-  | "needs_outcome";
+  | "needs_outcome"
+  | "drip_replied";
 
 export type InboxFilterCounts = Record<InboxFilter, number>;
 
@@ -48,6 +49,7 @@ const FILTER_LABELS: Record<InboxFilter, string> = {
   escalated: "Escalated",
   dispo: "Sandra Dispo",
   needs_outcome: "Needs Outcome",
+  drip_replied: "Replied to drip",
 };
 
 /**
