@@ -299,6 +299,38 @@ describe('parseInputs', () => {
 });
 
 describe('dry run', () => {
+  it.each(['/api/v2/webhooks', '/api/v2/subscriptions/call'])('preserves listed resources when %s ends with an empty cursor page', async (path) => {
+    const w = await prepared();
+    const baseline = await dryRun(w);
+    const ports = makePorts(w);
+    const request = ports.dialpad.request.bind(ports.dialpad);
+    ports.dialpad.request = async (method, requestedPath, body) => {
+      if (method === 'GET' && requestedPath === `${path}?cursor=terminal`) return { status: 200, text: '{}' };
+      const response = await request(method, requestedPath, body);
+      if (method === 'GET' && requestedPath.split('?')[0] === path) {
+        const page = JSON.parse(response.text);
+        if (!page.cursor) response.text = JSON.stringify({ ...page, cursor: 'terminal' });
+      }
+      return response;
+    };
+    const result = await runProvisioning(ports, inputs, { execute: false });
+    expect(result.exitCode).toBe(0);
+    expect(result.plan!.steps).toEqual(baseline.plan!.steps);
+    expect(w.log).toEqual([]);
+  });
+
+  it.each(['{}', 'null', '{"items":null}', '{"error":"failed"}', '{"cursor":"next"}'])('rejects unreadable initial pages: %s', async (text) => {
+    const w = await prepared();
+    const ports = makePorts(w);
+    const request = ports.dialpad.request.bind(ports.dialpad);
+    ports.dialpad.request = async (method, path, body) => path === '/api/v2/subscriptions/call'
+      ? { status: 200, text }
+      : request(method, path, body);
+    const result = await runProvisioning(ports, inputs, { execute: false });
+    expect(result.exitCode).toBe(1);
+    expect(w.log).toEqual([]);
+  });
+
   it('previews every create and performs no mutation', async () => {
     const w = makeWorld();
     const result = await dryRun(w);

@@ -319,6 +319,9 @@ async function listAll<T>(dialpad: DialpadPort, basePath: string, parseItem: (va
     const response = await dialpad.request('GET', path);
     if (response.status !== 200) throw new ProvisioningError('dialpad_list_failed', `${basePath} returned HTTP ${response.status}`);
     const body = record(parseProviderJson(response.text));
+    // Dialpad can return {} when a cursor points beyond the final full page.
+    // Accept only that exact continuation response; malformed pages still fail.
+    if (cursor && body && Object.keys(body).length === 0) return out;
     if (!body || !Array.isArray(body.items)) throw new ProvisioningError('dialpad_list_failed', `${basePath} returned an unreadable page`);
     for (const raw of body.items) {
       const parsed = parseItem(raw);
