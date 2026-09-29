@@ -12,7 +12,7 @@ import { checkPrivileges } from './outbox-db-contract/privileges.mjs';
 import { writeManifest, runPath, sha256 } from './outbox-run-record.mjs';
 
 const repo = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
-const MIGRATIONS = ['20260929000000', '20260929000100', '20260929000200'];
+const MIGRATIONS = ['20260930000000', '20260930000100', '20260930000200'];
 const C_IDS = ['C00','C01','C02','C03','C04','C05','C06','C07','C08','C08b','C09','D01','D02','D03','D04','D05'];
 
 function options(args) {

@@ -19,20 +19,16 @@ const sources = {
   D01: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_select on public.messages'],
   D02: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_update on public.messages'],
   D03: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy memberships_self_select on public.memberships'],
-  D04: ['supabase/migrations/20260929000000_inbox_control_foundation.sql', 'CREATE FUNCTION public.inbox_guard_inbound_revision()'],
-  D05: ['supabase/migrations/20260929000000_inbox_control_foundation.sql', 'CREATE TABLE public.inbox_inbound_heads'],
+  D04: ['supabase/migrations/20260930000000_inbox_control_foundation.sql', 'CREATE FUNCTION public.inbox_guard_inbound_revision()'],
+  D05: ['supabase/migrations/20260930000000_inbox_control_foundation.sql', 'CREATE TABLE public.inbox_inbound_heads'],
 };
 
 test('every executable contract has one anchored application or schema source', () => {
   const pins = JSON.parse(readFileSync('scripts/outbox-db-contract/expected/privileges.post.json', 'utf8'));
   for (const [id, [file, snippet]] of Object.entries(sources)) {
-    if (!existsSync(file)) {
-      assert(file.startsWith('supabase/migrations/20260929'), `${id} missing source: ${file}`);
-      assert.match(pins.source_sha256[file] ?? '', /^[a-f0-9]{64}$/, `${id} migration source pin missing`);
-      continue;
-    }
+    assert(existsSync(file), `${id} reviewed source missing from checkout: ${file}`);
     const source = readFileSync(file, 'utf8');
-    if (file.startsWith('supabase/migrations/20260929')) assert.equal(createHash('sha256').update(source).digest('hex'), pins.source_sha256[file], `${id} migration source changed`);
+    if (file.startsWith('supabase/migrations/20260930')) assert.equal(createHash('sha256').update(source).digest('hex'), pins.source_sha256[file], `${id} migration source changed`);
     assert.equal(source.split(snippet).length - 1, 1, `${id} source drift: ${file}`);
   }
 });
