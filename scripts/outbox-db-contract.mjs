@@ -18,7 +18,7 @@ const C_IDS = ['C00','C01','C02','C03','C04','C05','C06','C07','C08','C08b','C09
 function options(args) {
   const value = {};
   for (let i = 0; i < args.length; i++) {
-    if (!['--target', '--phase', '--expect-fail'].includes(args[i])) throw new Error(`Unknown option ${args[i]}`);
+    if (!['--target', '--phase', '--expect-fail', '--mutations-file'].includes(args[i])) throw new Error(`Unknown option ${args[i]}`);
     value[args[i].slice(2)] = args[++i];
   }
   if (value.target !== 'disposable' || !['pre', 'post'].includes(value.phase)) throw new Error('Disposable write lane requires --target disposable --phase pre|post');
@@ -65,6 +65,7 @@ export async function run(args = process.argv.slice(2), env = process.env) {
   } catch (error) { errorText = String(error.stack ?? error); }
   finally { await db.end().catch(() => {}); }
   writeFileSync(path.join(runDir, 'contracts.json'), `${JSON.stringify(checks, null, 2)}\n`);
+  if (opts['mutations-file']) writeFileSync(path.join(runDir, 'mutations.json'), readFileSync(opts['mutations-file']));
   if (errorText) writeFileSync(path.join(runDir, 'failure.log'), `${errorText}\n`);
   const lane = env.HEAVY_LANE || 'db-contract';
   writeManifest(repo, relative, {
@@ -77,6 +78,7 @@ export async function run(args = process.argv.slice(2), env = process.env) {
     runner_script_sha256: sha256(readFileSync(path.join(repo, 'scripts/inbox-ci', `${lane}.sh`))),
     contracts: checks, failure: errorText ? errorText.split('\n')[0] : null,
   }, env);
+  console.log(`CONTRACT_RESULT ${JSON.stringify({ phase: opts.phase, verdict, status, failed: checks.filter(check => check.verdict === 'FAIL').map(check => check.id), error: errorText.split('\n')[0], runDir })}`);
   return status;
 }
 

@@ -19,14 +19,23 @@ export async function checkPrivileges(db, phase) {
   });
   await check('PIN_BASE_GRANTS', async () => {
     const names = ['messages', 'contacts', 'properties', 'memberships', 'lead_events'];
+    const base = pin('pre').base_relacl;
+    assert(base, 'Generated disposable-from-main ACL pin missing');
+    const actualAcl = await q("select c.relname as name,coalesce(c.relacl::text[],array[]::text[]) as acl,c.relrowsecurity as rls from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname=any($1::text[]) order by c.relname", [names]);
+    assert.deepEqual(actualAcl.map(r => r.name), [...names].sort());
+    for (const row of actualAcl) {
+      assert.deepEqual([...row.acl].sort(), base[row.name], row.name);
+      if (row.name !== 'lead_events') assert.equal(row.rls, true, row.name);
+    }
+    const anonPolicies = await q("select c.relname as name,p.polname as policy from pg_policy p join pg_class c on c.oid=p.polrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname=any($1::text[]) and (0=any(p.polroles) or 'anon'::regrole::oid=any(p.polroles))", [names.filter(n => n !== 'lead_events')]);
+    assert.deepEqual(anonPolicies, []);
     const rows = await q("select n,role,op,has_table_privilege(role,'public.'||n,op) as allowed from unnest($1::text[]) n cross join unnest($2::text[]) role cross join unnest($3::text[]) op order by n,role,op", [names, roles, ops]);
     for (const row of rows) {
-      if (['messages', 'contacts', 'properties', 'memberships'].includes(row.n)) assert.equal(row.allowed, row.role !== 'anon', JSON.stringify(row));
       if (row.n === 'lead_events') assert.equal(row.allowed, row.role === 'authenticated' ? row.op === 'SELECT' : row.role === 'service_role' && ['SELECT', 'INSERT'].includes(row.op), JSON.stringify(row));
     }
     const metrics = await q("select role,has_function_privilege(role,'public.outbound_sms_metrics(uuid,uuid,timestamptz,timestamptz,timestamptz)','EXECUTE') as allowed from unnest($1::text[]) role", [roles]);
     for (const row of metrics) assert.equal(row.allowed, row.role === 'authenticated', JSON.stringify(row));
-    return { tables: rows, metrics };
+    return { tables: rows, acl: actualAcl, anonPolicies, metrics };
   });
   if (phase === 'post') {
     const expected = pin('post');
@@ -60,8 +69,7 @@ export async function checkPrivileges(db, phase) {
       const schemas = Object.keys(expected.relation_owners).filter(k => k.startsWith('schema:')).map(k => k.slice(7));
       for (const schema of schemas) {
         const perms = await q('select role,has_schema_privilege(role,$1,\'USAGE\') as allowed from unnest($2::text[]) role', [schema, roles]);
-        const authAllowed = ['inbox_authenticated_detail', 'inbox_capture_boundary', 'inbox_read', 'inbox_action_api'].includes(schema);
-        for (const p of perms) assert.equal(p.allowed, p.role === 'authenticated' && authAllowed, `${schema}:${p.role}`);
+        for (const p of perms) assert.equal(p.allowed, false, `${schema}:${p.role}`);
       }
       const rollout = await q('select serving_enabled from inbox_control.rollout'); assert.equal(rollout.length, 1); assert.equal(rollout[0].serving_enabled, false);
       const workers = await q("select rolname,rolcanlogin from pg_roles where rolname in ('inbox_action_worker','inbox_reply_send_worker','inbox_projection_worker') order by rolname");

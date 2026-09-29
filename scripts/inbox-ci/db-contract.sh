@@ -35,5 +35,11 @@ for phase in pre post; do
   set +a
   export GITHUB_ENV="$original_env" MESSAGING_PROVIDER=mock
   if [[ -n "$original_env" ]]; then cat "$lane_env" >> "$original_env"; fi
-  node scripts/outbox-db-contract.mjs --target disposable --phase "$phase"
+  if [[ "$phase" == post ]]; then
+    mutation_results="${RUNNER_TEMP:-/tmp}/db-contract-mutations-${HEAVY_TESTED_SHA}.json"
+    node scripts/outbox-db-contract-mutations.mjs "$mutation_results"
+    node scripts/outbox-db-contract.mjs --target disposable --phase post --mutations-file "$mutation_results"
+  else
+    node scripts/outbox-db-contract.mjs --target disposable --phase pre
+  fi
 done

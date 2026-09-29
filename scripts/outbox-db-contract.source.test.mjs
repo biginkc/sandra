@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 
 const sources = {
   C00: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_insert on public.messages for insert to authenticated'],
@@ -17,11 +18,15 @@ const sources = {
   D01: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_select on public.messages'],
   D02: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_update on public.messages'],
   D03: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy memberships_self_select on public.memberships'],
+  D04: ['supabase/migrations/20260929000000_inbox_control_foundation.sql', 'CREATE FUNCTION public.inbox_guard_inbound_revision()'],
+  D05: ['supabase/migrations/20260929000000_inbox_control_foundation.sql', 'CREATE TABLE public.inbox_inbound_heads'],
 };
 
 test('every executable contract has one anchored application or schema source', () => {
   for (const [id, [file, snippet]] of Object.entries(sources)) {
-    const source = readFileSync(file, 'utf8');
+    const source = file.startsWith('supabase/migrations/20260929')
+      ? execFileSync('git', ['show', `e767bec7:${file}`], { encoding: 'utf8' })
+      : readFileSync(file, 'utf8');
     assert.equal(source.split(snippet).length - 1, 1, `${id} source drift: ${file}`);
   }
 });

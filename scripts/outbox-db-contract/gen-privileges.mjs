@@ -43,4 +43,4 @@ for (const match of migrationSql.matchAll(/\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXIS
 const expected = { source_commit: sourceCommit, source_sha256: Object.fromEntries(paths.map(file => [file, sha(read(file))])), artifact_sha256: Object.fromEntries(Object.entries(artifacts).map(([key, value]) => [key, value.sha256])), functions, relation_owners: relations };
 const dir = path.join('scripts', 'outbox-db-contract', 'expected'); mkdirSync(dir, { recursive: true });
 writeFileSync(path.join(dir, 'privileges.post.json'), `${JSON.stringify(expected, null, 2)}\n`);
-writeFileSync(path.join(dir, 'privileges.pre.json'), `${JSON.stringify({ message_triggers: ['trg_messages_fill_sms_conversation_id', 'guard_training_messages', 'messages_reject_dnc_locked_read'] }, null, 2)}\n`);
+// The pre pin is generated from a live disposable-from-main catalog by gen-base-acl.mjs.

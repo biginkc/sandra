@@ -134,7 +134,9 @@ export async function runContracts({ fixture, db, phase, provider }) {
     return { untouched: untouched.length, leadEvents: 0 };
   });
   await run('D01', async () => {
-    const page = await q('anon', 'GET', PAGE); assert.equal(page.status, 200); assert.deepEqual(page.data, []);
+    const page = await q('anon', 'GET', PAGE); assert.equal(page.status, 200);
+    if (page.data.length) throw new Error(`ANON_ROW_EXPOSURE count=${page.data.length} fixture=${page.data.some(r => Object.values(ids.messages).some(m => m.id === r.id))}`);
+    assert.deepEqual(page.data, []);
     const before = await get('member', 'm1');
     for (const method of ['PATCH', 'DELETE']) { const response = await q('anon', method, `/rest/v1/messages?id=eq.${row('m1').id}&select=id`, method === 'PATCH' ? { body: 'bad' } : undefined, { Prefer: 'return=representation' }); assert(response.status >= 400 || (Array.isArray(response.data) && response.data.length === 0)); }
     const after = await get('member', 'm1'); assert.deepEqual(after.data, before.data);
