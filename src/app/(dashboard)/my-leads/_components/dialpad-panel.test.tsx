@@ -321,6 +321,35 @@ describe('DialpadPanel recording capture', () => {
     await waitFor(() => expect(screen.getByText('Next homeowner')).toBeInTheDocument());
     expect(mocks.start).not.toHaveBeenCalled();
     expect(ctx.post.mock.calls.filter(([message]) => (message as { method?: string }).method === 'initiate_call')).toHaveLength(0);
+
+    const active = { state: vi.fn(() => 'recording'), stop: vi.fn(async () => undefined), dispose: vi.fn(async () => undefined) };
+    const prepared = { startLocal: vi.fn(async () => active), dispose: vi.fn(async () => undefined) };
+    mocks.prepareCapture.mockResolvedValueOnce({ proof: { handle: 'handle', origin: 'https://sandra.example' }, start: vi.fn(), startLocal: prepared.startLocal, dispose: prepared.dispose });
+    mocks.start.mockResolvedValue(released);
+    await userEvent.click(screen.getByRole('button', { name: 'Call' }));
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+  });
+
+  it('clears an owned preparation when the chooser is replaced during local capture start', async () => {
+    let releaseStartLocal!: (value: unknown) => void;
+    const oldActive = { state: vi.fn(() => 'recording'), stop: vi.fn(async () => undefined), dispose: vi.fn(async () => undefined) };
+    const oldPrepared = { startLocal: vi.fn(() => new Promise((resolve) => { releaseStartLocal = resolve; })), dispose: vi.fn(async () => undefined) };
+    mocks.prepareCapture.mockResolvedValueOnce({ proof: { handle: 'handle', origin: 'https://sandra.example' }, start: vi.fn(), startLocal: oldPrepared.startLocal, dispose: oldPrepared.dispose });
+    const ctx = await chooseAndCall({ bootstrap: recordingBootstrap });
+    await userEvent.click(ctx.call);
+    await waitFor(() => expect(oldPrepared.startLocal).toHaveBeenCalledTimes(1));
+
+    const nextRequest = { ...request, nonce: 4, propertyId: 'property-4', label: 'Start replacement homeowner' };
+    ctx.view.rerender(<DialpadPanel bootstrap={recordingBootstrap} callRequest={nextRequest} onLogOutcome={ctx.onLogOutcome} pollMs={15} />);
+    releaseStartLocal(oldActive);
+    await waitFor(() => expect(screen.getByText('Start replacement homeowner')).toBeInTheDocument());
+
+    const active = { state: vi.fn(() => 'recording'), stop: vi.fn(async () => undefined), dispose: vi.fn(async () => undefined) };
+    const prepared = { startLocal: vi.fn(async () => active), dispose: vi.fn(async () => undefined) };
+    mocks.prepareCapture.mockResolvedValueOnce({ proof: { handle: 'handle', origin: 'https://sandra.example' }, start: vi.fn(), startLocal: prepared.startLocal, dispose: prepared.dispose });
+    mocks.start.mockResolvedValue(released);
+    await userEvent.click(screen.getByRole('button', { name: 'Call' }));
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
   });
 
   it('cancels an old authorization when the chooser is replaced while dispatch is pending', async () => {

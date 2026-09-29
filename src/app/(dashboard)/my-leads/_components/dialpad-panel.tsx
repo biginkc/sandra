@@ -415,20 +415,25 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
     const preparing: RecordingPanelState = { intentId, prepared: null, active: null, captureId: null, session: null, busy: true, message: null, measuredSamples: null, measurementStatus: null };
     recordingRef.current = preparing;
     setRecording(preparing);
+    const clearOwnedPreparation = () => {
+      if (!mountedRef.current || recordingRef.current !== preparing) return;
+      recordingRef.current = null;
+      setRecording(null);
+    };
     try {
       const mediaDevices = navigator.mediaDevices as (MediaDevices & { setCaptureHandleConfig?: (config: { handle: string; exposeOrigin: boolean; permittedOrigins: readonly string[] }) => void }) | undefined;
       const proof = createSandraCaptureHandleProof({ origin: window.location.origin, setCaptureHandleConfig: mediaDevices?.setCaptureHandleConfig?.bind(mediaDevices) });
       const prepared = await prepareDialpadBrowserCapture({ proof });
-      if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) { await prepared.dispose(); return null; }
+      if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) { await prepared.dispose(); clearOwnedPreparation(); return null; }
       if (!prepared.startLocal) throw new Error('This browser cannot start local capture before the call.');
       const active = await prepared.startLocal(1);
-      if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) { await active.dispose(); await prepared.dispose(); return null; }
+      if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) { await active.dispose(); await prepared.dispose(); clearOwnedPreparation(); return null; }
       const ready: RecordingPanelState = { intentId, prepared, active, captureId: null, session: null, busy: false, message, measuredSamples: null, measurementStatus: null };
       recordingRef.current = ready;
       setRecording(ready);
       return { generation, active };
     } catch (error) {
-      if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) return null;
+      if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) { clearOwnedPreparation(); return null; }
       const failedPreparation: RecordingPanelState = { intentId, prepared: null, active: null, captureId: null, session: null, busy: false, message: error instanceof Error ? error.message : 'Browser capture could not be prepared.', measuredSamples: null, measurementStatus: null };
       recordingRef.current = failedPreparation;
       setRecording(failedPreparation);
