@@ -32,22 +32,24 @@ class SealedEvidenceTests(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", message)
 
-    def record(self, name="one", *, sha=None, exit_status=0, completed="2026-09-28T12:00:00Z", commit=True) -> Path:
+    def record(self, name="one", *, sha=None, tier="pre-merge", exit_status=0, completed="2026-09-28T12:00:00Z", observed=None, commit=True) -> Path:
         sha = sha or self.sha
-        directory = self.repo / ROOT / sha / "pre-merge" / name
+        directory = self.repo / ROOT / sha / tier / name
         directory.mkdir(parents=True)
         artifact = directory / "screenshots" / "O01.png"
         artifact.parent.mkdir()
         artifact.write_bytes(b"screenshot")
         relative = directory.relative_to(self.repo).as_posix()
         manifest = {
-            "tested_sha": self.sha, "tier": "pre-merge", "run_id": name,
+            "tested_sha": self.sha, "tier": tier, "run_id": name,
             "started_at": "2026-09-28T11:00:00Z", "completed_at": completed,
             "runner_script_sha256": "a" * 64, "fault_proxy_script_sha256": "b" * 64,
             "clean_tree": {"start": True, "end_excluding_run_dir": True, "excluded_path": relative},
             "exit_status": exit_status,
             "artifacts": {"screenshots/O01.png": hashlib.sha256(artifact.read_bytes()).hexdigest()},
         }
+        if observed is not None:
+            manifest["observed_deployment"] = observed
         (directory / "manifest.json").write_text(json.dumps(manifest))
         if commit:
             self.commit(name)
@@ -61,6 +63,35 @@ class SealedEvidenceTests(unittest.TestCase):
     def test_valid_sealed_record(self) -> None:
         self.record()
         self.assertEqual(evaluate(self.repo, self.sha, "pre-merge")["status"], "PASS")
+
+    def test_relative_symlink_artifact_rejected(self) -> None:
+        self.assert_symlink_artifact_rejected("../../../base.txt")
+
+    def test_absolute_symlink_artifact_rejected(self) -> None:
+        self.assert_symlink_artifact_rejected("/etc/hosts")
+
+    def assert_symlink_artifact_rejected(self, target: str) -> None:
+        directory = self.record(commit=False)
+        artifact = directory / "screenshots/O01.png"
+        artifact.unlink()
+        artifact.symlink_to(target)
+        manifest_path = directory / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["artifacts"]["screenshots/O01.png"] = hashlib.sha256(target.encode()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        self.commit("symlink artifact")
+        self.assert_fails("non-regular evidence entry")
+
+    def test_gitlink_artifact_rejected(self) -> None:
+        directory = self.record(commit=False)
+        artifact = directory / "screenshots/O01.png"
+        artifact.unlink()
+        self.git("add", "-A")
+        path = artifact.relative_to(self.repo).as_posix()
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{self.sha},{path}")
+        self.git("commit", "-qm", "gitlink artifact")
+        self.git("reset", "--hard", "HEAD")
+        self.assert_fails("non-regular evidence entry")
 
     def test_dirty_tree_at_evaluation(self) -> None:
         self.record()
@@ -145,8 +176,17 @@ class SealedEvidenceTests(unittest.TestCase):
         self.assert_fails("ambiguous")
 
     def test_deploy_entrypoint_fails_closed(self) -> None:
-        self.record()
-        with self.assertRaises(EvidenceError):
+        observed = {
+            "vercel_git_commit_sha": "0" * 40,
+            "railway_git_commit_sha": self.sha,
+            "railway_deployment_id": "deployment-1",
+        }
+        self.record(tier="test-env", observed=observed)
+        with self.assertRaisesRegex(EvidenceError, "observed commit mismatch"):
+            evaluate_deploy(self.repo, self.sha, "test-env")
+        observed["vercel_git_commit_sha"] = self.sha
+        self.record("matching", tier="test-env", observed=observed, completed="2026-09-28T13:00:00Z")
+        with self.assertRaisesRegex(EvidenceError, "awaits authenticated source and schema verification"):
             evaluate_deploy(self.repo, self.sha, "test-env")
 
 

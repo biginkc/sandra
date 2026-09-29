@@ -29,6 +29,23 @@ def blob(repo: Path, commit: str, path: str) -> bytes:
     return git(repo, "show", f"{commit}:{path}")
 
 
+def check_run_modes(repo: Path, commit: str, directory: str, added_paths: set[str]) -> None:
+    """Require every committed run entry to be a regular Git blob."""
+    entries = git(repo, "ls-tree", "-r", "-z", commit, "--", directory)
+    tree_paths: set[str] = set()
+    for entry in entries.split(b"\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split(b"\t", 1)
+        mode, kind, _ = metadata.split(b" ", 2)
+        name = path.decode("utf-8", errors="surrogateescape")
+        tree_paths.add(name)
+        if mode not in (b"100644", b"100755") or kind != b"blob":
+            raise EvidenceError(f"non-regular evidence entry: {name} (mode {mode.decode()})")
+    if tree_paths != added_paths:
+        raise EvidenceError(f"run tree differs from added paths: {directory}")
+
+
 def timestamp(value: object) -> datetime:
     if not isinstance(value, str) or not value:
         raise EvidenceError("missing or invalid completed_at")
@@ -125,6 +142,7 @@ def evaluate(repo: Path, tested_sha: str, tier: str | None = None, head: str = "
         tiers_in_commit: set[str] = set()
         commit_completed: list[datetime] = []
         for directory, paths in added_by_dir.items():
+            check_run_modes(repo, commit, directory, paths)
             run = validate_manifest(repo, commit, directory, paths, tested_sha)
             if run["tier"] in tiers_in_commit:
                 raise EvidenceError(f"ambiguous same-commit run ordering for {run['tier']}: {commit}")
