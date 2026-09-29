@@ -2,12 +2,13 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { dndHandlers, dragPointerDown, routerPush, routerRefresh, updatePropertyStatus, loadLeadBoardAction, setLeadNextActionAction } = vi.hoisted(() => ({
+const { dndHandlers, dragPointerDown, enrollPropertyIds, routerPush, routerRefresh, updatePropertyStatus, loadLeadBoardAction, setLeadNextActionAction } = vi.hoisted(() => ({
   dndHandlers: {
     onDragStart: null as null | ((event: unknown) => void),
     onDragEnd: null as null | ((event: unknown) => Promise<void>),
   },
   dragPointerDown: vi.fn(),
+  enrollPropertyIds: vi.fn(),
   routerPush: vi.fn(),
   routerRefresh: vi.fn(),
   updatePropertyStatus: vi.fn(),
@@ -26,6 +27,13 @@ vi.mock("./actions", () => ({
 vi.mock("./board-actions", () => ({
   loadLeadBoardAction,
   setLeadNextActionAction,
+}));
+
+vi.mock("./bulk-start-drip-dialog", () => ({
+  BulkStartDripDialog: ({ leads, onClose }: { leads: { id: string; address: string }[]; onClose: () => void }) => <div role="dialog">
+    Drip choices
+    <button onClick={() => { enrollPropertyIds(leads.map((lead) => lead.id)); onClose(); }}>Enroll selected leads</button>
+  </div>,
 }));
 
 vi.mock("@/lib/errors/call-action", () => ({
@@ -189,11 +197,51 @@ beforeEach(() => {
   routerPush.mockReset();
   routerRefresh.mockReset();
   dragPointerDown.mockReset();
+  enrollPropertyIds.mockReset();
   dndHandlers.onDragStart = null;
   dndHandlers.onDragEnd = null;
 });
 
 describe("Leads Kanban foundation", () => {
+  it("shows Start drip only after selecting a lead and supports select all loaded leads", async () => {
+    const user = userEvent.setup();
+    renderBoard([makeLead(), makeLead({ id: "lead-b", address: "456 Oak St" })]);
+    expect(screen.queryByRole("button", { name: "Start drip" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Select 123 Main St" }));
+    expect(screen.getByRole("button", { name: "Start drip" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Start drip" }));
+    await user.click(screen.getByRole("button", { name: "Enroll selected leads" }));
+    expect(enrollPropertyIds).toHaveBeenLastCalledWith(["lead-a"]);
+    await user.click(screen.getByRole("button", { name: /Select all 2 loaded leads/ }));
+    expect(screen.getByText("2 selected")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Start drip" }));
+    expect(screen.getByRole("dialog", { name: "" })).toHaveTextContent("Drip choices");
+    await user.click(screen.getByRole("button", { name: "Enroll selected leads" }));
+    expect(enrollPropertyIds).toHaveBeenLastCalledWith(["lead-a", "lead-b"]);
+  });
+  it("drops hidden selections when search changes so they do not reappear", async () => {
+    const user = userEvent.setup();
+    renderBoard([makeLead(), makeLead({ id: "lead-b", address: "456 Oak St" })]);
+
+    await user.click(screen.getByRole("button", { name: /Select all 2 loaded leads/ }));
+    expect(screen.getByText("2 selected")).toBeVisible();
+
+    const search = screen.getByRole("textbox", { name: "Search leads" });
+    await user.type(search, "Main");
+    expect(screen.getByText("1 selected")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Start drip" }));
+    await user.click(screen.getByRole("button", { name: "Enroll selected leads" }));
+    expect(enrollPropertyIds).toHaveBeenCalledExactlyOnceWith(["lead-a"]);
+    await user.clear(search);
+    expect(screen.getByRole("checkbox", { name: "Select 123 Main St" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select 456 Oak St" })).not.toBeChecked();
+
+    await user.type(search, "Oak");
+    expect(screen.queryByRole("button", { name: "Start drip" })).not.toBeInTheDocument();
+    await user.clear(search);
+    expect(screen.getByRole("checkbox", { name: "Select 123 Main St" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select 456 Oak St" })).not.toBeChecked();
+  });
   it("renders exactly one latest-contract badge in the first badge row", () => {
     renderBoard([
       makeLead({
