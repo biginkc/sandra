@@ -401,7 +401,7 @@ async function loadMessageDripContext(
       replied,
       status: enrollment.status as "active" | "paused" | "completed",
       timeZone: OPERATOR_TIME_ZONE,
-      stoppedAt: enrollment.status === "active" ? null : reply?.created_at ?? null,
+      stoppedAt: (pausedForReply || enrollment.status === "completed") ? reply?.created_at ?? null : null,
     } : null,
     dripMessageLabels,
     dripReplyMessageIds,

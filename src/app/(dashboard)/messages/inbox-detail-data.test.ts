@@ -1017,7 +1017,7 @@ describe("fetchInboxDetail", () => {
     expect(takeover?.drip?.replied).toBe(false);
     seed.sequence_enrollments![0].pause_reason = "manual";
     const manuallyPaused = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
-    expect(manuallyPaused?.drip).toMatchObject({ status: "paused", replied: false });
+    expect(manuallyPaused?.drip).toMatchObject({ status: "paused", replied: false, stoppedAt: null });
     seed.sequence_enrollments![0].status = "active";
     seed.sequence_enrollments![0].pause_reason = null;
     const resumed = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
