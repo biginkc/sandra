@@ -22,27 +22,32 @@ const PILES = [
   { key: "needs_sequence", id: "needs-drip", title: "Needs a drip", detail: "Marked for a drip, but none has started yet." },
 ] as const;
 
-export function NeedsPersonBoard({ rows, counts, pages }: {
+export function NeedsPersonBoard({ rows, counts, pages, openGroups }: {
   rows: NeedsPersonLead[];
   counts?: NeedsPersonCounts;
   pages?: Record<NeedsPersonBucket, number>;
+  openGroups?: string;
 }) {
   const router = useRouter();
   const piles = needsPersonPiles(rows);
   const totals = counts ?? Object.fromEntries(PILES.map((pile) => [pile.key, piles[pile.key].length])) as NeedsPersonCounts;
   const currentPages = pages ?? { finished_no_reply: 1, couldnt_send: 1, needs_sequence: 1 };
+  const [expanded, setExpanded] = useState<Record<NeedsPersonBucket, boolean>>(() =>
+    openGroups === undefined
+      ? { finished_no_reply: true, couldnt_send: false, needs_sequence: true }
+      : Object.fromEntries(PILES.map((pile) => [pile.key, openGroups.split(",").includes(pile.key)])) as Record<NeedsPersonBucket, boolean>);
   function pageHref(bucket: NeedsPersonBucket, page: number, anchor: string) {
     const params = new URLSearchParams();
     for (const pile of PILES) {
       const next = pile.key === bucket ? page : currentPages[pile.key];
       if (next > 1) params.set(pile.key, String(next));
     }
+    params.set("open", PILES.filter((pile) => expanded[pile.key]).map((pile) => pile.key).join(","));
     return `/sequences/needs-person${params.size ? `?${params}` : ""}#${anchor}`;
   }
   const [selected, setSelected] = useState<string[]>([]);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [deadLead, setDeadLead] = useState<NeedsPersonLead | null>(null);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({ finished_no_reply: true, couldnt_send: false, needs_sequence: true });
   const [showAll, setShowAll] = useState<Record<string, boolean>>({});
   const [pending, startTransition] = useTransition();
 
