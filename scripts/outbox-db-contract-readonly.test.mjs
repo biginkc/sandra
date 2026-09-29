@@ -1,10 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
 import { readonlyGet, comparePlatform, platformFingerprint } from './outbox-db-contract/platform.mjs';
-import { assertTarget, parseArgs, compareCatalog } from './outbox-db-contract-readonly.mjs';
+import { assertTarget, parseArgs, compareCatalog, assertSealedPre } from './outbox-db-contract-readonly.mjs';
+import { connectionConfig, assertBackendTls } from './outbox-db-contract/connection.mjs';
+import { describePlan, comparePlans, catalogIndexes, compareIndexes, OPERATOR_INDEXES } from './outbox-db-contract/plan-contract.mjs';
 
 const row = (id, body='a') => ({ id, body, status:'queued', from_address:'x', to_address:'y', created_at:'2026-01-01', scheduled_for:null, property_id:null, contact_id:null });
 function fails(label, fn, pattern) { assert.throws(fn, pattern, label); }
@@ -255,7 +260,74 @@ test('Outbox source shape and claim pin', () => {
   for(const fragment of ['scheduled_for.gt.','scheduled_for.eq.','scheduled_for.is.null','nullTail']) assert.ok(cursor.includes(fragment),fragment);
 });
 
-test('injected Seq Scan plan is rejected',()=>fails('scan',()=>planSkeleton({'Node Type':'Seq Scan','Relation Name':'messages'}),/FAIL SEQ_SCAN/));
+const plan = (scan, cost = 10, index = 'messages_queue_idx') => describePlan({ 'Node Type':scan, 'Relation Name':'messages', Schema:'public', 'Index Name':index, 'Total Cost':cost });
+const planRecord = (target, phase, scan = 'Index Scan') => ({ target, phase, plans: Object.fromEntries(['privileged','member'].map(role => [role, Object.fromEntries(['first','keyset','null_tail'].map(shape => [shape, plan(scan)]))])) });
+test('SEQ PRE natural Seq Scan passes and records a digest', () => {
+  const observed = plan('Seq Scan');
+  assert.equal(observed.messages_scan, 'Seq Scan');
+  assert.match(observed.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(planSkeleton({'Node Type':'Seq Scan','Relation Name':'messages'}).length, 1);
+});
+test('SEQ POST Index to Seq fails with role and shape, same target only', () => {
+  const pre = planRecord('shared-readonly','pre');
+  const post = planRecord('shared-readonly','post');
+  post.plans.member.null_tail = plan('Seq Scan');
+  fails('regression', () => comparePlans(pre, post.plans, 'shared-readonly'), /FAIL PLAN_REGRESSION member null_tail/);
+  fails('cross target', () => comparePlans(pre, post.plans, 'production'), /PLAN_PRE_TARGET_MISMATCH/);
+});
+test('SEQ changed index passes and cost ratio is informational', () => {
+  const pre = planRecord('production','pre');
+  const post = planRecord('production','post');
+  post.plans.member.keyset = plan('Index Only Scan', 20, 'different_index');
+  assert.equal(comparePlans(pre, post.plans, 'production').member.keyset, 2);
+  const seqPre = planRecord('production','pre','Seq Scan');
+  assert.equal(comparePlans(seqPre, post.plans, 'production').member.keyset, 2);
+});
+test('SEQ index absence, invalidity and pre-build inconclusive remain distinct', () => {
+  const pre = { old_queue: { relation:'public.messages', valid:true } };
+  const full = Object.fromEntries([...OPERATOR_INDEXES,'old_queue'].map(name => [name,{relation:'public.messages',valid:true}]));
+  assert.deepEqual(compareIndexes(pre, {old_queue:full.old_queue}), {verdict:'INCONCLUSIVE',reason:'INDEXES_NOT_BUILT'});
+  const absent = {...full}; delete absent.old_queue;
+  fails('absent',()=>compareIndexes(pre,absent),/FAIL INDEX_ABSENT old_queue/);
+  const invalid = {...full,old_queue:{relation:'public.messages',valid:false}};
+  fails('invalid',()=>compareIndexes(pre,invalid),/FAIL INDEX_INVALID old_queue/);
+  assert.equal(compareIndexes(pre,full).verdict,'PASS');
+  const fingerprint = { sections:{relations:[{identity:'public.messages',indexes:[{definition:'CREATE INDEX old_queue ON public.messages USING btree (id)',valid:true,ready:true}]}]}};
+  assert.equal(catalogIndexes(fingerprint).old_queue.valid,true);
+});
+test('SEQ hosted TLS config is verified and disposable disables TLS', () => {
+  for (const target of ['shared-readonly','production']) {
+    const config = connectionConfig(target, hosted(target === 'production' ? PROD_REF : TEST_REF), {});
+    assert.deepEqual(config.ssl,{rejectUnauthorized:true});
+    assert.notEqual(config.ssl,false);
+  }
+  assert.equal(connectionConfig('disposable-readonly','postgres://postgres@127.0.0.1:55422/postgres',{}).ssl,false);
+  const source = readFileSync(new URL('./outbox-db-contract/connection.mjs',import.meta.url),'utf8');
+  assert.match(source,/rejectUnauthorized: true/);
+  const mutated = source.replace('rejectUnauthorized: true','rejectUnauthorized: false');
+  assert.doesNotMatch(mutated,/rejectUnauthorized: true/);
+  const dir = mkdtempSync(path.join(os.tmpdir(),'seq-ca-'));
+  try {
+    const caPath = path.join(dir,'root.pem');
+    writeFileSync(caPath,'TEST CA');
+    assert.deepEqual(connectionConfig('shared-readonly',hosted(TEST_REF),{NODE_EXTRA_CA_CERTS:caPath}).ssl,{rejectUnauthorized:true,ca:'TEST CA'});
+  } finally { rmSync(dir,{recursive:true,force:true}); }
+});
+test('SEQ probe TLS assertion rejects ssl=false', async () => {
+  await assert.rejects(assertBackendTls({query:async()=>({rows:[{ssl:false}]})}),/TLS_REQUIRED/);
+  assert.equal((await assertBackendTls({query:async()=>({rows:[{ssl:true,version:'TLSv1.3',cipher:'test'}]})})).ssl,true);
+});
+test('SEQ POST accepts only hashed sealed PRE output for the same target', () => {
+  const rawBytes = Buffer.from('{"target":"shared-readonly","phase":"pre"}');
+  const sealed = {target:'shared-test',phase:'pre',verdict:'PASS',source_output_sha256:readableDigest(rawBytes)};
+  const sealedBytes = Buffer.from(JSON.stringify(sealed));
+  const manifest = {kind:'shared-readonly',phase:'pre',target:'shared-test',verdict:'PASS',exit_status:0,artifacts:{'readonly.json':readableDigest(sealedBytes)}};
+  assert.equal(assertSealedPre({manifest,sealed,sealedBytes,rawBytes,target:'shared-readonly'}),sealed);
+  fails('wrong target',()=>assertSealedPre({manifest,sealed,sealedBytes,rawBytes,target:'production'}),/PLAN_PRE_NOT_SEALED/);
+  fails('mutated raw',()=>assertSealedPre({manifest,sealed,sealedBytes,rawBytes:Buffer.from('changed'),target:'shared-readonly'}),/PLAN_PRE_NOT_SEALED/);
+  fails('mutated seal',()=>assertSealedPre({manifest:{...manifest,artifacts:{'readonly.json':'f'.repeat(64)}},sealed,sealedBytes,rawBytes,target:'shared-readonly'}),/PLAN_PRE_NOT_SEALED/);
+});
+function readableDigest(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 test('platform performs exactly two unauthenticated GETs',async()=>{
   const calls=[];
   const { platformFingerprint }=await import('./outbox-db-contract/platform.mjs');
