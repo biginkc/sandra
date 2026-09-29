@@ -524,7 +524,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
 
     it("lets the trusted service close with a service reason", async () => {
       const { captureId } = await openedCapture();
-      expect(await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, null, "call_ended"])).toMatchObject({ capture: { status: "closing", closeReason: "call_ended" } });
+      expect(await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, null, "call_ended"])).toMatchObject({ capture: { status: "closing", closeReason: "service_closed" } });
     });
   });
 
@@ -826,6 +826,22 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       const claimed = await claim("worker-service-close");
       const result = await register(captureId, claimed.claimToken, [decoded("tab"), decoded("mic")]);
       expect(result).toMatchObject({ outcome: "partial", capture: { status: "partial", closeReason: "service_closed", failureCode: "capture_stopped_before_call_end" } });
+    });
+
+    it("does not let a requested service call-ended reason erase an early close after later hangup", async () => {
+      const { call, captureId } = await openedCapture();
+      await authorizedEpoch(captureId);
+      await fullTrack(captureId, "tab");
+      await fullTrack(captureId, "mic");
+      const closed = await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, null, "call_ended"]);
+      expect(closed).toMatchObject({ capture: { status: "closing", closeReason: "service_closed" } });
+      await endCall(call);
+      const claimed = await claim("worker-service-early-end");
+      expect(claimed.status).toBe("claimed");
+      expect(await register(captureId, claimed.claimToken, [decoded("tab"), decoded("mic")])).toMatchObject({
+        outcome: "partial",
+        capture: { status: "partial", closeReason: "service_closed", failureCode: "capture_stopped_before_call_end" },
+      });
     });
 
     it("recovers an expired lease with a new token, fences the old holder and exhausts after five attempts", async () => {

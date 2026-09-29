@@ -488,6 +488,9 @@ begin
   -- A session close after the provider's signed hangup is still a normal
   -- call-ended close. If the signed end is not projected yet, preserve the
   -- caller's early-stop reason permanently; a later hangup cannot upgrade it.
+  -- A trusted service's requested call_ended reason is advisory until the
+  -- signed activity projection exists, so an early service close is recorded
+  -- as service_closed.
   select exists (
     select 1 from public.call_activities a
      where a.id = v_capture.call_activity_id and a.ended_at is not null
@@ -495,7 +498,7 @@ begin
   v_reason := case
     when v_call_ended then 'call_ended'
     when p_rep_user_id is not null then 'rep_closed'
-    else coalesce(p_reason, 'service_closed')
+    else 'service_closed'
   end;
   -- This deadline is an operational bound for an abandoned/incomplete
   -- MediaRecorder flush. It is not a timing tolerance and cannot establish
