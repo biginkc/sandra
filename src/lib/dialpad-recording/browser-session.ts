@@ -78,6 +78,7 @@ const DEFAULT_ACK_TIMEOUT_MS = 2_000;
 const DEFAULT_READY_TIMEOUT_MS = 5_000;
 const DEFAULT_MAX_PENDING_CHUNKS = 8;
 const DEFAULT_MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
+const MAX_PENDING_PCM_FRAMES = 32;
 
 function defaultSocketFactory(endpoint: string): DialpadBrowserSocket {
   return new WebSocket(endpoint) as unknown as DialpadBrowserSocket;
@@ -148,6 +149,10 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   let pendingChunkConversions = 0;
   const pendingChunkAcks = new Map<string, { readonly track: Track; readonly seq: number; readonly resolve: () => void; readonly reject: (error: Error) => void; readonly timer: ReturnType<typeof setTimeout> }>();
   const acknowledgedChunks = new Set<string>();
+  const pendingPcmAcks = new Map<string, { readonly track: Track; readonly seq: number; readonly resolve: () => void; readonly reject: (error: Error) => void; readonly timer: ReturnType<typeof setTimeout> }>();
+  const acknowledgedPcmFrames = new Set<string>();
+  const pcmCreditWaiters: { readonly resolve: () => void; readonly reject: (error: Error) => void }[] = [];
+  let pcmCreditWakeups = 0;
   const recordingLastSeq = new Map<Track, number>();
   const pcmEndSamples = new Map<Track, number>();
   const pcmTails = new Map<Track, PcmTailReport>();
@@ -179,6 +184,23 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     pendingChunkAcks.clear();
   };
 
+  const drainPcmCreditWaiters = () => {
+    while (pcmCreditWaiters.length > 0 && pendingPcmAcks.size + pcmCreditWakeups < MAX_PENDING_PCM_FRAMES) {
+      pcmCreditWakeups += 1;
+      pcmCreditWaiters.shift()!.resolve();
+    }
+  };
+
+  const settlePendingPcmAcks = (error: DialpadBrowserSessionError) => {
+    for (const pending of pendingPcmAcks.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    pendingPcmAcks.clear();
+    while (pcmCreditWaiters.length > 0) pcmCreditWaiters.shift()!.reject(error);
+    pcmCreditWakeups = 0;
+  };
+
   function disposeCapture(): Promise<void> {
     if (!cleanupPromise) {
       cleanupPromise = Promise.resolve().then(() => options.capture.dispose()).catch(() => undefined);
@@ -193,6 +215,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     mediaAdmissionOpen = false;
     lifecycleGeneration += 1;
     settlePendingChunkAcks(error);
+    settlePendingPcmAcks(error);
     try { options.onFailure?.(error); } catch { /* failure remains sticky */ }
     if (socket) {
       detach();
@@ -290,6 +313,19 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
           pendingChunkAcks.delete(ackKey);
           pending.resolve();
         }
+      } else if (message.type === 'pcm_frame_ack') {
+        const ackKey = key(message.track, message.seq);
+        const pending = pendingPcmAcks.get(ackKey);
+        if (!pending) {
+          if (acknowledgedPcmFrames.has(ackKey)) return;
+          fail(new DialpadBrowserSessionError('protocol', 'Unexpected PCM frame acknowledgement.'));
+          return;
+        }
+        clearTimeout(pending.timer);
+        pendingPcmAcks.delete(ackKey);
+        acknowledgedPcmFrames.add(ackKey);
+        pending.resolve();
+        drainPcmCreditWaiters();
       } else if (message.type === 'recording_eof_ack') {
         const expected = recordingEofRequests.get(message.track);
         if (expected === undefined || expected !== message.lastSeq) {
@@ -369,9 +405,46 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       fail(new DialpadBrowserSessionError('protocol', 'PCM frame did not match the session contract.'));
       return;
     }
+    const ackKey = key(frame.track, frame.frameIndex);
+    if (pendingPcmAcks.has(ackKey) || acknowledgedPcmFrames.has(ackKey)) return;
+    if (pendingPcmAcks.size >= MAX_PENDING_PCM_FRAMES) {
+      await new Promise<void>((resolve, reject) => { pcmCreditWaiters.push({ resolve, reject }); });
+      pcmCreditWakeups = Math.max(0, pcmCreditWakeups - 1);
+      if (failed || disposed || !mediaAdmissionOpen) return;
+    }
     const end = frame.frameIndex * 320 + 320;
     pcmEndSamples.set(frame.track, Math.max(pcmEndSamples.get(frame.track) ?? 0, end));
-    await enqueueSend(encodeDialpadBrowserBinary({ kind: 'pcm', track: frame.track, epoch: options.epoch, sequence: frame.frameIndex, sampleClock: frame.frameIndex * 320, payload: frame.bytes }));
+    let resolveAck!: () => void;
+    let rejectAck!: (error: Error) => void;
+    const ackPromise = new Promise<void>((resolve, reject) => { resolveAck = resolve; rejectAck = reject; });
+    void ackPromise.catch(() => undefined);
+    const timer = setTimeout(() => {
+      const pending = pendingPcmAcks.get(ackKey);
+      if (!pending) return;
+      pendingPcmAcks.delete(ackKey);
+      const timeout = new DialpadBrowserSessionError('timeout', 'PCM frame acknowledgement timed out.');
+      clearTimeout(pending.timer);
+      rejectAck(timeout);
+      drainPcmCreditWaiters();
+      fail(timeout);
+    }, ackTimeoutMs);
+    pendingPcmAcks.set(ackKey, { track: frame.track, seq: frame.frameIndex, resolve: resolveAck, reject: rejectAck, timer });
+    try {
+      await enqueueSend(encodeDialpadBrowserBinary({ kind: 'pcm', track: frame.track, epoch: options.epoch, sequence: frame.frameIndex, sampleClock: frame.frameIndex * 320, payload: frame.bytes }));
+    } catch (error) {
+      clearTimeout(timer);
+      pendingPcmAcks.delete(ackKey);
+      rejectAck(error instanceof Error ? error : new DialpadBrowserSessionError('socket', 'PCM frame could not be sent.'));
+      drainPcmCreditWaiters();
+      throw error;
+    }
+    if (acknowledgedPcmFrames.has(ackKey)) {
+      clearTimeout(timer);
+      pendingPcmAcks.delete(ackKey);
+      resolveAck();
+      drainPcmCreditWaiters();
+    }
+    await ackPromise;
   }
 
   async function sendRecordingChunk(chunk: EncodedMediaChunk): Promise<void> {
@@ -438,6 +511,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   }
 
   async function finishControls(): Promise<void> {
+    await waitForAcks(() => pendingPcmAcks.size === 0 && pcmCreditWaiters.length === 0 && pcmCreditWakeups === 0, 'PCM frame');
     for (const track of TRACKS) {
       const tail = pcmTails.get(track);
       const discardedTailSamples = tail ? boundedTail(tail) : null;
@@ -539,6 +613,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     mediaAdmissionOpen = false;
     lifecycleGeneration += 1;
     settlePendingChunkAcks(new DialpadBrowserSessionError('interrupted', 'Recording session was disposed.'));
+    settlePendingPcmAcks(new DialpadBrowserSessionError('interrupted', 'Recording session was disposed.'));
     if (socket) {
       detach();
       try { socket.close(1000, 'recording session disposed'); } catch { /* closed */ }

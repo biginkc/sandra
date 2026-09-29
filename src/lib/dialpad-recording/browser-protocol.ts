@@ -504,6 +504,14 @@ export interface DialpadBrowserRecordingChunkAck {
   readonly status: 'recorded' | 'replayed'
 }
 
+/** Receipt after the worker has processed a complete PCM inference window. */
+export interface DialpadBrowserPcmFrameAck {
+  readonly type: 'pcm_frame_ack'
+  readonly epoch: number
+  readonly track: DialpadBrowserTrack
+  readonly seq: number
+}
+
 export interface DialpadBrowserRecordingEofAck {
   readonly type: 'recording_eof_ack'
   readonly track: DialpadBrowserTrack
@@ -518,7 +526,7 @@ export interface DialpadBrowserPcmEofDrained {
   readonly endSample: number
 }
 
-export type DialpadBrowserServerMessage = DialpadBrowserReadyMessage | DialpadBrowserMeasurementSnapshotMessage | DialpadBrowserCaptureStateMessage | DialpadBrowserRecordingChunkAck | DialpadBrowserRecordingEofAck | DialpadBrowserPcmEofDrained
+export type DialpadBrowserServerMessage = DialpadBrowserReadyMessage | DialpadBrowserMeasurementSnapshotMessage | DialpadBrowserCaptureStateMessage | DialpadBrowserRecordingChunkAck | DialpadBrowserPcmFrameAck | DialpadBrowserRecordingEofAck | DialpadBrowserPcmEofDrained
 
 /** Projects an already-authoritative DB snapshot into the narrow browser view. */
 export function toDialpadBrowserMeasurementSnapshot(input: Omit<DialpadBrowserMeasurementSnapshotMessage, 'type'>): DialpadBrowserMeasurementSnapshotMessage {
@@ -563,6 +571,10 @@ function validateServerMessage(message: DialpadBrowserServerMessage): void {
   }
   if (message.type === 'recording_chunk_ack') {
     if (!hasExactKeys(message, ['type', 'track', 'epoch', 'seq', 'status']) || !isTrack(message.track) || !isEpoch(message.epoch) || !isSequence(message.seq, true) || (message.status !== 'recorded' && message.status !== 'replayed')) throw protocolError('server_message_invalid')
+    return
+  }
+  if (message.type === 'pcm_frame_ack') {
+    if (!hasExactKeys(message, ['type', 'epoch', 'track', 'seq']) || !isEpoch(message.epoch) || !isTrack(message.track) || !isSequence(message.seq, false)) throw protocolError('server_message_invalid')
     return
   }
   if (message.type === 'recording_eof_ack') {

@@ -226,12 +226,14 @@ describe('Dialpad browser server acknowledgements', () => {
       { type: 'measurement_snapshot', epoch: 1, revision: 4, totalSamples: 4_800_001, measurementStatus: 'provisional', threshold: { crossed: true, crossingEpoch: 1, crossingSample: 4_800_001 }, degradedReasons: ['capture_overflow'] } as const,
       { type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: '2026-09-29T12:01:00.000Z' } as const,
       { type: 'recording_chunk_ack', track: 'tab', epoch: 1, seq: 7, status: 'recorded' } as const,
+      { type: 'pcm_frame_ack', epoch: 1, track: 'mic', seq: 7 } as const,
       { type: 'recording_eof_ack', track: 'mic', epoch: 1, lastSeq: 9_999 } as const,
       { type: 'pcm_eof_drained', track: 'tab', epoch: 1, endSample: 123_456 } as const,
     ]
     for (const message of messages) expect(parseDialpadBrowserServerMessage(encodeDialpadBrowserServerMessage(message))).toEqual(message)
     expectCode(() => parseDialpadBrowserServerMessage('{"type":"ready","epoch":1,"sellerSpeechSecondsMeasured":301}'), 'server_message_invalid')
     expectCode(() => parseDialpadBrowserServerMessage('{"type":"recording_chunk_ack","track":"tab","epoch":1,"seq":7,"status":"recorded","path":"forged"}'), 'server_message_invalid')
+    expectCode(() => parseDialpadBrowserServerMessage('{"type":"pcm_frame_ack","epoch":1,"track":"mic","seq":7,"status":"processed"}'), 'server_message_invalid')
     expectCode(() => parseDialpadBrowserServerMessage('{"type":"measurement_snapshot","epoch":1,"revision":1,"totalSamples":1,"measurementStatus":"finalized","threshold":{"crossed":false,"crossingEpoch":null,"crossingSample":null},"degradedReasons":[]}'), 'server_message_invalid')
     expectCode(() => parseDialpadBrowserServerMessage('{"type":"measurement_snapshot","epoch":1,"revision":1,"totalSamples":1,"measurementStatus":"partial","threshold":{"crossed":false,"crossingEpoch":1,"crossingSample":null},"degradedReasons":[]}'), 'server_message_invalid')
     expectCode(() => parseDialpadBrowserServerMessage('{"type":"measurement_snapshot","epoch":1,"revision":1,"totalSamples":1,"measurementStatus":"partial","threshold":{"crossed":true,"crossingEpoch":null,"crossingSample":1},"degradedReasons":[]}'), 'server_message_invalid')

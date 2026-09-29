@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { BrowserCaptureSinks, EncodedMediaChunk, PreparedDialpadCapture } from './browser-capture';
+import { decodeDialpadBrowserBinary } from './browser-protocol';
 import {
   createDialpadBrowserSession,
   type DialpadBrowserSocket,
@@ -54,6 +55,10 @@ function fakeCapture(onStart: (sinks: BrowserCaptureSinks) => void): PreparedDia
 const format = (track: 'tab' | 'mic') => ({
   track, contextSampleRateHz: 48_000, inputChannels: 1, recordingMimeType: 'audio/webm;codecs=opus' as const,
   pcmSampleRateHz: 16_000 as const, pcmChannels: 1 as const, pcmEncoding: 's16le' as const,
+});
+
+const pcmFrame = (track: 'tab' | 'mic', frameIndex: number) => ({
+  track, epoch: 1, frameIndex, samples: new Int16Array(320), bytes: new Uint8Array(640),
 });
 
 function binarySent(socket: FakeSocket): Uint8Array[] {
@@ -134,6 +139,134 @@ describe('Dialpad browser session', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(session.state()).toBe('failed');
     expect(failures).toContain('timeout');
+  });
+
+  it('pipelines a dual-track prefix beyond 64 frames behind a global 32-frame PCM receipt window', async () => {
+    const socket = new FakeSocket();
+    const originalSend = socket.send.bind(socket);
+    const sentSequences: Record<'tab' | 'mic', number[]> = { tab: [], mic: [] };
+    const events: string[] = [];
+    const failures: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let captureDrain = Promise.resolve();
+    socket.send = (data) => {
+      originalSend(data);
+      if (data instanceof Uint8Array) {
+        const frame = decodeDialpadBrowserBinary(data);
+        if (frame.kind === 'pcm') {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          sentSequences[frame.track].push(frame.sequence);
+          setTimeout(() => {
+            events.push(`ack:pcm:${frame.track}:${frame.sequence}`);
+            inFlight -= 1;
+            socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: frame.track, seq: frame.sequence }));
+          }, 5);
+        } else {
+          setTimeout(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: frame.track, epoch: 1, seq: frame.sequence, status: 'recorded' })), 5);
+        }
+        return;
+      }
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; epoch?: number; track?: 'tab' | 'mic'; lastSeq?: number; endSample?: number };
+      events.push(`send:${message.type ?? 'unknown'}`);
+      if (message.type === 'recording_eof') {
+        setTimeout(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })), 5);
+      } else if (message.type === 'pcm_eof') {
+        setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })), 5);
+      }
+    };
+    const capture: PreparedDialpadCapture = {
+      proof: { handle: 'h', origin: 'https://app.example.test' },
+      start: async (maybeSinks) => {
+        if (!maybeSinks) throw new Error('fake capture requires network sinks');
+        const sinks = maybeSinks;
+        await sinks.onTrackFormat?.(format('tab'));
+        await sinks.onTrackFormat?.(format('mic'));
+        const inputs: Promise<void>[] = [];
+        for (let index = 0; index < 96; index += 1) {
+          inputs.push(Promise.resolve(sinks.onPcmFrame(pcmFrame('tab', index))));
+          inputs.push(Promise.resolve(sinks.onPcmFrame(pcmFrame('mic', index))));
+        }
+        inputs.push(Promise.resolve(sinks.onWebmChunk({ track: 'tab', epoch: 1, seq: 0, blob: new Blob([new Uint8Array([1])]), byteLength: 1 })));
+        inputs.push(Promise.resolve(sinks.onWebmChunk({ track: 'mic', epoch: 1, seq: 0, blob: new Blob([new Uint8Array([2])]), byteLength: 1 })));
+        captureDrain = Promise.all(inputs).then(async () => {
+          await sinks.onPcmTail?.({ track: 'tab', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 96 * 320, creditedSamples: 96 * 320, uncreditedTailSamples: 0 });
+          await sinks.onPcmTail?.({ track: 'mic', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 96 * 320, creditedSamples: 96 * 320, uncreditedTailSamples: 0 });
+        });
+        return { state: () => 'recording', stop: async () => captureDrain, dispose: async () => captureDrain };
+      },
+      dispose: async () => captureDrain,
+    };
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 500, capture, onFailure: (error) => failures.push(`${error.code}:${error.message}`) });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    await session.stop();
+    expect(failures).toEqual([]);
+    expect(maxInFlight).toBeLessThanOrEqual(32);
+    expect(sentSequences.tab).toEqual(Array.from({ length: 96 }, (_, index) => index));
+    expect(sentSequences.mic).toEqual(Array.from({ length: 96 }, (_, index) => index));
+    const lastPcmAck = Math.max(...events.map((event, index) => event.startsWith('ack:pcm:') ? index : -1));
+    const firstPcmEof = events.findIndex((event) => event === 'send:pcm_eof');
+    expect(lastPcmAck).toBeGreaterThanOrEqual(0);
+    expect(firstPcmEof).toBeGreaterThan(lastPcmAck);
+    expect(session.state()).toBe('stopped');
+  });
+
+  it('fails closed on an unknown PCM ACK and ignores a duplicate of an acknowledged frame', async () => {
+    const socket = new FakeSocket();
+    let frameSent!: Promise<void>;
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 100,
+      capture: fakeCapture((sinks) => { frameSent = Promise.resolve(sinks.onPcmFrame(pcmFrame('tab', 0))); }),
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: 'tab', seq: 0 }));
+    await frameSent;
+    socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: 'tab', seq: 0 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.state()).toBe('recording');
+    socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: 'mic', seq: 0 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.state()).toBe('failed');
+    await session.dispose();
+  });
+
+  it('times out a PCM receipt and settles the pending frame on abortive disposal', async () => {
+    const socket = new FakeSocket();
+    let frameSent!: Promise<void>;
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 15,
+      capture: fakeCapture((sinks) => { frameSent = Promise.resolve(sinks.onPcmFrame(pcmFrame('tab', 0))); }),
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await frameSent;
+    expect(session.state()).toBe('failed');
+
+    const secondSocket = new FakeSocket();
+    let secondFrame!: Promise<void>;
+    const second = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => secondSocket, ackTimeoutMs: 200,
+      capture: fakeCapture((sinks) => { secondFrame = Promise.resolve(sinks.onPcmFrame(pcmFrame('tab', 0))); }),
+    });
+    const secondStarted = second.start();
+    secondSocket.open();
+    serverHydrate(secondSocket);
+    await secondStarted;
+    const began = Date.now();
+    await second.dispose();
+    expect(Date.now() - began).toBeLessThan(100);
+    await secondFrame;
   });
 
   it('rejects a server epoch mismatch before capture starts', async () => {
