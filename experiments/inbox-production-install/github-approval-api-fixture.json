@@ -1,4 +1,5 @@
 {
+  "_note": "hand-authored synthetic fixture, not recorded from GitHub",
   "production_run": {
     "id": 7,
     "event": "workflow_run",
