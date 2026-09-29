@@ -24,7 +24,7 @@ from pathlib import Path
 import re
 p = Path('supabase/config.toml')
 s = p.read_text()
-for section in ('analytics', 'studio', 'local_smtp', 'realtime', 'storage', 'edge_runtime'):
+for section in ('analytics', 'studio', 'local_smtp', 'edge_runtime'):
     pattern = rf'(?m)^(\[{re.escape(section)}\]\n)(?:enabled\s*=\s*(?:true|false)\n)?'
     if re.search(pattern, s):
         s = re.sub(pattern, rf'\1enabled = false\n', s, count=1)
@@ -84,7 +84,8 @@ if [[ "$LOCAL" == 1 ]]; then
   CONTAINER="supabase_db_$PROJECT_ID"
   [[ "$(docker --host "$DOCKER_SOCKET" inspect --format '{{.State.Running}}' "$CONTAINER")" == true ]] || { echo 'Owned local DB container missing' >&2; exit 3; }
 else
-  mapfile -t DBS < <(docker --host "$DOCKER_SOCKET" ps --format '{{.Names}}' --filter 'name=^supabase_db_')
+  DBS=()
+  while IFS= read -r name; do DBS+=("$name"); done < <(docker --host "$DOCKER_SOCKET" ps --format '{{.Names}}' --filter 'name=^supabase_db_')
   [[ ${#DBS[@]} -eq 1 && ${DBS[0]} =~ ^supabase_db_[a-z0-9_-]+$ && ${DBS[0]} != *_sandra ]] || { echo 'Expected exactly one local non-Sandra supabase_db_<id> container' >&2; exit 3; }
   CONTAINER=${DBS[0]}
 fi
@@ -117,12 +118,10 @@ SQL
  done
 python3 "$ASSERT" indexes > "$WORK/indexes.txt"
 psql -X -At -v ON_ERROR_STOP=1 -f "$INSTALL/operator/precondition-check.sql" > "$WORK/index-preconditions.txt"
-python3 - "$WORK/index-preconditions.txt" <<'PY'
-import sys
-rows=[line.split('|') for line in open(sys.argv[1]) if line.strip()]
-if len(rows)!=8 or any(len(row)!=4 or row[1:]!=['t','8','t'] for row in rows):
-    raise SystemExit('Eight valid concurrent indexes not proven')
-PY
+python3 "$ASSERT" index-preconditions "$WORK/index-preconditions.txt"
+# Foundation adds this check NOT VALID to keep its ACCESS EXCLUSIVE window
+# short. The reviewed installer validates it after concurrent index work.
+psql -X -v ON_ERROR_STOP=1 -c 'ALTER TABLE public.messages VALIDATE CONSTRAINT messages_inbox_inbound_revision_nonnegative' > "$WORK/constraint-validation.txt"
 export INBOX_CATALOG_EVIDENCE_PATH="$WORK/installed-catalog.json"
 python3 "$INSTALL/verify.py" --installed > "$WORK/verify-installed.txt"
 python3 "$ASSERT" verify "$WORK/verify-installed.txt"
@@ -131,9 +130,21 @@ set +e
 docker --host "$DOCKER_SOCKET" exec -i "$CONTAINER" psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 -v VERBOSITY=verbose < supabase/migrations/20260929000000_inbox_control_foundation.sql > "$WORK/second-apply.stdout.txt" 2> "$WORK/second-apply.stderr.txt"
 second_status=$?
 set -e
-mapfile -t ledger < <(psql -X -At -v ON_ERROR_STOP=1 -c "SELECT version FROM supabase_migrations.schema_migrations WHERE version LIKE '2026092900%' ORDER BY version")
+ledger=()
+while IFS= read -r version; do ledger+=("$version"); done < <(psql -X -At -v ON_ERROR_STOP=1 -c "SELECT version FROM supabase_migrations.schema_migrations WHERE version LIKE '2026092900%' ORDER BY version")
 python3 "$ASSERT" second-apply "$second_status" "$WORK/second-apply.stderr.txt" "${ledger[@]}"
 export INBOX_MUTATION_EVIDENCE_PATH="$WORK/mutation-cases.json"
+# The reviewed fixture had this non-browser role. A fresh Supabase stack does
+# not, but mutation 17c needs it to prove an unexpected direct EXECUTE grant.
+psql -X -v ON_ERROR_STOP=1 <<'SQL' > "$WORK/mutation-role.txt"
+DO $body$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'inbox_projection_worker') THEN
+    CREATE ROLE inbox_projection_worker NOLOGIN;
+  END IF;
+END
+$body$;
+SQL
 INBOX_CATALOG_EVIDENCE_PATH="$WORK/harness-installed-catalog.json" python3 "$INSTALL/verify-mutation-harness.py" --owned-fixture > "$WORK/mutation-harness.txt"
 python3 "$ASSERT" mutations "$WORK/mutation-cases.json"
 python3 "$INSTALL/catalog_fingerprint.py" > "$WORK/catalog-post-harness.json"

@@ -57,9 +57,9 @@ const pre = JSON.parse(readFileSync(path.join(work, 'catalog-pre.json'), 'utf8')
 const post = JSON.parse(readFileSync(path.join(work, 'catalog-post.json'), 'utf8'));
 if (mutations.cases?.length !== 41 || !mutations.passed) throw new Error('Missing 41-case proof');
 const dryRunFiles = [
-  'indexes.txt', 'index-preconditions.txt', 'verify-installed.txt', 'installed-catalog.json',
+  'indexes.txt', 'index-preconditions.txt', 'constraint-validation.txt', 'verify-installed.txt', 'installed-catalog.json',
   'pre-migration-ledger.txt',
-  'second-apply.stdout.txt', 'second-apply.stderr.txt', 'mutation-harness.txt', 'mutation-cases.json',
+  'second-apply.stdout.txt', 'second-apply.stderr.txt', 'mutation-role.txt', 'mutation-harness.txt', 'mutation-cases.json',
   'catalog-post-harness.json',
   'production-install-unit.txt',
   'apply-20260929000000.txt', 'apply-20260929000100.txt', 'apply-20260929000200.txt',

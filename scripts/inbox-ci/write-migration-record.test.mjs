@@ -23,7 +23,7 @@ test('each W2 lane produces a pullable record and the W1 gate selects both keys'
     git(repo, 'init'); git(repo, 'add', '.'); git(repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'candidate');
     const sha = git(repo, 'rev-parse', 'HEAD');
     const work = path.join(root, 'scratch'); mkdirSync(work);
-    for (const name of ['indexes.txt', 'index-preconditions.txt', 'verify-installed.txt', 'pre-migration-ledger.txt', 'second-apply.stdout.txt', 'second-apply.stderr.txt', 'mutation-harness.txt', 'production-install-unit.txt', 'catalog-manifest-check.txt', 'catalog-live.txt', ...versions.map(v => `apply-${v}.txt`)]) writeFileSync(path.join(work, name), 'synthetic disposable evidence\n');
+    for (const name of ['indexes.txt', 'index-preconditions.txt', 'constraint-validation.txt', 'verify-installed.txt', 'pre-migration-ledger.txt', 'second-apply.stdout.txt', 'second-apply.stderr.txt', 'mutation-role.txt', 'mutation-harness.txt', 'production-install-unit.txt', 'catalog-manifest-check.txt', 'catalog-live.txt', ...versions.map(v => `apply-${v}.txt`)]) writeFileSync(path.join(work, name), 'synthetic disposable evidence\n');
     writeFileSync(path.join(work, 'installed-catalog.json'), '{}\n');
     writeFileSync(path.join(work, 'mutation-cases.json'), JSON.stringify({ passed: true, cases: Array(41).fill({ drift_caught: true, restored_pass: true }) }));
     for (const phase of ['pre', 'post']) writeFileSync(path.join(work, `catalog-${phase}.json`), JSON.stringify({ sha256: phase, section_sha256: { catalog: phase } }));

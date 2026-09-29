@@ -67,6 +67,12 @@ class MigrationAssertionsTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 a.index_statements(source)
 
+    def test_index_precondition_rows(self):
+        good = ''.join(f'index_{n}|t|8|t\n' for n in range(8))
+        a.assert_index_preconditions(good)
+        with self.assertRaisesRegex(ValueError, 'Eight valid concurrent indexes'):
+            a.assert_index_preconditions(good.replace('index_7|t|8|t', 'index_7|f|8|t'))
+
     def test_catalog_live_skip_fails(self):
         a.assert_catalog_live('Ran 5 tests in 0.100s\n\nOK\n')
         for output in ('Ran 5 tests in 0.100s\n\nOK (skipped=5)\n', 'Ran 4 tests in 0.100s\n\nOK\n', 'Ran 5 tests in 0.100s\n\nFAILED (failures=1)\n'):

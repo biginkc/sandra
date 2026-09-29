@@ -47,6 +47,12 @@ def index_statements(source):
     return statements
 
 
+def assert_index_preconditions(output):
+    rows = [line.strip().split('|') for line in output.splitlines() if line.strip()]
+    if len(rows) != 8 or any(len(row) != 4 or row[1:] != ['t', '8', 't'] for row in rows):
+        raise ValueError('Eight valid concurrent indexes not proven')
+
+
 def assert_second_apply(status, stderr, versions):
     if status != 3 or REFUSAL not in stderr:
         raise ValueError(f'Second foundation apply did not refuse with exit 3 and exact text (exit={status})')
@@ -97,6 +103,8 @@ if __name__ == '__main__':
             assert_second_apply(int(sys.argv[2]), Path(sys.argv[3]).read_text(), sys.argv[4:])
         elif command == 'verify':
             assert_verify(Path(sys.argv[2]).read_text())
+        elif command == 'index-preconditions':
+            assert_index_preconditions(Path(sys.argv[2]).read_text())
         elif command == 'mutations':
             assert_mutations(sys.argv[2])
         elif command == 'catalog-live':
