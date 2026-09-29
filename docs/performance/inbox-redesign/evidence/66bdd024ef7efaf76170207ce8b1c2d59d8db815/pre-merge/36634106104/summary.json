@@ -1,0 +1,10 @@
+{
+  "migration_versions": [
+    "20260930040000",
+    "20260930040100",
+    "20260930040200"
+  ],
+  "second_apply_refused": true,
+  "mutation_cases": 41,
+  "private_helper_exposure_count": 0
+}
