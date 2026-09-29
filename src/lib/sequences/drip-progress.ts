@@ -106,28 +106,42 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
       const at = lastRunAt.get(row.id)!;
       return at < min ? at : min;
     }, lastRunAt.get(batch[0].id)!);
-    for (let offset = 0; ; offset += 1000) {
-      const { data, error } = await client.from("messages").select("property_id, created_at")
-        .in("property_id", batch.map((row) => row.property_id)).eq("direction", "inbound")
-        .gt("created_at", earliest).range(offset, offset + 999);
-      assertQuery(error, "inbound replies");
-      for (const message of data ?? []) for (const row of batch) {
-        if (message.property_id === row.property_id && message.created_at > lastRunAt.get(row.id)!) repliedAfterLast.add(row.id);
-      }
-      if (!data || data.length < 1000) break;
+    // One newest inbound per property is enough to answer every enrollment in this chunk.
+    const { data, error } = await client.from("properties")
+      .select("id, inbound_messages:messages!messages_property_id_fkey(created_at)")
+      .in("id", batch.map((row) => row.property_id))
+      .eq("inbound_messages.direction", "inbound")
+      .gt("inbound_messages.created_at", earliest)
+      .order("created_at", { referencedTable: "inbound_messages", ascending: false })
+      .limit(1, { referencedTable: "inbound_messages" });
+    assertQuery(error, "inbound replies");
+    const latestInbound = new Map((data ?? []).map((property) => [property.id, property.inbound_messages[0]?.created_at]));
+    for (const row of batch) {
+      const at = latestInbound.get(row.property_id);
+      if (at && at > lastRunAt.get(row.id)!) repliedAfterLast.add(row.id);
     }
   }
   return chosen.map((row) => {
     const lastSent = runs.filter((run) => run.enrollment_id === row.id && run.message_id && run.run_at && messages.get(run.message_id)?.sent_at)
       .sort((a, b) => b.run_at!.localeCompare(a.run_at!))[0];
     const message = lastSent?.message_id ? messages.get(lastSent.message_id) : null;
-    const steps = (stepsBySequence.get(row.sequence_id) ?? []).sort((a, b) => a.step_index - b.step_index);
+    const steps = stepsBySequence.get(row.sequence_id) ?? [];
     const totalSteps = steps.length;
     // Match the inbox: current_step_index is the zero-based next step to run.
     const step = Math.min(totalSteps, Math.max(1, row.current_step_index + 1));
-    const nextText = steps.find((item) => item.step_index >= row.current_step_index && item.action_type === "send_sms");
-    const delay = nextText && row.next_run_at ? steps.filter((item) => item.step_index > row.current_step_index && item.step_index <= nextText.step_index)
-      .reduce((sum, item) => sum + item.delay_after_previous_minutes, 0) : 0;
+    const byIndex = new Map(steps.map((item) => [item.step_index, item]));
+    const missingCurrentStep = !byIndex.has(row.current_step_index);
+    let nextText: (typeof steps)[number] | undefined;
+    let delay = 0;
+    // The tick completes at the first missing index; it never jumps over a gap.
+    for (let index = row.current_step_index; byIndex.has(index); index++) {
+      const candidate = byIndex.get(index)!;
+      if (index > row.current_step_index) delay += candidate.delay_after_previous_minutes;
+      if (candidate.action_type === "send_sms") {
+        nextText = candidate;
+        break;
+      }
+    }
     return {
       propertyId: row.property_id,
       enrollmentId: row.id,
@@ -138,7 +152,9 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
       nextTextAt: row.status === "active" && nextText && row.next_run_at ? new Date(new Date(row.next_run_at).getTime() + delay * 60_000).toISOString() : null,
       lastText: message?.sent_at ? { sentAt: message.sent_at, preview: message.body.replace(/\s+/g, " ").trim().slice(0, 100) } : null,
       status: dripStatus(row.status, row.pause_reason, canceled.has(row.id), repliedAfterLast.has(row.id)),
-      reason: pauseReasonText(row.pause_reason),
+      reason: row.status === "active" && missingCurrentStep
+        ? "Drip will end — next step is missing."
+        : pauseReasonText(row.pause_reason),
     };
   });
 }

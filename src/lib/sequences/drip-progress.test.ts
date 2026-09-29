@@ -4,7 +4,7 @@ import { listDripProgress } from "./drip-progress";
 
 const rows = {
   sequence_enrollments: [
-    { id: "e1", property_id: "p1", sequence_id: "s1", status: "paused", pause_reason: "inbound_reply", current_step_index: 1, next_run_at: null, enrolled_at: "2026-09-01", completed_at: null },
+    { id: "e1", property_id: "p1", sequence_id: "s1", status: "paused", pause_reason: "inbound_reply", current_step_index: 1, next_run_at: null as string | null, enrolled_at: "2026-09-01", completed_at: null },
     { id: "e2", property_id: "p2", sequence_id: "s1", status: "completed", pause_reason: null, current_step_index: 2, next_run_at: null, enrolled_at: "2026-09-01", completed_at: "2026-09-03" },
     { id: "e3", property_id: "p3", sequence_id: "s1", status: "completed", pause_reason: null, current_step_index: 2, next_run_at: null, enrolled_at: "2026-09-01", completed_at: "2026-09-03" },
   ],
@@ -22,17 +22,41 @@ const rows = {
 function client(overrides: Partial<typeof rows> = {}) {
   const fixture = { ...rows, ...overrides };
   const calls: Array<{ table: string; ids: string[] }> = [];
-  return { calls, from: vi.fn((table: keyof typeof rows) => ({
+  const reads: Array<{ table: string; rows: number; inbound: boolean }> = [];
+  return { calls, reads, from: vi.fn((table: keyof typeof rows | "properties") => ({
     select: () => ({ in: (column: string, ids: string[]) => {
       calls.push({ table, ids });
       const key = table === "sequence_enrollments" || table === "lead_events" ? "property_id" : table === "sequences" ? "id" : table === "sequence_steps" ? "sequence_id" : table === "sequence_step_runs" ? "enrollment_id" : column;
-      let data: Array<Record<string, unknown>> = fixture[table].filter((row) => ids.includes(String(row[key as keyof typeof row])));
-      const result = () => ({ data, error: null });
-      const query = { then: (resolve: (value: ReturnType<typeof result>) => void) => Promise.resolve(result()).then(resolve),
-        order: () => query,
-        eq: (column: string, value: string) => { data = data.filter((row) => row[column] === value); return query; },
-        gt: (column: string, value: string) => { data = data.filter((row) => String(row[column]) > value); return query; },
-        range: (start: number, end: number) => Promise.resolve({ data: data.slice(start, end + 1), error: null }) };
+      let data: Array<Record<string, unknown>> = table === "properties"
+        ? ids.map((id) => ({ id, inbound_messages: fixture.messages.filter((message) => message.property_id === id) }))
+        : fixture[table].filter((row) => ids.includes(String(row[key as keyof typeof row])));
+      let inbound = false;
+      const finish = (result: Array<Record<string, unknown>>) => {
+        reads.push({ table, rows: table === "properties" ? result.reduce((count, row) => count + (row.inbound_messages as unknown[]).length, 0) : result.length, inbound });
+        return { data: result, error: null };
+      };
+      const query = { then: (resolve: (value: ReturnType<typeof finish>) => void) => Promise.resolve(finish(data)).then(resolve),
+        order: (field: string, options?: { ascending?: boolean; referencedTable?: string }) => {
+          if (options?.referencedTable === "inbound_messages") data = data.map((row) => ({ ...row, inbound_messages: [...row.inbound_messages as Array<Record<string, unknown>>].sort((a, b) => String(a[field]).localeCompare(String(b[field])) * (options.ascending === false ? -1 : 1)) }));
+          return query;
+        },
+        eq: (field: string, value: string) => {
+          if (field.startsWith("inbound_messages.")) data = data.map((row) => ({ ...row, inbound_messages: (row.inbound_messages as Array<Record<string, unknown>>).filter((message) => message[field.split(".")[1]] === value) }));
+          else data = data.filter((row) => row[field] === value);
+          if (field === "direction" || field === "inbound_messages.direction") inbound = true;
+          return query;
+        },
+        gt: (field: string, value: string) => {
+          if (field.startsWith("inbound_messages.")) data = data.map((row) => ({ ...row, inbound_messages: (row.inbound_messages as Array<Record<string, unknown>>).filter((message) => String(message[field.split(".")[1]]) > value) }));
+          else data = data.filter((row) => String(row[field]) > value);
+          return query;
+        },
+        limit: (count: number, options?: { referencedTable?: string }) => {
+          if (options?.referencedTable === "inbound_messages") data = data.map((row) => ({ ...row, inbound_messages: (row.inbound_messages as unknown[]).slice(0, count) }));
+          else data = data.slice(0, count);
+          return query;
+        },
+        range: (start: number, end: number) => Promise.resolve(finish(data.slice(start, end + 1))) };
       return query;
     } }),
   })) };
@@ -98,6 +122,14 @@ describe("listDripProgress", () => {
     expect(await listDripProgress(mixed as never, ["p1"]))
       .toMatchObject([{ step: 2, totalSteps: 3 }]);
   });
+  it("does not project a text across a deleted next step", async () => {
+    const stub = client({
+      sequence_enrollments: [{ ...rows.sequence_enrollments[0], status: "active", pause_reason: "inbound_reply", completed_at: null, next_run_at: "2026-09-02T12:00:00Z" }],
+      sequence_steps: [rows.sequence_steps[0], { ...rows.sequence_steps[1], id: "st3", step_index: 2 }],
+    });
+    expect(await listDripProgress(stub as never, ["p1"]))
+      .toMatchObject([{ nextTextAt: null, reason: expect.stringMatching(/drip will end.*missing/i) }]);
+  });
   it("links sent messages and cancellation to the right enrollment", async () => {
     const result = await listDripProgress(client() as never, ["p1", "p2"]);
     expect(result).toMatchObject([
@@ -108,6 +140,18 @@ describe("listDripProgress", () => {
   it("calls a completed drip Replied when an inbound arrives after its last send", async () => {
     expect(await listDripProgress(client() as never, ["p3"]))
       .toMatchObject([{ propertyId: "p3", status: "Replied", lastText: { preview: "Hello third lead" } }]);
+  });
+  it("uses one bounded reply lookup for thousands of later inbound messages", async () => {
+    const later = Array.from({ length: 3_001 }, (_, index) => ({
+      id: `reply-${index}`, property_id: "p3", direction: "inbound", body: "Reply",
+      created_at: new Date(Date.parse("2026-09-03T00:00:00Z") + index * 1000).toISOString(), sent_at: null,
+    }));
+    const stub = client({ messages: [...rows.messages, ...later] });
+    expect(await listDripProgress(stub as never, ["p3"]))
+      .toMatchObject([{ status: "Replied" }]);
+    const inboundReads = stub.reads.filter((read) => read.inbound);
+    expect(inboundReads).toHaveLength(1);
+    expect(inboundReads[0].rows).toBeLessThanOrEqual(1);
   });
   it("keeps every query batch at or below 100", async () => {
     const stub = client();
