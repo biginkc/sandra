@@ -205,22 +205,22 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (env.GITHUB_ACTIONS === 'true') {
     if (!env.RUNNER_TEMP) throw new Error('GitHub Outbox identity requires RUNNER_TEMP');
     env.E2E_QA_GUARD_STATE = path.join(env.RUNNER_TEMP, `sandra-e2e-browser-qa-${env.E2E_RUN_SLUG}.json`);
-    runIdentityLifecycle('preflight', env, repo);
   }
   let result;
+  const proxy = spawn(process.execPath, ['e2e/inbox-acceptance/fault-proxy.mjs'], { cwd: repo, env, stdio: 'ignore' });
+  let proxyError;
+  proxy.on('error', error => { proxyError = error; });
   try {
-    const proxy = spawn(process.execPath, ['e2e/inbox-acceptance/fault-proxy.mjs'], { cwd: repo, env, stdio: 'ignore' });
-    let proxyError;
-    proxy.on('error', error => { proxyError = error; });
+    await waitForProxy(proxy, token);
+    if (proxyError) throw proxyError;
+    if (env.GITHUB_ACTIONS === 'true') runIdentityLifecycle('preflight', env, repo);
     try {
-      await waitForProxy(proxy, token);
-      if (proxyError) throw proxyError;
       result = spawnSync('npx', ['playwright', 'test', '--config', 'playwright.outbox-regression.config.ts', '--reporter=json'], { cwd: repo, env, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
     } finally {
-      await stopProxy(proxy);
+      if (env.GITHUB_ACTIONS === 'true') runIdentityLifecycle('cleanup', env, repo);
     }
   } finally {
-    if (env.GITHUB_ACTIONS === 'true') runIdentityLifecycle('cleanup', env, repo);
+    await stopProxy(proxy);
   }
   if (result.error) throw result.error;
   writeFileSync(path.join(absoluteDir, 'results.json'), redactResultsJson(result.stdout || '', env, repo));
