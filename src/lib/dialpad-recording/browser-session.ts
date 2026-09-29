@@ -57,6 +57,8 @@ export type DialpadBrowserSessionOptions = {
   readonly socketFactory?: DialpadBrowserSocketFactory;
   readonly ackTimeoutMs?: number;
   readonly readyTimeoutMs?: number;
+  /** Separate deadline for draining an authenticated local prefix. */
+  readonly attachmentTimeoutMs?: number;
   readonly maxPendingRecordingChunks?: number;
   readonly maxPendingPackets?: number;
   readonly maxBufferedBytes?: number;
@@ -76,6 +78,7 @@ export type DialpadBrowserSession = {
 const OPEN = 1;
 const DEFAULT_ACK_TIMEOUT_MS = 2_000;
 const DEFAULT_READY_TIMEOUT_MS = 5_000;
+const DEFAULT_ATTACHMENT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_PENDING_CHUNKS = 8;
 const DEFAULT_MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 const MAX_PENDING_PCM_FRAMES = 32;
@@ -114,6 +117,7 @@ function boundedTail(tail: PcmTailReport): number | null {
 export function createDialpadBrowserSession(options: DialpadBrowserSessionOptions): DialpadBrowserSession {
   const ackTimeoutMs = options.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS;
   const readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+  const attachmentTimeoutMs = options.attachmentTimeoutMs ?? DEFAULT_ATTACHMENT_TIMEOUT_MS;
   const maxPendingChunks = options.maxPendingRecordingChunks ?? DEFAULT_MAX_PENDING_CHUNKS;
   const maxPendingPackets = options.maxPendingPackets ?? 64;
   const maxBufferedBytes = options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
@@ -123,7 +127,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   let endpoint: URL;
   try { endpoint = new URL(options.endpoint); } catch { throw new DialpadBrowserSessionError('protocol', 'Recording transport endpoint is invalid.'); }
   if (endpoint.protocol !== 'wss:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== '/dialpad-browser-ingest') throw new DialpadBrowserSessionError('protocol', 'Recording transport must use the trusted WSS endpoint.');
-  if (!options.token || !Number.isSafeInteger(ackTimeoutMs) || ackTimeoutMs < 1 || !Number.isSafeInteger(readyTimeoutMs) || readyTimeoutMs < 1 || !Number.isSafeInteger(maxPendingChunks) || maxPendingChunks < 1 || !Number.isSafeInteger(maxPendingPackets) || maxPendingPackets < 1 || !Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes < 1) {
+  if (!options.token || !Number.isSafeInteger(ackTimeoutMs) || ackTimeoutMs < 1 || !Number.isSafeInteger(readyTimeoutMs) || readyTimeoutMs < 1 || !Number.isSafeInteger(attachmentTimeoutMs) || attachmentTimeoutMs < 1 || !Number.isSafeInteger(maxPendingChunks) || maxPendingChunks < 1 || !Number.isSafeInteger(maxPendingPackets) || maxPendingPackets < 1 || !Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes < 1) {
     throw new DialpadBrowserSessionError('protocol', 'Invalid browser session limits.');
   }
 
@@ -142,6 +146,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   let queuedBytes = 0;
   let sendQueue = Promise.resolve();
   let captureStartPromise: Promise<void> | null = null;
+  let captureAttachmentInProgress = false;
   let cleanupPromise: Promise<void> | null = null;
   let lifecycleGeneration = 0;
   let mediaAdmissionOpen = true;
@@ -150,7 +155,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   const pendingChunkAcks = new Map<string, { readonly track: Track; readonly seq: number; readonly resolve: () => void; readonly reject: (error: Error) => void; readonly timer: ReturnType<typeof setTimeout> }>();
   const acknowledgedChunks = new Set<string>();
   const pendingPcmAcks = new Map<string, { readonly track: Track; readonly seq: number; readonly resolve: () => void; readonly reject: (error: Error) => void; readonly timer: ReturnType<typeof setTimeout> }>();
-  const acknowledgedPcmFrames = new Set<string>();
+  const pcmAckHistory = new Map<Track, { contiguous: number; readonly outOfOrder: Set<number> }>(TRACKS.map((track) => [track, { contiguous: -1, outOfOrder: new Set<number>() }]));
   const pcmCreditWaiters: { readonly resolve: () => void; readonly reject: (error: Error) => void }[] = [];
   let pcmCreditWakeups = 0;
   const recordingLastSeq = new Map<Track, number>();
@@ -189,6 +194,26 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       pcmCreditWakeups += 1;
       pcmCreditWaiters.shift()!.resolve();
     }
+  };
+
+  const isAcknowledgedPcmFrame = (track: Track, sequence: number): boolean => {
+    const history = pcmAckHistory.get(track)!;
+    return sequence <= history.contiguous || history.outOfOrder.has(sequence);
+  };
+
+  const recordPcmAcknowledgement = (track: Track, sequence: number): void => {
+    const history = pcmAckHistory.get(track)!;
+    if (sequence <= history.contiguous) return;
+    if (sequence === history.contiguous + 1) {
+      history.contiguous = sequence;
+      while (history.outOfOrder.delete(history.contiguous + 1)) history.contiguous += 1;
+      return;
+    }
+    if (history.outOfOrder.size >= MAX_PENDING_PCM_FRAMES) {
+      fail(new DialpadBrowserSessionError('protocol', 'PCM acknowledgement history exceeded its bounded reordering window.'));
+      return;
+    }
+    history.outOfOrder.add(sequence);
   };
 
   const settlePendingPcmAcks = (error: DialpadBrowserSessionError) => {
@@ -317,13 +342,14 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         const ackKey = key(message.track, message.seq);
         const pending = pendingPcmAcks.get(ackKey);
         if (!pending) {
-          if (acknowledgedPcmFrames.has(ackKey)) return;
+          if (isAcknowledgedPcmFrame(message.track, message.seq)) return;
           fail(new DialpadBrowserSessionError('protocol', 'Unexpected PCM frame acknowledgement.'));
           return;
         }
         clearTimeout(pending.timer);
         pendingPcmAcks.delete(ackKey);
-        acknowledgedPcmFrames.add(ackKey);
+        recordPcmAcknowledgement(message.track, message.seq);
+        if (failed) return;
         pending.resolve();
         drainPcmCreditWaiters();
       } else if (message.type === 'recording_eof_ack') {
@@ -380,7 +406,20 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         let startedCapture: ActiveDialpadCapture;
         if ('attach' in options.capture && options.capture.attach) {
           activeCapture = options.capture;
-          await options.capture.attach(sinks, options.epoch);
+          state = 'recording';
+          captureAttachmentInProgress = true;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              options.capture.attach(sinks, options.epoch),
+              new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new DialpadBrowserSessionError('timeout', 'Authenticated capture attachment exceeded its deadline.')), attachmentTimeoutMs);
+              }),
+            ]);
+          } finally {
+            captureAttachmentInProgress = false;
+            if (timer) clearTimeout(timer);
+          }
           startedCapture = options.capture;
         } else {
           startedCapture = await (options.capture as PreparedDialpadCapture).start(sinks, options.epoch);
@@ -401,16 +440,17 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
 
   async function sendPcmFrame(frame: PcmFrame): Promise<void> {
     if (failed || !mediaAdmissionOpen || (state !== 'recording' && state !== 'hydrating' && state !== 'stopping')) return;
-    if (frame.epoch !== options.epoch || !isTrack(frame.track) || frame.bytes.byteLength !== DIALPAD_BROWSER_PROTOCOL.pcmPayloadBytes) {
+    if (frame.epoch !== options.epoch || !isTrack(frame.track) || !Number.isSafeInteger(frame.frameIndex) || frame.frameIndex < 0 || frame.frameIndex > 0xffff_ffff || frame.bytes.byteLength !== DIALPAD_BROWSER_PROTOCOL.pcmPayloadBytes) {
       fail(new DialpadBrowserSessionError('protocol', 'PCM frame did not match the session contract.'));
       return;
     }
     const ackKey = key(frame.track, frame.frameIndex);
-    if (pendingPcmAcks.has(ackKey) || acknowledgedPcmFrames.has(ackKey)) return;
-    if (pendingPcmAcks.size >= MAX_PENDING_PCM_FRAMES) {
+    if (pendingPcmAcks.has(ackKey) || isAcknowledgedPcmFrame(frame.track, frame.frameIndex)) return;
+    while (pendingPcmAcks.size + pcmCreditWakeups >= MAX_PENDING_PCM_FRAMES) {
       await new Promise<void>((resolve, reject) => { pcmCreditWaiters.push({ resolve, reject }); });
       pcmCreditWakeups = Math.max(0, pcmCreditWakeups - 1);
       if (failed || disposed || !mediaAdmissionOpen) return;
+      if (pendingPcmAcks.has(ackKey) || isAcknowledgedPcmFrame(frame.track, frame.frameIndex)) return;
     }
     const end = frame.frameIndex * 320 + 320;
     pcmEndSamples.set(frame.track, Math.max(pcmEndSamples.get(frame.track) ?? 0, end));
@@ -438,13 +478,12 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       drainPcmCreditWaiters();
       throw error;
     }
-    if (acknowledgedPcmFrames.has(ackKey)) {
+    if (isAcknowledgedPcmFrame(frame.track, frame.frameIndex)) {
       clearTimeout(timer);
       pendingPcmAcks.delete(ackKey);
       resolveAck();
       drainPcmCreditWaiters();
     }
-    await ackPromise;
   }
 
   async function sendRecordingChunk(chunk: EncodedMediaChunk): Promise<void> {
@@ -556,11 +595,25 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         return;
       }
       state = 'stopping';
+      let abortedCaptureStart = false;
       try {
-        await captureStartPromise;
+        const pendingCaptureStart = captureStartPromise;
+        if (pendingCaptureStart && captureAttachmentInProgress) {
+          // A prefix attachment can be waiting on a server receipt. Release
+          // those waits before disposing the capture so an explicit stop
+          // cannot deadlock behind its own authenticated sink.
+          abortedCaptureStart = true;
+          mediaAdmissionOpen = false;
+          lifecycleGeneration += 1;
+          const interrupted = new DialpadBrowserSessionError('interrupted', 'Recording session stopped during capture attachment.');
+          settlePendingChunkAcks(interrupted);
+          settlePendingPcmAcks(interrupted);
+          await disposeCapture();
+          await pendingCaptureStart;
+        }
         await activeCapture?.stop();
         await sendQueue;
-        if (!failed && !disposed) await finishControls();
+        if (!failed && !disposed && !abortedCaptureStart) await finishControls();
         mediaAdmissionOpen = false;
         await disposeCapture();
         state = failed ? 'failed' : 'stopped';

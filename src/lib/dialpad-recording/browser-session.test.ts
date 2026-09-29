@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { BrowserCaptureSinks, EncodedMediaChunk, PreparedDialpadCapture } from './browser-capture';
+import { prepareDialpadBrowserCapture, type ActiveDialpadCapture, type BrowserCaptureRuntime, type BrowserCaptureSinks, type EncodedMediaChunk, type MediaRecorderLike, type PreparedDialpadCapture } from './browser-capture';
 import { decodeDialpadBrowserBinary } from './browser-protocol';
 import {
   createDialpadBrowserSession,
@@ -29,6 +29,68 @@ class FakeSocket implements DialpadBrowserSocket {
   message(data: string): void { this.emit('message', { data }); }
   error(reason = 'socket failed'): void { this.emit('error', { reason }); }
   private emit(type: string, event: DialpadBrowserSocketMessage & DialpadBrowserSocketEvent): void { for (const listener of this.listeners.get(type) ?? []) listener(event); }
+}
+
+class IntegrationTrack extends EventTarget {
+  readyState: MediaStreamTrackState = 'live';
+  constructor(readonly handle: string | null = 'h') { super(); }
+  getCaptureHandle = () => this.handle ? { handle: this.handle, origin: 'https://app.example.test' } : null;
+  stop = () => { this.readyState = 'ended'; this.dispatchEvent(new Event('ended')); };
+}
+
+class IntegrationStream {
+  constructor(private readonly tracks: readonly IntegrationTrack[], private readonly videoCount: number) {}
+  getTracks = () => [...this.tracks];
+  getAudioTracks = () => this.tracks.slice(this.videoCount);
+  getVideoTracks = () => this.tracks.slice(0, this.videoCount);
+}
+
+class IntegrationRecorder extends EventTarget implements MediaRecorderLike {
+  state = 'inactive';
+  start = () => { this.state = 'recording'; };
+  stop = () => { this.state = 'inactive'; this.dispatchEvent(new Event('stop')); };
+  emit = (blob: Blob) => { this.dispatchEvent(Object.assign(new Event('dataavailable'), { data: blob })); };
+}
+
+async function waitUntil(check: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for capture/session progress.');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function realLocalCapture(): Promise<{
+  readonly active: ActiveDialpadCapture;
+  readonly callbacks: { tab: ((frame: ReturnType<typeof pcmFrame>) => void | Promise<void>) | null; mic: ((frame: ReturnType<typeof pcmFrame>) => void | Promise<void>) | null };
+  readonly recorders: readonly IntegrationRecorder[];
+  readonly prepared: PreparedDialpadCapture;
+}> {
+  const callbacks: { tab: ((frame: ReturnType<typeof pcmFrame>) => void | Promise<void>) | null; mic: ((frame: ReturnType<typeof pcmFrame>) => void | Promise<void>) | null } = { tab: null, mic: null };
+  const recorders = [new IntegrationRecorder(), new IntegrationRecorder()];
+  let recorderIndex = 0;
+  const runtime: BrowserCaptureRuntime = {
+    getDisplayMedia: async () => new IntegrationStream([new IntegrationTrack(), new IntegrationTrack()], 1) as unknown as MediaStream,
+    getUserMedia: async () => new IntegrationStream([new IntegrationTrack()], 0) as unknown as MediaStream,
+    createMediaStream: (tracks) => new IntegrationStream(tracks as unknown as readonly IntegrationTrack[], 0) as unknown as MediaStream,
+    supportsMediaRecorder: () => true,
+    createRecorder: () => recorders[recorderIndex++]!,
+    createPcmSession: async (_stream, track, epoch, onFrame, onTail) => {
+      callbacks[track] = onFrame;
+      return {
+        sourceSampleRateHz: 48_000,
+        inputChannels: 1,
+        stop: async () => {
+          const tail = { track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 } as const;
+          await onTail(tail);
+          return tail;
+        },
+      };
+    },
+  };
+  const prepared = await prepareDialpadBrowserCapture({ proof: { handle: 'h', origin: 'https://app.example.test' }, runtime });
+  const active = await prepared.startLocal!(1);
+  return { active, callbacks, recorders, prepared };
 }
 
 function serverHydrate(socket: FakeSocket): void {
@@ -216,6 +278,133 @@ describe('Dialpad browser session', () => {
     expect(session.state()).toBe('stopped');
   });
 
+  it('attaches a serialized real capture prefix past the short hydration deadline while live PCM continues', async () => {
+    const { active, callbacks, recorders, prepared } = await realLocalCapture();
+    const frame = (track: 'tab' | 'mic', frameIndex: number) => pcmFrame(track, frameIndex);
+    for (let index = 0; index < 96; index += 1) {
+      await callbacks.tab?.(frame('tab', index));
+      await callbacks.mic?.(frame('mic', index));
+    }
+    recorders[0]!.emit(new Blob([new Uint8Array([1, 2, 3])]));
+    recorders[1]!.emit(new Blob([new Uint8Array([4, 5, 6])]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const socket = new FakeSocket();
+    const originalSend = socket.send.bind(socket);
+    const sentSequences: Record<'tab' | 'mic', number[]> = { tab: [], mic: [] };
+    const events: string[] = [];
+    let liveScheduled = false;
+    socket.send = (data) => {
+      originalSend(data);
+      if (data instanceof Uint8Array) {
+        const binary = decodeDialpadBrowserBinary(data);
+        if (binary.kind === 'pcm') {
+          sentSequences[binary.track].push(binary.sequence);
+          setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: binary.track, seq: binary.sequence })), 10);
+        } else {
+          setTimeout(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })), 10);
+          if (!liveScheduled) {
+            liveScheduled = true;
+            setTimeout(() => {
+              for (let index = 96; index < 112; index += 1) {
+                void callbacks.tab?.(frame('tab', index));
+                void callbacks.mic?.(frame('mic', index));
+              }
+            }, 0);
+          }
+        }
+        return;
+      }
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; epoch?: number; track?: 'tab' | 'mic'; lastSeq?: number; endSample?: number };
+      events.push(`send:${message.type ?? 'unknown'}`);
+      if (message.type === 'recording_eof') setTimeout(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })), 10);
+      if (message.type === 'pcm_eof') setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })), 10);
+    };
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket,
+      readyTimeoutMs: 20, attachmentTimeoutMs: 500, ackTimeoutMs: 500,
+      capture: active,
+    });
+    const startedAt = Date.now();
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    await waitUntil(() => sentSequences.tab.length >= 112 && sentSequences.mic.length >= 112, 2_000);
+    expect(sentSequences.tab).toEqual(Array.from({ length: 112 }, (_, index) => index));
+    expect(sentSequences.mic).toEqual(Array.from({ length: 112 }, (_, index) => index));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await session.stop();
+    expect(events).toContain('send:recording_eof');
+    expect(events).toContain('send:pcm_eof');
+    expect(session.state()).toBe('stopped');
+    await prepared.dispose();
+  });
+
+  it('reserves PCM credits across waiter wakeups instead of admitting a competing frame into the slot', async () => {
+    const socket = new FakeSocket();
+    let sinksRef: BrowserCaptureSinks | null = null;
+    const sent: number[] = [];
+    socket.send = (data) => {
+      socket.sent.push(data);
+      if (data instanceof Uint8Array) {
+        const binary = decodeDialpadBrowserBinary(data);
+        if (binary.kind === 'pcm') sent.push(binary.sequence);
+      }
+    };
+    const capture: PreparedDialpadCapture = {
+      proof: { handle: 'h', origin: 'https://app.example.test' },
+      start: async (sinks) => {
+        sinksRef = sinks!;
+        for (let index = 0; index < 34; index += 1) void sinks!.onPcmFrame(pcmFrame('tab', index));
+        return { state: () => 'recording', stop: async () => undefined, dispose: async () => undefined };
+      },
+      dispose: async () => undefined,
+    };
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, capture });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    await waitUntil(() => sent.length === 32);
+    socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: 'tab', seq: 0 }));
+    const competing = sinksRef!.onPcmFrame(pcmFrame('tab', 34));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toEqual([...Array.from({ length: 33 }, (_, index) => index)]);
+    socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: 'tab', seq: 1 }));
+    await waitUntil(() => sent.includes(33));
+    expect(sent.length).toBe(34);
+    await session.dispose();
+    await competing;
+  });
+
+  it('keeps PCM acknowledgement history bounded while accepting old duplicates after a long stream', async () => {
+    const socket = new FakeSocket();
+    const sent: number[] = [];
+    socket.send = (data) => {
+      socket.sent.push(data);
+      if (!(data instanceof Uint8Array)) return;
+      const binary = decodeDialpadBrowserBinary(data);
+      if (binary.kind !== 'pcm') return;
+      sent.push(binary.sequence);
+      socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: binary.track, seq: binary.sequence }));
+    };
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, capture: fakeCapture((sinks) => {
+      for (let index = 0; index < 2_048; index += 1) void sinks.onPcmFrame(pcmFrame('tab', index));
+    }) });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    await waitUntil(() => sent.length === 2_048, 2_000);
+    socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: 'tab', seq: 0 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.state()).toBe('recording');
+    await session.dispose();
+  });
+
   it('fails closed on an unknown PCM ACK and ignores a duplicate of an acknowledged frame', async () => {
     const socket = new FakeSocket();
     let frameSent!: Promise<void>;
@@ -382,5 +571,30 @@ describe('Dialpad browser session', () => {
     expect(Date.now() - began).toBeLessThan(100);
     await chunkDelivery;
     expect(session.state()).toBe('stopped');
+  });
+
+  it('fails and disposes cleanly when authenticated prefix attachment exceeds its separate deadline', async () => {
+    const socket = new FakeSocket();
+    let disposed = 0;
+    const capture: ActiveDialpadCapture = {
+      state: () => 'recording',
+      attach: async (sinks) => {
+        await sinks.onWebmChunk({ track: 'tab', epoch: 1, seq: 0, blob: new Blob([new Uint8Array([1])]), byteLength: 1 });
+      },
+      stop: async () => undefined,
+      dispose: async () => { disposed += 1; },
+    };
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket,
+      readyTimeoutMs: 10, attachmentTimeoutMs: 20, ackTimeoutMs: 200,
+      capture,
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    await waitUntil(() => session.state() === 'failed', 200);
+    await waitUntil(() => disposed === 1, 200);
+    expect(session.state()).toBe('failed');
   });
 });
