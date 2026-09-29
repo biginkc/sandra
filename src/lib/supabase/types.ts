@@ -5774,6 +5774,10 @@ export type Database = {
       }
     }
     Functions: {
+      sequence_step_stats: { Args: { p_org: string; p_sequence: string }; Returns: Array<{
+        step_id: string; sent: number; replied: number; waiting: number;
+      }> }
+      sequence_copy_steps: { Args: { p_target: string; p_source: string }; Returns: number }
       dialpad_recording_playback_file_id: { Args: { p_capture_id: string; p_track: string; p_epoch: number }; Returns: string }
       fn_dialpad_recording_library_sources: { Args: { p_actor: string; p_scope: string }; Returns: Json }
       fn_dialpad_recording_playback_file: { Args: { p_actor: string; p_scope: string; p_file_id: string }; Returns: Json }
