@@ -272,6 +272,36 @@ async function eventRow(eventId: string): Promise<Record<string, unknown>> {
   return (await pg.query("select * from public.dialpad_call_events where id=$1", [eventId])).rows[0];
 }
 
+async function rpc<T>(sql: string, params: unknown[]): Promise<T> {
+  try {
+    return (await service(() => pg.query<{ v: T }>(sql, params))).rows[0]!.v;
+  } catch (error) {
+    const e = error as PgError;
+    throw new DialpadDbError(classifyDialpadRpcError({ code: e.code, details: e.detail }), e.code ?? null);
+  }
+}
+
+function pgDb(overrides: Partial<DialpadCtiDb> = {}): DialpadCtiDb {
+  return {
+    async loadConnection(id) {
+      const r = await service(() =>
+        pg.query("select id, org_id, status, webhook_secret_ref, webhook_secret_version from public.dialpad_org_connections where id=$1", [id]),
+      );
+      const row = r.rows[0];
+      return row
+        ? { id: row.id, orgId: row.org_id, status: row.status, webhookSecretRef: row.webhook_secret_ref, webhookSecretVersion: row.webhook_secret_version }
+        : null;
+    },
+    ingest: (org, conn, version, text) => rpc("select public.fn_ingest_dialpad_call_event($1,$2,$3,$4) as v", [org, conn, version, text]),
+    process: (eventId) => rpc("select public.fn_process_dialpad_call_event($1) as v", [eventId]),
+    async recordProcessFailure(eventId, sqlstate) {
+      await rpc("select public.fn_record_dialpad_event_process_failure($1,$2)::text as v", [eventId, sqlstate]);
+    },
+    listPending: (limit) => rpc("select public.fn_list_dialpad_call_events_for_processing($1) as v", [limit]),
+    ...overrides,
+  };
+}
+
 describe("20260929120000 Dialpad CTI call projection migration", () => {
   beforeAll(async () => {
     pg = new Client({ connectionString: url() });
@@ -754,6 +784,132 @@ describe("20260929120000 Dialpad CTI call projection migration", () => {
     });
   });
 
+  describe("call longer than the intent TTL (hangup outside the prepare window)", () => {
+    // prepare() uses a 600 s TTL; this call starts inside it and lasts 20 minutes.
+    function longCall(custom: string, o: { callId?: string } = {}): { calling: CallEvent; connected: CallEvent; hangup: CallEvent } {
+      const start = NOW_MS + 1000;
+      const common = { callId: o.callId, custom, extra: { date_started: start } };
+      return {
+        calling: { ...common, state: "calling", at: start },
+        connected: { ...common, state: "connected", at: start + 4000, extra: { date_started: start, date_connected: start + 4000 } },
+        hangup: {
+          ...common,
+          state: "hangup",
+          at: start + 1_200_000,
+          extra: { date_started: start, date_connected: start + 4000, date_ended: start + 1_200_000, talk_time: 1_150_000, was_recorded: true },
+        },
+      };
+    }
+
+    async function expectFullyProjected(intentId: string): Promise<void> {
+      const { activities, attempts } = await ledger();
+      expect(activities).toHaveLength(1);
+      expect(attempts).toHaveLength(1);
+      expect(activities[0]).toMatchObject({
+        provider_call_id: ROOT_CALL,
+        operator_user_id: repA,
+        jitter_attempt_id: `dialpad-cti:${intentId}`,
+        talk_duration_seconds: 1150,
+        duration_seconds: 1200,
+        raw_event_count: 3,
+        outcome: "unknown",
+      });
+      expect(activities[0]!.ended_at).not.toBeNull();
+      expect(attempts[0]).toMatchObject({ source: "dialpad", outcome: null });
+      const states = await pg.query("select disposition, disposition_reason, projected_at is not null as projected from public.dialpad_call_events where provider_call_id=$1", [ROOT_CALL]);
+      expect(states.rows.every((r) => r.disposition === "matched" && r.disposition_reason === null && r.projected)).toBe(true);
+      expect(await kpis()).toMatchObject({ conversationsOverFiveMinutes: 0 });
+    }
+
+    it("in order: the hangup after the window is accepted because the same call is already bound", async () => {
+      const intent = await prepare();
+      const { calling, connected, hangup } = longCall(String(intent.customData));
+      for (const event of [calling, connected, hangup]) expect((await deliver(event)).disposition).toBe("matched");
+      await expectFullyProjected(String(intent.intentId));
+    });
+
+    it("hangup first: quarantined outside the window, then recovered by the in-window event with no redelivery", async () => {
+      const intent = await prepare();
+      const { calling, connected, hangup } = longCall(String(intent.customData));
+      const early = await deliver(hangup);
+      expect(early).toMatchObject({ disposition: "quarantined", reason: "outside_intent_window", projected: false });
+      expect((await ledger()).activities).toHaveLength(0);
+
+      const bound = await deliver(calling);
+      expect(bound).toMatchObject({ disposition: "matched", projected: true });
+      expect(await eventRow(early.eventId)).toMatchObject({ disposition: "matched", disposition_reason: null, matched_intent_id: intent.intentId });
+      expect((await ledger()).activities[0]!.ended_at).not.toBeNull();
+
+      await deliver(connected);
+      await expectFullyProjected(String(intent.intentId));
+    });
+
+    it("hangup, connected, calling: every order converges on the same projection", async () => {
+      const intent = await prepare();
+      const { calling, connected, hangup } = longCall(String(intent.customData));
+      await deliver(hangup);
+      await deliver(connected);
+      const partial = (await ledger()).activities[0]!;
+      expect(partial).toMatchObject({ talk_duration_seconds: 1150, duration_seconds: 1200, raw_event_count: 2 });
+      expect(partial.ended_at).not.toBeNull();
+      await deliver(calling);
+      await expectFullyProjected(String(intent.intentId));
+    });
+
+    it("stays strict: a lone late hangup with no in-window event is never attributed and never falls back to the phone number", async () => {
+      const intent = await prepare();
+      const { hangup } = longCall(String(intent.customData));
+      const lone = await deliver(hangup);
+      expect(lone).toMatchObject({ disposition: "quarantined", reason: "outside_intent_window" });
+      expect((await ledger()).activities).toHaveLength(0);
+      expect((await ledger()).attempts).toHaveLength(0);
+      const noToken = await deliver({ ...hangup, custom: null, at: hangup.at + 1000 });
+      expect(noToken).toMatchObject({ disposition: "quarantined", reason: "no_custom_data" });
+    });
+
+    it("stays strict: late events with the token on a different call, a wrong number or a wrong target are not recovered", async () => {
+      const intent = await prepare();
+      const { calling, connected, hangup } = longCall(String(intent.customData));
+      const otherCall = await deliver({ ...hangup, callId: LEG_CALL });
+      expect(otherCall).toMatchObject({ disposition: "quarantined", reason: "outside_intent_window" });
+      const wrongNumber = await deliver({ ...hangup, external: "+18165550199", at: hangup.at + 1 });
+      expect(wrongNumber).toMatchObject({ disposition: "quarantined", reason: "number_mismatch" });
+      const wrongTarget = await deliver({ ...hangup, target: { type: "user", id: DIALPAD_TRANSFEREE }, at: hangup.at + 2 });
+      expect(wrongTarget).toMatchObject({ disposition: "quarantined", reason: "target_mismatch" });
+
+      await deliver(calling);
+      await deliver(connected);
+      for (const rejected of [otherCall, wrongNumber, wrongTarget]) {
+        expect(await eventRow(rejected.eventId)).toMatchObject({ disposition: "quarantined", matched_intent_id: null });
+      }
+      const { activities } = await ledger();
+      expect(activities).toHaveLength(1);
+      expect(activities[0]).toMatchObject({ ended_at: null, talk_duration_seconds: null, raw_event_count: 2 });
+    });
+
+    it("does not extend the intent window: a late token-bearing event for a second, unbound intent call is still outside it", async () => {
+      const intent = await prepare();
+      const { calling } = longCall(String(intent.customData));
+      const expiresMs = Date.parse(String(intent.expiresAt));
+      const late = await deliver({ ...calling, at: expiresMs + 60_000 });
+      expect(late).toMatchObject({ disposition: "quarantined", reason: "outside_intent_window" });
+      expect((await ledger()).activities).toHaveLength(0);
+    });
+
+    it("recovers a stranded hangup when the binding event was matched but its projection was interrupted, via the sweep", async () => {
+      const intent = await prepare();
+      const { calling, hangup } = longCall(String(intent.customData));
+      const early = await deliver(hangup);
+      const ingested = await ingest(payload(calling));
+      // A1 matched the binding event but the run died before projection.
+      await service(() => pg.query("select public.fn_match_dialpad_call_event($1)", [ingested.eventId]));
+      expect(await eventRow(early.eventId)).toMatchObject({ disposition: "quarantined" });
+      expect(await sweepDialpadCallEvents(pgDb(), 50)).toMatchObject({ processed: 1, failed: 0 });
+      expect(await eventRow(early.eventId)).toMatchObject({ disposition: "matched" });
+      expect((await ledger()).activities[0]!.ended_at).not.toBeNull();
+    });
+  });
+
   describe("signed webhook receiver against the database", () => {
     const SECRET_A = "receiver-secret-org-a-0000000001";
     const SECRET_B = "receiver-secret-org-b-0000000002";
@@ -763,36 +919,6 @@ describe("20260929120000 Dialpad CTI call projection migration", () => {
     function sign(text: string, secret = SECRET_A, header: object = { alg: "HS256", typ: "JWT" }): string {
       const input = `${b64(JSON.stringify(header))}.${b64(text)}`;
       return `${input}.${createHmac("sha256", secret).update(input).digest("base64url")}`;
-    }
-
-    async function rpc<T>(sql: string, params: unknown[]): Promise<T> {
-      try {
-        return (await service(() => pg.query<{ v: T }>(sql, params))).rows[0]!.v;
-      } catch (error) {
-        const e = error as PgError;
-        throw new DialpadDbError(classifyDialpadRpcError({ code: e.code, details: e.detail }), e.code ?? null);
-      }
-    }
-
-    function pgDb(overrides: Partial<DialpadCtiDb> = {}): DialpadCtiDb {
-      return {
-        async loadConnection(id) {
-          const r = await service(() =>
-            pg.query("select id, org_id, status, webhook_secret_ref, webhook_secret_version from public.dialpad_org_connections where id=$1", [id]),
-          );
-          const row = r.rows[0];
-          return row
-            ? { id: row.id, orgId: row.org_id, status: row.status, webhookSecretRef: row.webhook_secret_ref, webhookSecretVersion: row.webhook_secret_version }
-            : null;
-        },
-        ingest: (org, conn, version, text) => rpc("select public.fn_ingest_dialpad_call_event($1,$2,$3,$4) as v", [org, conn, version, text]),
-        process: (eventId) => rpc("select public.fn_process_dialpad_call_event($1) as v", [eventId]),
-        async recordProcessFailure(eventId, sqlstate) {
-          await rpc("select public.fn_record_dialpad_event_process_failure($1,$2)::text as v", [eventId, sqlstate]);
-        },
-        listPending: (limit) => rpc("select public.fn_list_dialpad_call_events_for_processing($1) as v", [limit]),
-        ...overrides,
-      };
     }
 
     const post = (event: CallEvent, opts: { secret?: string; connection?: string; db?: DialpadCtiDb; header?: object } = {}) =>

@@ -385,11 +385,16 @@ begin
   v_intent_id := nullif(v_res ->> 'intentId', '')::uuid;
 
   if v_changed then
-    -- Earlier arrivals of this same call that could not match yet.
+    -- Earlier arrivals of this same call that could not match yet. An event that
+    -- was outside the intent window only because it arrived before the in-window
+    -- event that binds the call (a call longer than the TTL whose hangup came
+    -- first) is re-run through the full matcher: once the intent is bound to this
+    -- call id the window no longer applies, while token, target and number are
+    -- still checked. The window itself is never widened.
     for v_sib in
       select id from public.dialpad_call_events
         where org_id = v_event.org_id and id <> v_event.id and disposition = 'quarantined'
-          and disposition_reason in ('no_custom_data', 'intent_already_matched', 'target_mismatch')
+          and disposition_reason in ('no_custom_data', 'intent_already_matched', 'target_mismatch', 'outside_intent_window')
           and (provider_call_id = v_root or (payload ->> 'master_call_id') = v_root)
         order by event_timestamp_ms, id
     loop
