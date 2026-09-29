@@ -236,13 +236,14 @@ class RecordContractTests(unittest.TestCase):
             if (repo / 'docs').exists():
                 shutil.rmtree(repo / 'docs')
 
-            def produce(run_id, verdicts, workrepo=repo):
-                for n, verdict in enumerate(verdicts, 1):
-                    attempt = source / f'attempt-{n}'
-                    write_burst_attempt(attempt, verdict)
-                    if verdict == 'FAIL':
-                        (attempt / 'final-db.json').write_text(json.dumps({'inbound': 0, 'unknown': 0, 'total': 0}))
-                        subprocess.run(['python3', str(HERE / 'analyze.py'), str(attempt)], capture_output=True, check=False)
+            def produce(run_id, verdicts, workrepo=repo, prepare=True):
+                if prepare:
+                    for n, verdict in enumerate(verdicts, 1):
+                        attempt = source / f'attempt-{n}'
+                        write_burst_attempt(attempt, verdict)
+                        if verdict == 'FAIL':
+                            (attempt / 'final-db.json').write_text(json.dumps({'inbound': 0, 'unknown': 0, 'total': 0}))
+                            subprocess.run(['python3', str(HERE / 'analyze.py'), str(attempt)], capture_output=True, check=False)
                 local_env = {**env, 'GITHUB_RUN_ID': run_id}
                 verdict = 'PASS' if all(v == 'PASS' for v in verdicts) else 'FAIL'
                 relative = run('python3', 'experiments/inbox-production-install/perf/record.py', str(source), 'burst', verdict,
@@ -268,6 +269,63 @@ class RecordContractTests(unittest.TestCase):
             self.assertEqual(pull.returncode, 0, pull.stderr)
             self.assertEqual(manifest['attempts'], ['PASS'] * 3)
             self.assertEqual(gate.evaluate(repo, sha, 'pre-merge')['status'], 'PASS')
+
+            crash_repo = Path(temp) / 'crash'
+            run('git', 'worktree', 'add', '--detach', str(crash_repo), sha, cwd=repo)
+            (source / 'attempt-2' / 'fatal.json').write_text(json.dumps({'error': 'synthetic burst crash'}) + '\n')
+            forged_complete = subprocess.run(['python3', 'experiments/inbox-production-install/perf/record.py',
+                                              str(source), 'burst', 'PASS'], cwd=crash_repo,
+                                             env={**env, 'GITHUB_RUN_ID': '1004'}, text=True, capture_output=True)
+            self.assertNotEqual(forged_complete.returncode, 0, 'complete PASS with fatal.json sealed')
+            self.assertIn('PASS verdict conflicts with fatal.json', forged_complete.stderr)
+            print(f'NEGATIVE CONTROL forged complete PASS crash: {forged_complete.stderr.strip().splitlines()[-1]}')
+            (source / 'attempt-2' / 'fatal.json').unlink()
+            shutil.rmtree(crash_repo / 'docs')
+
+            crash_attempt = source / 'attempt-2'
+            shutil.rmtree(crash_attempt)
+            crash_attempt.mkdir()
+            (crash_attempt / 'fatal.json').write_text(json.dumps({'error': 'synthetic burst crash'}) + '\n')
+            forged = subprocess.run(['python3', 'experiments/inbox-production-install/perf/record.py',
+                                     str(source), 'burst', 'PASS'], cwd=crash_repo,
+                                    env={**env, 'GITHUB_RUN_ID': '1003'}, text=True, capture_output=True)
+            self.assertNotEqual(forged.returncode, 0, 'PASS aggregate over crash sealed')
+            print(f'NEGATIVE CONTROL forged aggregate PASS crash: {forged.stderr.strip().splitlines()[-1]}')
+            shutil.rmtree(crash_repo / 'docs')
+            (crash_attempt / 'verdict.txt').write_text('PASS\n')
+            forged_attempt = subprocess.run(['python3', 'experiments/inbox-production-install/perf/record.py',
+                                             str(source), 'burst', 'FAIL'], cwd=crash_repo,
+                                            env={**env, 'GITHUB_RUN_ID': '1003'}, text=True, capture_output=True)
+            self.assertNotEqual(forged_attempt.returncode, 0, 'PASS attempt over crash sealed')
+            print(f'NEGATIVE CONTROL forged attempt PASS crash: {forged_attempt.stderr.strip().splitlines()[-1]}')
+            shutil.rmtree(crash_repo / 'docs')
+            (crash_attempt / 'verdict.txt').unlink()
+            crashed, pulled, crash_path = produce('1003', ['PASS', 'FAIL', 'PASS'], crash_repo, prepare=False)
+            self.assertEqual(pulled.returncode, 0, pulled.stderr)
+            self.assertEqual(crashed['attempts'], ['PASS', 'FAIL', 'PASS'])
+            self.assertEqual(crashed['verdict'], 'FAIL')
+            self.assertEqual(crashed['missing_artifacts']['attempt-2'], sorted(
+                ('runner-hardware.txt', 'verdict.txt', 'burst-summary.json', 'before.json',
+                 'pg-server.log', 'pg-stat-statements.json', 'client-latencies.csv',
+                 'backlog.csv', 'writer-distribution.json', 'final-db.json',
+                 'lock-config-observed.txt', 'analysis.json')))
+            self.assertIn('attempt-2/fatal.json', crashed['artifacts'])
+            shutil.copytree(crash_repo / crash_path, repo / crash_path)
+            run('git', 'add', 'docs', cwd=repo)
+            run('git', 'commit', '-qm', 'seal crashed attempt', cwd=repo)
+            with self.assertRaisesRegex(gate.EvidenceError, 'latest required check failed') as crash_rejection:
+                gate.evaluate(repo, sha, 'pre-merge')
+            print(f'NEGATIVE CONTROL crashed attempt: {crash_rejection.exception}')
+
+            (crash_attempt / 'fatal.json').unlink()
+            (crash_attempt / 'verdict.txt').write_text('FAIL\n')
+            partial_repo = Path(temp) / 'partial-fail'
+            run('git', 'worktree', 'add', '--detach', str(partial_repo), sha, cwd=repo)
+            partial, partial_pull, _ = produce('1005', ['PASS', 'FAIL', 'PASS'], partial_repo, prepare=False)
+            self.assertEqual(partial_pull.returncode, 0, partial_pull.stderr)
+            self.assertEqual(partial['attempts'], ['PASS', 'FAIL', 'PASS'])
+            self.assertEqual(partial['missing_artifacts']['attempt-2'], sorted(
+                name for name in crashed['missing_artifacts']['attempt-2'] if name != 'verdict.txt'))
 
             failure_repo = Path(temp) / 'failure'
             run('git', 'worktree', 'add', '--detach', str(failure_repo), sha, cwd=repo)

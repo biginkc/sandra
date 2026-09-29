@@ -65,6 +65,7 @@ if size > 40 * 1024 * 1024:
     raise RuntimeError(f'Perf run exceeds 40 MiB ({size} bytes)')
 now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 attempts = []
+missing_artifacts = {}
 if lane == 'burst':
     from analyze import analyze
     required = ('runner-hardware.txt', 'verdict.txt', 'burst-summary.json', 'before.json',
@@ -73,17 +74,24 @@ if lane == 'burst':
                 'lock-config-observed.txt', 'analysis.json')
     for n in range(1, 4):
         attempt = source / f'attempt-{n}'
-        for name in required:
-            if not (attempt / name).is_file():
-                raise RuntimeError(f'Burst attempt {n} missing {name}')
-        claimed = (attempt / 'verdict.txt').read_text().strip()
-        if claimed not in ('PASS', 'FAIL'):
+        missing = [name for name in required if not (attempt / name).is_file()]
+        fatal = (attempt / 'fatal.json').is_file()
+        claimed = (attempt / 'verdict.txt').read_text().strip() if (attempt / 'verdict.txt').is_file() else None
+        if claimed not in ('PASS', 'FAIL') and not (fatal and claimed is None):
             raise RuntimeError(f'Burst attempt {n} verdict missing or invalid')
-        recomputed = analyze(attempt)
-        recorded = json.loads((attempt / 'analysis.json').read_text())
-        if recorded != recomputed or claimed != recomputed['verdict']:
-            raise RuntimeError(f'Burst attempt {n} analysis/verdict mismatch')
-        attempts.append(claimed)
+        if claimed == 'PASS':
+            if missing:
+                raise RuntimeError(f'Burst attempt {n} missing {missing[0]}')
+            if fatal:
+                raise RuntimeError(f'Burst attempt {n} PASS verdict conflicts with fatal.json')
+        if missing:
+            missing_artifacts[f'attempt-{n}'] = sorted(missing)
+        if not missing and not fatal:
+            recomputed = analyze(attempt)
+            recorded = json.loads((attempt / 'analysis.json').read_text())
+            if recorded != recomputed or claimed != recomputed['verdict']:
+                raise RuntimeError(f'Burst attempt {n} analysis/verdict mismatch')
+        attempts.append('FAIL' if fatal else claimed)
     if (verdict == 'PASS') != all(value == 'PASS' for value in attempts):
         raise RuntimeError('Burst aggregate verdict disagrees with attempts')
 else:
@@ -111,6 +119,7 @@ manifest = {
 }
 if lane == 'burst':
     manifest['attempts'] = attempts
+    manifest['missing_artifacts'] = missing_artifacts
 (dest / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 other = subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=all'], cwd=repo, text=True).splitlines()
 if any(not line[3:].startswith(str(relative) + '/') for line in other):
