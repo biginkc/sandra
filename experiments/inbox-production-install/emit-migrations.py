@@ -147,13 +147,13 @@ GUARD_HTTP = (
 BATCH_A = [
     dict(
         source=INSTALL_GENERATED / "install-candidate.sql",
-        output="20260929000000_inbox_control_foundation.sql",
+        output="20260930000000_inbox_control_foundation.sql",
         guard=None,
         count=0,
     ),
     dict(
         source=INSTALL_GENERATED / "read-companion.sql",
-        output="20260929000100_inbox_read_companion.sql",
+        output="20260930000100_inbox_read_companion.sql",
         guard=None,
         count=0,
     ),
@@ -162,7 +162,7 @@ BATCH_A = [
 BATCH_B = [
     dict(
         source=RELEASE_GENERATED / "backend-operation-reply.sql",
-        output="20260929000200_inbox_backend_operation_reply.sql",
+        output="20260930000200_inbox_backend_operation_reply.sql",
         guard=GUARD_HTTP,
         count=10,
     ),
@@ -182,12 +182,6 @@ DROPPED_BY_R1_AMENDMENT = [
     "20260919120500_inbox_read_upgrade_sync_authority.sql",
     "20260919120600_inbox_read_upgrade_unknown.sql",
     "20260919120700_inbox_read_upgrade_workset_updates.sql",
-]
-
-PREVIOUS_OUTPUTS = [
-    "20260919120000_inbox_control_foundation.sql",
-    "20260919120100_inbox_read_companion.sql",
-    "20260919120200_inbox_backend_operation_reply.sql",
 ]
 
 # Statements that must never appear in emitted migrations. Note: we check
@@ -343,17 +337,24 @@ def owned_filenames() -> list[str]:
     return [spec["output"] for spec in FILE_SPECS]
 
 
+def stale_owned_paths() -> list[Path]:
+    owned = set(owned_filenames())
+    suffixes = tuple(name.split("_", 1)[1] for name in owned)
+    candidates = set(MIGRATIONS_DIR.glob("2026091912*.sql"))
+    candidates.update(MIGRATIONS_DIR.glob("2026093000*.sql"))
+    candidates.update(p for p in MIGRATIONS_DIR.glob("*.sql") if p.name.endswith(suffixes))
+    return sorted(p for p in candidates if p.name not in owned)
+
+
 def write_mode() -> int:
     emitted = compute_emitted()
     MIGRATIONS_DIR.mkdir(parents=True, exist_ok=True)
     for name, text in emitted.items():
         (MIGRATIONS_DIR / name).write_text(text)
         print(f"wrote {MIGRATIONS_DIR / name}")
-    for name in PREVIOUS_OUTPUTS:
-        old = MIGRATIONS_DIR / name
-        if old.exists():
-            old.unlink()
-            print(f"removed superseded {old}")
+    for old in stale_owned_paths():
+        old.unlink()
+        print(f"removed superseded {old}")
     print(f"emitted {len(emitted)} migration file(s)")
     return 0
 
@@ -379,11 +380,9 @@ def check_mode() -> int:
 
     # Also flag any owned filename present on disk that we didn't just
     # generate (stale output from a previous, now-different spec set).
-    owned = set(owned_filenames())
     if MIGRATIONS_DIR.is_dir():
-        for path in list(MIGRATIONS_DIR.glob("2026091912*.sql")) + list(MIGRATIONS_DIR.glob("2026092900*.sql")):
-            if path.name not in owned:
-                problems.append(f"STALE (no longer emitted by this script): {path.name}")
+        for path in stale_owned_paths():
+            problems.append(f"STALE (no longer emitted by this script): {path.name}")
 
     if problems:
         print("emit-migrations.py --check FAILED:", file=sys.stderr)
