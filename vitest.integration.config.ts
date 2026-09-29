@@ -30,6 +30,8 @@ export default defineConfig({
     // suite cannot accidentally select it.
     exclude: [
       "supabase/migrations/20260927023443_dialpad_cti_kpi_seller_speech.integration.test.ts",
+      "supabase/migrations/20260929034021_dialpad_cti_foundation.integration.test.ts",
+      "supabase/migrations/20260929120000_dialpad_cti_call_projection.integration.test.ts",
     ],
     environment: "node",
     reporters: ["default"],

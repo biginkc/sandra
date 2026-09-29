@@ -433,6 +433,7 @@ describe("listThreads (integration)", () => {
       unassigned: 1,
       escalated: 1,
       dispo: 1,
+      drip_replied: 0,
     };
     const exactScaleRows = {
       mine: {

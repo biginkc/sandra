@@ -1,5 +1,15 @@
 /** The shared operator wording for a sequence enrollment. */
-export type DripStatus = "Waiting" | "Replied" | "Couldn't send" | "Stopped" | "Finished, no reply";
+export type DripBucket = "waiting" | "replied" | "finished_no_reply" | "couldnt_send" | "stopped";
+
+export const DRIP_BUCKET_LABELS = {
+  waiting: "Waiting",
+  replied: "Replied",
+  finished_no_reply: "Finished, no reply",
+  couldnt_send: "Couldn't send",
+  stopped: "Stopped",
+} as const satisfies Record<DripBucket, string>;
+
+export type DripStatus = (typeof DRIP_BUCKET_LABELS)[DripBucket];
 
 const REASONS: Record<string, string> = {
   inbound_reply: "Lead replied to a drip text.",
@@ -27,10 +37,26 @@ export function pauseReasonText(reason: string | null): string | null {
 }
 
 export function dripStatus(status: string, pauseReason: string | null, canceled: boolean, repliedAfterLast = false): DripStatus {
-  if (status === "active") return "Waiting";
-  if (status === "opted_out" || (status === "completed" && canceled)) return "Stopped";
-  if (status === "completed") return repliedAfterLast ? "Replied" : "Finished, no reply";
-  if (pauseReason === "inbound_reply" || pauseReason === "rep_sms_human_takeover") return "Replied";
-  if (pauseReason === "provider_failed" || pauseReason === "reconciliation_required" || pauseReason === "template_missing" || pauseReason === "step_misconfigured" || pauseReason === "no_phone" || pauseReason === "no approved sender for first-touch sequence send") return "Couldn't send";
-  return "Stopped";
+  if (status === "active") return DRIP_BUCKET_LABELS.waiting;
+  if (status === "opted_out" || (status === "completed" && canceled)) return DRIP_BUCKET_LABELS.stopped;
+  if (status === "completed") return repliedAfterLast ? DRIP_BUCKET_LABELS.replied : DRIP_BUCKET_LABELS.finished_no_reply;
+  if (pauseReason === "inbound_reply" || pauseReason === "rep_sms_human_takeover") return DRIP_BUCKET_LABELS.replied;
+  if (pauseReason === "provider_failed" || pauseReason === "reconciliation_required" || pauseReason === "template_missing" || pauseReason === "step_misconfigured" || pauseReason === "no_phone" || pauseReason === "no approved sender for first-touch sequence send") return DRIP_BUCKET_LABELS.couldnt_send;
+  return DRIP_BUCKET_LABELS.stopped;
+}
+
+export function dripBucket(input: {
+  status: string;
+  pause_reason?: string | null;
+  canceled?: boolean;
+  inboundAfterLastRun?: boolean;
+}): DripBucket | null {
+  if (input.status === "active") return "waiting";
+  if (input.status === "paused") {
+    if (["inbound_reply", "rep_sms_human_takeover"].includes(input.pause_reason ?? "")) return "replied";
+    if (["provider_failed", "reconciliation_required"].includes(input.pause_reason ?? "")) return "couldnt_send";
+  }
+  if (input.status === "opted_out" || (input.status === "completed" && input.canceled)) return "stopped";
+  if (input.status === "completed" && !input.inboundAfterLastRun) return "finished_no_reply";
+  return null;
 }

@@ -64,7 +64,49 @@ export async function findAttributedOutboundMessageId(
     throw new Error(`findAttributedOutboundMessageId: ${error.message}`);
   }
 
-  const newestOutbound = [...(data ?? [])].sort(compareOutboundRecency)[0];
+  // The run table is the authoritative link for drip SMS: ordinary manual
+  // messages have no campaign_id and must not become attribution candidates.
+  const { data: enrollments, error: enrollmentError } = await supabase
+    .from("sequence_enrollments")
+    .select("id")
+    .in("property_id", candidatePropertyIds);
+  if (enrollmentError) {
+    throw new Error(`findAttributedOutboundMessageId: ${enrollmentError.message}`);
+  }
+
+  let dripOutbounds: AttributableOutboundMessage[] = [];
+  const enrollmentIds = (enrollments ?? []).map((row) => row.id);
+  if (enrollmentIds.length > 0) {
+    const { data: runs, error: runsError } = await supabase
+      .from("sequence_step_runs")
+      .select("message_id")
+      .in("enrollment_id", enrollmentIds)
+      .not("message_id", "is", null);
+    if (runsError) {
+      throw new Error(`findAttributedOutboundMessageId: ${runsError.message}`);
+    }
+    const messageIds = Array.from(new Set((runs ?? [])
+      .map((run) => run.message_id)
+      .filter((id): id is string => id !== null)));
+    if (messageIds.length > 0) {
+      const { data: dripMessages, error: dripError } = await supabase
+        .from("messages")
+        .select("id, sent_at, created_at")
+        .in("id", messageIds)
+        .eq("channel", "sms")
+        .eq("direction", "outbound")
+        .eq("contact_id", input.contactId)
+        .in("property_id", candidatePropertyIds)
+        .in("status", ["sent", "delivered"]);
+      if (dripError) {
+        throw new Error(`findAttributedOutboundMessageId: ${dripError.message}`);
+      }
+      dripOutbounds = dripMessages ?? [];
+    }
+  }
+
+  const newestOutbound = [...(data ?? []), ...dripOutbounds]
+    .sort(compareOutboundRecency)[0];
 
   return newestOutbound?.id ?? null;
 }

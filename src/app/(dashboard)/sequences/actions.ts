@@ -12,6 +12,7 @@ import {
   retrySequenceStep,
 } from "@/lib/sequences/enrollment";
 import { getSequenceImpact } from "@/lib/sequences/impact";
+import { DRIP_BUCKET_LABELS } from "@/lib/sequences/drip-status";
 import { enrollmentReason, previewFirstSend, startFollowUpDrip, type DripResult } from "@/lib/sequences/start-drip";
 
 import { requireSequenceAdmin } from "./admin";
@@ -26,6 +27,12 @@ export type SequenceRow = {
   step_count: number;
   active_enrollment_count: number;
   created_at: string;
+  waiting?: number;
+  replied?: number;
+  finished_no_reply?: number;
+  couldnt_send?: number;
+  stopped?: number;
+  last_sent?: string | null;
 };
 
 export type SequenceWithSteps = {
@@ -46,6 +53,45 @@ export type SequenceWithSteps = {
   }>;
 };
 
+export type NeedsPersonRow = {
+  property_id: string;
+  sequence_id: string | null;
+  bucket: "finished_no_reply" | "couldnt_send" | "needs_sequence";
+  reason: string;
+};
+
+async function activeOrgId(supabase: Awaited<ReturnType<typeof createClient>>, userId: string) {
+  const { data, error } = await supabase.from("memberships").select("org_id")
+    .eq("user_id", userId).eq("access_status", "active")
+    .is("deletion_prepared_at", null).limit(1).maybeSingle();
+  if (error) throw error;
+  return data?.org_id ?? null;
+}
+
+export async function listSequenceNeedsPerson(): Promise<Result<NeedsPersonRow[]>> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+    const orgId = await activeOrgId(supabase, user.id);
+    if (!orgId) return ok([]);
+    const { data, error } = await supabase.rpc("sequence_needs_person", { p_org: orgId });
+    if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Sequence stats are being prepared." : error.message } };
+    return ok((data ?? []).filter((row) =>
+      !process.env.SEQUENCE_CANARY_USER_ID || row.sequence_created_by !== process.env.SEQUENCE_CANARY_USER_ID)
+      .map((row) => ({
+        property_id: row.property_id,
+        sequence_id: row.sequence_id,
+        bucket: row.bucket as NeedsPersonRow["bucket"],
+        reason: row.bucket === "needs_sequence" ? "Needs a sequence" :
+          DRIP_BUCKET_LABELS[row.bucket as "finished_no_reply" | "couldnt_send"],
+      })));
+  } catch (error) {
+    reportError(error, { tags: { surface: "sequence_needs_person" } });
+    return errFromUnknown(error, "SEQ_STATS_FAILED");
+  }
+}
+
 export type DripChoice = { id: string; name: string; textCount: number; days: number; firstSend: string | null };
 
 export async function listDripChoices(): Promise<Result<DripChoice[]>> {
@@ -54,14 +100,16 @@ export async function listDripChoices(): Promise<Result<DripChoice[]>> {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
     const { data: sequences, error } = await supabase.from("sequences")
-      .select("id, name").eq("active", true).is("archived_at", null).order("name");
+      .select("id, name, created_by").eq("active", true).is("archived_at", null).order("name");
     if (error) return { ok: false, error: { code: "SEQ_LIST_FAILED", message: error.message } };
-    if (!sequences?.length) return ok([]);
+    const visibleSequences = (sequences ?? []).filter((sequence) =>
+      !process.env.SEQUENCE_CANARY_USER_ID || sequence.created_by !== process.env.SEQUENCE_CANARY_USER_ID);
+    if (!visibleSequences.length) return ok([]);
     const { data: steps, error: stepError } = await supabase.from("sequence_steps")
       .select("sequence_id, step_index, delay_after_previous_minutes, action_type")
-      .in("sequence_id", sequences.map((sequence) => sequence.id)).order("step_index");
+      .in("sequence_id", visibleSequences.map((sequence) => sequence.id)).order("step_index");
     if (stepError) return { ok: false, error: { code: "SEQ_LIST_FAILED", message: stepError.message } };
-    return ok(sequences.flatMap((sequence) => {
+    return ok(visibleSequences.flatMap((sequence) => {
       const own = (steps ?? []).filter((step) => step.sequence_id === sequence.id);
       if (!own.length || own[0].step_index !== 0) return [];
       const firstSmsIndex = own.findIndex((step) => step.action_type === "send_sms");
@@ -102,11 +150,31 @@ export async function startDripForLeads(sequenceId: string, propertyIds: string[
 export async function listSequences(): Promise<Result<SequenceRow[]>> {
   try {
     const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+    const orgId = await activeOrgId(supabase, user.id);
+    if (!orgId) return ok([]);
+    const stats = await supabase.rpc("sequence_overview_stats", { p_org: orgId });
+    if (!stats.error) return ok((stats.data ?? []).filter((row) =>
+      !process.env.SEQUENCE_CANARY_USER_ID || row.created_by !== process.env.SEQUENCE_CANARY_USER_ID)
+      .map((row) => ({
+        id: row.id, name: row.name, description: row.description,
+        active: row.active, append_opt_out: row.append_opt_out,
+        archived_at: row.archived_at, created_at: row.created_at,
+        step_count: row.step_count, active_enrollment_count: row.active_enrollment_count,
+        waiting: row.waiting, replied: row.replied,
+        finished_no_reply: row.finished_no_reply,
+        couldnt_send: row.couldnt_send, stopped: row.stopped,
+        last_sent: row.last_sent,
+      })));
+    // Deploys can precede the migration; keep the current page available.
+    if (stats.error.code !== "PGRST202" && stats.error.code !== "42883") {
+      return { ok: false, error: { code: "SEQ_LIST_FAILED", message: stats.error.message } };
+    }
     const { data, error } = await supabase
       .from("sequences")
-      .select(
-        "id, name, description, active, append_opt_out, archived_at, created_at",
-      )
+      .select("id, name, description, active, append_opt_out, archived_at, created_at, created_by")
+      .eq("org_id", orgId)
       .order("created_at", { ascending: false });
     if (error) {
       return {
@@ -114,11 +182,13 @@ export async function listSequences(): Promise<Result<SequenceRow[]>> {
         error: { code: "SEQ_LIST_FAILED", message: error.message },
       };
     }
-    if (!data || data.length === 0) return ok([]);
+    const visible = (data ?? []).filter((row) =>
+      !process.env.SEQUENCE_CANARY_USER_ID || row.created_by !== process.env.SEQUENCE_CANARY_USER_ID);
+    if (!visible.length) return ok([]);
 
     // Batch fetch step + enrollment counts so the index doesn't N+1.
-    const seqIds = data.map((s) => s.id);
-    const [{ data: stepCounts }, { data: enrCounts }] = await Promise.all([
+    const seqIds = visible.map((s) => s.id);
+    const [stepResult, enrollmentResult] = await Promise.all([
       supabase
         .from("sequence_steps")
         .select("sequence_id")
@@ -130,18 +200,23 @@ export async function listSequences(): Promise<Result<SequenceRow[]>> {
         .in("status", ["active", "paused"]),
     ]);
 
+    if (stepResult.error || enrollmentResult.error) return {
+      ok: false,
+      error: { code: "SEQ_LIST_FAILED", message: (stepResult.error ?? enrollmentResult.error)!.message },
+    };
     const stepTally = new Map<string, number>();
-    for (const r of stepCounts ?? []) {
+    for (const r of stepResult.data ?? []) {
       stepTally.set(r.sequence_id, (stepTally.get(r.sequence_id) ?? 0) + 1);
     }
     const enrTally = new Map<string, number>();
-    for (const r of enrCounts ?? []) {
+    for (const r of enrollmentResult.data ?? []) {
       enrTally.set(r.sequence_id, (enrTally.get(r.sequence_id) ?? 0) + 1);
     }
 
     return ok(
-      data.map((s) => ({
-        ...s,
+      visible.map((s) => ({
+        id: s.id, name: s.name, description: s.description, active: s.active,
+        append_opt_out: s.append_opt_out, archived_at: s.archived_at, created_at: s.created_at,
         step_count: stepTally.get(s.id) ?? 0,
         active_enrollment_count: enrTally.get(s.id) ?? 0,
       })),

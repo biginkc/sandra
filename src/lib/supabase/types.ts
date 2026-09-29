@@ -14,6 +14,41 @@ export type Database = {
   }
   public: {
     Tables: {
+      dialpad_org_connections: {
+        Row: { id: string; org_id: string; status: string; cti_client_id: string; allowed_origins: string[]; webhook_secret_ref: string; webhook_secret_version: number; created_at: string; updated_at: string }
+        Insert: { id?: string; org_id: string; status?: string; cti_client_id: string; allowed_origins?: string[]; webhook_secret_ref: string; webhook_secret_version?: number; created_at?: string; updated_at?: string }
+        Update: { status?: string; cti_client_id?: string; allowed_origins?: string[]; webhook_secret_ref?: string; webhook_secret_version?: number; updated_at?: string }
+        Relationships: []
+      }
+
+      dialpad_member_bindings: {
+        Row: { id: string; org_id: string; user_id: string; dialpad_user_id: string; status: string; claimed_at: string; verified_at: string | null; verification_kind: string | null; verification_ref: string | null; revoked_at: string | null; revoked_reason: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; org_id: string; user_id: string; dialpad_user_id: string; status?: string; claimed_at?: string; created_at?: string; updated_at?: string }
+        Update: { status?: string; verified_at?: string | null; verification_kind?: string | null; verification_ref?: string | null; revoked_at?: string | null; revoked_reason?: string | null; updated_at?: string }
+        Relationships: []
+      }
+
+      dialpad_number_grants: {
+        Row: { id: string; org_id: string; user_id: string; caller_number_e164: string; identity_type: string | null; identity_id: string | null; status: string; granted_by: string; granted_at: string; revoked_at: string | null; revoked_by: string | null }
+        Insert: { id?: string; org_id: string; user_id: string; caller_number_e164: string; identity_type?: string | null; identity_id?: string | null; granted_by: string; granted_at?: string }
+        Update: { status?: string; revoked_at?: string | null; revoked_by?: string | null }
+        Relationships: []
+      }
+
+      dialpad_call_intents: {
+        Row: { id: string; org_id: string; connection_id: string; rep_user_id: string; binding_id: string; dialpad_user_id: string; property_id: string; contact_id: string; phone_slot: number; destination_e164: string; assignment_episode_id: string; number_grant_id: string | null; caller_number_e164: string | null; caller_identity_type: string | null; caller_identity_id: string | null; custom_data: string; idempotency_key: string; request_hash: string; status: string; prepared_at: string; expires_at: string; matched_provider_call_id: string | null; matched_event_id: string | null; matched_at: string | null; cancelled_at: string | null }
+        Insert: { id?: string; org_id: string; connection_id: string; rep_user_id: string; binding_id: string; dialpad_user_id: string; property_id: string; contact_id: string; phone_slot: number; destination_e164: string; assignment_episode_id: string; number_grant_id?: string | null; caller_number_e164?: string | null; caller_identity_type?: string | null; caller_identity_id?: string | null; custom_data: string; idempotency_key: string; request_hash: string; prepared_at?: string; expires_at: string }
+        Update: { status?: string; matched_provider_call_id?: string | null; matched_event_id?: string | null; matched_at?: string | null; cancelled_at?: string | null }
+        Relationships: []
+      }
+
+      dialpad_call_events: {
+        Row: { id: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg: string; secret_version: number; received_at: string; disposition: string; disposition_reason: string | null; matched_intent_id: string | null; conflicts_with_event_id: string | null; disposed_at: string | null; projected_at: string | null; process_attempts: number; last_process_error: string | null }
+        Insert: { id?: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg?: string; secret_version: number; received_at?: string; disposition?: string; disposition_reason?: string | null; conflicts_with_event_id?: string | null; disposed_at?: string | null }
+        Update: { disposition?: string; disposition_reason?: string | null; matched_intent_id?: string | null; disposed_at?: string | null; projected_at?: string | null; process_attempts?: number; last_process_error?: string | null }
+        Relationships: []
+      }
+
       rep_sms_sender_assignments: {
         Row: { id: string; org_id: string; user_id: string; provider: string; provider_account_id: string | null; provider_sender_id: string | null; phone_e164: string; label: string; is_default: boolean; active: boolean; updated_by: string; updated_at: string; composition_policy_version: number; grant_status: string; granted_at: string; revoked_at: string | null; revoked_by: string | null }
         Insert: { id?: string; org_id: string; user_id: string; provider?: string; provider_account_id?: string | null; provider_sender_id?: string | null; phone_e164: string; label: string; is_default?: boolean; active?: boolean; updated_by: string; updated_at?: string; composition_policy_version?: number; grant_status?: string; granted_at?: string; revoked_at?: string | null; revoked_by?: string | null }
@@ -5662,6 +5697,28 @@ export type Database = {
       }
     }
     Functions: {
+      sequence_overview_stats: { Args: { p_org: string }; Returns: Array<{
+        id: string; name: string; description: string | null; active: boolean;
+        append_opt_out: boolean; archived_at: string | null; created_at: string;
+        created_by: string | null; step_count: number; active_enrollment_count: number;
+        waiting: number; replied: number; finished_no_reply: number;
+        couldnt_send: number; stopped: number; last_sent: string | null;
+      }> }
+      sequence_needs_person: { Args: { p_org: string }; Returns: Array<{
+        property_id: string; sequence_id: string | null; bucket: string; reason: string; sequence_created_by: string | null;
+      }> }
+      fn_claim_dialpad_member_binding: { Args: { p_org_id: string; p_user_id: string; p_dialpad_user_id: string }; Returns: Json }
+      fn_verify_dialpad_member_binding: { Args: { p_binding_id: string; p_verification_kind: string; p_verification_ref: string }; Returns: Json }
+      fn_revoke_dialpad_member_binding: { Args: { p_binding_id: string; p_reason: string }; Returns: Json }
+      fn_grant_dialpad_caller: { Args: { p_org_id: string; p_user_id: string; p_caller_number_e164: string; p_identity_type: string | null; p_identity_id: string | null; p_granted_by: string }; Returns: Json }
+      fn_revoke_dialpad_caller_grant: { Args: { p_grant_id: string; p_revoked_by: string }; Returns: Json }
+      fn_prepare_dialpad_call_intent: { Args: { p_org_id: string; p_rep_user_id: string; p_property_id: string; p_contact_id: string; p_phone_slot: number; p_idempotency_key: string; p_number_grant_id?: string | null; p_ttl_seconds?: number }; Returns: Json }
+      fn_cancel_dialpad_call_intent: { Args: { p_org_id: string; p_rep_user_id: string; p_intent_id: string }; Returns: Json }
+      fn_ingest_dialpad_call_event: { Args: { p_org_id: string; p_connection_id: string; p_secret_version: number; p_payload: string }; Returns: Json }
+      fn_match_dialpad_call_event: { Args: { p_event_id: string }; Returns: Json }
+      fn_process_dialpad_call_event: { Args: { p_event_id: string }; Returns: Json }
+      fn_list_dialpad_call_events_for_processing: { Args: { p_limit?: number }; Returns: string[] }
+      fn_record_dialpad_event_process_failure: { Args: { p_event_id: string; p_sqlstate: string }; Returns: undefined }
       fn_get_rep_sms_context: { Args: { p_property_id: string }; Returns: Json }
       fn_set_rep_sms_enrollment: { Args: { p_org_id: string; p_user_id: string; p_enabled: boolean }; Returns: boolean }
       fn_set_rep_sms_sender: { Args: { p_org_id: string; p_user_id: string; p_provider: string; p_phone: string; p_provider_account_id?: string | null; p_provider_sender_id?: string | null; p_label: string; p_default: boolean; p_active: boolean }; Returns: string }

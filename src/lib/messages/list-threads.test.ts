@@ -251,6 +251,42 @@ describe("listThreads — chunking", () => {
     );
   });
 
+  it("maps drip context and the replied count from the new snapshot", async () => {
+    const rpc = vi.fn(async () => ({
+      data: {
+        rows: [{
+          thread_id: "thread", contact_id: "contact", contact_name: "Seller",
+          property_id: "property", property_status: "contacted", outreach_dispo: null,
+          drip_name: "Follow up", drip_step: 2, drip_steps_total: 4, drip_replied: true,
+          is_dnc_locked: false, assignee_id: null, last_message_body: "Reply",
+          last_message_direction: "inbound", last_message_at: "2026-09-01T12:00:00Z",
+          unread_count: 1, has_inbound: true, needs_human_attention: false,
+          is_opted_out: false,
+        }],
+        counts: { all: 1, mine: 0, unassigned: 0, unread: 1, escalated: 0, dispo: 0, needs_outcome: 1, drip_replied: 1 },
+        total: 1, hidden_count: 0, limit: 200, offset: 0,
+      }, error: null,
+    }));
+    const page = await listThreadPage({ rpc } as unknown as SupabaseClient<Database>, {
+      filter: "drip_replied", currentUserId: null, includeThreadId: null,
+      hideNoise: true, page: 1,
+    });
+    expect(page.counts.drip_replied).toBe(1);
+    expect(page.threads[0]).toMatchObject({ dripName: "Follow up", dripStep: 2, dripStepsTotal: 4, dripReplied: true });
+  });
+
+  it("returns an empty replied view while the old RPC is still deployed", async () => {
+    const rpc = vi.fn(async () => ({
+      data: { rows: [], counts: { all: 3, mine: 0, unassigned: 0, unread: 0, escalated: 0, dispo: 0, needs_outcome: 0 }, total: 3, hidden_count: 0, limit: 200, offset: 0 },
+      error: null,
+    }));
+    const page = await listThreadPage({ rpc } as unknown as SupabaseClient<Database>, {
+      filter: "drip_replied", currentUserId: null, includeThreadId: null,
+      hideNoise: true, page: 1,
+    });
+    expect(page).toMatchObject({ degraded: true, threads: [], total: 0, counts: { drip_replied: 0 } });
+  });
+
   it("fails closed on a paged snapshot tenant collision", async () => {
     const supabase = {
       rpc: vi.fn(async () => ({
