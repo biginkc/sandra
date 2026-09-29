@@ -23,8 +23,10 @@ async function seed(): Promise<Fixture> {
   return { captureId, batchId }
 }
 
-function anchor(track: 'tab' | 'mic', seq: number, kind: 'start' | 'final' = 'start') {
-  return { kind: 'anchor', track, seq, contextId: `00000000-0000-4000-8000-00000000000${track === 'tab' ? '1' : '2'}`, anchor: kind, contextFrame: seq * 128, sourceCursor: seq * 128, blockLength: kind === 'final' ? 0 : 128, sourceRateHz: 48_000, outputCursor: seq * 40, outputFrameIndex: 0, phaseNumerator: 0, continuity: 'continuous', previousContextEndFrame: seq === 0 ? null : seq * 128, discardedTailSamples: kind === 'final' ? 0 : null }
+function anchor(track: 'tab' | 'mic', seq: number, kind: 'start' | 'periodic' | 'final' = 'start') {
+  const sourceCursor = seq * 128
+  const outputCursor = Math.trunc(sourceCursor * 16_000 / 48_000)
+  return { kind: 'anchor', track, seq, contextId: `00000000-0000-4000-8000-00000000000${track === 'tab' ? '1' : '2'}`, anchor: kind, contextFrame: sourceCursor, sourceCursor, blockLength: kind === 'final' ? 0 : 128, sourceRateHz: 48_000, outputCursor, outputFrameIndex: Math.trunc(outputCursor / 320), phaseNumerator: (outputCursor * 48_000) % 16_000, continuity: 'continuous', previousContextEndFrame: seq === 0 ? null : sourceCursor, discardedTailSamples: kind === 'final' ? outputCursor - Math.trunc(outputCursor / 320) * 320 : null }
 }
 
 function context(track: 'tab' | 'mic', seq: number, observation: 'start' | 'final', browserTimeOriginMs = 4) {
@@ -39,9 +41,9 @@ function sparseAnchor(track: 'tab' | 'mic', seq: number, anchorKind: 'start' | '
   const contextId = `00000000-0000-4000-8000-00000000000${track === 'tab' ? '1' : '2'}`
   if (seq === 0) return anchor(track, 0)
   if (anchorKind === 'periodic') {
-    return { ...anchor(track, seq), anchor: 'periodic' as const, contextFrame: 480_000, sourceCursor: 480_000, blockLength: 128, outputCursor: 160_000, outputFrameIndex: 500, previousContextEndFrame: 480_000, contextId }
+    return { ...anchor(track, seq), anchor: 'periodic' as const, contextFrame: 480_128, sourceCursor: 480_128, blockLength: 128, outputCursor: 160_042, outputFrameIndex: 500, previousContextEndFrame: 480_128, contextId }
   }
-  return { ...anchor(track, seq, 'final'), contextFrame: gapped ? 480_100 : 480_256, sourceCursor: gapped ? 480_100 : 480_256, outputCursor: 160_080, outputFrameIndex: 500, previousContextEndFrame: gapped ? 480_100 : 480_256, contextId }
+  return { ...anchor(track, seq, 'final'), contextFrame: gapped ? 480_100 : 480_256, sourceCursor: gapped ? 480_100 : 480_256, outputCursor: gapped ? 160_033 : 160_085, outputFrameIndex: 500, phaseNumerator: 0, previousContextEndFrame: gapped ? 480_100 : 480_256, discardedTailSamples: gapped ? 33 : 85, contextId }
 }
 
 function sparseCompleteRecords(gapped = false) {
@@ -75,7 +77,7 @@ describe('Dialpad timing migration', () => {
 
   it('persists exact records, replays an identical batch, rejects changed replay and requires final evidence', async () => {
     const fixture = await seed()
-    const records = [anchor('tab', 0), anchor('tab', 1), anchor('tab', 2, 'final')]
+    const records = [anchor('tab', 0), anchor('tab', 1, 'periodic'), anchor('tab', 2, 'final')]
     expect(await append(fixture, records)).toMatchObject({ status: 'recorded', recordCount: 3 })
     expect(await append(fixture, records)).toMatchObject({ status: 'replayed' })
     await expect(append(fixture, [anchor('tab', 0, 'final')])).rejects.toMatchObject({ code: '40001' })
@@ -225,6 +227,15 @@ describe('Dialpad timing migration', () => {
     await pg.query('set role service_role')
     try {
       const result = await pg.query<{ value: { status: string; reasons: string[] } }>('select public.fn_finish_dialpad_recording_timing($1,$2,1,$3,$4,$5) as value', [orgId, clocks.captureId, JSON.stringify({ tabAnchor: 2, micAnchor: 2, tabContext: 1, micContext: 1, exchange: 1 }), 'collected', '[]'])
+      expect(result.rows[0]!.value).toMatchObject({ status: 'incomplete', reasons: ['clock_discontinuity'] })
+    } finally { await pg.query('reset role') }
+
+    const wall = await seed()
+    const backwardsWall = { ...exchange(), seq: 1, browserSendMs: 4, browserReceiveMs: 6, serverReceiveMonoMs: 3.5, serverSendMonoMs: 4, serverReceiveWallMs: 8, serverSendWallMs: 7 }
+    expect(await append(wall, [...sparseCompleteRecords(), backwardsWall])).toMatchObject({ status: 'recorded' })
+    await pg.query('set role service_role')
+    try {
+      const result = await pg.query<{ value: { status: string; reasons: string[] } }>('select public.fn_finish_dialpad_recording_timing($1,$2,1,$3,$4,$5) as value', [orgId, wall.captureId, JSON.stringify({ tabAnchor: 2, micAnchor: 2, tabContext: 1, micContext: 1, exchange: 1 }), 'collected', '[]'])
       expect(result.rows[0]!.value).toMatchObject({ status: 'incomplete', reasons: ['clock_discontinuity'] })
     } finally { await pg.query('reset role') }
   })

@@ -189,6 +189,48 @@ describe('Dialpad browser session', () => {
     expect(probes.length).toBeGreaterThanOrEqual(1);
     const ends = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string; lastSeq?: { tabAnchor?: number } }).filter((entry) => entry.type === 'timing_end');
     expect(ends.at(-1)?.lastSeq?.tabAnchor).toBe(0);
+    const timingBatches = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string; records?: Array<{ kind?: string }> }).filter((entry) => entry.type === 'timing_batch');
+    expect(timingBatches.length).toBeGreaterThan(0);
+    expect(timingBatches.flatMap((batch) => batch.records ?? []).every((record) => record.kind !== 'exchange')).toBe(true);
+    expect(session.state()).toBe('stopped');
+  });
+
+  it('degrades timing when a confirm send fails and suppresses late replies after the timing barrier', async () => {
+    const socket = new FakeSocket();
+    const failures: string[] = [];
+    let confirmAttempts = 0;
+    let lateReply: string | null = null;
+    socket.send = (data) => {
+      socket.sent.push(data);
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; seq?: number };
+      if (message.type === 'timing_probe') {
+        lateReply = JSON.stringify({ type: 'timing_probe_reply', epoch: 1, seq: message.seq, nonce: 'c'.repeat(64), serverClockId: '00000000-0000-4000-8000-000000000003', serverReceiveMonoMs: 1, serverSendMonoMs: 2, serverReceiveWallMs: 100, serverSendWallMs: 90 });
+        queueMicrotask(() => socket.message(lateReply!));
+      } else if (message.type === 'timing_confirm') {
+        confirmAttempts += 1;
+        throw new Error('confirm transport failed');
+      } else if (message.type === 'timing_end') {
+        socket.message(lateReply!);
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_end_ack', epoch: 1, status: 'incomplete', reasons: ['persistence_failed'] })));
+      }
+    };
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, enableTiming: true, ackTimeoutMs: 25,
+      onFailure: (error) => failures.push(error.code), capture: fakeCapture(() => {}),
+    });
+    const started = session.start();
+    socket.open();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.message(JSON.stringify({ type: 'ready', epoch: 1, controlVersion: 2, capabilities: ['capture_timing_v1'] }));
+    socket.message(JSON.stringify({ type: 'measurement_snapshot', epoch: 1, revision: 0, totalSamples: 0, measurementStatus: 'provisional', threshold: { crossed: false, crossingEpoch: null, crossingSample: null }, degradedReasons: [] }));
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'open', drainDeadlineAt: null }));
+    await started;
+    await waitUntil(() => confirmAttempts === 1);
+    await session.stop();
+    const confirms = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string }).filter((entry) => entry.type === 'timing_confirm');
+    expect(confirms).toHaveLength(1);
+    expect(failures).toEqual([]);
     expect(session.state()).toBe('stopped');
   });
 

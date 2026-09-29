@@ -549,7 +549,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         }
         completed.resolve(); timingBatchInFlight = null;
       } else if (message.type === 'timing_probe_reply') {
-        if (timingIncomplete) return;
+        if (timingIncomplete || timingBarrierSent) return;
         const replyFingerprint = JSON.stringify(message);
         if (!timingProbeInFlight || timingProbeInFlight.seq !== message.seq) {
           const completed = timingProbeHistory.get(message.seq);
@@ -558,7 +558,11 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
             timingIncomplete = true;
             return;
           }
-          await sendControl({ type: 'timing_confirm', epoch: options.epoch, seq: message.seq, nonce: completed.nonce, browserReceiveMs: completed.browserReceiveMs }, true);
+          try {
+            await sendControl({ type: 'timing_confirm', epoch: options.epoch, seq: message.seq, nonce: completed.nonce, browserReceiveMs: completed.browserReceiveMs }, true);
+          } catch {
+            timingIncomplete = true;
+          }
           return;
         }
         const pending = timingProbeInFlight;
@@ -577,19 +581,12 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         if (firstReply) {
           timingProbeHistory.set(message.seq, { nonce: message.nonce, browserReceiveMs: pending.browserReceiveMs, replyFingerprint });
           while (timingProbeHistory.size > 32) timingProbeHistory.delete(timingProbeHistory.keys().next().value!);
-          noteTimingRecord({
-            kind: 'exchange',
-            seq: message.seq,
-            serverClockId: message.serverClockId,
-            browserSendMs: pending.browserSendMs,
-            browserReceiveMs: pending.browserReceiveMs,
-            serverReceiveMonoMs: message.serverReceiveMonoMs,
-            serverSendMonoMs: message.serverSendMonoMs,
-            serverReceiveWallMs: message.serverReceiveWallMs,
-            serverSendWallMs: message.serverSendWallMs,
-          });
         }
-        await sendControl({ type: 'timing_confirm', epoch: options.epoch, seq: message.seq, nonce: message.nonce, browserReceiveMs: pending.browserReceiveMs }, true);
+        try {
+          await sendControl({ type: 'timing_confirm', epoch: options.epoch, seq: message.seq, nonce: message.nonce, browserReceiveMs: pending.browserReceiveMs }, true);
+        } catch {
+          timingIncomplete = true;
+        }
       } else if (message.type === 'timing_exchange_ack') {
         if (timingIncomplete) return;
         if (!timingProbeInFlight || timingProbeInFlight.seq !== message.seq) return;

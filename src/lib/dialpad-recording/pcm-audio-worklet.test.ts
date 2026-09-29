@@ -102,6 +102,11 @@ describe("stateful Dialpad PCM capture", () => {
     expect(anchors.map((record) => record.anchor)).toEqual(["start", "periodic", "final"]);
     const periodic = anchors[1]!;
     const final = anchors[2]!;
+    expect(periodic.sourceCursor).toBe(480_128);
+    expect(periodic.outputCursor).toBe(160_042);
+    expect(final.sourceCursor).toBe(480_256);
+    expect(final.outputCursor).toBe(160_085);
+    expect(final.discardedTailSamples).toBe(85);
     expect(Number(final.sourceCursor)).toBeGreaterThanOrEqual(Number(periodic.sourceCursor) + Number(periodic.blockLength));
     expect(final.contextFrame).toBe(final.previousContextEndFrame);
     expect(final.blockLength).toBe(0);

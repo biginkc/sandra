@@ -343,11 +343,52 @@ begin
        where r.capture_id=p_capture_id and r.epoch=p_epoch and r.stream in ('tab:anchor','mic:anchor')
          and (
            (r.record->>'outputFrameIndex')::numeric <> trunc((r.record->>'outputCursor')::numeric / 320)
+           or (r.record->>'outputCursor')::numeric <> trunc((r.record->>'sourceCursor')::numeric * 16000 / (r.record->>'sourceRateHz')::numeric)
            or mod((r.record->>'outputCursor')::numeric * (r.record->>'sourceRateHz')::numeric, 16000) <> (r.record->>'phaseNumerator')::numeric
          )
     ) then
       effective := 'incomplete';
       canonical_reasons := canonical_reasons || '["sequence_gap"]'::jsonb;
+    end if;
+    if exists (
+      select 1
+        from public.dialpad_recording_timing_records r
+       where r.capture_id=p_capture_id and r.epoch=p_epoch and r.stream in ('tab:anchor','mic:anchor')
+         and r.record->>'anchor'='final'
+         and (
+           r.record->>'discardedTailSamples' is null
+           or (r.record->>'discardedTailSamples')::numeric <> trunc((r.record->>'sourceCursor')::numeric * 16000 / (r.record->>'sourceRateHz')::numeric) - (r.record->>'outputFrameIndex')::numeric * 320
+         )
+    ) then
+      effective := 'incomplete';
+      canonical_reasons := canonical_reasons || '["sequence_gap"]'::jsonb;
+    end if;
+    if exists (
+      select 1 from public.dialpad_recording_timing_records r
+       where r.capture_id=p_capture_id and r.epoch=p_epoch
+         and r.stream in ('tab:anchor','mic:anchor','tab:context','mic:context')
+         and ((r.stream like '%anchor' and r.record->>'anchor'='start') or (r.stream like '%context' and r.record->>'observation'='start'))
+         and r.seq <> 0
+    ) then
+      effective := 'incomplete';
+      canonical_reasons := canonical_reasons || '["sequence_gap"]'::jsonb;
+    end if;
+    if exists (
+      select 1
+        from public.dialpad_recording_timing_records current_row
+        join public.dialpad_recording_timing_records previous_row
+          on previous_row.capture_id=current_row.capture_id and previous_row.epoch=current_row.epoch
+         and previous_row.stream='exchange' and previous_row.seq=current_row.seq-1
+       where current_row.capture_id=p_capture_id and current_row.epoch=p_epoch and current_row.stream='exchange'
+         and (
+           (current_row.record->>'serverReceiveMonoMs')::numeric < (previous_row.record->>'serverReceiveMonoMs')::numeric
+           or (current_row.record->>'serverSendMonoMs')::numeric < (previous_row.record->>'serverSendMonoMs')::numeric
+           or (current_row.record->>'serverReceiveWallMs')::numeric < (previous_row.record->>'serverReceiveWallMs')::numeric
+           or (current_row.record->>'serverSendWallMs')::numeric < (previous_row.record->>'serverSendWallMs')::numeric
+         )
+    ) then
+      effective := 'incomplete';
+      canonical_reasons := canonical_reasons || '["clock_discontinuity"]'::jsonb;
     end if;
     if exists (
       select 1
