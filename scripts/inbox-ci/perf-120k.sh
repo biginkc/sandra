@@ -18,7 +18,8 @@ perf_stop
 if [[ "${PERF_LOCAL_EXECUTION:-}" == 1 ]]; then
   echo "Local diagnostic: $PERF_RUN_DIR ($verdict). No approval record."
 else
-  python3 "$PERF_SOURCE/record.py" "$PERF_RUN_DIR" perf-120k "$verdict"
+  sealed_dir="$(python3 "$PERF_SOURCE/record.py" "$PERF_RUN_DIR" perf-120k "$verdict")"
+  printf 'HEAVY_RUN_DIR=%s\n' "$sealed_dir" >> "$GITHUB_ENV"
 fi
 echo "120k synthetic measurements: $PERF_RUN_DIR ($verdict)"
 [[ "$verdict" == PASS ]]
