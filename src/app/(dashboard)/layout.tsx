@@ -38,9 +38,7 @@ export default async function DashboardLayout({
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
   const objectionPromptEnabled = isObjectionPromptAllowed(
-    user.id,
     process.env.COACH_OBJECTION_PROMPT_ENABLED,
-    process.env.COACH_OBJECTION_PROMPT_OPERATOR_ALLOWLIST,
   );
   const showAdmin = isAdminEmail(user.email);
   const recordingAccess = await recordingViewer().catch(() => null);

@@ -1,7 +1,7 @@
 import { act, fireEvent, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useInboxRefresh, type InboxRefreshSnapshot } from "./use-inbox-refresh";
-const initial = { page: { threads: [], counts: { all: 1, mine: 0, unassigned: 0, unread: 0, escalated: 0, dispo: 0, needs_outcome: 0, drip_replied: 0 }, total: 1, page: 1, pageSize: 200, hiddenCount: 0, degraded: false }, unknown: 2, dismissed: 1 } as InboxRefreshSnapshot;
+const initial = { page: { threads: [], counts: { all: 1, mine: 0, unassigned: 0, unread: 0, escalated: 0, dispo: 0, needs_outcome: 0, drip_replied: 0, in_drip: 0 }, total: 1, page: 1, pageSize: 200, hiddenCount: 0, degraded: false }, unknown: 2, dismissed: 1 } as InboxRefreshSnapshot;
 const fetchMock = vi.fn();
 const response = (count: number) => ({ ok: true, json: async () => ({ ...initial, page: { ...initial.page, counts: { ...initial.page.counts, all: count }, total: count }, unknown: count }) });
 beforeEach(() => { vi.stubGlobal("fetch", fetchMock); fetchMock.mockReset(); window.history.replaceState(null,"","/messages"); });
