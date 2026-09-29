@@ -1,0 +1,61 @@
+.......wrote /tmp/tmpaco_x0tk/supabase/migrations/20260930040000_inbox_control_foundation.sql
+wrote /tmp/tmpaco_x0tk/supabase/migrations/20260930040100_inbox_read_companion.sql
+wrote /tmp/tmpaco_x0tk/supabase/migrations/20260930040200_inbox_backend_operation_reply.sql
+emitted 3 migration file(s)
+.wrote /tmp/tmpgn1szt3l/supabase/migrations/20260930040000_inbox_control_foundation.sql
+wrote /tmp/tmpgn1szt3l/supabase/migrations/20260930040100_inbox_read_companion.sql
+wrote /tmp/tmpgn1szt3l/supabase/migrations/20260930040200_inbox_backend_operation_reply.sql
+emitted 3 migration file(s)
+.....wrote /tmp/tmpma9icw7w/supabase/migrations/20260930040000_inbox_control_foundation.sql
+wrote /tmp/tmpma9icw7w/supabase/migrations/20260930040100_inbox_read_companion.sql
+wrote /tmp/tmpma9icw7w/supabase/migrations/20260930040200_inbox_backend_operation_reply.sql
+emitted 3 migration file(s)
+emit-migrations.py --check FAILED:
+  MISSING on disk: 20260930040200_inbox_backend_operation_reply.sql
+...wrote /tmp/tmp9jm9l4cc/supabase/migrations/20260930040000_inbox_control_foundation.sql
+wrote /tmp/tmp9jm9l4cc/supabase/migrations/20260930040100_inbox_read_companion.sql
+wrote /tmp/tmp9jm9l4cc/supabase/migrations/20260930040200_inbox_backend_operation_reply.sql
+emitted 3 migration file(s)
+--check OK: 3 migration file(s) match byte-for-byte
+emit-migrations.py --check FAILED:
+  DIFFERS: 20260930040000_inbox_control_foundation.sql
+  --- expected/20260930040000_inbox_control_foundation.sql
+  +++ disk/20260930040000_inbox_control_foundation.sql
+  @@ -1933,3 +1933,5 @@
+   ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY FULL;
+   -- Capture remains installed; serving is disabled until independent activation gates.
+   COMMIT;
+  +
+  +-- hand-edited, should never be byte-stable
+.....wrote /tmp/tmpg0isw40v/supabase/migrations/20260930040000_inbox_control_foundation.sql
+wrote /tmp/tmpg0isw40v/supabase/migrations/20260930040100_inbox_read_companion.sql
+wrote /tmp/tmpg0isw40v/supabase/migrations/20260930040200_inbox_backend_operation_reply.sql
+emitted 3 migration file(s)
+emit-migrations.py --check FAILED:
+  STALE (no longer emitted by this script): 20260929000000_inbox_control_foundation.sql
+..wrote /tmp/tmpokd35ll_/supabase/migrations/20260930040000_inbox_control_foundation.sql
+wrote /tmp/tmpokd35ll_/supabase/migrations/20260930040100_inbox_read_companion.sql
+wrote /tmp/tmpokd35ll_/supabase/migrations/20260930040200_inbox_backend_operation_reply.sql
+emitted 3 migration file(s)
+--check OK: 3 migration file(s) match byte-for-byte
+...............................Compiled pinned read/history companion; no database connection
+...Compiled pinned read/history companion; no database connection
+{
+  "status": "INSTALLED_CURRENT_SCHEMA_UPGRADE",
+  "upgrade": "current",
+  "packet_sha256": "c9e6a2ad1c9fb1f2fa1dc096be274981f5a51457457233f470923c12ed6cade0",
+  "packet_path": "experiments/inbox-production-install/generated/read-upgrade-current.sql",
+  "auth_upgrade_sha256": "c65046046b63d1e362476b617e01b72e9a2de09977e42732ec886e773a8ddcad",
+  "auth_upgrade_path": "experiments/inbox-production-install/generated/auth-upgrade.sql",
+  "database": "postgres",
+  "marker": "sandra-inbox-http-owned-synthetic-20260917",
+  "serving_enabled": false,
+  "scope": "Live owned http catalog proof after guarded existing-schema read upgrade; no production claim."
+}
+.Compiled pinned read/history companion; no database connection
+Compiled pinned read/history companion; no database connection
+............
+----------------------------------------------------------------------
+Ran 70 tests in 2.066s
+
+OK
