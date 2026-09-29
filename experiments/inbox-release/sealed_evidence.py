@@ -142,7 +142,7 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
         completed_text = manifest["completed_at"]
         if (not isinstance(completed_text, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", completed_text)
                 or manifest["started_at"] != completed_text
-                or manifest["run_id"] != "shared-readonly-" + manifest["phase"] + "-" + re.sub(r"[-:.]", "", completed_text)):
+                or manifest["run_id"] != "shared-readonly-" + manifest["phase"] + "-" + completed_text.replace("-", "").replace(":", "").replace(".", "")):
             raise EvidenceError(f"shared-readonly run metadata mismatch: {directory}")
         scripts = ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs", "scripts/outbox-db-contract/catalog-sections.mjs")
         operator = manifest.get("operator_script_sha256")
