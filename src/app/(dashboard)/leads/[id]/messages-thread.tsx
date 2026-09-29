@@ -35,6 +35,9 @@ type Props = {
   onLiveMessage?: (message: Message, event: "INSERT" | "UPDATE") => void;
   nowMs?: number;
   scrollContainerRef?: RefObject<HTMLDivElement | null>;
+  dripMessageLabels?: Record<string, string>;
+  dripReplyMessageIds?: string[];
+  dripReplyLabels?: Record<string, string>;
 };
 
 export type LeadMessageScope = {
@@ -86,6 +89,9 @@ export function MessagesThread({
   onLiveMessage,
   nowMs,
   scrollContainerRef,
+  dripMessageLabels = {},
+  dripReplyMessageIds = [],
+  dripReplyLabels = {},
 }: Props) {
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = useLiveNow(nowMs ?? fallbackNowMs);
@@ -203,6 +209,9 @@ export function MessagesThread({
             isContinuation={it.isContinuation}
             isLastInGroup={it.isLastInGroup}
             isMostRecentOutbound={it.msg.id === mostRecentOutboundId}
+            dripLabel={dripMessageLabels[it.msg.id]}
+            dripReply={dripReplyMessageIds.includes(it.msg.id)}
+            dripReplyLabel={dripReplyLabels[it.msg.id]}
           />
         ),
       )}
@@ -407,6 +416,8 @@ export function MessageBubble({
   isMostRecentOutbound,
   presentation = "thread",
   dripLabel = null,
+  dripReply = false,
+  dripReplyLabel,
 }: {
   message: Message;
   isContinuation: boolean;
@@ -414,6 +425,8 @@ export function MessageBubble({
   isMostRecentOutbound: boolean;
   presentation?: "thread" | "timeline";
   dripLabel?: string | null;
+  dripReply?: boolean;
+  dripReplyLabel?: string;
 }) {
   const outbound = message.direction === "outbound";
   const timeline = presentation === "timeline";
@@ -424,7 +437,7 @@ export function MessageBubble({
     isMostRecentOutbound,
   );
   const aiGenerated = isAiGeneratedMessage(message);
-  const showMetadataFooter = isLastInGroup || aiGenerated;
+  const showMetadataFooter = isLastInGroup || aiGenerated || Boolean(dripLabel) || dripReply;
 
   // Per-bubble vertical spacing replaces the old blanket `gap-4` on the
   // container. A continuation bubble (same sender, same day) gets a
@@ -503,7 +516,6 @@ export function MessageBubble({
           {message.body}
         </div>
       </div>
-      {dripLabel && outbound && !timeline ? <div className="mt-1 flex items-center gap-1 text-[11px] text-sky-800" data-testid="message-drip-label"><Droplet className="size-3" />{dripLabel}</div> : null}
       {showMetadataFooter ? (
         <div
           className={`mt-1 flex items-center gap-1.5 text-[10px] tabular-nums text-muted-foreground ${
@@ -544,6 +556,8 @@ export function MessageBubble({
               </Badge>
             )}
           {aiGenerated ? <SandraReplyBadge message={message} /> : null}
+          {outbound && dripLabel && !timeline ? <span className="font-semibold text-teal-700" data-testid="messages-thread-drip-label">{dripLabel}</span> : null}
+          {!outbound && dripReply ? <span className="font-semibold text-amber-700" data-testid="messages-thread-drip-reply">{dripReplyLabel ?? "Replied to drip"}</span> : null}
         </div>
       ) : null}
       {!showMetadataFooter && deliveryStatusLabel ? (

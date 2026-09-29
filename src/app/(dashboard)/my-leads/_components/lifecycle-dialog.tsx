@@ -7,6 +7,8 @@ import {
   DialogContent,
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
+import { StartDripPicker } from "@/components/sequences/start-drip-picker"
+import type { DripChoice } from "@/app/(dashboard)/sequences/actions"
 import {
   DIALOG_CONTENT_CLASS,
   DateTimeField,
@@ -41,6 +43,7 @@ export type AcquisitionLifecycleDialogProps = {
   pendingOfferId?: string | null
   recipientOptions?: readonly AcquisitionRecipientOption[]
   initialRecipientUserId?: string
+  previewDripChoices?: DripChoice[]
   onOpenChange: (open: boolean) => void
   onSubmit: AcquisitionSubmit<AcquisitionLifecycleFormPayload>
 }
@@ -76,6 +79,7 @@ export function AcquisitionLifecycleDialog({
   pendingOfferId = null,
   recipientOptions = [],
   initialRecipientUserId = "",
+  previewDripChoices,
   onOpenChange,
   onSubmit,
 }: AcquisitionLifecycleDialogProps) {
@@ -84,6 +88,7 @@ export function AcquisitionLifecycleDialog({
   const [offerId, setOfferId] = useState("")
   const [reason, setReason] = useState<"not_interested" | "needs_nurture" | "">("")
   const [recipientUserId, setRecipientUserId] = useState(initialRecipientUserId)
+  const [sequenceId, setSequenceId] = useState<string | null>(null)
   const [confirmed, setConfirmed] = useState(false)
   const [clientError, setClientError] = useState<string | null>(null)
   const [clientFieldErrors, setClientFieldErrors] = useState<Record<string, string>>({})
@@ -113,6 +118,7 @@ export function AcquisitionLifecycleDialog({
     setOfferId("")
     setReason("")
     setRecipientUserId(initialRecipientUserId)
+    setSequenceId(null)
     setConfirmed(false)
     setClientError(null)
     setClientFieldErrors({})
@@ -177,8 +183,8 @@ export function AcquisitionLifecycleDialog({
 
     if (mode === "handoff") {
       if (!reason) nextFieldErrors.reason = "Choose a handoff reason."
-      if (!recipientUserId) nextFieldErrors.recipientUserId = "Choose the configured recipient."
-      if (Object.keys(nextFieldErrors).length > 0 || !reason || !recipientUserId) {
+      if (!sequenceId && !recipientUserId) nextFieldErrors.recipientUserId = "Choose the configured recipient."
+      if (Object.keys(nextFieldErrors).length > 0 || !reason || (!sequenceId && !recipientUserId)) {
         setClientError("Review the highlighted fields.")
         setClientFieldErrors(nextFieldErrors)
         return
@@ -188,6 +194,7 @@ export function AcquisitionLifecycleDialog({
         mode,
         reason,
         recipientUserId,
+        ...(reason === 'not_interested' && sequenceId ? {sequenceId} : {}),
       })
       return
     }
@@ -215,7 +222,7 @@ export function AcquisitionLifecycleDialog({
       <DialogContent
         className={`flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden ${DIALOG_CONTENT_CLASS}`}
       >
-        <WorkflowDialogHeader title={copy.title} description={`${copy.description} (${propertyLabel})`} />
+        <WorkflowDialogHeader title={copy.title} description={`${mode === 'handoff' && sequenceId ? 'Save Needs drip and start the drip while this lead stays with its current owner.' : copy.description} (${propertyLabel})`} />
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
             <WorkflowFormError message={clientError || submitState.error} />
@@ -275,7 +282,7 @@ export function AcquisitionLifecycleDialog({
                     id="acquisition-handoff-reason"
                     value={reason}
                     disabled={reconciliationLocked}
-                    onChange={(event) => setReason(event.target.value as typeof reason)}
+                    onChange={(event) => {setReason(event.target.value as typeof reason);setSequenceId(null)}}
                     aria-invalid={Boolean(fieldError("reason"))}
                     aria-describedby={fieldError("reason") ? "acquisition-handoff-reason-error" : undefined}
                     className={SELECT_FIELD_CLASS}
@@ -286,7 +293,12 @@ export function AcquisitionLifecycleDialog({
                   </select>
                   <FieldError id="acquisition-handoff-reason-error" message={fieldError("reason")} />
                 </div>
-                <div className="flex flex-col gap-1.5">
+                {reason === 'not_interested' && <div className="rounded-xl border p-3">
+                  <p className="mb-2 text-sm font-semibold">Add to a drip (optional)</p>
+                  <StartDripPicker inline selectionOnly selectedSequenceId={sequenceId} onSelect={setSequenceId} previewChoices={previewDripChoices} />
+                  {sequenceId && <button type="button" className="mt-2 text-xs underline" onClick={() => setSequenceId(null)}>Leave without a drip</button>}
+                </div>}
+                {!sequenceId && <div className="flex flex-col gap-1.5">
                   <div className="flex items-center">
                     <Label htmlFor="acquisition-handoff-recipient">Reassign to</Label>
                     <RequiredHint />
@@ -309,7 +321,7 @@ export function AcquisitionLifecycleDialog({
                   </select>
                   <FieldError id="acquisition-handoff-recipient-error" message={fieldError("recipientUserId")} />
                   <p className="text-xs text-muted-foreground">The parent action supplies the authorized same-org recipient list.</p>
-                </div>
+                </div>}
               </>
             )}
 

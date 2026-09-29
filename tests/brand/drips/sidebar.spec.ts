@@ -9,5 +9,6 @@ test("Drips sidebar wording and water drop", async ({ page }) => {
   await expect(drips).toHaveAttribute("data-active", "true");
   await expect(drips.locator("svg.lucide-droplet")).toBeVisible();
   await expect(sidebar.getByRole("link", { name: "Sequences" })).toHaveCount(0);
+  await page.addStyleTag({ content: "nextjs-portal { display: none !important; }" });
   await expect(sidebar).toHaveScreenshot("sidebar.png");
 });

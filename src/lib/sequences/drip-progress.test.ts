@@ -67,8 +67,8 @@ describe("drip status", () => {
     ["active", null, false, "Waiting"],
     ["paused", "inbound_reply", false, "Replied"],
     ["paused", "rep_sms_human_takeover", false, "Replied"],
-    ["paused", "provider_failed", false, "Couldn't send"],
-    ["paused", "reconciliation_required", false, "Couldn't send"],
+    ["paused", "provider_failed", false, "Couldn’t send"],
+    ["paused", "reconciliation_required", false, "Couldn’t send"],
     ["paused", "step_misconfigured", false, null],
     ["paused", "no_phone", false, null],
     ["opted_out", "consent_revoked", false, "Stopped"],
@@ -116,6 +116,14 @@ describe("listDripProgress", () => {
     ] });
     expect(await listDripProgress(stub as never, ["p1"]))
       .toMatchObject([{ enrollmentId: "active-second", status: "Waiting" }]);
+  });
+  it("breaks equal enrollment timestamps by descending id, like the SQL", async () => {
+    const stub = client({ sequence_enrollments: [
+      rows.sequence_enrollments[2],
+      { ...rows.sequence_enrollments[2], id: "e4" },
+    ] });
+    expect(await listDripProgress(stub as never, ["p3"]))
+      .toMatchObject([{ enrollmentId: "e4" }]);
   });
   it("reports the next step with the inbox's one-based index", async () => {
     const stub = client({ sequence_enrollments: [

@@ -61,7 +61,7 @@ describe("DripCard", () => {
 
   it.each(["provider_failed", "reconciliation_required"])("retries a paused %s step instead of resuming", async (pauseReason) => {
     const user = userEvent.setup();
-    render(<DripCard propertyId="lead-1" initialProgress={{ ...progress, enrollmentStatus: "paused", status: "Couldn't send", pauseReason }} />);
+    render(<DripCard propertyId="lead-1" initialProgress={{ ...progress, enrollmentStatus: "paused", status: "Couldn’t send", pauseReason }} />);
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(retrySequenceStepAction).toHaveBeenCalledWith("enrollment-1"));

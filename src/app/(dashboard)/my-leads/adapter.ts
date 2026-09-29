@@ -1,5 +1,6 @@
 import { zillowUrl } from '@/lib/utils/zillow-url';
 import type { AcquisitionKpis,AcquisitionRoster,QueueRow,QueueSnapshot,AcquisitionDetail } from '@/lib/my-leads/queries';
+import type { MyLeadDripSnapshot } from '@/lib/my-leads/drip-queries';
 import { type MyLeadQueueRow,type MyLeadStage,type MyLeadStagePage,type MyLeadsKpis,type MyLeadDetail } from './_components/types';
 const date=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
 const dollars=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'});
@@ -42,9 +43,21 @@ export function queueRow(row:QueueRow,asOf?:string):MyLeadQueueRow {
     archived:false,
   };
 }
-export function stagePages(snapshot:QueueSnapshot):Record<MyLeadStage,MyLeadStagePage> {
-  const build=(stage:MyLeadStage):MyLeadStagePage=>({stage,rows:(snapshot.stages[stage]?.rows??[]).map(row=>queueRow(row,snapshot.snapshotAt)),
-    totalCount:snapshot.search?snapshot.stages[stage]?.filteredCount??0:snapshot.stages[stage]?.totalCount??0,hasMore:snapshot.stages[stage]?.hasMore??false});
+export function stagePages(snapshot:QueueSnapshot,drips?:MyLeadDripSnapshot|null):Record<MyLeadStage,MyLeadStagePage> {
+  const activeIds=new Set(drips?.active.map(row=>row.propertyId)??[]);
+  const replied=new Map(drips?.replied.map(row=>[row.propertyId,row])??[]);
+  const build=(stage:MyLeadStage):MyLeadStagePage=>{
+    const loaded=snapshot.stages[stage]?.rows??[];
+    const loadedIds=new Set(loaded.map(row=>row.propertyId));
+    const pinned=drips?.replied.filter(row=>row.stage===stage&&!loadedIds.has(row.propertyId)&&row.queueRow).map(row=>row.queueRow!)??[];
+    const rows=[...pinned,...loaded].filter(row=>!activeIds.has(row.propertyId)).map(row=>({
+      ...queueRow(row,snapshot.snapshotAt),dripReply:replied.get(row.propertyId)??null,
+    }));
+    rows.sort((a,b)=>Number(Boolean(b.dripReply))-Number(Boolean(a.dripReply)) ||
+      (b.dripReply?.repliedAt??'').localeCompare(a.dripReply?.repliedAt??''));
+    const rpcCount=snapshot.search?snapshot.stages[stage]?.filteredCount??0:snapshot.stages[stage]?.totalCount??0;
+    return {stage,rows,totalCount:Math.max(0,rpcCount-(drips?.counts[stage]??0)),hasMore:snapshot.stages[stage]?.hasMore??false};
+  };
   return {not_contacted:build('not_contacted'),contacted:build('contacted'),needs_offer:build('needs_offer'),offer_sent:build('offer_sent'),under_contract:build('under_contract')};
 }
 export function kpiTiles(kpis:AcquisitionKpis):MyLeadsKpis {

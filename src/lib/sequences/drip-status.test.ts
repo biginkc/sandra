@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { dripBucket, dripStatus, DRIP_BUCKET_LABELS, pauseReasonText, type DripBucket } from "./drip-status";
+import { dripBucket, dripStatus, DRIP_BUCKET_LABELS, latestEnrollmentBucket, pauseReasonText, type DripBucket } from "./drip-status";
 
 // Expected buckets are hand-computed from sequence_overview_stats in
 // 20260929120000_sequence_stats.sql. Null means the SQL counts no bucket.
@@ -23,4 +23,12 @@ it.each([
   expect(dripBucket({ status, pause_reason: reason, canceled, inboundAfterLastRun: inbound })).toBe(expected);
   expect(dripStatus(status, reason, canceled, inbound)).toBe(expected ? DRIP_BUCKET_LABELS[expected] : null);
   if (status === "paused" && reason) expect(pauseReasonText(reason)).toBeTruthy();
+});
+
+it("buckets only the latest enrollment after a completed drip is restarted", () => {
+  const completed = { id: "a", enrolled_at: "2026-09-01", status: "completed" };
+  const current = { id: "b", enrolled_at: "2026-09-02", status: "active" };
+  expect(latestEnrollmentBucket([completed, current])).toBe("waiting");
+  expect(latestEnrollmentBucket([completed, { ...current, status: "paused", pause_reason: "provider_failed" }])).toBe("couldnt_send");
+  expect(latestEnrollmentBucket([completed, { ...current, status: "paused", pause_reason: "manual" }])).toBeNull();
 });

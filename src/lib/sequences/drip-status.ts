@@ -5,7 +5,7 @@ export const DRIP_BUCKET_LABELS = {
   waiting: "Waiting",
   replied: "Replied",
   finished_no_reply: "Finished, no reply",
-  couldnt_send: "Couldn't send",
+  couldnt_send: "Couldn’t send",
   stopped: "Stopped",
 } as const satisfies Record<DripBucket, string>;
 
@@ -55,4 +55,15 @@ export function dripBucket(input: {
   if (input.status === "opted_out" || (input.status === "completed" && input.canceled)) return "stopped";
   if (input.status === "completed" && !input.inboundAfterLastRun) return "finished_no_reply";
   return null;
+}
+
+/** Needs-person triage examines the newest enrollment, even when it is not actionable. */
+export function latestEnrollmentBucket(enrollments: Array<Parameters<typeof dripBucket>[0] & {
+  id: string;
+  enrolled_at: string;
+}>): DripBucket | null {
+  const latest = enrollments.reduce<(typeof enrollments)[number] | null>((newest, enrollment) =>
+    !newest || enrollment.enrolled_at > newest.enrolled_at ||
+      (enrollment.enrolled_at === newest.enrolled_at && enrollment.id > newest.id) ? enrollment : newest, null);
+  return latest ? dripBucket(latest) : null;
 }
