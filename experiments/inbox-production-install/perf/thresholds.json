@@ -1,0 +1,4 @@
+{
+  "single_connection": {"p95_ms": 5, "p99_ms": 10, "foundation_access_exclusive_upper_ms": 500},
+  "burst": {"connections": 16, "duration_s": 120, "updates_per_s": 85, "inbound_per_s": 20, "server_p95_ms": 15, "server_p99_ms": 50, "max_deadlocks": 0, "max_40001": 0, "max_55P03": 0, "max_lock_wait_ms": 500, "drain_s": 60, "attempts": 3}
+}

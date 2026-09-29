@@ -207,6 +207,7 @@ const baseProps = {
     escalated: 0,
     dispo: 0,
     needs_outcome: 0,
+    drip_replied: 0,
   } satisfies InboxFilterCounts,
   assigneeEmails: {},
   currentUserId: "user-1",
@@ -351,6 +352,13 @@ describe("<CockpitView /> URL deep-linking", () => {
     expect(navigationMocks.push).toHaveBeenCalledWith(
       "/messages?filter=unread",
     );
+  });
+
+  it("treats the replied-to-drip URL filter as an inbox thread list without adding a chip", () => {
+    const thread = makeThread({ contactId: "drip-contact" });
+    render(<CockpitView {...baseProps} activeTab="inbox" filter="drip_replied" threads={[thread]} />);
+    expect(screen.getByTestId(`inbox-thread-${thread.threadId}`)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /Replied to drip/i })).not.toBeInTheDocument();
   });
 
   it("keeps an unsent draft mounted when its loaded conversation is clicked again", async () => {

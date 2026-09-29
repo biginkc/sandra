@@ -8,7 +8,7 @@ Never touches supabase/migrations. Always leaves the fixture in the clean,
 correct, serving-disabled state, even on failure (best-effort restore in a
 finally per case).
 """
-import argparse,json,subprocess,sys
+import argparse,json,os,subprocess,sys
 from pathlib import Path
 P=Path(__file__).resolve().parent
 ap=argparse.ArgumentParser();ap.add_argument('--owned-fixture',action='store_true');a=ap.parse_args()
@@ -489,5 +489,5 @@ def restore_injection():
 run_case('index_packet_injection_ignored',inject_and_drift,restore_injection,'index definition drift')
 need(not (P/'generated/index-08.sql').exists(),'Injected index-08.sql should have been removed by restore')
 
-(P/'verify-mutation-harness-evidence.json').write_text(json.dumps({'passed':True,'cases':results,'scope':'Owned fixture only; each case: apply drift, verify.py --installed FAILS with the drift-specific error, restore, verify.py --installed PASSES again'},indent=2)+'\n')
+Path(os.environ.get('INBOX_MUTATION_EVIDENCE_PATH', P/'verify-mutation-harness-evidence.json')).write_text(json.dumps({'passed':True,'cases':results,'scope':'Owned fixture only; each case: apply drift, verify.py --installed FAILS with the drift-specific error, restore, verify.py --installed PASSES again'},indent=2)+'\n')
 print(f'{len(results)} mutation-harness drift classes all correctly caught and restored')
