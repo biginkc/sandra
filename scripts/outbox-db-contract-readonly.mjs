@@ -51,10 +51,17 @@ function assertTarget(target, dsn, { apiUrl, ack = process.env.INBOX_PROD_READON
   }
 }
 export { assertTarget };
+export function catalogChildEnv(dsn, parentEnv) {
+  const url = new URL(dsn);
+  const env = { ...parentEnv, PGDATABASE: url.pathname.slice(1), PGHOST: url.hostname, PGPORT: url.port, PGUSER: decodeURIComponent(url.username), PGPASSWORD: decodeURIComponent(url.password), PGSSLMODE: parentEnv.INBOX_CATALOG_TLS_MODE ?? 'disable' };
+  delete env.PGSSLROOTCERT;
+  if (env.PGSSLMODE === 'verify-full') env.PGSSLROOTCERT = parentEnv.NODE_EXTRA_CA_CERTS ?? 'system';
+  return env;
+}
 async function catalog(dsn) {
   const path = 'experiments/inbox-production-install/catalog_fingerprint.py';
   if (!existsSync(path)) throw new Error('CATALOG_TOOL_UNAVAILABLE: rebase migrations branch');
-  const run = spawnSync('python3', ['scripts/outbox-db-contract/catalog-readonly.py'], { env: { ...process.env, PGDATABASE: new URL(dsn).pathname.slice(1), PGHOST: new URL(dsn).hostname, PGPORT: new URL(dsn).port, PGUSER: decodeURIComponent(new URL(dsn).username), PGPASSWORD: decodeURIComponent(new URL(dsn).password), PGSSLMODE: process.env.INBOX_CATALOG_TLS_MODE ?? 'disable', PGSSLROOTCERT: process.env.NODE_EXTRA_CA_CERTS ?? 'system' }, encoding: 'utf8' });
+  const run = spawnSync('python3', ['scripts/outbox-db-contract/catalog-readonly.py'], { env: catalogChildEnv(dsn, process.env), encoding: 'utf8' });
   if (run.status !== 0) throw new Error(`CATALOG_FAILED ${run.stderr.trim()}`);
   return JSON.parse(run.stdout);
 }
