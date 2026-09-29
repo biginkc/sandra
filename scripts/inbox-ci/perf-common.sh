@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared, disposable-only setup for W3 perf lanes. Source from a lane script.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/failure-exit.sh"
 PERF_REPO="$(git rev-parse --show-toplevel)"
 PERF_SOURCE="$PERF_REPO/experiments/inbox-production-install/perf"
 PERF_MIGRATIONS_DIR="$PERF_REPO/supabase/migrations"
@@ -29,7 +30,7 @@ perf_start() {
   export PERF_STACK_ID
   node "$PERF_REPO/scripts/ci/provision-disposable-stack.mjs" \
     --no-baseline-owner \
-    "${local_ports[@]}" \
+    "${local_ports[@]+"${local_ports[@]}"}" \
     --exclude-migrations 20260930020000_inbox_control_foundation.sql \
     --exclude-migrations 20260930020100_inbox_read_companion.sql \
     --exclude-migrations 20260930020200_inbox_backend_operation_reply.sql
@@ -79,8 +80,10 @@ perf_stop() {
   unset PERF_DATABASE_URL PERF_API_URL PERF_SERVICE_ROLE_KEY PERF_DB_CONTAINER E2E_DISPOSABLE_DATABASE E2E_LOCAL_WORKDIR E2E_CI_SUPABASE_DB_URL TEST_SUPABASE_URL TEST_SUPABASE_SERVICE_ROLE_KEY PERF_WORKDIR PERF_STACK_ID PERF_ORG_ID PERF_ACTOR_ID
 }
 perf_exit() {
-  perf_stop
+  local status=0
+  perf_stop || status=$?
   # The lane owns and stops each stack. Prevent the workflow's final step from
   # trying to stop an already stopped stack via the provisioner's GITHUB_ENV.
-  echo 'E2E_LOCAL_WORKDIR=' >> "$GITHUB_ENV"
+  echo 'E2E_LOCAL_WORKDIR=' >> "$GITHUB_ENV" || status=$?
+  return "$status"
 }
