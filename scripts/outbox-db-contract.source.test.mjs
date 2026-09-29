@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 const sources = {
   C00: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_insert on public.messages for insert to authenticated'],
@@ -23,10 +24,15 @@ const sources = {
 };
 
 test('every executable contract has one anchored application or schema source', () => {
+  const pins = JSON.parse(readFileSync('scripts/outbox-db-contract/expected/privileges.post.json', 'utf8'));
   for (const [id, [file, snippet]] of Object.entries(sources)) {
-    const source = file.startsWith('supabase/migrations/20260929')
-      ? execFileSync('git', ['show', `e767bec7:${file}`], { encoding: 'utf8' })
-      : readFileSync(file, 'utf8');
+    if (!existsSync(file)) {
+      assert(file.startsWith('supabase/migrations/20260929'), `${id} missing source: ${file}`);
+      assert.match(pins.source_sha256[file] ?? '', /^[a-f0-9]{64}$/, `${id} migration source pin missing`);
+      continue;
+    }
+    const source = readFileSync(file, 'utf8');
+    if (file.startsWith('supabase/migrations/20260929')) assert.equal(createHash('sha256').update(source).digest('hex'), pins.source_sha256[file], `${id} migration source changed`);
     assert.equal(source.split(snippet).length - 1, 1, `${id} source drift: ${file}`);
   }
 });

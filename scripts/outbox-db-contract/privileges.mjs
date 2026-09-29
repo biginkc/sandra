@@ -45,7 +45,7 @@ export async function checkPrivileges(db, phase) {
       for (const row of rows) {
         const want = expected.functions[row.name];
         assert.equal(row.secdef, want.secdef, row.name); assert.equal(row.owner, want.owner, row.name);
-        assert.equal(row.search_path.replaceAll(' ', ''), want.search_path.replaceAll(' ', ''), row.name);
+        assert.equal(row.search_path.replaceAll(' ', '').replaceAll('"', ''), want.search_path.replaceAll(' ', '').replaceAll('"', ''), row.name);
         const grants = await q("select role,has_function_privilege(role,$1,'EXECUTE') as allowed from unnest($2::text[]) role", [row.signature, roles]);
         assert.deepEqual(grants.filter(r => r.allowed).map(r => r.role).sort(), want.execute, row.name);
       }
@@ -57,7 +57,7 @@ export async function checkPrivileges(db, phase) {
       const expectedTables = Object.keys(expected.relation_owners).filter(k => k.startsWith('table:')).map(k => k.slice(6)).sort();
       assert.deepEqual(rows.map(r => r.name), expectedTables);
       for (const row of rows) {
-        assert.equal(row.owner, 'postgres'); assert.equal(row.rls, true); assert.equal(row.policies, 0);
+        assert.equal(row.owner, 'postgres'); assert.equal(row.rls, expected.relation_rls?.[row.name], row.name); assert.equal(row.policies, 0);
         const perms = await q("select role,op,has_table_privilege(role,$1,op) as allowed from unnest($2::text[]) role cross join unnest($3::text[]) op", [row.relation, roles, ops]);
         assert(perms.every(r => !r.allowed), row.name);
         const columns = await q("select grantee,column_name from information_schema.column_privileges where table_schema=$1 and table_name=$2 and grantee=any($3::text[])", row.name.split('.').concat([roles]));

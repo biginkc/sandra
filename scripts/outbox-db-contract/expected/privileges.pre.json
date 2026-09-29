@@ -3,5 +3,36 @@
     "trg_messages_fill_sms_conversation_id",
     "guard_training_messages",
     "messages_reject_dnc_locked_read"
-  ]
+  ],
+  "base_relacl": {
+    "contacts": [
+      "anon=arwdDxtm/postgres",
+      "authenticated=arwdDxtm/postgres",
+      "postgres=arwdDxtm/postgres",
+      "service_role=arwdDxtm/postgres"
+    ],
+    "lead_events": [
+      "authenticated=r/postgres",
+      "postgres=arwdDxtm/postgres",
+      "service_role=ar/postgres"
+    ],
+    "memberships": [
+      "anon=arwdDxtm/postgres",
+      "authenticated=arwdDxtm/postgres",
+      "postgres=arwdDxtm/postgres",
+      "service_role=arwdDxtm/postgres"
+    ],
+    "messages": [
+      "anon=arwdDxtm/postgres",
+      "authenticated=arwdDxtm/postgres",
+      "postgres=arwdDxtm/postgres",
+      "service_role=arwdDxtm/postgres"
+    ],
+    "properties": [
+      "anon=arwdDxtm/postgres",
+      "authenticated=arwdDxtm/postgres",
+      "postgres=arwdDxtm/postgres",
+      "service_role=arwdDxtm/postgres"
+    ]
+  }
 }
