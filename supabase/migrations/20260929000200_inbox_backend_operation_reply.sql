@@ -195,7 +195,7 @@ END $$;
 
 
 -- Pinned saved_actions_setup: experiments/inbox-saved-actions/setup.sql
--- source_sha256=11219f96df6cc1e44d50135a1a7707d184c53aab0f6dff4e27d307fe32678bb1
+-- source_sha256=bbe17876c87e5192665b43f0cbafadd2668a56904f25d463308218392b5b7b6d
 -- Personal saved-action definitions (DoD#3 backend). Immutable per-version
 -- rows feeding the EXISTING `saved` seam in action-definition.ts
 -- (parseInboxActionIntent's 3rd argument). No picker/builder UI, no
@@ -278,9 +278,7 @@ BEGIN
    unknown_action:=step->>'type';
   ELSIF step->>'type'='review_reply' THEN
    IF has_review_reply OR position<>array_length(types,1) THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';END IF;
-   -- Match ECMAScript String.prototype.trim() exactly. The second argument
-   -- contains only WhiteSpace and LineTerminator code points from that set.
-   reply:=btrim(step->>'text',U&'\0009\000A\000B\000C\000D\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF');
+   reply:=btrim(step->>'text');
    SELECT char_length(reply)+count(*) INTO reply_units
    FROM generate_series(1,char_length(reply)) AS g(pos)
    WHERE get_byte(convert_to(substr(reply,pos,1),'UTF8'),0)>=240;
@@ -1813,9 +1811,6 @@ END $$;
 -- inventory. Fixture-only; install through the reviewed production migration.
 
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
-DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
-END $$;
 CREATE SCHEMA inbox_reply_context AUTHORIZATION postgres;
 REVOKE ALL ON SCHEMA inbox_reply_context FROM PUBLIC,anon,authenticated,service_role;
 CREATE TABLE inbox_reply_context.versions(
@@ -1896,9 +1891,6 @@ REVOKE ALL ON ALL TABLES IN SCHEMA inbox_reply_context FROM PUBLIC,anon,authenti
 -- Private canonical recipient capture. No public API or send permission.
 
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
-DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
-END $$;
 CREATE SCHEMA inbox_reply_preparation AUTHORIZATION postgres;
 REVOKE ALL ON SCHEMA inbox_reply_preparation FROM PUBLIC,anon,authenticated,service_role;
 -- Exact current application normalization (csv/normalize.ts), not a new phone
@@ -2101,9 +2093,6 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_reply_preparation FROM PUBLIC,anon,a
 -- Source map SHA256: 7a7780a583099c0bf302589e23e35595de4f133ee4606fd3dfd52869d306f340
 
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
-DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
-END $$;
 CREATE FUNCTION inbox_reply_preparation.quiet_hours(state text,at_time timestamptz) RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path='' AS $$
  SELECT CASE WHEN zone IS NULL OR at_time IS NULL THEN jsonb_build_object('ok',false,'reason','unknown_state')
  ELSE jsonb_build_object('ok',extract(hour FROM timezone(zone,at_time))>=8 AND extract(hour FROM timezone(zone,at_time))<21,'zone',zone,'local_time',to_char(timezone(zone,at_time),'HH24:MI:SS')) END
@@ -2210,9 +2199,6 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA inbox_reply_preparation FROM PUBLIC,anon,a
 --     and recipient_limit() from canonical state (E4/D1/D5).
 
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
-DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
-END $$;
 CREATE SCHEMA inbox_reply_review AUTHORIZATION postgres;
 REVOKE ALL ON SCHEMA inbox_reply_review FROM PUBLIC,anon,authenticated,service_role;
 CREATE TABLE inbox_reply_review.preparations(
@@ -2421,9 +2407,6 @@ REVOKE ALL ON FUNCTION inbox_reply_review.source_context(uuid)
 -- source_sha256=0711295976fce7ff258f4948a08ed71e49374ccd1a5759034c230c505e3cb263
 -- Owned candidate only: explicit default-closed RPC admission. No send endpoint.
 
-DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
-END $$;
 CREATE TABLE inbox_reply_review.admission(singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),enabled boolean NOT NULL DEFAULT false);
 INSERT INTO inbox_reply_review.admission(singleton) VALUES(true);
 ALTER TABLE inbox_reply_review.admission ENABLE ROW LEVEL SECURITY;
@@ -2518,9 +2501,6 @@ GRANT EXECUTE ON FUNCTION public.inbox_capture_reply_recipients(uuid[]),public.i
 --    provider_reference is the provider's own id, never message content.
 
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
-DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
-END $$;
 
 -- D-12: operations header. NO status column — status is always derived from
 -- attempts by callers (PR-E). Reuses the same immutable_row trigger as every
@@ -3014,9 +2994,6 @@ END $$;
 -- allow through freeze.
 
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
-DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
-END $$;
 
 -- Full claim-ready shape (mirrors inbox_operations.dispatch_outbox,
 -- experiments/inbox-operation-acceptance/setup.sql:60-65, plus the pending-
@@ -3313,9 +3290,6 @@ END $$;
 -- provider_accepted to a terminal state, or leaves it untouched.
 
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
-DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
-END $$;
 
 -- [ARCH] Global-unique on the Sendillo externalId: Sendillo's own message
 -- ids are globally unique, so a callback can be matched by reference alone
@@ -3608,9 +3582,6 @@ END $$;
 -- recover stay inert while admission is closed — identical to the flag
 -- being off entirely.
 
-DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
-END $$;
 
 CREATE FUNCTION public.inbox_accept_reply(preparation_id uuid,idempotency_key uuid) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' SET statement_timeout='15s' AS $$
 DECLARE a jsonb;
@@ -3665,9 +3636,6 @@ GRANT EXECUTE ON FUNCTION public.inbox_accept_reply(uuid,uuid),public.inbox_reco
 -- them directly.
 
 SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='20s';
-DO $$ BEGIN
- IF current_user<>'postgres' OR current_database()<>'postgres' OR NOT EXISTS(SELECT 1 FROM install_fixture.identity WHERE marker='sandra-inbox-http-owned-synthetic-20260917') THEN RAISE EXCEPTION 'Owned HTTP fixture required';END IF;
-END $$;
 
 -- Outbox claim/ack. Byte-identical fencing to
 -- inbox_action_api.claim_dispatch_batch/ack_dispatch
