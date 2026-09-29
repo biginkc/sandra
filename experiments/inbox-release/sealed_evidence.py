@@ -70,6 +70,10 @@ def blob(repo: Path, commit: str, path: str) -> bytes:
     return git(repo, "show", f"{commit}:{path}")
 
 
+def artifact_sha256(repo: Path, commit: str, path: str) -> str:
+    return hashlib.sha256(blob(repo, commit, path)).hexdigest()
+
+
 def check_run_modes(repo: Path, commit: str, directory: str, added_paths: set[str]) -> None:
     """Require every committed run entry to be a regular Git blob."""
     entries = git(repo, "ls-tree", "-r", "-z", commit, "--", directory)
@@ -172,7 +176,7 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
     if normalized_paths != actual_paths:
         raise EvidenceError(f"artifact inventory mismatch: {directory}")
     for relative, expected in artifacts.items():
-        observed = hashlib.sha256(blob(repo, commit, f"{directory}/{relative}")).hexdigest()
+        observed = artifact_sha256(repo, commit, f"{directory}/{relative}")
         if observed != expected:
             raise EvidenceError(f"artifact hash mismatch: {directory}/{relative}")
     if type(manifest.get("exit_status")) is not int:
