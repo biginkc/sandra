@@ -17,7 +17,7 @@ import unittest
 HERE = Path(__file__).resolve().parent
 EXPECTED_COMMIT = "87e0a164294b7740c38b1ca926e3503e3f3ea7eb"
 EXPECTED_GRANT_FIX_SHA256 = "a935905bb86e545684f6414c4cced8d02d659b6fc60604537195b2a776534128"
-EXPECTED_PACKET_SHA256 = "c82750aecab9a2081f6a8ebbbfb1f6d7705c5649de481d8f666e1e2a881518bb"
+EXPECTED_PACKET_SHA256 = "3ac5b47555ef66079fbfc18d297d2ed972056b9f4698ca87e50d92cb5f9ce1f2"
 
 
 def load_module(name: str, path: Path):
@@ -74,13 +74,14 @@ class BackendPackagingTests(unittest.TestCase):
 
     def test_release_gate_rejects_changed_correction_pin(self) -> None:
         packet = (HERE / "generated" / "backend-operation-reply.sql").read_text()
-        for field, value in (("base_commit", "0" * 40), ("sha256", "0" * 64)):
-            with self.subTest(field=field):
-                manifest = copy.deepcopy(self.backend)
-                correction = next(s for s in manifest["sql_sources"] if s["name"] == "operation_domain_apply")["reviewed_correction"]
-                correction[field] = value
-                result = self.gate.verify_backend_source_content(manifest, packet)
-                self.assertEqual(result["status"], "FAIL", result)
+        for name in ("operation_domain_apply", "reply_context"):
+            for field, value in (("base_commit", "0" * 40), ("sha256", "0" * 64)):
+                with self.subTest(name=name, field=field):
+                    manifest = copy.deepcopy(self.backend)
+                    correction = next(s for s in manifest["sql_sources"] if s["name"] == name)["reviewed_correction"]
+                    correction[field] = value
+                    result = self.gate.verify_backend_source_content(manifest, packet)
+                    self.assertEqual(result["status"], "FAIL", result)
 
     def test_acceptance_gate_blocks_unbound_historical_rows(self) -> None:
         result = self.gate.check_acceptance_matrix("HEAD")

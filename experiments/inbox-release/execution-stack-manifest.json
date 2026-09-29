@@ -98,7 +98,7 @@
       "source": "experiments/inbox-operation-preparation/worker-role.sql",
       "sha256": "a686aec664667bf60e2a7507e5fad03508de5bc9d3d49265a3480797d3039948",
       "packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
-      "packet_sha256": "c82750aecab9a2081f6a8ebbbfb1f6d7705c5649de481d8f666e1e2a881518bb",
+      "packet_sha256": "3ac5b47555ef66079fbfc18d297d2ed972056b9f4698ca87e50d92cb5f9ce1f2",
       "must_apply_before": "operation-worker runtime"
     },
     {
@@ -106,7 +106,7 @@
       "source": "experiments/inbox-reply-send-worker/worker-role.sql",
       "sha256": "086f384ecb54a0966e16aa3d007cd767a73e3ba06faa120141c36926858de465",
       "packet": "experiments/inbox-release/generated/backend-operation-reply.sql",
-      "packet_sha256": "c82750aecab9a2081f6a8ebbbfb1f6d7705c5649de481d8f666e1e2a881518bb",
+      "packet_sha256": "3ac5b47555ef66079fbfc18d297d2ed972056b9f4698ca87e50d92cb5f9ce1f2",
       "must_apply_before": "reply-send-worker runtime"
     }
   ],
