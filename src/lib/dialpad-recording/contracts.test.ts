@@ -4,11 +4,16 @@ import {
   classifyDialpadRecordingRpcError,
   DIALPAD_RECORDING_CHUNK_MAX_BYTES,
   DIALPAD_RECORDING_TRACK_MAX_BYTES,
+  DIALPAD_RECORDING_VAD_THRESHOLD_SAMPLES,
   parseDialpadRecordingCapture,
   parseDialpadRecordingClaimResult,
   parseDialpadRecordingConsumeResult,
   parseDialpadRecordingGrantResult,
   parseDialpadRecordingOpenResult,
+  parseDialpadRecordingEofResult,
+  parseDialpadRecordingLifecycle,
+  parseDialpadRecordingSealInputs,
+  parseDialpadRecordingVadResult,
 } from './contracts';
 
 const capture = (over: Record<string, unknown> = {}) => ({
@@ -23,6 +28,7 @@ describe('recording contracts', () => {
   it('pins the storage bounds', () => {
     expect(DIALPAD_RECORDING_CHUNK_MAX_BYTES).toBe(1024 * 1024);
     expect(DIALPAD_RECORDING_TRACK_MAX_BYTES).toBe(512 * 1024 * 1024);
+    expect(DIALPAD_RECORDING_VAD_THRESHOLD_SAMPLES).toBe(4_800_000);
   });
 
   it('classifies database errors by SQLSTATE', () => {
@@ -64,5 +70,32 @@ describe('recording contracts', () => {
       finalPaths: [{ track: 'tab', epoch: 1, finalPath: 'o/c/final/1/tab' }],
     } as never);
     expect(claimed).toMatchObject({ status: 'claimed', attempt: 1, finalPaths: [{ track: 'tab', epoch: 1 }] });
+  });
+
+  it('parses explicit EOF and ordered claim-fenced seal inputs', () => {
+    expect(parseDialpadRecordingEofResult({ status: 'replayed', captureId: 'c', track: 'tab', epoch: 1, seq: 4, sha256: 'a'.repeat(64) })).toMatchObject({ status: 'replayed', seq: 4 });
+    expect(() => parseDialpadRecordingEofResult({ status: 'recorded', captureId: 'c', track: 'tab', epoch: 1, seq: 4, sha256: 'bad' })).toThrow();
+    const result = parseDialpadRecordingSealInputs({
+      status: 'ready', captureId: 'c', claimToken: 't', inputs: [
+        { captureId: 'c', orgId: 'o', track: 'tab', epoch: 1, seq: 0, sizeBytes: 100, sha256: 'a'.repeat(64), storagePath: 'o/c/chunks/1/tab/00000000', isEof: false },
+      ],
+    });
+    expect(result.inputs[0]).toMatchObject({ epoch: 1, seq: 0, isEof: false });
+  });
+
+  it('requires authoritative lifecycle flags and preserves provisional VAD threshold state', () => {
+    const lifecycle = parseDialpadRecordingLifecycle({
+      captureId: 'c', orgId: 'o', repUserId: 'r', intentId: 'i', callActivityId: 'a', providerCallId: 'p',
+      captureStatus: 'open', callState: 'connected', connected: true, ended: false, acceptsLivePcm: true, allowsRetentionDrain: true,
+      closedAt: null, closeReason: null, drainDeadlineAt: '2026-09-29T00:01:00Z',
+      callStatus: { intentId: 'i', state: 'connected', connected: true, propertyId: 'p', expiresAt: '2026-09-29T00:10:00Z', dispatchAuthorizedAt: null, callActivityId: 'a', attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null },
+    });
+    expect(lifecycle.acceptsLivePcm).toBe(true);
+    const vad = parseDialpadRecordingVadResult({
+      status: 'recorded', captureId: 'c', track: 'tab', epoch: 1, batchId: 'b', rangeCount: 1, voicedSamples: '4800000',
+      measurementStatus: 'provisional', highWaterEpoch: 1, highWaterEndSample: '4800000',
+      threshold: { status: 'not_latched', thresholdSamples: '4800000' },
+    });
+    expect(vad).toMatchObject({ voicedSamples: 4_800_000, measurementStatus: 'provisional', threshold: { status: 'not_latched' } });
   });
 });

@@ -13,6 +13,10 @@ import {
   parseDialpadRecordingGrantResult,
   parseDialpadRecordingOpenResult,
   parseDialpadRecordingRegisterResult,
+  parseDialpadRecordingEofResult,
+  parseDialpadRecordingLifecycle,
+  parseDialpadRecordingSealInputs,
+  parseDialpadRecordingVadResult,
 } from "../../src/lib/dialpad-recording/contracts";
 import { requireLoopbackPostgresUrl } from "../../src/lib/testing/loopback-postgres-url";
 
@@ -27,6 +31,7 @@ const foundationSql = readSql("20260929034021_dialpad_cti_foundation.sql");
 const projectionSql = readSql("20260929120000_dialpad_cti_call_projection.sql");
 const dispatchSql = readSql("20260929180000_dialpad_cti_dispatch.sql");
 const recordingSql = readSql("20260929210000_dialpad_recording_foundation.sql");
+const transportSql = readSql("20260929220000_dialpad_recording_transport_contract.sql");
 
 const uuid = () => crypto.randomUUID();
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -297,6 +302,8 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
     await pg.query(dispatchSql);
     await pg.query(recordingSql);
     await pg.query(recordingSql);
+    await pg.query(transportSql);
+    await pg.query(transportSql);
   });
 
   afterAll(async () => {
@@ -334,6 +341,10 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
           "fn_mint_dialpad_recording_ingest_grant",
           "fn_open_dialpad_recording_capture",
           "fn_record_dialpad_recording_chunk",
+          "fn_mark_dialpad_recording_eof",
+          "fn_get_dialpad_recording_lifecycle",
+          "fn_get_dialpad_recording_seal_inputs",
+          "fn_record_dialpad_recording_vad_ranges",
           "fn_register_dialpad_recording_result",
         ].sort(),
       );
@@ -348,7 +359,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
 
     it("gives browser roles no table privilege or policy on any recording table", async () => {
       await openedCapture();
-      for (const table of ["captures", "segments", "chunks", "track_finals", "ingest_grants"]) {
+      for (const table of ["captures", "segments", "chunks", "track_finals", "ingest_grants", "vad_batches", "vad_ranges", "vad_totals", "vad_threshold_latches"]) {
         for (const wrap of [(run: () => Promise<unknown>) => authenticated(repA, run), (run: () => Promise<unknown>) => anonymous(run)]) {
           expect((await failure(() => wrap(() => pg.query(`select * from public.dialpad_recording_${table}`)))).code).toBe("42501");
         }
@@ -384,6 +395,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
     it("re-applies without duplicating the bucket or resetting it public", async () => {
       await pg.query("update storage.buckets set public=true, file_size_limit=1 where id='dialpad-recordings'");
       await pg.query(recordingSql);
+      await pg.query(transportSql);
       const bucket = await pg.query("select public, file_size_limit from storage.buckets where id='dialpad-recordings'");
       expect(bucket.rowCount).toBe(1);
       expect(bucket.rows[0]).toMatchObject({ public: false, file_size_limit: "536870912" });
@@ -1233,5 +1245,94 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
     expect(ledger.rows[0]!.n).toBe(1);
     const segment = await pg.query("select chunk_count, total_bytes from public.dialpad_recording_segments where track='mic'");
     expect(segment.rows[0]).toMatchObject({ chunk_count: 1, total_bytes: "100" });
+  });
+
+  describe("20260929220000 transport contract", () => {
+    beforeEach(async () => {
+      await pg.query("begin");
+    });
+
+    afterEach(async () => {
+      await pg.query("rollback");
+      await pg.query("reset role");
+    });
+
+    it("records explicit EOF once, rejects conflicting replay, and exposes authoritative lifecycle", async () => {
+      const { call, captureId } = await openedCapture();
+      await authorizedEpoch(captureId);
+      const chunkSha = sha("eof-chunk");
+      await chunk(captureId, "tab", 1, 0, { sha: chunkSha });
+      const first = await rpc("fn_mark_dialpad_recording_eof", [orgId, captureId, "tab", 1, 0, chunkSha]);
+      expect(parseDialpadRecordingEofResult(first as never)).toMatchObject({ status: "recorded", seq: 0, sha256: chunkSha });
+      const replay = await rpc("fn_mark_dialpad_recording_eof", [orgId, captureId, "tab", 1, 0, chunkSha]);
+      expect(parseDialpadRecordingEofResult(replay as never)).toMatchObject({ status: "replayed", seq: 0 });
+      expect((await failure(() => rpc("fn_mark_dialpad_recording_eof", [orgId, captureId, "tab", 1, 0, sha("different-eof")]))).code).toBe("40001");
+      expect((await failure(() => chunk(captureId, "tab", 1, 1))).code).toBe("40001");
+
+      const live = parseDialpadRecordingLifecycle(await rpc("fn_get_dialpad_recording_lifecycle", [orgId, captureId]) as never);
+      expect(live).toMatchObject({ captureStatus: "open", callState: "connected", acceptsLivePcm: true, allowsRetentionDrain: true });
+      await endCall(call);
+      const ended = parseDialpadRecordingLifecycle(await rpc("fn_get_dialpad_recording_lifecycle", [orgId, captureId]) as never);
+      expect(ended).toMatchObject({ callState: "ended", connected: true, ended: true, acceptsLivePcm: false, allowsRetentionDrain: true });
+      const retainedSha = sha("terminal-drain");
+      await chunk(captureId, "mic", 1, 0, { sha: retainedSha });
+      expect(parseDialpadRecordingEofResult(await rpc("fn_mark_dialpad_recording_eof", [orgId, captureId, "mic", 1, 0, retainedSha]) as never)).toMatchObject({ status: "recorded", track: "mic" });
+      expect((await failure(() => rpc("fn_get_dialpad_recording_lifecycle", [otherOrgId, captureId]))).code).toBe("P0002");
+    });
+
+    it("returns ordered seal inputs only for the active claim lease", async () => {
+      const { call, captureId } = await openedCapture();
+      await authorizedEpoch(captureId);
+      await fullTrack(captureId, "mic");
+      await fullTrack(captureId, "tab");
+      await endCall(call);
+      const claimResult = await claim("transport-worker", 300);
+      expect(claimResult.status).toBe("claimed");
+      const claimToken = String(claimResult.claimToken);
+      const inputs = parseDialpadRecordingSealInputs(await rpc("fn_get_dialpad_recording_seal_inputs", [captureId, claimToken]) as never);
+      expect(inputs.inputs).toHaveLength(6);
+      expect(inputs.inputs.map((input) => `${input.epoch}:${input.track}:${input.seq}`)).toEqual([
+        "1:tab:0", "1:tab:1", "1:tab:2", "1:mic:0", "1:mic:1", "1:mic:2",
+      ]);
+      expect((await failure(() => rpc("fn_get_dialpad_recording_seal_inputs", [captureId, uuid()]))).code).toBe("42501");
+      expect((await rpc("fn_get_dialpad_recording_seal_inputs", [captureId, claimToken])).inputs).toHaveLength(6);
+      await withoutTriggers("update public.dialpad_recording_captures set lease_expires_at = now() - interval '1 second' where id=$1", [captureId]);
+      expect((await failure(() => rpc("fn_get_dialpad_recording_seal_inputs", [captureId, claimToken]))).code).toBe("42501");
+    });
+
+    it("persists exact VAD ranges, unions overlaps, and latches a strict threshold once", async () => {
+      const { captureId } = await openedCapture();
+      await authorizedEpoch(captureId);
+      const firstBatch = uuid();
+      const exactRanges = JSON.stringify([{ startSample: 0, endSample: 4_800_000, evidenceRef: "vad:exact" }]);
+      const exact = await rpc("fn_record_dialpad_recording_vad_ranges", [orgId, captureId, "tab", 1, firstBatch, exactRanges]);
+      expect(parseDialpadRecordingVadResult(exact as never)).toMatchObject({ status: "recorded", voicedSamples: 4_800_000, measurementStatus: "provisional", threshold: { status: "not_latched" } });
+      expect(parseDialpadRecordingVadResult(await rpc("fn_record_dialpad_recording_vad_ranges", [orgId, captureId, "tab", 1, firstBatch, exactRanges]) as never)).toMatchObject({ status: "replayed", voicedSamples: 4_800_000 });
+
+      const crossingBatch = uuid();
+      const crossingRanges = JSON.stringify([
+        { startSample: 4_800_000, endSample: 4_800_001, evidenceRef: "vad:cross" },
+        { startSample: 4_800_000, endSample: 4_800_001, evidenceRef: "vad:duplicate" },
+        { startSample: 4_800_100, endSample: 4_800_200, evidenceRef: "vad:gap" },
+      ]);
+      const crossed = parseDialpadRecordingVadResult(await rpc("fn_record_dialpad_recording_vad_ranges", [orgId, captureId, "tab", 1, crossingBatch, crossingRanges]) as never);
+      expect(crossed).toMatchObject({ status: "recorded", voicedSamples: 4_800_101, threshold: { status: "latched", crossingTotalSamples: 4_800_001, crossingEpoch: 1 } });
+      expect(parseDialpadRecordingVadResult(await rpc("fn_record_dialpad_recording_vad_ranges", [orgId, captureId, "tab", 1, crossingBatch, crossingRanges]) as never)).toMatchObject({ status: "replayed", threshold: { status: "latched", crossingTotalSamples: 4_800_001 } });
+      expect((await pg.query("select count(*)::int as n from public.dialpad_recording_vad_threshold_latches where capture_id=$1", [captureId])).rows[0]!.n).toBe(1);
+      expect((await pg.query("select measurement_status, provider_window_evidence, finalized_at from public.dialpad_recording_vad_totals where capture_id=$1", [captureId])).rows[0]).toMatchObject({ measurement_status: "provisional", provider_window_evidence: null, finalized_at: null });
+    });
+
+    it("keeps VAD epoch evidence replayable across a consumed restart epoch", async () => {
+      const { captureId } = await openedCapture();
+      await authorizedEpoch(captureId, 1);
+      await authorizedEpoch(captureId, 2);
+      const batch1 = uuid();
+      const batch2 = uuid();
+      await rpc("fn_record_dialpad_recording_vad_ranges", [orgId, captureId, "tab", 1, batch1, JSON.stringify([{ startSample: 0, endSample: 100, evidenceRef: "epoch:1" }])]);
+      const result = parseDialpadRecordingVadResult(await rpc("fn_record_dialpad_recording_vad_ranges", [orgId, captureId, "tab", 2, batch2, JSON.stringify([{ startSample: 0, endSample: 50, evidenceRef: "epoch:2" }])]) as never);
+      expect(result).toMatchObject({ voicedSamples: 150, highWaterEpoch: 2, highWaterEndSample: 50, measurementStatus: "provisional" });
+      const rows = await pg.query("select epoch, start_sample, end_sample from public.dialpad_recording_vad_ranges where capture_id=$1 order by epoch", [captureId]);
+      expect(rows.rows.map((row) => [row.epoch, row.start_sample, row.end_sample])).toEqual([[1, "0", "100"], [2, "0", "50"]]);
+    });
   });
 });
