@@ -140,12 +140,15 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     await page.getByRole("button", { name: /^save$/i }).first().click();
     await waitForSettled(page);
 
-    // Archive via the index page row action
+    // Archive through the overview row's Actions menu and confirmation dialog.
     await page.goto("/sequences");
-    const row = page.locator("tr", { hasText: uniqueName });
+    const row = page.getByTestId("drips-table").getByRole("row").filter({ hasText: uniqueName });
     await expect(row).toBeVisible();
-    page.once("dialog", (d) => void d.accept());
-    await row.getByRole("button", { name: /archive/i }).click();
+    await row.getByRole("button", { name: "Actions" }).click();
+    await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
+    const archiveDialog = page.getByRole("dialog", { name: "Archive this drip?" });
+    await expect(archiveDialog).toBeVisible();
+    await archiveDialog.getByRole("button", { name: "Archive drip" }).click();
 
     // Poll the DB — the server action + router.refresh() aren't instant.
     await expect(async () => {
@@ -155,28 +158,26 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
         .eq("name", uniqueName)
         .single();
       expect(data!.archived_at).not.toBeNull();
-      expect(data!.active).toBe(false);
+      expect(data!.active).toBe(true);
     }).toPass({ timeout: 5_000 });
 
     // UI caught up
-    await page.reload();
-    const archivedSection = page
-      .locator("section")
-      .filter({ hasText: "Archived" });
-    await expect(archivedSection.getByText(uniqueName)).toBeVisible();
+    await page.getByRole("link", { name: "View archived" }).click();
+    await expect(page).toHaveURL(/\/sequences\?archived=1$/);
+    const archivedRow = page.getByTestId("drips-table").getByRole("row").filter({ hasText: uniqueName });
+    await expect(archivedRow).toBeVisible();
 
     // Restore
-    await archivedSection
-      .locator("tr", { hasText: uniqueName })
-      .getByRole("button", { name: /restore/i })
-      .click();
+    await archivedRow.getByRole("button", { name: "Actions" }).click();
+    await page.getByRole("menuitem", { name: "Restore" }).click();
 
     await expect(async () => {
       const { data } = await admin
         .from("sequences")
-        .select("active")
+        .select("archived_at, active")
         .eq("name", uniqueName)
         .single();
+      expect(data!.archived_at).toBeNull();
       expect(data!.active).toBe(true);
     }).toPass({ timeout: 5_000 });
   });

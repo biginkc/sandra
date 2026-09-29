@@ -28,6 +28,7 @@ const SYSTEM_ACTOR = { actorType: "system" } as const;
 export type EnrollmentOutcome =
   | { status: "enrolled"; enrollmentId: string; sequenceLabel: string }
   | { status: "duplicate_active" }
+  | { status: "already_in_drip"; message: string }
   | { status: "no_phone"; message: string }
   | { status: "landline_phone"; message: string }
   | { status: "no_consent"; message: string }
@@ -85,6 +86,31 @@ export async function enrollLead(
       status: "failed",
       message: "Drip and property must belong to the same organization.",
     };
+  }
+
+  // Keep this pre-check for a useful reason. The property-level unique index
+  // enforces the same rule when two requests race past this read.
+  const { data: existing, error: existingErr } = await client
+    .from("sequence_enrollments")
+    .select("sequence_id, current_step_index, sequences(name)")
+    .eq("org_id", prop.org_id)
+    .eq("property_id", params.propertyId)
+    .in("status", ["active", "paused"])
+    .limit(1)
+    .maybeSingle();
+  if (existingErr) return { status: "failed", message: existingErr.message };
+  if (existing?.sequence_id === params.sequenceId) return { status: "duplicate_active" };
+  if (existing) {
+    const { count, error: countErr } = await client
+      .from("sequence_steps")
+      .select("id", { count: "exact", head: true })
+      .eq("sequence_id", existing.sequence_id);
+    if (countErr) return { status: "failed", message: countErr.message };
+    const total = count ?? 0;
+    const name = existing.sequences?.name ?? "the current drip";
+    if (total < 1) return { status: "already_in_drip", message: `Already in ${name}. Stop it or switch.` };
+    const step = Math.min(total, Math.max(1, existing.current_step_index + 1));
+    return { status: "already_in_drip", message: `Already in ${name}, text ${step} of ${total}. Stop it or switch.` };
   }
 
   if (evaluatePause({ type: "status_change", newStatus: prop.status }).shouldPause) {
@@ -170,9 +196,8 @@ export async function enrollLead(
   // Calculate first fire time — delay of step 0 from enrollment moment.
   const nextRunAt = delayToDate(step0.delay_after_previous_minutes, new Date());
 
-  // INSERT — unique partial index prevents a second active/paused enrollment
-  // on the same (sequence, property) pair; catch 23505 and return a friendly
-  // outcome instead of surfacing the raw constraint error.
+  // INSERT — partial unique indexes enforce both the same-sequence and
+  // property-wide live enrollment rules atomically.
   const { data: inserted, error: insertErr } = await client
     .from("sequence_enrollments")
     .insert({
@@ -190,6 +215,30 @@ export async function enrollLead(
 
   if (insertErr) {
     if (insertErr.code === "23505") {
+      if (insertErr.message.includes("idx_enrollments_one_live_per_property")) {
+        const { data: winner, error: winnerErr } = await client
+          .from("sequence_enrollments")
+          .select("sequence_id, current_step_index, sequences(name)")
+          .eq("org_id", prop.org_id)
+          .eq("property_id", params.propertyId)
+          .in("status", ["active", "paused"])
+          .limit(1)
+          .maybeSingle();
+        if (winnerErr) return { status: "failed", message: winnerErr.message };
+        if (winner) {
+          const { count, error: countErr } = await client
+            .from("sequence_steps")
+            .select("id", { count: "exact", head: true })
+            .eq("sequence_id", winner.sequence_id);
+          if (countErr) return { status: "failed", message: countErr.message };
+          const name = winner.sequences?.name ?? "the current drip";
+          const total = count ?? 0;
+          if (total < 1) return { status: "already_in_drip", message: `Already in ${name}. Stop it or switch.` };
+          const step = Math.min(total, Math.max(1, winner.current_step_index + 1));
+          return { status: "already_in_drip", message: `Already in ${name}, text ${step} of ${total}. Stop it or switch.` };
+        }
+        return { status: "already_in_drip", message: "Already in another drip. Stop it or switch." };
+      }
       return { status: "duplicate_active" };
     }
     return { status: "failed", message: insertErr.message };

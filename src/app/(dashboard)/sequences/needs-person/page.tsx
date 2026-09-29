@@ -24,6 +24,6 @@ export default async function NeedsPersonPage({ searchParams }: { searchParams: 
   return <Page>
     <PageHeader breadcrumb={[{ label: "Workspace" }, { label: "Drips", href: "/sequences" }, { label: "Needs a person" }]}
       title="Needs a person" description="Leads that need a human follow-up or a drip." actions={<Link href="/sequences" className="text-sm underline">Back to drips</Link>} />
-    {counts.ok && !error ? <NeedsPersonBoard key={JSON.stringify(pages)} rows={rows} counts={counts.data} pages={pages} /> : <p role="alert" className="text-destructive">Could not load leads: {error?.message}</p>}
+    {counts.ok && !error ? <NeedsPersonBoard key={JSON.stringify(pages)} rows={rows} counts={counts.data} pages={pages} openGroups={params.open} /> : <p role="alert" className="text-destructive">Could not load leads: {error?.message}</p>}
   </Page>;
 }

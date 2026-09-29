@@ -11,8 +11,14 @@ import {
   generateDialpadIngestToken,
   hashDialpadIngestToken,
   mintDialpadRecordingGrant,
+  getDialpadRecordingLifecycle,
+  getDialpadRecordingSealInputs,
+  markDialpadRecordingEof,
   openDialpadRecordingCapture,
   recordDialpadRecordingChunk,
+  recordDialpadRecordingVadRanges,
+  recordDialpadRecordingPcmProgress,
+  getDialpadRecordingVadSnapshot,
   registerDialpadSealResult,
   type DialpadRecordingDb,
 } from './capture';
@@ -35,6 +41,7 @@ function fakeDb(): FakeDb {
   return {
     open: vi.fn(), get: vi.fn(), close: vi.fn(), mintGrant: vi.fn(), consumeGrant: vi.fn(),
     recordChunk: vi.fn(), claimSealWork: vi.fn(), registerResult: vi.fn(),
+    markEof: vi.fn(), getLifecycle: vi.fn(), getSealInputs: vi.fn(), recordVadRanges: vi.fn(), recordPcmProgress: vi.fn(), getVadSnapshot: vi.fn(),
   } as unknown as FakeDb;
 }
 
@@ -148,6 +155,49 @@ describe('worker-side adapters', () => {
     const db = fakeDb();
     db.recordChunk.mockRejectedValue(new DialpadRecordingDbError({ kind: 'conflict', detail: 'chunk_conflict' }, '40001'));
     expect(await recordDialpadRecordingChunk(db, chunkInput)).toMatchObject({ ok: false, code: 'conflict' });
+  });
+
+  it('marks an acknowledged EOF idempotently and validates its fence inputs', async () => {
+    const db = fakeDb();
+    db.markEof.mockResolvedValue({ status: 'replayed', captureId: ID, track: 'tab', epoch: 1, seq: 3, sha256: SHA });
+    expect(await markDialpadRecordingEof(db, { orgId: ACTOR.orgId, captureId: ID, track: 'tab', epoch: 1, eofSeq: 3, eofSha256: SHA })).toMatchObject({ ok: true, status: 'replayed', seq: 3 });
+    expect(await markDialpadRecordingEof(db, { orgId: ACTOR.orgId, captureId: ID, track: 'tab', epoch: 1, eofSeq: 3, eofSha256: 'bad' })).toMatchObject({ ok: false, code: 'invalid_input' });
+    expect(db.markEof).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads lifecycle and claim-fenced seal inputs through worker-only adapters', async () => {
+    const db = fakeDb();
+    db.getLifecycle.mockResolvedValue({
+      captureId: ID, orgId: ACTOR.orgId, repUserId: ACTOR.userId, intentId: ID, callActivityId: ID, providerCallId: 'p',
+      captureStatus: 'open', callState: 'connected', connected: true, ended: false, acceptsLivePcm: true, allowsRetentionDrain: true,
+      closedAt: null, closeReason: null, drainDeadlineAt: null,
+      callStatus: { intentId: ID, state: 'connected', connected: true, propertyId: ID, expiresAt: '2026-09-29T00:10:00Z', dispatchAuthorizedAt: null, callActivityId: ID, attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null },
+    });
+    expect(await getDialpadRecordingLifecycle(db, ACTOR.orgId, ID)).toMatchObject({ ok: true, lifecycle: { acceptsLivePcm: true } });
+    db.getSealInputs.mockResolvedValue({ status: 'ready', captureId: ID, claimToken: CLAIM, inputs: [] });
+    expect(await getDialpadRecordingSealInputs(db, ID, CLAIM)).toMatchObject({ ok: true, inputs: { claimToken: CLAIM, inputs: [] } });
+    expect(await getDialpadRecordingSealInputs(db, ID, 'bad')).toMatchObject({ ok: false, code: 'invalid_input' });
+  });
+
+  it('validates and parses batched PCM continuity through the worker adapter', async () => {
+    const db = fakeDb();
+    const reasons = ['gap', 'reconnect'];
+    db.recordPcmProgress.mockResolvedValue({ status: 'recorded', captureId: ID, track: 'tab', epoch: 1, batchId: CLAIM, processedThroughSample: 640, pcmEofSample: 640, sourceSampleRateHz: 48000, sourceChannels: 1, sourceCodec: 'opus', normalizedSampleRateHz: 16000, normalizedChannels: 1, degradedReasons: reasons });
+    expect(await recordDialpadRecordingPcmProgress(db, { orgId: ACTOR.orgId, captureId: ID, track: 'tab', epoch: 1, batchId: CLAIM, processedThroughSample: 640, pcmEofSample: 640, sourceSampleRateHz: 48000, sourceChannels: 1, sourceCodec: 'opus', degradedReasons: reasons })).toMatchObject({ ok: true, processedThroughSample: 640, pcmEofSample: 640, degradedReasons: reasons });
+    expect(await recordDialpadRecordingPcmProgress(db, { orgId: ACTOR.orgId, captureId: ID, track: 'tab', epoch: 1, batchId: CLAIM, processedThroughSample: 640, pcmEofSample: 641, sourceSampleRateHz: null, sourceChannels: null, sourceCodec: null, degradedReasons: [] })).toMatchObject({ ok: false, code: 'invalid_input' });
+    expect(await recordDialpadRecordingPcmProgress(db, { orgId: ACTOR.orgId, captureId: ID, track: 'tab', epoch: 1, batchId: CLAIM, processedThroughSample: 640, pcmEofSample: null, sourceSampleRateHz: 48000, sourceChannels: null, sourceCodec: 'opus', degradedReasons: [] })).toMatchObject({ ok: false, code: 'invalid_input' });
+    db.getVadSnapshot.mockResolvedValue({ version: 1, captureId: ID, totalSamples: 640, measurementStatus: 'provisional', epoch: 1, epochCreditedThrough: 640, crossing: null, processedPcm: [{ track: 'tab', epoch: 1, processedThroughSample: 640, pcmEofSample: 640, sourceSampleRateHz: 48000, sourceChannels: 1, sourceCodec: 'opus', normalizedSampleRateHz: 16000, normalizedChannels: 1, degradedReasons: reasons }], degradedReasons: reasons });
+    expect(await getDialpadRecordingVadSnapshot(db, ACTOR.orgId, ID)).toMatchObject({ ok: true, snapshot: { totalSamples: 640, processedPcm: [{ processedThroughSample: 640 }] } });
+    expect(db.getVadSnapshot).toHaveBeenCalledWith(ACTOR.orgId, ID);
+  });
+
+  it('records exact VAD ranges and rejects client totals or invalid range shape', async () => {
+    const db = fakeDb();
+    db.recordVadRanges.mockResolvedValue({ status: 'recorded', captureId: ID, track: 'tab', epoch: 1, batchId: CLAIM, rangeCount: 1, voicedSamples: 100, measurementStatus: 'provisional', highWaterEpoch: 1, highWaterEndSample: 100, threshold: { status: 'not_latched', thresholdSamples: 4_800_000 } });
+    const ranges = [{ startSample: 0, endSample: 100, evidenceRef: 'window:1' }];
+    expect(await recordDialpadRecordingVadRanges(db, { orgId: ACTOR.orgId, captureId: ID, track: 'tab', epoch: 1, batchId: CLAIM, ranges })).toMatchObject({ ok: true, voicedSamples: 100, measurementStatus: 'provisional' });
+    expect(await recordDialpadRecordingVadRanges(db, { orgId: ACTOR.orgId, captureId: ID, track: 'tab', epoch: 1, batchId: CLAIM, ranges: [{ startSample: 0, endSample: 0, evidenceRef: 'bad' }] })).toMatchObject({ ok: false, code: 'invalid_input' });
+    expect(db.recordVadRanges).toHaveBeenCalledWith(expect.objectContaining({ ranges }));
   });
 
   it('claims seal work within lease bounds', async () => {

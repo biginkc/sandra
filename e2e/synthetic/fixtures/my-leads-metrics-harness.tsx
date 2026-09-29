@@ -14,8 +14,8 @@ function Harness() {
     <div className="pt-[116px] md:ml-64 md:pt-16">
       <main className="mx-auto flex max-w-[1600px] flex-col gap-6 px-4 py-6 lg:px-8">
         <h1>My Leads</h1>
-        <div ref={expandedRef} data-testid="expanded-metrics"><MyLeadsMetrics kpis={kpis} /></div>
-        <StickyMyLeadsMetrics kpis={kpis} expandedRef={expandedRef} repLabel="Test rep" />
+        <div ref={expandedRef} data-testid="expanded-metrics"><MyLeadsMetrics kpis={kpis} repliedToDrip={2} /></div>
+        <StickyMyLeadsMetrics kpis={kpis} expandedRef={expandedRef} repLabel="Test rep" repliedToDrip={2} />
         <div className="space-y-4">{Array.from({length: 30}, (_, index) => <article key={index} className="h-24 rounded border p-4">Lead {index + 1}</article>)}</div>
       </main>
     </div>

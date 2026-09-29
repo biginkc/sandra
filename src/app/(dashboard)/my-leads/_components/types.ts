@@ -38,6 +38,7 @@ export type MyLeadAssignmentState =
 export type MyLeadFirstCallState = "pending" | "started" | "unavailable"
 
 export type MyLeadQueueRow = {
+  dripReply?: import('@/lib/my-leads/drip-queries').MyLeadDrip | null
   propertyId: string
   queueStage: MyLeadStage
   address: string
@@ -220,6 +221,7 @@ export type AcquisitionCallReferenceOption = {
 
 export type MyLeadsQueueProps = {
   stages: Readonly<Record<MyLeadStage, MyLeadStagePage>>
+  drips?: import('@/lib/my-leads/drip-queries').MyLeadDripSnapshot | null
   kpis: MyLeadsKpis
   search: string
   selectedRepId: string
@@ -344,6 +346,7 @@ export type AcquisitionLifecycleFormPayload =
       mode: "handoff"
       reason: "not_interested" | "needs_nurture"
       recipientUserId: string
+      sequenceId?: string | null
     }
   | {
       propertyId: string

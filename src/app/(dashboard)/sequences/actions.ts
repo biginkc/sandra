@@ -79,7 +79,7 @@ export async function listSequenceNeedsPersonCounts(): Promise<Result<NeedsPerso
     const orgId = await activeOrgId(supabase, user.id);
     if (!orgId) return ok({ finished_no_reply: 0, couldnt_send: 0, needs_sequence: 0 });
     const { data, error } = await supabase.rpc("sequence_needs_person_counts", {
-      p_org: orgId, p_exclude_created_by: process.env.SEQUENCE_CANARY_USER_ID ?? null,
+      p_org: orgId, p_exclude_created_by: process.env.SEQUENCE_CANARY_USER_ID || null,
     });
     if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Drip stats are being prepared." : error.message } };
     const counts = data?.[0];
@@ -99,7 +99,7 @@ export async function listSequenceNeedsPersonPage(bucket: NeedsPersonBucket, pag
     if (!orgId) return ok([]);
     const { data, error } = await supabase.rpc("sequence_needs_person_page", {
       p_org: orgId, p_bucket: bucket, p_offset: (page - 1) * NEEDS_PERSON_PAGE_SIZE,
-      p_limit: NEEDS_PERSON_PAGE_SIZE, p_exclude_created_by: process.env.SEQUENCE_CANARY_USER_ID ?? null,
+      p_limit: NEEDS_PERSON_PAGE_SIZE, p_exclude_created_by: process.env.SEQUENCE_CANARY_USER_ID || null,
     });
     if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Drip stats are being prepared." : error.message } };
     return ok((data ?? []).map((row) => ({
@@ -664,6 +664,7 @@ export async function enrollLeadInSequence(
         return ok({ enrollmentId: outcome.enrollmentId });
       case "duplicate_active":
         return ok({ duplicate: true });
+      case "already_in_drip":
       case "no_phone":
       case "landline_phone":
       case "no_consent":
@@ -788,7 +789,7 @@ export async function changeDripAction(enrollmentId: string, sequenceId: string)
     try {
       const outcome = await enrollLead(supabase, { propertyId: old.property_id, sequenceId, enrolledByUserId: user.id });
       result = { propertyId: old.property_id,
-        status: outcome.status === "enrolled" ? "enrolled" : ["duplicate_active", "no_phone", "landline_phone", "no_consent", "suppressed"].includes(outcome.status) ? "skipped" : "failed",
+        status: outcome.status === "enrolled" ? "enrolled" : ["duplicate_active", "already_in_drip", "no_phone", "landline_phone", "no_consent", "suppressed"].includes(outcome.status) ? "skipped" : "failed",
         reason: outcome.status === "enrolled" ? enrollmentReason(outcome) : `Previous drip stopped. ${enrollmentReason(outcome)}` };
     } catch (error) {
       reportError(error, { tags: { surface: "change_drip_enroll" }, extra: { enrollmentId, sequenceId } });

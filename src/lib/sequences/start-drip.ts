@@ -16,6 +16,7 @@ export function enrollmentReason(outcome: EnrollmentOutcome): string {
   switch (outcome.status) {
     case "enrolled": return "Enrolled";
     case "duplicate_active": return "Already in this drip";
+    case "already_in_drip": return outcome.message;
     case "no_phone": return "Lead has no phone number.";
     case "landline_phone": return "Lead only has a landline.";
     case "no_consent": return "Contact has opted out of SMS.";
@@ -43,7 +44,7 @@ export async function startFollowUpDrip(
       results.push({
         propertyId,
         status: outcome.status === "enrolled" ? "enrolled"
-          : ["duplicate_active", "no_phone", "landline_phone", "no_consent", "suppressed"].includes(outcome.status)
+          : ["duplicate_active", "already_in_drip", "no_phone", "landline_phone", "no_consent", "suppressed"].includes(outcome.status)
             ? "skipped" : "failed",
         reason: enrollmentReason(outcome),
       });
