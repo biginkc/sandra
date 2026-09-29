@@ -83,6 +83,7 @@ type RecordingPanelState = {
   measuredSamples: number | null;
   measurementStatus: 'provisional' | 'partial' | 'finalized' | null;
   crossing: DialpadRecordingBrowserCrossing | null;
+  liveThresholdCrossing: { epoch: number; sample: number } | null;
   finalResult: DialpadRecordingBrowserFinalResult | null;
   hydrated: boolean;
 };
@@ -249,6 +250,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
         measuredSamples: status.status.totalSamples,
         measurementStatus: status.status.measurementStatus,
         crossing: status.status.crossing,
+        liveThresholdCrossing: null,
         finalResult: status.status.finalResult,
         hydrated: true,
       });
@@ -437,7 +439,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
     else if (current?.active) await current.active.dispose();
     else await current?.prepared?.dispose();
     if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) return null;
-    const preparing: RecordingPanelState = { intentId, prepared: null, active: null, captureId: null, session: null, busy: true, message: null, measuredSamples: null, measurementStatus: null, crossing: null, finalResult: null, hydrated: false };
+    const preparing: RecordingPanelState = { intentId, prepared: null, active: null, captureId: null, session: null, busy: true, message: null, measuredSamples: null, measurementStatus: null, crossing: null, liveThresholdCrossing: null, finalResult: null, hydrated: false };
     recordingRef.current = preparing;
     setRecording(preparing);
     const clearOwnedPreparation = () => {
@@ -453,13 +455,13 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
       if (!prepared.startLocal) throw new Error('This browser cannot start local capture before the call.');
       const active = await prepared.startLocal(1);
       if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) { await active.dispose(); await prepared.dispose(); clearOwnedPreparation(); return null; }
-      const ready: RecordingPanelState = { intentId, prepared, active, captureId: null, session: null, busy: false, message, measuredSamples: null, measurementStatus: null, crossing: null, finalResult: null, hydrated: false };
+      const ready: RecordingPanelState = { intentId, prepared, active, captureId: null, session: null, busy: false, message, measuredSamples: null, measurementStatus: null, crossing: null, liveThresholdCrossing: null, finalResult: null, hydrated: false };
       recordingRef.current = ready;
       setRecording(ready);
       return { generation, active };
     } catch (error) {
       if (!mountedRef.current || generation !== recordingGenerationRef.current || (ownerChooserGeneration !== undefined && ownerChooserGeneration !== chooserGenerationRef.current)) { clearOwnedPreparation(); return null; }
-      const failedPreparation: RecordingPanelState = { intentId, prepared: null, active: null, captureId: null, session: null, busy: false, message: error instanceof Error ? error.message : 'Browser capture could not be prepared.', measuredSamples: null, measurementStatus: null, crossing: null, finalResult: null, hydrated: false };
+      const failedPreparation: RecordingPanelState = { intentId, prepared: null, active: null, captureId: null, session: null, busy: false, message: error instanceof Error ? error.message : 'Browser capture could not be prepared.', measuredSamples: null, measurementStatus: null, crossing: null, liveThresholdCrossing: null, finalResult: null, hydrated: false };
       recordingRef.current = failedPreparation;
       setRecording(failedPreparation);
       return { generation, active: null, error: error instanceof Error ? error.message : 'Browser capture could not be prepared.' };
@@ -515,11 +517,9 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
           ...latest,
           measuredSamples: snapshot.totalSamples,
           measurementStatus: snapshot.measurementStatus,
-          crossing: snapshot.threshold.crossed ? {
-            status: 'latched', thresholdSamples: 4_800_000, crossingTotalSamples: snapshot.totalSamples,
-            crossingEpoch: snapshot.threshold.crossingEpoch ?? 0, crossingSample: snapshot.threshold.crossingSample ?? snapshot.totalSamples,
-            crossingStartSample: snapshot.threshold.crossingSample ?? snapshot.totalSamples, crossingEndSample: snapshot.totalSamples,
-          } : latest.crossing,
+          liveThresholdCrossing: snapshot.threshold.crossed && snapshot.threshold.crossingEpoch !== null && snapshot.threshold.crossingSample !== null
+            ? { epoch: snapshot.threshold.crossingEpoch, sample: snapshot.threshold.crossingSample }
+            : null,
         } : latest),
         onFailure: (failure) => setRecording((latest) => isOwned() && latest?.intentId === call.intentId ? { ...latest, prepared: null, active: null, session: null, busy: false, message: failure.message } : latest),
       });
@@ -549,7 +549,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
       const status = await getDialpadRecordingBrowserStatusAction(current.captureId);
       if (!mountedRef.current || generation !== recordingGenerationRef.current) return;
       const message = !closed.ok ? closed.message : !status.ok || !('status' in status) ? status.message : `Recording ${status.status.captureStatus}.`;
-      setRecording({ ...current, prepared: null, active: null, session: null, busy: false, message, measuredSamples: status.ok && 'status' in status ? status.status.totalSamples : current.measuredSamples, measurementStatus: status.ok && 'status' in status ? status.status.measurementStatus : current.measurementStatus, crossing: status.ok && 'status' in status ? status.status.crossing : current.crossing, finalResult: status.ok && 'status' in status ? status.status.finalResult : current.finalResult });
+      setRecording({ ...current, prepared: null, active: null, session: null, busy: false, message, measuredSamples: status.ok && 'status' in status ? status.status.totalSamples : current.measuredSamples, measurementStatus: status.ok && 'status' in status ? status.status.measurementStatus : current.measurementStatus, crossing: status.ok && 'status' in status ? status.status.crossing : current.crossing, liveThresholdCrossing: status.ok && 'status' in status ? null : current.liveThresholdCrossing, finalResult: status.ok && 'status' in status ? status.status.finalResult : current.finalResult });
     } catch (error) {
       if (!mountedRef.current || generation !== recordingGenerationRef.current) return;
       setRecording({ ...current, prepared: null, active: null, busy: false, message: error instanceof Error ? error.message : 'Recording could not finish.' });
@@ -632,7 +632,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
           return;
         }
         const status = result.status;
-        setRecording((latest) => latest?.captureId === current.captureId ? { ...latest, measuredSamples: status.totalSamples, measurementStatus: status.measurementStatus, crossing: status.crossing, finalResult: status.finalResult, message: status.finalResult?.status === 'eligible' ? 'Recording verified: eligible seller speech.' : status.finalResult?.status === 'ineligible' && status.finalResult.reasons.includes('below_threshold') ? 'Recording verified: below the five-minute seller-speech threshold.' : status.finalResult?.status === 'ineligible' ? 'Recording verified: evidence is incomplete.' : status.finalResult?.status === 'unknown' ? 'Recording qualification is unavailable until evidence is accepted.' : `Recording ${status.captureStatus}.` } : latest);
+        setRecording((latest) => latest?.captureId === current.captureId ? { ...latest, measuredSamples: status.totalSamples, measurementStatus: status.measurementStatus, crossing: status.crossing, liveThresholdCrossing: null, finalResult: status.finalResult, message: status.finalResult?.status === 'eligible' ? 'Recording verified: eligible seller speech.' : status.finalResult?.status === 'ineligible' && status.finalResult.reasons.includes('below_threshold') ? 'Recording verified: below the five-minute seller-speech threshold.' : status.finalResult?.status === 'ineligible' ? 'Recording verified: evidence is incomplete.' : status.finalResult?.status === 'unknown' ? 'Recording qualification is unavailable until evidence is accepted.' : `Recording ${status.captureStatus}.` } : latest);
         const finalSettled = status.finalResult !== null && status.finalResult.status !== 'stale';
         if ((status.captureStatus === 'sealed' || status.captureStatus === 'partial' || status.captureStatus === 'failed') && finalSettled) {
           cancelled = true;
@@ -736,7 +736,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
               )}
               {recording?.intentId === call.intentId && recording.message && <span role="status" className="ml-2 text-xs text-muted-foreground">{recording.message}</span>}
               {recording?.intentId === call.intentId && recording.measuredSamples !== null && <span className="ml-2 text-xs text-muted-foreground">{Math.floor(recording.measuredSamples / 16_000)}s measured ({recording.measurementStatus ?? 'provisional'})</span>}
-              {recording?.intentId === call.intentId && recording.crossing && (!recording.finalResult || recording.finalResult.status === 'stale') && <span className="ml-2 text-xs text-muted-foreground">Observed seller speech crossed 300s; final qualification is still being verified.</span>}
+              {recording?.intentId === call.intentId && (recording.crossing || recording.liveThresholdCrossing) && (!recording.finalResult || recording.finalResult.status === 'stale') && <span className="ml-2 text-xs text-muted-foreground">Observed seller speech crossed 300s; final qualification is still being verified.</span>}
               {recording?.intentId === call.intentId && recording.finalResult && <span className="ml-2 text-xs text-muted-foreground">{recording.finalResult.status === 'eligible' ? `Verified seller speech: ${Math.floor((recording.finalResult.eligibleSamples ?? 0) / 16_000)}s.` : recording.finalResult.status === 'ineligible' && recording.finalResult.reasons.includes('below_threshold') ? 'Not eligible: seller speech below 5 minutes.' : recording.finalResult.status === 'ineligible' ? 'Not eligible: evidence incomplete.' : recording.finalResult.status === 'stale' ? 'Verification changed; retrying.' : recording.finalResult.reasons.includes('policy_not_accepted') ? 'Final qualification unavailable: acceptance evidence pending.' : 'Final qualification unavailable: evidence incomplete.'}</span>}
               {recording?.intentId === call.intentId && recording.captureId && !recording.session && <Button type="button" variant="ghost" className="ml-2" onClick={() => setStatusRetryNonce((value) => value + 1)}>Refresh recording status</Button>}
             </li>
