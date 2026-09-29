@@ -61,6 +61,10 @@ test('sealer downgrades incomplete PASS to FAIL', () => {
     const manifest = JSON.parse(readFileSync(path.join(result.runDir, 'manifest.json'), 'utf8'));
     assert.equal(manifest.exit_status, 1);
     assert.equal(manifest.failure, 'INCOMPLETE_PHASE_INVENTORY');
+    assert.deepEqual(Object.keys(manifest.clean_tree).sort(), ['end_excluding_run_dir', 'end_status', 'excluded_path', 'start']);
+    assert.equal(manifest.clean_tree.start, true);
+    assert.equal(manifest.clean_tree.end_excluding_run_dir, true);
+    assert.equal(manifest.clean_tree.excluded_path, `docs/performance/inbox-redesign/evidence/${manifest.tested_sha}/pre-merge/${runId}`);
   } finally { rmSync(result.runDir, { recursive: true, force: true }); }
 });
 
