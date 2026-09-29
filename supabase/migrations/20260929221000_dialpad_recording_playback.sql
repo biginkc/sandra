@@ -126,7 +126,7 @@ begin
       c.provider as source,coalesce(nullif(c.disposition,''),c.outcome,'unknown') as outcome,
       c.direction,c.call_purpose as purpose,c.contact_id,c.property_id,c.phone_e164 as phone,
       c.transcript_status='available' as transcript,c.summary_status='available' as summary,
-      coalesce(proof.recording_status,c.recording_status), c.id as call_id,
+      coalesce(proof.recording_status,c.recording_status) as recording_status, c.id as call_id,
       c.jitter_attempt_id as attempt_key,c.jitter_session_id as scope_key,
       a.id as reference_id,a.recording_url as reference_url
     from public.call_activities c
@@ -225,15 +225,15 @@ begin
       and (coalesce(jsonb_array_length(p_filters->'users'),0)=0 or r.actor_id::text in(select jsonb_array_elements_text(p_filters->'users')))
       and ((p_filters->>'min' is null and p_filters->>'max' is null) or exists(
         select 1 from jsonb_array_elements(r.files) f where f->>'duration' is not null
-          and (p_filters->>'min' is null or (f->>'duration')::integer>=(p_filters->>'min')::integer)
-          and (p_filters->>'max' is null or (f->>'duration')::integer<=(p_filters->>'max')::integer)))
+          and (p_filters->>'min' is null or (f->>'duration')::numeric>=(p_filters->>'min')::numeric)
+          and (p_filters->>'max' is null or (f->>'duration')::numeric<=(p_filters->>'max')::numeric)))
   ), matching as materialized (
     select r.* from filtered r where coalesce(p_filters->>'status','available')='all'
       or (p_filters->>'status'='partial' and r.status='partial')
       or exists(select 1 from jsonb_array_elements(r.files) f
         where f->>'status'=coalesce(p_filters->>'status','available')
-          and (p_filters->>'min' is null or (f->>'duration')::integer>=(p_filters->>'min')::integer)
-          and (p_filters->>'max' is null or (f->>'duration')::integer<=(p_filters->>'max')::integer))
+          and (p_filters->>'min' is null or (f->>'duration')::numeric>=(p_filters->>'min')::numeric)
+          and (p_filters->>'max' is null or (f->>'duration')::numeric<=(p_filters->>'max')::numeric))
       or (jsonb_array_length(r.files)=0 and r.status=coalesce(p_filters->>'status','available')
         and p_filters->>'min' is null and p_filters->>'max' is null)
   ), page as (

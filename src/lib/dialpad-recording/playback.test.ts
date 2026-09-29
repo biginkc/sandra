@@ -13,9 +13,9 @@ const valid = {
   partialReason: 'missing_eof',
   recordingStatus: 'partial',
   captureId: '10000000-0000-4000-8000-000000000010',
-  orgId: '10000000-0000-4000-8000-0000000000bb',
+  orgId: '00000000-0000-0000-0000-000000000bbb',
   bucket: 'dialpad-recordings',
-  storagePath: '10000000-0000-4000-8000-0000000000bb/10000000-0000-4000-8000-000000000010/final/1/tab',
+  storagePath: '00000000-0000-0000-0000-000000000bbb/10000000-0000-4000-8000-000000000010/final/1/tab',
 } as const;
 
 function dbWithRpc(data: unknown) {
