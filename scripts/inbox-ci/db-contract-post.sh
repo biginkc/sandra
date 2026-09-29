@@ -37,6 +37,4 @@ SQL
 done
 bash scripts/inbox-ci/build-operator-indexes.sh
 mutations="${RUNNER_TEMP:-/tmp}/db-contract-post-mutations-${HEAVY_TESTED_SHA}.json"
-db_contract_cleanup
-lane_env=''
 node scripts/outbox-db-contract-mutations.mjs "$mutations" --phase post
