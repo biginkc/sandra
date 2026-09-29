@@ -35,6 +35,7 @@ const dispatchSql = readSql("20260929180000_dialpad_cti_dispatch.sql");
 const recordingSql = readSql("20260929210000_dialpad_recording_foundation.sql");
 const transportSql = readSql("20260929220000_dialpad_recording_transport_contract.sql");
 const playbackSql = readSql("20260929221000_dialpad_recording_playback.sql");
+const browserSessionSql = readSql("20260930000000_dialpad_recording_browser_session.sql");
 
 const uuid = () => crypto.randomUUID();
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -162,7 +163,7 @@ async function seedFixture(): Promise<void> {
   );
   const connection = await service(() =>
     pg.query<{ id: string }>(
-      "insert into public.dialpad_org_connections(org_id,status,cti_client_id,webhook_secret_ref,dialpad_company_id,directory_api_key_ref) values ($1,'active','client_abc','env:DIALPAD_CTI_WEBHOOK_SECRET_A','4040404040404040','env:DIALPAD_CTI_DIRECTORY_KEY_A') returning id",
+      "insert into public.dialpad_org_connections(org_id,status,cti_client_id,webhook_secret_ref,dialpad_company_id,directory_api_key_ref,recording_ingest_endpoint) values ($1,'active','client_abc','env:DIALPAD_CTI_WEBHOOK_SECRET_A','4040404040404040','env:DIALPAD_CTI_DIRECTORY_KEY_A','wss://recording.example.test/dialpad-browser-ingest') returning id",
       [orgId],
     ),
   );
@@ -202,7 +203,7 @@ async function seedSandraLibraryFixture(): Promise<void> {
   );
   const connection = await service(() =>
     pg.query<{ id: string }>(
-      "insert into public.dialpad_org_connections(org_id,status,cti_client_id,webhook_secret_ref,dialpad_company_id,directory_api_key_ref) values ($1,'active',$2,'env:DIALPAD_CTI_WEBHOOK_SECRET_SEARCH','4040404040404041','env:DIALPAD_CTI_DIRECTORY_KEY_SEARCH') on conflict (org_id) do update set status='active',cti_client_id=excluded.cti_client_id,webhook_secret_ref=excluded.webhook_secret_ref,dialpad_company_id=excluded.dialpad_company_id,directory_api_key_ref=excluded.directory_api_key_ref returning id",
+      "insert into public.dialpad_org_connections(org_id,status,cti_client_id,webhook_secret_ref,dialpad_company_id,directory_api_key_ref,recording_ingest_endpoint) values ($1,'active',$2,'env:DIALPAD_CTI_WEBHOOK_SECRET_SEARCH','4040404040404041','env:DIALPAD_CTI_DIRECTORY_KEY_SEARCH','wss://recording.example.test/dialpad-browser-ingest') on conflict (org_id) do update set status='active',cti_client_id=excluded.cti_client_id,webhook_secret_ref=excluded.webhook_secret_ref,dialpad_company_id=excluded.dialpad_company_id,directory_api_key_ref=excluded.directory_api_key_ref,recording_ingest_endpoint=excluded.recording_ingest_endpoint returning id",
       [orgId, `client_search_${uuid()}`],
     ),
   );
@@ -416,6 +417,8 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
     await pg.query(transportSql);
     await pg.query(playbackSql);
     await pg.query(playbackSql);
+    await pg.query(browserSessionSql);
+    await pg.query(browserSessionSql);
   });
 
   afterAll(async () => {
@@ -462,6 +465,8 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
           "fn_register_dialpad_recording_result",
           "fn_dialpad_recording_library_sources",
           "fn_dialpad_recording_playback_file",
+          "fn_get_dialpad_recording_browser_status",
+          "fn_mint_dialpad_recording_next_epoch",
         ].sort(),
       );
       const { captureId } = await openedCapture();
@@ -1686,6 +1691,70 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
       expect(await rpc("fn_dialpad_recording_playback_file", [otherRep, "mine", fileId])).toBeNull();
       expect(await rpc("fn_dialpad_recording_playback_file", [ownerId, "owner", `dpf_${"f".repeat(64)}`])).toBeNull();
       expect((await pg.query("select count(*)::int as n from public.dialpad_recording_track_finals where capture_id=$1", [captureId])).rows[0]!.n).toBe(2);
+    });
+  });
+
+  describe("20260930000000 browser session authority", () => {
+    const sessionOrg = () => orgs[0]!;
+    const sessionRep = () => users[1]!;
+    const sessionRpc = (name: string, args: unknown[]) => {
+      const marks = args.map((_, index) => `$${index + 1}`).join(",");
+      return service(async () => (await pg.query<{ v: Json }>(`select public.${name}(${marks}) as v`, args)).rows[0]!.v);
+    };
+    const sessionMint = (id: string, expected: number, hash = nextHash()) => sessionRpc("fn_mint_dialpad_recording_next_epoch", [sessionOrg(), sessionRep(), id, expected, hash, 60]);
+    const sessionStatus = (id: string) => sessionRpc("fn_get_dialpad_recording_browser_status", [sessionOrg(), sessionRep(), id]);
+
+    beforeEach(async () => {
+      await pg.query("begin");
+      NOW_MS = Date.now();
+      callCounter = 0;
+    });
+
+    afterEach(async () => {
+      await pg.query("rollback");
+      await pg.query("reset role");
+    });
+
+    it("advances a consumed zero-chunk epoch, fences stale callers, and reports the lifecycle watermark", async () => {
+      const baseline = Number((await sessionStatus(captureId)).latestConsumedEpoch);
+      const firstHash = nextHash();
+      const first = await sessionMint(captureId, baseline, firstHash);
+      expect(first).toMatchObject({ status: "minted", epoch: baseline + 1, controlVersion: 2 });
+      expect(await sessionStatus(captureId)).toMatchObject({ latestConsumedEpoch: baseline, captureStatus: "open" });
+      expect(await consume(firstHash)).toMatchObject({ status: "consumed", epoch: baseline + 1 });
+      expect(await sessionStatus(captureId)).toMatchObject({ latestConsumedEpoch: baseline + 1 });
+      expect(await sessionMint(captureId, baseline)).toMatchObject({ status: "denied", reason: "epoch_stale", latestConsumedEpoch: baseline + 1 });
+      const second = await sessionMint(captureId, baseline + 1);
+      expect(second).toMatchObject({ status: "minted", epoch: baseline + 2 });
+    });
+
+    it("does not rotate a live grant, accepts an expired pending grant, and denies the epoch cap", async () => {
+      const baseline = Number((await sessionStatus(captureId)).latestConsumedEpoch);
+      const expiredHash = nextHash();
+      await pg.query(
+        "insert into public.dialpad_recording_ingest_grants(org_id,capture_id,rep_user_id,epoch,token_hash,created_at,expires_at) values ($1,$2,$3,$4,$5,now()-interval '2 minutes',now()-interval '1 minute')",
+        [sessionOrg(), captureId, sessionRep(), baseline + 1, expiredHash],
+      );
+      const replacementHash = nextHash();
+      const replacement = await sessionMint(captureId, baseline, replacementHash);
+      expect(replacement).toMatchObject({ status: "minted", epoch: baseline + 1 });
+      expect(await sessionMint(captureId, baseline)).toMatchObject({ status: "denied", reason: "grant_pending" });
+      expect(await consume(replacementHash)).toMatchObject({ status: "consumed", epoch: baseline + 1 });
+      for (let epoch = baseline + 2; epoch <= 16; epoch += 1) {
+        const hash = nextHash();
+        expect((await sessionMint(captureId, epoch - 1, hash)).status).toBe("minted");
+        expect((await consume(hash)).status).toBe("consumed");
+      }
+      expect(await sessionMint(captureId, 16)).toMatchObject({ status: "denied", reason: "epoch_limit", latestConsumedEpoch: 16 });
+    });
+
+    it("keeps browser mint/status service-only and denies closed capture replay", async () => {
+      const baseline = Number((await sessionStatus(captureId)).latestConsumedEpoch);
+      const authFailure = await failure(() => authenticated(sessionRep(), () => pg.query("select public.fn_get_dialpad_recording_browser_status($1,$2,$3)", [sessionOrg(), sessionRep(), captureId])));
+      expect(authFailure.code).toBe("42501");
+      await sessionRpc("fn_close_dialpad_recording_capture", [sessionOrg(), captureId, null, "service_closed"]);
+      expect(await sessionMint(captureId, 0)).toMatchObject({ status: "denied", reason: "capture_not_open" });
+      expect(await sessionStatus(captureId)).toMatchObject({ captureStatus: "closing", latestConsumedEpoch: baseline });
     });
   });
 });

@@ -12,6 +12,7 @@ const ENDPOINT = 'wss://recording.example.test/dialpad-browser-ingest';
 
 class FakeSocket implements DialpadBrowserSocket {
   readyState = 0;
+  bufferedAmount = 0;
   readonly sent: (string | ArrayBuffer | Uint8Array)[] = [];
   private readonly listeners = new Map<string, Set<(event: DialpadBrowserSocketMessage & DialpadBrowserSocketEvent) => void>>();
 
@@ -35,7 +36,7 @@ function serverHydrate(socket: FakeSocket): void {
     type: 'measurement_snapshot', epoch: 1, revision: 0, totalSamples: 0,
     measurementStatus: 'provisional', threshold: { crossed: false, crossingEpoch: null, crossingSample: null }, degradedReasons: [],
   }));
-  socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, state: 'open', drainDeadlineAt: null }));
+  socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'open', drainDeadlineAt: null }));
 }
 
 function fakeCapture(onStart: (sinks: BrowserCaptureSinks) => void): PreparedDialpadCapture {
@@ -159,7 +160,7 @@ describe('Dialpad browser session', () => {
     await session.stop();
     await expect(started).rejects.toMatchObject({ code: 'interrupted' });
     expect(session.state()).toBe('stopped');
-    expect(disposed).toBe(0);
+    expect(disposed).toBe(1);
     await session.dispose();
     expect(disposed).toBe(1);
   });
@@ -167,5 +168,37 @@ describe('Dialpad browser session', () => {
   it('rejects untrusted endpoint shapes before opening a socket', () => {
     expect(() => createDialpadBrowserSession({ endpoint: 'https://recording.example.test/dialpad-browser-ingest', token: 'token', epoch: 1, capture: fakeCapture(() => {}) })).toThrowError(/trusted WSS/);
     expect(() => createDialpadBrowserSession({ endpoint: 'wss://recording.example.test/dialpad-browser-ingest?token=secret', token: 'token', epoch: 1, capture: fakeCapture(() => {}) })).toThrowError(/trusted WSS/);
+  });
+
+  it('fails closed when the native WebSocket buffer is already over the byte budget', async () => {
+    const socket = new FakeSocket();
+    socket.bufferedAmount = 128;
+    const failures: string[] = [];
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, maxBufferedBytes: 64,
+      onFailure: (error) => failures.push(error.code), capture: fakeCapture(() => {}),
+    });
+    const started = session.start();
+    socket.open();
+    await expect(started).rejects.toMatchObject({ code: 'queue_overflow' });
+    expect(failures).toEqual(['queue_overflow']);
+    expect(session.state()).toBe('failed');
+  });
+
+  it('rejects an EOF acknowledgement that was not requested for the exact range', async () => {
+    const socket = new FakeSocket();
+    const failures: string[] = [];
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket,
+      onFailure: (error) => failures.push(error.code), capture: fakeCapture(() => {}),
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    socket.message(JSON.stringify({ type: 'recording_eof_ack', track: 'tab', epoch: 1, lastSeq: 0 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.state()).toBe('failed');
+    expect(failures).toContain('protocol');
   });
 });

@@ -224,7 +224,7 @@ describe('Dialpad browser server acknowledgements', () => {
     const messages = [
       { type: 'ready', epoch: 1, controlVersion: 2 } as const,
       { type: 'measurement_snapshot', epoch: 1, revision: 4, totalSamples: 4_800_001, measurementStatus: 'provisional', threshold: { crossed: true, crossingEpoch: 1, crossingSample: 4_800_001 }, degradedReasons: ['capture_overflow'] } as const,
-      { type: 'capture_state', epoch: 1, state: 'closing', drainDeadlineAt: '2026-09-29T12:01:00.000Z' } as const,
+      { type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: '2026-09-29T12:01:00.000Z' } as const,
       { type: 'recording_chunk_ack', track: 'tab', epoch: 1, seq: 7, status: 'recorded' } as const,
       { type: 'recording_eof_ack', track: 'mic', epoch: 1, lastSeq: 9_999 } as const,
       { type: 'pcm_eof_drained', track: 'tab', epoch: 1, endSample: 123_456 } as const,

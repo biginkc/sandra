@@ -103,6 +103,9 @@ begin
   if (select count(*) from public.dialpad_recording_ingest_grants where capture_id = p_capture_id) >= 64 then
     return jsonb_build_object('status', 'denied', 'reason', 'grant_limit');
   end if;
+  if v_consumed >= 16 then
+    return jsonb_build_object('status', 'denied', 'reason', 'epoch_limit', 'latestConsumedEpoch', v_consumed);
+  end if;
 
   v_epoch := v_consumed + 1;
   update public.dialpad_recording_ingest_grants set revoked_at = now()

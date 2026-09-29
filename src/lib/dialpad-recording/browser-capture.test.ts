@@ -87,7 +87,10 @@ function realPcmFactory(nodes: PcmWorkletPort[], timeoutMs = 20): NonNullable<Br
       createAudioContext: () => context,
       createObjectURL: () => `blob:${track}`,
       revokeObjectURL: () => undefined,
-      createNode: () => ({ port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode),
+      createNode: () => {
+        queueMicrotask(() => port.onmessage?.({ data: { type: "input-format", inputChannels: 1 } } as MessageEvent));
+        return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode;
+      },
     }, stream, track, epoch, onFrame, onTail, { ...options, timeoutMs, startupTimeoutMs: timeoutMs });
   };
 }

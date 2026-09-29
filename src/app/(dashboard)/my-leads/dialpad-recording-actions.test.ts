@@ -42,7 +42,8 @@ describe('Dialpad recording server actions', () => {
     await getDialpadRecordingBrowserStatusAction('capture-1');
     expect(mocks.openDialpadRecordingCapture).toHaveBeenCalledWith(mocks.db, actor, 'intent-1');
     expect(mocks.closeDialpadRecordingCapture).toHaveBeenCalledWith(mocks.db, actor, 'capture-1');
-    expect(mocks.mintDialpadRecordingGrant).toHaveBeenCalledWith(mocks.db, actor, { captureId: 'capture-1', epoch: 2 });
+    expect(mocks.mintDialpadRecordingGrant).not.toHaveBeenCalled();
+    expect(mocks.mintDialpadRecordingNextEpoch).toHaveBeenNthCalledWith(1, mocks.db, actor, { captureId: 'capture-1', expectedConsumedEpoch: 1 });
     expect(mocks.mintDialpadRecordingNextEpoch).toHaveBeenCalledWith(mocks.db, actor, { captureId: 'capture-1', expectedConsumedEpoch: 0 });
     expect(mocks.getDialpadRecordingBrowserStatus).toHaveBeenCalledWith(mocks.db, actor, 'capture-1');
   });

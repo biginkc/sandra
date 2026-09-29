@@ -49,6 +49,7 @@ export const DIALPAD_RECORDING_BROWSER_MINT_DENIALS = [
   ...DIALPAD_RECORDING_MINT_DENIALS,
   'epoch_stale',
   'grant_pending',
+  'epoch_limit',
   'ingest_not_configured',
 ] as const;
 export type DialpadRecordingBrowserMintDenial = (typeof DIALPAD_RECORDING_BROWSER_MINT_DENIALS)[number];

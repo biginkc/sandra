@@ -236,6 +236,7 @@ const REASON_MESSAGES: Record<string, string> = {
   grant_limit: 'Too many recording connections were requested for this call.',
   epoch_stale: 'This recording session is out of date. Refresh and try again.',
   grant_pending: 'A recording session is already active for this call.',
+  epoch_limit: 'This recording has reached its session limit.',
   ingest_not_configured: 'Recording transport is not configured for this call.',
 };
 

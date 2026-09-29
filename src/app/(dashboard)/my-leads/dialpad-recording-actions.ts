@@ -4,7 +4,6 @@ import { myLeadsViewer } from '@/lib/my-leads/queries';
 import {
   closeDialpadRecordingCapture,
   createSupabaseDialpadRecordingDb,
-  mintDialpadRecordingGrant,
   mintDialpadRecordingNextEpoch,
   getDialpadRecordingBrowserStatus,
   openDialpadRecordingCapture,
@@ -48,7 +47,10 @@ export async function closeDialpadRecordingCaptureAction(captureId: unknown) {
 export async function mintDialpadRecordingGrantAction(input: { captureId: unknown; epoch: unknown }) {
   const s = await session();
   if (!s) return unauthenticated;
-  return mintDialpadRecordingGrant(s.db, s.actor, { captureId: input?.captureId, epoch: input?.epoch });
+  const epoch = typeof input?.epoch === 'number' && Number.isSafeInteger(input.epoch) ? input.epoch : 0;
+  // Compatibility entrypoint: all browser minting now goes through the
+  // capture-locked next-epoch policy, including pending-grant protection.
+  return mintDialpadRecordingNextEpoch(s.db, s.actor, { captureId: input?.captureId, expectedConsumedEpoch: Math.max(0, epoch - 1) });
 }
 
 export async function mintDialpadRecordingNextEpochAction(input: { captureId: unknown; expectedConsumedEpoch: unknown }) {
