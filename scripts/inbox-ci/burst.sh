@@ -5,7 +5,7 @@ perf_preflight
 export PERF_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 export PERF_RUN_ROOT="$(mktemp -d "$RUNNER_TEMP/perf-burst.XXXXXX")"
 verdict=PASS
-trap perf_stop EXIT
+trap perf_exit EXIT
 for attempt in 1 2 3; do
   export PERF_RUN_DIR="$PERF_RUN_ROOT/attempt-$attempt"
   mkdir -p "$PERF_RUN_DIR"
@@ -21,7 +21,7 @@ for attempt in 1 2 3; do
   node "$PERF_SOURCE/apply.js" > "$PERF_RUN_DIR/migration-apply.log"
   perf_indexes
   psql "$PERF_DATABASE_URL" -X -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET log_lock_waits=on;" -c "ALTER SYSTEM SET deadlock_timeout='10ms';" -c "SELECT pg_reload_conf();" > "$PERF_RUN_DIR/log-config.txt"
-  container="supabase_db_$PERF_STACK_ID"
+  container="$PERF_DB_CONTAINER"
   if node "$PERF_SOURCE/burst.js" > "$PERF_RUN_DIR/burst.log" 2>&1; then
     docker logs "$container" > "$PERF_RUN_DIR/pg-server.log" 2>&1
     if python3 "$PERF_SOURCE/analyze.py" "$PERF_RUN_DIR" > "$PERF_RUN_DIR/analysis.txt"; then

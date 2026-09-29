@@ -12,41 +12,31 @@ perf_preflight() {
     test -s "$PERF_MIGRATIONS_DIR/$file" || { echo "Missing required checked-out migration: $file" >&2; return 1; }
     git ls-files --error-unmatch "supabase/migrations/$file" >/dev/null || return 1
   done
-  [[ -n "${RUNNER_TEMP:-}" && "${GITHUB_ACTIONS:-}" == true ]] || { echo 'GitHub runner required' >&2; return 1; }
+  [[ -n "${RUNNER_TEMP:-}" && -n "${GITHUB_ENV:-}" && "${GITHUB_ACTIONS:-}" == true ]] || { echo 'GitHub runner required' >&2; return 1; }
 }
 perf_start() {
-  local attempt="$1" status
+  local attempt="$1" key value
   PERF_STACK_ID="sandra-heavy-perf-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}"
-  PERF_WORKDIR="$(mktemp -d "$RUNNER_TEMP/$PERF_STACK_ID.XXXXXX")"
-  export PERF_STACK_ID PERF_WORKDIR
-  supabase init --workdir "$PERF_WORKDIR" >/dev/null
-  cp "$PERF_REPO/supabase/config.toml" "$PERF_WORKDIR/supabase/config.toml"
-  python3 - "$PERF_WORKDIR/supabase/config.toml" "$PERF_STACK_ID" <<'PY'
-import re,socket,sys
-from pathlib import Path
-path=Path(sys.argv[1]); value=path.read_text()
-def port():
- with socket.socket() as sock:
-  sock.bind(('127.0.0.1',0)); return sock.getsockname()[1]
-api,db=port(),port()
-while db==api: db=port()
-value=re.sub(r'^project_id\s*=.*$',f'project_id = "{sys.argv[2]}"',value,flags=re.M)
-value=re.sub(r'(?m)^(\[api\]\n)port\s*=\s*\d+',rf'\g<1>port = {api}',value)
-value=re.sub(r'(?m)^(\[db\]\n)port\s*=\s*\d+',rf'\g<1>port = {db}',value)
-path.write_text(value)
-PY
-  mkdir -p "$PERF_WORKDIR/supabase/migrations"
-  cp "$PERF_MIGRATIONS_DIR/"*.sql "$PERF_WORKDIR/supabase/migrations/"
-  for file in 20260929000000_inbox_control_foundation.sql 20260929000100_inbox_read_companion.sql 20260929000200_inbox_backend_operation_reply.sql; do
-    rm "$PERF_WORKDIR/supabase/migrations/$file"
-  done
-  supabase start --workdir "$PERF_WORKDIR" > "$PERF_WORKDIR/start.log" 2>&1
-  status="$(supabase status --workdir "$PERF_WORKDIR" --output json)"
-  PERF_DATABASE_URL="$(printf '%s' "$status" | node -e 'let x="";process.stdin.on("data",d=>x+=d).on("end",()=>process.stdout.write(JSON.parse(x).DB_URL))')"
-  PERF_API_URL="$(printf '%s' "$status" | node -e 'let x="";process.stdin.on("data",d=>x+=d).on("end",()=>process.stdout.write(JSON.parse(x).API_URL))')"
-  PERF_SERVICE_ROLE_KEY="$(printf '%s' "$status" | node -e 'let x="";process.stdin.on("data",d=>x+=d).on("end",()=>process.stdout.write(JSON.parse(x).SERVICE_ROLE_KEY))')"
+  export PERF_STACK_ID
+  node "$PERF_REPO/scripts/ci/provision-disposable-stack.mjs" \
+    --no-baseline-owner \
+    --exclude-migrations 20260929000000_inbox_control_foundation.sql \
+    --exclude-migrations 20260929000100_inbox_read_companion.sql \
+    --exclude-migrations 20260929000200_inbox_backend_operation_reply.sql
+  while IFS='=' read -r key value; do
+    case "$key" in
+      E2E_LOCAL_WORKDIR|E2E_DISPOSABLE_DATABASE|TEST_SUPABASE_URL|TEST_SUPABASE_SERVICE_ROLE_KEY|E2E_CI_SUPABASE_DB_URL)
+        export "$key=$value" ;;
+    esac
+  done < "$GITHUB_ENV"
+  PERF_WORKDIR="$E2E_LOCAL_WORKDIR"
+  PERF_DB_CONTAINER="supabase_db_$(sed -n 's/^project_id = "\([^"]*\)"$/\1/p' "$PERF_WORKDIR/supabase/config.toml")"
+  PERF_DATABASE_URL="$E2E_CI_SUPABASE_DB_URL"
+  PERF_API_URL="$TEST_SUPABASE_URL"
+  PERF_SERVICE_ROLE_KEY="$TEST_SUPABASE_SERVICE_ROLE_KEY"
   [[ "$PERF_DATABASE_URL" == postgresql://postgres:*@127.0.0.1:*/postgres && "$PERF_API_URL" == http://127.0.0.1:* ]] || { echo 'Non-local Supabase endpoint' >&2; return 1; }
-  export PERF_DATABASE_URL PERF_API_URL PERF_SERVICE_ROLE_KEY E2E_DISPOSABLE_DATABASE=1
+  [[ "$PERF_DB_CONTAINER" == supabase_db_sandra-heavy-* ]] || { echo 'Unexpected owned database container' >&2; return 1; }
+  export PERF_DATABASE_URL PERF_API_URL PERF_SERVICE_ROLE_KEY PERF_DB_CONTAINER E2E_DISPOSABLE_DATABASE=1
   node "$PERF_SOURCE/init-fixture.mjs"
   PERF_ORG_ID="$(node -p 'JSON.parse(require("fs").readFileSync(process.env.PERF_RUN_DIR+"/identity.json")).org')"
   PERF_ACTOR_ID="$(node -p 'JSON.parse(require("fs").readFileSync(process.env.PERF_RUN_DIR+"/identity.json")).actor')"
@@ -76,5 +66,11 @@ perf_stop() {
   if [[ -n "${PERF_WORKDIR:-}" ]]; then
     supabase stop --workdir "$PERF_WORKDIR" --no-backup >/dev/null 2>&1 || { echo "Failed to stop owned stack $PERF_STACK_ID" >&2; return 1; }
   fi
-  unset PERF_DATABASE_URL PERF_API_URL PERF_SERVICE_ROLE_KEY E2E_DISPOSABLE_DATABASE PERF_WORKDIR PERF_STACK_ID PERF_ORG_ID PERF_ACTOR_ID
+  unset PERF_DATABASE_URL PERF_API_URL PERF_SERVICE_ROLE_KEY PERF_DB_CONTAINER E2E_DISPOSABLE_DATABASE E2E_LOCAL_WORKDIR E2E_CI_SUPABASE_DB_URL TEST_SUPABASE_URL TEST_SUPABASE_SERVICE_ROLE_KEY PERF_WORKDIR PERF_STACK_ID PERF_ORG_ID PERF_ACTOR_ID
+}
+perf_exit() {
+  perf_stop
+  # The lane owns and stops each stack. Prevent the workflow's final step from
+  # trying to stop an already stopped stack via the provisioner's GITHUB_ENV.
+  echo 'E2E_LOCAL_WORKDIR=' >> "$GITHUB_ENV"
 }
