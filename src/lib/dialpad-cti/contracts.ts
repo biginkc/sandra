@@ -200,6 +200,31 @@ export function parseDialpadEventIngestResult(value: Json | null | undefined): D
   };
 }
 
+export interface DialpadEventProcessResult {
+  eventId: string;
+  disposition: DialpadEventDisposition;
+  intentId: string | null;
+  reason: string | null;
+  projected: boolean;
+  callActivityId: string | null;
+  attemptId: string | null;
+  replayed: boolean;
+}
+
+export function parseDialpadEventProcessResult(value: Json | null | undefined): DialpadEventProcessResult {
+  const data = record(value, 'event process');
+  return {
+    eventId: str(data.eventId, 'eventId'),
+    disposition: oneOf(data.disposition, DIALPAD_EVENT_DISPOSITIONS, 'disposition'),
+    intentId: nullableStr(data.intentId, 'intentId'),
+    reason: nullableStr(data.reason, 'reason'),
+    projected: bool(data.projected, 'projected'),
+    callActivityId: nullableStr(data.callActivityId, 'callActivityId'),
+    attemptId: nullableStr(data.attemptId, 'attemptId'),
+    replayed: bool(data.replayed, 'replayed'),
+  };
+}
+
 export function parseDialpadEventMatchResult(value: Json | null | undefined): DialpadEventMatchResult {
   const data = record(value, 'event match');
   return {

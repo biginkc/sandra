@@ -43,9 +43,9 @@ export type Database = {
       }
 
       dialpad_call_events: {
-        Row: { id: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg: string; secret_version: number; received_at: string; disposition: string; disposition_reason: string | null; matched_intent_id: string | null; conflicts_with_event_id: string | null; disposed_at: string | null }
+        Row: { id: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg: string; secret_version: number; received_at: string; disposition: string; disposition_reason: string | null; matched_intent_id: string | null; conflicts_with_event_id: string | null; disposed_at: string | null; projected_at: string | null; process_attempts: number; last_process_error: string | null }
         Insert: { id?: string; org_id: string; connection_id: string; provider_call_id: string; event_state: string; event_timestamp_ms: number; payload: Json; payload_sha256: string; signature_alg?: string; secret_version: number; received_at?: string; disposition?: string; disposition_reason?: string | null; conflicts_with_event_id?: string | null; disposed_at?: string | null }
-        Update: { disposition?: string; disposition_reason?: string | null; matched_intent_id?: string | null; disposed_at?: string | null }
+        Update: { disposition?: string; disposition_reason?: string | null; matched_intent_id?: string | null; disposed_at?: string | null; projected_at?: string | null; process_attempts?: number; last_process_error?: string | null }
         Relationships: []
       }
 
@@ -5706,6 +5706,9 @@ export type Database = {
       fn_cancel_dialpad_call_intent: { Args: { p_org_id: string; p_rep_user_id: string; p_intent_id: string }; Returns: Json }
       fn_ingest_dialpad_call_event: { Args: { p_org_id: string; p_connection_id: string; p_secret_version: number; p_payload: string }; Returns: Json }
       fn_match_dialpad_call_event: { Args: { p_event_id: string }; Returns: Json }
+      fn_process_dialpad_call_event: { Args: { p_event_id: string }; Returns: Json }
+      fn_list_dialpad_call_events_for_processing: { Args: { p_limit?: number }; Returns: string[] }
+      fn_record_dialpad_event_process_failure: { Args: { p_event_id: string; p_sqlstate: string }; Returns: undefined }
       fn_get_rep_sms_context: { Args: { p_property_id: string }; Returns: Json }
       fn_set_rep_sms_enrollment: { Args: { p_org_id: string; p_user_id: string; p_enabled: boolean }; Returns: boolean }
       fn_set_rep_sms_sender: { Args: { p_org_id: string; p_user_id: string; p_provider: string; p_phone: string; p_provider_account_id?: string | null; p_provider_sender_id?: string | null; p_label: string; p_default: boolean; p_active: boolean }; Returns: string }
