@@ -221,7 +221,7 @@ export function InboxThreadList({
                     deliveryError={t.aiLastDeliveryError}
                   />
                 ) : null}
-                {t.dripName ? <DripThreadStatus thread={t} /> : null}
+                {(t.inDrip || t.dripReplied) && t.dripName ? <DripThreadStatus thread={t} /> : null}
                 {t.propertyAddress ? (
                   <span className="min-w-0 truncate text-[11px] italic text-[#78716c]">
                     {t.propertyAddress}

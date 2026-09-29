@@ -37,6 +37,7 @@ export type Thread = {
   dripStep: number | null;
   dripStepsTotal: number | null;
   dripReplied: boolean;
+  inDrip: boolean;
   /** Pending, conversation-scoped disposition decision made by Sandra AI.
    *  This is separate from the already-applied property outcome. */
   aiDispositionReview: AiDispositionReview | null;
@@ -418,6 +419,7 @@ export async function listThreads(
       dripStep: null,
       dripStepsTotal: null,
       dripReplied: false,
+      inDrip: false,
       aiDispositionReview: null,
       isDncLocked: p?.is_dnc_locked ?? false,
       assigneeId: p?.assigned_user_id ?? null,
@@ -879,6 +881,7 @@ function mapThreadSnapshot(
       dripStep: row.drip_step ?? null,
       dripStepsTotal: row.drip_steps_total ?? null,
       dripReplied: row.drip_replied ?? false,
+      inDrip: row.in_drip ?? false,
       aiDispositionReview: mapAiDispositionReview(row),
       isDncLocked: row.is_dnc_locked,
       assigneeId: row.assignee_id,

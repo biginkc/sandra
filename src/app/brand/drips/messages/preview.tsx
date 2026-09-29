@@ -11,7 +11,7 @@ import { InboxThreadList } from "@/app/(dashboard)/messages/inbox-thread-list";
 import { brandCantStartDetail, brandDetail, brandThread, brandTimestamp } from "./_fixture";
 
 export function DripMessagesPreview({ cantStart = false }: { cantStart?: boolean }) {
-  const thread = cantStart ? { ...brandThread, dripName: "Current seller check-in", dripReplied: false } : brandThread;
+  const thread = cantStart ? { ...brandThread, dripName: "Current seller check-in", dripReplied: false, inDrip: true } : brandThread;
   return <div className="flex h-screen min-h-[900px] bg-[#f5f5f4]" data-testid="drips-messages-preview">
     <aside className="nav-field flex w-48 shrink-0 flex-col" aria-label="Preview navigation">
       <div className="mb-4 flex justify-center px-5 pt-5 pb-3"><Image src="/brand/sandra-logo-home.svg" alt="Sandra" width={112} height={114} /></div>
