@@ -24,6 +24,8 @@ describe("BulkStartDripDialog", () => {
     expect(choice).toHaveTextContent("First text: Monday at 9 AM");
     await user.click(choice);
     await waitFor(() => expect(screen.getByText(/1 started/)).toBeVisible());
+    expect(screen.getByRole("dialog")).toHaveClass("max-h-[calc(100dvh-2rem)]", "overflow-hidden");
+    expect(screen.getByLabelText("Drip result details")).toHaveClass("min-h-0", "overflow-y-auto");
     expect(screen.getByText("2 skipped: Already in this drip")).toBeVisible();
     expect(screen.getByText("2 Main")).toBeInTheDocument();
     expect(screen.getByText("3 Main")).toBeInTheDocument();
