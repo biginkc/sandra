@@ -29,7 +29,8 @@ from transaction_envelope import normalize
 # different identity and must not be accepted by this packet.
 RELEASE_DATABASE = "postgres"
 RELEASE_MARKER = "sandra-inbox-http-owned-synthetic-20260917"
-SOURCE_COMMIT = "a18092714821f3805923007a885da4327b596a7e"  # runtime routing and generation guard review fixes
+SOURCE_COMMIT = "a18092714821f3805923007a885da4327b596a7e"  # runtime guards over the trim-parity P3 source snapshot
+GRANT_FIX_COMMIT = "0b57b46e438689c2086488ab0f68b42c221bf162"  # reviewed migration source correction
 
 SQL_SOURCES = [
     ("operation_foundation", "experiments/inbox-operation-acceptance/setup.sql"),
@@ -232,7 +233,24 @@ def main() -> int:
             body = remove_recovery_admission(body)
         source_hash = hashlib.sha256(raw_bytes).hexdigest()
         transformed_hash = hashlib.sha256(body.encode()).hexdigest()
-        source_entries.append({"name": name, "kind": "sql", "path": path, "sha256": source_hash, "bytes": len(raw_bytes), "transformed_sha256": transformed_hash})
+        entry = {"name": name, "kind": "sql", "path": path, "sha256": source_hash, "bytes": len(raw_bytes), "transformed_sha256": transformed_hash}
+        if name == "operation_domain_apply":
+            corrected = git_show(repo, GRANT_FIX_COMMIT, path)
+            corrected_body, _ = transform_sql(corrected.decode(), path)
+            # The reviewed SQL has one extra blank line before the first REVOKE.
+            corrected_body = corrected_body.replace(
+                "END $$;\n\nREVOKE ALL ON FUNCTION inbox_operation_domain.apply_promotion_step",
+                "END $$;\nREVOKE ALL ON FUNCTION inbox_operation_domain.apply_promotion_step",
+                1,
+            )
+            if corrected_body != body:
+                raise RuntimeError("Reviewed grant correction differs from assembled operation-domain SQL")
+            entry["reviewed_correction"] = {
+                "source_commit": GRANT_FIX_COMMIT,
+                "sha256": hashlib.sha256(corrected).hexdigest(),
+                "bytes": len(corrected),
+            }
+        source_entries.append(entry)
         sql_parts.append(f"-- Pinned {name}: {path}\n-- source_sha256={source_hash}\n{body}\n")
 
     runtime_entries = []
