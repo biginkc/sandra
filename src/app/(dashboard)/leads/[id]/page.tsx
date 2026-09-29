@@ -60,7 +60,7 @@ import { CassWidget } from "./cass-widget";
 import { DeleteLeadButton } from "./delete-lead-button";
 import { InlineReply } from "./inline-reply";
 import { LeadAssigneeWidget } from "./assignee-widget";
-import { EnrollInSequenceWidget } from "./enroll-widget";
+import { DripCard } from "./drip-card";
 import { LeadMotivationWidget } from "./motivation-widget";
 import { LeadStatusWidget } from "./status-widget";
 import type { CallActivityRollupRow } from "./lead-call-summary";
@@ -911,6 +911,7 @@ export default async function LeadDetailPage({
           </div>
 
           <aside className="min-w-0 space-y-3" aria-label="Lead dossier">
+            <fieldset disabled={training} inert={training || undefined} className="contents"><DripCard propertyId={lead.id} /></fieldset>
             <LeadFilesCard
               files={esign.files}
               loadError={esign.filesError}
@@ -1037,8 +1038,6 @@ export default async function LeadDetailPage({
                     cassStatus={lead.cass_status}
                   /></fieldset>
                 </div>
-                <div className="bg-border/60 h-px" />
-                <fieldset disabled={training} inert={training || undefined} className="contents"><EnrollInSequenceWidget propertyId={lead.id} /></fieldset>
               </div>
             </Section>
 

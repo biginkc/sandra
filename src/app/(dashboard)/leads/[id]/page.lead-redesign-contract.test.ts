@@ -148,7 +148,7 @@ describe("Lead Detail v2 integration contract", () => {
       "SkipTraceToggle",
       "SkipTraceButton",
       "CassWidget",
-      "EnrollInSequenceWidget",
+      "DripCard",
       "DeleteLeadButton",
       'data-testid="zillow-link-header"',
       'data-testid="zillow-link-panel"',
