@@ -1,6 +1,7 @@
 "use client";
 
 import { formatDistance } from "date-fns/formatDistance";
+import { Droplet } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -220,6 +221,7 @@ export function InboxThreadList({
                     deliveryError={t.aiLastDeliveryError}
                   />
                 ) : null}
+                {t.dripName ? <DripThreadStatus thread={t} /> : null}
                 {t.propertyAddress ? (
                   <span className="min-w-0 truncate text-[11px] italic text-[#78716c]">
                     {t.propertyAddress}
@@ -276,6 +278,23 @@ export function InboxThreadList({
         })}
       </div>
     </div>
+  );
+}
+
+function DripThreadStatus({ thread }: { thread: Thread }) {
+  const label = thread.dripReplied
+    ? "Replied to drip"
+    : thread.lastMessageDirection === "outbound"
+      ? "Drip text sent"
+      : "In a drip";
+  const tone = thread.dripReplied ? "bg-amber-500" : label === "Drip text sent" ? "bg-blue-500" : "bg-teal-500";
+  return (
+    <span role="img" aria-label={label} title={`${label} · ${thread.dripName}`}
+      data-testid={`inbox-thread-${thread.threadId}-drip-status`}
+      className="relative inline-flex h-5 w-5 shrink-0 items-center justify-center text-teal-700">
+      <Droplet aria-hidden="true" className="h-4 w-4" />
+      <span aria-hidden="true" className={`absolute -right-0.5 -bottom-0.5 h-1.5 w-1.5 rounded-full ${tone}`} />
+    </span>
   );
 }
 

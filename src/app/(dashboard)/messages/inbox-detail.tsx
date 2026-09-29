@@ -7,7 +7,9 @@ import {
   ExternalLinkIcon,
   MoreHorizontalIcon,
   PhoneIcon,
+  Droplet,
 } from "lucide-react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 
@@ -15,7 +17,7 @@ import { toast } from "sonner";
 
 import { BookAppointmentPopover } from "@/components/appointments/book-appointment-popover";
 import { StartDripPicker, type PickResult } from "@/components/sequences/start-drip-picker";
-import { startDripForLeads } from "@/app/(dashboard)/sequences/actions";
+import { changeDripAction, startDripForLeads } from "@/app/(dashboard)/sequences/actions";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -64,6 +66,8 @@ type Props = {
   onRevalidate?: () => void;
   onReplySent?: (messageId: string, threadId: string) => void;
   revalidationPending?: boolean;
+  /** Stable public brand fixture only. */
+  previewFailedStart?: { reason: string; sequenceId: string; saved: boolean };
 };
 
 const DISPO_LABELS: Record<string, string> = {
@@ -115,6 +119,9 @@ function DispoBar({
   propertyStatus,
   currentUserId,
   onDispositionChanged,
+  activeDripEnrollmentId,
+  activeDripSequenceId,
+  initialFailedStart,
 }: {
   propertyId: string;
   contactId: string;
@@ -123,11 +130,16 @@ function DispoBar({
   propertyStatus: string | null;
   currentUserId: string | null;
   onDispositionChanged?: () => void;
+  activeDripEnrollmentId?: string | null;
+  activeDripSequenceId?: string | null;
+  initialFailedStart?: { reason: string; sequenceId: string; saved: boolean } | null;
 }) {
   const router = useRouter();
   const [dispo, setDispo] = useState<string | null>(initialDispo);
   const [wasMovedToLead, setWasMovedToLead] = useState(false);
   const [pending, startTransition] = useTransition();
+  const [failedStart, setFailedStart] = useState<{ reason: string; sequenceId: string; saved: boolean } | null>(initialFailedStart ?? null);
+  const [switching, setSwitching] = useState(false);
   const isLead = propertyStatus !== "prospect" || wasMovedToLead;
 
   function apply(newDispo: OutreachDispo) {
@@ -149,6 +161,15 @@ function DispoBar({
   }
 
   async function chooseDrip(sequenceId: string, afterSavedOutcome = false): Promise<PickResult> {
+    if (activeDripEnrollmentId) {
+      if (!afterSavedOutcome) {
+        const saved = await setOutreachDispo(propertyId, "needs_sequence");
+        if (!saved.ok) return { status: "failed", reason: saved.error, saved: false };
+        setDispo("needs_sequence");
+        onDispositionChanged?.();
+      }
+      return { status: "skipped", reason: sequenceId === activeDripSequenceId ? "Already in this drip" : "Already in a drip", saved: true };
+    }
     if (afterSavedOutcome) {
       const result = await startDripForLeads(sequenceId, [propertyId]);
       if (!result.ok) return { status: "failed", reason: result.error.message, saved: false };
@@ -160,6 +181,22 @@ function DispoBar({
     setDispo("needs_sequence");
     onDispositionChanged?.();
     return result.enrollment ?? { status: "failed", reason: "Could not enroll this lead." };
+  }
+
+  async function switchDrip() {
+    if (!activeDripEnrollmentId || !failedStart) return;
+    setSwitching(true);
+    try {
+      const result = await changeDripAction(activeDripEnrollmentId, failedStart.sequenceId);
+      if (!result.ok) { setFailedStart({ ...failedStart, reason: result.error.message }); return; }
+      if (result.data.status !== "enrolled") { setFailedStart({ ...failedStart, reason: result.data.reason }); return; }
+      setFailedStart(null);
+      onDispositionChanged?.();
+      toast.success("Switched drip");
+      router.refresh();
+    } catch {
+      setFailedStart({ ...failedStart, reason: "Could not switch drips. Open the lead to review its current drip." });
+    } finally { setSwitching(false); }
   }
 
   async function leaveToOwner() {
@@ -210,7 +247,8 @@ function DispoBar({
       >
         Not interested
       </button>
-      {dispo === "not_interested" && <StartDripPicker triggerLabel="Also start a drip" onChoose={(id) => chooseDrip(id, true)} disabled={pending} />}
+      {dispo === "not_interested" && <StartDripPicker triggerLabel="Also start a drip" onChoose={(id) => chooseDrip(id, true)} disabled={pending}
+        onResult={(result, sequenceId) => setFailedStart(result.status === "enrolled" ? null : { reason: result.reason, sequenceId, saved: result.saved !== false })} />}
 
       <button
         onClick={() => apply("nurture")}
@@ -238,8 +276,17 @@ function DispoBar({
       </button>
 
       <div data-testid="dispo-needs-sequence">
-        <StartDripPicker triggerLabel="Needs drip" onChoose={chooseDrip} onLeave={leaveToOwner} disabled={pending} />
+        <StartDripPicker triggerLabel="Needs drip" onChoose={chooseDrip} onLeave={leaveToOwner} disabled={pending}
+          onResult={(result, sequenceId) => setFailedStart(result.status === "enrolled" ? null : { reason: result.reason, sequenceId, saved: result.saved !== false })} />
       </div>
+      {failedStart ? <div className="w-full rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-stone-800" role="alert" data-testid="drip-cant-start">
+        <p className="font-bold">Can&apos;t start this drip</p>
+        <p className="mt-1">{failedStart.saved ? "The outcome was saved. " : ""}{failedStart.reason}</p>
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          {activeDripEnrollmentId && failedStart.sequenceId !== activeDripSequenceId && /already in/i.test(failedStart.reason) ? <button type="button" disabled={switching} onClick={() => void switchDrip()} className="font-semibold text-teal-800 underline">Switch to this drip</button> : null}
+          <Link href={`/leads/${propertyId}`} className="font-semibold text-teal-800 underline">Open lead</Link>
+        </div>
+      </div> : null}
 
       <button
         onClick={moveToLead}
@@ -409,6 +456,7 @@ export function InboxDetail({
   onRevalidate,
   onReplySent,
   revalidationPending = false,
+  previewFailedStart,
 }: Props) {
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = nowMs ?? fallbackNowMs;
@@ -701,6 +749,7 @@ export function InboxDetail({
                   status={data.propertyStatus}
                   historical={isPermanentlyLocked}
                 />
+                {data.drip?.replied ? <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800">Replied to drip</span> : null}
               </div>
               <p className="text-[13px] text-[#78716c] flex items-center gap-2 min-w-0">
                 {data.propertyAddress ? (
@@ -715,6 +764,12 @@ export function InboxDetail({
                   Assigned: {assignedLabel}
                 </span>
               </p>
+              {data.drip ? <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-teal-800" data-testid="inbox-detail-drip-line">
+                <Droplet aria-hidden="true" className="h-3.5 w-3.5" />
+                {data.drip.replied
+                  ? `Was in ${data.drip.name} · stopped ${data.drip.stoppedAt ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(data.drip.stoppedAt)) + " " : ""}when they replied`
+                  : `In ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`}
+              </p> : null}
               <p
                 className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] text-[#78716c]"
                 title={[
@@ -905,6 +960,8 @@ export function InboxDetail({
           onLiveMessage={handleLiveMessage}
           scrollContainerRef={scrollContainerRef}
           nowMs={renderNowMs}
+          dripMessageLabels={data.dripMessageLabels}
+          dripReplyMessageIds={data.dripReplyMessageIds}
         />
       </div>
       {data.propertyId && !isPermanentlyLocked ? (
@@ -919,6 +976,9 @@ export function InboxDetail({
                 initialDispo={data.outreachDispo}
                 propertyStatus={data.propertyStatus}
                 currentUserId={currentUserId}
+                activeDripEnrollmentId={data.drip && !data.drip.replied ? data.drip.enrollmentId : null}
+                activeDripSequenceId={data.drip && !data.drip.replied ? data.drip.sequenceId : null}
+                initialFailedStart={previewFailedStart}
                 onDispositionChanged={
                   data.aiDispositionReview
                     ? refreshAfterReviewResolution

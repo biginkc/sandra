@@ -1,5 +1,7 @@
 "use client";
 
+import { Droplet } from "lucide-react";
+
 import { InboxSearch } from "./inbox-search";
 
 export type InboxFilter =
@@ -155,6 +157,16 @@ export function InboxFilters({
         onClick={() => onFilterChange("dispo")}
         testId="filter-dispo"
       />
+      <FilterChip
+        label="Replied to drip"
+        icon="droplet"
+        active={displayedActive === "drip_replied"}
+        pending={pendingFilter === "drip_replied"}
+        interactionDisabled={controlsPending}
+        count={filterCounts.drip_replied}
+        onClick={() => onFilterChange("drip_replied")}
+        testId="filter-drip-replied"
+      />
       {showAssignmentChips && (
         <FilterChip
           label="No owner"
@@ -307,7 +319,7 @@ function FilterChip({
   testId,
 }: {
   label: string;
-  icon?: "mascot";
+  icon?: "mascot" | "droplet";
   active: boolean;
   pending?: boolean;
   interactionDisabled: boolean;
@@ -353,6 +365,7 @@ function FilterChip({
           }`}
         />
       ) : null}
+      {icon === "droplet" ? <Droplet aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : null}
       <span>{label}</span>
       {showCount ? (
         <span

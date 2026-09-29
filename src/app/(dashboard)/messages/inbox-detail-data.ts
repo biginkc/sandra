@@ -57,6 +57,17 @@ export type InboxDetail = {
   smsSafetyReadFailed: boolean;
   /** The only field that makes the entire property permanently read-only. */
   isDncLocked: boolean;
+  drip: {
+    enrollmentId: string;
+    sequenceId: string;
+    name: string;
+    step: number;
+    total: number;
+    replied: boolean;
+    stoppedAt: string | null;
+  } | null;
+  dripMessageLabels: Record<string, string>;
+  dripReplyMessageIds: string[];
   initialMessages: Database["public"]["Tables"]["messages"]["Row"][];
 };
 
@@ -212,6 +223,8 @@ export async function fetchInboxDetail(
       : false;
   }
 
+  const dripContext = await loadMessageDripContext(supabase, conversationOrgId, propertyId, contactId, messages);
+
   return {
     threadId: conversationId,
     conversationId,
@@ -253,6 +266,85 @@ export async function fetchInboxDetail(
     phoneSuppressed,
     smsSafetyReadFailed: smsConsentState === null || phoneSuppressed === null,
     isDncLocked: p?.is_dnc_locked ?? false,
+    ...dripContext,
     initialMessages: messages,
+  };
+}
+
+async function loadMessageDripContext(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  propertyId: string | null,
+  contactId: string,
+  messages: Database["public"]["Tables"]["messages"]["Row"][],
+): Promise<Pick<InboxDetail, "drip" | "dripMessageLabels" | "dripReplyMessageIds">> {
+  const outboundIds = messages.filter((m) => m.direction === "outbound").map((m) => m.id);
+  const [enrollmentResult, runsResult] = await Promise.all([
+    propertyId
+      ? supabase.from("sequence_enrollments")
+          .select("id, sequence_id, status, pause_reason, current_step_index, enrolled_at, updated_at")
+          .eq("org_id", orgId).eq("property_id", propertyId).eq("contact_id", contactId)
+          .in("status", ["active", "paused"])
+          .order("enrolled_at", { ascending: false }).limit(1).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+    outboundIds.length
+      ? supabase.from("sequence_step_runs")
+          .select("message_id, sequence_steps!inner(step_index, sequence_id), sequence_enrollments!inner(sequence_id, org_id)")
+          .in("message_id", outboundIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (enrollmentResult.error) throw new Error(`fetchInboxDetail drip: ${enrollmentResult.error.message}`);
+  if (runsResult.error) throw new Error(`fetchInboxDetail drip messages: ${runsResult.error.message}`);
+  const enrollment = enrollmentResult.data;
+  const runs = runsResult.data ?? [];
+  const sequenceIds = [...new Set([
+    ...(enrollment ? [enrollment.sequence_id] : []),
+    ...runs.filter((run) => run.sequence_enrollments?.org_id === orgId)
+      .map((run) => run.sequence_steps.sequence_id),
+  ])];
+  const [sequencesResult, stepsResult] = await Promise.all([
+    sequenceIds.length
+      ? supabase.from("sequences").select("id, name").eq("org_id", orgId).in("id", sequenceIds)
+      : Promise.resolve({ data: [], error: null }),
+    sequenceIds.length
+      ? supabase.from("sequence_steps").select("id, sequence_id").in("sequence_id", sequenceIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (sequencesResult.error) throw new Error(`fetchInboxDetail drip names: ${sequencesResult.error.message}`);
+  if (stepsResult.error) throw new Error(`fetchInboxDetail drip count: ${stepsResult.error.message}`);
+  const names = new Map((sequencesResult.data ?? []).map((row) => [row.id, row.name]));
+  const totals = new Map<string, number>();
+  for (const step of stepsResult.data ?? []) totals.set(step.sequence_id, (totals.get(step.sequence_id) ?? 0) + 1);
+  const dripMessageLabels: Record<string, string> = {};
+  for (const run of runs) {
+    if (!run.message_id || run.sequence_enrollments?.org_id !== orgId) continue;
+    const sequenceId = run.sequence_steps.sequence_id;
+    const name = names.get(sequenceId);
+    if (!name) continue;
+    dripMessageLabels[run.message_id] = `Drip · ${name} · text ${run.sequence_steps.step_index + 1} of ${totals.get(sequenceId) ?? run.sequence_steps.step_index + 1}`;
+  }
+  const pausedForReply = enrollment?.status === "paused" && enrollment.pause_reason === "inbound_reply";
+  const lastDripText = enrollment
+    ? messages.filter((m) => Boolean(dripMessageLabels[m.id]) && m.created_at >= enrollment.enrolled_at).at(-1)
+    : null;
+  const reply = enrollment && pausedForReply
+    ? messages.find((m) => m.direction === "inbound" && m.created_at > (lastDripText?.created_at ?? enrollment.enrolled_at)) ?? null
+    : null;
+  const repRepliedAfter = reply && messages.some((m) => m.direction === "outbound" && !dripMessageLabels[m.id] && m.created_at > reply.created_at);
+  const replied = pausedForReply && !repRepliedAfter;
+  const dripReplyMessageIds = reply && replied ? [reply.id] : [];
+  const name = enrollment ? names.get(enrollment.sequence_id) : null;
+  return {
+    drip: enrollment && name ? {
+      enrollmentId: enrollment.id,
+      sequenceId: enrollment.sequence_id,
+      name,
+      step: Math.min(enrollment.current_step_index + 1, totals.get(enrollment.sequence_id) ?? 0),
+      total: totals.get(enrollment.sequence_id) ?? 0,
+      replied,
+      stoppedAt: replied ? (reply?.created_at ?? enrollment.updated_at) : null,
+    } : null,
+    dripMessageLabels,
+    dripReplyMessageIds,
   };
 }

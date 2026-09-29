@@ -34,6 +34,8 @@ type Props = {
   onLiveMessage?: (message: Message, event: "INSERT" | "UPDATE") => void;
   nowMs?: number;
   scrollContainerRef?: RefObject<HTMLDivElement | null>;
+  dripMessageLabels?: Record<string, string>;
+  dripReplyMessageIds?: string[];
 };
 
 export type LeadMessageScope = {
@@ -85,6 +87,8 @@ export function MessagesThread({
   onLiveMessage,
   nowMs,
   scrollContainerRef,
+  dripMessageLabels = {},
+  dripReplyMessageIds = [],
 }: Props) {
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = useLiveNow(nowMs ?? fallbackNowMs);
@@ -202,6 +206,8 @@ export function MessagesThread({
             isContinuation={it.isContinuation}
             isLastInGroup={it.isLastInGroup}
             isMostRecentOutbound={it.msg.id === mostRecentOutboundId}
+            dripLabel={dripMessageLabels[it.msg.id]}
+            dripReply={dripReplyMessageIds.includes(it.msg.id)}
           />
         ),
       )}
@@ -405,12 +411,16 @@ export function MessageBubble({
   isLastInGroup,
   isMostRecentOutbound,
   presentation = "thread",
+  dripLabel,
+  dripReply = false,
 }: {
   message: Message;
   isContinuation: boolean;
   isLastInGroup: boolean;
   isMostRecentOutbound: boolean;
   presentation?: "thread" | "timeline";
+  dripLabel?: string;
+  dripReply?: boolean;
 }) {
   const outbound = message.direction === "outbound";
   const timeline = presentation === "timeline";
@@ -421,7 +431,7 @@ export function MessageBubble({
     isMostRecentOutbound,
   );
   const aiGenerated = isAiGeneratedMessage(message);
-  const showMetadataFooter = isLastInGroup || aiGenerated;
+  const showMetadataFooter = isLastInGroup || aiGenerated || Boolean(dripLabel) || dripReply;
 
   // Per-bubble vertical spacing replaces the old blanket `gap-4` on the
   // container. A continuation bubble (same sender, same day) gets a
@@ -539,6 +549,8 @@ export function MessageBubble({
               </Badge>
             )}
           {aiGenerated ? <SandraReplyBadge message={message} /> : null}
+          {outbound && dripLabel ? <span className="font-semibold text-teal-700" data-testid="messages-thread-drip-label">{dripLabel}</span> : null}
+          {!outbound && dripReply ? <span className="font-semibold text-amber-700" data-testid="messages-thread-drip-reply">Replied to drip</span> : null}
         </div>
       ) : null}
       {!showMetadataFooter && deliveryStatusLabel ? (

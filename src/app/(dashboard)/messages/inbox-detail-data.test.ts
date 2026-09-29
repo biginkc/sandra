@@ -156,11 +156,15 @@ type SeedData = {
     event_type: string;
     occurred_at: string;
   }>;
+  sequence_enrollments?: Array<Record<string, unknown>>;
+  sequence_step_runs?: Array<Record<string, unknown>>;
+  sequences?: Array<Record<string, unknown>>;
+  sequence_steps?: Array<Record<string, unknown>>;
 };
 
 function makeSupabaseStub(seed: SeedData) {
   function makeBuilder(table: keyof SeedData) {
-    const filters: Array<{ kind: "eq" | "is"; key: string; value: unknown }> =
+    const filters: Array<{ kind: "eq" | "is" | "in"; key: string; value: unknown }> =
       [];
     const negativeFilters: Array<{ key: string; value: unknown }> = [];
     let orderBy: { key: string; ascending: boolean } | null = null;
@@ -173,6 +177,10 @@ function makeSupabaseStub(seed: SeedData) {
       },
       eq(key: string, value: unknown) {
         filters.push({ kind: "eq", key, value });
+        return builder;
+      },
+      in(key: string, values: unknown[]) {
+        filters.push({ kind: "in", key, value: values });
         return builder;
       },
       is(key: string, value: unknown) {
@@ -229,6 +237,7 @@ function makeSupabaseStub(seed: SeedData) {
       for (const filter of filters) {
         rows = rows.filter((row) => {
           const value = row[filter.key as keyof typeof row];
+          if (filter.kind === "in") return (filter.value as unknown[]).includes(value);
           return filter.kind === "eq"
             ? value === filter.value
             : value === null && filter.value === null;
@@ -948,5 +957,30 @@ describe("fetchInboxDetail", () => {
     expect(detail?.threadCustomerPhone).toBe("+15550000004");
     expect(detail?.threadBusinessPhone).toBe("+18162804181");
     expect(detail?.replyToPhone).toBe("+15550000004");
+  });
+
+  it("attributes only step-run messages and marks the reply to the paused drip", async () => {
+    const seed: SeedData = {
+      messages: [
+        makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
+        makeMessage({ id: "manual-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:01:00Z" }),
+        makeMessage({ id: "reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, contact_id: CONTACT_ID, sequence_id: "drip", status: "paused", pause_reason: "inbound_reply", current_step_index: 1, enrolled_at: "2026-06-09T11:00:00Z", updated_at: "2026-06-09T12:02:00Z" }],
+      sequence_step_runs: [{ message_id: "drip-text", sequence_enrollments: { org_id: "org-1", sequence_id: "drip" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+      sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
+      sequence_steps: [{ id: "step-1", sequence_id: "drip" }, { id: "step-2", sequence_id: "drip" }],
+    };
+    const supabase = makeSupabaseStub(seed);
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+    expect(detail?.drip).toMatchObject({ name: "Seller follow-up", step: 2, total: 2, replied: true, stoppedAt: "2026-06-09T12:02:00Z" });
+    expect(detail?.dripMessageLabels).toEqual({ "drip-text": "Drip · Seller follow-up · text 1 of 2" });
+    expect(detail?.dripReplyMessageIds).toEqual(["reply"]);
+    seed.messages.push(makeMessage({ id: "rep-reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:03:00Z" }));
+    const afterRepAction = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+    expect(afterRepAction?.drip?.replied).toBe(false);
+    expect(afterRepAction?.dripReplyMessageIds).toEqual([]);
   });
 });

@@ -1,9 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { CockpitView } from "./cockpit-view";
 import type { Thread } from "@/lib/messages/list-threads";
-import type { InboxFilterCounts } from "./inbox-filters";
+import { InboxFilters, type InboxFilterCounts } from "./inbox-filters";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -130,6 +130,18 @@ const baseProps = {
   hiddenDncCount: 0,
   nowMs: Date.parse("2026-08-17T12:00:00.000Z"),
 };
+
+it("shows the replied-to-drip filter and keeps the in-drip filter for PR-8", () => {
+  const onFilterChange = vi.fn();
+  render(<InboxFilters active="all" filterCounts={{ ...baseProps.filterCounts, drip_replied: 6 }}
+    showAssignmentChips hideDnc hiddenDncCount={0} pendingChange={null} completedChange={null} errorMessage={null}
+    onFilterChange={onFilterChange} onHideDncChange={vi.fn()} />);
+  const replied = screen.getByTestId("filter-drip-replied");
+  expect(replied).toHaveAccessibleName("Replied to drip (6)");
+  fireEvent.click(replied);
+  expect(onFilterChange).toHaveBeenCalledWith("drip_replied");
+  expect(screen.queryByRole("button", { name: /^In a drip/ })).not.toBeInTheDocument();
+});
 
 describe("<CockpitView /> assignment chips", () => {
   it("Mine chip is active and only mine-assigned threads render when filter='mine'", () => {
@@ -411,6 +423,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       "filter-mine",
       "filter-escalated",
       "filter-dispo",
+      "filter-drip-replied",
       "filter-unassigned",
       "filter-all",
       "filter-unknown",
@@ -448,6 +461,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       "filter-needs-outcome",
       "filter-escalated",
       "filter-dispo",
+      "filter-drip-replied",
       "filter-all",
       "filter-unknown",
       "filter-dismissed",

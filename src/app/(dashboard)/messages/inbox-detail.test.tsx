@@ -21,6 +21,7 @@ const setOutreachDispoMock = vi.hoisted(() => vi.fn());
 const setInboxDispoAndStartDripMock = vi.hoisted(() => vi.fn());
 const listDripChoicesMock = vi.hoisted(() => vi.fn());
 const startDripForLeadsMock = vi.hoisted(() => vi.fn());
+const changeDripActionMock = vi.hoisted(() => vi.fn());
 const moveMessageThreadToLeadMock = vi.hoisted(() => vi.fn());
 const confirmAiDispositionReviewMock = vi.hoisted(() => vi.fn());
 const supabaseMock = vi.hoisted(() => {
@@ -85,6 +86,7 @@ vi.mock("./dispo-actions", () => ({
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({
   listDripChoices: listDripChoicesMock,
   startDripForLeads: startDripForLeadsMock,
+  changeDripAction: changeDripActionMock,
 }));
 
 // Server-action modules ("use server" at top) cannot be imported in jsdom —
@@ -215,6 +217,9 @@ function makeData(
       : false,
     smsSafetyReadFailed: overrides.smsSafetyReadFailed ?? false,
     isDncLocked: overrides.isDncLocked ?? false,
+    drip: overrides.drip ?? null,
+    dripMessageLabels: overrides.dripMessageLabels ?? {},
+    dripReplyMessageIds: overrides.dripReplyMessageIds ?? [],
     initialMessages: overrides.initialMessages ?? [],
   };
 }
@@ -254,6 +259,7 @@ describe("<InboxDetail />", () => {
     refreshCalls.length = 0;
     navigationSearch = "";
     setOutreachDispoMock.mockClear();
+    changeDripActionMock.mockClear();
     moveMessageThreadToLeadMock.mockClear();
     confirmAiDispositionReviewMock.mockClear();
     setOutreachDispoMock.mockResolvedValue({ ok: true });
@@ -1472,6 +1478,56 @@ describe("<InboxDetail />", () => {
     await waitFor(() => {
       expect(screen.getAllByText("Needs drip")).toHaveLength(2);
     });
+  });
+
+  it("shows the active and replied header variants and labels only attributed drip texts", () => {
+    const sent = makeMessage({ id: "drip-sent", body: "First follow-up", direction: "outbound", contact_id: "drip-ui" });
+    const manual = makeMessage({ id: "manual-sent", body: "Manual reply", direction: "outbound", contact_id: "drip-ui", created_at: "2026-04-29T12:01:00Z" });
+    const reply = makeMessage({ id: "seller-reply", body: "Yes please", direction: "inbound", contact_id: "drip-ui", created_at: "2026-04-29T12:02:00Z" });
+    const drip = { enrollmentId: "e1", sequenceId: "s1", name: "Seller follow-up", step: 2, total: 4, replied: false, stoppedAt: null };
+    const { rerender } = render(<InboxDetail data={makeData({ contactId: "drip-ui", drip, initialMessages: [sent, manual, reply], dripMessageLabels: { "drip-sent": "Drip · Seller follow-up · text 1 of 4" } })} assigneeEmails={{}} currentUserId="user-1" />);
+    expect(screen.getByTestId("inbox-detail-drip-line")).toHaveTextContent("In Seller follow-up · text 2 of 4");
+    expect(screen.getByTestId("messages-thread-drip-label")).toHaveTextContent("text 1 of 4");
+    expect(screen.getAllByTestId("messages-thread-drip-label")).toHaveLength(1);
+    rerender(<InboxDetail data={makeData({ contactId: "drip-ui", drip: { ...drip, replied: true, stoppedAt: "2026-04-29T12:02:00Z" }, initialMessages: [sent, manual, reply], dripMessageLabels: { "drip-sent": "Drip · Seller follow-up · text 1 of 4" }, dripReplyMessageIds: ["seller-reply"] })} assigneeEmails={{}} currentUserId="user-1" />);
+    expect(screen.getByTestId("inbox-detail-drip-line")).toHaveTextContent("Was in Seller follow-up · stopped Apr 29 when they replied");
+    expect(screen.getByTestId("messages-thread-drip-reply")).toHaveTextContent("Replied to drip");
+  });
+
+  it("preserves the saved outcome and offers switch when enrollment reports an active drip", async () => {
+    changeDripActionMock.mockResolvedValueOnce({ ok: true, data: { status: "enrolled", reason: "Enrolled" } });
+    const user = userEvent.setup();
+    render(<InboxDetail data={makeData({ contactId: "duplicate-drip", drip: { enrollmentId: "e1", sequenceId: "current", name: "Current drip", step: 1, total: 2, replied: false, stoppedAt: null } })} assigneeEmails={{}} currentUserId="user-1" />);
+    await user.click(screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+    expect(await screen.findByTestId("drip-cant-start")).toHaveTextContent("The outcome was saved. Already in a drip");
+    expect(setOutreachDispoMock).toHaveBeenCalledWith("prop-1", "needs_sequence");
+    expect(setInboxDispoAndStartDripMock).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "Open lead" })).toHaveAttribute("href", "/leads/prop-1");
+    await user.click(screen.getByRole("button", { name: "Switch to this drip" }));
+    expect(changeDripActionMock).toHaveBeenCalledWith("e1", "s1");
+  });
+
+  it("does not offer a same-drip switch or start a parallel enrollment", async () => {
+    const user = userEvent.setup();
+    render(<InboxDetail data={makeData({ contactId: "same-drip", drip: { enrollmentId: "e1", sequenceId: "s1", name: "Seller follow-up", step: 1, total: 2, replied: false, stoppedAt: null } })} assigneeEmails={{}} currentUserId="user-1" />);
+    await user.click(screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+    expect(await screen.findByTestId("drip-cant-start")).toHaveTextContent("Already in this drip");
+    expect(screen.queryByRole("button", { name: "Switch to this drip" })).not.toBeInTheDocument();
+    expect(setInboxDispoAndStartDripMock).not.toHaveBeenCalled();
+    expect(changeDripActionMock).not.toHaveBeenCalled();
+  });
+
+  it("shows the exact enrollment reason after the outcome saves", async () => {
+    setInboxDispoAndStartDripMock.mockResolvedValueOnce({ ok: true, enrollment: { status: "skipped", reason: "Lead has no phone number." } });
+    const user = userEvent.setup();
+    render(<InboxDetail data={makeData({ contactId: "missing-phone" })} assigneeEmails={{}} currentUserId="user-1" />);
+    await user.click(screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+    expect(await screen.findByTestId("drip-cant-start")).toHaveTextContent("The outcome was saved. Lead has no phone number.");
+    expect(screen.queryByRole("button", { name: "Switch to this drip" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open lead" })).toHaveAttribute("href", "/leads/prop-1");
   });
 
   it("leaves needs_sequence to the follow-up owner without enrollment", async () => {
