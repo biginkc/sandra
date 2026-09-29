@@ -289,6 +289,9 @@ describe('parseInputs', () => {
     ['http origin', { orgId: ORG, companyId: COMPANY, canaryUserIds: [U1], publicOrigin: 'http://sandra.bmhgroupkc.com' }],
     ['origin with path', { orgId: ORG, companyId: COMPANY, canaryUserIds: [U1], publicOrigin: 'https://sandra.bmhgroupkc.com/x' }],
     ['lowercase suffix', { orgId: ORG, companyId: COMPANY, canaryUserIds: [U1], suffix: 'bmh' }],
+    ['invalid Supabase project ref', { orgId: ORG, companyId: COMPANY, canaryUserIds: [U1], projectRef: 'not-a-project-ref' }],
+    ['invalid Vercel project', { orgId: ORG, companyId: COMPANY, canaryUserIds: [U1], vercelProject: 'sandra/project' }],
+    ['invalid Vercel scope', { orgId: ORG, companyId: COMPANY, canaryUserIds: [U1], vercelScope: 'jarrad scope' }],
     ['unknown mode', { orgId: ORG, companyId: COMPANY, canaryUserIds: [U1], mode: 'activate-all' }],
   ])('rejects %s', (_name, raw) => {
     expect(() => parseInputs(raw)).toThrow(ProvisioningError);
@@ -325,6 +328,24 @@ describe('dry run', () => {
     expect(a.plan!.digest).toBe(b.plan!.digest);
     w.env.add('DIALPAD_CTI_DIRECTORY_KEY_BMH');
     expect((await dryRun(w)).plan!.digest).not.toBe(a.plan!.digest);
+  });
+
+  it('binds the typed Supabase and Vercel targets into the displayed plan and digest', async () => {
+    const w = makeWorld();
+    const defaultPlan = await dryRun(w);
+    const alternateInputs = parseInputs({
+      orgId: ORG,
+      companyId: COMPANY,
+      canaryUserIds: [U1, U2],
+      projectRef: 'aaaaaaaaaaaaaaaaaaaa',
+      vercelProject: 'other-project',
+      vercelScope: 'other-scope',
+    });
+    const alternatePlan = await dryRun(w, alternateInputs);
+    expect(defaultPlan.plan!.targets).toEqual({ supabaseProjectRef: 'copflsklaefwzipsrjqz', vercelProject: 'sandra', vercelScope: 'jarrad-5416s-projects' });
+    expect(defaultPlan.lines.join('\n')).toContain('targets supabaseProjectRef=copflsklaefwzipsrjqz vercelProject=sandra vercelScope=jarrad-5416s-projects');
+    expect(alternatePlan.plan!.targets).toEqual({ supabaseProjectRef: 'aaaaaaaaaaaaaaaaaaaa', vercelProject: 'other-project', vercelScope: 'other-scope' });
+    expect(alternatePlan.plan!.digest).not.toBe(defaultPlan.plan!.digest);
   });
 
   it('reports a missing A2 schema as a blocker instead of planning DDL', async () => {
@@ -607,7 +628,7 @@ describe('activate mode', () => {
     const result = await dryRun(w, activateInputs);
     expect(result.exitCode).toBe(0);
     expect(w.log).toEqual([]);
-    expect(result.plan!.steps.filter((s) => s.action === 'enable').map((s) => s.id)).toEqual(['activate:connection', `activate:subscription:${U1}`, `activate:subscription:${U2}`]);
+    expect(result.plan!.steps.filter((s) => s.action === 'enable').map((s) => s.id)).toEqual([`activate:subscription:${U1}`, `activate:subscription:${U2}`, 'activate:connection']);
     expect(result.lines.join('\n')).toContain('--confirm-live-readiness');
   });
 
@@ -624,31 +645,47 @@ describe('activate mode', () => {
     expect(w.connection?.status).toBe('disabled');
   });
 
-  it('activates the connection first, then only the owned canary subscriptions', async () => {
+  it('enables and re-verifies owned canary subscriptions before activating the connection', async () => {
     const w = await prepared();
     const before = snapshotUnrelated(w);
     const result = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
     expect(result.exitCode).toBe(0);
-    expect(w.log).toEqual(['db.activate', `PATCH ${U1}`, `PATCH ${U2}`]);
+    expect(w.log).toEqual([`PATCH ${U1}`, `PATCH ${U2}`, 'db.activate']);
     expect(w.connection?.status).toBe('active');
     expect(w.subs.filter((s) => s.webhook_id === '7000000000000001').every((s) => s.enabled)).toBe(true);
     expect(snapshotUnrelated(w)).toBe(before);
     const rerun = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
     expect(rerun.exitCode).toBe(0);
-    expect(w.log).toEqual(['db.activate', `PATCH ${U1}`, `PATCH ${U2}`]);
+    expect(w.log).toEqual([`PATCH ${U1}`, `PATCH ${U2}`, 'db.activate']);
   });
 
-  it('recovers from a failed subscription enable without deactivating or duplicating', async () => {
+  it('leaves the connection disabled when the first subscription enable fails', async () => {
     const w = await prepared();
-    w.fail.set(`dialpad.subscription.enable:${U2}`, 'before');
+    w.fail.set(`dialpad.subscription.enable:${U1}`, 'before');
     const failed = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
     expect(failed.exitCode).toBe(1);
-    expect(w.connection?.status).toBe('active');
+    expect(w.connection?.status).toBe('disabled');
+    expect(w.log).toEqual([]);
     w.fail.clear();
     w.log.length = 0;
     const resumed = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
     expect(resumed.exitCode).toBe(0);
-    expect(w.log).toEqual([`PATCH ${U2}`]);
+    expect(w.connection?.status).toBe('active');
+    expect(w.log).toEqual([`PATCH ${U1}`, `PATCH ${U2}`, 'db.activate']);
+  });
+
+  it('leaves the connection disabled when the second subscription enable fails and resumes without duplicating', async () => {
+    const w = await prepared();
+    w.fail.set(`dialpad.subscription.enable:${U2}`, 'before');
+    const failed = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
+    expect(failed.exitCode).toBe(1);
+    expect(w.connection?.status).toBe('disabled');
+    expect(w.log).toEqual([`PATCH ${U1}`]);
+    w.fail.clear();
+    w.log.length = 0;
+    const resumed = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
+    expect(resumed.exitCode).toBe(0);
+    expect(w.log).toEqual([`PATCH ${U2}`, 'db.activate']);
   });
 
   it('reconciles a lost enable response', async () => {
@@ -657,6 +694,26 @@ describe('activate mode', () => {
     const result = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
     expect(result.exitCode).toBe(0);
     expect(result.results.find((r) => r.id === `activate:subscription:${U1}`)?.outcome).toBe('reconciled');
+    expect(w.connection?.status).toBe('active');
+    expect(w.log).toEqual([`PATCH ${U1}`, `PATCH ${U2}`, 'db.activate']);
+  });
+
+  it('fails convergence when a post-apply prerequisite becomes unavailable', async () => {
+    const w = await prepared();
+    const ports = makePorts(w);
+    const preview = await runProvisioning(ports, activateInputs, { execute: false });
+    expect(preview.exitCode).toBe(0);
+    const originalRequest = ports.dialpad.request.bind(ports.dialpad);
+    ports.dialpad.request = async (method, path, body) => {
+      const response = await originalRequest(method, path, body);
+      const ownedSecond = w.subs.find((s) => s.target_id === U2 && s.webhook_id === '7000000000000001');
+      if (method === 'PATCH' && ownedSecond && path.endsWith(ownedSecond.id)) w.schema = { ...w.schema, customDataFunction: false };
+      return response;
+    };
+    const result = await runProvisioning(ports, activateInputs, { execute: true, expectPlan: preview.plan!.digest, confirmLiveReadiness: CONNECTION_ID });
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain('post-check: 0 step(s) still pending, 1 blocker(s), 0 conflict(s)');
+    expect(result.lines.join('\n')).not.toContain('post-check: converged');
   });
 
   it('refuses if the connection changed after the preview', async () => {

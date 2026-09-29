@@ -22,6 +22,9 @@ import { parseArgs } from 'node:util';
 
 import {
   CREDENTIAL_FIELD,
+  DEFAULT_SUPABASE_PROJECT_REF,
+  DEFAULT_VERCEL_PROJECT,
+  DEFAULT_VERCEL_SCOPE,
   ProvisioningError,
   SecretGuard,
   parseInputs,
@@ -29,7 +32,6 @@ import {
   type ProvisioningPorts,
 } from '../src/lib/dialpad-cti/provisioning';
 import {
-  DEFAULT_SUPABASE_PROJECT_REF,
   MANAGEMENT_PAT_ITEM,
   createConnectionDbPort,
   createDialpadPort,
@@ -64,6 +66,9 @@ async function main(): Promise<number> {
     canaryUserIds: values['canary-user-id'],
     publicOrigin: values['public-origin'],
     suffix: values.suffix,
+    projectRef: values['project-ref'] ?? DEFAULT_SUPABASE_PROJECT_REF,
+    vercelProject: values['vercel-project'] ?? DEFAULT_VERCEL_PROJECT,
+    vercelScope: values['vercel-scope'] ?? DEFAULT_VERCEL_SCOPE,
     // The item titles are fixed defaults; override only through code review.
   });
 
@@ -86,8 +91,8 @@ async function main(): Promise<number> {
 
   const ports: ProvisioningPorts = {
     secrets,
-    db: createConnectionDbPort(createManagementQueryRunner(values['project-ref'] ?? DEFAULT_SUPABASE_PROJECT_REF, () => readOnce(MANAGEMENT_PAT_ITEM))),
-    vercel: createVercelPort({ project: values['vercel-project'], scope: values['vercel-scope'] }),
+    db: createConnectionDbPort(createManagementQueryRunner(inputs.supabaseProjectRef, () => readOnce(MANAGEMENT_PAT_ITEM))),
+    vercel: createVercelPort({ project: inputs.vercelProject, scope: inputs.vercelScope }),
     dialpad: createDialpadPort(() => readOnce(inputs.apiKeyItem)),
   };
 

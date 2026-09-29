@@ -21,6 +21,9 @@ import { parseDialpadDirectoryUser } from './directory';
 
 export const DEFAULT_PUBLIC_ORIGIN = 'https://sandra.bmhgroupkc.com';
 export const DEFAULT_SUFFIX = 'BMH';
+export const DEFAULT_SUPABASE_PROJECT_REF = 'copflsklaefwzipsrjqz';
+export const DEFAULT_VERCEL_PROJECT = 'sandra';
+export const DEFAULT_VERCEL_SCOPE = 'jarrad-5416s-projects';
 export const DEFAULT_API_KEY_ITEM = 'Dialpad - API';
 export const DEFAULT_CLIENT_ID_ITEM = 'Dialpad - CTI Client ID';
 export const CREDENTIAL_FIELD = 'credential';
@@ -36,6 +39,8 @@ const DIALPAD_ID = /^[1-9][0-9]{0,19}$/;
 const SUFFIX = /^[A-Z0-9_]{1,40}$/;
 const ORIGIN = /^https:\/\/[a-z0-9]([a-z0-9.-]{0,120}[a-z0-9])?(:[0-9]{1,5})?$/;
 const CLIENT_ID = /^[A-Za-z0-9_-]{1,200}$/;
+const PROJECT_REF = /^[a-z]{20}$/;
+const TARGET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const PLAN_DIGEST = /^[0-9a-f]{64}$/;
 
 export type ProvisioningMode = 'prepare' | 'activate';
@@ -58,6 +63,9 @@ export interface RawInputs {
   canaryUserIds?: readonly string[];
   publicOrigin?: string;
   suffix?: string;
+  projectRef?: string;
+  vercelProject?: string;
+  vercelScope?: string;
   apiKeyItem?: string;
   clientIdItem?: string;
 }
@@ -69,6 +77,9 @@ export interface ProvisioningInputs {
   canaryUserIds: readonly string[];
   publicOrigin: string;
   suffix: string;
+  supabaseProjectRef: string;
+  vercelProject: string;
+  vercelScope: string;
   apiKeyItem: string;
   clientIdItem: string;
   webhookSecretItem: string;
@@ -98,6 +109,11 @@ export function parseInputs(raw: RawInputs): ProvisioningInputs {
   if (!ORIGIN.test(publicOrigin)) throw new ProvisioningError('invalid_input', 'public origin must be a bare https origin');
   const suffix = raw.suffix ?? DEFAULT_SUFFIX;
   if (!SUFFIX.test(suffix)) throw new ProvisioningError('invalid_input', 'suffix must match [A-Z0-9_]{1,40}');
+  const supabaseProjectRef = (raw.projectRef ?? DEFAULT_SUPABASE_PROJECT_REF).trim().toLowerCase();
+  if (!PROJECT_REF.test(supabaseProjectRef)) throw new ProvisioningError('invalid_input', 'project ref must be a 20-character lowercase Supabase ref');
+  const vercelProject = (raw.vercelProject ?? DEFAULT_VERCEL_PROJECT).trim();
+  const vercelScope = (raw.vercelScope ?? DEFAULT_VERCEL_SCOPE).trim();
+  if (!TARGET_NAME.test(vercelProject) || !TARGET_NAME.test(vercelScope)) throw new ProvisioningError('invalid_input', 'Vercel project and scope must be safe target names');
   const apiKeyItem = raw.apiKeyItem ?? DEFAULT_API_KEY_ITEM;
   const clientIdItem = raw.clientIdItem ?? DEFAULT_CLIENT_ID_ITEM;
   if (!ITEM_TITLE.test(apiKeyItem) || !ITEM_TITLE.test(clientIdItem)) throw new ProvisioningError('invalid_input', 'invalid 1Password item title');
@@ -110,6 +126,9 @@ export function parseInputs(raw: RawInputs): ProvisioningInputs {
     canaryUserIds: canary,
     publicOrigin,
     suffix,
+    supabaseProjectRef,
+    vercelProject,
+    vercelScope,
     apiKeyItem,
     clientIdItem,
     webhookSecretItem: `Dialpad - CTI Webhook Secret - ${suffix}`,
@@ -458,9 +477,16 @@ export interface PlanStep {
   detail: string;
 }
 
+export interface PlanTargets {
+  supabaseProjectRef: string;
+  vercelProject: string;
+  vercelScope: string;
+}
+
 export interface Plan {
   mode: ProvisioningMode;
   connectionId: string | null;
+  targets: PlanTargets;
   steps: readonly PlanStep[];
   notes: readonly string[];
   blockers: readonly string[];
@@ -577,13 +603,6 @@ export function buildPlan(inputs: ProvisioningInputs, o: Observed): Plan {
     need(o.vercelNames.includes(inputs.webhookSecretEnv) && o.vercelNames.includes(inputs.directoryKeyEnv), 'not_prepared: Vercel env names missing');
     need(wh.kind === 'owned', 'not_prepared: owned webhook missing');
     for (const canary of o.canaries) need(canary.subscription.kind === 'owned', `not_prepared: subscription for ${canary.userId} missing`);
-    if (connection) {
-      steps.push({
-        id: 'activate:connection',
-        action: connection.status === 'active' ? 'reuse' : 'enable',
-        detail: connection.status === 'active' ? 'connection already active' : `set connection ${connection.id} status=active`,
-      });
-    }
     for (const canary of o.canaries) {
       if (canary.subscription.kind !== 'owned') continue;
       const enabled = canary.subscription.record.enabled === true;
@@ -593,14 +612,26 @@ export function buildPlan(inputs: ProvisioningInputs, o: Observed): Plan {
         detail: `subscription ${canary.subscription.record.id} ${enabled ? 'already enabled' : 'enable'}`,
       });
     }
+    if (connection) {
+      steps.push({
+        id: 'activate:connection',
+        action: connection.status === 'active' ? 'reuse' : 'enable',
+        detail: connection.status === 'active' ? 'connection already active' : `set connection ${connection.id} status=active after every subscription is enabled and reverified`,
+      });
+    }
   }
 
-  const body = { mode: inputs.mode, connectionId: connection?.id ?? null, steps, notes, blockers, conflicts };
+  const targets: PlanTargets = {
+    supabaseProjectRef: inputs.supabaseProjectRef,
+    vercelProject: inputs.vercelProject,
+    vercelScope: inputs.vercelScope,
+  };
+  const body = { mode: inputs.mode, connectionId: connection?.id ?? null, targets, steps, notes, blockers, conflicts };
   return { ...body, digest: digestOf(body, inputs) };
 }
 
 export function renderPlan(plan: Plan): string[] {
-  const lines = [`plan digest ${plan.digest}`, `mode ${plan.mode}`];
+  const lines = [`plan digest ${plan.digest}`, `mode ${plan.mode}`, `targets supabaseProjectRef=${plan.targets.supabaseProjectRef} vercelProject=${plan.targets.vercelProject} vercelScope=${plan.targets.vercelScope}`];
   for (const step of plan.steps) lines.push(`  [${step.action}] ${step.id}: ${step.detail}`);
   for (const note of plan.notes) lines.push(`  note: ${note}`);
   for (const blocker of plan.blockers) lines.push(`  BLOCKER: ${blocker}`);
@@ -768,22 +799,24 @@ async function applyPrepare(ctx: ApplyContext, plan: Plan): Promise<void> {
 
 async function applyActivate(ctx: ApplyContext): Promise<void> {
   const { ports, inputs } = ctx;
-  const connection = ctx.observed.connection!;
-  if (connection.status !== 'active') {
-    const changed = await ports.db.activateConnection(connection.id, connectionRow(inputs, ctx.secrets.clientId!));
-    if (changed !== 1) throw new ProvisioningError('activation_refused', 'the connection no longer matched the previewed state');
-    ctx.results.push({ id: 'activate:connection', outcome: 'done' });
-  } else ctx.results.push({ id: 'activate:connection', outcome: 'reused' });
 
+  // Enable and re-read every exact canary subscription before activating the
+  // receiver. If any enable fails, the connection remains disabled and a
+  // later rerun can resume from the subscriptions already verified.
   for (const canary of ctx.observed.canaries) {
     const sub = canary.subscription;
     const id = `activate:subscription:${canary.userId}`;
     if (sub.kind !== 'owned') throw new ProvisioningError('not_prepared', 'subscription missing');
+    const subId = sub.record.id;
+    const verifyEnabled = async (): Promise<boolean> => {
+      const matches = (await listAll(ports.dialpad, '/api/v2/subscriptions/call', parseSubscription)).filter((entry) => entry.id === subId);
+      return matches.length === 1 && matches[0]!.enabled === true && matches[0]!.targetType === 'user' && matches[0]!.targetId === canary.userId && matches[0]!.webhookId === sub.record.webhookId && sameStates(matches[0]!.callStates);
+    };
     if (sub.record.enabled === true) {
+      if (!(await verifyEnabled())) throw new ProvisioningError('subscription_unverified', `subscription ${subId} no longer matches the expected enabled canary`);
       ctx.results.push({ id, outcome: 'reused' });
       continue;
     }
-    const subId = sub.record.id;
     await mutateWithReconcile(
       ctx,
       id,
@@ -791,12 +824,17 @@ async function applyActivate(ctx: ApplyContext): Promise<void> {
         const response = await ports.dialpad.request('PATCH', `/api/v2/subscriptions/call/${subId}`, '{"enabled":true}');
         if (response.status !== 200) throw new ProvisioningError('subscription_enable_failed', `enable subscription returned HTTP ${response.status}`);
       },
-      async () => {
-        const subs = await listAll(ports.dialpad, '/api/v2/subscriptions/call', parseSubscription);
-        return subs.some((entry) => entry.id === subId && entry.enabled === true);
-      },
+      verifyEnabled,
     );
+    if (!(await verifyEnabled())) throw new ProvisioningError('subscription_unverified', `subscription ${subId} did not verify as enabled`);
   }
+
+  const connection = ctx.observed.connection!;
+  if (connection.status !== 'active') {
+    const changed = await ports.db.activateConnection(connection.id, connectionRow(inputs, ctx.secrets.clientId!));
+    if (changed !== 1) throw new ProvisioningError('activation_refused', 'the connection no longer matched the previewed state');
+    ctx.results.push({ id: 'activate:connection', outcome: 'done' });
+  } else ctx.results.push({ id: 'activate:connection', outcome: 'reused' });
 }
 
 /* ------------------------------------------------------------------------ */
@@ -865,8 +903,8 @@ export async function runProvisioning(ports: ProvisioningPorts, inputs: Provisio
     const after = await observe(ports, inputs, guard);
     const post = buildPlan(inputs, after.observed);
     const pending = post.steps.filter((step) => step.action === 'create' || step.action === 'enable');
-    if (pending.length > 0 || post.conflicts.length > 0) {
-      emit(`post-check: ${pending.length} step(s) still pending, ${post.conflicts.length} conflict(s); rerun the dry-run`);
+    if (pending.length > 0 || post.blockers.length > 0 || post.conflicts.length > 0) {
+      emit(`post-check: ${pending.length} step(s) still pending, ${post.blockers.length} blocker(s), ${post.conflicts.length} conflict(s); rerun the dry-run`);
       return { exitCode: 1, lines, plan, results };
     }
     emit('post-check: converged, a rerun would change nothing');
