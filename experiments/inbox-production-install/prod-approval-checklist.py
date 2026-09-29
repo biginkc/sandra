@@ -14,7 +14,7 @@ HERE = Path(__file__).resolve().parent
 WORKFLOW = Path(__file__).resolve().parents[2] / '.github/workflows/db-migrate-prod.yml'
 
 
-def decision(prod_id, expected_sha, prod, binding, upstream, jobs, waiting, workflow_bytes, expected_workflow_hash, protection):
+def decision(prod_id, expected_sha, prod, binding, upstream, jobs, waiting, run_workflow_bytes, main_workflow_bytes, expected_workflow_hash, protection):
     errors = []
     def require(ok, message):
         if not ok: errors.append(message)
@@ -37,9 +37,9 @@ def decision(prod_id, expected_sha, prod, binding, upstream, jobs, waiting, work
     bind = [j for j in jobs if j.get('name') == 'Bind upstream test run']
     require(len(bind) == 1 and bind[0].get('conclusion') == 'success', 'bind-upstream did not succeed')
     require(len(waiting_jobs) == 1 and waiting_jobs[0].get('name') == 'Apply migrations to prod', 'migrate-prod is not the only waiting job')
-    require(hashlib.sha256(workflow_bytes).hexdigest() == expected_workflow_hash, 'Workflow definition hash mismatch')
-    text = workflow_bytes.decode()
-    require('ref: ${{ github.event.workflow_run.head_sha }}' in text, 'Workflow checkout is not pinned to upstream SHA')
+    require(hashlib.sha256(run_workflow_bytes).hexdigest() == expected_workflow_hash, 'Production run SHA workflow definition hash mismatch')
+    require(hashlib.sha256(main_workflow_bytes).hexdigest() == expected_workflow_hash, 'origin/main workflow definition hash mismatch')
+    require('ref: ${{ github.event.workflow_run.head_sha }}' in run_workflow_bytes.decode(), 'Workflow checkout is not pinned to upstream SHA')
     reviewers = protection.get('protection_rules', [])
     require(any(r.get('type') == 'required_reviewers' and r.get('reviewers') for r in reviewers), 'Production required reviewers missing')
     require(protection.get('can_admins_bypass') is False, 'Production admin bypass enabled')
@@ -69,11 +69,13 @@ def main():
     jobs = api(f'actions/runs/{args.production_run_id}/jobs')['jobs']
     waiting_response = api('actions/workflows/db-migrate-prod.yml/runs?status=waiting&per_page=100')
     waiting = waiting_response['workflow_runs']
-    contents = api(f'contents/.github/workflows/db-migrate-prod.yml?ref={prod["head_sha"]}')
-    workflow = base64.b64decode(contents['content'])
+    run_contents = api(f'contents/.github/workflows/db-migrate-prod.yml?ref={prod["head_sha"]}')
+    main_contents = api('contents/.github/workflows/db-migrate-prod.yml?ref=main')
+    run_workflow = base64.b64decode(run_contents['content'])
+    main_workflow = base64.b64decode(main_contents['content'])
     expected_hash = (HERE / 'prod-workflow-definition.sha256').read_text().strip()
     protection = api('environments/Production')
-    errors = decision(args.production_run_id, args.expected_sha, prod, binding, upstream, jobs, waiting, workflow, expected_hash, protection)
+    errors = decision(args.production_run_id, args.expected_sha, prod, binding, upstream, jobs, waiting, run_workflow, main_workflow, expected_hash, protection)
     if waiting_response.get('total_count') != len(waiting):
         errors.append('Waiting Production run listing is incomplete')
     if errors:
