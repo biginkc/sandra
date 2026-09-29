@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 const createClient = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
-import { listSequences, listSequenceNeedsPerson } from "./actions";
+import { listSequences, listSequenceNeedsPersonCounts, listSequenceNeedsPersonPage } from "./actions";
 
 afterEach(() => { vi.clearAllMocks(); delete process.env.SEQUENCE_CANARY_USER_ID; });
 
@@ -11,16 +11,20 @@ it("returns typed buckets and strips canary-created overview rows", async () => 
   const rpc = vi.fn(async (name: string) => ({ data: name === "sequence_overview_stats"
     ? [{ id: "live", name: "Live", created_by: "user", waiting: 1 },
       { id: "test", name: "No smoke name", created_by: "canary-user", waiting: 1 }]
-    : [{ property_id: "p", sequence_id: "live", bucket: "couldnt_send", reason: "Ignored", sequence_created_by: "user" }], error: null }));
+    : name === "sequence_needs_person_counts"
+      ? [{ finished_no_reply: 501, couldnt_send: 1, needs_sequence: 0 }]
+      : [{ property_id: "p", sequence_id: "live", bucket: "couldnt_send", reason: "Ignored", sequence_created_by: "user" }], error: null }));
   createClient.mockResolvedValue({
     auth: { getUser: async () => ({ data: { user: { id: "user" } } }) },
     from: () => ({ select: () => ({ eq: () => ({ eq: () => ({ is: () => ({ limit: () => ({ maybeSingle: async () => ({ data: { org_id: "org" }, error: null }) }) }) }) }) }) }),
     rpc,
   });
   expect(await listSequences()).toMatchObject({ ok: true, data: [{ id: "live", waiting: 1 }] });
-  expect(await listSequenceNeedsPerson()).toMatchObject({ ok: true, data: [{ property_id: "p", bucket: "couldnt_send" }] });
+  expect(await listSequenceNeedsPersonCounts()).toMatchObject({ ok: true, data: { finished_no_reply: 501, couldnt_send: 1 } });
+  expect(await listSequenceNeedsPersonPage("couldnt_send", 2)).toMatchObject({ ok: true, data: [{ property_id: "p", bucket: "couldnt_send" }] });
   expect(rpc).toHaveBeenCalledWith("sequence_overview_stats", { p_org: "org" });
-  expect(rpc).toHaveBeenCalledWith("sequence_needs_person", { p_org: "org" });
+  expect(rpc).toHaveBeenCalledWith("sequence_needs_person_counts", { p_org: "org", p_exclude_created_by: "canary-user" });
+  expect(rpc).toHaveBeenCalledWith("sequence_needs_person_page", { p_org: "org", p_bucket: "couldnt_send", p_offset: 50, p_limit: 50, p_exclude_created_by: "canary-user" });
 });
 
 it.each(["PGRST202", "42883"])("falls back to the list query when stats RPC is missing (%s)", async (code) => {

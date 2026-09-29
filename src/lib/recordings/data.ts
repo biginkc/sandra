@@ -5,11 +5,17 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { SANDRA_ORG_ID } from '@/lib/auth/sandra-org';
 import { hasActiveSandraAccess } from '@/lib/auth/access-state';
 import type { RecordingFilters, RecordingScope } from './filters';
+import { getDialpadPlaybackFile, signDialpadPlaybackFile } from '@/lib/dialpad-recording/playback';
 
 export class RecordingAccessError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
-export interface LibraryFile { id: string; duration: number | null; status: string; kind: string }
+export interface LibraryFile {
+  id: string; duration: number | null; status: string; kind: string;
+  source?: string; track?: 'tab' | 'mic'; epoch?: number;
+  completeness?: 'complete' | 'partial'; partialReason?: string | null;
+  recordingStatus?: string;
+}
 export interface LibraryCall {
   id: string; at: string; actor_id: string | null; actor_name: string; conflicting: boolean;
   source: string; outcome: string; direction: string; purpose: string; contact: string; address: string;
@@ -20,8 +26,16 @@ export interface LibraryResult {
   rows: LibraryCall[]; total: number; availability: Record<string, number>;
   sources: string[]; outcomes: string[]; users: { id: string; name: string }[];
 }
-interface SourceCall { id: string; attemptId: string; scopeId: string; summaryPath?: string | null }
-interface AudioCall { id: string; actorId: string | null; files: { id: string; duration: number | null; status: string; matchesSummary: boolean }[] }
+interface SourceCall {
+  id: string; attemptId?: string | null; scopeId?: string | null; summaryPath?: string | null;
+  source?: string; actorId?: string | null; recordingStatus?: string;
+  files?: Array<{ id: string; duration: number | null; status: string; kind: string; source: string; track: 'tab' | 'mic'; epoch: number; completeness: 'complete' | 'partial'; partialReason: string | null; recordingStatus: string }>;
+}
+interface AudioCall {
+  id: string; actorId: string | null;
+  recordingStatus?: string;
+  files: Array<{ id: string; duration: number | null; status: string; matchesSummary?: boolean; source?: string; track?: 'tab' | 'mic'; epoch?: number; completeness?: 'complete' | 'partial'; partialReason?: string | null; recordingStatus?: string }>;
+}
 
 export async function recordingViewer() {
   const db = await createClient();
@@ -67,7 +81,8 @@ async function broker(body: unknown) {
 }
 async function audioCatalog(userId: string, scope: RecordingScope, callId?: string) {
   const allowedSources = await rpc<SourceCall[]>('fn_recording_library_sources', { p_actor: userId, p_scope: scope });
-  const sources = callId ? allowedSources.filter(c => c.id === callId) : allowedSources;
+  const dialpadSources = await rpc<SourceCall[]>('fn_dialpad_recording_library_sources', { p_actor: userId, p_scope: scope });
+  const sources = (callId ? allowedSources.filter(c => c.id === callId) : allowedSources).filter(c => c.source !== 'dialpad');
   const audio: AudioCall[] = [];
   // Each batch is tenant-scoped by the database; the broker independently
   // attests caller identity before the database applies self scope. No credentials or
@@ -82,7 +97,16 @@ async function audioCatalog(userId: string, scope: RecordingScope, callId?: stri
       audio.push(item);
     }
   }
-  return audio;
+  const dialpad = (callId ? dialpadSources.filter(c => c.id === callId) : dialpadSources).map(source => ({
+    id: source.id,
+    actorId: source.actorId ?? null,
+    recordingStatus: source.recordingStatus,
+    files: source.files ?? [],
+  }));
+  if (dialpad.some(item => item.files.some(file => file.source !== 'dialpad' || !/^dpf_[0-9a-f]{64}$/.test(file.id) || !['tab', 'mic'].includes(file.track) || !Number.isInteger(file.epoch) || !['complete', 'partial'].includes(file.completeness) || file.status !== 'available'))) {
+    throw new RecordingAccessError(503, 'Invalid recording inventory');
+  }
+  return [...audio, ...dialpad];
 }
 export async function listRecordings(scope: RecordingScope, filters: RecordingFilters) {
   const viewer = await requireRecordingViewer(scope);
@@ -98,6 +122,11 @@ interface PrivateFile { callId: string; source: string; file: LibraryFile & { ur
 async function getFile(scope: RecordingScope, id: string) {
   if (!id || id.length > 500) throw new RecordingAccessError(400, 'Invalid recording');
   const viewer = await requireRecordingViewer(scope);
+  if (id.startsWith('dpf_')) {
+    const found = await getDialpadPlaybackFile(viewer.userId, scope, id);
+    if (!found) throw new RecordingAccessError(404, 'Recording not found');
+    return found;
+  }
   const callId = /^jitter:([0-9a-f-]{36}):.+$/i.exec(id)?.[1]
     ?? await rpc<string | null>('fn_recording_library_file_parent', { p_actor: viewer.userId, p_scope: scope, p_file_id: id });
   const audio = callId ? await audioCatalog(viewer.userId, scope, callId) : [];
@@ -107,18 +136,35 @@ async function getFile(scope: RecordingScope, id: string) {
 }
 export async function recordingDetails(scope: RecordingScope, id: string) {
   const { file } = await getFile(scope, id);
-  return { id: file.id, duration: file.duration, status: file.status, kind: file.kind };
+  return { id: file.id, duration: file.duration, status: file.status, kind: file.kind,
+    source: file.source, track: file.track, epoch: file.epoch, completeness: file.completeness,
+    partialReason: file.partialReason, recordingStatus: file.recordingStatus };
 }
 export async function recordingPlayback(scope: RecordingScope, id: string) {
-  const { file, callId } = await getFile(scope, id);
-  if (file.kind === 'reference' && file.url) {
+  const viewer = await recordingViewer();
+  const found = await getFile(scope, id);
+  const { file } = found;
+  if (file.source === 'dialpad') {
+    try {
+      const signed = await signDialpadPlaybackFile(viewer.userId, scope, id);
+      await requireRecordingViewer(scope);
+      return signed;
+    } catch (error) {
+      if (error instanceof RecordingAccessError) throw error;
+      throw new RecordingAccessError(503, 'Recording service is unavailable');
+    }
+  }
+  const legacy = found as PrivateFile;
+  const legacyFile = legacy.file;
+  const { callId } = legacy;
+  if (legacyFile.kind === 'reference' && legacyFile.url) {
     let external: URL;
-    try { external = new URL(file.url); } catch { throw new RecordingAccessError(409, 'Unsupported recording reference'); }
+    try { external = new URL(legacyFile.url); } catch { throw new RecordingAccessError(409, 'Unsupported recording reference'); }
     if (external.protocol !== 'https:' || external.username || external.password) throw new RecordingAccessError(409, 'Unsupported recording reference');
     return { externalUrl: external.href };
   }
-  if (file.status !== 'available' || !file.recordingId || !file.attemptKey || !file.scopeKey) throw new RecordingAccessError(409, 'This recording reference is not available for playback');
-  const body = await broker({ calls: [{ id: callId.slice('call:'.length), attemptId: file.attemptKey, scopeId: file.scopeKey }], recordingId: file.recordingId });
+  if (legacyFile.status !== 'available' || !legacyFile.recordingId || !legacyFile.attemptKey || !legacyFile.scopeKey) throw new RecordingAccessError(409, 'This recording reference is not available for playback');
+  const body = await broker({ calls: [{ id: callId.slice('call:'.length), attemptId: legacyFile.attemptKey, scopeId: legacyFile.scopeKey }], recordingId: legacyFile.recordingId });
   if (typeof body.signedUrl !== 'string' || typeof body.expiresAt !== 'string') throw new RecordingAccessError(503, 'Invalid playback response');
   let url: URL;
   try { url = new URL(body.signedUrl); } catch { throw new RecordingAccessError(503, 'Invalid playback response'); }

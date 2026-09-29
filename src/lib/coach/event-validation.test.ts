@@ -6,6 +6,24 @@ import { parseCoachEvent } from "./event-validation";
  * the producer's verbatim wire contract. Spread into every payload/expected
  * event below rather than repeating the two fields in each test. */
 const V = { scriptVersion: "1.0.1", matcherVersion: "3" };
+const PROMPT = { type: "objection_prompt", objectionId: "price", label: "Price concern", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+
+describe("parseCoachEvent — objection prompt", () => {
+  it("accepts the bounded shape and ignores unknown fields", () => {
+    expect(parseCoachEvent({ ...PROMPT, extra: "ignored" })).toEqual({ ok: true, event: PROMPT });
+  });
+
+  it.each([
+    { objectionId: "" }, { objectionId: "x".repeat(65) },
+    { label: "" }, { label: "x".repeat(81) },
+    { sellerTurn: 0 }, { sellerTurn: 1.5 }, { sellerTurn: "1" },
+    { classifierModel: "" }, { questionsSha256: "bad" },
+    { ts: "invalid" }, { scriptVersion: null, scriptDigest: null },
+    { matcherVersion: null },
+  ])("rejects a malformed field: %j", (change) => {
+    expect(parseCoachEvent({ ...PROMPT, ...change })).toEqual({ ok: false, reason: "malformed", rawType: "objection_prompt" });
+  });
+});
 
 describe("parseCoachEvent — valid events", () => {
   it("parses a transcript event", () => {
