@@ -42,12 +42,18 @@ export function planCostRatios(pre, post) {
   }))]));
 }
 
-export const OPERATOR_INDEXES = ['inbox_parent_message_property', 'inbox_parent_message_contact', 'inbox_parent_review_property', 'inbox_backfill_messages', 'inbox_backfill_reviews', 'inbox_backfill_threads', 'inbox_backfill_thread_identity', 'inbox_unknown_history_page'];
+export const OPERATOR_RELATIONS = Object.freeze({
+  inbox_parent_message_property: 'public.messages', inbox_parent_message_contact: 'public.messages',
+  inbox_parent_review_property: 'public.ai_disposition_reviews', inbox_backfill_messages: 'public.messages',
+  inbox_backfill_reviews: 'public.ai_disposition_reviews', inbox_backfill_threads: 'public.message_threads',
+  inbox_backfill_thread_identity: 'public.message_threads', inbox_unknown_history_page: 'public.messages',
+});
+export const OPERATOR_INDEXES = Object.keys(OPERATOR_RELATIONS);
 export function catalogIndexes(fingerprint) {
   const relations = fingerprint?.sections?.relations;
   if (!Array.isArray(relations)) throw new Error('CATALOG_INDEX_SECTION_MISSING');
   const result = {};
-  for (const relation of relations) for (const index of relation.indexes ?? []) {
+  for (const relation of relations.filter(row => row.identity?.startsWith('public.'))) for (const index of relation.indexes ?? []) {
     const match = /\b(?:INDEX|index)\s+(?:"?public"?\.)?"?([a-z_][a-z_0-9]*)"?\s+ON\s+/i.exec(index.definition ?? '');
     if (match) result[match[1]] = { relation: relation.identity, valid: index.valid === true && index.ready === true };
   }
@@ -64,7 +70,7 @@ export function compareIndexes(pre, post, phase = 'post') {
   const builtCount = OPERATOR_INDEXES.filter(name => post?.[name]).length;
   if (phase === 'post' && builtCount === 0) return { verdict: 'INCONCLUSIVE', reason: 'INDEXES_NOT_BUILT' };
   for (const name of required) {
-    if (!post?.[name]) throw new Error(`FAIL INDEX_ABSENT ${name}`);
+    if (!post?.[name] || (OPERATOR_RELATIONS[name] && post[name].relation !== OPERATOR_RELATIONS[name])) throw new Error(`FAIL INDEX_ABSENT ${name}`);
     if (!post[name].valid) throw new Error(`FAIL INDEX_INVALID ${name}`);
   }
   return { verdict: 'PASS', count: required.size };
