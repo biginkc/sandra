@@ -57,7 +57,7 @@ def assert_mutations(path):
 
 
 def assert_catalog_live(output):
-    if not re.search(r'Ran 5 tests? in ', output) or re.search(r'\bskipped\b|\bfailures\b|\berrors\b', output, re.I) or not output.rstrip().endswith('OK'):
+    if not re.search(r'Ran 5 tests? in ', output) or output.rstrip().splitlines()[-1] != 'OK':
         raise ValueError('Five live catalog mutation tests did not run without skips')
 
 
