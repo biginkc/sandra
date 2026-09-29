@@ -17,8 +17,8 @@ beforeEach(() => {
   selectBestSmsPhone.mockReturnValue({ phone: "+18165550001", lineType: "mobile" });
 });
 
-function clientFor(property: Record<string, unknown>) {
-  const insert = vi.fn(() => ({ select: () => ({ single: async () => ({ data: { id: "enrollment-1" }, error: null }) }) }));
+function clientFor(property: Record<string, unknown>, existingEnrollment?: { sequence_id: string; current_step_index: number; status: string; sequences: { name: string } }, insertError?: { code: string; message: string }) {
+  const insert = vi.fn(() => ({ select: () => ({ single: async () => ({ data: insertError ? null : { id: "enrollment-1" }, error: insertError ?? null }) }) }));
   const rows: Record<string, unknown> = {
     sequences: { id: "sequence-1", org_id: "org-1", name: "Drip", active: true, archived_at: null },
     sequence_steps: { id: "step-1", delay_after_previous_minutes: 0 },
@@ -28,13 +28,48 @@ function clientFor(property: Record<string, unknown>) {
       homeowner: { id: "contact-1", phone_1: "+18165550001", phone_1_type: "mobile", phone_2: null, phone_2_type: null, phone_3: null, phone_3_type: null, do_not_contact: false, sms_opted_out: false },
       ...property,
     },
+    sequence_enrollments: existingEnrollment ?? null,
   };
+  const inStatus = vi.fn();
   const client = { from: vi.fn((table: string) => {
-    const builder = { select: () => builder, eq: () => builder, maybeSingle: async () => ({ data: rows[table], error: null }), insert };
+    const builder = { select: (_columns?: string, options?: { count?: string; head?: boolean }) => options?.head
+      ? { eq: async () => ({ count: 4, error: null }) }
+      : builder, eq: () => builder, in: (column: string, statuses: string[]) => { inStatus(column, statuses); return builder; }, limit: () => builder, maybeSingle: async () => ({ data: rows[table], error: null }), insert };
     return builder;
   }) };
-  return { client, insert };
+  return { client, insert, inStatus };
 }
+
+it.each(["active", "paused"])("refuses another drip while a lead has an %s enrollment", async (status) => {
+  const { client, insert, inStatus } = clientFor({}, { sequence_id: "other-sequence", current_step_index: 1, status, sequences: { name: "Quiet check-in" } });
+  expect(await enrollLead(client as never, { sequenceId: "sequence-1", propertyId: "property-1" }))
+    .toEqual({ status: "already_in_drip", message: "Already in Quiet check-in, text 2 of 4. Stop it or switch." });
+  expect(inStatus).toHaveBeenCalledWith("status", ["active", "paused"]);
+  expect(insert).not.toHaveBeenCalled();
+});
+
+it("maps the property-wide index race to the same plain reason", async () => {
+  const { client, insert } = clientFor({}, undefined, {
+    code: "23505", message: 'duplicate key value violates unique constraint "idx_enrollments_one_live_per_property"',
+  });
+  let enrollmentReads = 0;
+  const originalFrom = client.from;
+  client.from = vi.fn((table: string) => {
+    const builder = originalFrom(table);
+    if (table === "sequence_enrollments") {
+      builder.maybeSingle = async () => {
+        enrollmentReads++;
+        return enrollmentReads === 1
+          ? { data: null, error: null }
+          : { data: { sequence_id: "other-sequence", current_step_index: 1, sequences: { name: "Quiet check-in" } }, error: null };
+      };
+    }
+    return builder;
+  }) as typeof client.from;
+  expect(await enrollLead(client as never, { sequenceId: "sequence-1", propertyId: "property-1" }))
+    .toEqual({ status: "already_in_drip", message: "Already in Quiet check-in, text 2 of 4. Stop it or switch." });
+  expect(insert).toHaveBeenCalledOnce();
+});
 
 it.each([
   ["dnc disposition", { outreach_dispo: "dnc" }],

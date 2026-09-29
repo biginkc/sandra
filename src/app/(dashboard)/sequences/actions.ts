@@ -664,6 +664,7 @@ export async function enrollLeadInSequence(
         return ok({ enrollmentId: outcome.enrollmentId });
       case "duplicate_active":
         return ok({ duplicate: true });
+      case "already_in_drip":
       case "no_phone":
       case "landline_phone":
       case "no_consent":
@@ -788,7 +789,7 @@ export async function changeDripAction(enrollmentId: string, sequenceId: string)
     try {
       const outcome = await enrollLead(supabase, { propertyId: old.property_id, sequenceId, enrolledByUserId: user.id });
       result = { propertyId: old.property_id,
-        status: outcome.status === "enrolled" ? "enrolled" : ["duplicate_active", "no_phone", "landline_phone", "no_consent", "suppressed"].includes(outcome.status) ? "skipped" : "failed",
+        status: outcome.status === "enrolled" ? "enrolled" : ["duplicate_active", "already_in_drip", "no_phone", "landline_phone", "no_consent", "suppressed"].includes(outcome.status) ? "skipped" : "failed",
         reason: outcome.status === "enrolled" ? enrollmentReason(outcome) : `Previous drip stopped. ${enrollmentReason(outcome)}` };
     } catch (error) {
       reportError(error, { tags: { surface: "change_drip_enroll" }, extra: { enrollmentId, sequenceId } });
