@@ -5,6 +5,8 @@ import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { collect, reconcile, stabilityProbe } from './outbox-db-contract/readonly.mjs';
 import { platformFingerprint, comparePlatform } from './outbox-db-contract/platform.mjs';
+import { CATALOG_SECTIONS } from './outbox-db-contract/catalog-sections.mjs';
+export { CATALOG_SECTIONS } from './outbox-db-contract/catalog-sections.mjs';
 
 export function parseArgs(argv) {
   const parsed = {};
@@ -51,8 +53,6 @@ async function catalog(dsn) {
   if (run.status !== 0) throw new Error(`CATALOG_FAILED ${run.stderr.trim()}`);
   return JSON.parse(run.stdout);
 }
-// Pinned to catalog_fingerprint.py at e767bec7; catalog-scope.json does not list section names.
-export const CATALOG_SECTIONS = Object.freeze(['created_objects_present', 'extensions', 'functions', 'index_names', 'relations', 'schema_migrations', 'schemas', 'trigger_names', 'types']);
 export function compareCatalog(pinned, observed) {
   const required = CATALOG_SECTIONS.join(',');
   for (const [side, value] of [['expected', pinned], ['observed', observed]]) {

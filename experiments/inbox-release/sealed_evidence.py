@@ -36,6 +36,7 @@ MIGRATION_WORKFLOWS = {"shared-test": ".github/workflows/db-migrate-test.yml", "
 MIGRATION_APPLY_JOBS = {"shared-test": "Apply migrations to test", "production": "Apply migrations to prod"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
+CATALOG_SECTIONS = ("created_objects_present", "extensions", "functions", "index_names", "relations", "schema_migrations", "schemas", "trigger_names", "types")
 
 
 class EvidenceError(RuntimeError):
@@ -143,7 +144,7 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
                 or manifest["started_at"] != completed_text
                 or manifest["run_id"] != "shared-readonly-" + manifest["phase"] + "-" + re.sub(r"[-:.]", "", completed_text)):
             raise EvidenceError(f"shared-readonly run metadata mismatch: {directory}")
-        scripts = ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs")
+        scripts = ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs", "scripts/outbox-db-contract/catalog-sections.mjs")
         operator = manifest.get("operator_script_sha256")
         if (not isinstance(operator, dict) or set(operator) != set(scripts) or any(
                 operator[script] != hashlib.sha256(blob(repo, tested_sha, script)).hexdigest() for script in scripts)):
@@ -303,7 +304,11 @@ def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
         raise EvidenceError(f"queued item linkage mismatch: {directory}")
     if "queued_invariants" in items:
         queued = items["queued_invariants"]
-        if not isinstance(queued, dict) or set(queued) - {"verdict", "diff", "stability_probe"} or queued.get("verdict") not in {"PASS", "INCONCLUSIVE"} or ("diff" in queued and not isinstance(queued["diff"], str)) or ("diff" in queued and not HASH.fullmatch(queued["diff"])) or ("stability_probe" in queued and queued["stability_probe"] != "identical"):
+        if (not isinstance(queued, dict) or not {"verdict", "diff"} <= set(queued) <= {"verdict", "diff", "stability_probe"}
+                or queued.get("verdict") not in {"PASS", "INCONCLUSIVE"} or not isinstance(queued["diff"], str)
+                or not HASH.fullmatch(queued["diff"])
+                or (queued["verdict"] == "PASS") != (queued["diff"] == hashlib.sha256(b"[]").hexdigest())
+                or ("stability_probe" in queued and queued["stability_probe"] != "identical")):
             raise EvidenceError(f"invalid queued digest: {directory}")
     comparisons = output.get("comparisons")
     if (not isinstance(comparisons, dict) or set(comparisons) != {"catalog", "platform"}
@@ -328,8 +333,10 @@ def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
         data = json.loads(blob(repo, source["commit"], source["directory"] + "/" + artifact))
         if label == "catalog_record":
             sections = data.get("section_sha256")
-            allowed_sections = {"created_objects_present", "extensions", "functions", "index_names", "relations", "schema_migrations", "schemas", "trigger_names", "types"}
-            if not isinstance(sections, dict) or not sections or set(sections) - allowed_sections or any(not isinstance(v, str) or not HASH.fullmatch(v) for v in sections.values()) or output["comparisons"]["catalog"].get("observed_section_sha256") != sections or output["comparisons"]["catalog"].get("verdict") != "PASS":
+            if (not isinstance(sections, dict) or set(sections) != set(CATALOG_SECTIONS)
+                    or any(not isinstance(v, str) or not HASH.fullmatch(v) for v in sections.values())
+                    or output["comparisons"]["catalog"].get("observed_section_sha256") != sections
+                    or output["comparisons"]["catalog"].get("verdict") != "PASS"):
                 raise EvidenceError(f"catalog mismatch: {directory}")
         else:
             platform_keys = ("postgres_major", "postgrest_major", "gotrue_major")

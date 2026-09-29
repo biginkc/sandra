@@ -4,11 +4,11 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CATALOG_SECTIONS } from '../outbox-db-contract/catalog-sections.mjs';
 
 const ROOT = 'docs/performance/inbox-redesign/evidence';
 const REF = 'ncsngxlcyxylaeskiteu';
 const HEX = /^[0-9a-f]{64}$/;
-const CATALOG_SECTIONS = new Set(['created_objects_present', 'extensions', 'functions', 'index_names', 'relations', 'schema_migrations', 'schemas', 'trigger_names', 'types']);
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const git = (repo, ...args) => execFileSync('git', args, { cwd: repo });
 function keys(value, expected, label) {
@@ -47,14 +47,14 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   keys(source.comparisons.catalog, ['verdict', 'input_sha256', 'observed_section_sha256'], 'catalog comparison');
   keys(source.comparisons.platform, ['verdict', 'input_sha256', 'observed_sha256'], 'platform comparison');
   keys(source.platform_config, ['postgres_major', 'postgrest_major', 'gotrue_major', 'sha256'], 'platform config');
-  keys(source.items ?? {}, source.items?.queued_invariants ? ['queued_invariants'] : [], 'items');
+  keys(source.items, source.items?.queued_invariants ? ['queued_invariants'] : [], 'items');
   if (source.comparisons?.catalog?.verdict !== 'PASS' || source.comparisons.catalog.input_sha256 !== catalog.sha256 || source.comparisons?.platform?.verdict !== 'PASS' || source.comparisons.platform.input_sha256 !== platform.sha256) throw new Error('Comparison input linkage mismatch');
   const expectedSections = catalog.data.section_sha256;
   const observedSections = source.comparisons.catalog.observed_section_sha256;
   if (!expectedSections || typeof expectedSections !== 'object' || Array.isArray(expectedSections) ||
       !observedSections || typeof observedSections !== 'object' || Array.isArray(observedSections) ||
-      !Object.keys(expectedSections).length || Object.keys(expectedSections).some(k => !CATALOG_SECTIONS.has(k)) ||
-      Object.keys(expectedSections).sort().join() !== Object.keys(observedSections).sort().join() ||
+      Object.keys(expectedSections).sort().join() !== CATALOG_SECTIONS.join() ||
+      Object.keys(observedSections).sort().join() !== CATALOG_SECTIONS.join() ||
       Object.keys(expectedSections).some(k => !HEX.test(expectedSections[k]) || observedSections[k] !== expectedSections[k])) throw new Error('Catalog comparison mismatch');
   if (!HEX.test(source.comparisons.platform.observed_sha256)) throw new Error('Platform comparison digest missing');
   const platformKeys = ['postgres_major', 'postgrest_major', 'gotrue_major'];
@@ -71,13 +71,15 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   const queued = source.items?.queued_invariants;
   if (queued) {
     if (typeof queued !== 'object' || Array.isArray(queued) || Object.keys(queued).some(key => !['verdict', 'diff', 'stability_probe'].includes(key)) ||
+        !Array.isArray(queued.diff) ||
         !['PASS', 'INCONCLUSIVE'].includes(queued.verdict) ||
+        (queued.verdict === 'PASS') !== (queued.diff.length === 0) ||
         (Object.hasOwn(queued, 'stability_probe') && queued.stability_probe !== 'identical')) throw new Error('Invalid queued invariants');
   }
-  if (queued) readonly.items.queued_invariants = { verdict: queued.verdict, ...(queued.diff ? { diff: hash(Buffer.from(JSON.stringify(queued.diff))) } : {}), ...(queued.stability_probe ? { stability_probe: queued.stability_probe } : {}) };
+  if (queued) readonly.items.queued_invariants = { verdict: queued.verdict, diff: hash(Buffer.from(JSON.stringify(queued.diff))), ...(queued.stability_probe ? { stability_probe: queued.stability_probe } : {}) };
   inspect(readonly);
   const bytes = Buffer.from(JSON.stringify(readonly, null, 2) + '\n');
-  const scripts = ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs'];
+  const scripts = ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs', 'scripts/outbox-db-contract/catalog-sections.mjs'];
   const operator_script_sha256 = Object.fromEntries(scripts.map(script => [script, hash(git(repo, 'show', `${sha}:${script}`))]));
   if (scripts.some(script => operator_script_sha256[script] !== hash(readFileSync(path.join(repo, script))))) throw new Error('Operator script differs from tested SHA');
   const manifest = { tested_sha: sha, tier: 'pre-merge', kind: 'shared-readonly', phase, target: 'shared-test', verdict: source.verdict, exit_status: 0, run_id: runId, started_at: now.toISOString(), completed_at: now.toISOString(), clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative }, artifacts: { 'readonly.json': hash(bytes) }, target_binding: { project_ref: REF, pooler_user: `postgres.${REF}` }, inputs: { catalog_record: { directory: catalog.directory, artifact: catalog.artifact, sha256: catalog.sha256 }, platform_record: { directory: platform.directory, artifact: platform.artifact, sha256: platform.sha256 } }, operator_script_sha256, event: 'operator', workflow_path: '', github_run_id: '', github_run_attempt: '', items: readonly.items };

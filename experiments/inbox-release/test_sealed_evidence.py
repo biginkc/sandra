@@ -10,10 +10,18 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from sealed_evidence import ROOT, EvidenceError, evaluate, evaluate_deploy, evaluate_migration, J5A, MIGRATION_VERSIONS
+from sealed_evidence import ROOT, EvidenceError, evaluate, evaluate_deploy, evaluate_migration, J5A, MIGRATION_VERSIONS, CATALOG_SECTIONS
 
 
 class SealedEvidenceTests(unittest.TestCase):
+    def test_catalog_section_contract_matches_node_checker(self):
+        source = Path(__file__).resolve().parents[2]
+        sections = subprocess.check_output(
+            ["node", "--input-type=module", "-e", "import { CATALOG_SECTIONS } from './scripts/outbox-db-contract/catalog-sections.mjs'; console.log(JSON.stringify(CATALOG_SECTIONS))"],
+            cwd=source, text=True,
+        )
+        self.assertEqual(tuple(json.loads(sections)), CATALOG_SECTIONS)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -23,7 +31,7 @@ class SealedEvidenceTests(unittest.TestCase):
         self.git("config", "user.name", "Evidence Test")
         (self.repo / "base.txt").write_text("base")
         source = Path(__file__).resolve().parents[2]
-        for name in ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs"):
+        for name in ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs", "scripts/outbox-db-contract/catalog-sections.mjs"):
             target = self.repo / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((source / name).read_bytes())
@@ -46,7 +54,7 @@ class SealedEvidenceTests(unittest.TestCase):
 
     @staticmethod
     def catalog_config() -> dict:
-        names = ("created_objects_present", "extensions", "functions", "index_names", "relations", "schema_migrations", "schemas", "trigger_names", "types")
+        names = CATALOG_SECTIONS
         sections = {name: [] for name in names}
         hashes = {name: "c" * 64 for name in names}
         # catalog_fingerprint.py emits the raw sections plus both levels of digest.
@@ -86,7 +94,7 @@ class SealedEvidenceTests(unittest.TestCase):
             manifest["started_at"] = sealed_time
             manifest["completed_at"] = sealed_time
             manifest["run_id"] = "shared-readonly-" + phase + "-" + sealed_time.replace("-", "").replace(":", "").replace(".", "")
-            scripts = ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs")
+            scripts = ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs", "scripts/outbox-db-contract/catalog-sections.mjs")
             inputs = {}
             for label, source_kind, source_phase, filename in (("catalog_record", "catalog-fingerprint", "n/a", "catalog-pre.json"), ("platform_record", "db-contract", "pre", "platform-config.json")):
                 candidates = list((self.repo / ROOT / self.sha / "pre-merge").glob("*/manifest.json"))
@@ -432,6 +440,8 @@ class SealedEvidenceTests(unittest.TestCase):
             ("catalog observed", mutate_output(lambda o, m: o["comparisons"]["catalog"]["observed_section_sha256"].update(relations="0" * 64))),
             ("input hash", mutate_output(lambda o, m: o["comparisons"]["platform"].update(input_sha256="0" * 64))),
             ("stability probe", mutate_output(lambda o, m: (o["items"].update(queued_invariants={"verdict": "INCONCLUSIVE", "stability_probe": {"message_body": "private"}}), m["items"].update(o["items"])))),
+            ("queued diff omitted", mutate_output(lambda o, m: (o["items"].update(queued_invariants={"verdict": "PASS"}), m["items"].update(o["items"])))),
+            ("empty INCONCLUSIVE diff", mutate_output(lambda o, m: (o["items"].update(queued_invariants={"verdict": "INCONCLUSIVE", "diff": hashlib.sha256(b"[]").hexdigest()}), m["items"].update(o["items"])))),
             ("extra output", mutate_output(lambda o, m: o["comparisons"]["platform"].update(message_body="private"))),
             ("extra manifest", lambda m, d: m.update(message_body="private")),
         )
@@ -443,6 +453,24 @@ class SealedEvidenceTests(unittest.TestCase):
                     case.shared_mutation = mutation
                     case.j5a_records()
                     with case.assertRaises(EvidenceError):
+                        evaluate(case.repo, "j5a", case.sha)
+                finally:
+                    case.doCleanups()
+
+    def test_shared_readonly_rejects_every_missing_catalog_section_and_extra(self):
+        for omitted in (*self.catalog_config()["section_sha256"], None):
+            with self.subTest(omitted=omitted):
+                case = SealedEvidenceTests(methodName="test_valid_sealed_record")
+                case.setUp()
+                try:
+                    config = case.catalog_config()
+                    if omitted:
+                        del config["section_sha256"][omitted]
+                    else:
+                        config["section_sha256"]["unexpected"] = "c" * 64
+                    case.catalog_config = lambda: config
+                    case.j5a_records()
+                    with case.assertRaisesRegex(EvidenceError, "catalog mismatch"):
                         evaluate(case.repo, "j5a", case.sha)
                 finally:
                     case.doCleanups()

@@ -6,10 +6,10 @@ import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } fro
 import os from 'node:os';
 import path from 'node:path';
 import { sealSharedReadonly } from './seal-shared-readonly.mjs';
+import { CATALOG_SECTIONS } from '../outbox-db-contract/catalog-sections.mjs';
 import { platformFingerprint } from '../outbox-db-contract/platform.mjs';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const git = (repo, ...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
-const CATALOG_SECTIONS = ['created_objects_present', 'extensions', 'functions', 'index_names', 'relations', 'schema_migrations', 'schemas', 'trigger_names', 'types'];
 async function producerPlatform() {
   return platformFingerprint('https://example.invalid', 'anon', '17', async url => url.endsWith('/rest/v1/')
     ? new Response('', { status: 200, headers: { 'x-postgrest-version': 'PostgREST/12.2.0' } })
@@ -18,7 +18,7 @@ async function producerPlatform() {
 async function fixture() {
   const repo = mkdtempSync(path.join(os.tmpdir(), 'shared-seal-'));
   git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Test'); git(repo, 'config', 'user.email', 'test@example.invalid');
-  for (const file of ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs']) {
+  for (const file of ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs', 'scripts/outbox-db-contract/catalog-sections.mjs']) {
     mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); copyFileSync(file, path.join(repo, file));
   }
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'base');
@@ -38,7 +38,7 @@ async function fixture() {
   const catalogRecord = input('catalog', 'catalog-fingerprint', 'n/a', 'catalog-pre.json', catalog);
   const platformRecord = input('platform', 'db-contract', 'pre', 'platform-config.json', platform);
   const output = path.join(os.tmpdir(), `shared-output-${sha}.json`);
-  const source = { verdict: 'PASS', target: 'shared-readonly', phase: 'pre', platform_config: platform, comparisons: { catalog: { verdict: 'PASS', input_sha256: digest(JSON.stringify(catalog)), observed_section_sha256: sections }, platform: { verdict: 'PASS', input_sha256: digest(JSON.stringify(platform)), observed_sha256: platform.sha256 } } };
+  const source = { verdict: 'PASS', target: 'shared-readonly', phase: 'pre', items: {}, platform_config: platform, comparisons: { catalog: { verdict: 'PASS', input_sha256: digest(JSON.stringify(catalog)), observed_section_sha256: sections }, platform: { verdict: 'PASS', input_sha256: digest(JSON.stringify(platform)), observed_sha256: platform.sha256 } } };
   const args = { repo, sha, phase: 'pre', output, catalogRecord, platformRecord };
   const save = () => writeFileSync(output, JSON.stringify(source)); save();
   return { args, source, save, repo, root };
@@ -48,6 +48,44 @@ test('seals only digest representation linked to committed inputs', async () => 
   const output = JSON.parse(readFileSync(path.join(f.repo, dir, 'readonly.json')));
   assert.deepEqual(Object.keys(output).sort(), ['comparisons', 'items', 'phase', 'target', 'verdict']);
   assert.equal(JSON.stringify(output).includes('platform_config'), false);
+});
+test('sealer refuses every missing catalog section and an extra section', async () => {
+  for (const omitted of [...CATALOG_SECTIONS, null]) {
+    const f = await fixture();
+    const file = path.join(f.repo, f.args.catalogRecord, 'catalog-pre.json');
+    const catalog = JSON.parse(readFileSync(file));
+    if (omitted) delete catalog.section_sha256[omitted];
+    else catalog.section_sha256.unexpected = 'c'.repeat(64);
+    const bytes = Buffer.from(JSON.stringify(catalog));
+    writeFileSync(file, bytes);
+    const manifestFile = path.join(f.repo, f.args.catalogRecord, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestFile));
+    manifest.artifacts['catalog-pre.json'] = digest(bytes);
+    writeFileSync(manifestFile, JSON.stringify(manifest));
+    git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'mutate catalog');
+    f.source.comparisons.catalog.input_sha256 = digest(bytes);
+    f.source.comparisons.catalog.observed_section_sha256 = catalog.section_sha256;
+    f.save();
+    assert.throws(() => sealSharedReadonly(f.args), /Catalog comparison mismatch/, omitted ?? 'extra');
+  }
+});
+test('sealer requires the producer items map', async () => {
+  const f = await fixture();
+  delete f.source.items;
+  f.save();
+  assert.throws(() => sealSharedReadonly(f.args), /Unexpected items fields/);
+});
+test('sealer refuses a queued item without its diff', async () => {
+  const f = await fixture();
+  f.source.items = { queued_invariants: { verdict: 'PASS' } };
+  f.save();
+  assert.throws(() => sealSharedReadonly(f.args), /Invalid queued invariants/);
+});
+test('sealer refuses an INCONCLUSIVE queued item with an empty diff', async () => {
+  const f = await fixture();
+  f.source.items = { queued_invariants: { verdict: 'INCONCLUSIVE', diff: [] } };
+  f.save();
+  assert.throws(() => sealSharedReadonly(f.args), /Invalid queued invariants/);
 });
 for (const [label, mutate] of [
   ['token key', f => { f.source.access_token = 'secret'; f.save(); }],
