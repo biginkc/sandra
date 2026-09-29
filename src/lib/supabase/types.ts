@@ -5662,6 +5662,16 @@ export type Database = {
       }
     }
     Functions: {
+      sequence_overview_stats: { Args: { p_org: string }; Returns: Array<{
+        id: string; name: string; description: string | null; active: boolean;
+        append_opt_out: boolean; archived_at: string | null; created_at: string;
+        created_by: string | null; step_count: number; active_enrollment_count: number;
+        waiting: number; replied: number; finished_no_reply: number;
+        couldnt_send: number; stopped: number; last_sent: string | null;
+      }> }
+      sequence_needs_person: { Args: { p_org: string }; Returns: Array<{
+        property_id: string; sequence_id: string | null; bucket: string; reason: string; sequence_created_by: string | null;
+      }> }
       fn_get_rep_sms_context: { Args: { p_property_id: string }; Returns: Json }
       fn_set_rep_sms_enrollment: { Args: { p_org_id: string; p_user_id: string; p_enabled: boolean }; Returns: boolean }
       fn_set_rep_sms_sender: { Args: { p_org_id: string; p_user_id: string; p_provider: string; p_phone: string; p_provider_account_id?: string | null; p_provider_sender_id?: string | null; p_label: string; p_default: boolean; p_active: boolean }; Returns: string }

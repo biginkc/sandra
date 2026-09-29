@@ -1,0 +1,90 @@
+import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { Client } from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
+import { loadTestEnv } from "@tests/integration/env";
+
+const sql = readFileSync("supabase/migrations/20260928150000_sequence_stats.sql", "utf8");
+const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
+if (!url) throw new Error("Missing TEST_SUPABASE_DB_URL");
+const pg = new Client({ connectionString: url });
+let org = "";
+let otherOrg = "";
+let actor = "";
+let sequence = "";
+let otherSequence = "";
+const ids: Record<string, string> = {};
+
+async function role(userId: string) {
+  await pg.query("set local role authenticated");
+  await pg.query("select set_config('request.jwt.claim.role','authenticated',true)");
+  await pg.query("select set_config('request.jwt.claim.sub',$1,true)", [userId]);
+}
+
+beforeAll(async () => {
+  await pg.connect();
+  await pg.query(sql);
+  await pg.query(sql); // idempotency is part of the contract.
+});
+afterAll(async () => { await pg.end(); });
+beforeEach(async () => {
+  await pg.query("begin");
+  org = randomUUID(); otherOrg = randomUUID(); actor = randomUUID(); sequence = randomUUID(); otherSequence = randomUUID();
+  await pg.query("insert into auth.users(id) values ($1)", [actor]);
+  await pg.query("insert into public.organizations(id,name) values ($1,'Stats A'),($2,'Stats B')", [org, otherOrg]);
+  await pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner')", [actor, org]);
+  await pg.query("insert into public.sequences(id,org_id,name) values ($1,$2,'Stats'),($3,$4,'Other')", [sequence, org, otherSequence, otherOrg]);
+  await pg.query("insert into public.sequence_steps(sequence_id,step_index,action_type,template_body) values ($1,0,'send_sms','Test')", [sequence]);
+  for (const key of ["waiting", "replied", "takeover", "failed", "reconcile", "stopped", "canceled", "finished", "answered", "needs"]) {
+    ids[key] = randomUUID();
+    await pg.query("insert into public.properties(id,org_id,address,state,outreach_dispo) values ($1,$2,$3,'MO',$4)",
+      [ids[key], org, `Stats ${key}`, key === "needs" ? "needs_sequence" : null]);
+  }
+  for (const [key, status, reason] of [
+    ["waiting", "active", null], ["replied", "paused", "inbound_reply"],
+    ["takeover", "paused", "rep_sms_human_takeover"], ["failed", "paused", "provider_failed"],
+    ["reconcile", "paused", "reconciliation_required"], ["stopped", "opted_out", null],
+    ["canceled", "completed", null], ["finished", "completed", null], ["answered", "completed", null],
+  ] as const) {
+    const enrollmentId = randomUUID();
+    ids[`${key}Enrollment`] = enrollmentId;
+    await pg.query(`insert into public.sequence_enrollments
+      (id,org_id,sequence_id,property_id,status,pause_reason,enrolled_at)
+      values ($1,$2,$3,$4,$5,$6,'2026-09-01T00:00:00Z')`,
+    [enrollmentId, org, sequence, ids[key], status, reason]);
+  }
+  await pg.query(`insert into public.lead_events(org_id,property_id,actor_type,event_type,source_type,source_id)
+    values ($1,$2,'system','sequence_canceled','sequence_enrollments.canceled',$3)`,
+  [org, ids.canceled, ids.canceledEnrollment]);
+  await pg.query(`insert into public.messages(org_id,property_id,channel,direction,body,status,created_at)
+    values ($1,$2,'sms','inbound','Reply','received','2026-09-03T00:00:00Z')`, [org, ids.answered]);
+});
+afterEach(async () => { await pg.query("rollback"); await pg.query("reset role"); });
+
+it("counts each plain-English bucket and excludes a later reply from no-reply", async () => {
+  await role(actor);
+  const result = await pg.query("select * from public.sequence_overview_stats($1)", [org]);
+  expect(result.rows).toHaveLength(1);
+  expect(result.rows[0]).toMatchObject({
+    step_count: "1", active_enrollment_count: "5", waiting: "1", replied: "2",
+    couldnt_send: "2", stopped: "2", finished_no_reply: "1",
+  });
+});
+
+it("returns finished, failed, and unassigned needs-sequence leads", async () => {
+  await role(actor);
+  const result = await pg.query("select * from public.sequence_needs_person($1)", [org]);
+  const byProperty = Object.fromEntries(result.rows.map((row) => [row.property_id, row.bucket]));
+  expect(byProperty[ids.finished]).toBe("finished_no_reply");
+  expect(byProperty[ids.failed]).toBe("couldnt_send");
+  expect(byProperty[ids.reconcile]).toBe("couldnt_send");
+  expect(byProperty[ids.needs]).toBe("needs_sequence");
+  expect(byProperty[ids.answered]).toBeUndefined();
+  expect(byProperty[ids.canceled]).toBeUndefined();
+});
+
+it("rejects an org without active membership", async () => {
+  await role(actor);
+  await expect(pg.query("select * from public.sequence_overview_stats($1)", [otherOrg]))
+    .rejects.toMatchObject({ code: "42501" });
+});

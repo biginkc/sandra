@@ -33,3 +33,24 @@ it("previews the cumulative delay through the first SMS and omits it for status-
     { id: "status-only", name: "Status only", textCount: 0, days: 1, firstSend: null },
   ] });
 });
+
+it("excludes the dedicated canary creator from drip choices", async () => {
+  process.env.SEQUENCE_CANARY_USER_ID = "canary-user";
+  try {
+    const sequences = [
+      { id: "live", name: "Live", created_by: "real-user" },
+      { id: "canary", name: "Looks live", created_by: "canary-user" },
+    ];
+    createClient.mockResolvedValue({
+      auth: { getUser: async () => ({ data: { user: { id: "real-user" } } }) },
+      from: (table: string) => table === "sequences"
+        ? { select: () => ({ eq: () => ({ is: () => ({ order: async () => ({ data: sequences, error: null }) }) }) }) }
+        : { select: () => ({ in: () => ({ order: async () => ({ data: [
+          { sequence_id: "live", step_index: 0, delay_after_previous_minutes: 0, action_type: "send_sms" },
+        ], error: null }) }) }) },
+    });
+    expect(await listDripChoices()).toMatchObject({ ok: true, data: [{ id: "live" }] });
+  } finally {
+    delete process.env.SEQUENCE_CANARY_USER_ID;
+  }
+});

@@ -40,6 +40,7 @@ jobs:
       # developer's local `.env.local`.
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
+      SEQUENCE_CANARY_USER_ID: ${{ secrets.SEQUENCE_CANARY_USER_ID }}
       CI: "1"
 
     steps:
@@ -60,3 +61,7 @@ jobs:
         # enrollment advanced to `completed`, then cleans up. Exits 0
         # on success, non-zero on any failure.
         run: npx tsx scripts/smoke-sequences-prod.ts
+
+      - name: Clean up tagged canary data
+        if: always()
+        run: npx tsx scripts/smoke-sequences-prod.ts --cleanup-only
