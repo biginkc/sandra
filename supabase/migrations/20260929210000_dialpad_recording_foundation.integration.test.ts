@@ -284,6 +284,7 @@ const chunk = (captureId: unknown, track: string, epoch: number, seq: number, op
 async function publishPcmEofForClaim(): Promise<void> {
   const rows = await pg.query<{
     capture_id: string;
+    org_id: string;
     epoch: number;
     track: "tab" | "mic";
     processed_through_sample: number;
@@ -293,7 +294,7 @@ async function publishPcmEofForClaim(): Promise<void> {
     source_codec: string | null;
     degraded_reasons: unknown;
   }>(
-    `select c.id as capture_id, g.epoch, s.track,
+    `select c.id as capture_id, c.org_id, g.epoch, s.track,
             coalesce(p.processed_through_sample, 0) as processed_through_sample,
             p.pcm_eof_sample, p.source_sample_rate_hz, p.source_channels, p.source_codec,
             coalesce(p.degraded_reasons, '[]'::jsonb) as degraded_reasons
@@ -306,7 +307,7 @@ async function publishPcmEofForClaim(): Promise<void> {
          on p.capture_id = c.id and p.epoch = g.epoch and p.track = s.track
       where c.status = 'open'
          or (c.status = 'closing' and c.drain_deadline_at is not null and c.drain_deadline_at > now())
-      group by c.id, g.epoch, s.track, p.processed_through_sample, p.pcm_eof_sample,
+      group by c.id, c.org_id, g.epoch, s.track, p.processed_through_sample, p.pcm_eof_sample,
                p.source_sample_rate_hz, p.source_channels, p.source_codec, p.degraded_reasons
       order by c.opened_at, c.id, g.epoch, s.track`,
   );
@@ -314,7 +315,7 @@ async function publishPcmEofForClaim(): Promise<void> {
     const processed = Number(row.processed_through_sample);
     const reasons = Array.isArray(row.degraded_reasons) ? row.degraded_reasons : [];
     await rpc("fn_record_dialpad_recording_pcm_progress", [
-      orgId,
+      row.org_id,
       row.capture_id,
       row.track,
       row.epoch,
@@ -1611,6 +1612,18 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
   });
 
   describe("20260929221000 Dialpad playback projection", () => {
+    beforeEach(async () => {
+      await pg.query("begin");
+      NOW_MS = Date.now();
+      callCounter = 0;
+      await seedFixture();
+    });
+
+    afterEach(async () => {
+      await pg.query("rollback");
+      await pg.query("reset role");
+    });
+
     it("publishes two opaque track files and preserves sealed metadata in the library projection", async () => {
       const { captureId, token } = await sealedReady(nextPlaybackCallId());
       await register(captureId, token, [decoded("tab"), decoded("mic")]);
