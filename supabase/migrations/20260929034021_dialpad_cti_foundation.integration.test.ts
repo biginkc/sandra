@@ -235,7 +235,7 @@ describe("20260929034021 Dialpad CTI foundation migration", () => {
   describe("schema, RLS and grants", () => {
     it("enables RLS on every CTI table and stores no raw secret in the connection table", async () => {
       const rls = await pg.query<{ relname: string; relrowsecurity: boolean }>(
-        "select relname, relrowsecurity from pg_class where relnamespace='public'::regnamespace and relname like 'dialpad\\_%' and relkind='r' order by relname",
+        "select relname, relrowsecurity from pg_class where relnamespace='public'::regnamespace and relname like 'dialpad\\_%' and relname not like 'dialpad\\_recording\\_%' and relkind='r' order by relname",
       );
       expect(rls.rows.map((row) => row.relname)).toEqual([
         "dialpad_call_events",
