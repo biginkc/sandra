@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname "$0")/failure-exit.sh"
-perf_cleanup() { if declare -F perf_exit >/dev/null; then perf_exit; fi; }
+perf_cleaned=0
+perf_cleanup() { if [[ "$perf_cleaned" == 0 ]] && declare -F perf_exit >/dev/null; then perf_exit; fi; }
 trap 'heavy_lane_exit "$?" perf_cleanup' EXIT
 source "$(dirname "$0")/perf-common.sh"
 perf_preflight
@@ -40,6 +41,8 @@ for attempt in $(seq 1 "$attempt_count"); do
   fi
   perf_stop
 done
+perf_exit
+perf_cleaned=1
 if [[ "${PERF_LOCAL_EXECUTION:-}" == 1 ]]; then
   echo "Local diagnostic: $PERF_RUN_ROOT ($verdict, $attempt_count attempt). No approval record."
 else
