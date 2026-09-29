@@ -12,7 +12,8 @@ import { DataTableFooter, DataTableShell } from "@/components/ui/data-table-shel
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { callAction } from "@/lib/errors/call-action";
-import { needsPersonPiles } from "../overview-model";
+import { NEEDS_PERSON_PAGE_SIZE, needsPersonPiles } from "../overview-model";
+import type { NeedsPersonBucket, NeedsPersonCounts } from "../actions";
 import type { NeedsPersonLead } from "./actions";
 
 const PILES = [
@@ -21,9 +22,23 @@ const PILES = [
   { key: "needs_sequence", id: "needs-drip", title: "Needs a drip", detail: "Marked for a drip, but none has started yet." },
 ] as const;
 
-export function NeedsPersonBoard({ rows }: { rows: NeedsPersonLead[] }) {
+export function NeedsPersonBoard({ rows, counts, pages }: {
+  rows: NeedsPersonLead[];
+  counts?: NeedsPersonCounts;
+  pages?: Record<NeedsPersonBucket, number>;
+}) {
   const router = useRouter();
   const piles = needsPersonPiles(rows);
+  const totals = counts ?? Object.fromEntries(PILES.map((pile) => [pile.key, piles[pile.key].length])) as NeedsPersonCounts;
+  const currentPages = pages ?? { finished_no_reply: 1, couldnt_send: 1, needs_sequence: 1 };
+  function pageHref(bucket: NeedsPersonBucket, page: number, anchor: string) {
+    const params = new URLSearchParams();
+    for (const pile of PILES) {
+      const next = pile.key === bucket ? page : currentPages[pile.key];
+      if (next > 1) params.set(pile.key, String(next));
+    }
+    return `/sequences/needs-person${params.size ? `?${params}` : ""}#${anchor}`;
+  }
   const [selected, setSelected] = useState<string[]>([]);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [deadLead, setDeadLead] = useState<NeedsPersonLead | null>(null);
@@ -42,16 +57,18 @@ export function NeedsPersonBoard({ rows }: { rows: NeedsPersonLead[] }) {
 
   return <div className="space-y-7">
     <div className="grid gap-3 md:grid-cols-3" aria-label="Needs attention">
-      {PILES.map((pile) => <a key={pile.key} href={`#${pile.id}`} className="rounded-xl border bg-card p-4 text-sm"><span className="text-muted-foreground">{pile.title}</span><strong className="mt-1 block font-heading text-2xl">{piles[pile.key].length}</strong></a>)}
+      {PILES.map((pile) => <a key={pile.key} href={`#${pile.id}`} className="rounded-xl border bg-card p-4 text-sm"><span className="text-muted-foreground">{pile.title}</span><strong className="mt-1 block font-heading text-2xl">{totals[pile.key]}</strong></a>)}
     </div>
     {PILES.map((pile) => {
       const leads = piles[pile.key];
       const shown = showAll[pile.key] ? leads : leads.slice(0, 5);
       const allSelected = leads.length > 0 && leads.every((lead) => selected.includes(lead.property_id));
+      const page = currentPages[pile.key];
+      const pageCount = Math.max(1, Math.ceil(totals[pile.key] / NEEDS_PERSON_PAGE_SIZE));
       return <section key={pile.key} id={pile.id} className="space-y-3">
         <button type="button" aria-expanded={expanded[pile.key]} onClick={() => setExpanded((current) => ({ ...current, [pile.key]: !current[pile.key] }))}
           className={`flex w-full items-center justify-between rounded-lg px-4 py-3 text-left text-sm font-bold text-white ${pile.key === "couldnt_send" ? "bg-red-700" : pile.key === "needs_sequence" ? "bg-blue-700" : "bg-zinc-600"}`}>
-          <span>{expanded[pile.key] ? "⌄" : "›"} &nbsp; {pile.title.toUpperCase()} <span className="rounded-full bg-white/20 px-2">{leads.length}</span></span><span className="text-xs font-normal">{pile.detail}</span>
+          <span>{expanded[pile.key] ? "⌄" : "›"} &nbsp; {pile.title.toUpperCase()} <span className="rounded-full bg-white/20 px-2">{totals[pile.key]}</span></span><span className="text-xs font-normal">{pile.detail}</span>
         </button>
         {expanded[pile.key] && <>
         {pile.key === "needs_sequence" && <div className="flex justify-end"><Button disabled={selected.length === 0} onClick={() => setBulkOpen(true)}>Start drip for {selected.length} selected</Button></div>}
@@ -76,7 +93,7 @@ export function NeedsPersonBoard({ rows }: { rows: NeedsPersonLead[] }) {
             </div></TableCell>
           </TableRow>)}
           {leads.length === 0 && <TableRow><TableCell colSpan={pile.key === "needs_sequence" ? 4 : 3} className="py-8 text-center text-muted-foreground">No leads in this group.</TableCell></TableRow>}
-        </TableBody></Table><DataTableFooter><span className="text-sm text-muted-foreground">{leads.length} leads</span>{leads.length > 5 && <button type="button" className="text-sm underline" onClick={() => setShowAll((current) => ({ ...current, [pile.key]: !current[pile.key] }))}>{showAll[pile.key] ? "Show fewer" : `Show all ${leads.length}`}</button>}</DataTableFooter></DataTableShell>
+        </TableBody></Table><DataTableFooter><span className="text-sm text-muted-foreground">Page {page} of {pageCount} · {totals[pile.key]} leads</span><div className="flex gap-3">{leads.length > 5 && <button type="button" className="text-sm underline" onClick={() => setShowAll((current) => ({ ...current, [pile.key]: !current[pile.key] }))}>{showAll[pile.key] ? "Show fewer" : `Show all ${leads.length} on this page`}</button>}{page > 1 && <Link className="text-sm underline" href={pageHref(pile.key, page - 1, pile.id)}>Previous</Link>}{page < pageCount && <Link className="text-sm underline" href={pageHref(pile.key, page + 1, pile.id)}>Next</Link>}</div></DataTableFooter></DataTableShell>
         </>}
       </section>;
     })}

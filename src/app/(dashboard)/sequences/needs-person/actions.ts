@@ -3,12 +3,12 @@
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import type { PropertyStatus } from "@/app/(dashboard)/leads/actions";
-import { listSequenceNeedsPerson, type NeedsPersonRow } from "../actions";
+import { listSequenceNeedsPersonPage, type NeedsPersonBucket, type NeedsPersonRow } from "../actions";
 
 export type NeedsPersonLead = NeedsPersonRow & { address: string; status: PropertyStatus; threadId: string | null };
 
-export async function listNeedsPersonLeads(): Promise<Result<NeedsPersonLead[]>> {
-  const result = await listSequenceNeedsPerson();
+export async function listNeedsPersonLeads(bucket: NeedsPersonBucket, page: number): Promise<Result<NeedsPersonLead[]>> {
+  const result = await listSequenceNeedsPersonPage(bucket, page);
   if (!result.ok) return result;
   if (result.data.length === 0) return ok([]);
   try {
