@@ -1,0 +1,27 @@
+import { createHash } from 'node:crypto';
+
+const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export async function readonlyGet(url, options = {}, transport = globalThis.fetch) {
+  const parsed = new URL(url);
+  if (options.method && options.method !== 'GET' || !['/rest/v1/', '/auth/v1/health'].includes(parsed.pathname) || parsed.search) {
+    throw new Error('READONLY_HTTP_DENIED');
+  }
+  return transport(url, { ...options, method: 'GET', redirect: 'error' });
+}
+export async function platformFingerprint(apiUrl, anonKey, postgresMajor, transport) {
+  const headers = anonKey ? { apikey: anonKey } : {};
+  const root = apiUrl.replace(/\/$/, '');
+  const rest = await readonlyGet(`${root}/rest/v1/`, { headers }, transport);
+  const auth = await readonlyGet(`${root}/auth/v1/health`, {}, transport);
+  if (!rest.ok || !auth.ok) throw new Error('PLATFORM_READ_FAILED');
+  const health = await auth.json();
+  const version = String(health.version ?? '');
+  const postgrest = rest.headers.get('x-postgrest-version') ?? rest.headers.get('server') ?? '';
+  if (!version || !postgrest) throw new Error('PLATFORM_VERSION_MISSING');
+  const result = { postgres_major: String(postgresMajor), postgrest_major: postgrest.match(/\d+/)?.[0], gotrue_major: version.match(/\d+/)?.[0] };
+  if (!result.postgrest_major || !result.gotrue_major) throw new Error('PLATFORM_VERSION_MISSING');
+  return { ...result, sha256: digest(result) };
+}
+export function comparePlatform(a, b) {
+  for (const key of ['postgres_major', 'postgrest_major', 'gotrue_major']) if (a[key] !== b[key]) throw new Error(`PLATFORM_MISMATCH ${key}`);
+}
