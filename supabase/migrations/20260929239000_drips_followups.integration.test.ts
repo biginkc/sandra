@@ -7,6 +7,7 @@ import { dripBucket, dripStatus, DRIP_BUCKET_LABELS, type DripBucket } from "@/l
 
 const url = requireLoopbackPostgresUrl(process.env.TEST_SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54329/postgres");
 const sql = readFileSync(new URL("./20260929239000_drips_followups.sql", import.meta.url), "utf8");
+const sequenceDetailSql = readFileSync(new URL("./20260929237000_sequence_detail.sql", import.meta.url), "utf8");
 const reasons: readonly [string, DripBucket | null][] = [
   ["inbound_reply", "replied"], ["rep_sms_human_takeover", "replied"],
   ["provider_failed", "couldnt_send"], ["reconciliation_required", "couldnt_send"],
@@ -16,6 +17,47 @@ const reasons: readonly [string, DripBucket | null][] = [
   ["manual", null],
 ];
 type Snapshot = { rows: Array<{ thread_id: string; in_drip: boolean; drip_replied: boolean }>; counts: Record<string, number>; total: number };
+
+it("copies body, template, and category SMS sources into a new drip", async () => {
+  const db = new Client({ connectionString: url });
+  await db.connect();
+  try {
+    await db.query("begin");
+    await db.query(sequenceDetailSql);
+    if (process.env.PR8_COPY_BASELINE !== "1") await db.query(sql);
+
+    const org = randomUUID(), actor = randomUUID(), source = randomUUID(), target = randomUUID();
+    await db.query("insert into auth.users(id) values ($1)", [actor]);
+    await db.query("insert into public.organizations(id,name) values ($1,'PR8 copy sources')", [org]);
+    await db.query("insert into public.memberships(user_id,org_id,role,access_status) values ($1,$2,'owner','active')", [actor, org]);
+    await db.query("insert into public.sequences(id,org_id,name) values ($1,$3,'Source'),($2,$3,'Target')", [source, target, org]);
+    const template = (await db.query<{ id: string }>(
+      "insert into public.sms_templates(org_id,name,content,category) values ($1,'PR8 template','Template text','PR8 category') returning id", [org],
+    )).rows[0]!.id;
+    await db.query(`insert into public.sequence_steps
+      (sequence_id,step_index,delay_after_previous_minutes,action_type,template_body,template_id,template_category)
+      values ($1,0,0,'send_sms','Body text',null,null),
+        ($1,1,60,'send_sms',null,$2,null),
+        ($1,2,120,'send_sms',null,null,'PR8 category')`, [source, template]);
+    const fields = "step_index,delay_after_previous_minutes,action_type,template_body,template_id,template_category,target_status";
+    const original = (await db.query(`select ${fields} from public.sequence_steps where sequence_id=$1 order by step_index`, [source])).rows;
+
+    await db.query("set local role authenticated");
+    await db.query("select set_config('request.jwt.claim.role','authenticated',true)");
+    await db.query("select set_config('request.jwt.claim.sub',$1,true)", [actor]);
+    expect((await db.query("select public.sequence_copy_steps($1,$2) as copied", [target, source])).rows[0]!.copied).toBe(3);
+    await db.query("reset role");
+    const copied = (await db.query(`select ${fields} from public.sequence_steps where sequence_id=$1 order by step_index`, [target])).rows;
+    expect(copied).toEqual(original);
+    expect(copied.map(row => [row.template_body, row.template_id, row.template_category])).toEqual([
+      ["Body text", null, null], [null, template, null], [null, null, "PR8 category"],
+    ]);
+    expect((await db.query(`select ${fields} from public.sequence_steps where sequence_id=$1 order by step_index`, [source])).rows).toEqual(original);
+  } finally {
+    await db.query("rollback").catch(() => {});
+    await db.end();
+  }
+});
 
 it("keeps SQL and TypeScript pause buckets in one table and enforces triage and inbox reply guards", async () => {
   const db = new Client({ connectionString: url });

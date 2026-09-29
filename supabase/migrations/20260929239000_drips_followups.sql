@@ -203,6 +203,44 @@ $$;
 revoke all on function public.sequence_step_stats(uuid, uuid) from public, anon, service_role;
 grant execute on function public.sequence_step_stats(uuid, uuid) to authenticated;
 
+-- Preserve each SMS source when copying steps, including category-backed sends.
+create or replace function public.sequence_copy_steps(p_target uuid, p_source uuid)
+returns integer
+language plpgsql security definer set search_path = '' set statement_timeout = '5s'
+as $$
+declare
+  target_org uuid;
+  copied integer;
+begin
+  if p_target is null or p_source is null or p_target = p_source or auth.uid() is null
+  then raise exception 'INVALID_SEQUENCE' using errcode = '22023'; end if;
+  -- The target row lock serializes concurrent copy attempts.
+  select s.org_id into target_org from public.sequences s where s.id = p_target for update;
+  if target_org is null or not exists (
+    select 1 from public.memberships m where m.org_id = target_org and m.user_id = auth.uid()
+      and m.access_status = 'active' and m.deletion_prepared_at is null
+      and (m.access_expires_at is null or m.access_expires_at > statement_timestamp())
+  ) then raise exception 'FORBIDDEN' using errcode = '42501'; end if;
+  if not exists (select 1 from public.sequences s where s.id = p_source and s.org_id = target_org)
+  then raise exception 'SOURCE_NOT_FOUND' using errcode = 'P0002'; end if;
+  if exists (
+    select 1 from public.sequence_steps where sequence_id = p_target
+  ) then raise exception 'TARGET_NOT_EMPTY' using errcode = '23514'; end if;
+  if not exists (select 1 from public.sequence_steps where sequence_id = p_source)
+  then raise exception 'SOURCE_EMPTY' using errcode = '23514'; end if;
+
+  insert into public.sequence_steps (sequence_id, step_index, delay_after_previous_minutes,
+    action_type, template_body, template_id, template_category, target_status)
+  select p_target, st.step_index, st.delay_after_previous_minutes,
+    st.action_type, st.template_body, st.template_id, st.template_category, st.target_status
+  from public.sequence_steps st where st.sequence_id = p_source order by st.step_index;
+  get diagnostics copied = row_count;
+  return copied;
+end;
+$$;
+revoke all on function public.sequence_copy_steps(uuid, uuid) from public, anon, service_role;
+grant execute on function public.sequence_copy_steps(uuid, uuid) to authenticated;
+
 
 CREATE OR REPLACE FUNCTION public.sms_inbox_thread_page_snapshot(p_cutoff timestamp with time zone, p_filter text DEFAULT 'all'::text, p_assignee_id uuid DEFAULT NULL::uuid, p_include_thread_id uuid DEFAULT NULL::uuid, p_hide_noise boolean DEFAULT true, p_limit integer DEFAULT 200, p_offset integer DEFAULT 0, p_search text DEFAULT NULL::text)
  RETURNS jsonb
