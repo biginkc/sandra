@@ -144,7 +144,8 @@ export type ThreadPageFilter =
   | "escalated"
   | "dispo"
   | "needs_outcome"
-  | "drip_replied";
+  | "drip_replied"
+  | "in_drip";
 
 export type ThreadPageCounts = Record<ThreadPageFilter, number>;
 
@@ -192,6 +193,7 @@ type ThreadSnapshotRow = {
   drip_step?: number | null;
   drip_steps_total?: number | null;
   drip_replied?: boolean;
+  in_drip?: boolean;
   is_dnc_locked: boolean;
   assignee_id: string | null;
   last_message_body: string;
@@ -509,13 +511,14 @@ export async function listThreadPage(
     throw new Error("sms_inbox_thread_page_snapshot: invalid response");
   }
 
-  // Old production RPCs treat an unknown filter as All. Until the migration
-  // lands, keep the new view empty instead of silently showing every thread.
-  if (opts.filter === "drip_replied" && !("drip_replied" in data.counts)) {
+  // Old production RPCs treat unknown filters as All. Until the migration
+  // lands, keep new views empty instead of showing every thread.
+  if ((opts.filter === "drip_replied" && !("drip_replied" in data.counts)) ||
+    (opts.filter === "in_drip" && !("in_drip" in data.counts))) {
     return {
       degraded: true,
       threads: [],
-      counts: { ...data.counts, drip_replied: 0 },
+      counts: { ...data.counts, drip_replied: data.counts.drip_replied ?? 0, in_drip: 0 },
       total: 0,
       hiddenCount: 0,
       page: 1,
@@ -526,7 +529,7 @@ export async function listThreadPage(
   return {
     degraded,
     threads: mapThreadSnapshot(data.rows, {}),
-    counts: { ...data.counts, drip_replied: data.counts.drip_replied ?? 0 },
+    counts: { ...data.counts, drip_replied: data.counts.drip_replied ?? 0, in_drip: data.counts.in_drip ?? 0 },
     total: data.total,
     hiddenCount: data.hidden_count,
     page: Math.floor(data.offset / data.limit) + 1,
@@ -733,7 +736,7 @@ async function fetchThreadSnapshot(
 
 type ThreadPageDocument = {
   rows: ThreadSnapshotRow[];
-  counts: Omit<ThreadPageCounts, "drip_replied"> & { drip_replied?: number };
+  counts: Omit<ThreadPageCounts, "drip_replied" | "in_drip"> & { drip_replied?: number; in_drip?: number };
   total: number;
   hidden_count: number;
   limit: number;
@@ -780,6 +783,7 @@ function isThreadPageDocument(value: unknown): value is ThreadPageDocument {
       "needs_outcome",
     ].every((key) => Number.isInteger(counts[key])) &&
     (counts.drip_replied === undefined || Number.isInteger(counts.drip_replied)) &&
+    (counts.in_drip === undefined || Number.isInteger(counts.in_drip)) &&
     document.rows.every(isThreadSnapshotRow)
   );
 }
@@ -805,6 +809,7 @@ function isThreadSnapshotRow(value: unknown): value is ThreadSnapshotRow {
     (row.drip_step == null || Number.isInteger(row.drip_step)) &&
     (row.drip_steps_total == null || Number.isInteger(row.drip_steps_total)) &&
     (row.drip_replied === undefined || typeof row.drip_replied === "boolean") &&
+    (row.in_drip === undefined || typeof row.in_drip === "boolean") &&
     hasValidAiDispositionReviewFields(row)
   );
 }

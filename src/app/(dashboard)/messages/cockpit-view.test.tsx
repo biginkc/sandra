@@ -210,7 +210,7 @@ const baseProps = {
     escalated: 0,
     dispo: 0,
     needs_outcome: 0,
-    drip_replied: 0,
+    drip_replied: 0, in_drip: 0,
   } satisfies InboxFilterCounts,
   assigneeEmails: {},
   currentUserId: "user-1",

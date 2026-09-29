@@ -21,6 +21,7 @@ export function parseInboxFilter(raw: string | undefined): InboxFilter {
       return "dispo";
     case "needs_outcome":
     case "drip_replied":
+    case "in_drip":
       return raw;
     default:
       return "all";
@@ -37,7 +38,8 @@ export function isThreadFilter(f: InboxFilter): boolean {
     f === "escalated" ||
     f === "dispo" ||
     f === "needs_outcome" ||
-    f === "drip_replied"
+    f === "drip_replied" ||
+    f === "in_drip"
   );
 }
 
