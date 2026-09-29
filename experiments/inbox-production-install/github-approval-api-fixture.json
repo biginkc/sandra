@@ -1,0 +1,64 @@
+{
+  "production_run": {
+    "id": 7,
+    "event": "workflow_run",
+    "status": "waiting",
+    "run_attempt": 1
+  },
+  "attempt_jobs": {
+    "total_count": 2,
+    "jobs": [
+      {
+        "id": 71,
+        "name": "Bind upstream test run",
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": 1,
+        "started_at": "2026-09-28T10:00:00Z",
+        "completed_at": "2026-09-28T10:02:00Z"
+      },
+      {
+        "id": 72,
+        "name": "Apply migrations to prod",
+        "status": "waiting",
+        "run_attempt": 1
+      }
+    ]
+  },
+  "artifacts": {
+    "total_count": 1,
+    "artifacts": [
+      {
+        "id": 90,
+        "name": "upstream-binding",
+        "expired": false,
+        "created_at": "2026-09-28T10:01:00Z",
+        "workflow_run": {
+          "id": 7
+        }
+      }
+    ]
+  },
+  "binding": {
+    "run_id": 7,
+    "run_attempt": 1,
+    "upstream_run_id": 5,
+    "upstream_run_attempt": 2,
+    "upstream_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "upstream_event": "push",
+    "upstream_head_branch": "main",
+    "upstream_conclusion": "success"
+  },
+  "upstream_attempt": {
+    "id": 5,
+    "run_attempt": 2,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "event": "push",
+    "head_branch": "main",
+    "conclusion": "success"
+  },
+  "upstream_latest": {
+    "id": 5,
+    "run_attempt": 2
+  }
+}
