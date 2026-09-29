@@ -1,0 +1,44 @@
+{
+  "kind": "perf-120k",
+  "thresholds": {
+    "p95_ms": 5,
+    "p99_ms": 10,
+    "foundation_access_exclusive_upper_ms": 500
+  },
+  "latencies": {
+    "message_insert_inbound": {
+      "n": 2000,
+      "p95_ms": 2.251346,
+      "p99_ms": 3.610693
+    },
+    "message_update_queued_sent": {
+      "n": 2000,
+      "p95_ms": 2.146986,
+      "p99_ms": 2.619399
+    },
+    "message_delete_queued": {
+      "n": 2000,
+      "p95_ms": 1.109698,
+      "p99_ms": 1.446115
+    },
+    "contact_update": {
+      "n": 2000,
+      "p95_ms": 1.541318,
+      "p99_ms": 1.980734
+    },
+    "property_update": {
+      "n": 2000,
+      "p95_ms": 1.01327,
+      "p99_ms": 1.22142
+    },
+    "consent_insert": {
+      "n": 2000,
+      "p95_ms": 1.70195,
+      "p99_ms": 2.167918
+    }
+  },
+  "foundation_file_wall_upper_ms": 266.115248,
+  "foundation_access_exclusive_messages_observed_ms": 212.354916,
+  "failures": [],
+  "verdict": "PASS"
+}

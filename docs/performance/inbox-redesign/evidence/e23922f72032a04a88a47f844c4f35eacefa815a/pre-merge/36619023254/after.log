@@ -1,0 +1,6 @@
+after message_insert_inbound complete
+after message_update_queued_sent complete
+after message_delete_queued complete
+after contact_update complete
+after property_update complete
+after consent_insert complete

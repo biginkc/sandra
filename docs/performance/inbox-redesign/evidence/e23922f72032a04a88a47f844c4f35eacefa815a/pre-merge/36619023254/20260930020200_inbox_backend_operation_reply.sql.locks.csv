@@ -1,0 +1,8 @@
+elapsed_ms,granted_access_exclusive_messages,waiting_locks,access_exclusive_pids
+2.280,false,0,
+53.063,false,0,
+103.869,false,1,
+154.359,false,1,
+206.138,false,1,
+257.024,false,1,
+312.487,false,0,
