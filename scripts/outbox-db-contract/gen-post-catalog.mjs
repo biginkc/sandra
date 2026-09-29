@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import pg from 'pg';
 import { assertWriteMode } from './guards.mjs';
+import { assertFunctionPin } from './privileges.mjs';
 
 const dbUrl = process.env.E2E_CI_SUPABASE_DB_URL;
 assertWriteMode('disposable', { apiUrl: process.env.TEST_SUPABASE_URL, dbUrl, env: process.env });
@@ -13,13 +14,15 @@ try {
   const names = Object.keys(expected.relation_owners).filter(key => key.startsWith('table:')).map(key => key.slice(6)).sort();
   if (JSON.stringify(rows.map(row => row.name)) !== JSON.stringify(names)) throw new Error('Post relation set differs from migration source inventory');
   delete expected.relation_rls;
-  const functions = (await db.query("select n.nspname||'.'||p.proname as name,p.oid::regprocedure::text as signature,p.prosecdef as secdef,pg_get_userbyid(p.proowner) as owner,coalesce((select regexp_replace(x,'^search_path=','') from unnest(p.proconfig) x where x like 'search_path=%'),'') as search_path from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname like 'inbox_%' or (n.nspname='public' and p.proname like 'inbox_%') order by 1,2")).rows;
+  const functions = (await db.query("select n.nspname||'.'||p.proname as name,p.oid::regprocedure::text as signature,p.prosecdef as secdef,pg_get_userbyid(p.proowner) as owner,(select regexp_replace(x,'^search_path=','') from unnest(p.proconfig) x where x like 'search_path=%') as search_path from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname like 'inbox_%' or (n.nspname='public' and p.proname like 'inbox_%') order by 1,2")).rows;
   if (JSON.stringify([...new Set(functions.map(row => row.name))].sort()) !== JSON.stringify(Object.keys(expected.functions).sort())) throw new Error('Post function set differs from migration source inventory');
   for (const fn of functions) {
-    const allowed = (await db.query("select role from unnest(array['anon','authenticated','service_role']::text[]) role where has_function_privilege(role,$1,'EXECUTE') order by role", [fn.signature])).rows.map(row => row.role);
+    const grants = (await db.query("select role,has_function_privilege(role,$1,'EXECUTE') as allowed from unnest(array['anon','authenticated','service_role']::text[]) role order by role", [fn.signature])).rows;
+    if (!grants.every(row => typeof row.allowed === 'boolean')) throw new Error(`Indeterminate function EXECUTE privilege ${fn.name}`);
+    const allowed = grants.filter(row => row.allowed).map(row => row.role);
     const current = expected.functions[fn.name];
-    const normalize = value => value.replaceAll(' ', '').replaceAll('"', '');
-    if (JSON.stringify(current.execute) !== JSON.stringify(allowed) || current.secdef !== fn.secdef || current.owner !== fn.owner || normalize(current.search_path) !== normalize(fn.search_path)) throw new Error(`Source/live function mismatch ${fn.name}: source=${JSON.stringify(current)} live=${JSON.stringify({ ...fn, execute: allowed })}`);
+    try { assertFunctionPin({ ...fn, execute: allowed }, current); }
+    catch { throw new Error(`Source/live function mismatch ${fn.name}: source=${JSON.stringify(current)} live=${JSON.stringify({ ...fn, execute: allowed })}`); }
   }
   writeFileSync(file, `${JSON.stringify(expected, null, 2)}\n`);
 } finally { await db.end(); }

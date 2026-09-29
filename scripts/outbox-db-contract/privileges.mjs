@@ -6,6 +6,13 @@ const ops = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'];
 const triggerPre = ['trg_messages_fill_sms_conversation_id', 'guard_training_messages', 'messages_reject_dnc_locked_read'];
 const triggerPost = [...triggerPre, 'zzz_inbox_guard_inbound_revision_insert', 'zzz_inbox_guard_inbound_revision_update', 'inbox_capture_inbound_head', 'zzzzz_inbox_message_direct', 'zzzzzzzz_inbox_operation_target'];
 const pin = phase => JSON.parse(readFileSync(new URL(`./expected/privileges.${phase}.json`, import.meta.url), 'utf8'));
+export const normalizeSearchPath = value => value === null ? null : value.replaceAll(' ', '').replaceAll('"', '');
+export function assertFunctionPin(actual, expected) {
+  assert.equal(actual.secdef, expected.secdef, actual.name);
+  assert.equal(actual.owner, expected.owner, actual.name);
+  assert.equal(normalizeSearchPath(actual.search_path), normalizeSearchPath(expected.search_path), actual.name);
+  assert.deepEqual([...actual.execute].sort(), expected.execute, actual.name);
+}
 
 export async function checkPrivileges(db, phase) {
   const checks = [];
@@ -40,14 +47,13 @@ export async function checkPrivileges(db, phase) {
   if (phase === 'post') {
     const expected = pin('post');
     await check('PIN_FUNCTIONS', async () => {
-      const rows = await q("select n.nspname||'.'||p.proname as name,p.prosecdef as secdef,pg_get_userbyid(p.proowner) as owner,coalesce((select regexp_replace(x,'^search_path=','') from unnest(p.proconfig) x where x like 'search_path=%'),'') as search_path,p.oid::regprocedure::text as signature from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname like 'inbox_%' or (n.nspname='public' and p.proname like 'inbox_%') order by 1,5");
+      const rows = await q("select n.nspname||'.'||p.proname as name,p.prosecdef as secdef,pg_get_userbyid(p.proowner) as owner,(select regexp_replace(x,'^search_path=','') from unnest(p.proconfig) x where x like 'search_path=%') as search_path,p.oid::regprocedure::text as signature from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname like 'inbox_%' or (n.nspname='public' and p.proname like 'inbox_%') order by 1,5");
       assert.deepEqual([...new Set(rows.map(r => r.name))].sort(), Object.keys(expected.functions).sort());
       for (const row of rows) {
         const want = expected.functions[row.name];
-        assert.equal(row.secdef, want.secdef, row.name); assert.equal(row.owner, want.owner, row.name);
-        assert.equal(row.search_path.replaceAll(' ', '').replaceAll('"', ''), want.search_path.replaceAll(' ', '').replaceAll('"', ''), row.name);
         const grants = await q("select role,has_function_privilege(role,$1,'EXECUTE') as allowed from unnest($2::text[]) role", [row.signature, roles]);
-        assert.deepEqual(grants.filter(r => r.allowed).map(r => r.role).sort(), want.execute, row.name);
+        assert(grants.every(r => typeof r.allowed === 'boolean'), row.name);
+        assertFunctionPin({ ...row, execute: grants.filter(r => r.allowed).map(r => r.role) }, want);
       }
       assert.equal(expected.functions['public.inbox_guard_inbound_revision'].secdef, false);
       return { count: rows.length };

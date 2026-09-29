@@ -20,7 +20,7 @@ for (const file of paths) {
     const key = match[1].toLowerCase();
     if (!key.startsWith('inbox_') && !key.startsWith('public.inbox_')) continue;
     const header = match[3];
-    const searchPath = header.match(/\bSET\s+search_path\s*=\s*'([^']*)'/i)?.[1] ?? '';
+    const searchPath = header.match(/\bSET\s+search_path\s*=\s*'([^']*)'/i)?.[1] ?? null;
     functions[key] = { secdef: /\bSECURITY DEFINER\b/i.test(header), owner: 'postgres', search_path: searchPath, execute: [] };
   }
 }
