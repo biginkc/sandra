@@ -13,7 +13,7 @@ import {
   List,
   Megaphone,
   MessageSquare,
-  Repeat,
+  Droplet,
   Target,
 } from "lucide-react";
 import Link from "next/link";
@@ -59,7 +59,7 @@ const ITEMS: readonly Item[] = [
   { href: "/properties", label: "Prospects", icon: Target },
   { href: "/lists", label: "Lists", icon: List },
   { href: "/campaigns", label: "Campaigns", icon: Megaphone },
-  { href: "/sequences", label: "Sequences", icon: Repeat },
+  { href: "/sequences", label: "Drips", icon: Droplet },
   { href: "/templates", label: "Templates", icon: FileText },
   { href: "/messages", label: "Messages", icon: MessageSquare },
   { href: "/leads", label: "Leads", icon: LayoutDashboard },
@@ -101,6 +101,7 @@ const MOBILE_ITEM_INACTIVE =
   "text-white/75 hover:bg-white/[0.07] hover:text-white";
 
 export function DashboardSidebar({
+  activePathname,
   showCalculators = false,
   showMyLeads = true,
   showRecordings = false,
@@ -109,6 +110,7 @@ export function DashboardSidebar({
   initialAcquisitionBadge = null,
   onRefreshAcquisitionBadge,
 }: {
+  activePathname?: string;
   showCalculators?: boolean;
   showMyLeads?: boolean;
   showRecordings?: boolean;
@@ -117,7 +119,8 @@ export function DashboardSidebar({
   initialAcquisitionBadge?: number | null;
   onRefreshAcquisitionBadge?: MyLeadsBadgeRefresh;
 }) {
-  const pathname = usePathname();
+  const routePathname = usePathname();
+  const pathname = activePathname ?? routePathname;
   const items = visibleItems(
     showMyLeads,
     showRecordings,

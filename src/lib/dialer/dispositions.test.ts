@@ -15,5 +15,6 @@ describe("softphone disposition mapping", () => {
     ]);
     expect(SOFTPHONE_DISPOSITIONS.map((item) => item.label)).not.toContain("Offer discussed");
     expect(SOFTPHONE_DISPOSITIONS.map((item) => item.label)).not.toContain("Voicemail");
+    expect(SOFTPHONE_DISPOSITIONS.find((item) => item.value === "needs_sequence")?.label).toBe("Needs drip");
   });
 });

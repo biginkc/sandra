@@ -234,7 +234,7 @@ function expectSharedOutcomeControls({
   );
   expect(screen.getByTestId("dispo-dnc-deferred")).toBeDisabled();
   expect(screen.getByTestId("dispo-needs-sequence")).toHaveTextContent(
-    "Needs sequence",
+    "Needs drip",
   );
   expect(screen.getByTestId("dispo-more")).toBeInTheDocument();
 
@@ -1470,7 +1470,7 @@ describe("<InboxDetail />", () => {
 
     expect(setInboxDispoAndStartDripMock).toHaveBeenCalledWith("prop-1", "needs_sequence", "s1");
     await waitFor(() => {
-      expect(screen.getAllByText("Needs sequence")).toHaveLength(2);
+      expect(screen.getAllByText("Needs drip")).toHaveLength(2);
     });
   });
 

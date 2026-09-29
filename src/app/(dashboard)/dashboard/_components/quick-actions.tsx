@@ -19,14 +19,14 @@ export function QuickActions({
       {isAdmin ? (
         <Action
           href="/sequences/new"
-          label="Start a sequence"
+          label="Start a drip"
           icon={Repeat}
           variant="solid"
         />
       ) : (
         <Action
           href="/sequences"
-          label="View sequences"
+          label="View drips"
           icon={Repeat}
           variant="outline"
         />

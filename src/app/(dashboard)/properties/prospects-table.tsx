@@ -1140,7 +1140,7 @@ const DISPO_PILL_META: Record<string, { label: string; className: string }> = {
     className: "bg-purple-100 text-purple-800 hover:bg-purple-100",
   },
   needs_sequence: {
-    label: "Needs sequence",
+    label: "Needs drip",
     className: "bg-teal-100 text-teal-800 hover:bg-teal-100",
   },
 };

@@ -233,7 +233,7 @@ export function formatLeadEventSentence(
     case "list_removed":
       return `${actor} removed the lead from ${label ?? "a list"}${batchSuffix}`;
     case "sequence_enrolled":
-      return `${actor} enrolled the lead in ${label ?? "a sequence"}${batchSuffix}`;
+      return `${actor} enrolled the lead in ${label ?? "a drip"}${batchSuffix}`;
     case "sequence_paused": {
       const sequenceCount = formatCountedSequence(payload);
       return sequenceCount
@@ -245,11 +245,11 @@ export function formatLeadEventSentence(
       return sequenceCount
         ? `${actor} resumed ${sequenceCount}`
         : isSingleSequencePayload(payload)
-          ? `${actor} resumed a sequence`
+          ? `${actor} resumed a drip`
           : `${actor} recorded activity`;
     }
     case "sequence_canceled":
-      return `${actor} canceled a sequence enrollment`;
+      return `${actor} canceled a drip enrollment`;
     case "dispo_set":
       return hasTransitionPayload(payload)
         ? `${actor} changed disposition: ${from} → ${to}`
@@ -474,7 +474,7 @@ function formatCountedSequence(
   const count = payload.count;
   if (typeof count !== "number" || !Number.isInteger(count) || count < 1)
     return null;
-  return count > 1 ? `${count} sequences` : "a sequence";
+  return count > 1 ? `${count} drips` : "a drip";
 }
 
 function isSingleSequencePayload(

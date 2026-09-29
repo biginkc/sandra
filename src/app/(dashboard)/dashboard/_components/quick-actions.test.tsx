@@ -7,7 +7,7 @@ describe("<QuickActions />", () => {
   it("sends admins to the sequence authoring flow", () => {
     render(<QuickActions isAdmin />);
 
-    const action = screen.getByRole("link", { name: /start a sequence/i });
+    const action = screen.getByRole("link", { name: /start a drip/i });
     expect(action).toHaveAttribute("href", "/sequences/new");
   });
 
@@ -15,9 +15,9 @@ describe("<QuickActions />", () => {
     render(<QuickActions isAdmin={false} />);
 
     expect(
-      screen.queryByRole("link", { name: /start a sequence/i }),
+      screen.queryByRole("link", { name: /start a drip/i }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /view sequences/i })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /view drips/i })).toHaveAttribute(
       "href",
       "/sequences",
     );

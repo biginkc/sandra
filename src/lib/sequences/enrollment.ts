@@ -83,7 +83,7 @@ export async function enrollLead(
   if (prop.org_id !== seq.org_id) {
     return {
       status: "failed",
-      message: "Sequence and property must belong to the same organization.",
+      message: "Drip and property must belong to the same organization.",
     };
   }
 
@@ -163,7 +163,7 @@ export async function enrollLead(
     return {
       status: "no_consent",
       message:
-        "Contact has opted out of SMS. Can't enroll in a send_sms sequence.",
+        "Contact has opted out of SMS. Can't enroll in a drip that sends SMS.",
     };
   }
 

@@ -105,7 +105,7 @@ export function StepPreflight({ state }: { state: WizardState }) {
               detected.
             </strong>{" "}
             They remain ordinary Prospects, but Sandra excludes them from SMS
-            and sequence enrollment.
+            and drip enrollment.
           </div>
           <Button
             variant="outline"

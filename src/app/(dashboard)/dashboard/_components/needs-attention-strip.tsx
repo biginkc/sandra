@@ -34,7 +34,7 @@ export function NeedsAttentionStrip({
     },
     {
       count: needs.sequence_ended_no_followup,
-      label: "Sequences ended without follow-up",
+      label: "Drips ended without follow-up",
       href: "/leads?sequence_ended=true",
       dotClass: "bg-yellow-500",
     },

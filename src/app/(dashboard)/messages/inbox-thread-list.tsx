@@ -46,7 +46,7 @@ const THREAD_DISPO_LABELS: Record<string, string> = {
   wrong_number: "Wrong #",
   bad_number: "Bad #",
   not_interested: "Not interested",
-  needs_sequence: "Needs sequence",
+  needs_sequence: "Needs drip",
   opted_out: "Opted out",
   dnc: "DNC",
   nurture: "Follow up",
