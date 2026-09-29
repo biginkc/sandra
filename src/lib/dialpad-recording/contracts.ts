@@ -170,6 +170,11 @@ function nullableOneOf<T extends string>(value: Json | undefined, allowed: reado
   return oneOf(value, allowed, label);
 }
 
+function strings(value: Json | undefined, label: string): string[] {
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string' && entry.length > 0)) throw new Error(`Invalid ${label}.`);
+  return value as string[];
+}
+
 const COMPLETENESS = ['complete', 'partial', 'unusable'] as const;
 
 function parseSegment(value: Json | undefined): DialpadRecordingSegmentSummary {
@@ -414,6 +419,7 @@ export interface DialpadRecordingSealInput {
   sha256: string;
   storagePath: string;
   isEof: boolean;
+  eofSha256?: string | null;
 }
 
 export interface DialpadRecordingSealInputsResult {
@@ -435,6 +441,8 @@ export function parseDialpadRecordingSealInputs(value: Json | null | undefined):
       const sha256 = str(item.sha256, 'sha256');
       if (!SHA256_HEX.test(sha256)) throw new Error('Invalid sha256.');
       if (typeof item.isEof !== 'boolean') throw new Error('Invalid isEof.');
+      const eofSha256 = item.eofSha256 === null || item.eofSha256 === undefined ? null : str(item.eofSha256, 'eofSha256');
+      if (eofSha256 !== null && !SHA256_HEX.test(eofSha256)) throw new Error('Invalid eofSha256.');
       return {
         captureId: str(item.captureId, 'captureId'),
         orgId: str(item.orgId, 'orgId'),
@@ -445,6 +453,7 @@ export function parseDialpadRecordingSealInputs(value: Json | null | undefined):
         sha256,
         storagePath: str(item.storagePath, 'storagePath'),
         isEof: item.isEof,
+        eofSha256,
       };
     }),
   };
@@ -461,6 +470,7 @@ export interface DialpadRecordingVadThreshold {
   thresholdSamples: number;
   crossingTotalSamples?: number;
   crossingEpoch?: number;
+  crossingSample?: number;
   crossingStartSample?: number;
   crossingEndSample?: number;
   evidenceRef?: string;
@@ -502,12 +512,120 @@ export function parseDialpadRecordingVadResult(value: Json | null | undefined): 
       ...(thresholdStatus === 'latched' ? {
         crossingTotalSamples: bigish(thresholdData.crossingTotalSamples, 'crossingTotalSamples'),
         crossingEpoch: int(thresholdData.crossingEpoch, 'crossingEpoch'),
+        crossingSample: bigish(thresholdData.crossingSample, 'crossingSample'),
         crossingStartSample: bigish(thresholdData.crossingStartSample, 'crossingStartSample'),
         crossingEndSample: bigish(thresholdData.crossingEndSample, 'crossingEndSample'),
         evidenceRef: str(thresholdData.evidenceRef, 'evidenceRef'),
         latchedAt: str(thresholdData.latchedAt, 'latchedAt'),
       } : {}),
     },
+  };
+}
+
+export interface DialpadRecordingPcmProgressResult {
+  status: 'recorded' | 'replayed';
+  captureId: string;
+  track: DialpadRecordingTrack;
+  epoch: number;
+  batchId: string;
+  processedThroughSample: number;
+  pcmEofSample: number | null;
+  sourceSampleRateHz: number | null;
+  sourceChannels: number | null;
+  sourceCodec: string | null;
+  normalizedSampleRateHz: number;
+  normalizedChannels: number;
+  degradedReasons: string[];
+}
+
+export function parseDialpadRecordingPcmProgressResult(value: Json | null | undefined): DialpadRecordingPcmProgressResult {
+  const data = record(value, 'PCM progress');
+  return {
+    status: oneOf(data.status, ['recorded', 'replayed'] as const, 'status'),
+    captureId: str(data.captureId, 'captureId'),
+    track: oneOf(data.track, DIALPAD_RECORDING_TRACKS, 'track'),
+    epoch: int(data.epoch, 'epoch'),
+    batchId: str(data.batchId, 'batchId'),
+    processedThroughSample: bigish(data.processedThroughSample, 'processedThroughSample'),
+    pcmEofSample: data.pcmEofSample === null || data.pcmEofSample === undefined ? null : bigish(data.pcmEofSample, 'pcmEofSample'),
+    sourceSampleRateHz: data.sourceSampleRateHz === null || data.sourceSampleRateHz === undefined ? null : int(data.sourceSampleRateHz, 'sourceSampleRateHz'),
+    sourceChannels: data.sourceChannels === null || data.sourceChannels === undefined ? null : int(data.sourceChannels, 'sourceChannels'),
+    sourceCodec: nullableStr(data.sourceCodec, 'sourceCodec'),
+    normalizedSampleRateHz: int(data.normalizedSampleRateHz, 'normalizedSampleRateHz'),
+    normalizedChannels: int(data.normalizedChannels, 'normalizedChannels'),
+    degradedReasons: strings(data.degradedReasons, 'degradedReasons'),
+  };
+}
+
+export interface DialpadRecordingPcmSnapshot {
+  track: DialpadRecordingTrack;
+  epoch: number;
+  processedThroughSample: number;
+  pcmEofSample: number | null;
+  sourceSampleRateHz: number | null;
+  sourceChannels: number | null;
+  sourceCodec: string | null;
+  normalizedSampleRateHz: number;
+  normalizedChannels: number;
+  degradedReasons: string[];
+}
+
+export interface DialpadRecordingVadSnapshot {
+  version: number;
+  captureId: string;
+  totalSamples: number;
+  measurementStatus: 'provisional' | 'partial' | 'finalized';
+  epoch: number | null;
+  epochCreditedThrough: number | null;
+  crossing: DialpadRecordingVadThreshold | null;
+  processedPcm: DialpadRecordingPcmSnapshot[];
+  degradedReasons: string[];
+}
+
+export function parseDialpadRecordingVadSnapshot(value: Json | null | undefined): DialpadRecordingVadSnapshot {
+  const data = record(value, 'VAD snapshot');
+  if (!Array.isArray(data.processedPcm)) throw new Error('Invalid processedPcm.');
+  const crossingData = data.crossing;
+  let crossing: DialpadRecordingVadThreshold | null = null;
+  if (crossingData !== null && crossingData !== undefined) {
+    const parsed = record(crossingData, 'VAD crossing');
+    crossing = {
+      status: oneOf(parsed.status, ['latched'] as const, 'crossing status'),
+      thresholdSamples: bigish(parsed.thresholdSamples, 'thresholdSamples'),
+      crossingTotalSamples: bigish(parsed.crossingTotalSamples, 'crossingTotalSamples'),
+      crossingEpoch: int(parsed.crossingEpoch, 'crossingEpoch'),
+      crossingSample: bigish(parsed.crossingSample, 'crossingSample'),
+      crossingStartSample: bigish(parsed.crossingStartSample, 'crossingStartSample'),
+      crossingEndSample: bigish(parsed.crossingEndSample, 'crossingEndSample'),
+      evidenceRef: str(parsed.evidenceRef, 'evidenceRef'),
+      latchedAt: str(parsed.latchedAt, 'latchedAt'),
+    };
+  }
+  return {
+    version: int(data.version, 'version'),
+    captureId: str(data.captureId, 'captureId'),
+    totalSamples: bigish(data.totalSamples, 'totalSamples'),
+    measurementStatus: oneOf(data.measurementStatus, ['provisional', 'partial', 'finalized'] as const, 'measurementStatus'),
+    epoch: nullableInt(data.epoch, 'epoch'),
+    epochCreditedThrough: data.epochCreditedThrough === null || data.epochCreditedThrough === undefined ? null : bigish(data.epochCreditedThrough, 'epochCreditedThrough'),
+    crossing,
+    processedPcm: data.processedPcm.map((entry) => {
+      const item = record(entry, 'PCM snapshot');
+      const sourceCodec = nullableStr(item.sourceCodec, 'sourceCodec');
+      return {
+        track: oneOf(item.track, DIALPAD_RECORDING_TRACKS, 'track'),
+        epoch: int(item.epoch, 'epoch'),
+        processedThroughSample: bigish(item.processedThroughSample, 'processedThroughSample'),
+        pcmEofSample: item.pcmEofSample === null || item.pcmEofSample === undefined ? null : bigish(item.pcmEofSample, 'pcmEofSample'),
+        sourceSampleRateHz: item.sourceSampleRateHz === null || item.sourceSampleRateHz === undefined ? null : int(item.sourceSampleRateHz, 'sourceSampleRateHz'),
+        sourceChannels: item.sourceChannels === null || item.sourceChannels === undefined ? null : int(item.sourceChannels, 'sourceChannels'),
+        sourceCodec,
+        normalizedSampleRateHz: int(item.normalizedSampleRateHz, 'normalizedSampleRateHz'),
+        normalizedChannels: int(item.normalizedChannels, 'normalizedChannels'),
+        degradedReasons: strings(item.degradedReasons, 'degradedReasons'),
+      };
+    }),
+    degradedReasons: strings(data.degradedReasons, 'degradedReasons'),
   };
 }
 

@@ -27,6 +27,8 @@ import {
   parseDialpadRecordingLifecycle,
   parseDialpadRecordingSealInputs,
   parseDialpadRecordingVadResult,
+  parseDialpadRecordingPcmProgressResult,
+  parseDialpadRecordingVadSnapshot,
   parseDialpadRecordingCapture,
   type DialpadRecordingCapture,
   type DialpadRecordingChunkResult,
@@ -41,6 +43,8 @@ import {
   type DialpadRecordingSealInputsResult,
   type DialpadRecordingVadRange,
   type DialpadRecordingVadResult,
+  type DialpadRecordingPcmProgressResult,
+  type DialpadRecordingVadSnapshot,
   type DialpadRecordingTrack,
   type DialpadRecordingTrackReport,
 } from './contracts';
@@ -72,6 +76,8 @@ export interface DialpadRecordingDb {
   getLifecycle(orgId: string, captureId: string): Promise<Json>;
   getSealInputs(captureId: string, claimToken: string): Promise<Json>;
   recordVadRanges(args: { orgId: string; captureId: string; track: 'tab'; epoch: number; batchId: string; ranges: Json }): Promise<Json>;
+  recordPcmProgress(args: { orgId: string; captureId: string; track: DialpadRecordingTrack; epoch: number; batchId: string; processedThroughSample: number; pcmEofSample: number | null; sourceSampleRateHz: number | null; sourceChannels: number | null; sourceCodec: string | null; degradedReasons: Json }): Promise<Json>;
+  getVadSnapshot(orgId: string, captureId: string): Promise<Json>;
   claimSealWork(workerId: string, leaseSeconds: number): Promise<Json>;
   registerResult(captureId: string, claimToken: string, tracks: Json, failureCode: string | null): Promise<Json>;
 }
@@ -144,6 +150,24 @@ export function createSupabaseDialpadRecordingDb(client: SupabaseClient<Database
         p_batch_id: args.batchId,
         p_ranges: args.ranges,
       }));
+    },
+    async recordPcmProgress(args) {
+      return unwrap(await client.rpc('fn_record_dialpad_recording_pcm_progress', {
+        p_org_id: args.orgId,
+        p_capture_id: args.captureId,
+        p_track: args.track,
+        p_epoch: args.epoch,
+        p_batch_id: args.batchId,
+        p_processed_through_sample: args.processedThroughSample,
+        p_pcm_eof_sample: args.pcmEofSample,
+        p_source_sample_rate_hz: args.sourceSampleRateHz,
+        p_source_channels: args.sourceChannels,
+        p_source_codec: args.sourceCodec,
+        p_degraded_reasons: args.degradedReasons,
+      }));
+    },
+    async getVadSnapshot(orgId, captureId) {
+      return unwrap(await client.rpc('fn_get_dialpad_recording_vad_snapshot', { p_org_id: orgId, p_capture_id: captureId }));
     },
     async claimSealWork(workerId, leaseSeconds) {
       return unwrap(await client.rpc('fn_claim_dialpad_recording_seal_work', { p_worker_id: workerId, p_lease_seconds: leaseSeconds }));
@@ -456,6 +480,74 @@ export async function recordDialpadRecordingVadRanges(
       ranges: input.ranges as unknown as Json,
     }));
     return { ok: true, ...result };
+  } catch (error) {
+    return failureFromDbError(error);
+  }
+}
+
+export interface RecordPcmProgressInput {
+  orgId: unknown;
+  captureId: unknown;
+  track: unknown;
+  epoch: unknown;
+  batchId: unknown;
+  processedThroughSample: unknown;
+  pcmEofSample: unknown;
+  sourceSampleRateHz: unknown;
+  sourceChannels: unknown;
+  sourceCodec: unknown;
+  degradedReasons: unknown;
+}
+
+export type RecordPcmProgressResult = ({ ok: true } & DialpadRecordingPcmProgressResult) | DialpadRecordingFailure;
+
+export async function recordDialpadRecordingPcmProgress(
+  db: DialpadRecordingDb,
+  input: RecordPcmProgressInput,
+): Promise<RecordPcmProgressResult> {
+  const reasons = input.degradedReasons;
+  if (
+    !isUuid(input.orgId) || !isUuid(input.captureId) || !(DIALPAD_RECORDING_TRACKS as readonly unknown[]).includes(input.track)
+    || !isIntIn(input.epoch, 1, DIALPAD_RECORDING_MAX_EPOCH) || !isUuid(input.batchId)
+    || !isIntIn(input.processedThroughSample, 0, DIALPAD_RECORDING_VAD_MAX_SAMPLE)
+    || (input.pcmEofSample !== null && !isIntIn(input.pcmEofSample, 0, DIALPAD_RECORDING_VAD_MAX_SAMPLE))
+    || (input.pcmEofSample !== null && input.pcmEofSample > input.processedThroughSample)
+    || (input.sourceSampleRateHz !== null && !isIntIn(input.sourceSampleRateHz, 8000, 192000))
+    || (input.sourceSampleRateHz === null && (input.sourceChannels !== null || input.sourceCodec !== null))
+    || (input.sourceSampleRateHz !== null && (!isIntIn(input.sourceChannels, 1, 2) || typeof input.sourceCodec !== 'string' || !CODEC.test(input.sourceCodec)))
+    || !Array.isArray(reasons) || reasons.length > 64
+    || !reasons.every((reason) => typeof reason === 'string' && /^[a-z0-9_]{1,64}$/.test(reason))
+  ) return fail('invalid_input', 'Invalid PCM continuity progress.');
+  try {
+    const result = parseDialpadRecordingPcmProgressResult(await db.recordPcmProgress({
+      orgId: input.orgId,
+      captureId: input.captureId,
+      track: input.track as DialpadRecordingTrack,
+      epoch: input.epoch,
+      batchId: input.batchId,
+      processedThroughSample: input.processedThroughSample,
+      pcmEofSample: input.pcmEofSample as number | null,
+      sourceSampleRateHz: input.sourceSampleRateHz as number | null,
+      sourceChannels: input.sourceChannels as number | null,
+      sourceCodec: input.sourceCodec as string | null,
+      degradedReasons: reasons as unknown as Json,
+    }));
+    return { ok: true, ...result };
+  } catch (error) {
+    return failureFromDbError(error);
+  }
+}
+
+export type VadSnapshotResult = ({ ok: true; snapshot: DialpadRecordingVadSnapshot } | DialpadRecordingFailure);
+
+export async function getDialpadRecordingVadSnapshot(
+  db: DialpadRecordingDb,
+  orgId: unknown,
+  captureId: unknown,
+): Promise<VadSnapshotResult> {
+  if (!isUuid(orgId) || !isUuid(captureId)) return fail('invalid_input', 'Choose a recording first.');
+  try {
+    return { ok: true, snapshot: parseDialpadRecordingVadSnapshot(await db.getVadSnapshot(orgId, captureId)) };
   } catch (error) {
     return failureFromDbError(error);
   }
