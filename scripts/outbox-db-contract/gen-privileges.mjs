@@ -1,15 +1,13 @@
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-const sourceCommit = 'e767bec7';
 const paths = [
   'supabase/migrations/20260930000000_inbox_control_foundation.sql',
   'supabase/migrations/20260930000100_inbox_read_companion.sql',
   'supabase/migrations/20260930000200_inbox_backend_operation_reply.sql',
 ];
-const read = file => execFileSync('git', ['show', `${sourceCommit}:${file.replace('20260930', '20260929')}`], { encoding: 'utf8' });
+const read = file => readFileSync(file, 'utf8');
 const sha = text => createHash('sha256').update(text).digest('hex');
 const functions = {};
 const migrationSql = paths.map(read).join('\n');
@@ -53,7 +51,7 @@ for (const [name, entry] of Object.entries(functions)) entry.execute = ['anon', 
 const relations = {};
 for (const match of migrationSql.matchAll(/\bCREATE\s+SCHEMA\s+(?:IF\s+NOT\s+EXISTS\s+)?(inbox_[a-z_]+)/gi)) relations[`schema:${match[1].toLowerCase()}`] = 'postgres';
 for (const match of migrationSql.matchAll(/\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(inbox_[a-z_]+\.[a-z_][\w]*|public\.inbox_inbound_heads)/gi)) relations[`table:${match[1].toLowerCase()}`] = 'postgres';
-const expected = { source_commit: sourceCommit, source_sha256: Object.fromEntries(paths.map(file => [file, sha(read(file))])), functions, relation_owners: relations };
+const expected = { source_sha256: Object.fromEntries(paths.map(file => [file, sha(read(file))])), functions, relation_owners: relations };
 const dir = path.join('scripts', 'outbox-db-contract', 'expected'); mkdirSync(dir, { recursive: true });
 writeFileSync(path.join(dir, 'privileges.post.json'), `${JSON.stringify(expected, null, 2)}\n`);
 // The pre pin is generated from a live disposable-from-main catalog by gen-base-acl.mjs.
