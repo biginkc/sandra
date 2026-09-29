@@ -412,6 +412,7 @@ export class DialpadBrowserProtocolState {
   private readonly interruptedTracks = new Map<DialpadBrowserTrack, DialpadBrowserCaptureDegradedReason>()
   private timingCapability = false
   private timingEnded = false
+  private timingEndMessage: DialpadBrowserTimingEndMessage | undefined
 
   constructor(options: DialpadBrowserProtocolStateOptions = {}) {
     if (options.expectedEpoch !== undefined && !isEpoch(options.expectedEpoch)) throw protocolError('epoch_invalid')
@@ -446,9 +447,16 @@ export class DialpadBrowserProtocolState {
     }
     if (message.type === 'auth') throw protocolError('auth_repeated')
     if (message.type === 'timing_batch' || message.type === 'timing_probe' || message.type === 'timing_confirm' || message.type === 'timing_end') {
-      if (!this.timingCapability || this.timingEnded) throw protocolError('control_invalid')
+      if (!this.timingCapability) throw protocolError('control_invalid')
       if (message.epoch !== this.authenticatedEpoch) throw protocolError('epoch_mismatch')
-      if (message.type === 'timing_end') this.timingEnded = true
+      if (this.timingEnded) {
+        if (message.type === 'timing_end' && JSON.stringify(this.timingEndMessage) === JSON.stringify(message)) return message
+        throw protocolError('control_invalid')
+      }
+      if (message.type === 'timing_end') {
+        this.timingEnded = true
+        this.timingEndMessage = message
+      }
       return message
     }
     this.assertMessageBinding(message.epoch, message.track)

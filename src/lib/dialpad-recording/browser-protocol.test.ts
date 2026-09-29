@@ -98,6 +98,13 @@ describe('Dialpad browser text controls and auth state', () => {
     expectCode(() => parseDialpadBrowserClientText(JSON.stringify({ type: 'timing_batch', epoch: 1, batchId: '00000000-0000-4000-8000-000000000002', records: [{ ...record, forged: true }] })), 'control_invalid')
     expectCode(() => parseDialpadBrowserClientText(JSON.stringify({ type: 'timing_batch', epoch: 1, batchId: '00000000-0000-4000-8000-000000000002', records: [{ kind: 'exchange', track: 'tab', seq: 0, serverClockId: '00000000-0000-4000-8000-000000000003', nonce: 'a'.repeat(64), browserSendMs: 1, browserReceiveMs: 2, serverReceiveMonoMs: 1, serverSendMonoMs: 2, serverReceiveWallMs: 3, serverSendWallMs: 4 }] })), 'control_invalid')
     expect(parseDialpadBrowserClientText('{"type":"timing_end","epoch":1,"lastSeq":{"tabAnchor":0,"micAnchor":-1,"tabContext":-1,"micContext":-1,"exchange":-1},"outcome":"incomplete","reasons":["missing_final"]}')).toMatchObject({ type: 'timing_end', outcome: 'incomplete' })
+    const timingState = new DialpadBrowserProtocolState({ expectedEpoch: 1 })
+    timingState.acceptText('{"type":"auth","token":"grant","epoch":1,"controlVersion":2,"capabilities":["capture_timing_v1"]}')
+    timingState.confirmAuthentication({ epoch: 1, tracks: ['tab'], timingCapability: true })
+    const end = '{"type":"timing_end","epoch":1,"lastSeq":{"tabAnchor":0,"micAnchor":-1,"tabContext":0,"micContext":-1,"exchange":0},"outcome":"incomplete","reasons":["missing_final"]}'
+    expect(timingState.acceptText(end)).toMatchObject({ type: 'timing_end' })
+    expect(timingState.acceptText(end)).toMatchObject({ type: 'timing_end' })
+    expectCode(() => timingState.acceptText(end.replace('missing_final', 'persistence_failed')), 'control_invalid')
   })
 
   it('accepts only exact auth, PCM EOF, and recording EOF shapes with bounded values', () => {
