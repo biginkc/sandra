@@ -36,7 +36,7 @@ test("/sequences index renders the starter library after org-level re-seed", asy
   await seedStarterLibrary(admin, DEFAULT_ORG_ID);
 
   await page.goto("/sequences");
-  await expect(page.getByRole("heading", { name: "Sequences" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Drips" })).toBeVisible();
   await expect(page.getByText("First touch new lead")).toBeVisible();
   await expect(page.getByText("Nurture cold lead")).toBeVisible();
   await expect(page.getByText("Nurture not-interested")).toBeVisible();

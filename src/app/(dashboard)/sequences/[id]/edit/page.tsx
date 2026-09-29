@@ -31,7 +31,7 @@ export default async function SequenceEditPage({
           title="Drip editor"
         />
         <div className="text-destructive text-sm">
-          Failed to load sequence: {result.error.message}
+          Failed to load drip: {result.error.message}
         </div>
       </Page>
     );

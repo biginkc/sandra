@@ -33,7 +33,7 @@ export default async function SequencesIndexPage() {
 
       {!result.ok && (
         <div className="text-destructive text-sm">
-          Failed to load sequences: {result.error.message}
+          Failed to load drips: {result.error.message}
         </div>
       )}
 
