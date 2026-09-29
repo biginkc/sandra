@@ -139,6 +139,13 @@ describe('provider-window finalizer migration', () => {
     expect((await pg.query<{v:boolean}>('select public.dialpad_recording_provider_window_is_eligible($1,$2,$3) v',[ORG,captureId,callActivityId])).rows[0]!.v).toBe(false);
   });
 
+  it('rejects a per-capture timing sequence gap even when start and final records remain', async () => {
+    await replica(`update public.dialpad_recording_timing_records set seq=2 where capture_id=$1 and org_id=$2 and stream in ('tab:anchor','mic:anchor') and seq=1`, [captureId, ORG]);
+    const input = await pg.query<{v:any}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
+    expect(input.rows[0]!.v.status).toBe('unknown');
+    expect(input.rows[0]!.v.reasons).toContain('timing_discontinuity');
+  });
+
   it('returns a bounded keyset page and keeps empty VAD status provisional', async () => {
     const page = await pg.query<{v:any}>('select public.fn_list_dialpad_recording_provider_window_candidates($1,$2,$3) v',[1,null,null]);
     expect(page.rows[0]!.v.candidates).toEqual([{ orgId: ORG, captureId, policyVersion: POLICY }]);

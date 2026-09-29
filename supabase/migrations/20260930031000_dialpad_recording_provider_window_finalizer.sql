@@ -303,6 +303,16 @@ begin
        and current_row.epoch=selected_epoch
        and current_row.stream in ('tab:anchor','mic:anchor')
        and current_row.record->>'anchor' <> 'start';
+    if exists (
+      select 1
+        from public.dialpad_recording_timing_records
+       where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch
+         and stream in ('tab:anchor','mic:anchor','tab:context','mic:context','exchange')
+       group by stream
+      having min(seq) <> 0 or count(*) <> max(seq)::bigint + 1
+    ) then
+      reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_discontinuity');
+    end if;
     if timing_start_count < 2 or timing_final_count < 2 or timing_context_start_count < 2 or timing_context_final_count < 2 or timing_exchange_count < 1 or timing_server_clock_count <> 1 then
       reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_mapping_missing');
     end if;
