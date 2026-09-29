@@ -4,7 +4,7 @@ const {spawn}=require('child_process');
 const {Client}=require('pg');
 const root=process.env.PERF_RUN_DIR, url=process.env.PERF_DATABASE_URL;
 const source=process.env.PERF_MIGRATIONS_DIR;
-const files=['20260930000000_inbox_control_foundation.sql','20260930000100_inbox_read_companion.sql','20260930000200_inbox_backend_operation_reply.sql'];
+const files=['20260930020000_inbox_control_foundation.sql','20260930020100_inbox_read_companion.sql','20260930020200_inbox_backend_operation_reply.sql'];
 for (const file of files) if (!fs.statSync(path.join(source,file)).isFile()) throw Error('Missing required checked-out migration: '+file);
 const ms=x=>Number(x)/1e6;
 const sleep=x=>new Promise(r=>setTimeout(r,x));
