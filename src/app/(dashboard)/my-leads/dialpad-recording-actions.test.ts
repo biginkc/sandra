@@ -67,6 +67,14 @@ describe('Dialpad recording server actions', () => {
     expect(mocks.mintDialpadRecordingGrant).not.toHaveBeenCalled();
   });
 
+  it('rejects legacy mint epochs outside the server contract without clamping', async () => {
+    for (const epoch of [undefined, null, 0, -1, 1.5, 17, '1']) {
+      const result = await mintDialpadRecordingGrantAction({ captureId: 'capture-1', epoch });
+      expect(result).toMatchObject({ ok: false, code: 'invalid_input' });
+    }
+    expect(mocks.mintDialpadRecordingNextEpoch).not.toHaveBeenCalled();
+  });
+
   it('exposes only session-owned operations', async () => {
     const mod = await import('./dialpad-recording-actions');
     expect(Object.keys(mod).sort()).toEqual(['closeDialpadRecordingCaptureAction', 'getDialpadRecordingBrowserStatusAction', 'mintDialpadRecordingGrantAction', 'mintDialpadRecordingNextEpochAction', 'openDialpadRecordingCaptureAction']);

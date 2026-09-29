@@ -315,6 +315,43 @@ describe("Dialpad capture preparation", () => {
     await prepared.dispose();
   });
 
+  it("keeps attachment-time PCM in the bounded spool while a WebM prefix sink is stalled", async () => {
+    const callbacks: { tab: ((frame: PcmFrame) => void | Promise<void>) | null; mic: ((frame: PcmFrame) => void | Promise<void>) | null } = { tab: null, mic: null };
+    const tabRecorder = new FakeRecorder();
+    const micRecorder = new FakeRecorder();
+    const recorders = [tabRecorder, micRecorder];
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>) => {
+      callbacks[track] = onFrame;
+      return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => recorders.shift()!, createPcmSession),
+      localSpoolMaxBytes: 128_000,
+    });
+    const active = await prepared.startLocal!(1);
+    const frame = (index: number): PcmFrame => ({ track: "tab", epoch: 1, frameIndex: index, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) });
+    tabRecorder.emit(new Blob(["webm-prefix"]));
+    let release!: () => void;
+    const stalled = new Promise<void>((resolve) => { release = resolve; });
+    const webm: number[] = [];
+    const pcm: number[] = [];
+    const attach = active.attach!({
+      onTrackFormat: vi.fn(),
+      onWebmChunk: async (chunk) => { webm.push(chunk.seq); await stalled; },
+      onPcmFrame: (value) => { pcm.push(value.frameIndex); },
+    }, 7);
+    await Promise.resolve();
+    for (let index = 0; index < 80; index += 1) await callbacks.tab?.(frame(index));
+    release();
+    await attach;
+    expect(webm).toEqual([0]);
+    expect(pcm).toEqual(Array.from({ length: 80 }, (_, index) => index));
+    expect(active.state()).toBe("recording");
+    await active.dispose();
+    await prepared.dispose();
+  });
+
   it("does not allocate a recorder after disposal wins during delayed format publication", async () => {
     const formatRelease = (() => { let resolve!: () => void; const promise = new Promise<void>((r) => { resolve = r; }); return { promise, resolve }; })();
     const recorders = [new FakeRecorder(), new FakeRecorder()];

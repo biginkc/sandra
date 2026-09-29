@@ -47,7 +47,10 @@ export async function closeDialpadRecordingCaptureAction(captureId: unknown) {
 export async function mintDialpadRecordingGrantAction(input: { captureId: unknown; epoch: unknown }) {
   const s = await session();
   if (!s) return unauthenticated;
-  const epoch = typeof input?.epoch === 'number' && Number.isSafeInteger(input.epoch) ? input.epoch : 0;
+  if (typeof input?.epoch !== 'number' || !Number.isSafeInteger(input.epoch) || input.epoch < 1 || input.epoch > 16) {
+    return { ok: false as const, code: 'invalid_input' as const, message: 'Choose a valid recording epoch.' };
+  }
+  const epoch = input.epoch;
   // Compatibility entrypoint: all browser minting now goes through the
   // capture-locked next-epoch policy, including pending-grant protection.
   return mintDialpadRecordingNextEpoch(s.db, s.actor, { captureId: input?.captureId, expectedConsumedEpoch: Math.max(0, epoch - 1) });

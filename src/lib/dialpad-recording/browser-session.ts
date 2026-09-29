@@ -171,6 +171,14 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     socket.removeEventListener('close', listener.close);
   };
 
+  const settlePendingChunkAcks = (error: DialpadBrowserSessionError) => {
+    for (const pending of pendingChunkAcks.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    pendingChunkAcks.clear();
+  };
+
   function disposeCapture(): Promise<void> {
     if (!cleanupPromise) {
       cleanupPromise = Promise.resolve().then(() => options.capture.dispose()).catch(() => undefined);
@@ -179,16 +187,12 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   }
 
   function fail(error: DialpadBrowserSessionError): void {
-    if (failed) return;
+    if (failed || disposed) return;
     failed = error;
     state = 'failed';
     mediaAdmissionOpen = false;
     lifecycleGeneration += 1;
-    for (const pending of pendingChunkAcks.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-    pendingChunkAcks.clear();
+    settlePendingChunkAcks(error);
     try { options.onFailure?.(error); } catch { /* failure remains sticky */ }
     if (socket) {
       detach();
@@ -482,7 +486,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         await captureStartPromise;
         await activeCapture?.stop();
         await sendQueue;
-        if (!failed) await finishControls();
+        if (!failed && !disposed) await finishControls();
         mediaAdmissionOpen = false;
         await disposeCapture();
         state = failed ? 'failed' : 'stopped';
@@ -527,13 +531,20 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   }
 
   async function dispose(): Promise<void> {
+    if (disposed) {
+      await disposeCapture();
+      return;
+    }
     disposed = true;
-    await stop();
-    await disposeCapture();
-    if (state !== 'stopped' && socket) {
+    mediaAdmissionOpen = false;
+    lifecycleGeneration += 1;
+    settlePendingChunkAcks(new DialpadBrowserSessionError('interrupted', 'Recording session was disposed.'));
+    if (socket) {
       detach();
       try { socket.close(1000, 'recording session disposed'); } catch { /* closed */ }
     }
+    await disposeCapture();
+    if (state !== 'failed') state = 'stopped';
   }
 
   return { state: () => state, start, stop, dispose };

@@ -228,4 +228,26 @@ describe('Dialpad browser session', () => {
     process.removeListener('unhandledRejection', onUnhandled);
     expect(unhandled).toEqual([]);
   });
+
+  it('aborts promptly during a held prefix ACK instead of waiting for graceful drain', async () => {
+    const socket = new FakeSocket();
+    let chunkDelivery: Promise<void> | undefined;
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 200,
+      capture: fakeCapture((sinks) => {
+        void sinks.onTrackFormat?.(format('tab'));
+        void sinks.onTrackFormat?.(format('mic'));
+        chunkDelivery = Promise.resolve(sinks.onWebmChunk({ track: 'tab', epoch: 1, seq: 0, blob: new Blob([new Uint8Array([1])]), byteLength: 1 }));
+      }),
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    const began = Date.now();
+    await session.dispose();
+    expect(Date.now() - began).toBeLessThan(100);
+    await chunkDelivery;
+    expect(session.state()).toBe('stopped');
+  });
 });

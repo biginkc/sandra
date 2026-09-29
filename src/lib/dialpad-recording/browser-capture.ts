@@ -639,7 +639,15 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
       };
       const emitPcmFrame = async (frame: PcmFrame) => {
         if (!pcmAdmissionOpen || failed) return;
-        if (!formatReady || pcmPrefixDraining) {
+        if (spool && spoolMode !== "live") {
+          const normalized = { ...frame, epoch: captureEpoch };
+          if (appendSpool(normalized.bytes.byteLength)) spool.pcm.push(normalized);
+          return;
+        }
+        // A local capture has a byte/time bounded spool while the authenticated
+        // prefix drains. A network-only start still needs its small startup
+        // queue until format metadata is accepted.
+        if (!formatReady || (pcmPrefixDraining && !spool)) {
           if (startupPcmFrames.length >= MAX_PENDING_PCM_FRAMES) {
             fail(new BrowserCaptureError("buffer_overflow", "PCM startup buffer capacity was exceeded."));
             return;

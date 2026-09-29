@@ -1396,7 +1396,7 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
     )).rejects.toMatchObject({ code: "40001" });
   });
 
-  it("serializes concurrent next-epoch mint and redemption across separate clients", async () => {
+  it("serializes concurrent next-epoch mint attempts and redeems the single winner", async () => {
     const status = await pg.query<{ v: Json }>(
       "select public.fn_get_dialpad_recording_browser_status($1,$2,$3) as v",
       [orgId, repA, captureId],
