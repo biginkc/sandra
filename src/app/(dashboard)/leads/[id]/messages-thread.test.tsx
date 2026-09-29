@@ -210,6 +210,13 @@ describe("messageBelongsToThread", () => {
 });
 
 describe("<MessageBubble presentation=timeline />", () => {
+  it("shows a step-run label only on the linked outbound text", () => {
+    const label = "Drip · 90-day follow-up · text 2 of 4";
+    const { rerender } = render(<MessageBubble message={makeMessage({ id: "drip-out", direction: "outbound" })} isContinuation={false} isLastInGroup isMostRecentOutbound presentation="timeline" dripLabel={label} />);
+    expect(screen.getByTestId("message-drip-label")).toHaveTextContent(label);
+    rerender(<MessageBubble message={makeMessage({ id: "drip-in", direction: "inbound" })} isContinuation={false} isLastInGroup isMostRecentOutbound presentation="timeline" dripLabel={label} />);
+    expect(screen.queryByTestId("message-drip-label")).not.toBeInTheDocument();
+  });
   it.each([
     ["queued", "Queued · in Outbox"],
     ["failed", "Not delivered"],

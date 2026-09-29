@@ -6,7 +6,7 @@ vi.mock('./queries',()=>({myLeadsViewer:mocks.viewer,MyLeadsReadError:class exte
 vi.mock('@/lib/sequences/drip-progress',()=>({listDripProgress:mocks.progress}));
 import { groupMyLeadDrips,listMyLeadsInDrip } from './drip-queries';
 
-const progress = { propertyId: 'one', enrollmentId: 'e1', sequenceId: 's1', sequenceName: 'Warm check-in', step: 2, totalSteps: 4,
+const progress = { propertyId: 'one', enrollmentId: 'e1', enrollmentStatus: 'active', sequenceId: 's1', sequenceName: 'Warm check-in', step: 2, totalSteps: 4,
   nextTextAt: null, lastText: null, status: 'Waiting' as const, reason: null };
 
 describe('groupMyLeadDrips', () => {

@@ -207,7 +207,7 @@ describe("MyLeadsClient", () => {
     first.stages.not_contacted!.rows=Array.from({length:20},(_,index)=>({...template,propertyId:`loaded-${index}`}));
     first.stages.not_contacted!.totalCount=21;
     const pinned={...template,propertyId:'pinned-reply',address:'Pinned Reply Lane'};
-    const drips:MyLeadDripSnapshot={active:[],replied:[{propertyId:pinned.propertyId,enrollmentId:'enrollment',
+    const drips:MyLeadDripSnapshot={active:[],replied:[{propertyId:pinned.propertyId,enrollmentId:'enrollment',enrollmentStatus:'paused',
       sequenceId:'sequence',sequenceName:'Follow-up',step:1,totalSteps:2,nextTextAt:null,lastText:null,
       status:'Replied',reason:null,stage:'not_contacted',repliedAt:'2026-09-11T14:00:00Z',queueRow:pinned}],
       repliedCount:1,counts:{not_contacted:0,contacted:0,needs_offer:0,offer_sent:0,under_contract:0}};

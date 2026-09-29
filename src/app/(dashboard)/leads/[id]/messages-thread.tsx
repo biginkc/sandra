@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 
 import { Badge } from "@/components/ui/badge";
+import { Droplet } from "lucide-react";
 import { OPERATOR_TIME_ZONE } from "@/lib/messages/message-metrics";
 import { createClient } from "@/lib/supabase/client";
 import type { Database } from "@/lib/supabase/types";
@@ -414,7 +415,7 @@ export function MessageBubble({
   isLastInGroup,
   isMostRecentOutbound,
   presentation = "thread",
-  dripLabel,
+  dripLabel = null,
   dripReply = false,
   dripReplyLabel,
 }: {
@@ -423,7 +424,7 @@ export function MessageBubble({
   isLastInGroup: boolean;
   isMostRecentOutbound: boolean;
   presentation?: "thread" | "timeline";
-  dripLabel?: string;
+  dripLabel?: string | null;
   dripReply?: boolean;
   dripReplyLabel?: string;
 }) {
@@ -509,6 +510,7 @@ export function MessageBubble({
           </time>
         </div>
       ) : null}
+      {dripLabel && outbound && timeline ? <div className="mb-1 flex items-center gap-1 text-[11px] text-sky-800" data-testid="message-drip-label"><Droplet className="size-3" />{dripLabel}</div> : null}
       <div className={bubbleShape}>
         <div className="whitespace-pre-wrap break-words text-[14px] leading-relaxed">
           {message.body}
@@ -554,7 +556,7 @@ export function MessageBubble({
               </Badge>
             )}
           {aiGenerated ? <SandraReplyBadge message={message} /> : null}
-          {outbound && dripLabel ? <span className="font-semibold text-teal-700" data-testid="messages-thread-drip-label">{dripLabel}</span> : null}
+          {outbound && dripLabel && !timeline ? <span className="font-semibold text-teal-700" data-testid="messages-thread-drip-label">{dripLabel}</span> : null}
           {!outbound && dripReply ? <span className="font-semibold text-amber-700" data-testid="messages-thread-drip-reply">{dripReplyLabel ?? "Replied to drip"}</span> : null}
         </div>
       ) : null}

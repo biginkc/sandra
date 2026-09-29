@@ -11,6 +11,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/client";
+import { messageDripLabels } from "@/lib/sequences/message-drip-labels";
 
 import {
   CallEventCard,
@@ -140,6 +141,33 @@ export function LeadActivityTimeline(props: Props) {
       propertyId,
     },
   });
+  const [dripLabels, setDripLabels] = useState<Record<string, string>>({});
+  const outboundMessageKey = messages.filter((message) => message.direction === "outbound").map((message) => `${message.id}:${message.status}`).join(",");
+  useEffect(() => {
+    let current = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (!outboundMessageKey) {
+      setDripLabels({});
+      return;
+    }
+    const ids = outboundMessageKey.split(",").map((entry) => entry.split(":")[0]);
+    let unresolved = ids;
+    let attempts = 0;
+    const reconcile = async () => {
+      attempts += 1;
+      try {
+        const labels = await messageDripLabels(createClient(), unresolved);
+        if (!current) return;
+        if (Object.keys(labels).length) setDripLabels((previous) => ({ ...previous, ...labels }));
+        unresolved = unresolved.filter((id) => !labels[id]);
+      } catch {
+        if (!current) return;
+      }
+      if (unresolved.length && attempts < 4) timer = setTimeout(() => void reconcile(), 10_000);
+    };
+    void reconcile();
+    return () => { current = false; if (timer) clearTimeout(timer); };
+  }, [outboundMessageKey, propertyId]);
   const { notes, authorEmails: liveAuthorEmails } = useLeadNotes({
     propertyId,
     initial: noteSnapshot,
@@ -365,6 +393,7 @@ export function LeadActivityTimeline(props: Props) {
                       isLastInGroup={isLastInGroup}
                       isMostRecentOutbound={event.id === mostRecentOutboundId}
                       presentation="timeline"
+                      dripLabel={dripLabels[event.id] ?? null}
                     />
                   </div>
                 </Fragment>

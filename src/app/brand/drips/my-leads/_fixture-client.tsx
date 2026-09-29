@@ -18,12 +18,12 @@ const row=(id:string,address:string,name:string,stage:MyLeadQueueRow['queueStage
   warningReasons:[],attemptsCount:2,motivation:{temperature:'warm',motivationResponseKind:'provided',text:'Considering an offer'},
   nextStep:null,offer:null,archived:false,
 });
-const replied={propertyId:'fixture-replied',enrollmentId:'enrollment-replied',sequenceId:'drip-1',sequenceName:'Seller follow-up',
+const replied={propertyId:'fixture-replied',enrollmentId:'enrollment-replied',enrollmentStatus:'paused',sequenceId:'drip-1',sequenceName:'Seller follow-up',
   step:2,totalSteps:4,nextTextAt:null,lastText:{sentAt:'2026-09-28T15:00:00Z',preview:'Checking in about your property'},
   status:'Replied' as const,reason:'Lead replied to a drip text.',stage:'contacted' as const,
   repliedAt:'2026-09-29T14:00:00Z',queueRow:null};
 const drip=(id:string,name:string,address:string,step:number):MyLeadDripSnapshot['active'][number]=>({
-  propertyId:id,enrollmentId:`enrollment-${id}`,sequenceId:'drip-1',sequenceName:name,step,totalSteps:4,
+  propertyId:id,enrollmentId:`enrollment-${id}`,enrollmentStatus:'active',sequenceId:'drip-1',sequenceName:name,step,totalSteps:4,
   nextTextAt:'2026-10-01T15:00:00Z',lastText:{sentAt:'2026-09-28T15:00:00Z',preview:'Hi, following up about your property.'},
   status:'Waiting',reason:null,stage:'contacted',repliedAt:null,queueRow:row(id,address,'Alex Morgan','contacted') as never,
 });
