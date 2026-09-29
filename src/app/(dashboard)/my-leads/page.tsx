@@ -7,7 +7,10 @@ import {
   type Membership,
 } from "@/lib/auth/memberships";
 import { shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
+import { reportError } from "@/lib/errors/report";
+import { createSupabaseDialpadDispatchDb, loadDialpadPanelBootstrap } from "@/lib/dialpad-cti/dispatch";
 import { canViewMyLeads } from "@/lib/my-leads/access";
+import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getAcquisitionKpis,
   getAcquisitionQueue,
@@ -124,9 +127,26 @@ export default async function MyLeadsPage() {
     return loadFailureState(error);
   }
 
+  // Only a usable connection (active, fixed Dialpad origin allowed) surfaces the panel; any failure keeps the existing softphone flow.
+  let dialpad: Awaited<ReturnType<typeof loadDialpadPanelBootstrap>> = null;
+  if (data.roster.settings.enabled) {
+    try {
+      dialpad = await loadDialpadPanelBootstrap(createSupabaseDialpadDispatchDb(createAdminClient()), {
+        orgId: data.viewer.orgId,
+        userId: data.viewer.userId,
+      });
+    } catch (error) {
+      reportError(error instanceof Error ? error : new Error("dialpad panel bootstrap failed"), {
+        errorClass: "database",
+        tags: { surface: "server", operation: "dialpad_panel_bootstrap" },
+      });
+    }
+  }
+
   return (
     <Page>
       <MyLeadsClient
+        dialpad={dialpad}
         viewer={data.viewer}
         roster={data.roster}
         initialMemberId={data.memberId}

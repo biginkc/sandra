@@ -13,16 +13,18 @@ import { AcquisitionAttemptDialog } from './_components/attempt-dialog';
 import { AcquisitionReadinessDialog } from './_components/readiness-dialog';
 import { AcquisitionOfferDialog } from './_components/offer-dialog';
 import { AcquisitionLifecycleDialog } from './_components/lifecycle-dialog';
+import { DialpadPanel,type DialpadCallRequest } from './_components/dialpad-panel';
+import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
 import type { MyLeadAction,MyLeadStage,AcquisitionLifecycleMode } from './_components/types';
 import { detailView,kpiTiles,stagePages } from './adapter';
 import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,submitMyLeadCommand,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
 
-type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null};
+type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;dialpad?:DialpadPanelBootstrap|null};
 
 const REFRESH_INTERVAL_MS = 30_000;
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
 
-export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis}:Props) {
+export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,dialpad=null}:Props) {
   const router=useRouter();const softphone=useOptionalSoftphone();
   const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState('');
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
@@ -35,6 +37,8 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const [refreshError,setRefreshError]=useState<string|null>(null);
   const [callOptions,setCallOptions]=useState<{propertyId:string;options:{id:string;label:string}[];error:string|null}|null>(null);
   const [callRetry,setCallRetry]=useState(0);
+  const [dialpadRequest,setDialpadRequest]=useState<DialpadCallRequest|null>(null);
+  const dialpadNonce=useRef(0);
   const [dialog,setDialog]=useState<{action:MyLeadAction;row:QueueRow}|null>(null);
   type Opening = {action:MyLeadAction;row:QueueRow;scope:string};
   type CurrentRead = Awaited<ReturnType<typeof loadMyLeads>> | null;
@@ -167,6 +171,12 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
   const action=(kind:MyLeadAction,id:string)=>{
     const row=rawRow(id);if(!row)return;
     cancelOpening();
+    if(kind==='start-call'&&dialpad){
+      // An active Dialpad connection routes calls through the audited CTI flow; the server re-derives org and rep and revalidates at dispatch.
+      if(member!==viewer.userId){setError('Open your own queue to call with Dialpad.');return;}
+      setError(null);
+      setDialpadRequest({nonce:++dialpadNonce.current,propertyId:row.propertyId,contactId:row.contactId??null,label:row.homeownerName??row.address});return;
+    }
     if(kind==='start-call'){
       if(!softphone?.callingEnabled){setError('Calling is not enabled.');return;}
       softphone.openLead({id:row.propertyId,contactId:row.contactId,firstName:row.homeownerName?.split(' ')[0]??'',name:row.homeownerName??row.address,address:row.address,state:row.state,
@@ -267,6 +277,9 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     </details>}
     {error&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{error} <Button variant="outline" onClick={()=>void refresh()}>Refresh</Button></div>}
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
+    {dialpad&&roster.settings.enabled&&<DialpadPanel bootstrap={dialpad} callRequest={dialpadRequest}
+      onCallRequestHandled={nonce=>setDialpadRequest(current=>current?.nonce===nonce?null:current)}
+      onLogOutcome={propertyId=>{if(!rawRow(propertyId)){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId);}}/>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
       <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={tiles} search={search} selectedRepId={member}
         onReviewingChange={onReviewingChange}

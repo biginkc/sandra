@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   getAcquisitionQueue: vi.fn(),
   getAcquisitionKpis: vi.fn(),
   MyLeadsClient: vi.fn(() => <div data-testid="my-leads-client" />),
+  loadDialpadPanelBootstrap: vi.fn(),
+  reportError: vi.fn(),
   notFound: vi.fn(() => {
     throw new Error("notFound");
   }),
@@ -29,6 +31,12 @@ vi.mock("@/lib/my-leads/queries", () => ({
     }
   },
 }));
+vi.mock("@/lib/dialpad-cti/dispatch", () => ({
+  loadDialpadPanelBootstrap: mocks.loadDialpadPanelBootstrap,
+  createSupabaseDialpadDispatchDb: vi.fn(() => ({})),
+}));
+vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn(() => ({})) }));
+vi.mock("@/lib/errors/report", () => ({ reportError: mocks.reportError }));
 vi.mock("./client", () => ({ MyLeadsClient: mocks.MyLeadsClient }));
 vi.mock("next/navigation", () => ({ notFound: mocks.notFound }));
 vi.mock("next/link", () => ({
@@ -88,6 +96,7 @@ beforeEach(() => {
   mocks.getAcquisitionRoster.mockResolvedValue({ viewer, roster: baseRoster });
   mocks.getAcquisitionQueue.mockResolvedValue({});
   mocks.getAcquisitionKpis.mockResolvedValue({});
+  mocks.loadDialpadPanelBootstrap.mockResolvedValue(null);
 });
 
 describe("MyLeadsPage availability boundary", () => {
@@ -175,5 +184,33 @@ describe("MyLeadsPage availability boundary", () => {
       period: "today",
     });
     expect(html).toContain("my-leads-client");
+  });
+
+  it("passes the Dialpad panel bootstrap to the client only for the session's own org and rep", async () => {
+    const bootstrap = {
+      connectionId: "c-1",
+      allowedOrigins: ["https://dialpad.com"],
+      binding: { status: "none" },
+      grants: [],
+    };
+    mocks.loadDialpadPanelBootstrap.mockResolvedValue(bootstrap);
+
+    renderPage(await MyLeadsPage());
+
+    expect(mocks.loadDialpadPanelBootstrap).toHaveBeenCalledWith(expect.anything(), {
+      orgId: "org-1",
+      userId: "user-1",
+    });
+    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0]).toMatchObject({ dialpad: bootstrap });
+  });
+
+  it("keeps the existing calling flow when the Dialpad bootstrap fails", async () => {
+    mocks.loadDialpadPanelBootstrap.mockRejectedValue(new Error("db down"));
+
+    const html = renderPage(await MyLeadsPage());
+
+    expect(html).toContain("my-leads-client");
+    expect((mocks.MyLeadsClient.mock.calls as unknown as Array<[Record<string, unknown>]>)[0]?.[0]).toMatchObject({ dialpad: null });
+    expect(mocks.reportError).toHaveBeenCalledTimes(1);
   });
 });
