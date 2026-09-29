@@ -51,6 +51,8 @@ class ScratchFixtureTest(unittest.TestCase):
         for info, marker in [({'State': {'Running': False}}, 'synthetic-marker'), ({'State': {'Running': True}}, 'wrong-marker')]:
             with self.subTest(info=info, marker=marker), patch.object(f.subprocess, 'check_output', return_value=json.dumps([info])), patch.object(f, 'sql', return_value=marker), self.assertRaises(RuntimeError):
                 f.guard()
+        with patch.object(f.subprocess, 'check_output', return_value=json.dumps([{'State': {'Running': True}}])), patch.object(f, 'sql', side_effect=RuntimeError('relation missing')), self.assertRaisesRegex(RuntimeError, 'marker missing or unreadable'):
+            f.guard()
 
 
 if __name__ == '__main__':
