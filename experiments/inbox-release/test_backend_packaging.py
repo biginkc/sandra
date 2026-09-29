@@ -15,7 +15,8 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 EXPECTED_COMMIT = "87e0a164294b7740c38b1ca926e3503e3f3ea7eb"
-EXPECTED_PACKET_SHA256 = "e895bd6fe1f7c0eb58ca467122bda792a0191353cec40fa8218d20b25eb96064"
+EXPECTED_GRANT_FIX_COMMIT = "0b57b46e438689c2086488ab0f68b42c221bf162"
+EXPECTED_PACKET_SHA256 = "c82750aecab9a2081f6a8ebbbfb1f6d7705c5649de481d8f666e1e2a881518bb"
 
 
 def load_module(name: str, path: Path):
@@ -38,6 +39,10 @@ class BackendPackagingTests(unittest.TestCase):
     def test_default_assembler_and_generated_packet_share_reviewed_pin(self) -> None:
         self.assertEqual(self.assembler.SOURCE_COMMIT, EXPECTED_COMMIT)
         self.assertEqual(self.backend["source_commit"], EXPECTED_COMMIT)
+        self.assertEqual(self.assembler.GRANT_FIX_COMMIT, EXPECTED_GRANT_FIX_COMMIT)
+        correction = next(s for s in self.backend["sql_sources"] if s["name"] == "operation_domain_apply")["reviewed_correction"]
+        self.assertEqual(correction["source_commit"], EXPECTED_GRANT_FIX_COMMIT)
+        self.assertEqual(correction["sha256"], hashlib.sha256((HERE.parent / "inbox-operation-domain" / "restrictive-apply.sql").read_bytes()).hexdigest())
         packet = HERE.parent / "inbox-release" / "generated" / "backend-operation-reply.sql"
         packet_hash = hashlib.sha256(packet.read_bytes()).hexdigest()
         self.assertEqual(packet_hash, EXPECTED_PACKET_SHA256)
@@ -48,6 +53,9 @@ class BackendPackagingTests(unittest.TestCase):
     def test_execution_pin_and_service_tags_match_backend_packet(self) -> None:
         self.assertEqual(self.execution["source_commit"], EXPECTED_COMMIT)
         self.assertEqual(self.execution["source_commit"], self.backend["source_commit"])
+        for entry in self.execution["database_role_install_order"]:
+            if entry["service"] in ("operation-worker", "reply-send-worker"):
+                self.assertEqual(entry["packet_sha256"], EXPECTED_PACKET_SHA256)
         expected_tag = f"release-{EXPECTED_COMMIT[:7]}"
         services = self.execution["runtime_definition"]["services"]
         for name in ("operation-worker", "reply-send-worker", "projection-worker", "relay"):
