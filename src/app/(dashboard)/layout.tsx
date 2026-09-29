@@ -16,6 +16,8 @@ import { ErrorBoundary } from "@/components/error-boundary";
 import { JobFailureNotifier } from "@/components/job-failure-notifier";
 import { NotificationsBell } from "@/components/notifications-bell";
 import { SoftphoneHeaderButton, SoftphoneProvider } from "@/components/softphone/softphone-provider";
+import { ObjectionPromptProvider } from "@/components/coach/objection-prompt-context";
+import { isObjectionPromptAllowed } from "@/lib/coach/objection-prompt-gate";
 import { isAdminEmail } from "@/lib/auth/allowlist";
 import { getCallerMemberships } from "@/lib/auth/memberships";
 import { canViewMyLeads } from "@/lib/my-leads/access";
@@ -35,6 +37,11 @@ export default async function DashboardLayout({
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
+  const objectionPromptEnabled = isObjectionPromptAllowed(
+    user.id,
+    process.env.COACH_OBJECTION_PROMPT_ENABLED,
+    process.env.COACH_OBJECTION_PROMPT_OPERATOR_ALLOWLIST,
+  );
   const showAdmin = isAdminEmail(user.email);
   const recordingAccess = await recordingViewer().catch(() => null);
   const [rosterResult, badgeResult, surfaceMembershipsResult] = await Promise.allSettled([
@@ -63,6 +70,7 @@ export default async function DashboardLayout({
     canAccessMessagesAndLeadsBoard(surfaceMembershipsResult.value);
 
   return (
+    <ObjectionPromptProvider enabled={objectionPromptEnabled}>
     <SoftphoneProvider>
     <GlobalSearchProvider>
     <div className="bg-background min-h-screen">
@@ -156,5 +164,6 @@ export default async function DashboardLayout({
     </div>
     </GlobalSearchProvider>
     </SoftphoneProvider>
+    </ObjectionPromptProvider>
   );
 }

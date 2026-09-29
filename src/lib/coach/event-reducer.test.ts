@@ -14,6 +14,25 @@ const V = { scriptVersion: "1.0.1", matcherVersion: "3" };
 const CV = { scriptVersion: closrOutbound123Bundle.script.version, matcherVersion: "3" };
 const coachReducer = createCoachReducer(closrOutbound123Bundle);
 
+describe("coachReducer — objection prompt", () => {
+  const prompt = { type: "objection_prompt" as const, objectionId: "price", label: "Price concern", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_000_000); });
+  afterEach(() => vi.useRealTimers());
+
+  it("sets, replaces, expires, and resets the single prompt", () => {
+    expect(initialCoachState().objectionPrompt).toBeNull();
+    let state = coachReducer(initialCoachState(), prompt);
+    expect(state.objectionPrompt).toMatchObject({ label: "Price concern", expiresAt: 1_030_000 });
+    vi.setSystemTime(1_010_000);
+    state = coachReducer(state, { ...prompt, label: "Timing concern", sellerTurn: 2 });
+    expect(state.objectionPrompt).toMatchObject({ label: "Timing concern", expiresAt: 1_040_000 });
+    vi.setSystemTime(1_040_000);
+    expect(state.objectionPrompt!.expiresAt <= Date.now()).toBe(true);
+    state = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
+    expect(state.objectionPrompt).toBeNull();
+  });
+});
+
 describe("coachReducer — transcript", () => {
   it("appends a final line for a fresh speaker turn", () => {
     const state = coachReducer(initialCoachState(), {

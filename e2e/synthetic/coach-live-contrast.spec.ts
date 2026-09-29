@@ -295,6 +295,9 @@ for (const mode of [
   test(`meets WCAG AA for the manual coach surfaces in ${mode.label} mode`, async ({ page }) => {
     await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false });
 
+    await expect(page.getByTestId("coach-objection-prompt-label")).toHaveText("Price concern");
+    assertAA("objection prompt label", await measureRenderedContrast(page.getByTestId("coach-objection-prompt-label")));
+
     const palette = await page.getByTestId("coach-live-view").evaluate((element, names) => {
       const style = getComputedStyle(element);
       return Object.fromEntries(names.map((name) => [name, style.getPropertyValue(name).trim()]));

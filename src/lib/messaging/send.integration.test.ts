@@ -1133,35 +1133,44 @@ describe("sendSmsToContact (integration)", () => {
   });
 
   it("release permanently fails when consent was revoked between queue and release", async () => {
-    const { contactId, propertyId } = await seed({ withConsent: true });
-    const queue = await sendSmsToContact(supabase, {
-      origin: "manual",
-      contactId,
-      propertyId,
-      body: "queued while consented Mel with BMH.",
-      queueOnly: true,
+    await withSafeSendWindow(async () => {
+      const { contactId, propertyId } = await seed({
+        withConsent: true,
+        // Keep the event ordering explicit while Date is frozen below. The
+        // consent reducer intentionally uses occurred_at, so equal implicit
+        // timestamps make this fixture depend on the database's tie order.
+        consentOccurredAt: new Date(SAFE_SEND_WINDOW.getTime() - 1000),
+      });
+      const queue = await sendSmsToContact(supabase, {
+        origin: "manual",
+        contactId,
+        propertyId,
+        body: "queued while consented Mel with BMH.",
+        queueOnly: true,
+      });
+      expect(queue.status).toBe("queued");
+      if (queue.status !== "queued") return;
+
+      // Revoke between queue and release.
+      await recordConsentEvent(supabase, {
+        contactId,
+        channel: "sms",
+        eventType: "opt_out",
+        source: "integration-test-mid-queue-revoke",
+        occurredAt: new Date(SAFE_SEND_WINDOW.getTime() + 1000),
+      });
+
+      const release = await releaseQueuedMessage(supabase, queue.messageId);
+      expect(release.status).toBe("blocked_terminal_dispo");
+
+      const { data: row } = await supabase
+        .from("messages")
+        .select("status, error_message")
+        .eq("id", queue.messageId)
+        .single();
+      expect(row?.status).toBe("failed");
+      expect(row?.error_message).toMatch(/opted out/i);
     });
-    expect(queue.status).toBe("queued");
-    if (queue.status !== "queued") return;
-
-    // Revoke between queue and release.
-    await recordConsentEvent(supabase, {
-      contactId,
-      channel: "sms",
-      eventType: "opt_out",
-      source: "integration-test-mid-queue-revoke",
-    });
-
-    const release = await releaseQueuedMessage(supabase, queue.messageId);
-    expect(release.status).toBe("blocked_terminal_dispo");
-
-    const { data: row } = await supabase
-      .from("messages")
-      .select("status, error_message")
-      .eq("id", queue.messageId)
-      .single();
-    expect(row?.status).toBe("failed");
-    expect(row?.error_message).toMatch(/opted out/i);
   });
 
   it("release-time automated boundary: a campaign SMS queued BEFORE a booking cannot release AFTER it — zero provider calls, terminal suppressed row", async () => {

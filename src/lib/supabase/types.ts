@@ -49,6 +49,41 @@ export type Database = {
         Relationships: []
       }
 
+      dialpad_recording_captures: {
+        Row: { id: string; org_id: string; intent_id: string; rep_user_id: string; call_activity_id: string; provider_call_id: string; status: string; opened_at: string; closed_at: string | null; close_reason: string | null; claim_token: string | null; claimed_by: string | null; claimed_at: string | null; lease_expires_at: string | null; drain_deadline_at: string | null; seal_attempts: number; result_at: string | null; failure_code: string | null; result_identity: Json | null; created_at: string; updated_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_segments: {
+        Row: { capture_id: string; org_id: string; track: string; epoch: number; chunk_count: number; total_bytes: number; max_seq: number | null; eof_seq: number | null; created_at: string; updated_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_chunks: {
+        Row: { capture_id: string; org_id: string; track: string; epoch: number; seq: number; size_bytes: number; sha256: string; is_eof: boolean; storage_path: string; recorded_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_track_finals: {
+        Row: { capture_id: string; org_id: string; track: string; epoch: number; completeness: string; decode_ok: boolean; eof_verified: boolean; contiguous: boolean; source_chunk_count: number; source_bytes: number; source_last_seq: number; storage_path: string | null; size_bytes: number | null; sha256: string | null; codec: string | null; sample_rate_hz: number | null; channels: number | null; decoded_duration_ms: number | null; partial_reason: string | null; registered_by: string; registered_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_ingest_grants: {
+        Row: { id: string; org_id: string; capture_id: string; rep_user_id: string; epoch: number; token_hash: string; created_at: string; expires_at: string; revoked_at: string | null; consumed_at: string | null; consumed_by: string | null }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
       rep_sms_sender_assignments: {
         Row: { id: string; org_id: string; user_id: string; provider: string; provider_account_id: string | null; provider_sender_id: string | null; phone_e164: string; label: string; is_default: boolean; active: boolean; updated_by: string; updated_at: string; composition_policy_version: number; grant_status: string; granted_at: string; revoked_at: string | null; revoked_by: string | null }
         Insert: { id?: string; org_id: string; user_id: string; provider?: string; provider_account_id?: string | null; provider_sender_id?: string | null; phone_e164: string; label: string; is_default?: boolean; active?: boolean; updated_by: string; updated_at?: string; composition_policy_version?: number; grant_status?: string; granted_at?: string; revoked_at?: string | null; revoked_by?: string | null }
@@ -5720,6 +5755,14 @@ export type Database = {
       fn_match_dialpad_call_event: { Args: { p_event_id: string }; Returns: Json }
       fn_process_dialpad_call_event: { Args: { p_event_id: string }; Returns: Json }
       fn_list_dialpad_call_events_for_processing: { Args: { p_limit?: number }; Returns: string[] }
+      fn_open_dialpad_recording_capture: { Args: { p_org_id: string; p_rep_user_id: string; p_intent_id: string }; Returns: Json }
+      fn_get_dialpad_recording_capture: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string }; Returns: Json }
+      fn_close_dialpad_recording_capture: { Args: { p_org_id: string; p_capture_id: string; p_rep_user_id?: string | null; p_reason?: string | null }; Returns: Json }
+      fn_mint_dialpad_recording_ingest_grant: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string; p_epoch: number; p_token_hash: string; p_ttl_seconds?: number }; Returns: Json }
+      fn_consume_dialpad_recording_ingest_grant: { Args: { p_token_hash: string; p_worker_id: string }; Returns: Json }
+      fn_record_dialpad_recording_chunk: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_seq: number; p_size_bytes: number; p_sha256: string; p_is_eof?: boolean }; Returns: Json }
+      fn_claim_dialpad_recording_seal_work: { Args: { p_worker_id: string; p_lease_seconds?: number }; Returns: Json }
+      fn_register_dialpad_recording_result: { Args: { p_capture_id: string; p_claim_token: string; p_tracks: Json; p_failure_code?: string | null }; Returns: Json }
       fn_record_dialpad_event_process_failure: { Args: { p_event_id: string; p_sqlstate: string }; Returns: undefined }
       fn_get_rep_sms_context: { Args: { p_property_id: string }; Returns: Json }
       fn_set_rep_sms_enrollment: { Args: { p_org_id: string; p_user_id: string; p_enabled: boolean }; Returns: boolean }
