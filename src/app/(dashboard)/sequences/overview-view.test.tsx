@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { DripsOverview } from "./overview-view";
 import type { SequenceRow } from "./actions";
@@ -14,8 +14,18 @@ const needs = { ok: true as const, data: [
 
 it("renders RPC metrics in the matching list columns and attention boxes", () => {
   render(<DripsOverview archived={false} isAdmin sequencesResult={{ ok: true, data: [row] }} needsResult={needs} />);
-  expect(screen.getByRole("row", { name: /Seller follow-up/ })).toHaveTextContent("13");
-  expect(screen.getByRole("row", { name: /Seller follow-up/ })).toHaveTextContent("7");
+  const headers = within(screen.getByRole("table")).getAllByRole("columnheader");
+  const cells = within(screen.getByRole("row", { name: /Seller follow-up/ })).getAllByRole("cell");
+  for (const [header, value] of [
+    ["Enrolled", "13"],
+    ["Replied", "7"],
+    ["Finished, no reply", "5"],
+    ["Couldn’t send", "3"],
+  ]) {
+    const index = headers.findIndex((cell) => cell.textContent === header);
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(cells[index]).toHaveTextContent(new RegExp(`^${value}$`));
+  }
   expect(screen.getByRole("link", { name: /Finished, no reply\s*5/ })).toHaveAttribute("href", "/sequences/needs-person#finished-no-reply");
   expect(screen.getByRole("link", { name: /Texts couldn’t send\s*3/ })).toHaveAttribute("href", "/sequences/needs-person#couldnt-send");
   expect(screen.getByRole("link", { name: /Needs a drip, none picked yet\s*1/ })).toHaveAttribute("href", "/sequences/needs-person#needs-drip");

@@ -415,7 +415,6 @@ export async function archiveSequence(
       .from("sequences")
       .update({
         archived_at: new Date().toISOString(),
-        active: false,
         updated_at: new Date().toISOString(),
       })
       .eq("id", sequenceId);
@@ -442,7 +441,7 @@ export async function restoreSequence(sequenceId: string): Promise<Result<null>>
     if (!guard.ok) return { ok: false, error: guard.error };
     const supabase = await createClient();
     const { error } = await supabase.from("sequences")
-      .update({ archived_at: null, active: true, updated_at: new Date().toISOString() })
+      .update({ archived_at: null, updated_at: new Date().toISOString() })
       .eq("id", sequenceId);
     if (error) return { ok: false, error: { code: "SEQ_RESTORE_FAILED", message: error.message } };
     revalidatePath("/sequences");

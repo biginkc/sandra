@@ -4,7 +4,7 @@ export const DRIP_BUCKET_LABELS: Record<DripBucket, string> = {
   waiting: "Waiting",
   replied: "Replied",
   finished_no_reply: "Finished, no reply",
-  couldnt_send: "Couldn't send",
+  couldnt_send: "Couldn’t send",
   stopped: "Stopped",
 };
 
