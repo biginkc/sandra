@@ -1,6 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
-import { pauseReasonText } from "@/lib/sequences/drip-status";
+import { dripStatus, pauseReasonText } from "@/lib/sequences/drip-status";
 import { getSequenceWithSteps, type SequenceWithSteps } from "../actions";
 
 export type StepStat = { step_id: string; sent: number; replied: number; waiting: number };
@@ -69,14 +69,26 @@ export async function getDripDetail(sequenceId: string): Promise<Result<DripDeta
         .in("source_id", completedIds).limit(200) : Promise.resolve({ data: [], error: null }),
     ]);
     if (repliesResult.error || canceledResult.error) throw repliesResult.error ?? canceledResult.error;
-    const lastRun = new Map<string, string>();
+    const textRuns: Array<{ enrollment_id: string; message_id: string }> = [];
     if (completedIds.length) for (let offset = 0; ; offset += 1000) {
       const runs = await supabase.from("sequence_step_runs")
-        .select("enrollment_id, run_at, message_id").in("enrollment_id", completedIds)
+        .select("enrollment_id, message_id").in("enrollment_id", completedIds)
         .not("message_id", "is", null).order("id").range(offset, offset + 999);
       if (runs.error) throw runs.error;
-      for (const run of runs.data ?? []) if (run.run_at && (!lastRun.has(run.enrollment_id) || run.run_at > lastRun.get(run.enrollment_id)!)) lastRun.set(run.enrollment_id, run.run_at);
+      for (const run of runs.data ?? []) if (run.message_id) textRuns.push({ enrollment_id: run.enrollment_id, message_id: run.message_id });
       if (!runs.data || runs.data.length < 1000) break;
+    }
+    const lastSent = new Map<string, string>();
+    for (let offset = 0; offset < textRuns.length; offset += 100) {
+      const batch = textRuns.slice(offset, offset + 100);
+      const messages = await supabase.from("messages").select("id, sent_at")
+        .eq("org_id", sequenceOrg.org_id).in("id", batch.map((run) => run.message_id));
+      if (messages.error) throw messages.error;
+      const sentAt = new Map((messages.data ?? []).map((message) => [message.id, message.sent_at]));
+      for (const run of batch) {
+        const at = sentAt.get(run.message_id);
+        if (at && (!lastSent.has(run.enrollment_id) || at > lastSent.get(run.enrollment_id)!)) lastSent.set(run.enrollment_id, at);
+      }
     }
     const lastInbound = new Map<string, string>();
     for (const property of repliesResult.data ?? []) if (property.inbound_messages[0]) lastInbound.set(property.id, property.inbound_messages[0].created_at);
@@ -87,13 +99,12 @@ export async function getDripDetail(sequenceId: string): Promise<Result<DripDeta
         const property = byProperty.get(row.property_id);
         const contact = property?.homeowner_contact_id ? byContact.get(property.homeowner_contact_id) : null;
         const name = [contact?.first_name, contact?.last_name].filter(Boolean).join(" ");
-        const status = row.status === "active" ? "Waiting" : row.status === "paused"
-          ? ["inbound_reply", "rep_sms_human_takeover"].includes(row.pause_reason ?? "") ? "Replied" : ["provider_failed", "reconciliation_required", "template_missing", "step_misconfigured", "no_phone", "no approved sender for first-touch sequence send"].includes(row.pause_reason ?? "") ? "Couldn’t send" : "Paused"
-          : row.status === "opted_out" || canceled.has(row.id) ? "Stopped"
-          : (lastInbound.get(row.property_id) ?? "") > (lastRun.get(row.id) ?? row.enrolled_at) ? "Replied" : "Finished, no reply";
+        const repliedAfterLast = (lastInbound.get(row.property_id) ?? "") > (lastSent.get(row.id) ?? row.enrolled_at);
+        const bucketStatus = dripStatus(row.status, row.pause_reason, canceled.has(row.id), repliedAfterLast);
+        const status = bucketStatus ?? "Paused";
         return { enrollmentId: row.id, propertyId: row.property_id, threadId: property?.homeowner_contact_id ?? null,
           address: property?.address ?? "Address unavailable", name: name || property?.address || "Lead",
-          status, detail: pauseReasonText(row.pause_reason), step: count ? Math.min(count, Math.max(1, row.current_step_index + 1)) : 0,
+          status, detail: pauseReasonText(row.pause_reason) ?? (bucketStatus ? null : repliedAfterLast ? "Lead replied after the last drip text." : "Review this drip before continuing."), step: count ? Math.min(count, Math.max(1, row.current_step_index + 1)) : 0,
           nextRunAt: row.status === "active" ? row.next_run_at : null,
           canAct: row.status === "active" || row.status === "paused" };
       }) });
