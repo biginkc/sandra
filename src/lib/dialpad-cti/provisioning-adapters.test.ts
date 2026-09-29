@@ -18,6 +18,8 @@ import { ProvisioningError } from './provisioning';
 
 const SECRET = `whsec_${'z'.repeat(40)}`;
 const ORG = '00000000-0000-0000-0000-000000000bbb';
+const CONNECTION = 'c0000000-0000-4000-8000-000000000001';
+const ENDPOINT = 'wss://receiver.example.up.railway.app/dialpad-browser-ingest';
 
 async function rejection(promise: Promise<unknown>): Promise<Error> {
   try {
@@ -161,18 +163,62 @@ describe('connection db port', () => {
 
   it('activates only when every expected field still matches', async () => {
     const { port, statements } = capture(() => [{ id: 'x' }]);
-    expect(await port.activateConnection('c0000000-0000-4000-8000-000000000001', row)).toBe(1);
+    expect(await port.activateConnection('c0000000-0000-4000-8000-000000000001', { ...row, recordingIngestEndpoint: ENDPOINT })).toBe(1);
     expect(statements[0]).toContain("status = 'disabled'");
     expect(statements[0]).toContain('webhook_secret_ref =');
     expect(statements[0]).toContain('dialpad_company_id =');
     expect(statements[0]).toContain('cti_client_id =');
+    expect(statements[0]).toContain(`recording_ingest_endpoint is not distinct from '${ENDPOINT}'`);
     expect(await capture(() => []).port.activateConnection('c0000000-0000-4000-8000-000000000001', row)).toBe(0);
   });
 
   it('inspects schema and organization state', async () => {
     const { port } = capture((sql) => (sql.includes('a2_columns') ? [{ a2_columns: true, custom_data_function: false }] : [{ org_exists: true }]));
-    expect(await port.inspectSchema()).toEqual({ a2Columns: true, customDataFunction: false });
+    expect(await port.inspectSchema()).toEqual({ a2Columns: true, customDataFunction: false, recordingEndpointColumn: false });
     expect(await port.organizationExists(ORG)).toBe(true);
+  });
+
+  it('reads the endpoint only after schema inspection and never references it when absent', async () => {
+    const { port, statements } = capture((sql) => sql.includes('recording_endpoint_column')
+      ? [{ a2_columns: true, recording_endpoint_column: true, custom_data_function: true }]
+      : [{ id: CONNECTION, status: 'disabled', webhook_secret_ref: row.webhookSecretRef, webhook_secret_version: 1, allowed_origins: ['https://dialpad.com'], dialpad_company_id: row.companyId, directory_api_key_ref: row.directoryKeyRef, recording_ingest_endpoint: ENDPOINT, cti_client_id_matches: true }]);
+    await port.inspectSchema();
+    const found = await port.findConnection(ORG, row.ctiClientId, CONNECTION);
+    expect(found).toMatchObject({ id: CONNECTION, recordingIngestEndpoint: ENDPOINT });
+    expect(statements[1]).toContain('recording_ingest_endpoint');
+    expect(statements[1]).toContain(`id = '${CONNECTION}'`);
+
+    const absent = capture((sql) => sql.includes('recording_endpoint_column') ? [{ a2_columns: true, recording_endpoint_column: false, custom_data_function: true }] : [{ id: CONNECTION, status: 'disabled', webhook_secret_ref: row.webhookSecretRef, webhook_secret_version: 1, allowed_origins: ['https://dialpad.com'], dialpad_company_id: row.companyId, directory_api_key_ref: row.directoryKeyRef, cti_client_id_matches: true }]);
+    await absent.port.inspectSchema();
+    await absent.port.findConnection(ORG, row.ctiClientId, CONNECTION);
+    expect(absent.statements[1]).not.toContain('recording_ingest_endpoint');
+  });
+
+  it('builds endpoint CAS with exact disabled identity and expected previous value', async () => {
+    const { port, statements } = capture((sql) => sql.includes('recording_endpoint_column')
+      ? [{ a2_columns: true, recording_endpoint_column: true, custom_data_function: true }]
+      : [{ id: CONNECTION, status: 'disabled', webhook_secret_ref: row.webhookSecretRef, webhook_secret_version: 1, allowed_origins: ['https://dialpad.com'], dialpad_company_id: row.companyId, directory_api_key_ref: row.directoryKeyRef, cti_client_id_matches: false, recording_ingest_endpoint: ENDPOINT }]);
+    await port.inspectSchema();
+    const updated = await port.configureRecordingEndpoint({ orgId: ORG, connectionId: CONNECTION, companyId: row.companyId, expectedPreviousEndpoint: null, proposedEndpoint: ENDPOINT });
+    expect(updated).toMatchObject({ id: CONNECTION, status: 'disabled', recordingIngestEndpoint: ENDPOINT });
+    const sql = statements[1]!;
+    expect(sql).toContain(`id = '${CONNECTION}'`);
+    expect(sql).toContain(`org_id = '${ORG}'`);
+    expect(sql).toContain(`dialpad_company_id = '${row.companyId}'`);
+    expect(sql).toContain("status = 'disabled'");
+    expect(sql).toContain('recording_ingest_endpoint is not distinct from null');
+    expect(sql).toContain(`recording_ingest_endpoint = '${ENDPOINT}'`);
+  });
+
+  it('refuses endpoint CAS before constructing an update when the column is absent or the value is unsafe', async () => {
+    const absent = capture((sql) => sql.includes('recording_endpoint_column') ? [{ a2_columns: true, recording_endpoint_column: false, custom_data_function: true }] : []);
+    await absent.port.inspectSchema();
+    await expect(absent.port.configureRecordingEndpoint({ orgId: ORG, connectionId: CONNECTION, companyId: row.companyId, expectedPreviousEndpoint: null, proposedEndpoint: ENDPOINT })).rejects.toThrow(/recording_ingest_endpoint is absent/);
+    expect(absent.statements).toHaveLength(1);
+    const present = capture((sql) => sql.includes('recording_endpoint_column') ? [{ a2_columns: true, recording_endpoint_column: true, custom_data_function: true }] : []);
+    await present.port.inspectSchema();
+    await expect(present.port.configureRecordingEndpoint({ orgId: ORG, connectionId: CONNECTION, companyId: row.companyId, expectedPreviousEndpoint: null, proposedEndpoint: "wss://evil.example.test/x'" })).rejects.toThrow(/failed validation before SQL construction/);
+    expect(present.statements).toHaveLength(1);
   });
 
   it('refuses to build SQL from unsafe values', async () => {

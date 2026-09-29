@@ -17,6 +17,7 @@ import { pathToFileURL } from 'node:url';
 import { DIALPAD_API_ORIGIN } from './directory';
 import {
   ProvisioningError,
+  isCanonicalRecordingIngestEndpoint,
   type ConnectionDbPort,
   type ConnectionInsert,
   type ConnectionObservation,
@@ -268,42 +269,62 @@ function firstRow(rows: unknown[]): Record<string, unknown> | null {
 
 /** Data statements only. Schema DDL stays in the workflow-run migrations. */
 export function createConnectionDbPort(run: QueryRunner): ConnectionDbPort {
+  let schema: SchemaState = { a2Columns: false, customDataFunction: false, recordingEndpointColumn: false };
+  const mapConnection = (row: Record<string, unknown>): ConnectionObservation => {
+    if (typeof row.id !== 'string' || typeof row.status !== 'string' || typeof row.webhook_secret_ref !== 'string') {
+      throw new ProvisioningError('db_query_failed', 'connection row had an unexpected shape');
+    }
+    return {
+      id: row.id,
+      status: row.status,
+      webhookSecretRef: row.webhook_secret_ref,
+      webhookSecretVersion: Number(row.webhook_secret_version),
+      allowedOrigins: Array.isArray(row.allowed_origins) ? row.allowed_origins.filter((o): o is string => typeof o === 'string') : [],
+      companyId: typeof row.dialpad_company_id === 'string' ? row.dialpad_company_id : null,
+      directoryKeyRef: typeof row.directory_api_key_ref === 'string' ? row.directory_api_key_ref : null,
+      ctiClientIdMatches: row.cti_client_id_matches === true,
+      recordingIngestEndpoint: schema.recordingEndpointColumn && typeof row.recording_ingest_endpoint === 'string' ? row.recording_ingest_endpoint : null,
+    };
+  };
+  const endpointLiteral = (value: string): string => {
+    if (!isCanonicalRecordingIngestEndpoint(value)) throw new ProvisioningError('unsafe_sql_value', 'a recording endpoint failed validation before SQL construction');
+    return lit(value, SAFE_TEXT);
+  };
+  const endpointExpected = (value: string | null): string => value === null ? 'null' : endpointLiteral(value);
+
   return {
     async inspectSchema(): Promise<SchemaState> {
       const row = firstRow(
         await run(`select
           (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'dialpad_org_connections'
              and column_name in ('dialpad_company_id', 'directory_api_key_ref')) = 2 as a2_columns,
+          exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'dialpad_org_connections'
+             and column_name = 'recording_ingest_endpoint') as recording_endpoint_column,
           exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
              where n.nspname = 'public' and p.proname = 'dialpad_cti_custom_data') as custom_data_function`),
       );
-      return { a2Columns: row?.a2_columns === true, customDataFunction: row?.custom_data_function === true };
+      schema = {
+        a2Columns: row?.a2_columns === true,
+        customDataFunction: row?.custom_data_function === true,
+        recordingEndpointColumn: row?.recording_endpoint_column === true,
+      };
+      return schema;
     },
     async organizationExists(orgId) {
       const row = firstRow(await run(`select exists (select 1 from public.organizations where id = ${lit(orgId, SAFE_UUID)}) as org_exists`));
       return row?.org_exists === true;
     },
-    async findConnection(orgId, ctiClientId): Promise<ConnectionObservation | null> {
+    async findConnection(orgId, ctiClientId, connectionId): Promise<ConnectionObservation | null> {
       const clientCheck = ctiClientId ? `(cti_client_id = ${lit(ctiClientId, /^[A-Za-z0-9_-]{1,200}$/)})` : 'false';
+      const endpointSelect = schema.recordingEndpointColumn ? ', recording_ingest_endpoint' : '';
+      const connectionCheck = connectionId ? `id = ${lit(connectionId, SAFE_UUID)}` : 'true';
       const row = firstRow(
-        await run(`select id, status, webhook_secret_ref, webhook_secret_version, allowed_origins, dialpad_company_id, directory_api_key_ref,
+        await run(`select id, status, webhook_secret_ref, webhook_secret_version, allowed_origins, dialpad_company_id, directory_api_key_ref${endpointSelect},
           ${clientCheck} as cti_client_id_matches
-          from public.dialpad_org_connections where org_id = ${lit(orgId, SAFE_UUID)}`),
+          from public.dialpad_org_connections where org_id = ${lit(orgId, SAFE_UUID)} and ${connectionCheck}`),
       );
       if (!row) return null;
-      if (typeof row.id !== 'string' || typeof row.status !== 'string' || typeof row.webhook_secret_ref !== 'string') {
-        throw new ProvisioningError('db_query_failed', 'connection row had an unexpected shape');
-      }
-      return {
-        id: row.id,
-        status: row.status,
-        webhookSecretRef: row.webhook_secret_ref,
-        webhookSecretVersion: Number(row.webhook_secret_version),
-        allowedOrigins: Array.isArray(row.allowed_origins) ? row.allowed_origins.filter((o): o is string => typeof o === 'string') : [],
-        companyId: typeof row.dialpad_company_id === 'string' ? row.dialpad_company_id : null,
-        directoryKeyRef: typeof row.directory_api_key_ref === 'string' ? row.directory_api_key_ref : null,
-        ctiClientIdMatches: row.cti_client_id_matches === true,
-      };
+      return mapConnection(row);
     },
     async insertDisabledConnection(row: ConnectionInsert) {
       const result = firstRow(
@@ -316,14 +337,30 @@ export function createConnectionDbPort(run: QueryRunner): ConnectionDbPort {
       return typeof result?.id === 'string' ? result.id : null;
     },
     async activateConnection(id, expected) {
+      const endpointClause = expected.recordingIngestEndpoint === undefined
+        ? ''
+        : ` and recording_ingest_endpoint is not distinct from ${endpointExpected(expected.recordingIngestEndpoint)}`;
       const rows = await run(`update public.dialpad_org_connections set status = 'active', updated_at = now()
         where id = ${lit(id, SAFE_UUID)} and org_id = ${lit(expected.orgId, SAFE_UUID)} and status = 'disabled'
           and webhook_secret_ref = ${lit(expected.webhookSecretRef, SAFE_TEXT)} and webhook_secret_version = 1
           and dialpad_company_id = ${lit(expected.companyId, /^[0-9]{1,20}$/)} and directory_api_key_ref = ${lit(expected.directoryKeyRef, SAFE_TEXT)}
           and allowed_origins = array['https://dialpad.com']::text[]
           and cti_client_id = ${lit(expected.ctiClientId, /^[A-Za-z0-9_-]{1,200}$/)}
+          ${endpointClause}
         returning id`);
       return rows.length;
+    },
+    async configureRecordingEndpoint(expected) {
+      if (!schema.recordingEndpointColumn) throw new ProvisioningError('recording_endpoint_schema_missing', 'recording_ingest_endpoint is absent; apply the reviewed browser-session migration first');
+      const rows = await run(`update public.dialpad_org_connections set recording_ingest_endpoint = ${endpointLiteral(expected.proposedEndpoint)}, updated_at = now()
+        where id = ${lit(expected.connectionId, SAFE_UUID)} and org_id = ${lit(expected.orgId, SAFE_UUID)}
+          and dialpad_company_id = ${lit(expected.companyId, /^[0-9]{1,20}$/)}
+          and status = 'disabled'
+          and recording_ingest_endpoint is not distinct from ${endpointExpected(expected.expectedPreviousEndpoint)}
+        returning id, status, webhook_secret_ref, webhook_secret_version, allowed_origins, dialpad_company_id, directory_api_key_ref,
+          false as cti_client_id_matches, recording_ingest_endpoint`);
+      const row = firstRow(rows);
+      return row ? mapConnection(row) : null;
     },
   };
 }
