@@ -22,6 +22,8 @@ function Player({ file, scope }: { file: LibraryFile; scope: RecordingScope }) {
   const controller = useRef<AbortController | null>(null);
   const audio = useRef<HTMLAudioElement>(null);
   const resume = useRef({ time: 0, rate: 1, playing: true });
+  const partial = file.completeness === 'partial' || file.recordingStatus === 'partial' || file.recordingStatus === 'failed';
+  const track = file.track === 'tab' ? 'Tab audio' : file.track === 'mic' ? 'Mic audio' : null;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; controller.current?.abort(); }; }, []);
   async function play() {
     controller.current?.abort(); controller.current = new AbortController();
@@ -36,7 +38,7 @@ function Player({ file, scope }: { file: LibraryFile; scope: RecordingScope }) {
     finally { if (mounted.current) setBusy(false); }
   }
   return <div className="space-y-2 rounded-lg border p-3">
-    <div className="flex flex-wrap items-center gap-3"><span className="text-sm">{length(file.duration)} · {labels[file.status] ?? file.status}</span>
+    <div className="flex flex-wrap items-center gap-3"><span className="text-sm">{track ? `${track} · ` : ''}{length(file.duration)} · {labels[file.status] ?? file.status}</span>{partial && <span className="text-sm font-medium text-amber-700">Partial recording</span>}
       {(file.status === 'available' || file.kind === 'reference') && <button className={button} disabled={busy} onClick={play}>{busy ? 'Loading…' : url ? 'Refresh playback link' : file.kind === 'reference' ? 'Resolve external reference' : 'Play recording'}</button>}
     </div>
     {url && <audio ref={audio} key={url} controls preload="metadata" className="w-full" src={url} onLoadedMetadata={() => {

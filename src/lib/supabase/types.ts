@@ -5774,6 +5774,9 @@ export type Database = {
       }
     }
     Functions: {
+      dialpad_recording_playback_file_id: { Args: { p_capture_id: string; p_track: string; p_epoch: number }; Returns: string }
+      fn_dialpad_recording_library_sources: { Args: { p_actor: string; p_scope: string }; Returns: Json }
+      fn_dialpad_recording_playback_file: { Args: { p_actor: string; p_scope: string; p_file_id: string }; Returns: Json }
       sequence_overview_stats: { Args: { p_org: string }; Returns: Array<{
         id: string; name: string; description: string | null; active: boolean;
         append_opt_out: boolean; archived_at: string | null; created_at: string;

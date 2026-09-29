@@ -34,6 +34,7 @@ const projectionSql = readSql("20260929120000_dialpad_cti_call_projection.sql");
 const dispatchSql = readSql("20260929180000_dialpad_cti_dispatch.sql");
 const recordingSql = readSql("20260929210000_dialpad_recording_foundation.sql");
 const transportSql = readSql("20260929220000_dialpad_recording_transport_contract.sql");
+const playbackSql = readSql("20260929221000_dialpad_recording_playback.sql");
 
 const uuid = () => crypto.randomUUID();
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -365,6 +366,8 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
     await pg.query(recordingSql);
     await pg.query(transportSql);
     await pg.query(transportSql);
+    await pg.query(playbackSql);
+    await pg.query(playbackSql);
   });
 
   afterAll(async () => {
@@ -409,6 +412,8 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
           "fn_record_dialpad_recording_vad_ranges",
           "fn_record_dialpad_recording_pcm_progress",
           "fn_register_dialpad_recording_result",
+          "fn_dialpad_recording_library_sources",
+          "fn_dialpad_recording_playback_file",
         ].sort(),
       );
       const { captureId } = await openedCapture();
@@ -459,6 +464,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       await pg.query("update storage.buckets set public=true, file_size_limit=1 where id='dialpad-recordings'");
       await pg.query(recordingSql);
       await pg.query(transportSql);
+      await pg.query(playbackSql);
       const bucket = await pg.query("select public, file_size_limit from storage.buckets where id='dialpad-recordings'");
       expect(bucket.rowCount).toBe(1);
       expect(bucket.rows[0]).toMatchObject({ public: false, file_size_limit: "536870912" });
@@ -1554,6 +1560,56 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
       const snapshot = parseDialpadRecordingVadSnapshot(await rpc("fn_get_dialpad_recording_vad_snapshot", [orgId, captureId]) as never);
       expect(snapshot).toMatchObject({ version: 1, totalSamples: 0, epoch: null, epochCreditedThrough: null, degradedReasons: ["gap", "reconnect"] });
       expect(snapshot.processedPcm).toEqual([expect.objectContaining({ track: "tab", epoch: 1, processedThroughSample: 640, pcmEofSample: 640, sourceSampleRateHz: 48000, sourceChannels: 1, sourceCodec: "opus", normalizedSampleRateHz: 16000, normalizedChannels: 1, degradedReasons: ["gap", "reconnect"] })]);
+    });
+  });
+
+  describe("20260929221000 Dialpad playback projection", () => {
+    it("publishes two opaque track files and preserves sealed metadata in the library projection", async () => {
+      const { captureId, token } = await sealedReady();
+      await register(captureId, token, [decoded("tab"), decoded("mic")]);
+      const activityId = (await captureRow(captureId)).call_activity_id;
+      const sources = await rpc("fn_dialpad_recording_library_sources", [ownerId, "owner"]);
+      const source = (sources as unknown as Array<Json>).find((item) => item.id === String(activityId));
+      expect(source).toMatchObject({ source: "dialpad", actorId: repA });
+      const files = (source?.files ?? []) as Array<Json>;
+      expect(files).toHaveLength(2);
+      expect(files.map((file) => file.track)).toEqual(["mic", "tab"]);
+      expect(files.every((file) => typeof file.id === "string" && /^dpf_[0-9a-f]{64}$/.test(String(file.id)))).toBe(true);
+      expect(files.every((file) => file.completeness === "complete" && file.recordingStatus === "sealed")).toBe(true);
+      const playback = await rpc("fn_dialpad_recording_playback_file", [ownerId, "owner", files[0]!.id]);
+      expect(playback).toMatchObject({ source: "dialpad", file: { track: files[0]!.track, epoch: 1, completeness: "complete", recordingStatus: "sealed", bucket: "dialpad-recordings" } });
+      expect(String((playback.file as Json).storagePath)).toBe(`${orgId}/${captureId}/final/1/${files[0]!.track}`);
+    });
+
+    it("keeps a usable partial final playable while marking the capture partial", async () => {
+      const { call, captureId } = await openedCapture();
+      await authorizedEpoch(captureId);
+      await fullTrack(captureId, "tab");
+      await endCall(call);
+      await rpc("fn_close_dialpad_recording_capture", [orgId, captureId, null, "service_closed"]);
+      const claimToken = uuid();
+      await withoutTriggers("update public.dialpad_recording_captures set status='sealing', claim_token=$2, claimed_by='partial-playback', claimed_at=now(), lease_expires_at=now()+interval '5 minutes' where id=$1", [captureId, claimToken]);
+      await register(captureId, claimToken, [decoded("tab")]);
+      const activityId = (await captureRow(captureId)).call_activity_id;
+      const sources = await rpc("fn_dialpad_recording_library_sources", [ownerId, "owner"]);
+      const source = (sources as unknown as Array<Json>).find((item) => item.id === String(activityId));
+      expect(source).toMatchObject({ source: "dialpad", recordingStatus: "partial" });
+      expect(source?.files).toEqual([expect.objectContaining({ status: "available", track: "tab", completeness: "complete", recordingStatus: "partial" })]);
+      const playback = await rpc("fn_dialpad_recording_playback_file", [ownerId, "owner", (source?.files as Array<Json>)[0]!.id]);
+      expect(playback).toMatchObject({ file: { status: "available", completeness: "complete", recordingStatus: "partial" } });
+    });
+
+    it("denies guessed IDs, other reps and cross-org access", async () => {
+      const { captureId, token } = await sealedReady();
+      await register(captureId, token, [decoded("tab"), decoded("mic")]);
+      const activityId = (await captureRow(captureId)).call_activity_id;
+      const sources = await rpc("fn_dialpad_recording_library_sources", [ownerId, "owner"]);
+      const source = (sources as unknown as Array<Json>).find((item) => item.id === String(activityId))!;
+      const fileId = ((source.files ?? []) as Array<Json>)[0]!.id;
+      expect(await rpc("fn_dialpad_recording_playback_file", [repB, "mine", fileId])).toBeNull();
+      expect(await rpc("fn_dialpad_recording_playback_file", [otherRep, "mine", fileId])).toBeNull();
+      expect(await rpc("fn_dialpad_recording_playback_file", [ownerId, "owner", `dpf_${"f".repeat(64)}`])).toBeNull();
+      expect((await pg.query("select count(*)::int as n from public.dialpad_recording_track_finals where capture_id=$1", [captureId])).rows[0]!.n).toBe(2);
     });
   });
 });
