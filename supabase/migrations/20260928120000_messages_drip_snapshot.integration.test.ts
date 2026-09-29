@@ -106,9 +106,10 @@ it("applies twice, preserves old snapshot values, aligns replied counts, and use
        ) drip on true`,
       [randomUUID(), randomUUID()],
     )).rows.map((row) => row["QUERY PLAN"]).join("\n");
-    expect(await explain()).toMatch(/Index (?:Scan|Only Scan).*idx_enrollments_property[\s\S]*Index Cond: \(property_id =/);
+    expect(await explain()).toMatch(/Index (?:Scan|Only Scan) using idx_enrollments_(?:property|unique_active)[\s\S]*Index Cond: \(property_id =/);
     await db.query("savepoint without_index");
     await db.query("drop index public.idx_enrollments_property");
+    await db.query("drop index public.idx_enrollments_unique_active");
     expect(await explain()).not.toContain("Index Cond: (property_id =");
     await db.query("rollback to savepoint without_index");
   } finally {
