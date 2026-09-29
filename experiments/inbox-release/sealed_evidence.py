@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+import math
 import ntpath
 from pathlib import Path
 import posixpath
@@ -37,6 +38,9 @@ MIGRATION_APPLY_JOBS = {"shared-test": "Apply migrations to test", "production":
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 CATALOG_SECTIONS = ("created_objects_present", "extensions", "functions", "index_names", "relations", "schema_migrations", "schemas", "trigger_names", "types")
+OPERATOR_LIST = "scripts/inbox-ci/shared-readonly-operators.json"
+PLAN_ROLES = ("privileged", "member")
+PLAN_SHAPES = ("first", "keyset", "null_tail")
 
 
 class EvidenceError(RuntimeError):
@@ -151,7 +155,14 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
                 or manifest["started_at"] != completed_text
                 or manifest["run_id"] != "shared-readonly-" + manifest["phase"] + "-" + completed_text.replace("-", "").replace(":", "").replace(".", "")):
             raise EvidenceError(f"shared-readonly run metadata mismatch: {directory}")
-        scripts = ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs", "scripts/outbox-db-contract/catalog-sections.mjs")
+        try:
+            operator_list = json.loads(blob(repo, tested_sha, OPERATOR_LIST), object_pairs_hook=unique_object_pairs)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise EvidenceError(f"invalid operator list: {directory}: {exc}") from exc
+        scripts = operator_list.get("operator_scripts") if isinstance(operator_list, dict) and set(operator_list) == {"operator_scripts"} else None
+        if (not isinstance(scripts, list) or any(not isinstance(script, str) or not re.fullmatch(r"scripts/[a-z0-9/.-]+", script) or ".." in script for script in scripts)
+                or OPERATOR_LIST not in scripts or len(scripts) != len(set(scripts))):
+            raise EvidenceError(f"invalid operator list: {directory}")
         operator = manifest.get("operator_script_sha256")
         if (not isinstance(operator, dict) or set(operator) != set(scripts) or any(
                 operator[script] != hashlib.sha256(blob(repo, tested_sha, script)).hexdigest() for script in scripts)):
@@ -318,9 +329,30 @@ def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
         output = json.loads(blob(repo, run["commit"], directory + "/readonly.json"), object_pairs_hook=unique_object_pairs)
     except (ValueError, UnicodeDecodeError) as exc:
         raise EvidenceError(f"invalid shared-readonly output: {directory}: {exc}") from exc
-    if not isinstance(output, dict) or set(output) != {"verdict", "target", "phase", "comparisons", "items"} or output["verdict"] != "PASS" or output["target"] != "shared-test" or output["phase"] != manifest["phase"]:
+    if not isinstance(output, dict) or set(output) != {"verdict", "target", "phase", "source_output_sha256", "plans", "tls", "catalog_indexes_sha256", "comparisons", "items"} or output["verdict"] != "PASS" or output["target"] != "shared-test" or output["phase"] != manifest["phase"]:
         raise EvidenceError(f"raw or malformed shared-readonly output: {directory}")
     reject_raw(output)
+    if (not isinstance(output["source_output_sha256"], str) or not HASH.fullmatch(output["source_output_sha256"])
+            or not isinstance(output["catalog_indexes_sha256"], str) or not HASH.fullmatch(output["catalog_indexes_sha256"])):
+        raise EvidenceError(f"invalid shared-readonly source/index digest: {directory}")
+    plans = output["plans"]
+    if not isinstance(plans, dict) or set(plans) != set(PLAN_ROLES):
+        raise EvidenceError(f"invalid shared-readonly plans: {directory}")
+    for role in PLAN_ROLES:
+        if not isinstance(plans[role], dict) or set(plans[role]) != set(PLAN_SHAPES):
+            raise EvidenceError(f"invalid shared-readonly plans: {directory}")
+        for shape in PLAN_SHAPES:
+            plan = plans[role][shape]
+            if (not isinstance(plan, dict) or set(plan) != {"sha256", "messages_scan", "total_cost"}
+                    or not isinstance(plan["sha256"], str) or not HASH.fullmatch(plan["sha256"])
+                    or not isinstance(plan["messages_scan"], str) or plan["messages_scan"] not in {"Seq Scan", "Index"}
+                    or isinstance(plan["total_cost"], bool) or not isinstance(plan["total_cost"], (int, float))
+                    or not math.isfinite(plan["total_cost"])):
+                raise EvidenceError(f"invalid shared-readonly plan: {directory}")
+    tls = output["tls"]
+    if (not isinstance(tls, dict) or set(tls) != {"ssl", "version", "cipher"} or tls["ssl"] is not True
+            or not isinstance(tls["version"], str) or not isinstance(tls["cipher"], str)):
+        raise EvidenceError(f"invalid shared-readonly TLS: {directory}")
     items = output["items"]
     if not isinstance(items, dict) or set(items) - {"queued_invariants"}:
         raise EvidenceError(f"raw or malformed shared-readonly items: {directory}")
