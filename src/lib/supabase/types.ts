@@ -5732,6 +5732,10 @@ export type Database = {
       }
     }
     Functions: {
+      sequence_step_stats: { Args: { p_org: string; p_sequence: string }; Returns: Array<{
+        step_id: string; sent: number; replied: number; waiting: number;
+      }> }
+      sequence_copy_steps: { Args: { p_target: string; p_source: string }; Returns: number }
       sequence_overview_stats: { Args: { p_org: string }; Returns: Array<{
         id: string; name: string; description: string | null; active: boolean;
         append_opt_out: boolean; archived_at: string | null; created_at: string;
