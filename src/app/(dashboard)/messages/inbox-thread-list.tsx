@@ -284,10 +284,8 @@ export function InboxThreadList({
 function DripThreadStatus({ thread }: { thread: Thread }) {
   const label = thread.dripReplied
     ? "Replied to drip"
-    : thread.lastMessageDirection === "outbound"
-      ? "Drip text sent"
-      : "In a drip";
-  const tone = thread.dripReplied ? "bg-amber-500" : label === "Drip text sent" ? "bg-blue-500" : "bg-teal-500";
+    : "In a drip";
+  const tone = thread.dripReplied ? "bg-amber-500" : "bg-teal-500";
   return (
     <span role="img" aria-label={label} title={`${label} · ${thread.dripName}`}
       data-testid={`inbox-thread-${thread.threadId}-drip-status`}

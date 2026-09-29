@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   findLatestAuthoritativeSmsRoute,
 } from "@/lib/messages/sms-parties";
+import { OPERATOR_TIME_ZONE } from "@/lib/messages/message-metrics";
 import type { AiDispositionReview } from "@/lib/messages/list-threads";
 import {
   computeConsentState,
@@ -64,6 +65,8 @@ export type InboxDetail = {
     step: number;
     total: number;
     replied: boolean;
+    status?: "active" | "paused";
+    timeZone?: string;
     stoppedAt: string | null;
   } | null;
   dripMessageLabels: Record<string, string>;
@@ -223,7 +226,7 @@ export async function fetchInboxDetail(
       : false;
   }
 
-  const dripContext = await loadMessageDripContext(supabase, conversationOrgId, propertyId, contactId, messages);
+  const dripContext = await loadMessageDripContext(supabase, conversationOrgId, propertyId, messages);
 
   return {
     threadId: conversationId,
@@ -275,7 +278,6 @@ async function loadMessageDripContext(
   supabase: SupabaseClient<Database>,
   orgId: string,
   propertyId: string | null,
-  contactId: string,
   messages: Database["public"]["Tables"]["messages"]["Row"][],
 ): Promise<Pick<InboxDetail, "drip" | "dripMessageLabels" | "dripReplyMessageIds">> {
   const outboundIds = messages.filter((m) => m.direction === "outbound").map((m) => m.id);
@@ -283,7 +285,7 @@ async function loadMessageDripContext(
     propertyId
       ? supabase.from("sequence_enrollments")
           .select("id, sequence_id, status, pause_reason, current_step_index, enrolled_at, updated_at")
-          .eq("org_id", orgId).eq("property_id", propertyId).eq("contact_id", contactId)
+          .eq("org_id", orgId).eq("property_id", propertyId)
           .in("status", ["active", "paused"])
           .order("enrolled_at", { ascending: false }).limit(1).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
@@ -323,15 +325,14 @@ async function loadMessageDripContext(
     if (!name) continue;
     dripMessageLabels[run.message_id] = `Drip · ${name} · text ${run.sequence_steps.step_index + 1} of ${totals.get(sequenceId) ?? run.sequence_steps.step_index + 1}`;
   }
-  const pausedForReply = enrollment?.status === "paused" && enrollment.pause_reason === "inbound_reply";
+  const pausedForReply = enrollment?.status === "paused" && ["inbound_reply", "rep_sms_human_takeover"].includes(enrollment.pause_reason ?? "");
   const lastDripText = enrollment
     ? messages.filter((m) => Boolean(dripMessageLabels[m.id]) && m.created_at >= enrollment.enrolled_at).at(-1)
     : null;
   const reply = enrollment && pausedForReply
     ? messages.find((m) => m.direction === "inbound" && m.created_at > (lastDripText?.created_at ?? enrollment.enrolled_at)) ?? null
     : null;
-  const repRepliedAfter = reply && messages.some((m) => m.direction === "outbound" && !dripMessageLabels[m.id] && m.created_at > reply.created_at);
-  const replied = pausedForReply && !repRepliedAfter;
+  const replied = pausedForReply;
   const dripReplyMessageIds = reply && replied ? [reply.id] : [];
   const name = enrollment ? names.get(enrollment.sequence_id) : null;
   return {
@@ -342,6 +343,8 @@ async function loadMessageDripContext(
       step: Math.min(enrollment.current_step_index + 1, totals.get(enrollment.sequence_id) ?? 0),
       total: totals.get(enrollment.sequence_id) ?? 0,
       replied,
+      status: enrollment.status as "active" | "paused",
+      timeZone: OPERATOR_TIME_ZONE,
       stoppedAt: replied ? (reply?.created_at ?? enrollment.updated_at) : null,
     } : null,
     dripMessageLabels,

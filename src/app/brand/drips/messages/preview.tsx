@@ -26,7 +26,7 @@ export function DripMessagesPreview({ cantStart = false }: { cantStart?: boolean
         <div className="grid min-h-0 flex-1 grid-cols-[270px_minmax(0,1fr)] gap-3">
           <InboxThreadList initial={[thread]} selectedThreadId={thread.threadId} currentUserId={null} onSelectThread={() => {}} nowMs={brandTimestamp} />
           <InboxDetail data={cantStart ? brandCantStartDetail : brandDetail} assigneeEmails={{}} currentUserId={null} nowMs={brandTimestamp}
-            previewFailedStart={cantStart ? { reason: "Already in a drip", sequenceId: "00000000-0000-4000-8000-000000000006", saved: true } : undefined} />
+            previewFailedStart={cantStart ? { reason: "Already in Current seller check-in, text 1 of 3. Stop it or switch.", sequenceId: "00000000-0000-4000-8000-000000000006", saved: true } : undefined} />
         </div>
       </div>
     </div>

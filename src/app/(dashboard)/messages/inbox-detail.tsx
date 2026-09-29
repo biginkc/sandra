@@ -121,6 +121,9 @@ function DispoBar({
   onDispositionChanged,
   activeDripEnrollmentId,
   activeDripSequenceId,
+  activeDripName,
+  activeDripStep,
+  activeDripTotal,
   initialFailedStart,
 }: {
   propertyId: string;
@@ -132,6 +135,9 @@ function DispoBar({
   onDispositionChanged?: () => void;
   activeDripEnrollmentId?: string | null;
   activeDripSequenceId?: string | null;
+  activeDripName?: string | null;
+  activeDripStep?: number | null;
+  activeDripTotal?: number | null;
   initialFailedStart?: { reason: string; sequenceId: string; saved: boolean } | null;
 }) {
   const router = useRouter();
@@ -168,7 +174,7 @@ function DispoBar({
         setDispo("needs_sequence");
         onDispositionChanged?.();
       }
-      return { status: "skipped", reason: sequenceId === activeDripSequenceId ? "Already in this drip" : "Already in a drip", saved: true };
+      return { status: "skipped", reason: `Already in ${activeDripName}, text ${activeDripStep} of ${activeDripTotal}. Stop it or switch.`, saved: true };
     }
     if (afterSavedOutcome) {
       const result = await startDripForLeads(sequenceId, [propertyId]);
@@ -767,8 +773,8 @@ export function InboxDetail({
               {data.drip ? <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-teal-800" data-testid="inbox-detail-drip-line">
                 <Droplet aria-hidden="true" className="h-3.5 w-3.5" />
                 {data.drip.replied
-                  ? `Was in ${data.drip.name} · stopped ${data.drip.stoppedAt ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(data.drip.stoppedAt)) + " " : ""}when they replied`
-                  : `In ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`}
+                  ? `Was in ${data.drip.name} · stopped ${data.drip.stoppedAt ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: data.drip.timeZone ?? "America/Chicago" }).format(new Date(data.drip.stoppedAt)) + " " : ""}when they replied`
+                  : `${data.drip.status === "paused" ? "Paused in" : "In"} ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`}
               </p> : null}
               <p
                 className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] text-[#78716c]"
@@ -976,8 +982,11 @@ export function InboxDetail({
                 initialDispo={data.outreachDispo}
                 propertyStatus={data.propertyStatus}
                 currentUserId={currentUserId}
-                activeDripEnrollmentId={data.drip && !data.drip.replied ? data.drip.enrollmentId : null}
-                activeDripSequenceId={data.drip && !data.drip.replied ? data.drip.sequenceId : null}
+                activeDripEnrollmentId={data.drip?.enrollmentId}
+                activeDripSequenceId={data.drip?.sequenceId}
+                activeDripName={data.drip?.name}
+                activeDripStep={data.drip?.step}
+                activeDripTotal={data.drip?.total}
                 initialFailedStart={previewFailedStart}
                 onDispositionChanged={
                   data.aiDispositionReview

@@ -158,7 +158,7 @@ describe("applyThreadUpdates — recency-only ordering", () => {
 });
 
 describe("<InboxThreadList /> realtime subscriptions", () => {
-  it("distinguishes running, sent, and replied drip rows from the snapshot", () => {
+  it("distinguishes in a drip and replied rows from the snapshot", () => {
     render(<InboxThreadList initial={[
       makeThread({ threadId: "running", dripName: "Seller follow-up" }),
       makeThread({ threadId: "sent", dripName: "Seller follow-up", lastMessageDirection: "outbound" }),
@@ -166,7 +166,7 @@ describe("<InboxThreadList /> realtime subscriptions", () => {
       makeThread({ threadId: "plain", dripReplied: false }),
     ]} selectedThreadId={null} currentUserId={null} onSelectThread={vi.fn()} />);
     expect(screen.getByTestId("inbox-thread-running-drip-status")).toHaveAttribute("aria-label", "In a drip");
-    expect(screen.getByTestId("inbox-thread-sent-drip-status")).toHaveAttribute("aria-label", "Drip text sent");
+    expect(screen.getByTestId("inbox-thread-sent-drip-status")).toHaveAttribute("aria-label", "In a drip");
     expect(screen.getByTestId("inbox-thread-replied-drip-status")).toHaveAttribute("aria-label", "Replied to drip");
     expect(screen.queryByTestId("inbox-thread-plain-drip-status")).not.toBeInTheDocument();
   });
