@@ -9,7 +9,7 @@ import { makeRest } from './outbox-db-contract/postgrest.mjs';
 import { createFixture } from './outbox-db-contract/fixture.mjs';
 import { runContracts } from './outbox-db-contract/contracts.mjs';
 import { checkPrivileges } from './outbox-db-contract/privileges.mjs';
-import { writeManifest, runPath, sha256 } from './outbox-run-record.mjs';
+import { assertOnlyRunDirDirty, writeManifest, runPath, sha256 } from './outbox-run-record.mjs';
 
 const repo = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const MIGRATIONS = ['20260930020000', '20260930020100', '20260930020200'];
@@ -89,6 +89,7 @@ export function sealPhaseRecord({ phase, checks = [], schemaState = {}, mutation
   if (fixtureRows) writeFileSync(path.join(runDir, 'fixture-rows.json'), fixtureRows);
   if (errorText) writeFileSync(path.join(runDir, 'failure.log'), `${errorText}\n`);
   const lane = env.HEAVY_LANE || `db-contract-${phase}`;
+  const endStatus = assertOnlyRunDirDirty(repo, relative);
   writeManifest(repo, relative, {
     tested_sha: sha, tier: 'pre-merge', kind: 'db-contract', phase, target: 'disposable', verdict, exit_status: verdict === 'PASS' ? 0 : 1,
     run_id: runId, started_at: startedAt ?? new Date().toISOString(), completed_at: new Date().toISOString(), target_binding: binding, schema_state: schemaState,
@@ -97,6 +98,7 @@ export function sealPhaseRecord({ phase, checks = [], schemaState = {}, mutation
     artifact_name: env.GITHUB_ACTIONS === 'true' ? `heavy-${lane}-${sha}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}` : '',
     event: env.GITHUB_EVENT_NAME ?? '', head_branch: env.GITHUB_REF_NAME ?? '', lane,
     runner_script_sha256: sha256(readFileSync(path.join(repo, 'scripts/inbox-ci', `${lane}.sh`))),
+    clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative, end_status: endStatus },
     contracts: checks, mutation_inventory: mutations, failure: errorText ? errorText.split('\n')[0] : null,
   }, env);
   return { verdict, runDir };
