@@ -58,6 +58,7 @@ export async function runMutations(output) {
         revert = `ALTER POLICY ${name} ON public.messages ${id === 'M3' ? 'USING' : 'WITH CHECK'} (${original})`;
       }
       let observed, exact;
+      let anonRowExposure = null;
       for (const mode of ['observe', 'exact']) {
         const fixture = await prepareFixture();
         await db.query(apply);
@@ -70,8 +71,11 @@ export async function runMutations(output) {
             assert(!observed.error || observed.error.startsWith('Error: CONTRACT_FAILURE'), `${id}: ${observed.error}`);
             for (const check of required) assert(observed.failed.includes(check), `${id}: ${check} did not fail; got ${observed.failed}`);
             if (id === 'M10') {
-              const contracts = readFileSync(`${observed.runDir}/contracts.json`, 'utf8');
-              assert(/ANON_ROW_EXPOSURE count=[1-9]\d* fixture=true/.test(contracts), `${id}: anon did not read its own fixture row`);
+              const contracts = JSON.parse(readFileSync(`${observed.runDir}/contracts.json`, 'utf8'));
+              const detail = contracts.find(check => check.id === 'D01')?.error ?? '';
+              const match = detail.match(/^ANON_ROW_EXPOSURE count=([1-9]\d*) fixture=true$/);
+              assert(match, `${id}: anon did not read its own fixture row`);
+              anonRowExposure = { count: Number(match[1]), fixture: true };
             }
           } else {
             assert.equal(exact.exit, 1, `${id}: --expect-fail must exit nonzero`);
@@ -84,7 +88,7 @@ export async function runMutations(output) {
       const restored = runContract();
       assert.equal(restored.exit, 0, `${id}: restore run: ${restored.error}; failed=${restored.failed}`);
       assert.equal(restored.verdict, 'PASS');
-      results.push({ id, expected_fail: observed.failed, observed_exit: exact.exit, restored: restored.verdict });
+      results.push({ id, expected_fail: observed.failed, observed_exit: exact.exit, restored: restored.verdict, ...(anonRowExposure ? { anon_row_exposure: anonRowExposure } : {}) });
       writeFileSync(output, `${JSON.stringify(results, null, 2)}\n`);
       console.log(`MUTATION ${id} FAIL ${observed.failed.join(',')} RESTORED PASS`);
     }
