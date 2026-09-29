@@ -354,8 +354,9 @@ begin
         'captureId', c.capture_id, 'orgId', c.org_id, 'track', c.track, 'epoch', c.epoch,
         'seq', c.seq, 'sizeBytes', c.size_bytes, 'sha256', c.sha256,
         'storagePath', c.storage_path,
-        'isEof', (c.is_eof or (s.eof_seq = c.seq and s.eof_sha256 = c.sha256)),
-        'eofSha256', case when s.eof_seq = c.seq then s.eof_sha256 else null end
+        'isEof', coalesce(c.is_eof or (s.eof_seq = c.seq and s.eof_sha256 = c.sha256), false),
+        'eofSha256', case when coalesce(c.is_eof or (s.eof_seq = c.seq and s.eof_sha256 = c.sha256), false)
+                         then coalesce(s.eof_sha256, c.sha256) else null end
       ) order by c.epoch, case when c.track = 'tab' then 0 else 1 end, c.seq)
         from public.dialpad_recording_chunks c
         left join public.dialpad_recording_segments s
@@ -420,7 +421,10 @@ create table if not exists public.dialpad_recording_vad_threshold_latches (
   threshold_samples bigint not null default 4800000 check (threshold_samples = 4800000),
   crossing_total_samples bigint not null check (crossing_total_samples > threshold_samples),
   crossing_epoch smallint not null check (crossing_epoch between 1 and 16),
-  -- Zero-based half-open PCM coordinate of the first sample above threshold.
+  -- Zero-based PCM coordinate of the first sample above threshold. A later
+  -- Jitter meter reports an exclusive end, so its crossingSample maps here
+  -- as (meter crossingSample - 1), or conversely this value plus one when
+  -- exporting the meter's exclusive-end coordinate.
   crossing_sample bigint not null check (crossing_sample >= 0),
   crossing_start_sample bigint not null check (crossing_start_sample >= 0),
   crossing_end_sample bigint not null check (crossing_end_sample > crossing_start_sample),
@@ -457,19 +461,21 @@ declare
   v_definition text;
   v_patched text;
   v_old text := 'select count(*), coalesce(sum(size_bytes), 0), coalesce(max(seq), -1), bool_or(is_eof), max(seq) filter (where is_eof)';
-  v_new text := 'select count(*), coalesce(sum(c.size_bytes), 0), coalesce(max(c.seq), -1), bool_or(c.is_eof or (s.eof_seq = c.seq and s.eof_sha256 = c.sha256)), max(c.seq) filter (where c.is_eof or (s.eof_seq = c.seq and s.eof_sha256 = c.sha256))';
+  v_new text := 'select count(*), coalesce(sum(c.size_bytes), 0), coalesce(max(c.seq), -1), bool_or(coalesce(c.is_eof or (s.eof_seq = c.seq and s.eof_sha256 = c.sha256), false)), max(c.seq) filter (where coalesce(c.is_eof or (s.eof_seq = c.seq and s.eof_sha256 = c.sha256), false))';
 begin
   select pg_get_functiondef(p.oid) into v_definition
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
    where n.nspname = 'public' and p.proname = 'fn_register_dialpad_recording_result'
      and p.pronargs = 4;
   if v_definition is null then raise exception 'missing recording result registrar'; end if;
-  if position('bool_or(c.is_eof' in v_definition) > 0 then return; end if;
+  if position('bool_or(coalesce(c.is_eof' in v_definition) > 0 then return; end if;
+  if position(v_old in v_definition) = 0 then raise exception 'recording result registrar EOF aggregate target was not found'; end if;
+  if position('from public.dialpad_recording_chunks where capture_id = p_capture_id and track = v_track and epoch = v_epoch;' in v_definition) = 0 then raise exception 'recording result registrar chunk source target was not found'; end if;
   v_patched := replace(v_definition, v_old, v_new);
   v_patched := replace(v_patched,
     'from public.dialpad_recording_chunks where capture_id = p_capture_id and track = v_track and epoch = v_epoch;',
     'from public.dialpad_recording_chunks c left join public.dialpad_recording_segments s on s.capture_id = c.capture_id and s.track = c.track and s.epoch = c.epoch where c.capture_id = p_capture_id and c.track = v_track and c.epoch = v_epoch;');
-  if v_patched = v_definition then raise exception 'recording result registrar EOF aggregate was not found'; end if;
+  if v_patched = v_definition or position(v_new in v_patched) = 0 or position('from public.dialpad_recording_chunks c left join public.dialpad_recording_segments s' in v_patched) = 0 then raise exception 'recording result registrar EOF patch did not apply'; end if;
   execute v_patched;
 end;
 $transport_register_patch$;
@@ -668,7 +674,9 @@ create table if not exists public.dialpad_recording_pcm_batches (
   recorded_at timestamptz not null default now(),
   check (pcm_eof_sample is null or (pcm_eof_sample between 0 and 1000000000000 and pcm_eof_sample <= processed_through_sample)),
   check ((source_sample_rate_hz is null and source_channels is null and source_codec is null)
-      or (source_sample_rate_hz between 8000 and 192000 and source_channels between 1 and 2 and source_codec ~ '^[a-z0-9_.-]{1,64}$')),
+      or (source_sample_rate_hz is not null and source_channels is not null and source_codec is not null
+          and source_sample_rate_hz between 8000 and 192000 and source_channels between 1 and 2
+          and source_codec ~ '^[a-z0-9_.-]{1,64}$')),
   check (jsonb_typeof(degraded_reasons) = 'array' and jsonb_array_length(degraded_reasons) <= 64),
   foreign key (capture_id, org_id) references public.dialpad_recording_captures (id, org_id)
 );
@@ -688,7 +696,9 @@ create table if not exists public.dialpad_recording_pcm_progress (
   primary key (capture_id, track, epoch),
   check (pcm_eof_sample is null or (pcm_eof_sample between 0 and 1000000000000 and pcm_eof_sample <= processed_through_sample)),
   check ((source_sample_rate_hz is null and source_channels is null and source_codec is null)
-      or (source_sample_rate_hz between 8000 and 192000 and source_channels between 1 and 2 and source_codec ~ '^[a-z0-9_.-]{1,64}$')),
+      or (source_sample_rate_hz is not null and source_channels is not null and source_codec is not null
+          and source_sample_rate_hz between 8000 and 192000 and source_channels between 1 and 2
+          and source_codec ~ '^[a-z0-9_.-]{1,64}$')),
   check (jsonb_typeof(degraded_reasons) = 'array' and jsonb_array_length(degraded_reasons) <= 64),
   foreign key (capture_id, org_id) references public.dialpad_recording_captures (id, org_id)
 );
@@ -698,36 +708,18 @@ comment on table public.dialpad_recording_pcm_batches is
 comment on table public.dialpad_recording_pcm_progress is
   'Monotonic per-track/epoch normalized PCM boundary, PCM EOF sample, source format and accumulated degradation reasons used to resume ingest safely.';
 
--- This migration is rerunnable in the local scratch database while the
--- contract is being reviewed. Remove the pre-review retention EOF names if a
--- previous interrupted run created them; PCM EOF is a normalized sample
--- boundary and intentionally has no retention chunk sequence or hash.
-alter table public.dialpad_recording_pcm_batches
-  add column if not exists pcm_eof_sample bigint,
-  add column if not exists source_sample_rate_hz integer,
-  add column if not exists source_channels smallint,
-  add column if not exists source_codec text;
-alter table public.dialpad_recording_pcm_progress
-  add column if not exists pcm_eof_sample bigint,
-  add column if not exists source_sample_rate_hz integer,
-  add column if not exists source_channels smallint,
-  add column if not exists source_codec text;
-alter table public.dialpad_recording_pcm_batches drop column if exists eof_seq, drop column if exists eof_sha256;
-alter table public.dialpad_recording_pcm_progress drop column if exists eof_seq, drop column if exists eof_sha256;
 do $$
 begin
+  alter table public.dialpad_recording_pcm_batches drop constraint if exists dialpad_recording_pcm_batches_source_format_check;
+  alter table public.dialpad_recording_pcm_progress drop constraint if exists dialpad_recording_pcm_progress_source_format_check;
   if not exists (select 1 from pg_constraint where conrelid = 'public.dialpad_recording_pcm_batches'::regclass and conname = 'dialpad_recording_pcm_batches_eof_sample_check') then
     alter table public.dialpad_recording_pcm_batches add constraint dialpad_recording_pcm_batches_eof_sample_check check (pcm_eof_sample is null or (pcm_eof_sample between 0 and 1000000000000 and pcm_eof_sample <= processed_through_sample));
   end if;
-  if not exists (select 1 from pg_constraint where conrelid = 'public.dialpad_recording_pcm_batches'::regclass and conname = 'dialpad_recording_pcm_batches_source_format_check') then
-    alter table public.dialpad_recording_pcm_batches add constraint dialpad_recording_pcm_batches_source_format_check check ((source_sample_rate_hz is null and source_channels is null and source_codec is null) or (source_sample_rate_hz between 8000 and 192000 and source_channels between 1 and 2 and source_codec ~ '^[a-z0-9_.-]{1,64}$'));
-  end if;
+  alter table public.dialpad_recording_pcm_batches add constraint dialpad_recording_pcm_batches_source_format_check check ((source_sample_rate_hz is null and source_channels is null and source_codec is null) or (source_sample_rate_hz is not null and source_channels is not null and source_codec is not null and source_sample_rate_hz between 8000 and 192000 and source_channels between 1 and 2 and source_codec ~ '^[a-z0-9_.-]{1,64}$'));
   if not exists (select 1 from pg_constraint where conrelid = 'public.dialpad_recording_pcm_progress'::regclass and conname = 'dialpad_recording_pcm_progress_eof_sample_check') then
     alter table public.dialpad_recording_pcm_progress add constraint dialpad_recording_pcm_progress_eof_sample_check check (pcm_eof_sample is null or (pcm_eof_sample between 0 and 1000000000000 and pcm_eof_sample <= processed_through_sample));
   end if;
-  if not exists (select 1 from pg_constraint where conrelid = 'public.dialpad_recording_pcm_progress'::regclass and conname = 'dialpad_recording_pcm_progress_source_format_check') then
-    alter table public.dialpad_recording_pcm_progress add constraint dialpad_recording_pcm_progress_source_format_check check ((source_sample_rate_hz is null and source_channels is null and source_codec is null) or (source_sample_rate_hz between 8000 and 192000 and source_channels between 1 and 2 and source_codec ~ '^[a-z0-9_.-]{1,64}$'));
-  end if;
+  alter table public.dialpad_recording_pcm_progress add constraint dialpad_recording_pcm_progress_source_format_check check ((source_sample_rate_hz is null and source_channels is null and source_codec is null) or (source_sample_rate_hz is not null and source_channels is not null and source_codec is not null and source_sample_rate_hz between 8000 and 192000 and source_channels between 1 and 2 and source_codec ~ '^[a-z0-9_.-]{1,64}$'));
 end;
 $$;
 
@@ -751,9 +743,11 @@ begin
   if p_org_id is null or p_capture_id is null or p_track not in ('tab', 'mic')
      or p_epoch is null or p_epoch not between 1 and 16 or p_batch_id is null
      or p_processed_through_sample is null or p_processed_through_sample not between 0 and 1000000000000
-     or p_pcm_eof_sample is not null and (p_pcm_eof_sample not between 0 and 1000000000000 or p_pcm_eof_sample > p_processed_through_sample)
-     or (p_source_sample_rate_hz is null and (p_source_channels is not null or p_source_codec is not null))
-     or (p_source_sample_rate_hz is not null and (p_source_sample_rate_hz not between 8000 and 192000 or p_source_channels not between 1 and 2 or p_source_codec is null or p_source_codec !~ '^[a-z0-9_.-]{1,64}$'))
+     or p_pcm_eof_sample is not null and (p_pcm_eof_sample not between 0 and 1000000000000 or p_pcm_eof_sample <> p_processed_through_sample)
+     or not ((p_source_sample_rate_hz is null and p_source_channels is null and p_source_codec is null)
+             or (p_source_sample_rate_hz is not null and p_source_channels is not null and p_source_codec is not null
+                 and p_source_sample_rate_hz between 8000 and 192000 and p_source_channels between 1 and 2
+                 and p_source_codec ~ '^[a-z0-9_.-]{1,64}$'))
      or jsonb_typeof(p_degraded_reasons) <> 'array'
      or jsonb_array_length(p_degraded_reasons) > 64
      or exists (select 1 from jsonb_array_elements(p_degraded_reasons) r where jsonb_typeof(r) <> 'string' or length(r #>> '{}') not between 1 and 64 or r #>> '{}' !~ '^[a-z0-9_]+$') then
@@ -808,6 +802,7 @@ begin
     returning * into v_progress;
   elsif v_status = 'recorded' then
     if p_processed_through_sample < v_progress.processed_through_sample
+       or (v_progress.pcm_eof_sample is not null and p_processed_through_sample <> v_progress.pcm_eof_sample)
        or (v_progress.pcm_eof_sample is not null and p_pcm_eof_sample is distinct from v_progress.pcm_eof_sample)
        or (v_progress.source_sample_rate_hz is not null and (p_source_sample_rate_hz is distinct from v_progress.source_sample_rate_hz or p_source_channels is distinct from v_progress.source_channels or p_source_codec is distinct from v_progress.source_codec)) then
       raise exception 'PCM_PROGRESS_CONFLICT' using errcode = '40001', detail = 'pcm_progress_regressed';
@@ -833,6 +828,114 @@ begin
     'normalizedSampleRateHz', 16000, 'normalizedChannels', 1,
     'degradedReasons', v_progress.degraded_reasons
   );
+end;
+$$;
+
+-- Once transport measurement evidence has started, a retention-complete
+-- capture is not claimable until every consumed epoch has durable normalized
+-- PCM EOF at its processed boundary on both tracks. This closes the race
+-- between retention EOF and a final VAD/PCM flush. Captures with no transport
+-- measurement rows retain the foundation claim behavior, and deadline expiry
+-- still permits partial artifact classification with its missing continuity
+-- evidence left degraded/provisional.
+create or replace function public.fn_claim_dialpad_recording_seal_work(
+  p_worker_id text, p_lease_seconds integer default 300
+) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare
+  v_capture public.dialpad_recording_captures%rowtype;
+  v_token uuid := extensions.gen_random_uuid();
+  v_guard integer := 0;
+begin
+  if p_worker_id is null or length(p_worker_id) not between 1 and 200 or p_lease_seconds is null or p_lease_seconds not between 30 and 1800 then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
+  end if;
+
+  update public.dialpad_recording_captures c
+     set status = 'closing', closed_at = now(), close_reason = 'call_ended',
+         drain_deadline_at = now() + interval '30 seconds'
+   where c.status = 'open'
+     and exists (select 1 from public.call_activities a where a.id = c.call_activity_id and a.ended_at is not null);
+
+  loop
+    v_guard := v_guard + 1;
+    exit when v_guard > 25;
+    select * into v_capture from public.dialpad_recording_captures c
+      where (
+        c.status = 'closing'
+        and (
+          coalesce(c.drain_deadline_at, c.closed_at + interval '30 seconds') <= now()
+          or (
+            exists (select 1 from public.dialpad_recording_ingest_grants g where g.capture_id = c.id and g.consumed_at is not null)
+            and not exists (
+              select 1
+                from (
+                  select distinct g.epoch
+                    from public.dialpad_recording_ingest_grants g
+                   where g.capture_id = c.id and g.consumed_at is not null
+                ) epochs
+                cross join (values ('tab'::text), ('mic'::text)) expected(track)
+                left join public.dialpad_recording_segments s
+                  on s.capture_id = c.id and s.epoch = epochs.epoch and s.track = expected.track
+               where s.capture_id is null
+                  or s.chunk_count < 1
+                  or s.max_seq is null
+                  or s.eof_seq is null
+                  or s.eof_seq <> s.max_seq
+                  or s.chunk_count <> s.max_seq + 1
+            )
+            and (
+              not exists (
+                select 1 from public.dialpad_recording_vad_batches b where b.capture_id = c.id
+                union all
+                select 1 from public.dialpad_recording_pcm_batches b where b.capture_id = c.id
+              )
+              or not exists (
+                select 1
+                  from (
+                    select distinct g.epoch
+                      from public.dialpad_recording_ingest_grants g
+                     where g.capture_id = c.id and g.consumed_at is not null
+                  ) epochs
+                  cross join (values ('tab'::text), ('mic'::text)) expected(track)
+                  left join public.dialpad_recording_pcm_progress p
+                    on p.capture_id = c.id and p.epoch = epochs.epoch and p.track = expected.track
+                   and p.pcm_eof_sample is not null
+                   and p.processed_through_sample = p.pcm_eof_sample
+                 where p.capture_id is null
+              )
+            )
+          )
+        )
+      )
+      or (c.status = 'sealing' and c.lease_expires_at <= now())
+      order by coalesce(closed_at, opened_at), id
+      for update skip locked limit 1;
+    if not found then return jsonb_build_object('status', 'none'); end if;
+
+    if v_capture.seal_attempts >= 5 then
+      update public.dialpad_recording_captures
+         set status = 'failed', result_at = now(), failure_code = 'seal_attempts_exhausted'
+       where id = v_capture.id;
+      perform public.dialpad_recording_publish_call_row(v_capture.call_activity_id, 'failed', null, null, 'seal_attempts_exhausted',
+        'The recording could not be sealed and was not made available.');
+      continue;
+    end if;
+
+    update public.dialpad_recording_captures
+       set status = 'sealing', claim_token = v_token, claimed_by = p_worker_id, claimed_at = now(),
+           lease_expires_at = now() + make_interval(secs => p_lease_seconds), seal_attempts = seal_attempts + 1
+     where id = v_capture.id;
+    return jsonb_build_object(
+      'status', 'claimed', 'claimToken', v_token, 'attempt', v_capture.seal_attempts + 1,
+      'leaseExpiresAt', now() + make_interval(secs => p_lease_seconds),
+      'capture', public.dialpad_recording_capture_json(v_capture.id),
+      'finalPaths', coalesce((
+        select jsonb_agg(jsonb_build_object('track', s.track, 'epoch', s.epoch,
+          'finalPath', public.dialpad_recording_final_path(s.org_id, s.capture_id, s.epoch, s.track)) order by s.epoch, s.track)
+          from public.dialpad_recording_segments s where s.capture_id = v_capture.id), '[]'::jsonb));
+  end loop;
+  return jsonb_build_object('status', 'none');
 end;
 $$;
 

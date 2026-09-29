@@ -511,10 +511,14 @@ export async function recordDialpadRecordingPcmProgress(
     || !isIntIn(input.epoch, 1, DIALPAD_RECORDING_MAX_EPOCH) || !isUuid(input.batchId)
     || !isIntIn(input.processedThroughSample, 0, DIALPAD_RECORDING_VAD_MAX_SAMPLE)
     || (input.pcmEofSample !== null && !isIntIn(input.pcmEofSample, 0, DIALPAD_RECORDING_VAD_MAX_SAMPLE))
-    || (input.pcmEofSample !== null && input.pcmEofSample > input.processedThroughSample)
-    || (input.sourceSampleRateHz !== null && !isIntIn(input.sourceSampleRateHz, 8000, 192000))
-    || (input.sourceSampleRateHz === null && (input.sourceChannels !== null || input.sourceCodec !== null))
-    || (input.sourceSampleRateHz !== null && (!isIntIn(input.sourceChannels, 1, 2) || typeof input.sourceCodec !== 'string' || !CODEC.test(input.sourceCodec)))
+    || (input.pcmEofSample !== null && input.pcmEofSample !== input.processedThroughSample)
+    || !(
+      (input.sourceSampleRateHz === null && input.sourceChannels === null && input.sourceCodec === null)
+      || (isIntIn(input.sourceSampleRateHz, 8000, 192000)
+        && isIntIn(input.sourceChannels, 1, 2)
+        && typeof input.sourceCodec === 'string'
+        && CODEC.test(input.sourceCodec))
+    )
     || !Array.isArray(reasons) || reasons.length > 64
     || !reasons.every((reason) => typeof reason === 'string' && /^[a-z0-9_]{1,64}$/.test(reason))
   ) return fail('invalid_input', 'Invalid PCM continuity progress.');
