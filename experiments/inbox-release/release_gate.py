@@ -171,17 +171,13 @@ def verify_backend_source_content(manifest: dict[str, Any], packet: str) -> dict
                 if group != "sql_sources" or entry.get("name") != "operation_domain_apply" or path != "experiments/inbox-operation-domain/restrictive-apply.sql" or not isinstance(correction, dict):
                     mismatches.append(f"{group}:{path}: unexpected reviewed correction")
                     continue
-                correction_commit = correction.get("source_commit")
+                correction_base = correction.get("base_commit")
                 worktree_expected = correction.get("sha256")
-                if not isinstance(correction_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", correction_commit) or not isinstance(worktree_expected, str) or not re.fullmatch(r"[0-9a-f]{64}", worktree_expected):
+                if correction_base != commit or not isinstance(worktree_expected, str) or not re.fullmatch(r"[0-9a-f]{64}", worktree_expected) or not isinstance(correction.get("bytes"), int):
                     mismatches.append(f"{group}:{path}: invalid reviewed correction pin")
                     continue
-                try:
-                    corrected = git_source_bytes(repository, correction_commit, path)
-                except GateError as exc:
-                    mismatches.append(str(exc))
-                    continue
-                if hashlib.sha256(corrected).hexdigest() != worktree_expected or len(corrected) != correction.get("bytes"):
+                corrected_path = repository / path
+                if not corrected_path.is_file() or corrected_path.stat().st_size != correction["bytes"] or sha256(corrected_path) != worktree_expected:
                     mismatches.append(f"{group}:{path}: reviewed correction content drift")
                     continue
             worktree_path = repository / path
