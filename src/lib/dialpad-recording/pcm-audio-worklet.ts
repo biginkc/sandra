@@ -198,6 +198,7 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
     this.flushing = false;
     this.unsupported = sampleRate < TARGET_RATE || sampleRate > 192000;
     this.closed = false;
+    this.inputChannels = 0;
     this.port.onmessage = (event) => {
       if (event.data?.type !== "flush") return;
       if (this.flushing || this.unsupported) return;
@@ -215,6 +216,19 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
     if (this.flushing) return false;
     const channels = inputs[0] ?? [];
     if (channels.length === 0 || channels[0].length === 0) return true;
+    if (this.inputChannels === 0) {
+      this.inputChannels = channels.length;
+      this.port.postMessage({ type: "input-format", inputChannels: this.inputChannels });
+    } else if (channels.length !== this.inputChannels) {
+      this.port.postMessage({ type: "channel-change", inputChannels: channels.length });
+      this.closed = true;
+      return false;
+    }
+    if (channels.length > 2) {
+      this.port.postMessage({ type: "unsupported-channels", inputChannels: channels.length });
+      this.closed = true;
+      return false;
+    }
     const length = channels[0].length;
     const joined = new Float32Array(this.pending.length + length);
     joined.set(this.pending);
@@ -263,6 +277,8 @@ export type PcmWorkletPort = {
 
 export type PcmWorkletSession = {
   readonly sourceSampleRateHz: number;
+  /** Actual input layout observed by the AudioContext source before collection starts. */
+  readonly inputChannels: number;
   stop(): Promise<PcmTailReport>;
 };
 
@@ -349,6 +365,7 @@ export async function startPcmWorkletSession(
   }
   let source: MediaStreamAudioSourceNode | null = null;
   let node: AudioWorkletNode | null = null;
+  let inputChannels = 0;
   let deliveryActive = true;
   let acceptingFrames = true;
   let tailReceived: PcmTailReport | null = null;
@@ -391,10 +408,25 @@ export async function startPcmWorkletSession(
     node = runtime.createNode ? runtime.createNode(context) : new AudioWorkletNode(context, PCM_WORKLET_PROCESSOR_NAME);
     const actualRate = context.sampleRate;
     assertSampleRate(actualRate);
+    let resolveInputFormat!: (channels: number) => void;
+    const inputFormatPromise = new Promise<number>((resolve) => { resolveInputFormat = resolve; });
     node.port.onmessage = (event: MessageEvent) => {
-      const message = event.data as { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number };
+      const message = event.data as { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number; inputChannels?: number };
       if (message.type === "unsupported-rate") {
         notifyFailure(new Error(`Unsupported source sample rate: ${message.sourceSampleRateHz ?? actualRate} Hz.`));
+        return;
+      }
+      if (message.type === "unsupported-channels" || message.type === "channel-change") {
+        notifyFailure(new Error(`Unsupported input channel layout: ${message.inputChannels ?? "unknown"}.`));
+        return;
+      }
+      if (message.type === "input-format") {
+        if (!Number.isInteger(message.inputChannels) || message.inputChannels! < 1 || message.inputChannels! > 2) {
+          notifyFailure(new Error("Unsupported input channel layout; expected one or two channels."));
+          return;
+        }
+        inputChannels = message.inputChannels!;
+        resolveInputFormat(inputChannels);
         return;
       }
       if (message.type === "tail") {
@@ -428,6 +460,7 @@ export async function startPcmWorkletSession(
     silent.connect(context.destination);
     if (context.state === "suspended") await boundedAwait(context.resume(), startupTimeoutMs, wait, options.signal);
     if (options.signal?.aborted) throw abortError();
+    inputChannels = await boundedAwait(inputFormatPromise, startupTimeoutMs, wait, options.signal);
   } catch (error) {
     deliveryActive = false;
     await cleanup();
@@ -436,6 +469,7 @@ export async function startPcmWorkletSession(
   let stopPromise: Promise<PcmTailReport> | null = null;
   return {
     sourceSampleRateHz: context.sampleRate,
+    inputChannels,
     stop: async () => {
       if (stopPromise) return stopPromise;
       stopPromise = (async () => {

@@ -58,7 +58,7 @@ function runtime(display: MediaStream, microphone: MediaStream, recorderFactory:
     getUserMedia: vi.fn(async () => microphone),
     createMediaStream: (tracks) => new FakeStream([], [...tracks] as unknown as FakeTrack[]) as unknown as MediaStream,
     createRecorder: () => recorderFactory(),
-    createPcmSession: pcmFactory ?? (async () => ({ sourceSampleRateHz: 48_000, stop: async () => ({ track: "tab", epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) })),
+    createPcmSession: pcmFactory ?? (async () => ({ sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track: "tab", epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) })),
   };
 }
 
@@ -78,7 +78,7 @@ function realPcmFactory(nodes: PcmWorkletPort[], timeoutMs = 20): NonNullable<Br
       sampleRate: 48_000,
       state: "running",
       audioWorklet: { addModule: async () => undefined },
-      createMediaStreamSource: () => ({ connect: () => undefined, disconnect: () => undefined }),
+      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
       createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
       destination: {},
       close: async () => undefined,
@@ -87,7 +87,10 @@ function realPcmFactory(nodes: PcmWorkletPort[], timeoutMs = 20): NonNullable<Br
       createAudioContext: () => context,
       createObjectURL: () => `blob:${track}`,
       revokeObjectURL: () => undefined,
-      createNode: () => ({ port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode),
+      createNode: () => {
+        queueMicrotask(() => port.onmessage?.({ data: { type: "input-format", inputChannels: 1 } } as MessageEvent));
+        return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode;
+      },
     }, stream, track, epoch, onFrame, onTail, { ...options, timeoutMs, startupTimeoutMs: timeoutMs });
   };
 }
@@ -241,7 +244,7 @@ describe("Dialpad capture preparation", () => {
     const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, _onFrame: unknown, _onTail: unknown) => {
       void _onFrame;
       void _onTail;
-      return { sourceSampleRateHz: 48_000, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) };
+      return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) };
     });
     const prepared = await prepareDialpadBrowserCapture({ proof: { handle: "tab-handle", origin: "https://sandra.example" }, runtime: runtime(mediaStream(video, tabAudio), new FakeStream([], [micAudio]) as unknown as MediaStream, () => recorders[recorderIndex++]!, createPcmSession) });
     expect(recorderIndex).toBe(0);
@@ -254,6 +257,233 @@ describe("Dialpad capture preparation", () => {
     await prepared.dispose();
     expect(video.stopped).toBeGreaterThan(0);
     expect(micAudio.stopped).toBeGreaterThan(0);
+  });
+
+  it("publishes actual PCM formats before releasing queued PCM or starting WebM", async () => {
+    const events: string[] = [];
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>) => {
+      await onFrame({ track, epoch, frameIndex: 0, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) });
+      return { sourceSampleRateHz: track === "tab" ? 48_000 : 44_100, inputChannels: track === "tab" ? 2 : 1, stop: async () => ({ track, epoch, sourceSampleRateHz: track === "tab" ? 48_000 : 44_100, totalInputSamples: 320, creditedSamples: 320, uncreditedTailSamples: 0 }) };
+    });
+    const recorders = [new FakeRecorder(), new FakeRecorder()];
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => recorders.shift()!, createPcmSession),
+    });
+    const active = await prepared.start({
+      onTrackFormat: (format) => { events.push(`${format.track}:format:${format.contextSampleRateHz}:${format.inputChannels}`); },
+      onPcmFrame: (frame) => { events.push(`${frame.track}:pcm`); },
+      onWebmChunk: () => { events.push("webm"); },
+    });
+    expect(events.slice(0, 4)).toEqual(["tab:format:48000:2", "mic:format:44100:1", "tab:pcm", "mic:pcm"]);
+    expect(events).not.toContain("webm");
+    await active.stop();
+    await prepared.dispose();
+  });
+
+  it("starts a bounded local spool and drains its immutable PCM prefix before live frames", async () => {
+    const callbacks: Record<"tab" | "mic", ((frame: PcmFrame) => void | Promise<void>) | null> = { tab: null, mic: null };
+    const recorders = [new FakeRecorder(), new FakeRecorder()];
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>) => {
+      callbacks[track] = onFrame;
+      return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 960, creditedSamples: 960, uncreditedTailSamples: 0 }) };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => recorders.shift()!, createPcmSession),
+      localSpoolMaxBytes: 1_000_000,
+    });
+    const first = (index: number): PcmFrame => ({ track: "tab", epoch: 1, frameIndex: index, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) });
+    const active = await prepared.startLocal!(1);
+    await callbacks.tab?.(first(0));
+    await callbacks.tab?.(first(1));
+    let release!: () => void;
+    const delayed = new Promise<void>((resolve) => { release = resolve; });
+    const seen: number[] = [];
+    const attach = active.attach!({
+      onTrackFormat: vi.fn(),
+      onPcmFrame: async (frame) => { seen.push(frame.frameIndex); if (frame.frameIndex === 0) await delayed; },
+      onWebmChunk: vi.fn(),
+    }, 7);
+    await Promise.resolve();
+    await callbacks.tab?.(first(2));
+    release();
+    await attach;
+    expect(seen).toEqual([0, 1, 2]);
+    expect(active.state()).toBe("recording");
+    await active.dispose();
+    await prepared.dispose();
+  });
+
+  it("keeps attachment-time PCM in the bounded spool while a WebM prefix sink is stalled", async () => {
+    const callbacks: { tab: ((frame: PcmFrame) => void | Promise<void>) | null; mic: ((frame: PcmFrame) => void | Promise<void>) | null } = { tab: null, mic: null };
+    const tabRecorder = new FakeRecorder();
+    const micRecorder = new FakeRecorder();
+    const recorders = [tabRecorder, micRecorder];
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>) => {
+      callbacks[track] = onFrame;
+      return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => recorders.shift()!, createPcmSession),
+      localSpoolMaxBytes: 128_000,
+    });
+    const active = await prepared.startLocal!(1);
+    const frame = (index: number): PcmFrame => ({ track: "tab", epoch: 1, frameIndex: index, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) });
+    tabRecorder.emit(new Blob(["webm-prefix"]));
+    let release!: () => void;
+    const stalled = new Promise<void>((resolve) => { release = resolve; });
+    const webm: number[] = [];
+    const pcm: number[] = [];
+    const attach = active.attach!({
+      onTrackFormat: vi.fn(),
+      onWebmChunk: async (chunk) => { webm.push(chunk.seq); await stalled; },
+      onPcmFrame: (value) => { pcm.push(value.frameIndex); },
+    }, 7);
+    await Promise.resolve();
+    for (let index = 0; index < 80; index += 1) await callbacks.tab?.(frame(index));
+    release();
+    await attach;
+    expect(webm).toEqual([0]);
+    expect(pcm).toEqual(Array.from({ length: 80 }, (_, index) => index));
+    expect(active.state()).toBe("recording");
+    await active.dispose();
+    await prepared.dispose();
+  });
+
+  it("does not allocate a recorder after disposal wins during delayed format publication", async () => {
+    const formatRelease = (() => { let resolve!: () => void; const promise = new Promise<void>((r) => { resolve = r; }); return { promise, resolve }; })();
+    const recorders = [new FakeRecorder(), new FakeRecorder()];
+    const createRecorder = vi.fn(() => recorders.shift()!);
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, createRecorder),
+    });
+    const start = prepared.start({ onTrackFormat: async () => formatRelease.promise, onWebmChunk: vi.fn(), onPcmFrame: vi.fn() });
+    await Promise.resolve();
+    const dispose = prepared.dispose();
+    formatRelease.resolve();
+    await dispose;
+    await expect(start).rejects.toMatchObject({ code: "interrupted" });
+    expect(createRecorder).not.toHaveBeenCalled();
+  });
+
+  it("keeps a live PCM frame behind the complete buffered startup prefix", async () => {
+    let tabFrame: ((frame: PcmFrame) => void | Promise<void>) | null = null;
+    const frame = (index: number): PcmFrame => ({ track: "tab", epoch: 1, frameIndex: index, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) });
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (value: PcmFrame) => void | Promise<void>) => {
+      if (track === "tab") {
+        tabFrame = onFrame;
+        await onFrame(frame(0));
+        await onFrame(frame(1));
+      }
+      return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 640, creditedSamples: 640, uncreditedTailSamples: 0 }) };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => new FakeRecorder(), createPcmSession),
+    });
+    let release!: () => void;
+    const stalled = new Promise<void>((resolve) => { release = resolve; });
+    const seen: number[] = [];
+    const start = prepared.start({
+      onTrackFormat: vi.fn(),
+      onPcmFrame: async (value) => {
+        seen.push(value.frameIndex);
+        if (value.frameIndex === 0) {
+          await tabFrame?.(frame(2));
+          await stalled;
+        }
+      },
+      onWebmChunk: vi.fn(),
+    });
+    await Promise.resolve();
+    release();
+    const active = await start;
+    expect(seen).toEqual([0, 1, 2]);
+    await active.dispose();
+    await prepared.dispose();
+  });
+
+  it("fails honestly when the pre-call spool reaches its byte capacity", async () => {
+    let tabFrame: ((frame: PcmFrame) => void | Promise<void>) | null = null;
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (value: PcmFrame) => void | Promise<void>) => {
+      if (track === "tab") tabFrame = onFrame;
+      return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      localSpoolMaxBytes: 500,
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => new FakeRecorder(), createPcmSession),
+    });
+    const active = await prepared.startLocal!(1);
+    const emitTabFrame = tabFrame as unknown as ((frame: PcmFrame) => void | Promise<void>);
+    await emitTabFrame({ track: "tab", epoch: 1, frameIndex: 0, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(active.state()).toBe("interrupted");
+    await active.dispose();
+    await prepared.dispose();
+  });
+
+  it("fails honestly when the pre-call spool exceeds its elapsed bound", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    let tabFrame: ((frame: PcmFrame) => void | Promise<void>) | null = null;
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (value: PcmFrame) => void | Promise<void>) => {
+      if (track === "tab") tabFrame = onFrame;
+      return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      localSpoolMaxMs: 1,
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => new FakeRecorder(), createPcmSession),
+    });
+    const active = await prepared.startLocal!(1);
+    clock.mockReturnValue(1_002);
+    const emitTabFrame = tabFrame as unknown as (frame: PcmFrame) => void | Promise<void>;
+    await emitTabFrame({ track: "tab", epoch: 1, frameIndex: 0, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(active.state()).toBe("interrupted");
+    await active.dispose();
+    await prepared.dispose();
+    clock.mockRestore();
+  });
+
+  it("ends the unauthenticated spool clock at attachment while retaining a bounded late prefix drain", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    let tabFrame: ((frame: PcmFrame) => void | Promise<void>) | null = null;
+    const recorders = [new FakeRecorder(), new FakeRecorder()];
+    let recorderIndex = 0;
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (value: PcmFrame) => void | Promise<void>) => {
+      if (track === "tab") tabFrame = onFrame;
+      return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      localSpoolMaxMs: 120_000,
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => recorders[recorderIndex++]!, createPcmSession),
+    });
+    const active = await prepared.startLocal!(1);
+    const frame = (index: number): PcmFrame => ({ track: "tab", epoch: 1, frameIndex: index, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) });
+    const emitTabFrame = tabFrame as unknown as (value: PcmFrame) => void | Promise<void>;
+    await emitTabFrame(frame(0));
+    recorders[0]!.emit(new Blob(["webm-prefix"]));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const seen: number[] = [];
+    clock.mockReturnValue(120_999);
+    const attach = active.attach!({ onTrackFormat: vi.fn(), onWebmChunk: async () => held, onPcmFrame: (value) => { seen.push(value.frameIndex); } }, 7);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    clock.mockReturnValue(121_500);
+    await emitTabFrame(frame(1));
+    release();
+    await attach;
+    expect(seen).toEqual([0, 1]);
+    expect(active.state()).toBe("recording");
+    await active.dispose();
+    await prepared.dispose();
+    clock.mockRestore();
   });
 
   it("rejects wrong-tab and missing-tab-audio preparation", async () => {
@@ -304,8 +534,8 @@ describe("Dialpad capture preparation", () => {
     const start = prepared.start({ onWebmChunk: vi.fn(), onPcmFrame: vi.fn() });
     await Promise.resolve();
     const dispose = prepared.dispose();
-    resolveTab({ sourceSampleRateHz: 48_000, stop: tabStop });
-    resolveMic({ sourceSampleRateHz: 48_000, stop: micStop });
+    resolveTab({ sourceSampleRateHz: 48_000, inputChannels: 1, stop: tabStop });
+    resolveMic({ sourceSampleRateHz: 48_000, inputChannels: 1, stop: micStop });
     await dispose;
     await expect(start).rejects.toMatchObject({ code: "interrupted" });
     expect(tabStop).toHaveBeenCalledTimes(1);
@@ -315,7 +545,7 @@ describe("Dialpad capture preparation", () => {
   it.each(["tab", "mic"] as const)("stops the successful %s PCM sibling when the other startup rejects", async (successfulTrack) => {
     const successfulStop = vi.fn(async () => ({ track: successfulTrack, epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }));
     const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic") => {
-      if (track === successfulTrack) return { sourceSampleRateHz: 48_000, stop: successfulStop };
+      if (track === successfulTrack) return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: successfulStop };
       throw new Error(`${track} worklet startup failed`);
     });
     const prepared = await prepareDialpadBrowserCapture({ proof: { handle: "tab-handle", origin: "https://sandra.example" }, runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => new FakeRecorder(), createPcmSession) });

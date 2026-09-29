@@ -360,23 +360,42 @@ function browserRuntime(): BrowserCaptureRuntime {
 }
 
 export type BrowserCaptureSinks = {
+  /** Actual worklet format, emitted before either binary sink is allowed. */
+  readonly onTrackFormat?: (format: BrowserCaptureTrackFormat) => void | Promise<void>;
   readonly onWebmChunk: (chunk: EncodedMediaChunk) => void | Promise<void>;
   readonly onPcmFrame: (frame: PcmFrame) => void | Promise<void>;
   readonly onPcmTail?: (tail: PcmTailReport) => void | Promise<void>;
   readonly onFailure?: (error: BrowserCaptureError) => void;
 };
 
+export type BrowserCaptureTrackFormat = {
+  readonly track: PcmTrack;
+  readonly contextSampleRateHz: number;
+  readonly inputChannels: number;
+  readonly recordingMimeType: typeof MEDIA_RECORDER_MIME_TYPE;
+  readonly pcmSampleRateHz: 16_000;
+  readonly pcmChannels: 1;
+  readonly pcmEncoding: "s16le";
+};
+
 export type PreparedDialpadCapture = {
   readonly proof: CaptureHandleProof;
-  readonly start: (sinks: BrowserCaptureSinks, epoch?: number) => Promise<ActiveDialpadCapture>;
+  readonly start: (sinks?: BrowserCaptureSinks, epoch?: number) => Promise<ActiveDialpadCapture>;
+  /** Starts bounded local capture before the provider call is dispatched. */
+  readonly startLocal?: (epoch?: number) => Promise<ActiveDialpadCapture>;
   readonly dispose: () => Promise<void>;
 };
 
 export type ActiveDialpadCapture = {
   readonly state: () => "starting" | "recording" | "stopping" | "stopped" | "interrupted";
+  /** Attaches an authenticated network sink without resetting local clocks or sequence origins. */
+  readonly attach?: (sinks: BrowserCaptureSinks, epoch?: number) => Promise<void>;
   readonly stop: () => Promise<void>;
   readonly dispose: () => Promise<void>;
 };
+
+export const DEFAULT_LOCAL_SPOOL_MAX_BYTES = 16 * MAX_MEDIA_CHUNK_BYTES;
+export const DEFAULT_LOCAL_SPOOL_MAX_MS = 120_000;
 
 type ActiveDialpadCaptureState = ReturnType<ActiveDialpadCapture["state"]>;
 
@@ -385,10 +404,41 @@ export type PrepareDialpadCaptureOptions = {
   readonly runtime?: BrowserCaptureRuntime;
   readonly displayConstraints?: DisplayMediaStreamOptions;
   readonly microphoneConstraints?: MediaStreamConstraints;
+  readonly localSpoolMaxBytes?: number;
+  readonly localSpoolMaxMs?: number;
 };
 
 function stopTracks(stream: MediaStream | null): void {
   for (const track of stream?.getTracks() ?? []) track.stop();
+}
+
+type LocalSpool = {
+  readonly maxBytes: number;
+  readonly maxMs: number;
+  readonly startedAt: number;
+  readonly formats: Partial<Record<PcmTrack, BrowserCaptureTrackFormat>>;
+  readonly webm: EncodedMediaChunk[];
+  readonly pcm: PcmFrame[];
+  readonly tails: PcmTailReport[];
+  bytes: number;
+  overflow: BrowserCaptureError | null;
+};
+
+function createLocalSpool(maxBytes: number, maxMs: number): LocalSpool {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || !Number.isSafeInteger(maxMs) || maxMs < 1) {
+    throw new BrowserCaptureError("unsupported", "Local capture spool limits are invalid.");
+  }
+  return { maxBytes, maxMs, startedAt: Date.now(), formats: {}, webm: [], pcm: [], tails: [], bytes: 0, overflow: null };
+}
+
+function spoolBytes(spool: LocalSpool, bytes: number, enforceElapsedBound: boolean): boolean {
+  if (spool.overflow) return false;
+  if ((enforceElapsedBound && Date.now() - spool.startedAt > spool.maxMs) || spool.bytes + bytes > spool.maxBytes) {
+    spool.overflow = new BrowserCaptureError("buffer_overflow", "The pre-call recording buffer reached its bounded capacity.");
+    return false;
+  }
+  spool.bytes += bytes;
+  return true;
 }
 
 export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptureOptions): Promise<PreparedDialpadCapture> {
@@ -423,11 +473,15 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
     stopTracks(display);
   };
 
-  return {
+  const prepared: PreparedDialpadCapture = {
     proof: options.proof,
     start: async (sinks, epoch = 1) => {
       if (disposed) throw new BrowserCaptureError("interrupted", "Capture has been disposed.");
       if (active) throw new BrowserCaptureError("interrupted", "Capture has already started.");
+      let captureEpoch = epoch;
+      let attachedSinks: BrowserCaptureSinks | null = sinks ?? null;
+      let spoolMode: "live" | "buffering" | "draining" = sinks ? "live" : "buffering";
+      const spool = sinks ? null : createLocalSpool(options.localSpoolMaxBytes ?? DEFAULT_LOCAL_SPOOL_MAX_BYTES, options.localSpoolMaxMs ?? DEFAULT_LOCAL_SPOOL_MAX_MS);
       let state: ActiveDialpadCaptureState = "starting";
       let failed: BrowserCaptureError | null = null;
       let handleMonitor: CaptureHandleMonitor | null = null;
@@ -441,14 +495,42 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
       let stopPromise: Promise<void> | null = null;
       let stopRequested = false;
       let pcmAdmissionOpen = true;
+      let formatReady = false;
+      let pcmPrefixDraining = false;
+      const startupPcmFrames: PcmFrame[] = [];
+      let pcmDeliveryQueue = Promise.resolve();
+      let queuedPcmFrames = 0;
       const startupAbort = new AbortController();
       const fail = (error: BrowserCaptureError) => {
         if (!failed) {
           failed = error;
           state = "interrupted";
-          try { sinks.onFailure?.(error); } catch { /* the original capture failure remains authoritative */ }
+          try { attachedSinks?.onFailure?.(error); } catch { /* the original capture failure remains authoritative */ }
         }
         void stop();
+      };
+      const appendSpool = (bytes: number): boolean => {
+        if (!spool) return false;
+        if (spoolBytes(spool, bytes, spoolMode === "buffering")) return true;
+        fail(spool.overflow ?? new BrowserCaptureError("buffer_overflow", "The pre-call recording buffer reached its bounded capacity."));
+        return false;
+      };
+      const deliverFormat = async (format: BrowserCaptureTrackFormat): Promise<void> => {
+        if (spoolMode !== "live" || !attachedSinks) {
+          if (!spool || !appendSpool(128)) return;
+          spool.formats[format.track] = format;
+          return;
+        }
+        await attachedSinks.onTrackFormat?.(format);
+      };
+      const deliverWebm = async (chunk: EncodedMediaChunk): Promise<void> => {
+        const normalized = { ...chunk, epoch: captureEpoch };
+        if (spoolMode !== "live" || !attachedSinks) {
+          if (!spool || !appendSpool(chunk.byteLength)) return;
+          spool.webm.push(normalized);
+          return;
+        }
+        await attachedSinks.onWebmChunk(normalized);
       };
       const cleanup = async () => {
         handleMonitor?.stop();
@@ -462,7 +544,18 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
             fail(new BrowserCaptureError("timeout", "PCM capture did not drain within the stop deadline."));
           }
         }
+        // Once authenticated sinks are attached, their network delivery queue is
+        // governed by the session's receipt/attachment deadlines. The short
+        // local cleanup watchdog must cover acquisition/worklet teardown only;
+        // racing it against the authenticated prefix would interrupt a healthy
+        // prefix when the server is processing a bounded batch of receipts.
+        const networkDeliveryActive = Boolean(attachedSinks) && spoolMode !== "buffering";
+        if (!networkDeliveryActive) {
+          const drained = await Promise.race([pcmDeliveryQueue.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))]);
+          if (!drained && !failed) fail(new BrowserCaptureError("timeout", "PCM frame sink did not drain within the stop deadline."));
+        }
         pcmAdmissionOpen = false;
+        startupPcmFrames.length = 0;
         stopTracks(tabStream);
         stopTracks(micStream);
         stopTracks(display);
@@ -484,7 +577,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         return stopPromise;
       };
       let pendingPcmFrames = 0;
-      const emitPcmFrame = async (frame: PcmFrame) => {
+      const deliverPcmFrame = async (frame: PcmFrame) => {
         if (!pcmAdmissionOpen || failed) return;
         if (pendingPcmFrames >= MAX_PENDING_PCM_FRAMES) {
           fail(new BrowserCaptureError("buffer_overflow", "PCM sink capacity was exceeded."));
@@ -492,24 +585,106 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         }
         pendingPcmFrames += 1;
         try {
-          await sinks.onPcmFrame(frame);
+          const normalized = { ...frame, epoch: captureEpoch };
+          if (spoolMode === "buffering" || (spoolMode === "draining" && spool) || !attachedSinks) {
+            if (spool && appendSpool(normalized.bytes.byteLength)) spool.pcm.push(normalized);
+          } else {
+            await attachedSinks.onPcmFrame(normalized);
+          }
         } catch (error) {
           fail(new BrowserCaptureError("sink_failure", error instanceof Error ? error.message : "PCM frame sink failed."));
         } finally {
           pendingPcmFrames -= 1;
         }
       };
+      const queuePcmFrame = (frame: PcmFrame): Promise<void> => {
+        if (!pcmAdmissionOpen || failed) return Promise.resolve();
+        if (queuedPcmFrames >= MAX_PENDING_PCM_FRAMES) {
+          fail(new BrowserCaptureError("buffer_overflow", "PCM sink capacity was exceeded."));
+          return Promise.reject(failed ?? new BrowserCaptureError("buffer_overflow", "PCM sink capacity was exceeded."));
+        }
+        queuedPcmFrames += 1;
+        pcmDeliveryQueue = pcmDeliveryQueue.then(() => deliverPcmFrame(frame)).finally(() => { queuedPcmFrames -= 1; });
+        return pcmDeliveryQueue;
+      };
+      const attach = async (nextSinks: BrowserCaptureSinks, nextEpoch = captureEpoch): Promise<void> => {
+        if (!spool || spoolMode !== "buffering" || state !== "recording" || failed || stopRequested) {
+          throw failed ?? new BrowserCaptureError("interrupted", "Capture is not available for authenticated attachment.");
+        }
+        captureEpoch = nextEpoch;
+        if (Date.now() - spool.startedAt > spool.maxMs) {
+          spool.overflow = new BrowserCaptureError("buffer_overflow", "The pre-call recording buffer expired before authenticated attachment.");
+          throw spool.overflow;
+        }
+        spoolMode = "draining";
+        pcmPrefixDraining = true;
+        attachedSinks = nextSinks;
+        try {
+          for (const track of ["tab", "mic"] as const) {
+            const format = spool.formats[track];
+            if (format) await nextSinks.onTrackFormat?.(format);
+          }
+          let flushed = false;
+          while (spool.webm.length > 0 || spool.pcm.length > 0 || spool.tails.length > 0 || startupPcmFrames.length > 0) {
+            const webm = spool.webm.splice(0);
+            const pcm = spool.pcm.splice(0);
+            const tails = spool.tails.splice(0);
+            const latePcm = startupPcmFrames.splice(0);
+            for (const chunk of webm) await nextSinks.onWebmChunk({ ...chunk, epoch: captureEpoch });
+            for (const frame of [...pcm, ...latePcm]) {
+              const normalized = { ...frame, epoch: captureEpoch };
+              pcmDeliveryQueue = pcmDeliveryQueue.then(() => nextSinks.onPcmFrame(normalized));
+              flushed = true;
+            }
+            if (flushed) await pcmDeliveryQueue;
+            for (const tail of tails) await nextSinks.onPcmTail?.({ ...tail, epoch: captureEpoch });
+          }
+          spoolMode = "live";
+          pcmPrefixDraining = false;
+          if (spool.overflow) throw spool.overflow;
+        } catch (error) {
+          pcmPrefixDraining = false;
+          const normalized = error instanceof BrowserCaptureError ? error : new BrowserCaptureError("sink_failure", error instanceof Error ? error.message : "Authenticated capture attachment failed.");
+          fail(normalized);
+          throw normalized;
+        }
+      };
+      const emitPcmFrame = async (frame: PcmFrame) => {
+        if (!pcmAdmissionOpen || failed) return;
+        if (spool && spoolMode !== "live") {
+          const normalized = { ...frame, epoch: captureEpoch };
+          if (appendSpool(normalized.bytes.byteLength)) spool.pcm.push(normalized);
+          return;
+        }
+        // A local capture has a byte/time bounded spool while the authenticated
+        // prefix drains. A network-only start still needs its small startup
+        // queue until format metadata is accepted.
+        if (!formatReady || (pcmPrefixDraining && !spool)) {
+          if (startupPcmFrames.length >= MAX_PENDING_PCM_FRAMES) {
+            fail(new BrowserCaptureError("buffer_overflow", "PCM startup buffer capacity was exceeded."));
+            return;
+          }
+          startupPcmFrames.push(frame);
+          return;
+        }
+        await queuePcmFrame(frame);
+      };
       const emitPcmTail = async (tail: PcmTailReport) => {
         if (!pcmAdmissionOpen) return;
         try {
-          await sinks.onPcmTail?.(tail);
+          const normalized = { ...tail, epoch: captureEpoch };
+          if (spoolMode !== "live" || !attachedSinks) {
+            if (spool && appendSpool(64)) spool.tails.push(normalized);
+          } else {
+            await attachedSinks.onPcmTail?.(normalized);
+          }
         } catch (error) {
           fail(new BrowserCaptureError("sink_failure", error instanceof Error ? error.message : "PCM tail sink failed."));
           return;
         }
         if (tail.timedOut || tail.deliveryTimedOut) fail(new BrowserCaptureError("timeout", "PCM capture did not drain within the stop deadline."));
       };
-      active = { state: () => state, stop, dispose: stop };
+      active = { state: () => state, attach: spool ? attach : undefined, stop, dispose: stop };
       try {
         tabStream = runtime.createMediaStream(display!.getAudioTracks());
         micStream = runtime.createMediaStream(microphone!.getAudioTracks());
@@ -521,17 +696,13 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         if (runtime.supportsMediaRecorder && !runtime.supportsMediaRecorder(MEDIA_RECORDER_MIME_TYPE)) {
           throw new BrowserCaptureError("unsupported", `MediaRecorder does not support ${MEDIA_RECORDER_MIME_TYPE}.`);
         }
-        tabCollector = new MediaRecorderCollector({ track: "tab", stream: tabStream, epoch, createRecorder: runtime.createRecorder, onChunk: sinks.onWebmChunk, onFailure: fail });
-        micCollector = new MediaRecorderCollector({ track: "mic", stream: micStream, epoch, createRecorder: runtime.createRecorder, onChunk: sinks.onWebmChunk, onFailure: fail });
-        tabCollector.start(epoch);
-        micCollector.start(epoch);
         if (!runtime.createPcmSession) throw new BrowserCaptureError("unsupported", "AudioWorklet capture is unavailable.");
         const pcmFailure = (error: Error) => {
           fail(new BrowserCaptureError(error.name === "TimeoutError" ? "timeout" : "sink_failure", error.message));
         };
         const startPcm = async (stream: MediaStream, pcmTrack: PcmTrack): Promise<PcmWorkletSession | null> => {
           const session = await runtime.createPcmSession!(stream, pcmTrack, epoch, emitPcmFrame, emitPcmTail, { signal: startupAbort.signal, onFailure: pcmFailure });
-          if (stopRequested || failed) {
+          if (stopRequested || failed || disposed) {
             await session.stop();
             return null;
           }
@@ -540,13 +711,41 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         const [tabResult, micResult] = await Promise.allSettled([startPcm(tabStream, "tab"), startPcm(micStream, "mic")]);
         tabPcm = tabResult.status === "fulfilled" ? tabResult.value : null;
         micPcm = micResult.status === "fulfilled" ? micResult.value : null;
-        if (stopRequested || failed) {
+        if (stopRequested || failed || disposed) {
           await Promise.allSettled([tabPcm?.stop(), micPcm?.stop()]);
           throw failed ?? new BrowserCaptureError("interrupted", "Capture stopped during start.");
         }
         if (tabResult.status === "rejected") throw tabResult.reason;
         if (micResult.status === "rejected") throw micResult.reason;
         if (!tabPcm || !micPcm) throw new BrowserCaptureError("interrupted", "PCM capture did not start.");
+        const formats: BrowserCaptureTrackFormat[] = [
+          { track: "tab", contextSampleRateHz: tabPcm.sourceSampleRateHz, inputChannels: tabPcm.inputChannels, recordingMimeType: MEDIA_RECORDER_MIME_TYPE, pcmSampleRateHz: 16_000, pcmChannels: 1, pcmEncoding: "s16le" },
+          { track: "mic", contextSampleRateHz: micPcm.sourceSampleRateHz, inputChannels: micPcm.inputChannels, recordingMimeType: MEDIA_RECORDER_MIME_TYPE, pcmSampleRateHz: 16_000, pcmChannels: 1, pcmEncoding: "s16le" },
+        ];
+        try {
+          await deliverFormat(formats[0]!);
+          if (stopRequested || failed || disposed) throw new BrowserCaptureError("interrupted", "Capture stopped while publishing format metadata.");
+          await deliverFormat(formats[1]!);
+          if (stopRequested || failed || disposed) throw new BrowserCaptureError("interrupted", "Capture stopped while publishing format metadata.");
+        } catch (error) {
+          throw new BrowserCaptureError("sink_failure", error instanceof Error ? error.message : "Track format sink failed.");
+        }
+        formatReady = true;
+        pcmPrefixDraining = true;
+        while (startupPcmFrames.length > 0) {
+          const queuedFrames = startupPcmFrames.splice(0);
+          for (const frame of queuedFrames) await queuePcmFrame(frame);
+        }
+        pcmPrefixDraining = false;
+        if (failed) throw failed;
+        if (stopRequested || failed || disposed) throw new BrowserCaptureError("interrupted", "Capture stopped before media collectors were allocated.");
+        tabCollector = new MediaRecorderCollector({ track: "tab", stream: tabStream, epoch, createRecorder: runtime.createRecorder, onChunk: deliverWebm, onFailure: fail });
+        if (stopRequested || failed || disposed) throw new BrowserCaptureError("interrupted", "Capture stopped before media collectors were allocated.");
+        micCollector = new MediaRecorderCollector({ track: "mic", stream: micStream, epoch, createRecorder: runtime.createRecorder, onChunk: deliverWebm, onFailure: fail });
+        if (stopRequested || failed || disposed) throw new BrowserCaptureError("interrupted", "Capture stopped before media collectors were started.");
+        tabCollector.start(epoch);
+        micCollector.start(epoch);
+        if (stopRequested || failed || disposed) throw new BrowserCaptureError("interrupted", "Capture stopped while starting media collectors.");
         state = "recording";
         return active;
       } catch (error) {
@@ -555,8 +754,10 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         throw failed ?? new BrowserCaptureError("interrupted", "Media capture could not start.");
       }
     },
+    startLocal: async (epoch = 1) => prepared.start(undefined, epoch),
     dispose: disposePrepared,
   };
+  return prepared;
 }
 
 export { PCM_AUDIO_WORKLET_SOURCE, PCM_FRAME_SAMPLES };

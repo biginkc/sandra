@@ -32,6 +32,10 @@ function inputSamples(length: number): Float32Array {
   return samples;
 }
 
+function announceInputFormat(port: PcmWorkletPort, inputChannels = 1): void {
+  queueMicrotask(() => port.onmessage?.({ data: { type: "input-format", inputChannels } } as MessageEvent));
+}
+
 function runGeneratedProcessor(sourceRateHz: number, chunks: readonly number[]): { frames: Int16Array[]; messages: HarnessMessage[]; processor: { port: PcmWorkletPort; process(inputs: Float32Array[][]): boolean } } {
   const harness = generatedProcessor(sourceRateHz);
   let offset = 0;
@@ -86,6 +90,14 @@ describe("stateful Dialpad PCM capture", () => {
     expect(manyBlocks480.frames.map((frame) => [...frame])).toEqual(oneBlock480.frames.map((frame) => [...frame]));
   });
 
+  it("reports the observed input layout and stops on a channel-layout change", () => {
+    const harness = generatedProcessor(48_000);
+    expect(harness.processor.process([[inputSamples(128), inputSamples(128)]])).toBe(true);
+    expect(harness.messages).toContainEqual({ type: "input-format", inputChannels: 2 });
+    expect(harness.processor.process([[inputSamples(128)]])).toBe(false);
+    expect(harness.messages.at(-1)).toEqual({ type: "channel-change", inputChannels: 1 });
+  });
+
   it("freezes generated processing after one flush and rejects lower rates", () => {
     const harness = generatedProcessor(48_000);
     const input = inputSamples(960);
@@ -118,7 +130,7 @@ describe("stateful Dialpad PCM capture", () => {
       },
       close: portClose,
     };
-    const source = { connect: () => undefined, disconnect: () => undefined };
+    const source = { channelCount: 1, connect: () => undefined, disconnect: () => undefined };
     const gain = { gain: { value: 1 }, connect: () => undefined };
     const context = {
       sampleRate: 44_100,
@@ -135,7 +147,7 @@ describe("stateful Dialpad PCM capture", () => {
       createAudioContext: () => context,
       createObjectURL: () => "blob:pcm",
       revokeObjectURL: (url) => revoked.push(url),
-      createNode: () => node,
+      createNode: () => { announceInputFormat(port); return node; },
     }, {} as MediaStream, "mic", 4, (frame) => { frames.push(frame); }, (tail) => { tails.push(tail); });
     const tail = await session.stop();
     expect(tail).toMatchObject({ track: "mic", epoch: 4, sourceSampleRateHz: 44_100, totalInputSamples: 441 });
@@ -151,7 +163,7 @@ describe("stateful Dialpad PCM capture", () => {
       sampleRate: 48_000,
       state: "running",
       audioWorklet: { addModule: async () => undefined },
-      createMediaStreamSource: () => ({ connect: () => undefined, disconnect: () => undefined }),
+      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
       createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
       close: async () => undefined,
     } as unknown as AudioContext;
@@ -159,7 +171,7 @@ describe("stateful Dialpad PCM capture", () => {
       createAudioContext: () => context,
       createObjectURL: () => "blob:timeout",
       revokeObjectURL: () => undefined,
-      createNode: () => ({ port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode),
+      createNode: () => { announceInputFormat(port); return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode; },
       waitMs: async () => undefined,
     }, {} as MediaStream, "tab", 5, () => undefined, () => undefined, 1);
     await expect(session.stop()).resolves.toMatchObject({ timedOut: true, totalInputSamples: 0, creditedSamples: 0 });
@@ -181,7 +193,7 @@ describe("stateful Dialpad PCM capture", () => {
       sampleRate: 48_000,
       state: "running",
       audioWorklet: { addModule: async () => undefined },
-      createMediaStreamSource: () => ({ connect: () => undefined, disconnect: () => undefined }),
+      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
       createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
       close: async () => undefined,
     } as unknown as AudioContext;
@@ -189,7 +201,7 @@ describe("stateful Dialpad PCM capture", () => {
       createAudioContext: () => context,
       createObjectURL: () => "blob:ordered",
       revokeObjectURL: () => undefined,
-      createNode: () => ({ port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode),
+      createNode: () => { announceInputFormat(port); return { port, connect: () => undefined, disconnect: () => undefined } as unknown as AudioWorkletNode; },
     }, {} as MediaStream, "tab", 6, async () => { order.push("frame"); await framePending; }, async () => { order.push("tail"); }, { timeoutMs: 10 });
     const samples = new Int16Array(PCM_FRAME_SAMPLES).buffer;
     port.onmessage?.({ data: { type: "frame", frameIndex: 0, samples } } as MessageEvent);
@@ -229,7 +241,7 @@ describe("stateful Dialpad PCM capture", () => {
       sampleRate: 48_000,
       state: "suspended",
       audioWorklet: { addModule: async () => undefined },
-      createMediaStreamSource: () => ({ connect: () => undefined, disconnect: () => undefined }),
+      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
       createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
       destination: {},
       resume: () => new Promise<void>(() => undefined),

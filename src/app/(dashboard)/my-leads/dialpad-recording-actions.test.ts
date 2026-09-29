@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   openDialpadRecordingCapture: vi.fn(),
   closeDialpadRecordingCapture: vi.fn(),
   mintDialpadRecordingGrant: vi.fn(),
+  mintDialpadRecordingNextEpoch: vi.fn(),
+  getDialpadRecordingBrowserStatus: vi.fn(),
   db: { marker: 'db' },
 }));
 
@@ -16,9 +18,11 @@ vi.mock('@/lib/dialpad-recording/capture', () => ({
   openDialpadRecordingCapture: mocks.openDialpadRecordingCapture,
   closeDialpadRecordingCapture: mocks.closeDialpadRecordingCapture,
   mintDialpadRecordingGrant: mocks.mintDialpadRecordingGrant,
+  mintDialpadRecordingNextEpoch: mocks.mintDialpadRecordingNextEpoch,
+  getDialpadRecordingBrowserStatus: mocks.getDialpadRecordingBrowserStatus,
 }));
 
-import { closeDialpadRecordingCaptureAction, mintDialpadRecordingGrantAction, openDialpadRecordingCaptureAction } from './dialpad-recording-actions';
+import { closeDialpadRecordingCaptureAction, getDialpadRecordingBrowserStatusAction, mintDialpadRecordingGrantAction, mintDialpadRecordingNextEpochAction, openDialpadRecordingCaptureAction } from './dialpad-recording-actions';
 
 const viewer = () => ({ userId: 'rep-1', orgId: 'org-1', isOwner: false, client: { auth: { getUser: mocks.getUser } } });
 const actor = { orgId: 'org-1', userId: 'rep-1' };
@@ -34,9 +38,14 @@ describe('Dialpad recording server actions', () => {
     await openDialpadRecordingCaptureAction('intent-1');
     await closeDialpadRecordingCaptureAction('capture-1');
     await mintDialpadRecordingGrantAction({ captureId: 'capture-1', epoch: 2, orgId: 'evil-org', repUserId: 'evil-rep' } as never);
+    await mintDialpadRecordingNextEpochAction({ captureId: 'capture-1', expectedConsumedEpoch: 0, orgId: 'evil-org', repUserId: 'evil-rep' } as never);
+    await getDialpadRecordingBrowserStatusAction('capture-1');
     expect(mocks.openDialpadRecordingCapture).toHaveBeenCalledWith(mocks.db, actor, 'intent-1');
     expect(mocks.closeDialpadRecordingCapture).toHaveBeenCalledWith(mocks.db, actor, 'capture-1');
-    expect(mocks.mintDialpadRecordingGrant).toHaveBeenCalledWith(mocks.db, actor, { captureId: 'capture-1', epoch: 2 });
+    expect(mocks.mintDialpadRecordingGrant).not.toHaveBeenCalled();
+    expect(mocks.mintDialpadRecordingNextEpoch).toHaveBeenNthCalledWith(1, mocks.db, actor, { captureId: 'capture-1', expectedConsumedEpoch: 1 });
+    expect(mocks.mintDialpadRecordingNextEpoch).toHaveBeenCalledWith(mocks.db, actor, { captureId: 'capture-1', expectedConsumedEpoch: 0 });
+    expect(mocks.getDialpadRecordingBrowserStatus).toHaveBeenCalledWith(mocks.db, actor, 'capture-1');
   });
 
   it('returns a denied result and never touches the database when unauthenticated', async () => {
@@ -45,6 +54,8 @@ describe('Dialpad recording server actions', () => {
       await openDialpadRecordingCaptureAction('i'),
       await closeDialpadRecordingCaptureAction('c'),
       await mintDialpadRecordingGrantAction({ captureId: 'c', epoch: 1 }),
+      await mintDialpadRecordingNextEpochAction({ captureId: 'c', expectedConsumedEpoch: 0 }),
+      await getDialpadRecordingBrowserStatusAction('c'),
     ]) {
       expect(result).toMatchObject({ ok: false, code: 'denied' });
     }
@@ -56,8 +67,16 @@ describe('Dialpad recording server actions', () => {
     expect(mocks.mintDialpadRecordingGrant).not.toHaveBeenCalled();
   });
 
+  it('rejects legacy mint epochs outside the server contract without clamping', async () => {
+    for (const epoch of [undefined, null, 0, -1, 1.5, 17, '1']) {
+      const result = await mintDialpadRecordingGrantAction({ captureId: 'capture-1', epoch });
+      expect(result).toMatchObject({ ok: false, code: 'invalid_input' });
+    }
+    expect(mocks.mintDialpadRecordingNextEpoch).not.toHaveBeenCalled();
+  });
+
   it('exposes only session-owned operations', async () => {
     const mod = await import('./dialpad-recording-actions');
-    expect(Object.keys(mod).sort()).toEqual(['closeDialpadRecordingCaptureAction', 'mintDialpadRecordingGrantAction', 'openDialpadRecordingCaptureAction']);
+    expect(Object.keys(mod).sort()).toEqual(['closeDialpadRecordingCaptureAction', 'getDialpadRecordingBrowserStatusAction', 'mintDialpadRecordingGrantAction', 'mintDialpadRecordingNextEpochAction', 'openDialpadRecordingCaptureAction']);
   });
 });

@@ -33,6 +33,7 @@ export interface DialpadConnectionView {
   allowedOrigins: string[];
   companyId: string | null;
   directoryKeyRef: string | null;
+  recordingIngestEndpoint?: string | null;
 }
 
 export interface DialpadBindingView {
@@ -87,7 +88,7 @@ export function createSupabaseDialpadDispatchDb(client: SupabaseClient<Database>
     async loadConnection(orgId) {
       const { data, error } = await client
         .from('dialpad_org_connections')
-        .select('id, status, allowed_origins, dialpad_company_id, directory_api_key_ref')
+        .select('id, status, allowed_origins, dialpad_company_id, directory_api_key_ref, recording_ingest_endpoint')
         .eq('org_id', orgId)
         .maybeSingle();
       if (error) throw new DialpadDbError(classifyDialpadRpcError(error), error.code ?? null);
@@ -98,6 +99,7 @@ export function createSupabaseDialpadDispatchDb(client: SupabaseClient<Database>
         allowedOrigins: data.allowed_origins,
         companyId: data.dialpad_company_id,
         directoryKeyRef: data.directory_api_key_ref,
+        recordingIngestEndpoint: data.recording_ingest_endpoint,
       };
     },
     async loadLiveBinding(orgId, userId) {
@@ -217,6 +219,7 @@ export interface DialpadPanelBootstrap {
   allowedOrigins: string[];
   binding: { status: 'none' } | { status: 'pending' | 'verified'; dialpadUserId: string };
   grants: { id: string; callerNumberE164: string; identityType: DialpadIdentityType | null }[];
+  recording?: { ingestEndpoint: string };
 }
 
 const DENIAL_MESSAGES: Record<DialpadDenialDetail, string> = {
@@ -281,17 +284,29 @@ function failureFromDbError(error: unknown): DialpadFailure {
   return fail('unavailable', 'Sandra could not reach Dialpad calling. Nothing was dialed; try again.');
 }
 
+function isTrustedRecordingIngestEndpoint(value: string | null | undefined): value is string {
+  if (!value) return false;
+  try {
+    const endpoint = new URL(value);
+    return endpoint.protocol === 'wss:' && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash && endpoint.pathname === '/dialpad-browser-ingest';
+  } catch {
+    return false;
+  }
+}
+
 /** Everything the panel needs to render, or null when this org/rep has no usable Dialpad connection. */
 export async function loadDialpadPanelBootstrap(db: DialpadDispatchDb, actor: DialpadActor): Promise<DialpadPanelBootstrap | null> {
   const connection = await db.loadConnection(actor.orgId);
   if (!connection || connection.status !== 'active' || !isDialpadTargetOriginConfigured(connection.allowedOrigins)) return null;
   const [binding, grants] = await Promise.all([db.loadLiveBinding(actor.orgId, actor.userId), db.loadActiveGrants(actor.orgId, actor.userId)]);
-  return {
+  const bootstrap: DialpadPanelBootstrap = {
     connectionId: connection.id,
     allowedOrigins: connection.allowedOrigins,
     binding: binding ? { status: binding.status, dialpadUserId: binding.dialpadUserId } : { status: 'none' },
     grants,
-  };
+  } satisfies DialpadPanelBootstrap;
+  if (isTrustedRecordingIngestEndpoint(connection.recordingIngestEndpoint)) bootstrap.recording = { ingestEndpoint: connection.recordingIngestEndpoint };
+  return bootstrap;
 }
 
 export type VerifyBindingResult =

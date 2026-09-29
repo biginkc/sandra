@@ -4,7 +4,8 @@ import { myLeadsViewer } from '@/lib/my-leads/queries';
 import {
   closeDialpadRecordingCapture,
   createSupabaseDialpadRecordingDb,
-  mintDialpadRecordingGrant,
+  mintDialpadRecordingNextEpoch,
+  getDialpadRecordingBrowserStatus,
   openDialpadRecordingCapture,
   type DialpadRecordingActor,
   type DialpadRecordingDb,
@@ -46,5 +47,23 @@ export async function closeDialpadRecordingCaptureAction(captureId: unknown) {
 export async function mintDialpadRecordingGrantAction(input: { captureId: unknown; epoch: unknown }) {
   const s = await session();
   if (!s) return unauthenticated;
-  return mintDialpadRecordingGrant(s.db, s.actor, { captureId: input?.captureId, epoch: input?.epoch });
+  if (typeof input?.epoch !== 'number' || !Number.isSafeInteger(input.epoch) || input.epoch < 1 || input.epoch > 16) {
+    return { ok: false as const, code: 'invalid_input' as const, message: 'Choose a valid recording epoch.' };
+  }
+  const epoch = input.epoch;
+  // Compatibility entrypoint: all browser minting now goes through the
+  // capture-locked next-epoch policy, including pending-grant protection.
+  return mintDialpadRecordingNextEpoch(s.db, s.actor, { captureId: input?.captureId, expectedConsumedEpoch: Math.max(0, epoch - 1) });
+}
+
+export async function mintDialpadRecordingNextEpochAction(input: { captureId: unknown; expectedConsumedEpoch: unknown }) {
+  const s = await session();
+  if (!s) return unauthenticated;
+  return mintDialpadRecordingNextEpoch(s.db, s.actor, { captureId: input?.captureId, expectedConsumedEpoch: input?.expectedConsumedEpoch });
+}
+
+export async function getDialpadRecordingBrowserStatusAction(captureId: unknown) {
+  const s = await session();
+  if (!s) return unauthenticated;
+  return getDialpadRecordingBrowserStatus(s.db, s.actor, captureId);
 }

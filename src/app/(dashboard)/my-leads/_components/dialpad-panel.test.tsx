@@ -9,6 +9,15 @@ const mocks = vi.hoisted(() => ({
   status: vi.fn(),
   cancel: vi.fn(),
   recent: vi.fn(),
+  createProof: vi.fn(),
+  prepareCapture: vi.fn(),
+  createSession: vi.fn(),
+  openCapture: vi.fn(),
+  closeCapture: vi.fn(),
+  recordingStatus: vi.fn(),
+  mintRecording: vi.fn(),
+  captures: [] as { active: { state: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }; prepared: { startLocal: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> } }[],
+  lastSessionOptions: null as Record<string, unknown> | null,
 }));
 
 vi.mock('../dialpad-actions', () => ({
@@ -20,6 +29,22 @@ vi.mock('../dialpad-actions', () => ({
   listRecentDialpadCallsAction: mocks.recent,
 }));
 
+vi.mock('@/lib/dialpad-recording/browser-capture', () => ({
+  createSandraCaptureHandleProof: mocks.createProof,
+  prepareDialpadBrowserCapture: mocks.prepareCapture,
+}));
+
+vi.mock('@/lib/dialpad-recording/browser-session', () => ({
+  createDialpadBrowserSession: mocks.createSession,
+}));
+
+vi.mock('../dialpad-recording-actions', () => ({
+  openDialpadRecordingCaptureAction: mocks.openCapture,
+  closeDialpadRecordingCaptureAction: mocks.closeCapture,
+  getDialpadRecordingBrowserStatusAction: mocks.recordingStatus,
+  mintDialpadRecordingNextEpochAction: mocks.mintRecording,
+}));
+
 import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
 import { DialpadPanel, type DialpadCallRequest } from './dialpad-panel';
 
@@ -28,12 +53,14 @@ const INTENT = '66666666-6666-4666-8666-666666666666';
 const verifiedBootstrap: DialpadPanelBootstrap = {
   connectionId: 'c1', allowedOrigins: ['https://dialpad.com'], binding: { status: 'verified', dialpadUserId: '5551234' }, grants: [],
 };
+const recordingBootstrap: DialpadPanelBootstrap = { ...verifiedBootstrap, recording: { ingestEndpoint: 'wss://recording.example.test/dialpad-browser-ingest' } };
 const unboundBootstrap: DialpadPanelBootstrap = { ...verifiedBootstrap, binding: { status: 'none' } };
 const request: DialpadCallRequest = { nonce: 1, propertyId: 'property-1', contactId: 'contact-1', label: 'Fixture Homeowner' };
 
 const status = (state: string, extra: Record<string, unknown> = {}) => ({
   ok: true, status: { intentId: INTENT, state, connected: state === 'connected' || state === 'ended', propertyId: 'property-1', expiresAt: '2026-09-29T10:10:00Z', dispatchAuthorizedAt: '2026-09-29T10:00:01Z', callActivityId: null, attemptId: null, startedAt: null, endedAt: null, durationSeconds: null, talkDurationSeconds: null, ...extra },
 });
+const released = { ok: true, dispatched: true, intentId: INTENT, expiresAt: 'x', dial: { phoneNumber: '+18165440196', customData: TOKEN, identityType: null, identityId: null, outboundCallerId: null } };
 
 function iframeOf(container: HTMLElement): HTMLIFrameElement {
   return container.querySelector('iframe')!;
@@ -53,10 +80,27 @@ const authMessage = (userId: unknown, authenticated = true) => ({ api: 'opencti_
 
 beforeEach(() => {
   vi.resetAllMocks();
+  mocks.captures.length = 0;
+  mocks.lastSessionOptions = null;
+  mocks.createProof.mockReturnValue({ handle: 'handle', origin: 'https://sandra.example' });
   mocks.recent.mockResolvedValue({ ok: true, calls: [] });
   mocks.targets.mockResolvedValue({ ok: true, contactId: 'contact-1', phones: [{ slot: 1, masked: '••• ••• 0196' }, { slot: 2, masked: '••• ••• 0142' }], grants: [] });
   mocks.status.mockResolvedValue(status('awaiting_provider'));
   mocks.cancel.mockResolvedValue({ ok: true });
+  mocks.openCapture.mockResolvedValue({ ok: true, capture: { captureId: 'capture-1' } });
+  mocks.recordingStatus.mockResolvedValue({ ok: true, status: { latestConsumedEpoch: 0, captureStatus: 'open', totalSamples: 0, measurementStatus: 'provisional' } });
+  mocks.mintRecording.mockResolvedValue({ ok: true, token: 'recording-token', epoch: 1, ingestEndpoint: 'wss://recording.example.test/dialpad-browser-ingest', controlVersion: 2 });
+  mocks.closeCapture.mockResolvedValue({ ok: true });
+  mocks.prepareCapture.mockImplementation(async () => {
+    const active = { state: vi.fn(() => 'recording'), stop: vi.fn(async () => undefined), dispose: vi.fn(async () => undefined) };
+    const prepared = { startLocal: vi.fn(async () => active), dispose: vi.fn(async () => undefined) };
+    mocks.captures.push({ active, prepared });
+    return { proof: { handle: 'handle', origin: 'https://sandra.example' }, start: vi.fn(), startLocal: prepared.startLocal, dispose: prepared.dispose };
+  });
+  mocks.createSession.mockImplementation((options: Record<string, unknown>) => {
+    mocks.lastSessionOptions = options;
+    return { state: vi.fn(() => 'recording'), start: vi.fn(async () => undefined), stop: vi.fn(async () => undefined), dispose: vi.fn(async () => undefined) };
+  });
 });
 
 async function readyPanel(props: Partial<React.ComponentProps<typeof DialpadPanel>> = {}) {
@@ -65,6 +109,15 @@ async function readyPanel(props: Partial<React.ComponentProps<typeof DialpadPane
   const iframe = iframeOf(view.container);
   const post = vi.spyOn(iframe.contentWindow!, 'postMessage');
   return { view, iframe, post, onLogOutcome };
+}
+
+async function chooseAndCall(props: Partial<React.ComponentProps<typeof DialpadPanel>> = {}) {
+  const ctx = await readyPanel({ callRequest: request, ...props });
+  fromDialpad(ctx.iframe, authMessage(5551234));
+  const call = await screen.findByRole('button', { name: 'Call' });
+  await waitFor(() => expect(call).toBeEnabled());
+  ctx.post.mockClear();
+  return { ...ctx, call };
 }
 
 describe('DialpadPanel embedding', () => {
@@ -125,14 +178,12 @@ describe('DialpadPanel trusted binding', () => {
 });
 
 describe('DialpadPanel dialing', () => {
-  async function chooseAndCall(props: Partial<React.ComponentProps<typeof DialpadPanel>> = {}) {
-    const ctx = await readyPanel({ callRequest: request, ...props });
-    fromDialpad(ctx.iframe, authMessage(5551234));
-    const call = await screen.findByRole('button', { name: 'Call' });
-    await waitFor(() => expect(call).toBeEnabled());
-    ctx.post.mockClear();
-    return { ...ctx, call };
-  }
+  it('requires an explicit user gesture before preparing recording for a connected call', async () => {
+    mocks.recent.mockResolvedValue({ ok: true, calls: [status('connected').status] });
+    await readyPanel({ bootstrap: recordingBootstrap });
+    expect(await screen.findByRole('button', { name: 'Prepare recording' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start recording' })).not.toBeInTheDocument();
+  });
 
   it('dials once with the server-released payload and reports only webhook-derived state', async () => {
     mocks.start.mockResolvedValue({ ok: true, dispatched: true, intentId: INTENT, expiresAt: '2026-09-29T10:10:00Z', dial: { phoneNumber: '+18165440196', customData: TOKEN, identityType: null, identityId: null, outboundCallerId: null } });
@@ -214,8 +265,158 @@ describe('DialpadPanel dialing', () => {
   });
 });
 
+describe('DialpadPanel recording capture', () => {
+  it('requires capture permission before dispatch and keeps the chooser retryable after denial', async () => {
+    mocks.prepareCapture.mockRejectedValueOnce(new Error('Microphone permission was denied.'));
+    const { call } = await chooseAndCall({ bootstrap: recordingBootstrap });
+    await userEvent.click(call);
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Microphone permission was denied');
+    mocks.start.mockResolvedValue(released);
+    await userEvent.click(screen.getByRole('button', { name: 'Call' }));
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+  });
+
+  it('starts local capture exactly once before dispatching the provider call', async () => {
+    mocks.start.mockResolvedValue(released);
+    const { call } = await chooseAndCall({ bootstrap: recordingBootstrap });
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    expect(mocks.prepareCapture).toHaveBeenCalledTimes(1);
+    expect(mocks.captures[0]?.prepared.startLocal).toHaveBeenCalledTimes(1);
+    expect(mocks.captures[0]!.prepared.startLocal.mock.invocationCallOrder[0]).toBeLessThan(mocks.start.mock.invocationCallOrder[0]!);
+  });
+
+  it('attaches the explicitly armed capture after the provider reports connected', async () => {
+    mocks.start.mockResolvedValue(released);
+    const { call } = await chooseAndCall({ bootstrap: recordingBootstrap, pollMs: 15 });
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    mocks.status.mockResolvedValue(status('connected'));
+    await waitFor(() => expect(mocks.createSession).toHaveBeenCalledTimes(1));
+    expect(mocks.lastSessionOptions?.capture).toBe(mocks.captures[0]?.active);
+    expect(mocks.captures[0]?.prepared.startLocal).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not post an authorized call when local capture becomes interrupted before dispatch', async () => {
+    mocks.start.mockImplementation(async () => {
+      mocks.captures[0]?.active.state.mockReturnValue('interrupted');
+      return released;
+    });
+    const { call, post } = await chooseAndCall({ bootstrap: recordingBootstrap });
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith(INTENT));
+    expect(post.mock.calls.filter(([message]) => (message as { method?: string }).method === 'initiate_call')).toHaveLength(0);
+  });
+
+  it('ignores a permission result after the chooser is replaced by another lead', async () => {
+    let releasePrepare!: (value: unknown) => void;
+    mocks.prepareCapture.mockReturnValue(new Promise((resolve) => { releasePrepare = resolve; }));
+    const ctx = await chooseAndCall({ bootstrap: recordingBootstrap });
+    await userEvent.click(ctx.call);
+    await waitFor(() => expect(mocks.prepareCapture).toHaveBeenCalledTimes(1));
+    const nextRequest = { ...request, nonce: 2, propertyId: 'property-2', label: 'Next homeowner' };
+    ctx.view.rerender(<DialpadPanel bootstrap={recordingBootstrap} callRequest={nextRequest} onLogOutcome={ctx.onLogOutcome} pollMs={15} />);
+    releasePrepare({ proof: { handle: 'handle', origin: 'https://sandra.example' }, start: vi.fn(), startLocal: vi.fn(), dispose: vi.fn(async () => undefined) });
+    await waitFor(() => expect(screen.getByText('Next homeowner')).toBeInTheDocument());
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(ctx.post.mock.calls.filter(([message]) => (message as { method?: string }).method === 'initiate_call')).toHaveLength(0);
+
+    const active = { state: vi.fn(() => 'recording'), stop: vi.fn(async () => undefined), dispose: vi.fn(async () => undefined) };
+    const prepared = { startLocal: vi.fn(async () => active), dispose: vi.fn(async () => undefined) };
+    mocks.prepareCapture.mockResolvedValueOnce({ proof: { handle: 'handle', origin: 'https://sandra.example' }, start: vi.fn(), startLocal: prepared.startLocal, dispose: prepared.dispose });
+    mocks.start.mockResolvedValue(released);
+    await userEvent.click(screen.getByRole('button', { name: 'Call' }));
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+  });
+
+  it('clears an owned preparation when the chooser is replaced during local capture start', async () => {
+    let releaseStartLocal!: (value: unknown) => void;
+    const oldActive = { state: vi.fn(() => 'recording'), stop: vi.fn(async () => undefined), dispose: vi.fn(async () => undefined) };
+    const oldPrepared = { startLocal: vi.fn(() => new Promise((resolve) => { releaseStartLocal = resolve; })), dispose: vi.fn(async () => undefined) };
+    mocks.prepareCapture.mockResolvedValueOnce({ proof: { handle: 'handle', origin: 'https://sandra.example' }, start: vi.fn(), startLocal: oldPrepared.startLocal, dispose: oldPrepared.dispose });
+    const ctx = await chooseAndCall({ bootstrap: recordingBootstrap });
+    await userEvent.click(ctx.call);
+    await waitFor(() => expect(oldPrepared.startLocal).toHaveBeenCalledTimes(1));
+
+    const nextRequest = { ...request, nonce: 4, propertyId: 'property-4', label: 'Start replacement homeowner' };
+    ctx.view.rerender(<DialpadPanel bootstrap={recordingBootstrap} callRequest={nextRequest} onLogOutcome={ctx.onLogOutcome} pollMs={15} />);
+    releaseStartLocal(oldActive);
+    await waitFor(() => expect(screen.getByText('Start replacement homeowner')).toBeInTheDocument());
+
+    const active = { state: vi.fn(() => 'recording'), stop: vi.fn(async () => undefined), dispose: vi.fn(async () => undefined) };
+    const prepared = { startLocal: vi.fn(async () => active), dispose: vi.fn(async () => undefined) };
+    mocks.prepareCapture.mockResolvedValueOnce({ proof: { handle: 'handle', origin: 'https://sandra.example' }, start: vi.fn(), startLocal: prepared.startLocal, dispose: prepared.dispose });
+    mocks.start.mockResolvedValue(released);
+    await userEvent.click(screen.getByRole('button', { name: 'Call' }));
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+  });
+
+  it('cancels an old authorization when the chooser is replaced while dispatch is pending', async () => {
+    let releaseStart!: (value: unknown) => void;
+    mocks.start.mockReturnValue(new Promise((resolve) => { releaseStart = resolve; }));
+    const ctx = await chooseAndCall({ bootstrap: recordingBootstrap });
+    await userEvent.click(ctx.call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    const nextRequest = { ...request, nonce: 3, propertyId: 'property-3', label: 'Replacement homeowner' };
+    ctx.view.rerender(<DialpadPanel bootstrap={recordingBootstrap} callRequest={nextRequest} onLogOutcome={ctx.onLogOutcome} pollMs={15} />);
+    releaseStart(released);
+    await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith(INTENT));
+    expect(ctx.post.mock.calls.filter(([message]) => (message as { method?: string }).method === 'initiate_call')).toHaveLength(0);
+    expect(screen.getByText('Replacement homeowner')).toBeInTheDocument();
+  });
+
+  it('requires a fresh Prepare gesture after session failure and does not remint automatically', async () => {
+    mocks.start.mockResolvedValue(released);
+    mocks.createSession.mockImplementationOnce((options: Record<string, unknown>) => {
+      mocks.lastSessionOptions = options;
+      return { state: vi.fn(() => 'failed'), start: vi.fn(async () => { throw new Error('transport failed'); }), stop: vi.fn(async () => undefined), dispose: vi.fn(async () => undefined) };
+    });
+    const { call } = await chooseAndCall({ bootstrap: recordingBootstrap, pollMs: 15 });
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    mocks.status.mockResolvedValue(status('connected'));
+    await waitFor(() => expect(mocks.mintRecording).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare again' })).toBeInTheDocument());
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(mocks.mintRecording).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare again' }));
+    await waitFor(() => expect(mocks.mintRecording).toHaveBeenCalledTimes(2));
+  });
+
+  it('does not rearm capture after an explicit End recording while the provider remains connected', async () => {
+    mocks.start.mockResolvedValue(released);
+    const { call } = await chooseAndCall({ bootstrap: recordingBootstrap, pollMs: 15 });
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    mocks.status.mockResolvedValue(status('connected'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'End recording' })).toBeInTheDocument());
+    mocks.status.mockResolvedValue(status('ended'));
+    await waitFor(() => expect(mocks.closeCapture).toHaveBeenCalledWith('capture-1'));
+    const sessions = mocks.createSession.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(mocks.createSession).toHaveBeenCalledTimes(sessions);
+  });
+
+  it('stops a hung recording status request at the real deadline and ignores its late result', async () => {
+    mocks.start.mockResolvedValue(released);
+    mocks.createSession.mockImplementationOnce((options: Record<string, unknown>) => {
+      mocks.lastSessionOptions = options;
+      return { state: vi.fn(() => 'failed'), start: vi.fn(async () => { throw new Error('transport failed'); }), stop: vi.fn(async () => undefined), dispose: vi.fn(async () => undefined) };
+    });
+    mocks.recordingStatus.mockResolvedValueOnce({ ok: true, status: { latestConsumedEpoch: 0, captureStatus: 'open', totalSamples: 0, measurementStatus: 'provisional' } });
+    mocks.recordingStatus.mockImplementation(() => new Promise(() => undefined));
+    const { call } = await chooseAndCall({ bootstrap: recordingBootstrap, pollMs: 5, recordingStatusDeadlineMs: 20 });
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    mocks.status.mockResolvedValue(status('connected'));
+    await waitFor(() => expect(mocks.createSession).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/status did not settle before the deadline/)).toBeInTheDocument();
+    expect(mocks.recordingStatus).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('DialpadPanel authorization race', () => {
-  const released = { ok: true, dispatched: true, intentId: INTENT, expiresAt: 'x', dial: { phoneNumber: '+18165440196', customData: TOKEN, identityType: null, identityId: null, outboundCallerId: null } };
   async function inFlight() {
     let release!: (value: unknown) => void;
     mocks.start.mockReturnValue(new Promise((resolve) => { release = resolve; }));

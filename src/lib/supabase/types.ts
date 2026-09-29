@@ -15,9 +15,9 @@ export type Database = {
   public: {
     Tables: {
       dialpad_org_connections: {
-        Row: { id: string; org_id: string; status: string; cti_client_id: string; allowed_origins: string[]; webhook_secret_ref: string; webhook_secret_version: number; dialpad_company_id: string | null; directory_api_key_ref: string | null; created_at: string; updated_at: string }
-        Insert: { id?: string; org_id: string; status?: string; cti_client_id: string; allowed_origins?: string[]; webhook_secret_ref: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; created_at?: string; updated_at?: string }
-        Update: { status?: string; cti_client_id?: string; allowed_origins?: string[]; webhook_secret_ref?: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; updated_at?: string }
+        Row: { id: string; org_id: string; status: string; cti_client_id: string; allowed_origins: string[]; webhook_secret_ref: string; webhook_secret_version: number; dialpad_company_id: string | null; directory_api_key_ref: string | null; recording_ingest_endpoint: string | null; created_at: string; updated_at: string }
+        Insert: { id?: string; org_id: string; status?: string; cti_client_id: string; allowed_origins?: string[]; webhook_secret_ref: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; created_at?: string; updated_at?: string }
+        Update: { status?: string; cti_client_id?: string; allowed_origins?: string[]; webhook_secret_ref?: string; webhook_secret_version?: number; dialpad_company_id?: string | null; directory_api_key_ref?: string | null; recording_ingest_endpoint?: string | null; updated_at?: string }
         Relationships: []
       }
 
@@ -5815,10 +5815,12 @@ export type Database = {
       fn_get_dialpad_recording_capture: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string }; Returns: Json }
       fn_close_dialpad_recording_capture: { Args: { p_org_id: string; p_capture_id: string; p_rep_user_id?: string | null; p_reason?: string | null }; Returns: Json }
       fn_mint_dialpad_recording_ingest_grant: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string; p_epoch: number; p_token_hash: string; p_ttl_seconds?: number }; Returns: Json }
+      fn_mint_dialpad_recording_next_epoch: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string; p_expected_consumed_epoch: number; p_token_hash: string; p_ttl_seconds?: number }; Returns: Json }
       fn_consume_dialpad_recording_ingest_grant: { Args: { p_token_hash: string; p_worker_id: string }; Returns: Json }
       fn_record_dialpad_recording_chunk: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_seq: number; p_size_bytes: number; p_sha256: string; p_is_eof?: boolean }; Returns: Json }
       fn_mark_dialpad_recording_eof: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_eof_seq: number; p_eof_sha256: string }; Returns: Json }
       fn_get_dialpad_recording_lifecycle: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
+      fn_get_dialpad_recording_browser_status: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string }; Returns: Json }
       fn_get_dialpad_recording_seal_inputs: { Args: { p_capture_id: string; p_claim_token: string }; Returns: Json }
       fn_record_dialpad_recording_vad_ranges: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_batch_id: string; p_ranges: Json }; Returns: Json }
       fn_record_dialpad_recording_pcm_progress: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_batch_id: string; p_processed_through_sample: number; p_pcm_eof_sample?: number | null; p_source_sample_rate_hz?: number | null; p_source_channels?: number | null; p_source_codec?: string | null; p_degraded_reasons?: Json }; Returns: Json }
