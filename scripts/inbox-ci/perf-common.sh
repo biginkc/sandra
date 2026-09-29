@@ -11,7 +11,7 @@ perf_preflight() {
   if [[ "${PERF_LOCAL_EXECUTION:-}" != 1 ]]; then
     [[ -z "$(git status --porcelain)" ]] || { echo 'Dirty checkout' >&2; return 1; }
   fi
-  for file in 20260930020000_inbox_control_foundation.sql 20260930020100_inbox_read_companion.sql 20260930020200_inbox_backend_operation_reply.sql; do
+  for file in 20260930040000_inbox_control_foundation.sql 20260930040100_inbox_read_companion.sql 20260930040200_inbox_backend_operation_reply.sql; do
     test -s "$PERF_MIGRATIONS_DIR/$file" || { echo "Missing required checked-out migration: $file" >&2; return 1; }
     if [[ "${PERF_LOCAL_EXECUTION:-}" != 1 ]]; then
       git ls-files --error-unmatch "supabase/migrations/$file" >/dev/null || return 1
@@ -31,9 +31,9 @@ perf_start() {
   node "$PERF_REPO/scripts/ci/provision-disposable-stack.mjs" \
     --no-baseline-owner \
     "${local_ports[@]+"${local_ports[@]}"}" \
-    --exclude-migrations 20260930020000_inbox_control_foundation.sql \
-    --exclude-migrations 20260930020100_inbox_read_companion.sql \
-    --exclude-migrations 20260930020200_inbox_backend_operation_reply.sql
+    --exclude-migrations 20260930040000_inbox_control_foundation.sql \
+    --exclude-migrations 20260930040100_inbox_read_companion.sql \
+    --exclude-migrations 20260930040200_inbox_backend_operation_reply.sql
   while IFS='=' read -r key value; do
     case "$key" in
       E2E_LOCAL_WORKDIR|E2E_DISPOSABLE_DATABASE|TEST_SUPABASE_URL|TEST_SUPABASE_SERVICE_ROLE_KEY|E2E_CI_SUPABASE_DB_URL)

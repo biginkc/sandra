@@ -19,15 +19,15 @@ const sources = {
   D01: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_select on public.messages'],
   D02: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy messages_org_update on public.messages'],
   D03: ['supabase/migrations/054_memberships_and_rls_rewrite.sql', 'create policy memberships_self_select on public.memberships'],
-  D04: ['supabase/migrations/20260930020000_inbox_control_foundation.sql', 'CREATE FUNCTION public.inbox_guard_inbound_revision()'],
-  D05: ['supabase/migrations/20260930020000_inbox_control_foundation.sql', 'CREATE TABLE public.inbox_inbound_heads'],
+  D04: ['supabase/migrations/20260930040000_inbox_control_foundation.sql', 'CREATE FUNCTION public.inbox_guard_inbound_revision()'],
+  D05: ['supabase/migrations/20260930040000_inbox_control_foundation.sql', 'CREATE TABLE public.inbox_inbound_heads'],
 };
 
 test('every post-privilege source hash matches the checked-out migration', () => {
   const pins = JSON.parse(readFileSync('scripts/outbox-db-contract/expected/privileges.post.json', 'utf8'));
   assert.equal(Object.keys(pins.source_sha256).length, 3);
   for (const [file, expected] of Object.entries(pins.source_sha256)) {
-    assert.match(file, /^supabase\/migrations\/2026093002\d{4}_inbox_[a-z_]+\.sql$/);
+    assert.match(file, /^supabase\/migrations\/2026093004\d{4}_inbox_[a-z_]+\.sql$/);
     assert(existsSync(file), `post-privilege source missing: ${file}`);
     assert.equal(createHash('sha256').update(readFileSync(file)).digest('hex'), expected, `stale source hash: ${file}`);
   }

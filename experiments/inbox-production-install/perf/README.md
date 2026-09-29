@@ -1,6 +1,6 @@
 # Inbox performance lanes
 
-`bash scripts/inbox-ci/perf-120k.sh` and `bash scripts/inbox-ci/burst.sh` run on a GitHub runner against newly created local Supabase stacks. Both scripts require the three `2026093002*` migrations in the checked-out commit and refuse a dirty checkout. They never take a hosted URL. Each stack starts with the earlier checked-out migrations, receives the synthetic 120,000-group fixture (108,000 known conversations plus 12,000 unknown senders; 147,000 messages), and only then receives the three candidate migrations and eight concurrent indexes.
+`bash scripts/inbox-ci/perf-120k.sh` and `bash scripts/inbox-ci/burst.sh` run on a GitHub runner against newly created local Supabase stacks. Both scripts require the three `2026093004*` migrations in the checked-out commit and refuse a dirty checkout. They never take a hosted URL. Each stack starts with the earlier checked-out migrations, receives the synthetic 120,000-group fixture (108,000 known conversations plus 12,000 unknown senders; 147,000 messages), and only then receives the three candidate migrations and eight concurrent indexes.
 
 The lanes call W1's `provision-disposable-stack.mjs` with the three candidate migrations excluded and baseline-owner creation disabled. They consume only its loopback endpoints and stop each owned stack before starting the next attempt. The final GitHub environment handoff clears `E2E_LOCAL_WORKDIR` after the lane has stopped the stack.
 
