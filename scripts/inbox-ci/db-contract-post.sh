@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/failure-exit.sh"
+lane_env=''
+db_contract_cleanup() { if [[ -n "$lane_env" ]]; then rm -f "$lane_env"; fi; }
+trap 'heavy_lane_exit "$?" db_contract_cleanup' EXIT
 [[ "${HEAVY_LANE:-}" == db-contract-post ]]
 [[ "$(git rev-parse HEAD)" == "${HEAVY_TESTED_SHA:-}" ]]
 [[ -z "$(git status --porcelain --untracked-files=all)" ]]
@@ -9,7 +13,7 @@ for version in 20260930020000 20260930020100 20260930020200; do
 done
 lane_env="$(mktemp)"
 original_env="${GITHUB_ENV:-}"
-trap 'rm -f "$lane_env"' EXIT
+HEAVY_ORIGINAL_GITHUB_ENV="$original_env"
 export GITHUB_ENV="$lane_env"
 node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422
 set -a

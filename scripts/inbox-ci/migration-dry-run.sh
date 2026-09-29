@@ -22,21 +22,27 @@ cleanup() {
   fi
   if [[ -n "${E2E_LOCAL_WORKDIR:-}" ]]; then supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup >/dev/null 2>&1 || true; fi
 }
-on_error() {
+on_exit() {
   local status=$1 command=$2 line=$3
-  trap - ERR
+  trap - EXIT
+  cleanup
+  if [[ "$status" -eq 0 ]]; then return 0; fi
   printf 'Migration lane failed at line %s: %s (exit %s)\n' "$line" "$command" "$status" >&2
   printf 'line=%s\ncommand=%s\nexit_status=%s\n' "$line" "$command" "$status" > "$WORK/failure.log"
   for log in "$WORK"/catalog-live.txt "$WORK"/production-install-unit.txt; do
     if [[ -s "$log" ]]; then printf 'Last lines of %s:\n' "${log##*/}" >&2; tail -80 "$log" >&2; fi
   done
-  if [[ "$LOCAL" == 0 ]]; then
-    if node scripts/inbox-ci/write-migration-record.mjs "$WORK" --fail "$status"; then export_run_dir; fi
+  if [[ "$LOCAL" == 0 && -n "${ORIGINAL_GITHUB_ENV:-}" ]]; then
+    local run_dir="docs/performance/inbox-redesign/evidence/${HEAVY_TESTED_SHA:-}/pre-merge/${GITHUB_RUN_ID:-}"
+    if [[ -f "$run_dir/manifest.json" ]] || node scripts/inbox-ci/write-migration-record.mjs "$WORK" --fail "$status"; then
+      export_run_dir
+    else
+      echo 'Failed to seal migration FAIL record' >&2
+    fi
   fi
   exit "$status"
 }
-trap cleanup EXIT
-trap 'on_error "$?" "$BASH_COMMAND" "$LINENO"' ERR
+trap 'on_exit "$?" "$BASH_COMMAND" "$LINENO"' EXIT
 preflight() {
 [[ "$LOCAL" == 0 || "$LOCAL" == 1 ]] || { echo 'Invalid local diagnostic mode' >&2; return 3; }
 [[ "$LOCAL" != 1 || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]] || { echo 'Local diagnostic refused on github-hosted runner' >&2; return 3; }
