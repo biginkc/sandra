@@ -19,18 +19,18 @@ CREATED_INDEX = re.compile(r'\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+
 
 
 def migration_identifiers():
-    files = sorted(MIGRATIONS.glob('2026093002*.sql'))
+    files = sorted(MIGRATIONS.glob('2026093004*.sql'))
     if len(files) != 3:
-        raise ValueError('Expected exactly three 2026093002 migrations')
+        raise ValueError('Expected exactly three 2026093004 migrations')
     return sorted({m.group().lower() for p in files for m in IDENT.finditer(p.read_text())})
 
 
 def created_identifiers():
-    return sorted({m.group(1).lower() for p in MIGRATIONS.glob('2026093002*.sql') for m in CREATED.finditer(p.read_text())})
+    return sorted({m.group(1).lower() for p in MIGRATIONS.glob('2026093004*.sql') for m in CREATED.finditer(p.read_text())})
 
 
 def created_name_scope():
-    sources = [p.read_text() for p in MIGRATIONS.glob('2026093002*.sql')]
+    sources = [p.read_text() for p in MIGRATIONS.glob('2026093004*.sql')]
     return {
         'created_schemas': sorted({m.group(1).lower() for source in sources for m in CREATED_SCHEMA.finditer(source)}),
         'created_triggers': sorted({f'{m.group(2).lower()}.{m.group(1).lower()}' for source in sources for m in CREATED_TRIGGER.finditer(source)}),

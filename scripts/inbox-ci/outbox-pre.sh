@@ -11,7 +11,7 @@ if [[ "$(uname)" == Darwin ]]; then [[ "$(df -g /System/Volumes/Data | awk 'NR==
 lane_env="$(mktemp)"
 original_env="${GITHUB_ENV:-}"
 export GITHUB_ENV="$lane_env"
-node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --exclude-migrations '2026093002*'
+node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --exclude-migrations '2026093004*'
 set -a
 source "$lane_env"
 set +a

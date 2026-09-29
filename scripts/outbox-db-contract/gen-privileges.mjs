@@ -3,9 +3,9 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 const paths = [
-  'supabase/migrations/20260930020000_inbox_control_foundation.sql',
-  'supabase/migrations/20260930020100_inbox_read_companion.sql',
-  'supabase/migrations/20260930020200_inbox_backend_operation_reply.sql',
+  'supabase/migrations/20260930040000_inbox_control_foundation.sql',
+  'supabase/migrations/20260930040100_inbox_read_companion.sql',
+  'supabase/migrations/20260930040200_inbox_backend_operation_reply.sql',
 ];
 const read = file => readFileSync(file, 'utf8');
 const sha = text => createHash('sha256').update(text).digest('hex');

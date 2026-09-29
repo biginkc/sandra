@@ -1,8 +1,8 @@
 {
   "source_sha256": {
-    "supabase/migrations/20260930020000_inbox_control_foundation.sql": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6",
-    "supabase/migrations/20260930020100_inbox_read_companion.sql": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
-    "supabase/migrations/20260930020200_inbox_backend_operation_reply.sql": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad"
+    "supabase/migrations/20260930040000_inbox_control_foundation.sql": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6",
+    "supabase/migrations/20260930040100_inbox_read_companion.sql": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
+    "supabase/migrations/20260930040200_inbox_backend_operation_reply.sql": "2a4b49d43e67963805d547221d04c84c3f7823f430fd9c0cc9b3f22b36844aad"
   },
   "functions": {
     "public.inbox_capture_inbound_head": {
