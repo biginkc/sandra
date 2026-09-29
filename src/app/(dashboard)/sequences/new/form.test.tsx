@@ -40,6 +40,9 @@ describe("<CreateSequenceForm />", () => {
 
     render(<CreateSequenceForm />);
 
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Step \d+$/ })).not.toBeInTheDocument();
+
     const create = screen.getByRole("button", { name: /^create$/i });
     expect(create).toBeDisabled();
 
@@ -56,9 +59,8 @@ describe("<CreateSequenceForm />", () => {
     expect(createSequence).toHaveBeenCalledWith({
       name: "RTL smoke",
       description: "created by rtl",
-      append_opt_out: true,
     });
-    expect(push).toHaveBeenCalledWith("/sequences/seq-new/edit");
+    expect(push).toHaveBeenCalledWith("/sequences/seq-new/edit?new=1");
   });
 
   it("does not redirect when the action fails", async () => {

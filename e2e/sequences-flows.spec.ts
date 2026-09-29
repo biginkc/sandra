@@ -131,14 +131,46 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
       .getByLabel("Description")
       .fill("Created by the flow-1 smoke");
     await page.getByRole("button", { name: /^create$/i }).click();
-    await page.waitForURL(/\/sequences\/[0-9a-f-]+\/edit$/, { timeout: 10_000 });
+    await page.waitForURL(/\/sequences\/[0-9a-f-]+\/edit\?new=1$/, { timeout: 10_000 });
     await expect(page.getByRole("heading", { name: uniqueName })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Step 1", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^Step \d+$/ })).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Save all steps" })).toBeDisabled();
+    const sequenceId = new URL(page.url()).pathname.split("/")[2]!;
+    const { data: createdSequence } = await admin.from("sequences")
+      .select("name, description")
+      .eq("id", sequenceId)
+      .single();
+    expect(createdSequence).toMatchObject({ name: uniqueName, description: "Created by the flow-1 smoke" });
+    const { count: draftStepCount } = await admin.from("sequence_steps")
+      .select("id", { count: "exact", head: true })
+      .eq("sequence_id", sequenceId);
+    expect(draftStepCount).toBe(0);
+
+    // The first step is a local draft until the editor saves it with the details.
+    const firstStep = page.getByRole("heading", { name: "Step 1", exact: true }).locator("xpath=../..");
+    await firstStep.getByRole("combobox", { name: "Action" }).selectOption("change_status");
+    await firstStep.getByRole("combobox", { name: "Target status" }).selectOption("contacted");
+    await page.getByRole("button", { name: "Save all steps" }).click();
+    await page.waitForURL(/\/sequences\/[0-9a-f-]+\/edit$/, { timeout: 10_000 });
+    await expect(async () => {
+      const { data } = await admin.from("sequence_steps")
+        .select("step_index, action_type, target_status")
+        .eq("sequence_id", sequenceId);
+      expect(data).toEqual([{ step_index: 0, action_type: "change_status", target_status: "contacted" }]);
+    }).toPass({ timeout: 5_000 });
 
     // Edit description via the meta form, confirm impact modal (no enrollments yet → no modal)
     const descInput = page.getByLabel("Description");
     await descInput.fill("Edited by the flow-1 smoke");
-    await page.getByRole("button", { name: /^save$/i }).first().click();
-    await waitForSettled(page);
+    await page.getByRole("button", { name: "Save all steps" }).click();
+    await expect(async () => {
+      const { data } = await admin.from("sequences")
+        .select("description")
+        .eq("id", sequenceId)
+        .single();
+      expect(data?.description).toBe("Edited by the flow-1 smoke");
+    }).toPass({ timeout: 5_000 });
 
     // Archive through the overview row's Actions menu and confirmation dialog.
     await page.goto("/sequences");
@@ -313,9 +345,7 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
       void d.accept();
     });
 
-    // The first Save button in DOM order is the meta-form Save (the
-    // per-step Save buttons appear below).
-    await page.getByRole("button", { name: /^save$/i }).first().click();
+    await page.getByRole("button", { name: "Save all steps" }).click();
 
     await expect(async () => {
       expect(capturedMessage).not.toBeNull();

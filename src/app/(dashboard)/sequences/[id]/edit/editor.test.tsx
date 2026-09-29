@@ -1,221 +1,145 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, it, expect, vi } from "vitest";
 
 import { SequenceEditor } from "./editor";
 import type { SequenceWithSteps } from "../../actions";
 
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({
-    push: vi.fn(),
-    refresh: vi.fn(),
-    replace: vi.fn(),
-    back: vi.fn(),
-    forward: vi.fn(),
-    prefetch: vi.fn(),
-  }),
-  useSearchParams: () => new URLSearchParams(),
-  usePathname: () => "/",
-}));
+const replace = vi.fn();
+const refresh = vi.fn();
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn(), replace: vi.fn(), refresh: (...args: unknown[]) => refresh(...args) }) }));
+vi.mock("../../actions", () => ({ replaceSequenceSteps: (...args: unknown[]) => replace(...args) }));
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() } }));
 
-const upsertSequenceStep = vi.fn();
-const deleteSequenceStep = vi.fn();
-const updateSequence = vi.fn();
+afterEach(() => { replace.mockReset(); refresh.mockReset(); vi.restoreAllMocks(); });
+const sequence: SequenceWithSteps = {
+  id: "seq-1", name: "Seller follow-up", description: "Existing", active: true,
+  append_opt_out: true, archived_at: null,
+  steps: [{ id: "step-1", step_index: 0, delay_after_previous_minutes: 1440,
+    action_type: "send_sms", template_body: "Hi", template_id: null, template_category: null, target_status: null }],
+};
+const mount = (options?: { isNew?: boolean; total?: number; steps?: SequenceWithSteps["steps"]; templates?: React.ComponentProps<typeof SequenceEditor>["templates"] }) =>
+  render(<SequenceEditor sequence={{ ...sequence, steps: options?.steps ?? sequence.steps }}
+    initialImpact={{ total_enrolled: options?.total ?? 0, scheduled_next_7d: 2 }}
+    templates={options?.templates ?? []} isNew={options?.isNew} />);
+const categoryStep: SequenceWithSteps["steps"][number] = {
+  ...sequence.steps[0], template_body: null, template_category: "Opener - Homeowner",
+};
 
-vi.mock("../../actions", () => ({
-  upsertSequenceStep: (...args: unknown[]) => upsertSequenceStep(...args),
-  deleteSequenceStep: (...args: unknown[]) => deleteSequenceStep(...args),
-  updateSequence: (...args: unknown[]) => updateSequence(...args),
-}));
-
-vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
-}));
-
-afterEach(() => {
-  upsertSequenceStep.mockReset();
-  deleteSequenceStep.mockReset();
-  updateSequence.mockReset();
-});
-
-function makeSequence(
-  overrides: Partial<SequenceWithSteps> = {},
-): SequenceWithSteps {
-  return {
-    id: overrides.id ?? "seq-1",
-    name: overrides.name ?? "Flow",
-    description: overrides.description ?? null,
-    active: overrides.active ?? true,
-    append_opt_out: overrides.append_opt_out ?? false,
-    archived_at: overrides.archived_at ?? null,
-    steps: overrides.steps ?? [],
-  };
-}
-
-function makeStep(
-  overrides: Partial<SequenceWithSteps["steps"][number]> & { id: string },
-): SequenceWithSteps["steps"][number] {
-  return {
-    id: overrides.id,
-    step_index: overrides.step_index ?? 0,
-    delay_after_previous_minutes: overrides.delay_after_previous_minutes ?? 0,
-    action_type: overrides.action_type ?? "send_sms",
-    template_body: overrides.template_body ?? "Hi",
-    template_id: overrides.template_id ?? null,
-    target_status: overrides.target_status ?? null,
-  };
-}
-
-function renderEditor(sequence: SequenceWithSteps) {
-  return render(
-    <SequenceEditor
-      sequence={sequence}
-      initialImpact={{ total_enrolled: 0, scheduled_next_7d: 0 }}
-      templates={[]}
-    />,
-  );
-}
-
-describe("<SequenceEditor /> — sequences-flows migrated tests", () => {
-  it("2. add-step modal validates required fields + persists on save", async () => {
-    const user = userEvent.setup();
-    upsertSequenceStep.mockResolvedValue({ ok: true, data: { id: "step-new" } });
-
-    renderEditor(makeSequence({ id: "seq-2", steps: [] }));
-
-    await user.click(screen.getByRole("button", { name: /add step/i }));
-
-    const modal = await screen.findByRole("dialog");
-    expect(modal).toBeInTheDocument();
-    const modalSubmit = within(modal).getByRole("button", {
-      name: /add step/i,
-    });
-    expect(modalSubmit).toBeDisabled();
-
-    await user.type(
-      within(modal).getByPlaceholderText(/cash offer/i),
-      "Hi {{first_name}}, testing from flow-2",
-    );
-    expect(modalSubmit).toBeEnabled();
-
-    await user.click(modalSubmit);
-
-    expect(upsertSequenceStep).toHaveBeenCalledTimes(1);
-    const call = upsertSequenceStep.mock.calls[0][0];
-    expect(call.sequence_id).toBe("seq-2");
-    expect(call.step_index).toBe(0);
-    expect(call.action_type).toBe("send_sms");
-    expect(call.template_body).toContain("testing from flow-2");
+describe("drip editor", () => {
+  it("saves edited details and every step with exactly one action call", async () => {
+    replace.mockResolvedValue({ ok: true, data: ["step-1"] });
+    const user = userEvent.setup(); mount();
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "New name");
+    const card = screen.getByRole("heading", { name: "Step 1" }).closest("div.rounded-md.border") as HTMLElement;
+    await user.clear(within(card).getByRole("spinbutton"));
+    await user.type(within(card).getByRole("spinbutton"), "3");
+    await user.selectOptions(within(card).getByRole("combobox", { name: "Delay unit" }), "hours");
+    await user.click(screen.getByRole("button", { name: "Save all steps" }));
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(replace).toHaveBeenCalledWith(expect.objectContaining({ sequenceId: "seq-1", name: "New name",
+      steps: [expect.objectContaining({ id: "step-1", step_index: 0, delay_after_previous_minutes: 180 })] }));
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^save$/i })).not.toBeInTheDocument();
   });
 
-  it("3. delay unit picker round-trips (1 day → 3 hours)", async () => {
-    const user = userEvent.setup();
-    upsertSequenceStep.mockResolvedValue({ ok: true, data: { id: "step-3" } });
-
-    const step = makeStep({
-      id: "step-3",
-      delay_after_previous_minutes: 1440,
-      template_body: "Hello",
-    });
-    const { unmount } = renderEditor(
-      makeSequence({ id: "seq-3", steps: [step] }),
-    );
-
-    expect(screen.getByRole("heading", { name: /^Step 1$/ })).toBeInTheDocument();
-    const stepCard = screen
-      .getByRole("heading", { name: /^Step 1$/ })
-      .closest("div.rounded-md.border") as HTMLElement;
-    expect(stepCard).not.toBeNull();
-
-    const amount = within(stepCard).getAllByRole("spinbutton")[0];
-    expect(amount).toHaveValue(1);
-    const unit = within(stepCard).getAllByRole("combobox")[0];
-    expect(unit).toHaveValue("days");
-
-    await user.clear(amount);
-    await user.type(amount, "3");
-    await user.selectOptions(unit, "hours");
-
-    await user.click(within(stepCard).getByRole("button", { name: /save step/i }));
-
-    expect(upsertSequenceStep).toHaveBeenCalledTimes(1);
-    const call = upsertSequenceStep.mock.calls[0][0];
-    expect(call.id).toBe("step-3");
-    expect(call.delay_after_previous_minutes).toBe(180);
-
-    // "Reload" by re-rendering with the persisted minutes value — the
-    // unit picker should now display 3 hours.
-    unmount();
-    renderEditor(
-      makeSequence({
-        id: "seq-3",
-        steps: [
-          makeStep({
-            id: "step-3",
-            delay_after_previous_minutes: 180,
-            template_body: "Hello",
-          }),
-        ],
-      }),
-    );
-    const reloadedCard = screen
-      .getByRole("heading", { name: /^Step 1$/ })
-      .closest("div.rounded-md.border") as HTMLElement;
-    expect(within(reloadedCard).getAllByRole("spinbutton")[0]).toHaveValue(3);
-    expect(within(reloadedCard).getAllByRole("combobox")[0]).toHaveValue("hours");
+  it("new=1 starts with exactly one blank step; Add step stays local until save", async () => {
+    const user = userEvent.setup(); mount({ isNew: true, steps: [] });
+    expect(screen.getAllByRole("heading", { name: /^Step \d+$/ })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Save all steps" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Add step" }));
+    expect(screen.getAllByRole("heading", { name: /^Step \d+$/ })).toHaveLength(2);
+    expect(replace).not.toHaveBeenCalled();
   });
 
-  it("4. delete a step removes it from the list", async () => {
-    const user = userEvent.setup();
-    deleteSequenceStep.mockResolvedValue({ ok: true, data: undefined });
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-
-    const step = makeStep({
-      id: "step-4",
-      template_body: "Only step",
-    });
-    const { rerender } = renderEditor(
-      makeSequence({ id: "seq-4", steps: [step] }),
-    );
-
-    expect(screen.getByRole("heading", { name: /^Step 1$/ })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /^delete$/i }));
-
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
-    expect(deleteSequenceStep).toHaveBeenCalledTimes(1);
-    expect(deleteSequenceStep).toHaveBeenCalledWith("step-4", "seq-4");
-
-    // Server-side rerender (simulating router.refresh) drops the step
-    // and the empty state surfaces.
-    rerender(
-      <SequenceEditor
-        sequence={makeSequence({ id: "seq-4", steps: [] })}
-        initialImpact={{ total_enrolled: 0, scheduled_next_7d: 0 }}
-        templates={[]}
-      />,
-    );
-    expect(screen.getByText(/no steps yet/i)).toBeInTheDocument();
-
-    confirmSpy.mockRestore();
-  });
-});
-
-describe("<SequenceEditor /> — accessible markup (locks in Playwright failures)", () => {
-  // Note: the page-level <h1>{sequence.name}</h1> lives in PageHeader (see
-  // src/app/(dashboard)/sequences/[id]/edit/page.tsx). The editor itself
-  // intentionally does NOT render its own heading — adding one duplicates
-  // the PageHeader title and breaks Playwright's getByRole("heading", { name }).
-
-  it("associates the Description label with its input via htmlFor/id", () => {
-    renderEditor(makeSequence({ description: "Existing copy" }));
-    const descInput = screen.getByLabelText("Description");
-    expect(descInput).toHaveValue("Existing copy");
+  it("keeps returned IDs so saving a newly added step again updates it", async () => {
+    replace.mockResolvedValue({ ok: true, data: ["step-1", "step-new"] });
+    const user = userEvent.setup(); mount();
+    await user.click(screen.getByRole("button", { name: "Add step" }));
+    const newCard = screen.getByRole("heading", { name: "Step 2" }).closest("div.rounded-md.border") as HTMLElement;
+    await user.type(within(newCard).getByPlaceholderText(/cash offer/i), "Another text");
+    await user.click(screen.getByRole("button", { name: "Save all steps" }));
+    await user.click(screen.getByRole("button", { name: "Save all steps" }));
+    expect(replace).toHaveBeenCalledTimes(2);
+    expect(replace.mock.calls[1][0].steps[1].id).toBe("step-new");
   });
 
-  it("associates the Name label with its input via htmlFor/id", () => {
-    renderEditor(makeSequence({ name: "Flow Foo" }));
-    const nameInput = screen.getByLabelText("Name");
-    expect(nameInput).toHaveValue("Flow Foo");
+  it("warns once for active enrollments and cancellation leaves all data untouched", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const user = userEvent.setup(); mount({ total: 3 });
+    expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
+    expect(screen.getByText(/Saved steps cannot be moved or deleted/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save all steps" }));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("deletes a draft step without a server mutation", async () => {
+    const user = userEvent.setup(); mount();
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.queryByRole("heading", { name: "Step 1" })).not.toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("deletes an unsaved step on an enrolled drip while retaining the persisted step lock", async () => {
+    const user = userEvent.setup(); mount({ total: 3 });
+    expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Add step" }));
+    const draft = screen.getByRole("heading", { name: "Step 2" }).closest("div.rounded-md.border") as HTMLElement;
+    expect(within(draft).getByRole("button", { name: "Delete" })).toBeEnabled();
+    await user.click(within(draft).getByRole("button", { name: "Delete" }));
+    expect(screen.queryByRole("heading", { name: "Step 2" })).not.toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("loads and saves a renamed drip with a category-backed step", async () => {
+    replace.mockResolvedValue({ ok: true, data: ["step-1"] });
+    const user = userEvent.setup(); mount({ steps: [categoryStep] });
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Renamed");
+    expect(screen.getByRole("button", { name: "Save all steps" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Save all steps" }));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(expect.objectContaining({
+      name: "Renamed", steps: [expect.objectContaining({
+        template_body: null, template_id: null, template_category: "Opener - Homeowner",
+      })],
+    })));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+  });
+
+  it("clears category when a rep enters a custom body", async () => {
+    replace.mockResolvedValue({ ok: true, data: ["step-1"] });
+    const user = userEvent.setup(); mount({ steps: [categoryStep] });
+    await user.click(screen.getByRole("radio", { name: "Custom message" }));
+    await user.type(screen.getByRole("textbox", { name: /Message body/ }), "Custom text");
+    await user.click(screen.getByRole("button", { name: "Save all steps" }));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(expect.objectContaining({
+      steps: [expect.objectContaining({ template_body: "Custom text", template_category: null })],
+    })));
+  });
+
+  it("clears category when a rep chooses a template", async () => {
+    replace.mockResolvedValue({ ok: true, data: ["step-1"] });
+    const user = userEvent.setup(); mount({ steps: [categoryStep], templates: [{
+      id: "template-1", name: "First", content: "Hello", category: "Opener - Homeowner",
+      system_managed: false, created_at: "2026-09-29", updated_at: "2026-09-29",
+    }] });
+    await user.click(screen.getByRole("radio", { name: "Use template" }));
+    await user.click(screen.getByRole("button", { name: "Save all steps" }));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(expect.objectContaining({
+      steps: [expect.objectContaining({ template_body: null, template_id: "template-1", template_category: null })],
+    })));
+  });
+
+  it("keeps an unsaved custom draft while peeking at a template", async () => {
+    const user = userEvent.setup(); mount({ templates: [{
+      id: "template-1", name: "First", content: "Hello", category: "Opener - Homeowner",
+      system_managed: false, created_at: "2026-09-29", updated_at: "2026-09-29",
+    }] });
+    await user.click(screen.getByRole("radio", { name: "Use template" }));
+    await user.click(screen.getByRole("radio", { name: "Custom message" }));
+    expect(screen.getByRole("textbox", { name: /Message body/ })).toHaveValue("Hi");
   });
 });

@@ -37,8 +37,8 @@ it("handles empty, error, and archived states", () => {
   expect(screen.getByRole("row", { name: /Seller follow-up/ })).toBeInTheDocument();
 });
 
-it("shows a non-admin the drip name without an edit link", () => {
+it("lets a non-admin open read-only drip details without edit actions", () => {
   render(<DripsOverview archived={false} isAdmin={false} sequencesResult={{ ok: true, data: [row] }} needsResult={needs} />);
-  expect(screen.getByText("Seller follow-up")).toBeInTheDocument();
-  expect(screen.queryByRole("link", { name: "Seller follow-up" })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Seller follow-up" })).toHaveAttribute("href", "/sequences/s1");
+  expect(screen.queryByText("Row actions")).not.toBeInTheDocument();
 });

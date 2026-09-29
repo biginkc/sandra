@@ -95,7 +95,7 @@ describe("My Leads workflow dialogs", () => {
       />
     )
 
-    await user.type(screen.getByLabelText("Motivation"), "Needs to sell before moving")
+    fireEvent.change(screen.getByLabelText("Motivation"), { target: { value: "Needs to sell before moving" } })
     await user.selectOptions(screen.getByLabelText("Temperature (optional)"), "hot")
     await user.click(screen.getByRole("button", { name: "Save readiness" }))
 

@@ -126,6 +126,20 @@ export type Database = {
         Relationships: []
       }
 
+      dialpad_recording_shadow_measurements: {
+        Row: { capture_id: string; org_id: string; call_activity_id: string; intent_id: string; algorithm_version: string; input_digest: string; evidence_manifest: Json; observed_samples: number; observed_samples_by_epoch: Json; eligible_samples: null; timing_status: string; evidence_status: string; reasons: Json; evaluated_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_shadow_event_changes: {
+        Row: { change_id: number; event_id: string; org_id: string; change_kind: string; recorded_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
       rep_sms_sender_assignments: {
         Row: { id: string; org_id: string; user_id: string; provider: string; provider_account_id: string | null; provider_sender_id: string | null; phone_e164: string; label: string; is_default: boolean; active: boolean; updated_by: string; updated_at: string; composition_policy_version: number; grant_status: string; granted_at: string; revoked_at: string | null; revoked_by: string | null }
         Insert: { id?: string; org_id: string; user_id: string; provider?: string; provider_account_id?: string | null; provider_sender_id?: string | null; phone_e164: string; label: string; is_default?: boolean; active?: boolean; updated_by: string; updated_at?: string; composition_policy_version?: number; grant_status?: string; granted_at?: string; revoked_at?: string | null; revoked_by?: string | null }
@@ -5774,6 +5788,11 @@ export type Database = {
       }
     }
     Functions: {
+      sequence_replace_steps: { Args: { p_sequence: string; p_steps: Json; p_name: string; p_description: string | null }; Returns: Json }
+      sequence_step_stats: { Args: { p_org: string; p_sequence: string }; Returns: Array<{
+        step_id: string; sent: number; replied: number; waiting: number;
+      }> }
+      sequence_copy_steps: { Args: { p_target: string; p_source: string }; Returns: number }
       dialpad_recording_playback_file_id: { Args: { p_capture_id: string; p_track: string; p_epoch: number }; Returns: string }
       fn_dialpad_recording_library_sources: { Args: { p_actor: string; p_scope: string }; Returns: Json }
       fn_dialpad_recording_playback_file: { Args: { p_actor: string; p_scope: string; p_file_id: string }; Returns: Json }
@@ -5822,6 +5841,9 @@ export type Database = {
       fn_get_dialpad_recording_vad_snapshot: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
       fn_claim_dialpad_recording_seal_work: { Args: { p_worker_id: string; p_lease_seconds?: number }; Returns: Json }
       fn_register_dialpad_recording_result: { Args: { p_capture_id: string; p_claim_token: string; p_tracks: Json; p_failure_code?: string | null }; Returns: Json }
+      fn_get_dialpad_recording_shadow_input: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
+      fn_finalize_dialpad_recording_shadow: { Args: { p_org_id: string; p_capture_id: string; p_expected_input_digest: string }; Returns: Json }
+      fn_get_dialpad_recording_shadow_measurement: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
       fn_record_dialpad_event_process_failure: { Args: { p_event_id: string; p_sqlstate: string }; Returns: undefined }
       fn_get_rep_sms_context: { Args: { p_property_id: string }; Returns: Json }
       fn_set_rep_sms_enrollment: { Args: { p_org_id: string; p_user_id: string; p_enabled: boolean }; Returns: boolean }

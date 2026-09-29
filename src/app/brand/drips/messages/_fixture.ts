@@ -29,7 +29,7 @@ export const brandThread = {
   threadId: conversationId, contactId, contactName: "Marisol Vega", contactPhone: "+18165550142",
   threadCustomerPhone: "+18165550142", threadBusinessPhone: "+18165550100",
   propertyId, propertyAddress: "4127 Hollister Ave, Kansas City, MO", propertyStatus: "prospect",
-  outreachDispo: "needs_sequence", dripName: "Quiet owner check-in", dripStep: 2, dripStepsTotal: 4, dripReplied: true,
+  outreachDispo: "needs_sequence", dripName: "Quiet owner check-in", dripStep: 2, dripStepsTotal: 4, dripReplied: true, inDrip: false,
   aiDispositionReview: null, isDncLocked: false, assigneeId: null, lastMessageBody: brandMessages[2].body,
   lastMessageDirection: "inbound", lastMessageAt: "2026-09-26T23:41:00.000Z", unreadCount: 1,
   needsHumanAttention: false, escalationReason: null, isOptedOut: false, isTestTraffic: false,

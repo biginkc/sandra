@@ -50,9 +50,54 @@ export type SequenceWithSteps = {
     action_type: "send_sms" | "change_status";
     template_body: string | null;
     template_id: string | null;
+    template_category: string | null;
     target_status: string | null;
   }>;
 };
+
+export type SequenceStepInput = Omit<SequenceWithSteps["steps"][number], "id"> & { id?: string };
+
+export async function replaceSequenceSteps(input: {
+  sequenceId: string;
+  name: string;
+  description: string | null;
+  steps: SequenceStepInput[];
+}): Promise<Result<string[]>> {
+  const name = input.name.trim();
+  if (!name || name.length > 120 || input.steps.length > 100 || input.steps.some((step, index) =>
+    step.step_index !== index || !Number.isInteger(step.delay_after_previous_minutes) ||
+    step.delay_after_previous_minutes < 0 ||
+    (step.action_type === "send_sms" && (
+      Number(Boolean(step.template_body?.trim())) + Number(Boolean(step.template_id)) +
+      Number(Boolean(step.template_category?.trim())) !== 1 || Boolean(step.target_status)
+    )) ||
+    (step.action_type === "change_status" && (
+      !step.target_status?.trim() || Boolean(step.template_body?.trim()) ||
+      Boolean(step.template_id) || Boolean(step.template_category?.trim())
+    )) || !["send_sms", "change_status"].includes(step.action_type)
+  )) return { ok: false, error: { code: "VALIDATION", message: "Check the drip name and every step before saving." } };
+  try {
+    const guard = await requireSequenceAdmin();
+    if (!guard.ok) return { ok: false, error: guard.error };
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("sequence_replace_steps", {
+      p_sequence: input.sequenceId,
+      p_name: name,
+      p_description: input.description,
+      p_steps: input.steps,
+    });
+    if (error) return { ok: false, error: { code: "STEP_REPLACE_FAILED", message: error.message } };
+    revalidatePath("/sequences");
+    revalidatePath(`/sequences/${input.sequenceId}`);
+    revalidatePath(`/sequences/${input.sequenceId}/edit`);
+    if (!Array.isArray(data) || data.length !== input.steps.length || !data.every((id) => typeof id === "string"))
+      return { ok: false, error: { code: "STEP_REPLACE_RESPONSE", message: "Drip saved, but saved step IDs could not be read. Reload before editing again." } };
+    return ok(data as string[]);
+  } catch (error) {
+    reportError(error, { tags: { surface: "replace_sequence_steps" }, extra: { sequenceId: input.sequenceId } });
+    return errFromUnknown(error, "STEP_REPLACE_FAILED");
+  }
+}
 
 export type NeedsPersonRow = {
   property_id: string;
@@ -271,7 +316,7 @@ export async function getSequenceWithSteps(
     const { data: steps, error: stepErr } = await supabase
       .from("sequence_steps")
       .select(
-        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, target_status",
+        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, template_category, target_status",
       )
       .eq("sequence_id", sequenceId)
       .order("step_index", { ascending: true });
@@ -473,166 +518,6 @@ export async function restoreSequence(sequenceId: string): Promise<Result<null>>
   } catch (error) {
     reportError(error, { tags: { surface: "restore_sequence" }, extra: { sequenceId } });
     return errFromUnknown(error, "SEQ_RESTORE_FAILED");
-  }
-}
-
-export async function upsertSequenceStep(input: {
-  id?: string;
-  sequence_id: string;
-  step_index: number;
-  delay_after_previous_minutes: number;
-  action_type: "send_sms" | "change_status";
-  template_body?: string | null;
-  template_id?: string | null;
-  target_status?: string | null;
-}): Promise<Result<{ id: string }>> {
-  if (input.delay_after_previous_minutes < 0) {
-    return {
-      ok: false,
-      error: { code: "VALIDATION", message: "Delay must be non-negative." },
-    };
-  }
-  if (input.action_type === "send_sms") {
-    const hasInline = !!input.template_body?.trim();
-    const hasRef = !!input.template_id;
-    if (!hasInline && !hasRef) {
-      return {
-        ok: false,
-        error: {
-          code: "VALIDATION",
-          message:
-            "send_sms steps need either an inline message or a template reference.",
-        },
-      };
-    }
-  }
-  if (input.action_type === "change_status" && !input.target_status) {
-    return {
-      ok: false,
-      error: {
-        code: "VALIDATION",
-        message: "change_status steps need a target_status.",
-      },
-    };
-  }
-
-  // Steps either reference a template OR carry inline copy — never both.
-  // This keeps the render path unambiguous in tick.ts.
-  const usingTemplateRef =
-    input.action_type === "send_sms" && !!input.template_id;
-  const templateBodyOnInsert = usingTemplateRef
-    ? null
-    : (input.template_body ?? null);
-  const templateIdOnInsert = usingTemplateRef ? input.template_id! : null;
-
-  try {
-    const guard = await requireSequenceAdmin();
-    if (!guard.ok) return { ok: false, error: guard.error };
-
-    const supabase = await createClient();
-    if (input.id) {
-      const { error } = await supabase
-        .from("sequence_steps")
-        .update({
-          step_index: input.step_index,
-          delay_after_previous_minutes: input.delay_after_previous_minutes,
-          action_type: input.action_type,
-          template_body: templateBodyOnInsert,
-          template_id: templateIdOnInsert,
-          target_status: input.target_status ?? null,
-        })
-        .eq("id", input.id);
-      if (error) {
-        return {
-          ok: false,
-          error: { code: "STEP_UPDATE_FAILED", message: error.message },
-        };
-      }
-      revalidatePath(`/sequences/${input.sequence_id}/edit`);
-      return ok({ id: input.id });
-    }
-    const { data, error } = await supabase
-      .from("sequence_steps")
-      .insert({
-        sequence_id: input.sequence_id,
-        step_index: input.step_index,
-        delay_after_previous_minutes: input.delay_after_previous_minutes,
-        action_type: input.action_type,
-        template_body: templateBodyOnInsert,
-        template_id: templateIdOnInsert,
-        target_status: input.target_status ?? null,
-      })
-      .select("id")
-      .single();
-    if (error) {
-      return {
-        ok: false,
-        error: { code: "STEP_CREATE_FAILED", message: error.message },
-      };
-    }
-    revalidatePath(`/sequences/${input.sequence_id}/edit`);
-    return ok({ id: data.id });
-  } catch (e) {
-    reportError(e, { tags: { surface: "upsert_sequence_step" } });
-    return errFromUnknown(e, "STEP_UPSERT_FAILED");
-  }
-}
-
-export async function deleteSequenceStep(
-  stepId: string,
-  sequenceId: string,
-): Promise<Result<null>> {
-  try {
-    const guard = await requireSequenceAdmin();
-    if (!guard.ok) return { ok: false, error: guard.error };
-
-    const supabase = await createClient();
-    const { count: historicalRuns, error: historyError } = await supabase
-      .from("sequence_step_runs")
-      .select("id", { count: "exact", head: true })
-      .eq("step_id", stepId);
-    if (historyError) {
-      return {
-        ok: false,
-        error: { code: "STEP_DELETE_FAILED", message: historyError.message },
-      };
-    }
-    if ((historicalRuns ?? 0) > 0) {
-      return {
-        ok: false,
-        error: {
-          code: "STEP_DELETE_HAS_HISTORY",
-          message:
-            "This step has execution history and cannot be deleted. Archive the drip or create a replacement step.",
-        },
-      };
-    }
-    const { error } = await supabase
-      .from("sequence_steps")
-      .delete()
-      .eq("id", stepId)
-      .eq("sequence_id", sequenceId);
-    if (error) {
-      if (error.code === "42501" || /runtime-managed|audit history/i.test(error.message)) {
-        return {
-          ok: false,
-          error: {
-            code: "STEP_DELETE_HAS_HISTORY",
-            message:
-              "This step has execution history and cannot be deleted. Archive the drip or create a replacement step.",
-          },
-        };
-      }
-      return {
-        ok: false,
-        error: { code: "STEP_DELETE_FAILED", message: error.message },
-      };
-    }
-    revalidatePath(`/sequences/${sequenceId}/edit`);
-    return ok(null);
-  } catch (e) {
-    reportError(e, { tags: { surface: "delete_sequence_step" } });
-    return errFromUnknown(e, "STEP_DELETE_FAILED");
   }
 }
 
@@ -899,98 +784,5 @@ export async function getImpactAction(
   } catch (e) {
     reportError(e, { tags: { surface: "get_impact" } });
     return errFromUnknown(e, "IMPACT_FAILED");
-  }
-}
-
-/**
- * Listed sequences for a given property's lead detail page — the drip
- * chip + "Drips" panel need both names and enrollment states.
- */
-export async function listPropertyEnrollments(propertyId: string): Promise<
-  Result<
-    Array<{
-      id: string;
-      status: string;
-      pause_reason: string | null;
-      current_step_index: number;
-      next_run_at: string | null;
-      sequence: { id: string; name: string };
-      current_run: {
-        id: string;
-        attempt_outcome: string;
-        failure_reason: string | null;
-        message_id: string | null;
-      } | null;
-    }>
-  >
-> {
-  try {
-    const supabase = await createClient();
-    const { data, error } = await supabase
-      .from("sequence_enrollments")
-      .select(
-        `id, status, pause_reason, current_step_index, next_run_at,
-         sequence:sequences(id, name)`,
-      )
-      .eq("property_id", propertyId)
-      .order("enrolled_at", { ascending: false });
-    if (error) {
-      return {
-        ok: false,
-        error: { code: "LIST_ENROLL_FAILED", message: error.message },
-      };
-    }
-    const enrollmentIds = (data ?? []).map((row) => row.id);
-    const { data: runs, error: runsError } =
-      enrollmentIds.length === 0
-        ? { data: [], error: null }
-        : await supabase
-            .from("sequence_step_runs")
-            .select("id, enrollment_id, attempt_outcome, failure_reason, message_id")
-            .in("enrollment_id", enrollmentIds)
-            .eq("claim_active", true)
-            .order("created_at", { ascending: false });
-    if (runsError) {
-      return {
-        ok: false,
-        error: { code: "LIST_ENROLL_FAILED", message: runsError.message },
-      };
-    }
-    const currentRunByEnrollment = new Map<
-      string,
-      {
-        id: string;
-        attempt_outcome: string;
-        failure_reason: string | null;
-        message_id: string | null;
-      }
-    >();
-    for (const run of runs ?? []) {
-      if (!currentRunByEnrollment.has(run.enrollment_id)) {
-        currentRunByEnrollment.set(run.enrollment_id, {
-          id: run.id,
-          attempt_outcome: run.attempt_outcome,
-          failure_reason: run.failure_reason,
-          message_id: run.message_id,
-        });
-      }
-    }
-    return ok(
-      (data ?? []).map((row) => ({
-        id: row.id,
-        status: row.status,
-        pause_reason: row.pause_reason,
-        current_step_index: row.current_step_index,
-        next_run_at: row.next_run_at,
-        sequence: row.sequence as { id: string; name: string },
-        current_run: currentRunByEnrollment.get(row.id) ?? null,
-      })),
-    );
-  } catch (e) {
-    reportError(e, {
-      tags: { surface: "list_property_enrollments" },
-      extra: { propertyId },
-    });
-    return errFromUnknown(e, "LIST_ENROLL_FAILED");
   }
 }

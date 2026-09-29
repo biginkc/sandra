@@ -13,7 +13,6 @@ export function CreateSequenceForm() {
   const router = useRouter();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [appendOptOut, setAppendOptOut] = useState(true);
   const [pending, startTransition] = useTransition();
 
   const onSubmit = (e: React.FormEvent) => {
@@ -23,14 +22,13 @@ export function CreateSequenceForm() {
         createSequence({
           name,
           description: description.trim() || null,
-          append_opt_out: appendOptOut,
         }),
         {
           successMessage: "Drip created",
           fallbackMessage: "Could not create drip",
         },
       );
-      if (r.ok) router.push(`/sequences/${r.data.id}/edit`);
+      if (r.ok) router.push(`/sequences/${r.data.id}/edit?new=1`);
     });
   };
 
@@ -54,23 +52,6 @@ export function CreateSequenceForm() {
           onChange={(e) => setDescription(e.target.value)}
           placeholder="What this drip is for (internal only, sellers never see this)"
         />
-      </label>
-
-      <label className="flex items-start gap-2 text-sm">
-        <input
-          type="checkbox"
-          checked={appendOptOut}
-          onChange={(e) => setAppendOptOut(e.target.checked)}
-          className="mt-0.5"
-        />
-        <span className="flex-1">
-          <span className="font-medium">Auto-append opt-out phrase</span>
-          <span className="text-muted-foreground block text-xs">
-            When on, SMS steps that don&apos;t already include &ldquo;STOP&rdquo; or the{" "}
-            <code>{"{{opt_out}}"}</code> variable get a rotated opt-out phrase
-            appended at send time.
-          </span>
-        </span>
       </label>
 
       <div className="flex items-center gap-2">

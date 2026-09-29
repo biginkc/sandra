@@ -153,6 +153,7 @@ function makeThread(overrides: Partial<Thread> & { threadId: string }): Thread {
     dripStep: overrides.dripStep ?? null,
     dripStepsTotal: overrides.dripStepsTotal ?? null,
     dripReplied: overrides.dripReplied ?? false,
+    inDrip: overrides.inDrip ?? false,
     aiDispositionReview: overrides.aiDispositionReview ?? null,
     isDncLocked: overrides.isDncLocked ?? false,
     assigneeId: overrides.assigneeId ?? null,

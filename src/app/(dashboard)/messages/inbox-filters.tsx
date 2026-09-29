@@ -14,7 +14,8 @@ export type InboxFilter =
   | "escalated"
   | "dispo"
   | "needs_outcome"
-  | "drip_replied";
+  | "drip_replied"
+  | "in_drip";
 
 export type InboxFilterCounts = Record<InboxFilter, number>;
 
@@ -52,6 +53,7 @@ const FILTER_LABELS: Record<InboxFilter, string> = {
   dispo: "Sandra Dispo",
   needs_outcome: "Needs Outcome",
   drip_replied: "Replied to drip",
+  in_drip: "In a drip",
 };
 
 /**
@@ -156,6 +158,16 @@ export function InboxFilters({
         count={filterCounts.dispo}
         onClick={() => onFilterChange("dispo")}
         testId="filter-dispo"
+      />
+      <FilterChip
+        label="In a drip"
+        icon="droplet"
+        active={displayedActive === "in_drip"}
+        pending={pendingFilter === "in_drip"}
+        interactionDisabled={controlsPending}
+        count={filterCounts.in_drip}
+        onClick={() => onFilterChange("in_drip")}
+        testId="filter-in-drip"
       />
       <FilterChip
         label="Replied to drip"

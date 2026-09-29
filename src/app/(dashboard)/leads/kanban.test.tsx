@@ -198,6 +198,7 @@ it("shows a drip chip after bulk enrollment when the only lead ID is unchanged",
   listDripProgress.mockResolvedValueOnce([]).mockResolvedValueOnce([
     { propertyId: "lead-a", status: "Waiting", step: 1, totalSteps: 4 },
   ]);
+  loadLeadBoardAction.mockResolvedValueOnce({ ok: true, data: { ...emptyBoardData(), leads: [makeLead()], totals: baseProps.initialTotals, baselineTotals: baseProps.initialBaselineTotals, urgencyCounts: baseProps.initialUrgencyCounts } });
   renderBoard([makeLead()]);
   await waitFor(() => expect(listDripProgress).toHaveBeenCalledTimes(1));
   await user.click(screen.getByRole("checkbox", { name: "Select 123 Main St" }));
@@ -205,6 +206,7 @@ it("shows a drip chip after bulk enrollment when the only lead ID is unchanged",
   await user.click(screen.getByRole("button", { name: "Enroll selected leads" }));
   expect(await screen.findByTestId("lead-drip-chip-lead-a")).toHaveTextContent("Drip · 1 of 4");
   expect(listDripProgress).toHaveBeenNthCalledWith(2, expect.anything(), ["lead-a"]);
+  expect(listDripProgress).toHaveBeenCalledTimes(2);
 });
 
 function column(status: string): HTMLElement {
