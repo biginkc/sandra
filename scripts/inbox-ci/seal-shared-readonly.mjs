@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CATALOG_SECTIONS, hasExactKeys } from '../outbox-db-contract/catalog-sections.mjs';
+import { ROLES, SHAPE_NAMES } from '../outbox-db-contract/plan-contract.mjs';
 
 const ROOT = 'docs/performance/inbox-redesign/evidence';
 const REF = 'ncsngxlcyxylaeskiteu';
@@ -42,6 +43,22 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   const source = JSON.parse(readFileSync(output));
   inspect(source);
   if (source.target !== 'shared-readonly' || source.phase !== phase || source.verdict !== 'PASS') throw new Error('Readonly output identity mismatch');
+  keys(source.plans, ROLES, 'plan roles');
+  for (const role of ROLES) {
+    keys(source.plans[role], SHAPE_NAMES, `${role} plan shapes`);
+    for (const shape of SHAPE_NAMES) {
+      const plan = source.plans[role][shape];
+      keys(plan, ['sha256','messages_scan','total_cost'], `${role}/${shape} plan`);
+      if (!HEX.test(plan.sha256) || !['Seq Scan','Index'].includes(plan.messages_scan) || !Number.isFinite(plan.total_cost)) throw new Error('Invalid plan digest');
+    }
+  }
+  keys(source.tls, ['ssl','version','cipher'], 'TLS');
+  if (source.tls.ssl !== true || typeof source.tls.version !== 'string' || typeof source.tls.cipher !== 'string') throw new Error('Invalid TLS proof');
+  if (!source.catalog_indexes || Array.isArray(source.catalog_indexes) || typeof source.catalog_indexes !== 'object') throw new Error('Missing index summary');
+  for (const value of Object.values(source.catalog_indexes)) {
+    keys(value, ['relation','valid'], 'index summary');
+    if (typeof value.relation !== 'string' || typeof value.valid !== 'boolean') throw new Error('Invalid index summary');
+  }
   keys(source.comparisons, ['catalog', 'platform'], 'comparison');
   keys(source.comparisons.catalog, ['verdict', 'input_sha256', 'observed_section_sha256'], 'catalog comparison');
   keys(source.comparisons.platform, ['verdict', 'input_sha256', 'observed_sha256'], 'platform comparison');
@@ -64,7 +81,9 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   const runId = `shared-readonly-${phase}-${now.toISOString().replace(/[-:.]/g, '').replace('Z', 'Z')}`;
   const relative = `${ROOT}/${sha}/pre-merge/${runId}`;
   const absolute = path.join(repo, relative);
-  const readonly = { verdict: source.verdict, target: 'shared-test', phase, comparisons: { catalog: { verdict: 'PASS', input_sha256: catalog.sha256, observed_section_sha256: observedSections }, platform: { verdict: 'PASS', input_sha256: platform.sha256, observed_sha256: source.comparisons.platform.observed_sha256 } }, items: {} };
+  const readonly = { verdict: source.verdict, target: 'shared-test', phase, source_output_sha256: hash(readFileSync(output)),
+    plans: source.plans, tls: source.tls, catalog_indexes_sha256: hash(Buffer.from(JSON.stringify(source.catalog_indexes))),
+    comparisons: { catalog: { verdict: 'PASS', input_sha256: catalog.sha256, observed_section_sha256: observedSections }, platform: { verdict: 'PASS', input_sha256: platform.sha256, observed_sha256: source.comparisons.platform.observed_sha256 } }, items: {} };
   const queued = source.items?.queued_invariants;
   if (queued) {
     if (typeof queued !== 'object' || Array.isArray(queued) || Object.keys(queued).some(key => !['verdict', 'diff', 'stability_probe'].includes(key)) ||
@@ -76,7 +95,7 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   if (queued) readonly.items.queued_invariants = { verdict: queued.verdict, diff: hash(Buffer.from(JSON.stringify(queued.diff))), ...(queued.stability_probe ? { stability_probe: queued.stability_probe } : {}) };
   inspect(readonly);
   const bytes = Buffer.from(JSON.stringify(readonly, null, 2) + '\n');
-  const scripts = ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs', 'scripts/outbox-db-contract/catalog-sections.mjs'];
+  const scripts = ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs', 'scripts/outbox-db-contract/catalog-sections.mjs', 'scripts/outbox-db-contract/plan-contract.mjs', 'scripts/outbox-db-contract/connection.mjs'];
   const operator_script_sha256 = Object.fromEntries(scripts.map(script => [script, hash(git(repo, 'show', `${sha}:${script}`))]));
   if (scripts.some(script => operator_script_sha256[script] !== hash(readFileSync(path.join(repo, script))))) throw new Error('Operator script differs from tested SHA');
   const manifest = { tested_sha: sha, tier: 'pre-merge', kind: 'shared-readonly', phase, target: 'shared-test', verdict: source.verdict, exit_status: 0, run_id: runId, started_at: now.toISOString(), completed_at: now.toISOString(), clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative }, artifacts: { 'readonly.json': hash(bytes) }, target_binding: { project_ref: REF, pooler_user: `postgres.${REF}` }, inputs: { catalog_record: { directory: catalog.directory, artifact: catalog.artifact, sha256: catalog.sha256 }, platform_record: { directory: platform.directory, artifact: platform.artifact, sha256: platform.sha256 } }, operator_script_sha256, event: 'operator', workflow_path: '', github_run_id: '', github_run_attempt: '', items: readonly.items };
