@@ -29,6 +29,7 @@ export default defineConfig({
     // rejects hosted URLs. It has its own local-only runner so this hosted
     // suite cannot accidentally select it.
     exclude: [
+      "supabase/migrations/20260929238000_sequence_replace_steps.integration.test.ts",
       "supabase/migrations/20260927023443_dialpad_cti_kpi_seller_speech.integration.test.ts",
       "supabase/migrations/20260929034021_dialpad_cti_foundation.integration.test.ts",
       "supabase/migrations/20260929120000_dialpad_cti_call_projection.integration.test.ts",

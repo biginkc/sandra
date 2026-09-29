@@ -53,6 +53,44 @@ export type SequenceWithSteps = {
   }>;
 };
 
+export type SequenceStepInput = Omit<SequenceWithSteps["steps"][number], "id"> & { id?: string };
+
+export async function replaceSequenceSteps(input: {
+  sequenceId: string;
+  name: string;
+  description: string | null;
+  steps: SequenceStepInput[];
+}): Promise<Result<string[]>> {
+  const name = input.name.trim();
+  if (!name || name.length > 120 || input.steps.length > 100 || input.steps.some((step, index) =>
+    step.step_index !== index || !Number.isInteger(step.delay_after_previous_minutes) ||
+    step.delay_after_previous_minutes < 0 ||
+    (step.action_type === "send_sms" && (!!step.template_body?.trim() === !!step.template_id)) ||
+    (step.action_type === "change_status" && !step.target_status)
+  )) return { ok: false, error: { code: "VALIDATION", message: "Check the drip name and every step before saving." } };
+  try {
+    const guard = await requireSequenceAdmin();
+    if (!guard.ok) return { ok: false, error: guard.error };
+    const supabase = await createClient();
+    const { data, error } = await supabase.rpc("sequence_replace_steps", {
+      p_sequence: input.sequenceId,
+      p_name: name,
+      p_description: input.description,
+      p_steps: input.steps,
+    });
+    if (error) return { ok: false, error: { code: "STEP_REPLACE_FAILED", message: error.message } };
+    revalidatePath("/sequences");
+    revalidatePath(`/sequences/${input.sequenceId}`);
+    revalidatePath(`/sequences/${input.sequenceId}/edit`);
+    if (!Array.isArray(data) || data.length !== input.steps.length || !data.every((id) => typeof id === "string"))
+      return { ok: false, error: { code: "STEP_REPLACE_RESPONSE", message: "Drip saved, but saved step IDs could not be read. Reload before editing again." } };
+    return ok(data as string[]);
+  } catch (error) {
+    reportError(error, { tags: { surface: "replace_sequence_steps" }, extra: { sequenceId: input.sequenceId } });
+    return errFromUnknown(error, "STEP_REPLACE_FAILED");
+  }
+}
+
 export type NeedsPersonRow = {
   property_id: string;
   sequence_id: string | null;

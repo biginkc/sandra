@@ -4,14 +4,6 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { callAction } from "@/lib/errors/call-action";
 import {
@@ -23,9 +15,8 @@ import {
 import { type TemplateRow } from "@/app/(dashboard)/templates/actions";
 
 import {
-  deleteSequenceStep,
-  updateSequence,
-  upsertSequenceStep,
+  replaceSequenceSteps,
+  type SequenceStepInput,
   type SequenceWithSteps,
 } from "../../actions";
 
@@ -120,135 +111,103 @@ function DelayInput({
   );
 }
 
-/**
- * Inline vertical editor. One form for sequence meta, stacked step
- * editors below. Each step has its own save — simpler than a full-form
- * state machine for V1. Adding a step creates a row at step_index =
- * existing.length; deleting reorders via a best-effort resequence on
- * save (V1: no drag-drop, explicit up/down buttons if needed later).
- */
-export function SequenceEditor({
-  sequence,
-  initialImpact,
-  templates,
-}: {
+type DraftStep = SequenceStepInput & { key: string };
+
+function draftFromStep(step: SequenceWithSteps["steps"][number]): DraftStep {
+  return { ...step, key: step.id };
+}
+
+let draftCounter = 0;
+function blankStep(index: number): DraftStep {
+  return {
+    key: `new-${++draftCounter}`, step_index: index,
+    delay_after_previous_minutes: index === 0 ? 0 : 1440,
+    action_type: "send_sms", template_body: "", template_id: null, target_status: null,
+  };
+}
+
+export function SequenceEditor({ sequence, initialImpact, templates, isNew = false }: {
   sequence: SequenceWithSteps;
   initialImpact: { total_enrolled: number; scheduled_next_7d: number };
   templates: TemplateRow[];
+  isNew?: boolean;
 }) {
   const router = useRouter();
   const [name, setName] = useState(sequence.name);
   const [description, setDescription] = useState(sequence.description ?? "");
-  const [appendOptOut, setAppendOptOut] = useState(sequence.append_opt_out);
-  const [active, setActive] = useState(sequence.active);
+  const [steps, setSteps] = useState<DraftStep[]>(() =>
+    isNew && sequence.steps.length === 0 ? [blankStep(0)] : sequence.steps.map(draftFromStep));
   const [pending, startTransition] = useTransition();
 
-  const onSaveMeta = () => {
-    // Show the impact modal for any meta edit that affects enrolled leads.
-    // Template-body edits on individual steps live-read, so the modal is
-    // most relevant for active / description changes — but we show it
-    // for any save when enrollments exist.
-    const proceed = confirmImpact(initialImpact);
-    if (!proceed) return;
+  const patchStep = (key: string, patch: Partial<DraftStep>) =>
+    setSteps((old) => old.map((step) => step.key === key ? { ...step, ...patch } : step));
+  const removeStep = (key: string) =>
+    setSteps((old) => old.filter((step) => step.key !== key)
+      .map((step, step_index) => ({ ...step, step_index })));
+  const moveStep = (index: number, delta: number) => setSteps((old) => {
+    const target = index + delta;
+    if (target < 0 || target >= old.length) return old;
+    const next = [...old];
+    [next[index], next[target]] = [next[target], next[index]];
+    return next.map((step, step_index) => ({ ...step, step_index }));
+  });
+  const valid = name.trim().length > 0 && steps.every((step) =>
+    step.action_type === "send_sms"
+      ? Boolean(step.template_id || step.template_body?.trim())
+      : Boolean(step.target_status));
+
+  const onSave = () => {
+    if (!valid) return;
+    if (initialImpact.total_enrolled > 0 && !window.confirm(
+      `${initialImpact.total_enrolled} lead${initialImpact.total_enrolled === 1 ? "" : "s"} enrolled.\n` +
+      `${initialImpact.scheduled_next_7d} scheduled in the next 7 days.\n` +
+      "Changes to this drip take effect on the next step. Save all changes?")) return;
+    const savedKeys = steps.map((step) => step.key);
     startTransition(async () => {
-      await callAction(
-        updateSequence(sequence.id, {
-          name,
-          description: description.trim() || null,
-          append_opt_out: appendOptOut,
-          active,
-        }),
-        {
-          successMessage: "Drip saved",
-          fallbackMessage: "Could not save drip",
-        },
-      );
-      router.refresh();
+      const result = await callAction(replaceSequenceSteps({
+        sequenceId: sequence.id, name, description: description.trim() || null,
+        steps: steps.map((step, step_index) => ({
+          id: step.id, step_index, delay_after_previous_minutes: step.delay_after_previous_minutes,
+          action_type: step.action_type,
+          template_body: step.action_type === "send_sms" && !step.template_id ? step.template_body : null,
+          template_id: step.action_type === "send_sms" ? step.template_id : null,
+          target_status: step.action_type === "change_status" ? step.target_status : null,
+        })),
+      }), { successMessage: "Drip saved", fallbackMessage: "Could not save drip" });
+      if (result.ok) {
+        setSteps((old) => old.map((step) => {
+          const index = savedKeys.indexOf(step.key);
+          return index < 0 ? step : { ...step, id: result.data[index] };
+        }));
+        router.replace(`/sequences/${sequence.id}/edit`);
+        router.refresh();
+      }
     });
   };
 
-  return (
-    <div className="flex flex-col gap-6">
-      <div className="flex justify-end">
-        <Button variant="ghost" onClick={() => router.push("/sequences")}>
-          Back to list
-        </Button>
+  return <div className="flex flex-col gap-6">
+    <div className="flex justify-end"><Button variant="ghost" onClick={() => router.push("/sequences")}>Back to list</Button></div>
+    <section className="flex max-w-2xl flex-col gap-4 rounded-md border p-4">
+      <h2 className="font-semibold">Drip details</h2>
+      <label htmlFor="seq-name" className="flex flex-col gap-1 text-sm"><span>Name</span>
+        <Input id="seq-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} />
+      </label>
+      <label htmlFor="seq-description" className="flex flex-col gap-1 text-sm"><span>Description</span>
+        <Input id="seq-description" value={description} onChange={(e) => setDescription(e.target.value)} />
+      </label>
+    </section>
+    <section className="flex flex-col gap-4">
+      <div className="flex items-center justify-between"><h2 className="font-semibold">Steps <span className="text-muted-foreground text-sm font-normal">· {steps.length} {steps.length === 1 ? "step" : "steps"}</span></h2>
+        <Button variant="outline" onClick={() => setSteps((old) => [...old, blankStep(old.length)])}>Add step</Button>
       </div>
-
-      <section className="flex max-w-2xl flex-col gap-4 rounded-md border p-4">
-        <h2 className="font-semibold">Drip details</h2>
-        <label htmlFor="seq-name" className="flex flex-col gap-1 text-sm">
-          <span>Name</span>
-          <Input
-            id="seq-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            maxLength={120}
-          />
-        </label>
-        <label
-          htmlFor="seq-description"
-          className="flex flex-col gap-1 text-sm"
-        >
-          <span>Description</span>
-          <Input
-            id="seq-description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-        </label>
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={appendOptOut}
-            onChange={(e) => setAppendOptOut(e.target.checked)}
-          />
-          <span>
-            Auto-append opt-out phrase (rotates among 5 variants at send time)
-          </span>
-        </label>
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={active}
-            onChange={(e) => setActive(e.target.checked)}
-          />
-          <span>{active ? "Open to new leads — uncheck to close" : "Closed to new leads — check to reopen"}</span>
-        </label>
-        <div>
-          <Button onClick={onSaveMeta} disabled={pending}>
-            Save
-          </Button>
-        </div>
-      </section>
-
-      <section className="flex flex-col gap-4">
-        <div className="flex items-center justify-between">
-          <h2 className="font-semibold">Steps</h2>
-          <AddStepButton
-            sequenceId={sequence.id}
-            nextIndex={sequence.steps.length}
-            templates={templates}
-          />
-        </div>
-        {sequence.steps.length === 0 ? (
-          <div className="text-muted-foreground rounded-md border border-dashed p-6 text-sm">
-            No steps yet. Click &ldquo;Add step&rdquo; to author the first one.
-          </div>
-        ) : (
-          sequence.steps.map((step) => (
-            <StepEditor
-              key={step.id}
-              sequenceId={sequence.id}
-              step={step}
-              impact={initialImpact}
-              templates={templates}
-            />
-          ))
-        )}
-      </section>
-    </div>
-  );
+      {initialImpact.total_enrolled > 0 ? <p className="text-muted-foreground text-xs">Move and delete are unavailable while leads are enrolled. You can edit text or add a step.</p> : null}
+      {steps.length === 0 ? <div className="text-muted-foreground rounded-md border border-dashed p-6 text-sm">No steps yet. Add a step to start this drip.</div> :
+        steps.map((step, index) => <StepEditor key={step.key} step={step} index={index}
+          count={steps.length} locked={initialImpact.total_enrolled > 0} templates={templates} onChange={(patch) => patchStep(step.key, patch)}
+          onMove={(delta) => moveStep(index, delta)} onDelete={() => removeStep(step.key)} />)}
+    </section>
+    <div><Button onClick={onSave} disabled={pending || !valid}>Save all steps</Button></div>
+  </div>;
 }
 
 /**
@@ -375,315 +334,43 @@ function MessageBodyEditor({
   );
 }
 
-function AddStepButton({
-  sequenceId,
-  nextIndex,
-  templates,
-}: {
-  sequenceId: string;
-  nextIndex: number;
+function StepEditor({ step, index, count, locked, templates, onChange, onMove, onDelete }: {
+  step: DraftStep;
+  index: number;
+  count: number;
+  locked: boolean;
   templates: TemplateRow[];
+  onChange: (patch: Partial<DraftStep>) => void;
+  onMove: (delta: number) => void;
+  onDelete: () => void;
 }) {
-  const router = useRouter();
-  const [open, setOpen] = useState(false);
-  const [pending, startTransition] = useTransition();
-
-  // Sensible defaults for a brand-new step. First step fires immediately;
-  // subsequent steps default to +24h (a common first nudge cadence). The
-  // author can change either in the modal before committing.
-  const defaultDelay = nextIndex === 0 ? 0 : 1440;
-  const [delayMin, setDelayMin] = useState(defaultDelay);
-  const [actionType, setActionType] = useState<"send_sms" | "change_status">(
-    "send_sms",
-  );
-  const [templateBody, setTemplateBody] = useState("");
-  const [templateId, setTemplateId] = useState<string | null>(null);
-  const [targetStatus, setTargetStatus] = useState("");
-
-  const resetForm = () => {
-    setDelayMin(defaultDelay);
-    setActionType("send_sms");
-    setTemplateBody("");
-    setTemplateId(null);
-    setTargetStatus("");
-  };
-
-  const onOpenChange = (next: boolean) => {
-    if (!next) resetForm();
-    setOpen(next);
-  };
-
-  const onSave = () => {
-    startTransition(async () => {
-      const r = await callAction(
-        upsertSequenceStep({
-          sequence_id: sequenceId,
-          step_index: nextIndex,
-          delay_after_previous_minutes: delayMin,
-          action_type: actionType,
-          template_body:
-            actionType === "send_sms" && !templateId ? templateBody : null,
-          template_id: actionType === "send_sms" ? templateId : null,
-          target_status: actionType === "change_status" ? targetStatus : null,
-        }),
-        {
-          successMessage: "Step added",
-          fallbackMessage: "Could not add step",
-        },
-      );
-      if (r.ok) {
-        onOpenChange(false);
-        router.refresh();
-      }
-    });
-  };
-
-  // Disable save when the action's required field is missing.
-  const canSave =
-    actionType === "send_sms"
-      ? templateId !== null || templateBody.trim().length > 0
-      : targetStatus.length > 0;
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <Button variant="outline" onClick={() => setOpen(true)}>
-        Add step
-      </Button>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Add step {nextIndex + 1}</DialogTitle>
-          <DialogDescription>
-            Step fires after the delay elapses from the previous step&rsquo;s
-            run time (or enrollment time, for step 1). Templates are live-read
-            on every fire.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
-            <div className="flex flex-1 flex-col gap-1 text-sm">
-              <span className="font-medium">Delay</span>
-              <DelayInput value={delayMin} onChange={setDelayMin} autoFocus />
-            </div>
-
-            <label className="flex flex-col gap-1 text-sm">
-              <span className="font-medium">Action</span>
-              <select
-                value={actionType}
-                onChange={(e) =>
-                  setActionType(e.target.value as "send_sms" | "change_status")
-                }
-                className="border-input rounded-md border px-2 py-1.5 text-sm"
-              >
-                <option value="send_sms">
-                  {systemLabel(SEQUENCE_ACTION_LABELS, "send_sms")}
-                </option>
-                <option value="change_status">
-                  {systemLabel(SEQUENCE_ACTION_LABELS, "change_status")}
-                </option>
-              </select>
-            </label>
-          </div>
-
-          {actionType === "send_sms" ? (
-            <MessageBodyEditor
-              templates={templates}
-              body={templateBody}
-              setBody={setTemplateBody}
-              templateId={templateId}
-              setTemplateId={setTemplateId}
-            />
-          ) : (
-            <label className="flex flex-col gap-1 text-sm">
-              <span className="font-medium">Target status</span>
-              <select
-                value={targetStatus}
-                onChange={(e) => setTargetStatus(e.target.value)}
-                className="border-input rounded-md border px-2 py-1.5 text-sm"
-              >
-                <option value="">— select —</option>
-                {[
-                  "new_lead",
-                  "contacted",
-                  "interested",
-                  "offer_sent",
-                  "offer_declined",
-                  "under_contract",
-                  "closed",
-                  "dead",
-                ].map((status) => (
-                  <option key={status} value={status}>
-                    {systemLabel(PROPERTY_STATUS_LABELS, status)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-        </div>
-
-        <DialogFooter>
-          <Button
-            variant="ghost"
-            onClick={() => onOpenChange(false)}
-            disabled={pending}
-          >
-            Cancel
-          </Button>
-          <Button onClick={onSave} disabled={pending || !canSave}>
-            Add step
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function StepEditor({
-  sequenceId,
-  step,
-  impact,
-  templates,
-}: {
-  sequenceId: string;
-  step: SequenceWithSteps["steps"][number];
-  impact: { total_enrolled: number; scheduled_next_7d: number };
-  templates: TemplateRow[];
-}) {
-  const router = useRouter();
-  const [delayMin, setDelayMin] = useState(step.delay_after_previous_minutes);
-  const [actionType, setActionType] = useState(step.action_type);
-  const [templateBody, setTemplateBody] = useState(step.template_body ?? "");
-  const [templateId, setTemplateId] = useState<string | null>(
-    step.template_id ?? null,
-  );
-  const [targetStatus, setTargetStatus] = useState(step.target_status ?? "");
-  const [pending, startTransition] = useTransition();
-
-  const onSave = () => {
-    if (!confirmImpact(impact)) return;
-    startTransition(async () => {
-      const r = await callAction(
-        upsertSequenceStep({
-          id: step.id,
-          sequence_id: sequenceId,
-          step_index: step.step_index,
-          delay_after_previous_minutes: delayMin,
-          action_type: actionType,
-          template_body:
-            actionType === "send_sms" && !templateId ? templateBody : null,
-          template_id: actionType === "send_sms" ? templateId : null,
-          target_status: actionType === "change_status" ? targetStatus : null,
-        }),
-        {
-          successMessage: "Step saved",
-          fallbackMessage: "Could not save step",
-        },
-      );
-      if (r.ok) router.refresh();
-    });
-  };
-
-  const onDelete = () => {
-    if (!window.confirm(`Delete step ${step.step_index + 1}?`)) return;
-    startTransition(async () => {
-      const r = await callAction(deleteSequenceStep(step.id, sequenceId), {
-        successMessage: "Step deleted",
-        fallbackMessage: "Could not delete step",
-      });
-      if (r.ok) router.refresh();
-    });
-  };
-
-  return (
-    <div className="flex flex-col gap-3 rounded-md border p-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold">Step {step.step_index + 1}</h3>
-        <Button variant="ghost" size="sm" onClick={onDelete} disabled={pending}>
-          Delete
-        </Button>
+  return <div className="flex flex-col gap-3 rounded-md border p-4">
+    <div className="flex items-center justify-between"><h3 className="text-sm font-semibold">Step {index + 1}</h3>
+      <div className="flex items-center gap-1"><Button variant="ghost" size="sm" disabled={locked || index === 0} onClick={() => onMove(-1)}>Move up</Button>
+        <Button variant="ghost" size="sm" disabled={locked || index === count - 1} onClick={() => onMove(1)}>Move down</Button>
+        <Button variant="ghost" size="sm" disabled={locked} onClick={onDelete}>Delete</Button></div></div>
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
+      <div className="flex flex-1 flex-col gap-1 text-sm"><span className="font-medium">Delay</span>
+        <DelayInput value={step.delay_after_previous_minutes} onChange={(value) => onChange({ delay_after_previous_minutes: value })} />
       </div>
-
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
-        <div className="flex flex-1 flex-col gap-1 text-sm">
-          <span className="font-medium">Delay</span>
-          <DelayInput value={delayMin} onChange={setDelayMin} />
-        </div>
-
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium">Action</span>
-          <select
-            value={actionType}
-            onChange={(e) =>
-              setActionType(e.target.value as "send_sms" | "change_status")
-            }
-            className="border-input rounded-md border px-2 py-1.5 text-sm"
-          >
-            <option value="send_sms">
-              {systemLabel(SEQUENCE_ACTION_LABELS, "send_sms")}
-            </option>
-            <option value="change_status">
-              {systemLabel(SEQUENCE_ACTION_LABELS, "change_status")}
-            </option>
-          </select>
-        </label>
-      </div>
-
-      {actionType === "send_sms" ? (
-        <MessageBodyEditor
-          templates={templates}
-          body={templateBody}
-          setBody={setTemplateBody}
-          templateId={templateId}
-          setTemplateId={setTemplateId}
-        />
-      ) : (
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium">Target status</span>
-          <select
-            value={targetStatus}
-            onChange={(e) => setTargetStatus(e.target.value)}
-            className="border-input rounded-md border px-2 py-1.5 text-sm"
-          >
-            <option value="">— select —</option>
-            {[
-              "new_lead",
-              "contacted",
-              "interested",
-              "offer_sent",
-              "offer_declined",
-              "under_contract",
-              "closed",
-              "dead",
-            ].map((status) => (
-              <option key={status} value={status}>
-                {systemLabel(PROPERTY_STATUS_LABELS, status)}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-
-      <div>
-        <Button onClick={onSave} disabled={pending}>
-          Save step
-        </Button>
-      </div>
+      <label className="flex flex-col gap-1 text-sm"><span className="font-medium">Action</span>
+        <select value={step.action_type} onChange={(e) => onChange({ action_type: e.target.value as DraftStep["action_type"] })}
+          className="border-input rounded-md border px-2 py-1.5 text-sm">
+          <option value="send_sms">{systemLabel(SEQUENCE_ACTION_LABELS, "send_sms")}</option>
+          <option value="change_status">{systemLabel(SEQUENCE_ACTION_LABELS, "change_status")}</option>
+        </select>
+      </label>
     </div>
-  );
-}
-
-function confirmImpact(impact: {
-  total_enrolled: number;
-  scheduled_next_7d: number;
-}): boolean {
-  if (impact.total_enrolled === 0) return true;
-  const lines = [
-    `${impact.total_enrolled} lead${impact.total_enrolled === 1 ? "" : "s"} enrolled.`,
-    `${impact.scheduled_next_7d} scheduled to fire in the next 7 days.`,
-    "",
-    "Templates are live-read — edits take effect on the next fire.",
-    "",
-    "Proceed?",
-  ];
-  return window.confirm(lines.join("\n"));
+    {step.action_type === "send_sms" ? <MessageBodyEditor templates={templates}
+      body={step.template_body ?? ""} setBody={(value) => onChange({ template_body: value })}
+      templateId={step.template_id ?? null} setTemplateId={(value) => onChange({ template_id: value })} /> :
+      <label className="flex flex-col gap-1 text-sm"><span className="font-medium">Target status</span>
+        <select value={step.target_status ?? ""} onChange={(e) => onChange({ target_status: e.target.value })}
+          className="border-input rounded-md border px-2 py-1.5 text-sm">
+          <option value="">— select —</option>
+          {["new_lead", "contacted", "interested", "offer_sent", "offer_declined", "under_contract", "closed", "dead"].map((status) =>
+            <option key={status} value={status}>{systemLabel(PROPERTY_STATUS_LABELS, status)}</option>)}
+        </select>
+      </label>}
+  </div>;
 }

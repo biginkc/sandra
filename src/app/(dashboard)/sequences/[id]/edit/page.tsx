@@ -11,12 +11,15 @@ import { SequenceEditor } from "./editor";
 
 export default async function SequenceEditPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ new?: string }>;
 }) {
   if (!(await getSequenceAdminStatus())) redirect("/leads");
 
   const { id } = await params;
+  const isNew = (await searchParams).new === "1";
   const result = await getSequenceWithSteps(id);
   if (!result.ok || !result.data) {
     if (result.ok) notFound();
@@ -63,6 +66,7 @@ export default async function SequenceEditPage({
         sequence={result.data}
         initialImpact={impact}
         templates={templates}
+        isNew={isNew}
       />
     </Page>
   );

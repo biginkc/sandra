@@ -5732,6 +5732,7 @@ export type Database = {
       }
     }
     Functions: {
+      sequence_replace_steps: { Args: { p_sequence: string; p_steps: Json; p_name: string; p_description: string | null }; Returns: Json }
       sequence_overview_stats: { Args: { p_org: string }; Returns: Array<{
         id: string; name: string; description: string | null; active: boolean;
         append_opt_out: boolean; archived_at: string | null; created_at: string;
