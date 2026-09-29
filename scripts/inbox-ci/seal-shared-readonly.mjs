@@ -58,7 +58,9 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
       Object.keys(expectedSections).some(k => !HEX.test(expectedSections[k]) || observedSections[k] !== expectedSections[k])) throw new Error('Catalog comparison mismatch');
   if (!HEX.test(source.comparisons.platform.observed_sha256)) throw new Error('Platform comparison digest missing');
   const platformKeys = ['postgres_major', 'postgrest_major', 'gotrue_major'];
-  keys(platform.data, platformKeys, 'consumed platform');
+  keys(platform.data, [...platformKeys, 'sha256'], 'consumed platform');
+  const consumedPlatform = Object.fromEntries(platformKeys.map(key => [key, platform.data[key]]));
+  if (!HEX.test(platform.data.sha256) || platform.data.sha256 !== hash(JSON.stringify(consumedPlatform))) throw new Error('Consumed platform digest mismatch');
   if (platformKeys.some(k => !/^[0-9]+$/.test(platform.data[k]) || platform.data[k] !== source.platform_config[k])) throw new Error('Platform comparison mismatch');
   const observedPlatform = Object.fromEntries(platformKeys.map(key => [key, source.platform_config[key]]));
   if (source.platform_config.sha256 !== hash(JSON.stringify(observedPlatform)) || source.comparisons.platform.observed_sha256 !== source.platform_config.sha256) throw new Error('Observed platform digest mismatch');

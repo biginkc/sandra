@@ -333,13 +333,16 @@ def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
                 raise EvidenceError(f"catalog mismatch: {directory}")
         else:
             platform_keys = ("postgres_major", "postgrest_major", "gotrue_major")
-            if (not isinstance(data, dict) or set(data) != set(platform_keys)
+            if (not isinstance(data, dict) or set(data) != {*platform_keys, "sha256"}
                     or any(not isinstance(data[key], str) or not re.fullmatch(r"[0-9]+", data[key]) for key in platform_keys)):
                 raise EvidenceError(f"invalid consumed platform data: {directory}")
             # platform.mjs hashes JSON.stringify of these fields in this exact insertion order.
             canonical = {key: data[key] for key in platform_keys}
             digest = hashlib.sha256(json.dumps(canonical, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-            if output["comparisons"]["platform"].get("verdict") != "PASS" or output["comparisons"]["platform"].get("observed_sha256") != digest:
+            if (not isinstance(data["sha256"], str) or not HASH.fullmatch(data["sha256"])
+                    or data["sha256"] != digest
+                    or output["comparisons"]["platform"].get("verdict") != "PASS"
+                    or output["comparisons"]["platform"].get("observed_sha256") != digest):
                 raise EvidenceError(f"platform mismatch: {directory}")
 
 
