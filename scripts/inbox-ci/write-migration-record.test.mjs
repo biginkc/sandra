@@ -10,7 +10,7 @@ import { verifyDownload } from '../ci/pull-heavy-record.mjs';
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const git = (repo, ...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
 const copy = (repo, file) => { mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); cpSync(path.join(source, file), path.join(repo, file)); };
-const versions = ['20260930000000', '20260930000100', '20260930000200'];
+const versions = ['20260930020000', '20260930020100', '20260930020200'];
 
 test('each W2 lane produces a pullable record and the W1 gate selects both keys', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'w2-record-'));
