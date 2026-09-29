@@ -8,7 +8,7 @@ lane_env="$(mktemp)"
 original_env="${GITHUB_ENV:-}"
 trap 'rm -f "$lane_env"' EXIT
 export GITHUB_ENV="$lane_env"
-node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --exclude-migrations '2026092900*'
+node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422 --exclude-migrations '2026093002*'
 set -a
 source "$lane_env"
 set +a

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { verifyDownload } from '../ci/pull-heavy-record.mjs';
@@ -28,7 +28,7 @@ for (const phase of ['pre', 'post']) test(`db-contract ${phase} record is accept
       verdict: 'PASS', exit_status: 0, run_id: id, lane, artifact_name: artifactName,
       github_run_id: id, github_run_attempt: attempt, event: 'workflow_dispatch',
       head_branch: 'main', workflow_path: '.github/workflows/inbox-heavy-verification.yml',
-      workflow_input_sha: sha, runner_script_sha256: sha256(readFileSync(`scripts/inbox-ci/${lane}.sh`)),
+      workflow_input_sha: sha, runner_script_sha256: sha256(execFileSync('git', ['show', `${sha}:scripts/inbox-ci/${lane}.sh`])),
       completed_at: new Date().toISOString(), artifacts: { 'contracts.json': sha256(contracts) },
     };
     writeFileSync(path.join(dir, 'manifest.json'), `${JSON.stringify(manifest)}\n`);

@@ -10,10 +10,18 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from sealed_evidence import ROOT, EvidenceError, evaluate, evaluate_deploy, evaluate_migration, J5A, MIGRATION_VERSIONS
+from sealed_evidence import ROOT, EvidenceError, evaluate, evaluate_deploy, evaluate_migration, J5A, MIGRATION_VERSIONS, CATALOG_SECTIONS
 
 
 class SealedEvidenceTests(unittest.TestCase):
+    def test_catalog_section_contract_matches_node_checker(self):
+        source = Path(__file__).resolve().parents[2]
+        sections = subprocess.check_output(
+            ["node", "--input-type=module", "-e", "import { CATALOG_SECTIONS } from './scripts/outbox-db-contract/catalog-sections.mjs'; console.log(JSON.stringify(CATALOG_SECTIONS))"],
+            cwd=source, text=True,
+        )
+        self.assertEqual(tuple(json.loads(sections)), CATALOG_SECTIONS)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -22,6 +30,11 @@ class SealedEvidenceTests(unittest.TestCase):
         self.git("config", "user.email", "test@example.invalid")
         self.git("config", "user.name", "Evidence Test")
         (self.repo / "base.txt").write_text("base")
+        source = Path(__file__).resolve().parents[2]
+        for name in ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs", "scripts/outbox-db-contract/catalog-sections.mjs"):
+            target = self.repo / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((source / name).read_bytes())
         self.commit("base")
         self.sha = self.git("rev-parse", "HEAD")
         self.base_branch = self.git("branch", "--show-current")
@@ -33,8 +46,25 @@ class SealedEvidenceTests(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-qm", message)
 
+    @staticmethod
+    def platform_config() -> dict:
+        # This is platform.mjs's JSON.stringify serializer: majors in this insertion order, then sha256.
+        majors = {"postgres_major": "17", "postgrest_major": "12", "gotrue_major": "2"}
+        return {**majors, "sha256": hashlib.sha256(json.dumps(majors, separators=(",", ":")).encode()).hexdigest()}
+
+    @staticmethod
+    def catalog_config() -> dict:
+        names = CATALOG_SECTIONS
+        sections = {name: [] for name in names}
+        hashes = {name: "c" * 64 for name in names}
+        # catalog_fingerprint.py emits the raw sections plus both levels of digest.
+        return {"sections": sections, "section_sha256": hashes,
+                "sha256": hashlib.sha256(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+
     def record(self, name="one", *, sha=None, tier="pre-merge", exit_status=0, completed="2026-09-28T12:00:00Z", observed=None, commit=True, kind=None, phase="pre", target="n/a", verdict=None, extra=None) -> Path:
         sha = sha or self.sha
+        if kind == "shared-readonly":
+            name = "shared-readonly-" + phase + "-" + completed.replace("Z", ".000Z").replace("-", "").replace(":", "").replace(".", "")
         directory = self.repo / ROOT / sha / tier / name
         directory.mkdir(parents=True)
         artifact = directory / "screenshots" / "O01.png"
@@ -49,8 +79,40 @@ class SealedEvidenceTests(unittest.TestCase):
             "exit_status": exit_status,
             "artifacts": {"screenshots/O01.png": hashlib.sha256(artifact.read_bytes()).hexdigest()},
         }
+        if kind == "catalog-fingerprint":
+            artifact2 = directory / "catalog-pre.json"
+            artifact2.write_text(json.dumps(self.catalog_config()))
+            manifest["artifacts"][artifact2.name] = hashlib.sha256(artifact2.read_bytes()).hexdigest()
+        if kind == "db-contract" and phase == "pre":
+            artifact2 = directory / "platform-config.json"
+            artifact2.write_text(json.dumps(getattr(self, "platform_config_override", self.platform_config())))
+            manifest["artifacts"][artifact2.name] = hashlib.sha256(artifact2.read_bytes()).hexdigest()
+        if kind == "shared-readonly":
+            manifest.pop("runner_script_sha256")
+            manifest.pop("fault_proxy_script_sha256")
+            sealed_time = completed.replace("Z", ".000Z")
+            manifest["started_at"] = sealed_time
+            manifest["completed_at"] = sealed_time
+            manifest["run_id"] = "shared-readonly-" + phase + "-" + sealed_time.replace("-", "").replace(":", "").replace(".", "")
+            scripts = ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs", "scripts/outbox-db-contract/catalog-sections.mjs")
+            inputs = {}
+            for label, source_kind, source_phase, filename in (("catalog_record", "catalog-fingerprint", "n/a", "catalog-pre.json"), ("platform_record", "db-contract", "pre", "platform-config.json")):
+                candidates = list((self.repo / ROOT / self.sha / "pre-merge").glob("*/manifest.json"))
+                found = next((p for p in candidates if (v := json.loads(p.read_text())).get("kind") == source_kind and v.get("phase") == source_phase), None)
+                if found:
+                    v = json.loads(found.read_text())
+                    inputs[label] = {"directory": found.parent.relative_to(self.repo).as_posix(), "artifact": filename, "sha256": v["artifacts"][filename]}
+            manifest.update({"event": "operator", "workflow_path": "", "github_run_id": "", "github_run_attempt": "", "target_binding": {"project_ref": "ncsngxlcyxylaeskiteu", "pooler_user": "postgres.ncsngxlcyxylaeskiteu"}, "operator_script_sha256": {name: hashlib.sha256((self.repo / name).read_bytes()).hexdigest() for name in scripts}, "inputs": inputs, "items": {}})
+            if len(inputs) == 2:
+                platform_data = self.platform_config()
+                output = {"verdict": "PASS", "target": "shared-test", "phase": phase, "comparisons": {"catalog": {"verdict": "PASS", "input_sha256": inputs["catalog_record"]["sha256"], "observed_section_sha256": self.catalog_config()["section_sha256"]}, "platform": {"verdict": "PASS", "input_sha256": inputs["platform_record"]["sha256"], "observed_sha256": platform_data["sha256"]}}, "items": {}}
+                artifact.unlink()
+                manifest["artifacts"] = {"readonly.json": hashlib.sha256(json.dumps(output).encode()).hexdigest()}
+                (directory / "readonly.json").write_text(json.dumps(output))
         if extra:
             manifest.update(extra)
+        if kind == "shared-readonly" and hasattr(self, "shared_mutation"):
+            self.shared_mutation(manifest, directory)
         if observed is not None:
             manifest["observed_deployment"] = observed
         (directory / "manifest.json").write_text(json.dumps(manifest))
@@ -240,8 +302,10 @@ class SealedEvidenceTests(unittest.TestCase):
                            "workflow_path": ".github/workflows/inbox-heavy-verification.yml",
                            "workflow_input_sha": self.sha, "event": "workflow_dispatch", "head_branch": "main"}
                           if target == "disposable" else None)
-            self.record(str(1000 + i), tier=tier, kind=kind, phase=phase, target=target,
-                        verdict="FAIL" if failed else "PASS", completed=f"2026-09-28T12:{i:02}:00Z", extra=provenance)
+            completed = f"2026-09-28T12:{i:02}:00Z"
+            name = (f"shared-readonly-{phase}-20260928T12{i:02}00000Z" if kind == "shared-readonly" else str(1000 + i))
+            self.record(name, tier=tier, kind=kind, phase=phase, target=target,
+                        verdict="FAIL" if failed else "PASS", completed=completed, extra=provenance)
 
     def test_j5a_required_key_missing_negative(self):
         self.j5a_records(omit=J5A[3])
@@ -308,6 +372,108 @@ class SealedEvidenceTests(unittest.TestCase):
     def test_j5a_passes_complete_matrix(self):
         self.j5a_records()
         self.assertEqual(evaluate(self.repo, "j5a", self.sha)["status"], "PASS")
+
+    def test_j5a_refuses_nonproducer_platform_config_shapes(self):
+        valid = self.platform_config()
+        for label, platform, message in (
+            ("three keys", {key: valid[key] for key in ("postgres_major", "postgrest_major", "gotrue_major")}, "invalid consumed platform data"),
+            ("wrong sha256", {**valid, "sha256": "0" * 64}, "platform mismatch"),
+        ):
+            with self.subTest(label=label):
+                case = SealedEvidenceTests(methodName="test_valid_sealed_record")
+                case.setUp()
+                try:
+                    case.platform_config_override = platform
+                    case.j5a_records()
+                    with case.assertRaisesRegex(EvidenceError, message):
+                        evaluate(case.repo, "j5a", case.sha)
+                finally:
+                    case.doCleanups()
+
+    def test_j5a_missing_browser_post_names_key_six(self):
+        self.j5a_records(omit=J5A[5])
+        with self.assertRaisesRegex(EvidenceError, "browser.*post.*disposable"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def test_shared_readonly_project_ref_provenance_and_linkage_controls(self):
+        def wrong_ref(manifest, directory):
+            manifest["target_binding"]["project_ref"] = "other"
+        def missing_operator(manifest, directory):
+            manifest["operator_script_sha256"].pop("scripts/outbox-db-contract-readonly.mjs")
+        def wrong_input(manifest, directory):
+            manifest["inputs"]["catalog_record"]["sha256"] = "0" * 64
+        def wrong_phase(manifest, directory):
+            manifest["inputs"]["platform_record"]["directory"] = manifest["inputs"]["catalog_record"]["directory"]
+        def raw_content(manifest, directory):
+            output = json.loads((directory / "readonly.json").read_text())
+            output["content"] = "raw"
+            data = json.dumps(output).encode()
+            (directory / "readonly.json").write_bytes(data)
+            manifest["artifacts"]["readonly.json"] = hashlib.sha256(data).hexdigest()
+        for mutation, message in ((wrong_ref, "project_ref"), (missing_operator, "operator provenance"),
+                                  (wrong_input, "catalog_record"), (wrong_phase, "platform_record"),
+                                  (raw_content, "raw or malformed")):
+            with self.subTest(message=message):
+                case = SealedEvidenceTests(methodName="test_valid_sealed_record")
+                case.setUp()
+                try:
+                    case.shared_mutation = mutation
+                    case.j5a_records()
+                    with case.assertRaisesRegex(EvidenceError, message):
+                        evaluate(case.repo, "j5a", case.sha)
+                finally:
+                    case.doCleanups()
+
+    def test_shared_readonly_rejects_forged_or_extra_fields(self):
+        def mutate_output(change):
+            def mutation(manifest, directory):
+                path = directory / "readonly.json"
+                output = json.loads(path.read_text())
+                change(output, manifest)
+                data = json.dumps(output).encode()
+                path.write_bytes(data)
+                manifest["artifacts"]["readonly.json"] = hashlib.sha256(data).hexdigest()
+            return mutation
+        cases = (
+            ("platform digest", mutate_output(lambda o, m: o["comparisons"]["platform"].update(observed_sha256="0" * 64))),
+            ("catalog comparison", mutate_output(lambda o, m: o["comparisons"]["catalog"].update(verdict="FAIL"))),
+            ("catalog observed", mutate_output(lambda o, m: o["comparisons"]["catalog"]["observed_section_sha256"].update(relations="0" * 64))),
+            ("input hash", mutate_output(lambda o, m: o["comparisons"]["platform"].update(input_sha256="0" * 64))),
+            ("stability probe", mutate_output(lambda o, m: (o["items"].update(queued_invariants={"verdict": "INCONCLUSIVE", "stability_probe": {"message_body": "private"}}), m["items"].update(o["items"])))),
+            ("queued diff omitted", mutate_output(lambda o, m: (o["items"].update(queued_invariants={"verdict": "PASS"}), m["items"].update(o["items"])))),
+            ("empty INCONCLUSIVE diff", mutate_output(lambda o, m: (o["items"].update(queued_invariants={"verdict": "INCONCLUSIVE", "diff": hashlib.sha256(b"[]").hexdigest()}), m["items"].update(o["items"])))),
+            ("extra output", mutate_output(lambda o, m: o["comparisons"]["platform"].update(message_body="private"))),
+            ("extra manifest", lambda m, d: m.update(message_body="private")),
+        )
+        for label, mutation in cases:
+            with self.subTest(label=label):
+                case = SealedEvidenceTests(methodName="test_valid_sealed_record")
+                case.setUp()
+                try:
+                    case.shared_mutation = mutation
+                    case.j5a_records()
+                    with case.assertRaises(EvidenceError):
+                        evaluate(case.repo, "j5a", case.sha)
+                finally:
+                    case.doCleanups()
+
+    def test_shared_readonly_rejects_every_missing_catalog_section_and_extra(self):
+        for omitted in (*self.catalog_config()["section_sha256"], None):
+            with self.subTest(omitted=omitted):
+                case = SealedEvidenceTests(methodName="test_valid_sealed_record")
+                case.setUp()
+                try:
+                    config = case.catalog_config()
+                    if omitted:
+                        del config["section_sha256"][omitted]
+                    else:
+                        config["section_sha256"]["unexpected"] = "c" * 64
+                    case.catalog_config = lambda: config
+                    case.j5a_records()
+                    with case.assertRaisesRegex(EvidenceError, "catalog mismatch"):
+                        evaluate(case.repo, "j5a", case.sha)
+                finally:
+                    case.doCleanups()
 
     def test_missing_kind_phase_target_negative(self):
         for field in ("kind", "phase", "target"):

@@ -332,5 +332,27 @@ class ReleaseGateStatusTests(unittest.TestCase):
         self.assertIn("cleanup", result["detail"])
 
 
+
+class J5aCliControls(unittest.TestCase):
+    def run_cli(self, *args):
+        import subprocess
+        import sys
+        return subprocess.run([sys.executable, str(Path(__file__).with_name("release_gate.py")), *args], capture_output=True, text=True)
+
+    def test_approval_is_mandatory(self):
+        result = self.run_cli("--sealed-evidence-sha", "a" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--approval", result.stderr)
+
+    def test_j5b_requires_explicit_main_sha(self):
+        result = self.run_cli("--sealed-evidence-sha", "a" * 40, "--approval", "j5b")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--main-sha", result.stderr)
+
+    def test_deployment_evaluator_stays_reachable_and_fail_closed(self):
+        result = self.run_cli("--sealed-evidence-sha", "a" * 40, "--approval", "j5a", "--deploy-tier", "test-env")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('"status": "FAIL"', result.stdout)
+
 if __name__ == "__main__":
     unittest.main()
