@@ -1,0 +1,83 @@
+{
+  "tested_sha": "e23922f72032a04a88a47f844c4f35eacefa815a",
+  "tier": "pre-merge",
+  "phase": "n/a",
+  "target": "disposable",
+  "started_at": "2026-09-29T18:33:02.231Z",
+  "completed_at": "2026-09-29T18:36:50.195Z",
+  "runner_script_sha256": "14d4c06231b44522fcc6c6e8bef8b6707ebc219389c1b1209789c32203304ef8",
+  "fault_proxy_script_sha256": "e15d6410d84bf96af4c487e8f7354c820b4ea39adc8c84fc26c3a3d74d5f0143",
+  "github_run_id": "36612751501",
+  "github_run_attempt": "1",
+  "artifact_name": "heavy-migration-dry-run-e23922f72032a04a88a47f844c4f35eacefa815a-36612751501-1",
+  "workflow_input_sha": "e23922f72032a04a88a47f844c4f35eacefa815a",
+  "event": "workflow_dispatch",
+  "head_branch": "main",
+  "workflow_path": ".github/workflows/inbox-heavy-verification.yml",
+  "workflow_sha": "dbaedaaa9f8638a3094fd193ca993562ac808389",
+  "runner_image": {
+    "os": "ubuntu24",
+    "version": "20260920.314.1"
+  },
+  "supabase_cli_version": "2.116.0",
+  "docker_version": "Docker version 28.0.4, build b8034c0",
+  "lane": "migration-dry-run",
+  "exit_status": 0,
+  "verdict": "PASS",
+  "kind": "migration-dry-run",
+  "run_id": "36612751501",
+  "clean_tree": {
+    "start": true,
+    "end_excluding_run_dir": true,
+    "excluded_path": "docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501",
+    "end_status": [
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/apply-20260930020000.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/apply-20260930020100.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/apply-20260930020200.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/catalog-post-harness.json",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/constraint-validation.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/index-preconditions.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/indexes.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/installed-catalog.json",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/mutation-cases.json",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/mutation-harness.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/mutation-role.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/pre-migration-ledger.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/production-install-unit.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/second-apply.stderr.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/second-apply.stdout.txt",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/summary.json",
+      "?? docs/performance/inbox-redesign/evidence/e23922f72032a04a88a47f844c4f35eacefa815a/pre-merge/36612751501/verify-installed.txt"
+    ]
+  },
+  "summary": {
+    "migration_versions": [
+      "20260930020000",
+      "20260930020100",
+      "20260930020200"
+    ],
+    "second_apply_refused": true,
+    "mutation_cases": 41,
+    "private_helper_exposure_count": 0
+  },
+  "raw_inflated_sha256": {},
+  "artifacts": {
+    "apply-20260930020000.txt": "245c19f284200737b8ac7d0ad3b44918b76168bd8043eb77855c6754017a7485",
+    "apply-20260930020100.txt": "76e53d9dcf0763a65201644e10ec307657c4903f70b6f5f44584ba72abd1e440",
+    "apply-20260930020200.txt": "afc2e2699edf2028ee4808fc9abded3ce9682449704862dff32df1ab5919644d",
+    "catalog-post-harness.json": "c20e8e7018d72a91670c0e3145040d97b771d0c648aec793e833797d5db6fed3",
+    "constraint-validation.txt": "2f3ea809dd6ab08b3759423ecc8eed3099bc85e680461ed0321c3bf9dfa0fe78",
+    "index-preconditions.txt": "da5dd362f185885f23e078c8b0c7e56c0cb9edd97341c2793c3054b240396b2a",
+    "indexes.txt": "400c8ab76096bdb1fae0fff945ce0e12f05567662de7309860e55fa830aa3504",
+    "installed-catalog.json": "ce809ef02a1f65bddbb22df2f3b8f7e260197d8b027c7985d8b319862a15a26d",
+    "mutation-cases.json": "f0b69dd844bd23b3c4253c8a7ac37777ec61aff43132c59ae8bfd1b3e64e6d87",
+    "mutation-harness.txt": "85d859a89f53b7e109f758db06752754b19f64b31e92f2068ff28be597d3218d",
+    "mutation-role.txt": "c14aee5b62ffd744902b84a24398e930998597dda300e71334862f0ef148e50a",
+    "pre-migration-ledger.txt": "81feb2eeeed5d0e758933a18fdf087f1a9bc238a8acfbb2a2c0b57a20036dd9f",
+    "production-install-unit.txt": "503502e728742dc7a44888b9508844b6207b86be58d70fc4c5563041f0b7a6fa",
+    "second-apply.stderr.txt": "2d474b6f024da3b3d5a14d018a295cc411b52af6a0aff9f799f86f6627eba4ff",
+    "second-apply.stdout.txt": "882afb1bdb6caa80f2f006a1007effe5bef981d86fca2bf3600cb11860b5972d",
+    "summary.json": "32f1eda53c4093ae796562dded91dcfeb28801bfba3ef3666345bfbcb5e13558",
+    "verify-installed.txt": "8bfac132a29c57b57f83525db20be4d989e225f6de161619fa1fead260f55f0c"
+  }
+}
