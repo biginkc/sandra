@@ -18,7 +18,7 @@ async function producerPlatform() {
 async function fixture() {
   const repo = mkdtempSync(path.join(os.tmpdir(), 'shared-seal-'));
   git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Test'); git(repo, 'config', 'user.email', 'test@example.invalid');
-  for (const file of ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs', 'scripts/outbox-db-contract/catalog-sections.mjs']) {
+  for (const file of ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs', 'scripts/outbox-db-contract/catalog-sections.mjs', 'scripts/outbox-db-contract/plan-contract.mjs', 'scripts/outbox-db-contract/connection.mjs']) {
     mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); copyFileSync(file, path.join(repo, file));
   }
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'base');
@@ -38,7 +38,8 @@ async function fixture() {
   const catalogRecord = input('catalog', 'catalog-fingerprint', 'n/a', 'catalog-pre.json', catalog);
   const platformRecord = input('platform', 'db-contract', 'pre', 'platform-config.json', platform);
   const output = path.join(os.tmpdir(), `shared-output-${sha}.json`);
-  const source = { verdict: 'PASS', target: 'shared-readonly', phase: 'pre', items: {}, platform_config: platform, comparisons: { catalog: { verdict: 'PASS', input_sha256: digest(JSON.stringify(catalog)), observed_section_sha256: sections }, platform: { verdict: 'PASS', input_sha256: digest(JSON.stringify(platform)), observed_sha256: platform.sha256 } } };
+  const plans = Object.fromEntries(['privileged','member'].map(role => [role, Object.fromEntries(['first','keyset','null_tail'].map(shape => [shape,{sha256:'a'.repeat(64),messages_scan:'Seq Scan',total_cost:10}]))]));
+  const source = { verdict: 'PASS', target: 'shared-readonly', phase: 'pre', plans, tls:{ssl:true,version:'TLSv1.3',cipher:'test'}, catalog_indexes:{}, items: {}, platform_config: platform, comparisons: { catalog: { verdict: 'PASS', input_sha256: digest(JSON.stringify(catalog)), observed_section_sha256: sections }, platform: { verdict: 'PASS', input_sha256: digest(JSON.stringify(platform)), observed_sha256: platform.sha256 } } };
   const args = { repo, sha, phase: 'pre', output, catalogRecord, platformRecord };
   const save = () => writeFileSync(output, JSON.stringify(source)); save();
   return { args, source, save, repo, root };
@@ -46,7 +47,7 @@ async function fixture() {
 test('seals only digest representation linked to committed inputs', async () => {
   const f = await fixture(); const dir = sealSharedReadonly(f.args);
   const output = JSON.parse(readFileSync(path.join(f.repo, dir, 'readonly.json')));
-  assert.deepEqual(Object.keys(output).sort(), ['comparisons', 'items', 'phase', 'target', 'verdict']);
+  assert.deepEqual(Object.keys(output).sort(), ['catalog_indexes_sha256','comparisons', 'items', 'phase', 'plans', 'source_output_sha256', 'target', 'tls', 'verdict']);
   assert.equal(JSON.stringify(output).includes('platform_config'), false);
 });
 test('sealer refuses every missing catalog section and an extra section', async () => {
