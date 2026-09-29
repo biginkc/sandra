@@ -7,11 +7,11 @@ import pg from 'pg';
 import { assertWriteMode } from './outbox-db-contract/guards.mjs';
 import { makeRest } from './outbox-db-contract/postgrest.mjs';
 import { createFixture } from './outbox-db-contract/fixture.mjs';
+import { sealPhaseRecord } from './outbox-db-contract.mjs';
 
 const MUTATIONS = [
   ['M1', 'REVOKE SELECT ON public.messages FROM authenticated', 'GRANT SELECT ON public.messages TO authenticated', ['PIN_BASE_GRANTS', 'C00', 'C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07', 'C08', 'C08b', 'C09', 'D02', 'D03']],
-  // C00's fresh row and C06 detect capture loss; C05 edits still pass on already captured rows.
-  ['M2', 'ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct', 'ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct', ['PIN_TRIGGERS', 'C00', 'C06']],
+  ['M2', 'ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct', 'ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct', ['PIN_TRIGGERS', 'C00', 'C05', 'C06', 'C07', 'C08', 'C08b']],
   // The policy is TO authenticated, so anon D01 cannot change; tenant reads and D02/D03 do.
   ['M3', 'ALTER POLICY messages_org_select ON public.messages USING (true)', null, ['C01', 'C02', 'C03', 'D02', 'D03']],
   // Other INSERT/UPDATE policy predicates leave C00's O2 insert denied; D02/D03 detect the widened path.
@@ -30,7 +30,8 @@ const MUTATIONS = [
 ];
 
 function runContract(phase, extra = [], fixture = null) {
-  const env = fixture ? { ...process.env, MUTATION_FIXTURE_JSON: JSON.stringify(fixture) } : process.env;
+  const scratch = mkdtempSync(path.join(os.tmpdir(), 'w4w-contract-step-'));
+  const env = { ...process.env, OUTBOX_CONTRACT_SCRATCH_DIR: scratch, ...(fixture ? { MUTATION_FIXTURE_JSON: JSON.stringify(fixture) } : {}) };
   const result = spawnSync(process.execPath, ['scripts/outbox-db-contract.mjs', '--target', 'disposable', '--phase', phase, ...extra], { encoding: 'utf8', env, maxBuffer: 20 * 1024 * 1024 });
   const line = result.stdout?.split('\n').find(value => value.startsWith('CONTRACT_RESULT '));
   assert(line, `No contract result: ${result.stderr}\n${result.stdout}`);
@@ -50,9 +51,18 @@ export async function runMutations(output, phase) {
   assert(['pre', 'post'].includes(phase), 'Usage: outbox-db-contract-mutations.mjs <output> --phase pre|post');
   assertWriteMode('disposable', { apiUrl: process.env.TEST_SUPABASE_URL, dbUrl: process.env.E2E_CI_SUPABASE_DB_URL, env: process.env });
   const db = new pg.Client({ connectionString: process.env.E2E_CI_SUPABASE_DB_URL });
-  await db.connect();
   const results = [];
+  const inject = step => {
+    if (process.env.HEAVY_LOCAL_FAILURE_INJECTION === '1' && process.env.OUTBOX_INJECT_AT === step) throw new Error(`INJECTED_ORCHESTRATION_FAILURE ${step}`);
+  };
+  let baseline;
+  let failure;
   try {
+    await db.connect();
+    baseline = runContract(phase);
+    assert.equal(baseline.exit, 0, `baseline: ${baseline.error}`);
+    assert.equal(baseline.verdict, 'PASS');
+    inject('after-baseline');
     for (const [id, apply, fixedRevert, expected, phases = ['post']] of MUTATIONS.filter(item => (item[4] ?? ['post']).includes(phase))) {
       let revert = fixedRevert;
       if (id === 'M3' || id === 'M3b') {
@@ -66,8 +76,10 @@ export async function runMutations(output, phase) {
       let anonRowExposure = null;
       for (const mode of ['observe', 'exact']) {
         const fixture = await prepareFixture();
+        inject(`${id}:${mode}:fixture`);
         await db.query(apply);
         try {
+          inject(`${id}:${mode}:ddl`);
           if (mode === 'observe') observed = runContract(phase, [], fixture);
           else exact = runContract(phase, ['--expect-fail', expected.join(',')], fixture);
           if (mode === 'observe') {
@@ -89,15 +101,27 @@ export async function runMutations(output, phase) {
             assert.deepEqual([...exact.failed].sort(), [...expected].sort(), `${id}: failed IDs drifted`);
           }
         } finally { await db.query(revert); }
+        inject(`${id}:${mode}:restored-ddl`);
       }
       const restored = runContract(phase);
       assert.equal(restored.exit, 0, `${id}: restore run: ${restored.error}; failed=${restored.failed}`);
       assert.equal(restored.verdict, 'PASS');
-      results.push({ id, expected_fail: expected, observed_exit: exact.exit, restored: restored.verdict, ...(anonRowExposure ? { anon_row_exposure: anonRowExposure } : {}) });
+      inject(`${id}:restored-contract`);
+      results.push({ id, expected_fail: expected, observed_exit: exact.exit, observed_fail: observed.verdict === 'FAIL', exact_fail: exact.verdict === 'FAIL', restored: restored.verdict, ...(anonRowExposure ? { anon_row_exposure: anonRowExposure } : {}) });
       writeFileSync(output, `${JSON.stringify(results, null, 2)}\n`);
       console.log(`MUTATION ${id} FAIL ${observed.failed.join(',')} RESTORED PASS`);
+      inject(`${id}:recorded`);
     }
-  } finally { await db.end(); }
+    inject('aggregate');
+  } catch (error) { failure = error; }
+  finally {
+    await db.end();
+    const checks = baseline ? JSON.parse(readFileSync(path.join(baseline.runDir, 'contracts.json'), 'utf8')) : [];
+    const fixtureRows = baseline ? readFileSync(path.join(baseline.runDir, 'fixture-rows.json')) : undefined;
+    const sealed = sealPhaseRecord({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, verdict: failure ? 'FAIL' : 'PASS', errorText: failure ? String(failure.stack ?? failure) : '' });
+    if (sealed.verdict !== 'PASS' && !failure) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
+  }
+  if (failure) throw failure;
   return results;
 }
 

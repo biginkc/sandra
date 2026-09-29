@@ -20,4 +20,3 @@ export GITHUB_ENV="$original_env"
 export MESSAGING_PROVIDER=mock
 mutations="${RUNNER_TEMP:-/tmp}/db-contract-post-mutations-${HEAVY_TESTED_SHA}.json"
 node scripts/outbox-db-contract-mutations.mjs "$mutations" --phase post
-node scripts/outbox-db-contract.mjs --target disposable --phase post --mutations-file "$mutations"

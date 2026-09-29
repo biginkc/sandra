@@ -27,6 +27,7 @@ function options(args) {
 
 export async function run(args = process.argv.slice(2), env = process.env) {
   const opts = options(args);
+  if (!env.OUTBOX_CONTRACT_SCRATCH_DIR) throw new Error('Contract child requires orchestrator scratch directory');
   const apiUrl = env.TEST_SUPABASE_URL;
   const dbUrl = env.E2E_CI_SUPABASE_DB_URL;
   const binding = assertWriteMode(opts.target, { apiUrl, dbUrl, env });
@@ -36,7 +37,7 @@ export async function run(args = process.argv.slice(2), env = process.env) {
   if (env.HEAVY_TESTED_SHA && env.HEAVY_TESTED_SHA !== sha) throw new Error('Tested SHA mismatch');
   const runId = env.GITHUB_ACTIONS === 'true' ? env.GITHUB_RUN_ID : `${Date.now()}-${randomUUID().slice(0, 8)}-${opts.phase}`;
   const relative = runPath(sha, 'pre-merge', runId);
-  const runDir = path.join(repo, relative);
+  const runDir = env.OUTBOX_CONTRACT_SCRATCH_DIR || path.join(repo, relative);
   mkdirSync(runDir, { recursive: true });
   const startedAt = new Date().toISOString();
   const db = new pg.Client({ connectionString: dbUrl });
@@ -70,19 +71,44 @@ export async function run(args = process.argv.slice(2), env = process.env) {
   writeFileSync(path.join(runDir, 'contracts.json'), `${JSON.stringify(checks, null, 2)}\n`);
   if (opts['mutations-file']) writeFileSync(path.join(runDir, 'mutations.json'), readFileSync(opts['mutations-file']));
   if (errorText) writeFileSync(path.join(runDir, 'failure.log'), `${errorText}\n`);
-  const lane = env.HEAVY_LANE || `db-contract-${opts.phase}`;
+  console.log(`CONTRACT_RESULT ${JSON.stringify({ phase: opts.phase, verdict, status, failed: checks.filter(check => check.verdict === 'FAIL').map(check => check.id), error: errorText.split('\n')[0], runDir, schemaState })}`);
+  return status;
+}
+
+export function sealPhaseRecord({ phase, checks = [], schemaState = {}, mutations = [], fixtureRows, verdict = 'FAIL', errorText = '', env = process.env, runId, startedAt }) {
+  const binding = assertWriteMode('disposable', { apiUrl: env.TEST_SUPABASE_URL, dbUrl: env.E2E_CI_SUPABASE_DB_URL, env });
+  const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
+  runId ??= env.GITHUB_ACTIONS === 'true' ? env.GITHUB_RUN_ID : `${Date.now()}-${randomUUID().slice(0, 8)}-${phase}`;
+  const relative = runPath(sha, 'pre-merge', runId);
+  const runDir = path.join(repo, relative);
+  mkdirSync(runDir, { recursive: true });
+  const complete = completePhaseInventory(phase, checks, schemaState, mutations);
+  if (verdict === 'PASS' && !complete) { verdict = 'FAIL'; errorText = 'INCOMPLETE_PHASE_INVENTORY'; }
+  writeFileSync(path.join(runDir, 'contracts.json'), `${JSON.stringify(checks, null, 2)}\n`);
+  writeFileSync(path.join(runDir, 'mutations.json'), `${JSON.stringify(mutations, null, 2)}\n`);
+  if (fixtureRows) writeFileSync(path.join(runDir, 'fixture-rows.json'), fixtureRows);
+  if (errorText) writeFileSync(path.join(runDir, 'failure.log'), `${errorText}\n`);
+  const lane = env.HEAVY_LANE || `db-contract-${phase}`;
   writeManifest(repo, relative, {
-    tested_sha: sha, tier: 'pre-merge', kind: 'db-contract', phase: opts.phase, target: 'disposable', verdict, exit_status: status,
-    run_id: runId, started_at: startedAt, completed_at: new Date().toISOString(), target_binding: binding, schema_state: schemaState,
+    tested_sha: sha, tier: 'pre-merge', kind: 'db-contract', phase, target: 'disposable', verdict, exit_status: verdict === 'PASS' ? 0 : 1,
+    run_id: runId, started_at: startedAt ?? new Date().toISOString(), completed_at: new Date().toISOString(), target_binding: binding, schema_state: schemaState,
     workflow_path: env.GITHUB_WORKFLOW_REF?.split('@')[0]?.replace(/^[^/]+\/[^/]+\//, '') ?? '', workflow_input_sha: env.HEAVY_TESTED_SHA ?? '',
     github_run_id: env.GITHUB_RUN_ID ?? '', github_run_attempt: env.GITHUB_RUN_ATTEMPT ?? '',
     artifact_name: env.GITHUB_ACTIONS === 'true' ? `heavy-${lane}-${sha}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}` : '',
     event: env.GITHUB_EVENT_NAME ?? '', head_branch: env.GITHUB_REF_NAME ?? '', lane,
     runner_script_sha256: sha256(readFileSync(path.join(repo, 'scripts/inbox-ci', `${lane}.sh`))),
-    contracts: checks, failure: errorText ? errorText.split('\n')[0] : null,
+    contracts: checks, mutation_inventory: mutations, failure: errorText ? errorText.split('\n')[0] : null,
   }, env);
-  console.log(`CONTRACT_RESULT ${JSON.stringify({ phase: opts.phase, verdict, status, failed: checks.filter(check => check.verdict === 'FAIL').map(check => check.id), error: errorText.split('\n')[0], runDir })}`);
-  return status;
+  return { verdict, runDir };
+}
+
+export function completePhaseInventory(phase, checks, schemaState, mutations) {
+  const expectedMutations = phase === 'post' ? ['M1','M2','M3','M3b','M4','M4b','M5','M5b','M5c','M5d','M6','M6b','M7','M10'] : ['M10'];
+  return C_IDS.every(id => checks.filter(check => check.id === id && check.verdict === 'PASS').length === 1)
+    && (phase === 'post' ? schemaState.versions?.length === 3 && schemaState.inboundHeadsPresent === true : schemaState.versions?.length === 0 && schemaState.inboundHeadsPresent === false)
+    && ['PIN_BASE_GRANTS', ...(phase === 'post' ? ['PIN_FUNCTIONS','PIN_RELATIONS','PIN_SCHEMAS_ROLLOUT_ROLES'] : ['PIN_PRE_ABSENCE']), 'PIN_TRIGGERS'].every(id => checks.filter(check => check.id === id && check.verdict === 'PASS').length === 1)
+    && expectedMutations.length === mutations.length
+    && expectedMutations.every(id => mutations.filter(item => item.id === id && item.observed_exit === 1 && item.restored === 'PASS' && item.observed_fail === true && item.exact_fail === true).length === 1);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) run().then(status => { process.exitCode = status; }).catch(error => { console.error(error); process.exitCode = 1; });
