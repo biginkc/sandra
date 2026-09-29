@@ -13,6 +13,7 @@ declare
   v_action text;
   v_body text;
   v_template uuid;
+  v_category text;
   v_status text;
   v_delay integer;
   v_offset integer;
@@ -58,11 +59,13 @@ begin
     v_action := v_step ->> 'action_type';
     v_body := nullif(btrim(v_step ->> 'template_body'), '');
     v_template := nullif(v_step ->> 'template_id', '')::uuid;
+    v_category := v_step ->> 'template_category';
     v_status := nullif(btrim(v_step ->> 'target_status'), '');
     v_delay := (v_step ->> 'delay_after_previous_minutes')::integer;
     if v_delay is null or v_delay < 0 or
-      (v_action = 'send_sms' and ((v_body is null) = (v_template is null) or v_status is not null)) or
-      (v_action = 'change_status' and (v_status is null or v_body is not null or v_template is not null)) or
+      (v_action = 'send_sms' and (num_nonnulls(v_body, v_template, v_category) <> 1 or
+        (v_category is not null and length(btrim(v_category)) = 0) or v_status is not null)) or
+      (v_action = 'change_status' and (v_status is null or num_nonnulls(v_body, v_template, v_category) <> 0)) or
       v_action not in ('send_sms', 'change_status') or v_action is null then
       raise exception 'Invalid step body, template, status, or delay' using errcode = '22023';
     end if;
@@ -92,17 +95,19 @@ begin
     v_action := v_step ->> 'action_type';
     v_body := nullif(btrim(v_step ->> 'template_body'), '');
     v_template := nullif(v_step ->> 'template_id', '')::uuid;
+    v_category := v_step ->> 'template_category';
     v_status := nullif(btrim(v_step ->> 'target_status'), '');
     v_delay := (v_step ->> 'delay_after_previous_minutes')::integer;
     if v_id is null then
       insert into public.sequence_steps (sequence_id, step_index, delay_after_previous_minutes,
-        action_type, template_body, template_id, target_status)
-      values (p_sequence, v_index, v_delay, v_action, v_body, v_template, v_status)
+        action_type, template_body, template_id, template_category, target_status)
+      values (p_sequence, v_index, v_delay, v_action, v_body, v_template, v_category, v_status)
       returning id into v_id;
     else
       update public.sequence_steps set step_index = v_index,
         delay_after_previous_minutes = v_delay, action_type = v_action,
-        template_body = v_body, template_id = v_template, target_status = v_status
+        template_body = v_body, template_id = v_template,
+        template_category = v_category, target_status = v_status
       where id = v_id and sequence_id = p_sequence;
     end if;
     v_saved := v_saved || to_jsonb(v_id::text);

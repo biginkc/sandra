@@ -50,6 +50,7 @@ export type SequenceWithSteps = {
     action_type: "send_sms" | "change_status";
     template_body: string | null;
     template_id: string | null;
+    template_category: string | null;
     target_status: string | null;
   }>;
 };
@@ -66,8 +67,14 @@ export async function replaceSequenceSteps(input: {
   if (!name || name.length > 120 || input.steps.length > 100 || input.steps.some((step, index) =>
     step.step_index !== index || !Number.isInteger(step.delay_after_previous_minutes) ||
     step.delay_after_previous_minutes < 0 ||
-    (step.action_type === "send_sms" && (!!step.template_body?.trim() === !!step.template_id)) ||
-    (step.action_type === "change_status" && !step.target_status)
+    (step.action_type === "send_sms" && (
+      Number(Boolean(step.template_body?.trim())) + Number(Boolean(step.template_id)) +
+      Number(Boolean(step.template_category?.trim())) !== 1 || Boolean(step.target_status)
+    )) ||
+    (step.action_type === "change_status" && (
+      !step.target_status?.trim() || Boolean(step.template_body?.trim()) ||
+      Boolean(step.template_id) || Boolean(step.template_category?.trim())
+    )) || !["send_sms", "change_status"].includes(step.action_type)
   )) return { ok: false, error: { code: "VALIDATION", message: "Check the drip name and every step before saving." } };
   try {
     const guard = await requireSequenceAdmin();
@@ -309,7 +316,7 @@ export async function getSequenceWithSteps(
     const { data: steps, error: stepErr } = await supabase
       .from("sequence_steps")
       .select(
-        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, target_status",
+        "id, step_index, delay_after_previous_minutes, action_type, template_body, template_id, template_category, target_status",
       )
       .eq("sequence_id", sequenceId)
       .order("step_index", { ascending: true });

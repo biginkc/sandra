@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, it, expect, vi } from "vitest";
 
@@ -16,12 +16,15 @@ const sequence: SequenceWithSteps = {
   id: "seq-1", name: "Seller follow-up", description: "Existing", active: true,
   append_opt_out: true, archived_at: null,
   steps: [{ id: "step-1", step_index: 0, delay_after_previous_minutes: 1440,
-    action_type: "send_sms", template_body: "Hi", template_id: null, target_status: null }],
+    action_type: "send_sms", template_body: "Hi", template_id: null, template_category: null, target_status: null }],
 };
-const mount = (options?: { isNew?: boolean; total?: number; steps?: SequenceWithSteps["steps"] }) =>
+const mount = (options?: { isNew?: boolean; total?: number; steps?: SequenceWithSteps["steps"]; templates?: React.ComponentProps<typeof SequenceEditor>["templates"] }) =>
   render(<SequenceEditor sequence={{ ...sequence, steps: options?.steps ?? sequence.steps }}
     initialImpact={{ total_enrolled: options?.total ?? 0, scheduled_next_7d: 2 }}
-    templates={[]} isNew={options?.isNew} />);
+    templates={options?.templates ?? []} isNew={options?.isNew} />);
+const categoryStep: SequenceWithSteps["steps"][number] = {
+  ...sequence.steps[0], template_body: null, template_category: "Opener - Homeowner",
+};
 
 describe("drip editor", () => {
   it("saves edited details and every step with exactly one action call", async () => {
@@ -78,5 +81,54 @@ describe("drip editor", () => {
     await user.click(screen.getByRole("button", { name: "Delete" }));
     expect(screen.queryByRole("heading", { name: "Step 1" })).not.toBeInTheDocument();
     expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("loads and saves a renamed drip with a category-backed step", async () => {
+    replace.mockResolvedValue({ ok: true, data: ["step-1"] });
+    const user = userEvent.setup(); mount({ steps: [categoryStep] });
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Renamed");
+    expect(screen.getByRole("button", { name: "Save all steps" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Save all steps" }));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(expect.objectContaining({
+      name: "Renamed", steps: [expect.objectContaining({
+        template_body: null, template_id: null, template_category: "Opener - Homeowner",
+      })],
+    })));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+  });
+
+  it("clears category when a rep enters a custom body", async () => {
+    replace.mockResolvedValue({ ok: true, data: ["step-1"] });
+    const user = userEvent.setup(); mount({ steps: [categoryStep] });
+    await user.click(screen.getByRole("radio", { name: "Custom message" }));
+    await user.type(screen.getByRole("textbox", { name: /Message body/ }), "Custom text");
+    await user.click(screen.getByRole("button", { name: "Save all steps" }));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(expect.objectContaining({
+      steps: [expect.objectContaining({ template_body: "Custom text", template_category: null })],
+    })));
+  });
+
+  it("clears category when a rep chooses a template", async () => {
+    replace.mockResolvedValue({ ok: true, data: ["step-1"] });
+    const user = userEvent.setup(); mount({ steps: [categoryStep], templates: [{
+      id: "template-1", name: "First", content: "Hello", category: "Opener - Homeowner",
+      system_managed: false, created_at: "2026-09-29", updated_at: "2026-09-29",
+    }] });
+    await user.click(screen.getByRole("radio", { name: "Use template" }));
+    await user.click(screen.getByRole("button", { name: "Save all steps" }));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(expect.objectContaining({
+      steps: [expect.objectContaining({ template_body: null, template_id: "template-1", template_category: null })],
+    })));
+  });
+
+  it("keeps an unsaved custom draft while peeking at a template", async () => {
+    const user = userEvent.setup(); mount({ templates: [{
+      id: "template-1", name: "First", content: "Hello", category: "Opener - Homeowner",
+      system_managed: false, created_at: "2026-09-29", updated_at: "2026-09-29",
+    }] });
+    await user.click(screen.getByRole("radio", { name: "Use template" }));
+    await user.click(screen.getByRole("radio", { name: "Custom message" }));
+    expect(screen.getByRole("textbox", { name: /Message body/ })).toHaveValue("Hi");
   });
 });

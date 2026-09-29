@@ -122,7 +122,8 @@ function blankStep(index: number): DraftStep {
   return {
     key: `new-${++draftCounter}`, step_index: index,
     delay_after_previous_minutes: index === 0 ? 0 : 1440,
-    action_type: "send_sms", template_body: "", template_id: null, target_status: null,
+    action_type: "send_sms", template_body: "", template_id: null,
+    template_category: null, target_status: null,
   };
 }
 
@@ -151,10 +152,15 @@ export function SequenceEditor({ sequence, initialImpact, templates, isNew = fal
     [next[index], next[target]] = [next[target], next[index]];
     return next.map((step, step_index) => ({ ...step, step_index }));
   });
-  const valid = name.trim().length > 0 && steps.every((step) =>
-    step.action_type === "send_sms"
-      ? Boolean(step.template_id || step.template_body?.trim())
-      : Boolean(step.target_status));
+  const valid = name.trim().length > 0 && steps.every((step) => {
+    if (step.action_type === "send_sms") {
+      const body = !step.template_id && !step.template_category ? step.template_body?.trim() : null;
+      return Number(Boolean(body)) + Number(Boolean(step.template_id)) +
+        Number(Boolean(step.template_category?.trim())) === 1 && !step.target_status;
+    }
+    return step.action_type === "change_status" && Boolean(step.target_status?.trim()) &&
+      !step.template_body?.trim() && !step.template_id && !step.template_category?.trim();
+  });
 
   const onSave = () => {
     if (!valid) return;
@@ -169,8 +175,10 @@ export function SequenceEditor({ sequence, initialImpact, templates, isNew = fal
         steps: steps.map((step, step_index) => ({
           id: step.id, step_index, delay_after_previous_minutes: step.delay_after_previous_minutes,
           action_type: step.action_type,
-          template_body: step.action_type === "send_sms" && !step.template_id ? step.template_body : null,
+          template_body: step.action_type === "send_sms" && !step.template_id && !step.template_category
+            ? step.template_body?.trim() || null : null,
           template_id: step.action_type === "send_sms" ? step.template_id : null,
+          template_category: step.action_type === "send_sms" ? step.template_category : null,
           target_status: step.action_type === "change_status" ? step.target_status : null,
         })),
       }), { successMessage: "Drip saved", fallbackMessage: "Could not save drip" });
@@ -211,10 +219,7 @@ export function SequenceEditor({ sequence, initialImpact, templates, isNew = fal
 }
 
 /**
- * Message body editor for send_sms steps. Toggles between an inline custom
- * message and a saved SMS template reference. Inline body and template_id
- * are mutually exclusive — picking one resets the other so the upsert
- * action gets unambiguous input.
+ * Pick exactly one SMS source: custom body, saved template, or template pool.
  */
 function MessageBodyEditor({
   templates,
@@ -222,21 +227,20 @@ function MessageBodyEditor({
   setBody,
   templateId,
   setTemplateId,
+  templateCategory,
+  setTemplateCategory,
 }: {
   templates: TemplateRow[];
   body: string;
   setBody: (next: string) => void;
   templateId: string | null;
   setTemplateId: (next: string | null) => void;
+  templateCategory: string | null;
+  setTemplateCategory: (next: string | null) => void;
 }) {
-  const mode: "custom" | "template" = templateId ? "template" : "custom";
+  const mode: "custom" | "template" | "category" = templateCategory ? "category" : templateId ? "template" : "custom";
   const setMode = (next: "custom" | "template") => {
-    // WR-10: don't wipe `body` here. The previous version cleared it on
-    // every switch to template mode, so a half-written custom body was
-    // lost the moment the author toggled the radio to peek. Both modes
-    // keep their respective fields populated; the upstream save action
-    // already nulls out the inactive field at write time
-    // (editor.tsx:379-381 / :519-521).
+    setTemplateCategory(null);
     if (next === "custom") {
       setTemplateId(null);
     } else {
@@ -255,6 +259,10 @@ function MessageBodyEditor({
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-4 text-sm">
+        {templateCategory ? <label className="flex items-center gap-1.5">
+          <input type="radio" checked={mode === "category"} readOnly />
+          <span>Template pool: {templateCategory}</span>
+        </label> : null}
         <label className="flex items-center gap-1.5">
           <input
             type="radio"
@@ -285,7 +293,7 @@ function MessageBodyEditor({
           </span>
         </div>
       ) : null}
-      {mode === "custom" ? (
+      {mode === "category" ? <p className="text-muted-foreground text-xs">A template from this pool is chosen when the step sends.</p> : mode === "custom" ? (
         <label className="flex flex-col gap-1 text-sm">
           <span className="font-medium">Message body</span>
           <textarea
@@ -353,7 +361,10 @@ function StepEditor({ step, index, count, locked, templates, onChange, onMove, o
         <DelayInput value={step.delay_after_previous_minutes} onChange={(value) => onChange({ delay_after_previous_minutes: value })} />
       </div>
       <label className="flex flex-col gap-1 text-sm"><span className="font-medium">Action</span>
-        <select value={step.action_type} onChange={(e) => onChange({ action_type: e.target.value as DraftStep["action_type"] })}
+        <select value={step.action_type} onChange={(e) => onChange({
+          action_type: e.target.value as DraftStep["action_type"],
+          template_body: null, template_id: null, template_category: null, target_status: null,
+        })}
           className="border-input rounded-md border px-2 py-1.5 text-sm">
           <option value="send_sms">{systemLabel(SEQUENCE_ACTION_LABELS, "send_sms")}</option>
           <option value="change_status">{systemLabel(SEQUENCE_ACTION_LABELS, "change_status")}</option>
@@ -361,8 +372,9 @@ function StepEditor({ step, index, count, locked, templates, onChange, onMove, o
       </label>
     </div>
     {step.action_type === "send_sms" ? <MessageBodyEditor templates={templates}
-      body={step.template_body ?? ""} setBody={(value) => onChange({ template_body: value })}
-      templateId={step.template_id ?? null} setTemplateId={(value) => onChange({ template_id: value })} /> :
+      body={step.template_body ?? ""} setBody={(value) => onChange({ template_body: value, template_category: null })}
+      templateId={step.template_id ?? null} setTemplateId={(value) => onChange({ template_id: value, template_category: null })}
+      templateCategory={step.template_category} setTemplateCategory={(value) => onChange({ template_category: value })} /> :
       <label className="flex flex-col gap-1 text-sm"><span className="font-medium">Target status</span>
         <select value={step.target_status ?? ""} onChange={(e) => onChange({ target_status: e.target.value })}
           className="border-input rounded-md border px-2 py-1.5 text-sm">
