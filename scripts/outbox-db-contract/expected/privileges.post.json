@@ -1,0 +1,1308 @@
+{
+  "source_commit": "e767bec7",
+  "source_sha256": {
+    "supabase/migrations/20260929000000_inbox_control_foundation.sql": "a31799ba96e6f7264f062019cc8113a6401719a686cc31e569b10d21064bfbf6",
+    "supabase/migrations/20260929000100_inbox_read_companion.sql": "7a2c5f49fc8fcf58c7f37585c3c347869816912e47e504ec47f9cdac198d3dd7",
+    "supabase/migrations/20260929000200_inbox_backend_operation_reply.sql": "fff5dad88bf18f30ab070d69ed8e2cbd9330056747b60e1e021cb74896ab1e10"
+  },
+  "artifact_sha256": {
+    "function-grants.json": "00e891fa0b42a4efb0d741738fb9b1caaa839c588309ba8ec77cda3aef7fe3b7",
+    "function-owners.json": "a07acd64007dcd8b056fb94e6a9b20844c58e9cc4fa5fb29ad55f65edd500a09",
+    "relation-owners.json": "aedfbd764a4f31e32f899f8dd94c807265af331db06cb66d2c61ea8a0e78810e"
+  },
+  "functions": {
+    "public.inbox_capture_inbound_head": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_guard_inbound_revision": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_summary_contract.compute": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_unknown_summary.compute": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_unknown_summary.propose_message_ids": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_authenticated_detail.detail": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_authenticated_detail.detail_v2": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_capture_boundary.detail": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_message_capture.sender_id": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_message_capture.capture": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_maintained.snapshot": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_maintained.publish": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_maintained.wake_expiry": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_maintained.enqueue_dirty": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_maintained.claim_work": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_maintained.finish_work": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_parent.capture_parent": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_parent.capture_review": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_parent.claim": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_parent.batch": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_safety.consent_capture": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_safety.thread_capture": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_safety.suppression_capture": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_safety.claim": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_safety.batch": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_backfill.capture_collision": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_backfill.fingerprint": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_backfill.start": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_backfill.claim": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_backfill.batch": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_backfill.inspect_collisions": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_backfill.readiness": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_policy.validate_key": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_policy.bump": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_policy.capture_properties": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_policy.capture_contacts": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_policy.capture_consent_events": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_policy.capture_sms_phone_suppressions": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_policy.capture_message_threads": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_policy.capture_ai_disposition_reviews": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_policy.capture_memberships": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_policy.snapshot": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.project": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.capture_access": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.authorize": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.assert_serving": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET statement_timeout='2s",
+      "execute": []
+    },
+    "inbox_bridge.authorize_serving": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET statement_timeout='5s",
+      "execute": []
+    },
+    "inbox_bridge.scope_json": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.create_scope": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.get_scope": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.bind_handle": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_authorize_sync": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_create_workset": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_get_sync_scope": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_bind_sync_handle": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_bridge.upsert_filter": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.project_filter": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.page": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.counts_typed": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.normalize_filter": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.matching": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_counts_v2": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_create_workset_v2": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_bridge.outcome_counts": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_outcome_counts_v1": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_control.seed_baseline_batch": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_control.wake_due_expiries": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_control.readiness": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_control.prune_expired_worksets": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_control.admit_command": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET statement_timeout='2s' SET lock_timeout='2s",
+      "execute": []
+    },
+    "inbox_read.authoritative_context": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_read.detail": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_read.acknowledge": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_read_detail": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_acknowledge_read": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_read.history_page": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_history_page": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_read.unknown_history_values": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_read.unknown_history_page": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_unknown_history_page": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_bridge.authorized_scope": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_bridge.finalize_scope": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_sync_snapshot_v1": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_sync_finalize_v1": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_bridge.probe_current_workset": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_probe_workset_updates": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_read.review_selection": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_review_selection": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_read.prune_expired_boundaries": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_read.prune_expired_unknown_cursors": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operations.immutable_row": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operations.assert_request_access": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operations.assert_current_preparation": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operations.accept_prepared": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operations.claim_step": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operations.lock_step_for_effect": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operations.finish_step": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operations.claim_dispatch": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operations.ack_dispatch": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.validate_definition": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.create": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.update": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.deactivate": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.list": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.get": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.create_for_session": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.update_for_session": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.deactivate_for_session": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.list_for_session": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_saved_actions.get_for_session": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_saved_action_create": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_saved_action_update": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_saved_action_deactivate": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_saved_action_list": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_saved_action_get": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_operation_domain.capture_target": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operation_domain.apply_property_step": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operation_domain.capture_sms_scope": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operation_domain.apply_sms_opt_out": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operation_domain.apply_promotion_step": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_operation_domain.apply_unknown_step": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.authorize": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.lock_request_key": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.policy": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.assert_json_shape": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.prepare": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.invalid_saved_action_reference": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.fail_step": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.execute_step": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.run_step": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.load_operation": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.claim_dispatch_batch": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.ack_dispatch": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.worker_readiness": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.accept": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.status": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_prepare_action": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_accept_action": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_operation_status": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_action_api.prepare_review": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_action_api.assignees": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_action_assignees": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_action_api.recover": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_recover_operation": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_reply_context.bump": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_context.capture_sender": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_context.capture_organization": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_context.capture_property": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_context.value": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_context.snapshot": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_preparation.phone": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_preparation.recipient_limit": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_preparation.latest_sms_consent": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_preparation.destination_policy": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": []
+    },
+    "inbox_reply_preparation.recipient": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_preparation.quiet_hours": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_preparation.batch": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_review.text_length": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_review.capture": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_review.view": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_review.freeze": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_review.source_context": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_review.require_admission": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_capture_reply_recipients": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_freeze_reply_review": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_reply_source_context": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_reply_send.body_hash": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.guard_attempt": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.frozen_item": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.item_current": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.claim": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.start_dispatch": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.persist": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.accept": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.recover": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.operation_status": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.reconcile_delivery": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.drain_unmatched": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.sweep_unmatched_callbacks": {
+      "secdef": false,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "public.inbox_reply_sweep_unmatched_callbacks": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='20s",
+      "execute": [
+        "service_role"
+      ]
+    },
+    "public.inbox_reply_reconcile_callback": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "service_role"
+      ]
+    },
+    "public.inbox_accept_reply": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_recover_reply": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "public.inbox_reply_operation_status": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "execute": [
+        "authenticated"
+      ]
+    },
+    "inbox_reply_send.claim_dispatch_batch": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.operation_dispatch_complete": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.ack_dispatch": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.operation_attempts": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.worker_claim": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.worker_start_dispatch": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    },
+    "inbox_reply_send.worker_persist": {
+      "secdef": true,
+      "owner": "postgres",
+      "search_path": "",
+      "execute": []
+    }
+  },
+  "relation_owners": {
+    "schema:inbox_authenticated_detail": "postgres",
+    "schema:inbox_backfill": "postgres",
+    "schema:inbox_bridge": "postgres",
+    "schema:inbox_capture_boundary": "postgres",
+    "schema:inbox_control": "postgres",
+    "schema:inbox_maintained": "postgres",
+    "schema:inbox_message_capture": "postgres",
+    "schema:inbox_parent": "postgres",
+    "schema:inbox_policy": "postgres",
+    "schema:inbox_read": "postgres",
+    "schema:inbox_safety": "postgres",
+    "schema:inbox_summary_contract": "postgres",
+    "schema:inbox_unknown_summary": "postgres",
+    "table:inbox_backfill.collisions": "postgres",
+    "table:inbox_backfill.jobs": "postgres",
+    "table:inbox_bridge.access_epochs": "postgres",
+    "table:inbox_bridge.cursors": "postgres",
+    "table:inbox_bridge.filter_rows": "postgres",
+    "table:inbox_bridge.summaries": "postgres",
+    "table:inbox_bridge.worksets": "postgres",
+    "table:inbox_capture_boundary.generation": "postgres",
+    "table:inbox_control.baseline_progress": "postgres",
+    "table:inbox_control.command_admission": "postgres",
+    "table:inbox_control.command_cohort": "postgres",
+    "table:inbox_control.rollout": "postgres",
+    "table:inbox_maintained.queue": "postgres",
+    "table:inbox_maintained.rows": "postgres",
+    "table:inbox_message_capture.dirty": "postgres",
+    "table:inbox_message_capture.route_edges": "postgres",
+    "table:inbox_message_capture.sender_buckets": "postgres",
+    "table:inbox_message_capture.sender_groups": "postgres",
+    "table:inbox_message_capture.versions": "postgres",
+    "table:inbox_parent.work": "postgres",
+    "table:inbox_policy.versions": "postgres",
+    "table:inbox_read.boundaries": "postgres",
+    "table:inbox_read.history_cursors": "postgres",
+    "table:inbox_read.receipts": "postgres",
+    "table:inbox_read.unknown_history_cursors": "postgres",
+    "table:inbox_safety.routes": "postgres",
+    "table:public.inbox_inbound_heads": "postgres",
+    "type:inbox_bridge.cursor_context": "postgres",
+    "schema:inbox_operations": "postgres",
+    "schema:inbox_saved_actions": "postgres",
+    "schema:inbox_operation_domain": "postgres",
+    "schema:inbox_action_api": "postgres",
+    "schema:inbox_reply_context": "postgres",
+    "schema:inbox_reply_preparation": "postgres",
+    "schema:inbox_reply_review": "postgres",
+    "schema:inbox_reply_send": "postgres",
+    "table:inbox_operations.preparations": "postgres",
+    "table:inbox_operations.operations": "postgres",
+    "table:inbox_operations.items": "postgres",
+    "table:inbox_operations.steps": "postgres",
+    "table:inbox_operations.item_steps": "postgres",
+    "table:inbox_operations.receipts": "postgres",
+    "table:inbox_operations.dispatch_outbox": "postgres",
+    "table:inbox_saved_actions.definitions": "postgres",
+    "table:inbox_operation_domain.target_versions": "postgres",
+    "table:inbox_operation_domain.sms_scopes": "postgres",
+    "table:inbox_operation_domain.shared_sms_receipts": "postgres",
+    "table:inbox_action_api.preparation_requests": "postgres",
+    "table:inbox_reply_context.versions": "postgres",
+    "table:inbox_reply_review.preparations": "postgres",
+    "table:inbox_reply_review.admission": "postgres",
+    "table:inbox_reply_send.operations": "postgres",
+    "table:inbox_reply_send.attempts": "postgres",
+    "table:inbox_reply_send.dispatch_outbox": "postgres",
+    "table:inbox_reply_send.unmatched_callbacks": "postgres",
+    "table:inbox_reply_send.callback_receipts": "postgres"
+  }
+}
