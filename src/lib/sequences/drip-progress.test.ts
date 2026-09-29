@@ -113,6 +113,14 @@ describe("listDripProgress", () => {
     expect(await listDripProgress(stub as never, ["p1"]))
       .toMatchObject([{ enrollmentId: "active-second", status: "Waiting" }]);
   });
+  it("breaks equal enrollment timestamps by descending id, like the SQL", async () => {
+    const stub = client({ sequence_enrollments: [
+      rows.sequence_enrollments[2],
+      { ...rows.sequence_enrollments[2], id: "e4" },
+    ] });
+    expect(await listDripProgress(stub as never, ["p3"]))
+      .toMatchObject([{ enrollmentId: "e4" }]);
+  });
   it("reports the next step with the inbox's one-based index", async () => {
     const stub = client({ sequence_enrollments: [
       { ...rows.sequence_enrollments[0], current_step_index: 0, status: "active" },

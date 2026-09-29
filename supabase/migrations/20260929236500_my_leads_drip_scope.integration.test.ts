@@ -4,7 +4,7 @@ import { Client } from 'pg';
 import { expect, it } from 'vitest';
 import { loadTestEnv } from '@tests/integration/env';
 
-const sql=readFileSync(new URL('./20260929235000_my_leads_drip_scope.sql',import.meta.url),'utf8');
+const sql=readFileSync(new URL('./20260929236500_my_leads_drip_scope.sql',import.meta.url),'utf8');
 const url=process.env.TEST_SUPABASE_DB_URL??loadTestEnv().TEST_SUPABASE_DB_URL;
 
 it('keeps a reply flag until a human text, logged attempt, or outcome, while opening has no effect',async()=>{

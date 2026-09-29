@@ -16,6 +16,8 @@ begin
     select distinct on (e.property_id) e.property_id, e.id, e.status, e.pause_reason
     from public.sequence_enrollments e join owned o on o.id = e.property_id
     where e.org_id = p_org_id and e.status in ('active', 'paused', 'completed')
+    -- Migration 20260929236000's one-live-drip partial unique index guarantees
+    -- at most one active/paused enrollment per property.
     order by e.property_id,
       case when e.status in ('active', 'paused') then 0 else 1 end,
       e.enrolled_at desc, e.id desc

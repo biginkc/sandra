@@ -46,7 +46,10 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
     const prior = selected.get(enrollment.property_id);
     const live = (status: string) => status === "active" || status === "paused";
     if (!prior || (live(enrollment.status) && !live(prior.status)) ||
-      (live(enrollment.status) === live(prior.status) && enrollment.enrolled_at > prior.enrolled_at)) {
+      (live(enrollment.status) === live(prior.status) && (
+        enrollment.enrolled_at > prior.enrolled_at ||
+        (enrollment.enrolled_at === prior.enrolled_at && enrollment.id > prior.id)
+      ))) {
       selected.set(enrollment.property_id, enrollment);
     }
   }
