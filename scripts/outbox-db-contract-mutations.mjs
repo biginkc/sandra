@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
@@ -39,6 +39,10 @@ export function fixtureChildEnv(baseEnv, fixture, scratch) {
     env.MUTATION_FIXTURE_PATH = file;
   }
   return env;
+}
+
+export function stagePhaseRunDir(runDir, repoRoot, githubEnv) {
+  appendFileSync(githubEnv, `HEAVY_RUN_DIR=${path.relative(repoRoot, runDir)}\n`);
 }
 
 function runContract(phase, extra = [], fixture = null) {
@@ -143,6 +147,7 @@ export async function runMutations(output, phase) {
     const checks = baseline?.contracts ?? [];
     const fixtureRows = baseline?.fixtureRows;
     const sealed = sealPhaseRecord({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, platformConfig, verdict: failure ? 'FAIL' : 'PASS', errorText: failure ? String(failure.stack ?? failure) : '' });
+    if (process.env.GITHUB_ACTIONS === 'true') stagePhaseRunDir(sealed.runDir, process.cwd(), process.env.GITHUB_ENV);
     if (sealed.verdict !== 'PASS' && !failure) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
   }
   if (failure) throw failure;
