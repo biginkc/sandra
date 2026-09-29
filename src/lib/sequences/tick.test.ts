@@ -418,6 +418,25 @@ describe("processEnrollmentTick — advancement persistence", () => {
     expect(await processEnrollmentTick(client, BASE_ENROLLMENT)).toMatchObject({ status: "sent" });
     expect(enrollment).toMatchObject({ status: "completed", next_run_at: null });
   });
+
+  it("persists no_phone when an enrollment has no contact", async () => {
+    const { client, enrollment } = fixture();
+    const outcome = await processEnrollmentTick(client, { ...BASE_ENROLLMENT, contact_id: null });
+    expect(outcome).toMatchObject({ status: "paused", reason: "no_phone" });
+    expect(enrollment).toMatchObject({ status: "paused", pause_reason: "no_phone" });
+    expect(sendSmsToContact).not.toHaveBeenCalled();
+  });
+
+  it.each(["blocked_no_phone", "contact_not_found"] as const)(
+    "persists no_phone after %s",
+    async (status) => {
+      vi.mocked(sendSmsToContact).mockResolvedValue({ status } as Awaited<ReturnType<typeof sendSmsToContact>>);
+      const { client, enrollment } = fixture();
+      const outcome = await processEnrollmentTick(client, BASE_ENROLLMENT);
+      expect(outcome).toMatchObject({ status: "paused", reason: "no_phone" });
+      expect(enrollment).toMatchObject({ status: "paused", pause_reason: "no_phone" });
+    },
+  );
 });
 
 describe("processEnrollmentTick — send_sms race: booking lands after the early gate", () => {
