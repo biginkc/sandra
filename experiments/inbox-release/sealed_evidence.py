@@ -30,7 +30,7 @@ APPROVALS = {
                     ("test-env", "migration-apply", "post", "shared-test"),
                     ("test-env", "shared-readonly", "post", "shared-test")),
 }
-MIGRATION_VERSIONS = {"20260930020000", "20260930020100", "20260930020200"}
+MIGRATION_VERSIONS = {"20260930040000", "20260930040100", "20260930040200"}
 PROJECT_REFS = {"shared-test": "ncsngxlcyxylaeskiteu", "production": "copflsklaefwzipsrjqz"}
 MIGRATION_WORKFLOWS = {"shared-test": ".github/workflows/db-migrate-test.yml", "production": ".github/workflows/db-migrate-prod.yml"}
 MIGRATION_APPLY_JOBS = {"shared-test": "Apply migrations to test", "production": "Apply migrations to prod"}

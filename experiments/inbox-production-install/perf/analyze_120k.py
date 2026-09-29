@@ -30,7 +30,7 @@ before_nodes = (run / 'before-relfilenodes.csv').read_text()
 after_nodes = (run / 'after-relfilenodes.csv').read_text()
 if len(before_nodes.splitlines()) != 11 or before_nodes != after_nodes:
     failures.append('table rewrite or missing relfilenode evidence')
-lock = json.loads((run / '20260930020000_inbox_control_foundation.sql.json').read_text())
+lock = json.loads((run / '20260930040000_inbox_control_foundation.sql.json').read_text())
 observed_hold = lock.get('access_exclusive_messages_observed_ms')
 if lock['exit'] != 0 or not isinstance(observed_hold, (int, float)) or not math.isfinite(observed_hold) or observed_hold < 0 or observed_hold > limits['foundation_access_exclusive_upper_ms']:
     failures.append('foundation lock upper bound')

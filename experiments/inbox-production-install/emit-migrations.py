@@ -147,13 +147,13 @@ GUARD_HTTP = (
 BATCH_A = [
     dict(
         source=INSTALL_GENERATED / "install-candidate.sql",
-        output="20260930020000_inbox_control_foundation.sql",
+        output="20260930040000_inbox_control_foundation.sql",
         guard=None,
         count=0,
     ),
     dict(
         source=INSTALL_GENERATED / "read-companion.sql",
-        output="20260930020100_inbox_read_companion.sql",
+        output="20260930040100_inbox_read_companion.sql",
         guard=None,
         count=0,
     ),
@@ -162,7 +162,7 @@ BATCH_A = [
 BATCH_B = [
     dict(
         source=RELEASE_GENERATED / "backend-operation-reply.sql",
-        output="20260930020200_inbox_backend_operation_reply.sql",
+        output="20260930040200_inbox_backend_operation_reply.sql",
         guard=GUARD_HTTP,
         count=10,
     ),
@@ -343,7 +343,7 @@ def stale_owned_paths() -> list[Path]:
     owned = set(owned_filenames())
     suffixes = tuple(name.split("_", 1)[1] for name in owned)
     candidates = set(MIGRATIONS_DIR.glob("2026091912*.sql"))
-    candidates.update(MIGRATIONS_DIR.glob("2026093002*.sql"))
+    candidates.update(MIGRATIONS_DIR.glob("2026093004*.sql"))
     candidates.update(p for p in MIGRATIONS_DIR.glob("*.sql") if p.name.endswith(suffixes))
     return sorted(p for p in candidates if p.name not in owned)
 
