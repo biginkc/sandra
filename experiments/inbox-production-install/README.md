@@ -25,6 +25,8 @@ This is an executable candidate under review, outside `supabase/migrations`. It 
 
 `rehearse-install.py --owned-fixture` applies the compiled candidate only to that marked database. It refuses a duplicate foundation. `--indexes-only` resumes after a failed concurrent index build; existing invalid or differently defined indexes stop it for reviewed repair. It validates the deferred inbound-revision constraint after foundation locks are released, confirms REPLICA IDENTITY FULL and verifies the public authorization API remains disabled. Pass `--target http` to use the separately owned HTTP fixture adapter; that path invokes the same candidate with the adapter's `postgres` login and records the exact target identity in its receipt. It does not bless a `supabase_admin`-owned catalog.
 
+For the operator install, run `operator/concurrent-indexes.sql`, then `operator/precondition-check.sql` and confirm it reports 8 valid indexes. Run `operator/validate-constraints.sql` next, then the read-only post-check. Stop if the index precondition fails.
+
 `worker-step.py --owned-fixture --rounds 10` performs bounded durable steps: baseline users/organizations, two historical jobs of 100 rows, two parent-fanout jobs of 100 rows, 20 expiries and 10 summary claims per round. Claims commit before computation; lease/generation fences check publication afterward. Retry handles only whole aborted deadlock/serialization/lock-timeout transactions. It never contacts a provider. This fixture runner is not the production continuously supervised worker service.
 
 ## Baseline and reconciliation

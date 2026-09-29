@@ -23,6 +23,7 @@
     "install-unknown-companion.py": "449dd4face96e841476b239b9d79f6bb934de81648590bc1192ccbe11241c33b",
     "maintenance-test.py": "6ef8b437401d7b7ad053af4a59dad0e28f53991cb54db6530aff5ce80bcfc0a2",
     "operator/concurrent-indexes.sql": "7f005cd88cef210888438cdc0d0ca3ed3ace1c1b3a8d6b3c0041a826f43e6877",
+    "operator/validate-constraints.sql": "b528532ccda4551e61487eade3b5137607aad58147882ffd594698fed142c0d3",
     "private-schemas.json": "bafdef15eef48ac54a506c49b35f6577b00f70500d7ef337574a41457a0277f6",
     "read-companion-manifest.json": "75c78851ed49c59727e7d76e22fd6acfd8ecbb4363bb84961047c7bc9e8009a8",
     "read-companion.py": "08a506955c4bfa7ee05e6dff5a3860645e77d162bc130e74d04ec00252e73c82",
