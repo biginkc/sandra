@@ -8,8 +8,13 @@ import { fileURLToPath } from 'node:url';
 const ROOT = 'docs/performance/inbox-redesign/evidence';
 const REF = 'ncsngxlcyxylaeskiteu';
 const HEX = /^[0-9a-f]{64}$/;
+const CATALOG_SECTIONS = new Set(['created_objects_present', 'extensions', 'functions', 'index_names', 'relations', 'schema_migrations', 'schemas', 'trigger_names', 'types']);
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const git = (repo, ...args) => execFileSync('git', args, { cwd: repo });
+function keys(value, expected, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== [...expected].sort().join(',')) throw new Error(`Unexpected ${label} fields`);
+}
 const forbidden = new Set(['access_token', 'refresh_token', 'apikey', 'service_role', 'sections', 'content']);
 function inspect(value) {
   if (Array.isArray(value)) return value.forEach(inspect);
@@ -38,27 +43,42 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   const source = JSON.parse(readFileSync(output));
   inspect(source);
   if (source.target !== 'shared-readonly' || source.phase !== phase || source.verdict !== 'PASS') throw new Error('Readonly output identity mismatch');
+  keys(source.comparisons, ['catalog', 'platform'], 'comparison');
+  keys(source.comparisons.catalog, ['verdict', 'input_sha256', 'observed_section_sha256'], 'catalog comparison');
+  keys(source.comparisons.platform, ['verdict', 'input_sha256', 'observed_sha256'], 'platform comparison');
+  keys(source.platform_config, ['postgres_major', 'postgrest_major', 'gotrue_major', 'sha256'], 'platform config');
+  keys(source.items ?? {}, source.items?.queued_invariants ? ['queued_invariants'] : [], 'items');
   if (source.comparisons?.catalog?.verdict !== 'PASS' || source.comparisons.catalog.input_sha256 !== catalog.sha256 || source.comparisons?.platform?.verdict !== 'PASS' || source.comparisons.platform.input_sha256 !== platform.sha256) throw new Error('Comparison input linkage mismatch');
   const expectedSections = catalog.data.section_sha256;
   const observedSections = source.comparisons.catalog.observed_section_sha256;
-  if (!expectedSections || !observedSections || Object.keys(expectedSections).sort().join() !== Object.keys(observedSections).sort().join() || Object.keys(expectedSections).some(k => !HEX.test(expectedSections[k]) || observedSections[k] !== expectedSections[k])) throw new Error('Catalog comparison mismatch');
+  if (!expectedSections || typeof expectedSections !== 'object' || Array.isArray(expectedSections) ||
+      !observedSections || typeof observedSections !== 'object' || Array.isArray(observedSections) ||
+      !Object.keys(expectedSections).length || Object.keys(expectedSections).some(k => !CATALOG_SECTIONS.has(k)) ||
+      Object.keys(expectedSections).sort().join() !== Object.keys(observedSections).sort().join() ||
+      Object.keys(expectedSections).some(k => !HEX.test(expectedSections[k]) || observedSections[k] !== expectedSections[k])) throw new Error('Catalog comparison mismatch');
   if (!HEX.test(source.comparisons.platform.observed_sha256)) throw new Error('Platform comparison digest missing');
   const platformKeys = ['postgres_major', 'postgrest_major', 'gotrue_major'];
-  if (platformKeys.some(k => platform.data[k] !== source.platform_config?.[k])) throw new Error('Platform comparison mismatch');
+  keys(platform.data, platformKeys, 'consumed platform');
+  if (platformKeys.some(k => !/^[0-9]+$/.test(platform.data[k]) || platform.data[k] !== source.platform_config[k])) throw new Error('Platform comparison mismatch');
   const observedPlatform = Object.fromEntries(platformKeys.map(key => [key, source.platform_config[key]]));
   if (source.platform_config.sha256 !== hash(JSON.stringify(observedPlatform)) || source.comparisons.platform.observed_sha256 !== source.platform_config.sha256) throw new Error('Observed platform digest mismatch');
   const runId = `shared-readonly-${phase}-${now.toISOString().replace(/[-:.]/g, '').replace('Z', 'Z')}`;
   const relative = `${ROOT}/${sha}/pre-merge/${runId}`;
   const absolute = path.join(repo, relative);
-  const readonly = { verdict: source.verdict, target: 'shared-test', phase, comparisons: { catalog: { verdict: 'PASS', input_sha256: catalog.sha256, observed_section_sha256: observedSections }, platform: { verdict: 'PASS', input_sha256: platform.sha256, observed_sha256: source.comparisons.platform.observed_sha256 } }, counts: { member_orgs: source.member_orgs?.length ?? 0, queued: Object.keys(source.queued?.per_row ?? {}).length }, items: {} };
+  const readonly = { verdict: source.verdict, target: 'shared-test', phase, comparisons: { catalog: { verdict: 'PASS', input_sha256: catalog.sha256, observed_section_sha256: observedSections }, platform: { verdict: 'PASS', input_sha256: platform.sha256, observed_sha256: source.comparisons.platform.observed_sha256 } }, items: {} };
   const queued = source.items?.queued_invariants;
+  if (queued) {
+    if (typeof queued !== 'object' || Array.isArray(queued) || Object.keys(queued).some(key => !['verdict', 'diff', 'stability_probe'].includes(key)) ||
+        !['PASS', 'INCONCLUSIVE'].includes(queued.verdict) ||
+        (Object.hasOwn(queued, 'stability_probe') && queued.stability_probe !== 'identical')) throw new Error('Invalid queued invariants');
+  }
   if (queued) readonly.items.queued_invariants = { verdict: queued.verdict, ...(queued.diff ? { diff: hash(Buffer.from(JSON.stringify(queued.diff))) } : {}), ...(queued.stability_probe ? { stability_probe: queued.stability_probe } : {}) };
   inspect(readonly);
   const bytes = Buffer.from(JSON.stringify(readonly, null, 2) + '\n');
   const scripts = ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs'];
   const operator_script_sha256 = Object.fromEntries(scripts.map(script => [script, hash(git(repo, 'show', `${sha}:${script}`))]));
   if (scripts.some(script => operator_script_sha256[script] !== hash(readFileSync(path.join(repo, script))))) throw new Error('Operator script differs from tested SHA');
-  const manifest = { tested_sha: sha, tier: 'pre-merge', kind: 'shared-readonly', phase, target: 'shared-test', verdict: source.verdict, exit_status: 0, run_id: runId, started_at: source.started_at ?? now.toISOString(), completed_at: now.toISOString(), clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative }, artifacts: { 'readonly.json': hash(bytes) }, target_binding: { project_ref: REF, pooler_user: `postgres.${REF}` }, inputs: { catalog_record: { directory: catalog.directory, artifact: catalog.artifact, sha256: catalog.sha256 }, platform_record: { directory: platform.directory, artifact: platform.artifact, sha256: platform.sha256 } }, operator_script_sha256, event: 'operator', workflow_path: '', github_run_id: '', github_run_attempt: '', items: readonly.items };
+  const manifest = { tested_sha: sha, tier: 'pre-merge', kind: 'shared-readonly', phase, target: 'shared-test', verdict: source.verdict, exit_status: 0, run_id: runId, started_at: now.toISOString(), completed_at: now.toISOString(), clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative }, artifacts: { 'readonly.json': hash(bytes) }, target_binding: { project_ref: REF, pooler_user: `postgres.${REF}` }, inputs: { catalog_record: { directory: catalog.directory, artifact: catalog.artifact, sha256: catalog.sha256 }, platform_record: { directory: platform.directory, artifact: platform.artifact, sha256: platform.sha256 } }, operator_script_sha256, event: 'operator', workflow_path: '', github_run_id: '', github_run_attempt: '', items: readonly.items };
   mkdirSync(path.dirname(absolute), { recursive: true });
   mkdirSync(absolute, { recursive: false });
   writeFileSync(path.join(absolute, 'readonly.json'), bytes, { flag: 'wx' });

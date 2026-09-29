@@ -37,7 +37,7 @@ function fixture() {
 test('seals only digest representation linked to committed inputs', () => {
   const f = fixture(); const dir = sealSharedReadonly(f.args);
   const output = JSON.parse(readFileSync(path.join(f.repo, dir, 'readonly.json')));
-  assert.deepEqual(Object.keys(output).sort(), ['comparisons', 'counts', 'items', 'phase', 'target', 'verdict']);
+  assert.deepEqual(Object.keys(output).sort(), ['comparisons', 'items', 'phase', 'target', 'verdict']);
   assert.equal(JSON.stringify(output).includes('platform_config'), false);
 });
 for (const [label, mutate] of [
@@ -46,6 +46,9 @@ for (const [label, mutate] of [
   ['catalog mismatch', f => { f.source.comparisons.catalog.observed_section_sha256.relations = 'f'.repeat(64); f.save(); }],
   ['platform mismatch', f => { f.source.platform_config.postgres_major = '16'; f.save(); }],
   ['consumed hash mismatch', f => { f.source.comparisons.catalog.input_sha256 = '0'.repeat(64); f.save(); }],
+  ['forged platform digest', f => { f.source.comparisons.platform.observed_sha256 = '0'.repeat(64); f.source.platform_config.sha256 = '0'.repeat(64); f.save(); }],
+  ['stability probe content', f => { f.source.items = { queued_invariants: { verdict: 'INCONCLUSIVE', stability_probe: { message_body: 'private' } } }; f.save(); }],
+  ['unexpected comparison field', f => { f.source.comparisons.catalog.message_body = 'private'; f.save(); }],
   ['wrong phase', f => { f.args.phase = 'post'; }],
   ['INCONCLUSIVE source verdict', f => { f.source.verdict = 'INCONCLUSIVE'; f.save(); }],
   ['FAIL source verdict', f => { f.source.verdict = 'FAIL'; f.save(); }],
