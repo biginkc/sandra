@@ -25,6 +25,8 @@ export type PcmTailReport = {
   readonly deliveryTimedOut?: boolean;
 };
 
+export type PcmTimingRecord = DialpadTimingAnchor | DialpadTimingContextClock;
+
 export type PcmResamplerOptions = {
   readonly sourceSampleRateHz: number;
   readonly track: PcmTrack;
@@ -199,12 +201,28 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
     this.unsupported = sampleRate < TARGET_RATE || sampleRate > 192000;
     this.closed = false;
     this.inputChannels = 0;
+    this.contextId = null;
+    this.anchorSeq = 0;
+    this.lastContextEnd = 0;
+    this.nextPeriodicContextFrame = sampleRate * 10;
+    this.gapPending = false;
+    this.initialized = false;
     this.port.onmessage = (event) => {
+      if (event.data?.type === "init") {
+        this.contextId = event.data.contextId;
+        return;
+      }
       if (event.data?.type !== "flush") return;
       if (this.flushing || this.unsupported) return;
       this.flushing = true;
+      this.emitAnchor("final", this.lastContextEnd, this.totalInput, 0, this.gapPending ? "empty_input_gap" : "continuous", Math.max(0, Math.floor(this.totalInput * TARGET_RATE / sampleRate) - this.frameIndex * FRAME_SAMPLES));
       this.port.postMessage({ type: "tail", totalInputSamples: this.totalInput, creditedSamples: this.frameIndex * FRAME_SAMPLES, uncreditedTailSamples: Math.max(0, Math.floor(this.totalInput * TARGET_RATE / sampleRate) - this.frameIndex * FRAME_SAMPLES) });
     };
+  }
+  emitAnchor(anchor, contextFrame, sourceCursor, blockLength, continuity, discardedTailSamples) {
+    if (!this.contextId) return;
+    const product = BigInt(Math.trunc(this.nextOutput)) * BigInt(Math.trunc(sampleRate));
+    this.port.postMessage({ type: "anchor", record: { kind: "anchor", track: this.contextId.track, seq: this.anchorSeq++, contextId: this.contextId.id, anchor, contextFrame, sourceCursor, blockLength, sourceRateHz: sampleRate, outputCursor: this.nextOutput, outputFrameIndex: Math.floor(this.nextOutput / FRAME_SAMPLES), phaseNumerator: Number(product % 16000n), continuity, previousContextEndFrame: this.lastContextEnd === 0 ? null : this.lastContextEnd, discardedTailSamples, uncertainOutputStartSample: null, uncertainOutputEndSample: null } });
   }
   process(inputs) {
     if (this.closed) return false;
@@ -214,8 +232,13 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
       return false;
     }
     if (this.flushing) return false;
+    const contextFrame = typeof currentFrame === "number" ? currentFrame : this.lastContextEnd;
     const channels = inputs[0] ?? [];
-    if (channels.length === 0 || channels[0].length === 0) return true;
+    if (channels.length === 0 || channels[0].length === 0) {
+      this.gapPending = true;
+      this.lastContextEnd = contextFrame;
+      return true;
+    }
     if (this.inputChannels === 0) {
       this.inputChannels = channels.length;
       this.port.postMessage({ type: "input-format", inputChannels: this.inputChannels });
@@ -230,6 +253,13 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
       return false;
     }
     const length = channels[0].length;
+    const continuity = !this.initialized ? "continuous" : (this.gapPending || (this.lastContextEnd !== 0 && contextFrame !== this.lastContextEnd) ? "empty_input_gap" : "continuous");
+    if (!this.initialized || continuity !== "continuous" || contextFrame >= this.nextPeriodicContextFrame) {
+      this.emitAnchor(!this.initialized ? "start" : continuity !== "continuous" ? "discontinuity" : "periodic", contextFrame, this.totalInput, length, continuity, null);
+      while (this.nextPeriodicContextFrame <= contextFrame) this.nextPeriodicContextFrame += sampleRate * 10;
+    }
+    this.initialized = true;
+    this.gapPending = false;
     const joined = new Float32Array(this.pending.length + length);
     joined.set(this.pending);
     for (let index = 0; index < length; index += 1) {
@@ -263,6 +293,7 @@ class SandraDialpadPcm16Processor extends AudioWorkletProcessor {
       this.pending = this.pending.slice(keepFrom - this.pendingBase);
       this.pendingBase = keepFrom;
     }
+    this.lastContextEnd = contextFrame + length;
     return true;
   }
 }
@@ -279,6 +310,7 @@ export type PcmWorkletSession = {
   readonly sourceSampleRateHz: number;
   /** Actual input layout observed by the AudioContext source before collection starts. */
   readonly inputChannels: number;
+  readonly contextId?: string;
   stop(): Promise<PcmTailReport>;
 };
 
@@ -296,11 +328,13 @@ export type PcmWorkletStartOptions = {
   readonly signal?: AbortSignal;
   readonly onFailure?: (error: Error) => void;
   readonly maxPendingFrames?: number;
+  readonly onTiming?: (record: PcmTimingRecord) => void | Promise<void>;
 };
 
 const DEFAULT_PCM_TIMEOUT_MS = 1_000;
 const DEFAULT_PCM_STARTUP_TIMEOUT_MS = 2_000;
 const MAX_PCM_PENDING_FRAMES = 64;
+let contextIdCounter = 0;
 
 function abortError(): Error {
   const error = new Error("PCM AudioWorklet startup was cancelled.");
@@ -312,6 +346,11 @@ function timeoutError(message: string): Error {
   const error = new Error(message);
   error.name = "TimeoutError";
   return error;
+}
+
+function randomContextId(): string {
+  const maybeCrypto = (globalThis as typeof globalThis & { crypto?: { randomUUID?: () => string } }).crypto;
+  return maybeCrypto?.randomUUID?.() ?? `00000000-0000-4000-8000-${(++contextIdCounter).toString(16).padStart(12, '0')}`;
 }
 
 async function boundedAwait<T>(
@@ -365,6 +404,7 @@ export async function startPcmWorkletSession(
   }
   let source: MediaStreamAudioSourceNode | null = null;
   let node: AudioWorkletNode | null = null;
+  const contextId = randomContextId();
   let inputChannels = 0;
   let deliveryActive = true;
   let acceptingFrames = true;
@@ -372,6 +412,8 @@ export async function startPcmWorkletSession(
   let resolveTailReceived!: (tail: PcmTailReport) => void;
   const tailReceivedPromise = new Promise<PcmTailReport>((resolve) => { resolveTailReceived = resolve; });
   let deliveryQueue = Promise.resolve();
+  let timingQueue = Promise.resolve();
+  let timingSequence = 0;
   let pendingDeliveries = 0;
   let failureNotified = false;
   const notifyFailure = (error: Error) => {
@@ -387,6 +429,17 @@ export async function startPcmWorkletSession(
     }).catch((error: unknown) => {
       notifyFailure(error instanceof Error ? error : new Error("PCM sink failed."));
     });
+  };
+  const enqueueTiming = (record: PcmTimingRecord) => {
+    if (!options.onTiming) return;
+    timingQueue = timingQueue.then(() => options.onTiming!(record)).catch(() => undefined);
+  };
+  const emitContextClock = (observation: DialpadTimingContextClock['observation'], state: DialpadTimingContextClock['state']) => {
+    const perf = typeof performance !== 'undefined' ? performance : null;
+    const before = perf?.now() ?? 0;
+    const contextTime = typeof context.currentTime === 'number' ? context.currentTime * 1000 : 0;
+    const after = perf?.now() ?? before;
+    enqueueTiming({ kind: 'context_clock', track, seq: timingSequence++, contextId, observation, browserBeforeMs: before, contextTimeMs: contextTime, browserAfterMs: after, browserTimeOriginMs: perf?.timeOrigin ?? 0, state });
   };
   const cleanup = async () => {
     if (node) {
@@ -411,7 +464,13 @@ export async function startPcmWorkletSession(
     let resolveInputFormat!: (channels: number) => void;
     const inputFormatPromise = new Promise<number>((resolve) => { resolveInputFormat = resolve; });
     node.port.onmessage = (event: MessageEvent) => {
-      const message = event.data as { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number; inputChannels?: number };
+      const message = event.data as { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number; inputChannels?: number; record?: PcmTimingRecord };
+      if (message.type === 'anchor' && message.record) {
+        enqueueTiming({ ...message.record, track });
+        if (message.record.kind === 'anchor' && message.record.anchor === 'periodic') emitContextClock('periodic', context.state === 'suspended' ? 'suspended' : 'running');
+        else if (message.record.kind === 'anchor' && message.record.anchor === 'discontinuity') emitContextClock('state_change', context.state === 'suspended' ? 'suspended' : 'running');
+        return;
+      }
       if (message.type === "unsupported-rate") {
         notifyFailure(new Error(`Unsupported source sample rate: ${message.sourceSampleRateHz ?? actualRate} Hz.`));
         return;
@@ -454,11 +513,16 @@ export async function startPcmWorkletSession(
       });
     };
     source.connect(node);
+    node.port.postMessage({ type: 'init', contextId: { id: contextId, track } });
+    emitContextClock('start', context.state === 'suspended' ? 'suspended' : 'running');
     const silent = context.createGain();
     silent.gain.value = 0;
     node.connect(silent);
     silent.connect(context.destination);
-    if (context.state === "suspended") await boundedAwait(context.resume(), startupTimeoutMs, wait, options.signal);
+    if (context.state === "suspended") {
+      await boundedAwait(context.resume(), startupTimeoutMs, wait, options.signal);
+      emitContextClock('state_change', 'running');
+    }
     if (options.signal?.aborted) throw abortError();
     inputChannels = await boundedAwait(inputFormatPromise, startupTimeoutMs, wait, options.signal);
   } catch (error) {
@@ -470,6 +534,7 @@ export async function startPcmWorkletSession(
   return {
     sourceSampleRateHz: context.sampleRate,
     inputChannels,
+    contextId,
     stop: async () => {
       if (stopPromise) return stopPromise;
       stopPromise = (async () => {
@@ -494,6 +559,8 @@ export async function startPcmWorkletSession(
         }
         deliveryActive = false;
         acceptingFrames = false;
+        emitContextClock('final', context.state === 'closed' ? 'closed' : context.state === 'suspended' ? 'suspended' : 'running');
+        await timingQueue;
         await cleanup();
         return tail!;
       })();
@@ -501,3 +568,4 @@ export async function startPcmWorkletSession(
     },
   };
 }
+import type { DialpadTimingAnchor, DialpadTimingContextClock } from './timing-evidence';

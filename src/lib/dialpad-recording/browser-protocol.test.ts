@@ -85,6 +85,21 @@ describe('Dialpad browser binary protocol', () => {
 })
 
 describe('Dialpad browser text controls and auth state', () => {
+  it('negotiates timing capability without changing legacy auth/ready shapes', () => {
+    expect(parseDialpadBrowserClientText('{"type":"auth","token":"grant","epoch":1,"controlVersion":2,"capabilities":["capture_timing_v1"]}')).toMatchObject({ capabilities: ['capture_timing_v1'] })
+    expectCode(() => parseDialpadBrowserClientText('{"type":"auth","token":"grant","epoch":1,"controlVersion":2,"capabilities":["other"]}'), 'control_invalid')
+    expect(parseDialpadBrowserServerMessage('{"type":"ready","epoch":1,"controlVersion":2,"capabilities":["capture_timing_v1"]}')).toMatchObject({ capabilities: ['capture_timing_v1'] })
+    expectCode(() => parseDialpadBrowserServerMessage('{"type":"ready","epoch":1,"controlVersion":2,"capabilities":["other"]}'), 'server_message_invalid')
+  })
+
+  it('validates session timing controls and rejects unknown nested fields', () => {
+    const record = { kind: 'anchor', track: 'tab', seq: 0, contextId: '00000000-0000-4000-8000-000000000001', anchor: 'start', contextFrame: 0, sourceCursor: 0, blockLength: 128, sourceRateHz: 48000, outputCursor: 0, outputFrameIndex: 0, phaseNumerator: 0, continuity: 'continuous', previousContextEndFrame: null, discardedTailSamples: null, uncertainOutputStartSample: null, uncertainOutputEndSample: null }
+    expect(parseDialpadBrowserClientText(JSON.stringify({ type: 'timing_batch', epoch: 1, batchId: '00000000-0000-4000-8000-000000000002', records: [record] }))).toMatchObject({ type: 'timing_batch', epoch: 1 })
+    expectCode(() => parseDialpadBrowserClientText(JSON.stringify({ type: 'timing_batch', epoch: 1, batchId: '00000000-0000-4000-8000-000000000002', records: [{ ...record, forged: true }] })), 'control_invalid')
+    expectCode(() => parseDialpadBrowserClientText(JSON.stringify({ type: 'timing_batch', epoch: 1, batchId: '00000000-0000-4000-8000-000000000002', records: [{ kind: 'exchange', track: 'tab', seq: 0, serverClockId: '00000000-0000-4000-8000-000000000003', nonce: 'a'.repeat(64), browserSendMs: 1, browserReceiveMs: 2, serverReceiveMonoMs: 1, serverSendMonoMs: 2, serverReceiveWallMs: 3, serverSendWallMs: 4 }] })), 'control_invalid')
+    expect(parseDialpadBrowserClientText('{"type":"timing_end","epoch":1,"lastSeq":{"tabAnchor":0,"micAnchor":-1,"tabContext":-1,"micContext":-1,"exchange":-1},"outcome":"incomplete","reasons":["missing_final"]}')).toMatchObject({ type: 'timing_end', outcome: 'incomplete' })
+  })
+
   it('accepts only exact auth, PCM EOF, and recording EOF shapes with bounded values', () => {
     expect(parseDialpadBrowserClientText('{"type":"auth","token":"grant-123","epoch":1,"controlVersion":2}')).toEqual({ type: 'auth', token: 'grant-123', epoch: 1, controlVersion: 2 })
     expect(parseDialpadBrowserClientText('{"type":"pcm_eof","epoch":16,"track":"tab","endSample":4294967295,"discardedTailSamples":319,"degradedReasons":["capture_overflow"]}')).toEqual({ type: 'pcm_eof', epoch: 16, track: 'tab', endSample: 4294967295, discardedTailSamples: 319, degradedReasons: ['capture_overflow'] })

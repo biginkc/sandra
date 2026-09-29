@@ -126,6 +126,27 @@ export type Database = {
         Relationships: []
       }
 
+      dialpad_recording_timing_batches: {
+        Row: { capture_id: string; org_id: string; epoch: number; batch_id: string; content_hash: string; record_count: number; payload_bytes: number; created_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_timing_records: {
+        Row: { capture_id: string; org_id: string; epoch: number; stream: string; seq: number; content_hash: string; record: Json; payload_bytes: number; created_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_timing_state: {
+        Row: { capture_id: string; org_id: string; epoch: number; status: string; last_sequences: Json | null; reasons: Json; finalized_at: string | null }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
       dialpad_recording_shadow_measurements: {
         Row: { capture_id: string; org_id: string; call_activity_id: string; intent_id: string; algorithm_version: string; input_digest: string; evidence_manifest: Json; observed_samples: number; observed_samples_by_epoch: Json; eligible_samples: null; timing_status: string; evidence_status: string; reasons: Json; evaluated_at: string }
         Insert: Record<string, never>
@@ -5838,6 +5859,8 @@ export type Database = {
       fn_get_dialpad_recording_seal_inputs: { Args: { p_capture_id: string; p_claim_token: string }; Returns: Json }
       fn_record_dialpad_recording_vad_ranges: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_batch_id: string; p_ranges: Json }; Returns: Json }
       fn_record_dialpad_recording_pcm_progress: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_batch_id: string; p_processed_through_sample: number; p_pcm_eof_sample?: number | null; p_source_sample_rate_hz?: number | null; p_source_channels?: number | null; p_source_codec?: string | null; p_degraded_reasons?: Json }; Returns: Json }
+      fn_append_dialpad_recording_timing: { Args: { p_org_id: string; p_capture_id: string; p_epoch: number; p_batch_id: string; p_records: Json }; Returns: Json }
+      fn_finish_dialpad_recording_timing: { Args: { p_org_id: string; p_capture_id: string; p_epoch: number; p_last_sequences: Json; p_outcome: string; p_reasons: Json }; Returns: Json }
       fn_get_dialpad_recording_vad_snapshot: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
       fn_claim_dialpad_recording_seal_work: { Args: { p_worker_id: string; p_lease_seconds?: number }; Returns: Json }
       fn_register_dialpad_recording_result: { Args: { p_capture_id: string; p_claim_token: string; p_tracks: Json; p_failure_code?: string | null }; Returns: Json }

@@ -1,3 +1,5 @@
+import { DIALPAD_TIMING_MAX_BATCH_BYTES, DIALPAD_TIMING_MAX_RECORDS_PER_BATCH, parseDialpadTimingRecord, parseDialpadTimingReasons } from './timing-evidence'
+
 const PROTOCOL_VERSION = 1
 const HEADER_BYTES = 13
 const PCM_PAYLOAD_BYTES = 320 * 2
@@ -13,6 +15,7 @@ const MAX_SERVER_DEGRADED_REASONS = 32
 const MAX_SERVER_REASON_CHARS = 64
 const UINT32_MAX = 0xffff_ffff
 const CONTROL_VERSION = 2
+const TIMING_CAPABILITY = 'capture_timing_v1'
 
 export const DIALPAD_BROWSER_PROTOCOL = {
   version: PROTOCOL_VERSION,
@@ -246,6 +249,7 @@ export interface DialpadBrowserAuthMessage {
   readonly token: string
   readonly epoch: number
   readonly controlVersion: number
+  readonly capabilities?: readonly ['capture_timing_v1']
 }
 
 export type DialpadBrowserCaptureDegradedReason =
@@ -290,7 +294,37 @@ export interface DialpadBrowserCaptureInterruptedMessage {
   readonly reason: DialpadBrowserCaptureDegradedReason
 }
 
-export type DialpadBrowserClientMessage = DialpadBrowserAuthMessage | DialpadBrowserTrackFormatMessage | DialpadBrowserPcmEofMessage | DialpadBrowserRecordingEofMessage | DialpadBrowserCaptureInterruptedMessage
+export interface DialpadBrowserTimingBatchMessage {
+  readonly type: 'timing_batch'
+  readonly epoch: number
+  readonly batchId: string
+  readonly records: readonly import('./timing-evidence').DialpadTimingRecord[]
+}
+
+export interface DialpadBrowserTimingProbeMessage {
+  readonly type: 'timing_probe'
+  readonly epoch: number
+  readonly seq: number
+  readonly browserSendMs: number
+}
+
+export interface DialpadBrowserTimingConfirmMessage {
+  readonly type: 'timing_confirm'
+  readonly epoch: number
+  readonly seq: number
+  readonly nonce: string
+  readonly browserReceiveMs: number
+}
+
+export interface DialpadBrowserTimingEndMessage {
+  readonly type: 'timing_end'
+  readonly epoch: number
+  readonly lastSeq: { readonly tabAnchor: number; readonly micAnchor: number; readonly tabContext: number; readonly micContext: number; readonly exchange: number }
+  readonly outcome: 'collected' | 'incomplete'
+  readonly reasons: readonly string[]
+}
+
+export type DialpadBrowserClientMessage = DialpadBrowserAuthMessage | DialpadBrowserTrackFormatMessage | DialpadBrowserPcmEofMessage | DialpadBrowserRecordingEofMessage | DialpadBrowserCaptureInterruptedMessage | DialpadBrowserTimingBatchMessage | DialpadBrowserTimingProbeMessage | DialpadBrowserTimingConfirmMessage | DialpadBrowserTimingEndMessage
 
 export function parseDialpadBrowserClientText(text: string): DialpadBrowserClientMessage {
   if (typeof text !== 'string' || text.length === 0 || text.length > MAX_CONTROL_TEXT_CHARS) throw protocolError('text_invalid')
@@ -298,10 +332,12 @@ export function parseDialpadBrowserClientText(text: string): DialpadBrowserClien
   try { value = JSON.parse(text) as unknown } catch { throw protocolError('text_invalid') }
   if (!isRecord(value) || typeof value.type !== 'string') throw protocolError('control_invalid')
   if (value.type === 'auth') {
-    if (!hasExactKeys(value, ['type', 'token', 'epoch', 'controlVersion']) || typeof value.token !== 'string' || value.token.length === 0 || value.token.length > MAX_AUTH_TOKEN_CHARS || !isEpoch(value.epoch) || value.controlVersion !== CONTROL_VERSION) {
+    const base = hasExactKeys(value, ['type', 'token', 'epoch', 'controlVersion'])
+    const capable = hasExactKeys(value, ['type', 'token', 'epoch', 'controlVersion', 'capabilities']) && Array.isArray(value.capabilities) && value.capabilities.length === 1 && value.capabilities[0] === TIMING_CAPABILITY
+    if ((!base && !capable) || typeof value.token !== 'string' || value.token.length === 0 || value.token.length > MAX_AUTH_TOKEN_CHARS || !isEpoch(value.epoch) || value.controlVersion !== CONTROL_VERSION) {
       throw protocolError('control_invalid')
     }
-    return { type: 'auth', token: value.token, epoch: value.epoch, controlVersion: CONTROL_VERSION }
+    return capable ? { type: 'auth', token: value.token, epoch: value.epoch, controlVersion: CONTROL_VERSION, capabilities: [TIMING_CAPABILITY] } : { type: 'auth', token: value.token, epoch: value.epoch, controlVersion: CONTROL_VERSION }
   }
   if (value.type === 'track_format') {
     if (!isTrackFormat(value)) throw protocolError('format_invalid')
@@ -325,6 +361,28 @@ export function parseDialpadBrowserClientText(text: string): DialpadBrowserClien
     }
     return { type: 'capture_interrupted', epoch: value.epoch, track: value.track, reason: value.reason }
   }
+  if (value.type === 'timing_batch') {
+    if (!hasExactKeys(value, ['type', 'epoch', 'batchId', 'records']) || !isEpoch(value.epoch) || typeof value.batchId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.batchId) || !Array.isArray(value.records) || value.records.length === 0 || value.records.length > DIALPAD_TIMING_MAX_RECORDS_PER_BATCH) throw protocolError('control_invalid')
+    let records: import('./timing-evidence').DialpadTimingRecord[]
+    try { records = value.records.map(parseDialpadTimingRecord) } catch { throw protocolError('control_invalid') }
+    if (records.some((record) => record.kind === 'exchange')) throw protocolError('control_invalid')
+    const encoded = JSON.stringify({ type: 'timing_batch', epoch: value.epoch, batchId: value.batchId, records })
+    if (new TextEncoder().encode(encoded).byteLength > DIALPAD_TIMING_MAX_BATCH_BYTES) throw protocolError('control_invalid')
+    return { type: 'timing_batch', epoch: value.epoch, batchId: value.batchId, records }
+  }
+  if (value.type === 'timing_probe') {
+    if (!hasExactKeys(value, ['type', 'epoch', 'seq', 'browserSendMs']) || !isEpoch(value.epoch) || !isSafeBoundedInteger(value.seq, 0, Number.MAX_SAFE_INTEGER) || typeof value.browserSendMs !== 'number' || !Number.isFinite(value.browserSendMs)) throw protocolError('control_invalid')
+    return { type: 'timing_probe', epoch: value.epoch, seq: value.seq, browserSendMs: value.browserSendMs }
+  }
+  if (value.type === 'timing_confirm') {
+    if (!hasExactKeys(value, ['type', 'epoch', 'seq', 'nonce', 'browserReceiveMs']) || !isEpoch(value.epoch) || !isSafeBoundedInteger(value.seq, 0, Number.MAX_SAFE_INTEGER) || typeof value.nonce !== 'string' || !/^[0-9a-f]{64}$/.test(value.nonce) || typeof value.browserReceiveMs !== 'number' || !Number.isFinite(value.browserReceiveMs)) throw protocolError('control_invalid')
+    return { type: 'timing_confirm', epoch: value.epoch, seq: value.seq, nonce: value.nonce, browserReceiveMs: value.browserReceiveMs }
+  }
+  if (value.type === 'timing_end') {
+    if (!hasExactKeys(value, ['type', 'epoch', 'lastSeq', 'outcome', 'reasons']) || !isEpoch(value.epoch) || !isRecord(value.lastSeq) || !hasExactKeys(value.lastSeq, ['tabAnchor', 'micAnchor', 'tabContext', 'micContext', 'exchange']) || !isSafeBoundedInteger(value.lastSeq.tabAnchor, -1, 2_147_483_647) || !isSafeBoundedInteger(value.lastSeq.micAnchor, -1, 2_147_483_647) || !isSafeBoundedInteger(value.lastSeq.tabContext, -1, 2_147_483_647) || !isSafeBoundedInteger(value.lastSeq.micContext, -1, 2_147_483_647) || !isSafeBoundedInteger(value.lastSeq.exchange, -1, 2_147_483_647) || (value.outcome !== 'collected' && value.outcome !== 'incomplete')) throw protocolError('control_invalid')
+    try { parseDialpadTimingReasons(value.reasons) } catch { throw protocolError('control_invalid') }
+    return { type: 'timing_end', epoch: value.epoch, lastSeq: value.lastSeq as DialpadBrowserTimingEndMessage['lastSeq'], outcome: value.outcome, reasons: [...(value.reasons as unknown[])] as string[] }
+  }
   throw protocolError('control_invalid')
 }
 
@@ -337,6 +395,7 @@ export interface DialpadBrowserRedeemedAuthentication {
   /** Values returned by the authoritative grant redemption, never by browser text. */
   readonly epoch: number
   readonly tracks: readonly DialpadBrowserTrack[]
+  readonly timingCapability?: boolean
 }
 
 /** Enforces first-message auth, server-confirmed redemption, and bound epoch/tracks. */
@@ -351,6 +410,8 @@ export class DialpadBrowserProtocolState {
   private readonly observedPcmEnds = new Map<DialpadBrowserTrack, number>()
   private readonly pcmEofs = new Map<DialpadBrowserTrack, DialpadBrowserPcmEofMessage>()
   private readonly interruptedTracks = new Map<DialpadBrowserTrack, DialpadBrowserCaptureDegradedReason>()
+  private timingCapability = false
+  private timingEnded = false
 
   constructor(options: DialpadBrowserProtocolStateOptions = {}) {
     if (options.expectedEpoch !== undefined && !isEpoch(options.expectedEpoch)) throw protocolError('epoch_invalid')
@@ -364,6 +425,7 @@ export class DialpadBrowserProtocolState {
   get authenticated(): boolean { return this.phase === 'authenticated' }
   get authenticationPending(): boolean { return this.phase === 'pending_auth' }
   get epoch(): number | undefined { return this.authenticatedEpoch }
+  get timingEnabled(): boolean { return this.timingCapability }
 
   acceptText(text: string): DialpadBrowserClientMessage {
     const message = parseDialpadBrowserClientText(text)
@@ -383,6 +445,12 @@ export class DialpadBrowserProtocolState {
       return message
     }
     if (message.type === 'auth') throw protocolError('auth_repeated')
+    if (message.type === 'timing_batch' || message.type === 'timing_probe' || message.type === 'timing_confirm' || message.type === 'timing_end') {
+      if (!this.timingCapability || this.timingEnded) throw protocolError('control_invalid')
+      if (message.epoch !== this.authenticatedEpoch) throw protocolError('epoch_mismatch')
+      if (message.type === 'timing_end') this.timingEnded = true
+      return message
+    }
     this.assertMessageBinding(message.epoch, message.track)
     if (message.type === 'track_format') {
       const previous = this.trackFormats.get(message.track)
@@ -441,6 +509,7 @@ export class DialpadBrowserProtocolState {
     }
     this.authenticatedEpoch = redeemed.epoch
     this.confirmedTracks = new Set(tracks)
+    this.timingCapability = redeemed.timingCapability === true
     this.phase = 'authenticated'
   }
 
@@ -471,6 +540,7 @@ export interface DialpadBrowserReadyMessage {
   readonly type: 'ready'
   readonly epoch: number
   readonly controlVersion: number
+  readonly capabilities?: readonly ['capture_timing_v1']
 }
 
 export interface DialpadBrowserMeasurementSnapshotMessage {
@@ -526,7 +596,40 @@ export interface DialpadBrowserPcmEofDrained {
   readonly endSample: number
 }
 
-export type DialpadBrowserServerMessage = DialpadBrowserReadyMessage | DialpadBrowserMeasurementSnapshotMessage | DialpadBrowserCaptureStateMessage | DialpadBrowserRecordingChunkAck | DialpadBrowserPcmFrameAck | DialpadBrowserRecordingEofAck | DialpadBrowserPcmEofDrained
+export interface DialpadBrowserTimingBatchAck {
+  readonly type: 'timing_batch_ack'
+  readonly epoch: number
+  readonly batchId: string
+  readonly status: 'recorded' | 'replayed'
+}
+
+export interface DialpadBrowserTimingProbeReply {
+  readonly type: 'timing_probe_reply'
+  readonly epoch: number
+  readonly seq: number
+  readonly nonce: string
+  readonly serverClockId: string
+  readonly serverReceiveMonoMs: number
+  readonly serverSendMonoMs: number
+  readonly serverReceiveWallMs: number
+  readonly serverSendWallMs: number
+}
+
+export interface DialpadBrowserTimingExchangeAck {
+  readonly type: 'timing_exchange_ack'
+  readonly epoch: number
+  readonly seq: number
+  readonly status: 'recorded' | 'replayed'
+}
+
+export interface DialpadBrowserTimingEndAck {
+  readonly type: 'timing_end_ack'
+  readonly epoch: number
+  readonly status: 'collected' | 'incomplete'
+  readonly reasons: readonly string[]
+}
+
+export type DialpadBrowserServerMessage = DialpadBrowserReadyMessage | DialpadBrowserMeasurementSnapshotMessage | DialpadBrowserCaptureStateMessage | DialpadBrowserRecordingChunkAck | DialpadBrowserPcmFrameAck | DialpadBrowserRecordingEofAck | DialpadBrowserPcmEofDrained | DialpadBrowserTimingBatchAck | DialpadBrowserTimingProbeReply | DialpadBrowserTimingExchangeAck | DialpadBrowserTimingEndAck
 
 /** Projects an already-authoritative DB snapshot into the narrow browser view. */
 export function toDialpadBrowserMeasurementSnapshot(input: Omit<DialpadBrowserMeasurementSnapshotMessage, 'type'>): DialpadBrowserMeasurementSnapshotMessage {
@@ -557,7 +660,9 @@ export function parseDialpadBrowserServerMessage(text: string): DialpadBrowserSe
 function validateServerMessage(message: DialpadBrowserServerMessage): void {
   if (!isRecord(message) || typeof message.type !== 'string') throw protocolError('server_message_invalid')
   if (message.type === 'ready') {
-    if (!hasExactKeys(message, ['type', 'epoch', 'controlVersion']) || !isEpoch(message.epoch) || message.controlVersion !== CONTROL_VERSION) throw protocolError('server_message_invalid')
+    const base = hasExactKeys(message, ['type', 'epoch', 'controlVersion'])
+    const capable = hasExactKeys(message, ['type', 'epoch', 'controlVersion', 'capabilities']) && Array.isArray(message.capabilities) && message.capabilities.length === 1 && message.capabilities[0] === TIMING_CAPABILITY
+    if ((!base && !capable) || !isEpoch(message.epoch) || message.controlVersion !== CONTROL_VERSION) throw protocolError('server_message_invalid')
     return
   }
   if (message.type === 'measurement_snapshot') {
@@ -583,6 +688,22 @@ function validateServerMessage(message: DialpadBrowserServerMessage): void {
   }
   if (message.type === 'pcm_eof_drained') {
     if (!hasExactKeys(message, ['type', 'track', 'epoch', 'endSample']) || !isTrack(message.track) || !isEpoch(message.epoch) || !isUint32(message.endSample)) throw protocolError('server_message_invalid')
+    return
+  }
+  if (message.type === 'timing_batch_ack') {
+    if (!hasExactKeys(message, ['type', 'epoch', 'batchId', 'status']) || !isEpoch(message.epoch) || typeof message.batchId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(message.batchId) || (message.status !== 'recorded' && message.status !== 'replayed')) throw protocolError('server_message_invalid')
+    return
+  }
+  if (message.type === 'timing_probe_reply') {
+    if (!hasExactKeys(message, ['type', 'epoch', 'seq', 'nonce', 'serverClockId', 'serverReceiveMonoMs', 'serverSendMonoMs', 'serverReceiveWallMs', 'serverSendWallMs']) || !isEpoch(message.epoch) || !isSafeBoundedInteger(message.seq, 0, Number.MAX_SAFE_INTEGER) || typeof message.nonce !== 'string' || !/^[0-9a-f]{64}$/.test(message.nonce) || typeof message.serverClockId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(message.serverClockId) || ![message.serverReceiveMonoMs, message.serverSendMonoMs, message.serverReceiveWallMs, message.serverSendWallMs].every((value) => typeof value === 'number' && Number.isFinite(value))) throw protocolError('server_message_invalid')
+    return
+  }
+  if (message.type === 'timing_exchange_ack') {
+    if (!hasExactKeys(message, ['type', 'epoch', 'seq', 'status']) || !isEpoch(message.epoch) || !isSafeBoundedInteger(message.seq, 0, Number.MAX_SAFE_INTEGER) || (message.status !== 'recorded' && message.status !== 'replayed')) throw protocolError('server_message_invalid')
+    return
+  }
+  if (message.type === 'timing_end_ack') {
+    if (!hasExactKeys(message, ['type', 'epoch', 'status', 'reasons']) || !isEpoch(message.epoch) || (message.status !== 'collected' && message.status !== 'incomplete') || !isServerReasons(message.reasons)) throw protocolError('server_message_invalid')
     return
   }
   throw protocolError('server_message_invalid')
