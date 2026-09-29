@@ -58,6 +58,95 @@ class SealedEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(tuple(json.loads(sections)), CATALOG_SECTIONS)
 
+    def test_real_sealer_output_crosses_python_gate_and_detects_drift(self):
+        """Use a real Node seal, then the Git-backed Python manifest and artifact gate."""
+        catalog_dir = self.record("catalog", kind="catalog-fingerprint", phase="n/a", target="disposable")
+        catalog_commit = self.git("rev-parse", "HEAD")
+        platform_dir = self.record("platform", kind="db-contract", phase="pre", target="disposable")
+        platform_commit = self.git("rev-parse", "HEAD")
+        catalog = self.catalog_config()
+        platform = self.platform_config()
+        catalog_bytes = (catalog_dir / "catalog-pre.json").read_bytes()
+        platform_bytes = (platform_dir / "platform-config.json").read_bytes()
+        source = Path(__file__).resolve().parents[2]
+        plan_contract = json.loads(subprocess.check_output(
+            ["node", "--input-type=module", "-e", "import { ROLES, SHAPE_NAMES } from './scripts/outbox-db-contract/plan-contract.mjs'; console.log(JSON.stringify({roles:ROLES,shapes:SHAPE_NAMES}))"],
+            cwd=source, text=True,
+        ))
+        self.assertEqual(tuple(plan_contract["roles"]), evidence.PLAN_ROLES)
+        self.assertEqual(tuple(plan_contract["shapes"]), evidence.PLAN_SHAPES)
+        plan = {"sha256": "a" * 64, "messages_scan": "Index", "total_cost": 10.5}
+        raw = {
+            "verdict": "PASS", "target": "shared-readonly", "phase": "pre",
+            "plans": {role: {shape: plan for shape in plan_contract["shapes"]} for role in plan_contract["roles"]},
+            "tls": {"ssl": True, "version": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384"},
+            "catalog_indexes": {"messages_pkey": {"relation": "messages", "valid": True}},
+            "platform_config": platform, "items": {},
+            "comparisons": {
+                "catalog": {"verdict": "PASS", "input_sha256": hashlib.sha256(catalog_bytes).hexdigest(), "observed_section_sha256": catalog["section_sha256"]},
+                "platform": {"verdict": "PASS", "input_sha256": hashlib.sha256(platform_bytes).hexdigest(), "observed_sha256": platform["sha256"]},
+            },
+        }
+        raw_path = Path(self.temp.name).parent / f"shared-raw-{self.sha}.json"
+        raw_path.write_text(json.dumps(raw))
+        self.addCleanup(raw_path.unlink, missing_ok=True)
+        script = (source / "scripts/inbox-ci/seal-shared-readonly.mjs").as_uri()
+        args = {"repo": str(self.repo), "sha": self.sha, "phase": "pre", "output": str(raw_path),
+                "catalogRecord": catalog_dir.relative_to(self.repo).as_posix(),
+                "platformRecord": platform_dir.relative_to(self.repo).as_posix(),
+                "now": "2026-09-28T12:00:00.000Z"}
+        node = f"import {{ sealSharedReadonly }} from {json.dumps(script)}; const a=JSON.parse(process.argv[1]); a.now=new Date(a.now); console.log(sealSharedReadonly(a));"
+        directory = subprocess.check_output(["node", "--input-type=module", "-e", node, json.dumps(args)], cwd=source, text=True).strip()
+        self.commit("real shared readonly seal")
+
+        def check() -> None:
+            commit = self.git("rev-parse", "HEAD")
+            paths = {p.relative_to(self.repo).as_posix() for p in (self.repo / directory).iterdir()}
+            run = evidence.validate_manifest(self.repo, commit, directory, paths, self.sha)
+            selected = {}
+            for kind, phase, source_dir, source_commit in (("catalog-fingerprint", "n/a", catalog_dir, catalog_commit), ("db-contract", "pre", platform_dir, platform_commit)):
+                relative = source_dir.relative_to(self.repo).as_posix()
+                source_paths = {p.relative_to(self.repo).as_posix() for p in source_dir.rglob("*") if p.is_file()}
+                source_run = evidence.validate_manifest(self.repo, source_commit, relative, source_paths, self.sha)
+                selected[("pre-merge", kind, phase, "disposable")] = source_run
+            evidence._check_shared_readonly(self.repo, run, selected)
+
+        check()
+        manifest_path = self.repo / directory / "manifest.json"
+        output_path = self.repo / directory / "readonly.json"
+        original_manifest = json.loads(manifest_path.read_text())
+        original_output = json.loads(output_path.read_text())
+        for dropped in ("scripts/outbox-db-contract/connection.mjs", evidence.OPERATOR_LIST):
+            with self.subTest(dropped=dropped):
+                manifest = json.loads(json.dumps(original_manifest))
+                manifest["operator_script_sha256"].pop(dropped)
+                manifest_path.write_text(json.dumps(manifest))
+                self.commit("mutate operator provenance")
+                with self.assertRaisesRegex(EvidenceError, "operator provenance mismatch"):
+                    check()
+        mutations = {
+            "plans": lambda out: out.pop("plans"),
+            "plan_shape": lambda out: out["plans"]["member"].pop("null_tail"),
+            "tls": lambda out: out.pop("tls"),
+            "tls_cipher": lambda out: out["tls"].pop("cipher"),
+            "catalog_indexes_sha256": lambda out: out.pop("catalog_indexes_sha256"),
+            "catalog_index_digest": lambda out: out.update(catalog_indexes_sha256="bad"),
+            "source_output_sha256": lambda out: out.pop("source_output_sha256"),
+            "comparisons": lambda out: out["comparisons"].pop("platform"),
+            "items": lambda out: out.pop("items"),
+        }
+        for field, mutate in mutations.items():
+            with self.subTest(field=field):
+                output = json.loads(json.dumps(original_output))
+                mutate(output)
+                output_path.write_text(json.dumps(output))
+                manifest = json.loads(json.dumps(original_manifest))
+                manifest["artifacts"]["readonly.json"] = hashlib.sha256(output_path.read_bytes()).hexdigest()
+                manifest_path.write_text(json.dumps(manifest))
+                self.commit("mutate sealed output")
+                with self.assertRaises(EvidenceError):
+                    check()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -67,7 +156,7 @@ class SealedEvidenceTests(unittest.TestCase):
         self.git("config", "user.name", "Evidence Test")
         (self.repo / "base.txt").write_text("base")
         source = Path(__file__).resolve().parents[2]
-        for name in ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs", "scripts/outbox-db-contract/catalog-sections.mjs"):
+        for name in json.loads((source / evidence.OPERATOR_LIST).read_text())["operator_scripts"]:
             target = self.repo / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((source / name).read_bytes())
@@ -130,7 +219,7 @@ class SealedEvidenceTests(unittest.TestCase):
             manifest["started_at"] = sealed_time
             manifest["completed_at"] = sealed_time
             manifest["run_id"] = "shared-readonly-" + phase + "-" + sealed_time.replace("-", "").replace(":", "").replace(".", "")
-            scripts = ("scripts/inbox-ci/seal-shared-readonly.mjs", "scripts/outbox-db-contract-readonly.mjs", "scripts/outbox-db-contract/catalog-sections.mjs")
+            scripts = json.loads((self.repo / evidence.OPERATOR_LIST).read_text())["operator_scripts"]
             inputs = {}
             for label, source_kind, source_phase, filename in (("catalog_record", "catalog-fingerprint", "n/a", "catalog-pre.json"), ("platform_record", "db-contract", "pre", "platform-config.json")):
                 candidates = list((self.repo / ROOT / self.sha / "pre-merge").glob("*/manifest.json"))
@@ -141,7 +230,11 @@ class SealedEvidenceTests(unittest.TestCase):
             manifest.update({"event": "operator", "workflow_path": "", "github_run_id": "", "github_run_attempt": "", "target_binding": {"project_ref": "ncsngxlcyxylaeskiteu", "pooler_user": "postgres.ncsngxlcyxylaeskiteu"}, "operator_script_sha256": {name: hashlib.sha256((self.repo / name).read_bytes()).hexdigest() for name in scripts}, "inputs": inputs, "items": {}})
             if len(inputs) == 2:
                 platform_data = self.platform_config()
-                output = {"verdict": "PASS", "target": "shared-test", "phase": phase, "comparisons": {"catalog": {"verdict": "PASS", "input_sha256": inputs["catalog_record"]["sha256"], "observed_section_sha256": self.catalog_config()["section_sha256"]}, "platform": {"verdict": "PASS", "input_sha256": inputs["platform_record"]["sha256"], "observed_sha256": platform_data["sha256"]}}, "items": {}}
+                plan = {"sha256": "a" * 64, "messages_scan": "Seq Scan", "total_cost": 10}
+                output = {"verdict": "PASS", "target": "shared-test", "phase": phase, "source_output_sha256": "a" * 64,
+                          "plans": {role: {shape: plan for shape in evidence.PLAN_SHAPES} for role in evidence.PLAN_ROLES},
+                          "tls": {"ssl": True, "version": "TLSv1.3", "cipher": "fixture"}, "catalog_indexes_sha256": "a" * 64,
+                          "comparisons": {"catalog": {"verdict": "PASS", "input_sha256": inputs["catalog_record"]["sha256"], "observed_section_sha256": self.catalog_config()["section_sha256"]}, "platform": {"verdict": "PASS", "input_sha256": inputs["platform_record"]["sha256"], "observed_sha256": platform_data["sha256"]}}, "items": {}}
                 artifact.unlink()
                 manifest["artifacts"] = {"readonly.json": hashlib.sha256(json.dumps(output).encode()).hexdigest()}
                 (directory / "readonly.json").write_text(json.dumps(output))

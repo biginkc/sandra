@@ -18,7 +18,7 @@ async function producerPlatform() {
 async function fixture() {
   const repo = mkdtempSync(path.join(os.tmpdir(), 'shared-seal-'));
   git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Test'); git(repo, 'config', 'user.email', 'test@example.invalid');
-  for (const file of ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs', 'scripts/outbox-db-contract/catalog-sections.mjs', 'scripts/outbox-db-contract/plan-contract.mjs', 'scripts/outbox-db-contract/connection.mjs']) {
+  for (const file of JSON.parse(readFileSync('scripts/inbox-ci/shared-readonly-operators.json')).operator_scripts) {
     mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); copyFileSync(file, path.join(repo, file));
   }
   git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'base');
@@ -49,6 +49,14 @@ test('seals only digest representation linked to committed inputs', async () => 
   const output = JSON.parse(readFileSync(path.join(f.repo, dir, 'readonly.json')));
   assert.deepEqual(Object.keys(output).sort(), ['catalog_indexes_sha256','comparisons', 'items', 'phase', 'plans', 'source_output_sha256', 'target', 'tls', 'verdict']);
   assert.equal(JSON.stringify(output).includes('platform_config'), false);
+});
+test('sealer refuses an operator omitted from the working manifest', async () => {
+  const f = await fixture();
+  const file = path.join(f.repo, 'scripts/inbox-ci/shared-readonly-operators.json');
+  const list = JSON.parse(readFileSync(file));
+  list.operator_scripts.pop();
+  writeFileSync(file, JSON.stringify(list));
+  assert.throws(() => sealSharedReadonly(f.args), /Evidence worktree must start clean|Operator list differs from tested SHA/);
 });
 test('sealer refuses every missing catalog section and an extra section', async () => {
   for (const omitted of [...CATALOG_SECTIONS, null]) {
