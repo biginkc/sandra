@@ -183,7 +183,13 @@ export async function runContracts({ fixture, db, phase, provider }) {
     const first = await q('member', 'PATCH', path, payload, { Prefer: 'return=representation' });
     const second = await q('member', 'PATCH', path, payload, { Prefer: 'return=representation' });
     assert.deepEqual(first.data, [{ id: row('m6a').id }]); assert.deepEqual(second.data, []);
-    if (phase === 'post') { const after = await effects('m6a'); for (const key of ['target','dirty','content','known']) increased(after, state, key); }
+    if (phase === 'post') {
+      const after = await effects('m6a');
+      // 20260929000000:669-687: metadata changes content; status changes known_reply.
+      // 20260929000200:444 and :501-502: pending and sent are both ineligible targets.
+      assert.equal(after.target, state.target, 'target delta');
+      for (const key of ['dirty','content','known']) increased(after, state, key);
+    }
     return { first: first.status, repeat: second.status };
   });
   await run('C08b', async () => {
@@ -203,10 +209,15 @@ export async function runContracts({ fixture, db, phase, provider }) {
       assert(previous.scheduled_for <= current.scheduled_for || current.scheduled_for === null, 'deferred position wrong');
     }
     if (phase === 'post') {
+      // 20260929000000:669-687: failed metadata changes content and status changes known_reply.
+      // 20260929000200:444: pending and failed have the same target eligibility.
       for (const key of ['dirty','content','known']) increased(failedAfter, failedState, key);
-      increased(deferredAfter, failedAfter, 'dirty'); increased(deferredAfter, failedAfter, 'known'); increased(deferredAfter, failedAfter, 'target');
+      // 20260929000000:684-687,700-702: failed -> queued changes eligibility,
+      // scheduled_for changes content, and queue entry changes known_reply.
+      increased(deferredAfter, failedAfter, 'dirty'); increased(deferredAfter, failedAfter, 'known');
       increased(deferredAfter, deferredState, 'content');
-      increased(failedAfter, failedState, 'target');
+      assert.equal(failedAfter.target, failedState.target, 'failed target delta');
+      increased(deferredAfter, deferredState, 'target');
     }
     return { failed: row('m6b').id, deferred: row('m6c').id };
   });
