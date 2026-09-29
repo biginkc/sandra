@@ -2,6 +2,9 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
+const dripActions = vi.hoisted(() => ({listDripChoices:vi.fn(),startDripForLeads:vi.fn()}))
+vi.mock('@/app/(dashboard)/sequences/actions', () => dripActions)
+
 import { AcquisitionAttemptDialog } from "./attempt-dialog"
 import { AcquisitionLifecycleDialog } from "./lifecycle-dialog"
 import { AcquisitionOfferDialog } from "./offer-dialog"
@@ -18,6 +21,37 @@ const baseProps = {
 }
 
 describe("My Leads workflow dialogs", () => {
+  it('saves an attempt before offering and starting an optional drip', async () => {
+    dripActions.listDripChoices.mockResolvedValue({ok:true,data:[{id:'drip-1',name:'Seller follow-up',textCount:4,days:90,firstSend:'Today'}]})
+    dripActions.startDripForLeads.mockResolvedValue({ok:true,data:{results:[{propertyId:'property-1',status:'enrolled',reason:'Enrolled'}]}})
+    const onSubmit=vi.fn(async()=>({ok:true as const,attemptRecorded:true as const}))
+    const onDripChanged=vi.fn()
+    const user=userEvent.setup()
+    render(<AcquisitionAttemptDialog {...baseProps} onSubmit={onSubmit} onDripChanged={onDripChanged}/>)
+    expect(screen.queryByText('Add to a drip (optional)')).not.toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Source'),'manual')
+    await user.selectOptions(screen.getByLabelText('External outcome'),'reached')
+    fireEvent.change(screen.getByLabelText('When did the outreach occur?'),{target:{value:'2026-09-12T09:00'}})
+    await user.click(screen.getByRole('button',{name:'Save attempt'}))
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(await screen.findByText('Attempt saved. Add to a drip (optional).')).toBeVisible()
+    await user.click(await screen.findByRole('button',{name:/Seller follow-up/}))
+    expect(dripActions.startDripForLeads).toHaveBeenCalledWith('drip-1',['property-1'])
+    expect(onDripChanged).toHaveBeenCalledOnce()
+  })
+  it('offers handoff enrollment only for not interested and omits reassignment when selected', async () => {
+    const onSubmit=vi.fn(async()=>({ok:true as const}))
+    const user=userEvent.setup()
+    render(<AcquisitionLifecycleDialog {...baseProps} mode="handoff" recipientOptions={[{id:'recipient',label:'Follow-up owner'}]}
+      previewDripChoices={[{id:'drip-1',name:'Seller follow-up',textCount:4,days:90,firstSend:'Today'}]} onSubmit={onSubmit}/>)
+    await user.selectOptions(screen.getByLabelText('Handoff reason'),'needs_nurture')
+    expect(screen.queryByText('Add to a drip (optional)')).not.toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Handoff reason'),'not_interested')
+    await user.click(await screen.findByRole('button',{name:/Seller follow-up/}))
+    expect(screen.queryByLabelText('Reassign to')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button',{name:'Hand off lead'}))
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({mode:'handoff',reason:'not_interested',sequenceId:'drip-1'}))
+  })
   it("requires motivation text or accepts the explicit No motivation provided response", async () => {
     const user = userEvent.setup()
     const onSubmit = vi.fn(async () => ({ ok: true as const }))

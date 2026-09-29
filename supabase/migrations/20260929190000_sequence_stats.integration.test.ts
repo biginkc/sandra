@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 import { loadTestEnv } from "@tests/integration/env";
 
 const sql = readFileSync("supabase/migrations/20260929190000_sequence_stats.sql", "utf8");
+const hideDeadSql = readFileSync("supabase/migrations/20260929230000_sequence_needs_person_hide_dead.sql", "utf8");
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 if (!url) throw new Error("Missing TEST_SUPABASE_DB_URL");
 const pg = new Client({ connectionString: url });
@@ -25,6 +26,8 @@ beforeAll(async () => {
   await pg.connect();
   await pg.query(sql);
   await pg.query(sql); // idempotency is part of the contract.
+  await pg.query(hideDeadSql);
+  await pg.query(hideDeadSql);
 });
 afterAll(async () => { await pg.end(); });
 beforeEach(async () => {
@@ -110,6 +113,56 @@ it("returns finished, failed, and unassigned needs-sequence leads", async () => 
   expect(byProperty[ids.needs]).toBe("needs_sequence");
   expect(byProperty[ids.answered]).toBeUndefined();
   expect(byProperty[ids.canceled]).toBeUndefined();
+});
+
+it("removes a lead from needs-person triage after it is marked Dead", async () => {
+  await pg.query("update public.properties set status='dead' where id in ($1,$2,$3)", [ids.finished, ids.failed, ids.needs]);
+  await role(actor);
+  const result = await pg.query("select property_id from public.sequence_needs_person($1)", [org]);
+  const listed = result.rows.map((row) => row.property_id);
+  expect(listed).not.toContain(ids.finished);
+  expect(listed).not.toContain(ids.failed);
+  expect(listed).not.toContain(ids.needs);
+});
+
+it("uses only the latest enrollment: restarting clears finished and a later failed send takes its place", async () => {
+  const newer = randomUUID();
+  await pg.query("insert into public.sequences(id,org_id,name) values ($1,$2,'Restarted')", [newer, org]);
+  await pg.query(`insert into public.sequence_enrollments
+    (id,org_id,sequence_id,property_id,status,enrolled_at)
+    values ($1,$2,$3,$4,'active','2026-09-05T00:00:00Z')`,
+  [randomUUID(), org, newer, ids.finished]);
+  await role(actor);
+  const active = await pg.query("select * from public.sequence_needs_person($1) where property_id=$2", [org, ids.finished]);
+  expect(active.rows).toHaveLength(0);
+  await pg.query("reset role");
+  await pg.query(`update public.sequence_enrollments set status='paused', pause_reason='manual'
+    where property_id=$1 and sequence_id=$2`, [ids.finished, newer]);
+  await role(actor);
+  const paused = await pg.query("select * from public.sequence_needs_person($1) where property_id=$2", [org, ids.finished]);
+  expect(paused.rows).toHaveLength(0);
+  await pg.query("reset role");
+  await pg.query(`update public.sequence_enrollments set status='paused', pause_reason='provider_failed'
+    where property_id=$1 and sequence_id=$2`, [ids.finished, newer]);
+  await role(actor);
+  const failed = await pg.query("select * from public.sequence_needs_person($1) where property_id=$2", [org, ids.finished]);
+  expect(failed.rows).toMatchObject([{ bucket: "couldnt_send", sequence_id: newer }]);
+});
+
+it("counts all 501 extra leads and reaches the final page in stable property order", async () => {
+  await pg.query(`insert into public.properties(id,org_id,address,state,outreach_dispo)
+    select gen_random_uuid(),$1,'Bulk ' || n,'MO','needs_sequence'
+    from generate_series(1,501) n`, [org]);
+  await role(actor);
+  const counts = await pg.query("select * from public.sequence_needs_person_counts($1)", [org]);
+  expect(counts.rows[0].needs_sequence).toBe("502"); // The fixture has one existing needs-sequence lead.
+  const first = await pg.query("select property_id from public.sequence_needs_person_page($1,'needs_sequence',0,100)", [org]);
+  const last = await pg.query("select property_id from public.sequence_needs_person_page($1,'needs_sequence',500,100)", [org]);
+  expect(first.rows).toHaveLength(100);
+  expect(last.rows).toHaveLength(2);
+  expect(new Set([...first.rows, ...last.rows].map((row) => row.property_id)).size).toBe(102);
+  const ordered = await pg.query("select property_id from public.sequence_needs_person($1) where bucket='needs_sequence' order by property_id", [org]);
+  expect(last.rows.map((row) => row.property_id)).toEqual(ordered.rows.slice(500).map((row) => row.property_id));
 });
 
 it("rejects an org without active membership", async () => {

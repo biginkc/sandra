@@ -5787,6 +5787,12 @@ export type Database = {
       sequence_needs_person: { Args: { p_org: string }; Returns: Array<{
         property_id: string; sequence_id: string | null; bucket: string; reason: string; sequence_created_by: string | null;
       }> }
+      sequence_needs_person_counts: { Args: { p_org: string; p_exclude_created_by?: string | null }; Returns: Array<{
+        finished_no_reply: number; couldnt_send: number; needs_sequence: number;
+      }> }
+      sequence_needs_person_page: { Args: { p_org: string; p_bucket: string; p_offset: number; p_limit: number; p_exclude_created_by?: string | null }; Returns: Array<{
+        property_id: string; sequence_id: string | null; bucket: string; reason: string; sequence_created_by: string | null;
+      }> }
       fn_claim_dialpad_member_binding: { Args: { p_org_id: string; p_user_id: string; p_dialpad_user_id: string }; Returns: Json }
       fn_verify_dialpad_member_binding: { Args: { p_binding_id: string; p_verification_kind: string; p_verification_ref: string }; Returns: Json }
       fn_revoke_dialpad_member_binding: { Args: { p_binding_id: string; p_reason: string }; Returns: Json }
@@ -5931,6 +5937,17 @@ export type Database = {
           p_expected_settings_revision: number
         }
         Returns: Json
+      }
+      fn_list_my_leads_drip_scope: {
+        Args: { p_org_id: string; p_member_id: string }
+        Returns: {
+          property_id: string
+          stage: string
+          in_drip: boolean
+          replied_at: string | null
+          search_text: string
+          row_data: Json
+        }[]
       }
       fn_ready_acquisition_offer: {
         Args: { p_input: Json }

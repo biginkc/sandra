@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CallActivityRollupRow } from "./lead-call-summary";
@@ -7,6 +7,10 @@ import type { Message } from "./messages-thread";
 import type { Note } from "./notes-feed";
 
 const leadEventHookState = vi.hoisted(() => ({ reconciled: true }));
+const { messageDripLabels } = vi.hoisted(() => ({ messageDripLabels: vi.fn().mockResolvedValue({}) }));
+
+vi.mock("@/lib/sequences/message-drip-labels", () => ({ messageDripLabels }));
+vi.mock("@/lib/supabase/client", () => ({ createClient: () => ({}) }));
 
 vi.mock("./messages-thread", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./messages-thread")>();
@@ -57,6 +61,8 @@ import { LeadActivityTimeline } from "./lead-activity";
 
 beforeEach(() => {
   leadEventHookState.reconciled = true;
+  messageDripLabels.mockReset();
+  messageDripLabels.mockResolvedValue({});
 });
 
 function message({
@@ -100,6 +106,38 @@ function event(id: string, createdAt: string): LeadEvent {
 }
 
 describe("<LeadActivityTimeline /> with lead events", () => {
+  it("labels a live outbound message after its step-run association arrives on a status update", async () => {
+    const props = {
+      propertyId: "property-1", contactId: "contact-1", initialNotes: [], initialCalls: [], initialEvents: [],
+      messageError: null, noteError: null, callError: null, eventError: null,
+      authorEmails: {}, currentUserId: null, currentUserEmail: null, jitterHost: "",
+    };
+    messageDripLabels.mockResolvedValueOnce({}).mockResolvedValueOnce({ "message-1": "Drip · Follow up · text 1 of 4" });
+    const view = render(<LeadActivityTimeline {...props} initialMessages={[message({ id: "message-1", body: "Hello", createdAt: "2026-09-29T14:00:00Z", status: "queued" })]} />);
+    await waitFor(() => expect(messageDripLabels).toHaveBeenCalledTimes(1));
+    view.rerender(<LeadActivityTimeline {...props} initialMessages={[message({ id: "message-1", body: "Hello", createdAt: "2026-09-29T14:00:00Z", status: "sent" })]} />);
+    expect(await screen.findByText("Drip · Follow up · text 1 of 4")).toBeInTheDocument();
+    expect(messageDripLabels).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops reconciling an unlabeled outbound message after three timed retries", async () => {
+    vi.useFakeTimers();
+    try {
+      const props = {
+        propertyId: "property-1", contactId: "contact-1", initialNotes: [], initialCalls: [], initialEvents: [],
+        messageError: null, noteError: null, callError: null, eventError: null,
+        authorEmails: {}, currentUserId: null, currentUserEmail: null, jitterHost: "",
+      };
+      const view = render(<LeadActivityTimeline {...props} initialMessages={[message({ id: "message-1", body: "Hello", createdAt: "2026-09-29T14:00:00Z", status: "queued" })]} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(messageDripLabels).toHaveBeenCalledTimes(4);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(messageDripLabels).toHaveBeenCalledTimes(4);
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it("interleaves compact events without changing the existing SMS bubble", () => {
     render(
       <LeadActivityTimeline

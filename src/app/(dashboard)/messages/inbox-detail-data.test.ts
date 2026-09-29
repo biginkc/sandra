@@ -1,9 +1,21 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Database } from "@/lib/supabase/types";
 import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 
-import { fetchInboxDetail } from "./inbox-detail-data";
+import { DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS, fetchInboxDetail } from "./inbox-detail-data";
+
+const dripScopeMigration = resolve(process.cwd(), "supabase/migrations/20260929236500_my_leads_drip_scope.sql");
+
+it.skipIf(!existsSync(dripScopeMigration))("matches the drip scope SQL workflow operations", () => {
+  const sql = readFileSync(dripScopeMigration, "utf8");
+  const operations = sql.match(/payload->>'operation'\s+in\s*\(([^)]+)\)/)?.[1];
+  expect(operations).toBeDefined();
+  expect(operations?.match(/'[^']+'/g)?.map((operation) => operation.slice(1, -1)))
+    .toEqual([...DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS]);
+});
 
 vi.mock("@/lib/messaging/opt-out-phone", () => ({
   isSmsPhoneSuppressed: vi.fn(async () => false),
@@ -33,6 +45,7 @@ function makeMessage(
     contact_id: overrides.contact_id,
     property_id: overrides.property_id,
     conversation_id: overrides.conversation_id ?? null,
+    campaign_id: overrides.campaign_id ?? null,
     body: overrides.body ?? "hello",
     from_address: overrides.from_address ?? "+15551234567",
     to_address: overrides.to_address ?? "+18165550000",
@@ -156,11 +169,18 @@ type SeedData = {
     event_type: string;
     occurred_at: string;
   }>;
+  sequence_enrollments?: Array<Record<string, unknown>>;
+  sequence_step_runs?: Array<Record<string, unknown>>;
+  sequences?: Array<Record<string, unknown>>;
+  sequence_steps?: Array<Record<string, unknown>>;
+  lead_events?: Array<Record<string, unknown>>;
+  call_activities?: Array<Record<string, unknown>>;
+  acquisition_attempts?: Array<{ recorded_at: string; occurred_at?: string }>;
 };
 
 function makeSupabaseStub(seed: SeedData) {
   function makeBuilder(table: keyof SeedData) {
-    const filters: Array<{ kind: "eq" | "is"; key: string; value: unknown }> =
+    const filters: Array<{ kind: "eq" | "is" | "in" | "gt"; key: string; value: unknown }> =
       [];
     const negativeFilters: Array<{ key: string; value: unknown }> = [];
     let orderBy: { key: string; ascending: boolean } | null = null;
@@ -173,6 +193,14 @@ function makeSupabaseStub(seed: SeedData) {
       },
       eq(key: string, value: unknown) {
         filters.push({ kind: "eq", key, value });
+        return builder;
+      },
+      in(key: string, values: unknown[]) {
+        filters.push({ kind: "in", key, value: values });
+        return builder;
+      },
+      gt(key: string, value: string) {
+        filters.push({ kind: "gt", key, value });
         return builder;
       },
       is(key: string, value: unknown) {
@@ -228,7 +256,11 @@ function makeSupabaseStub(seed: SeedData) {
       let rows = [...(seed[table] ?? [])];
       for (const filter of filters) {
         rows = rows.filter((row) => {
-          const value = row[filter.key as keyof typeof row];
+          const value = filter.key === "payload->>operation"
+            ? ("payload" in row ? (row.payload as { operation?: string } | undefined)?.operation : undefined)
+            : row[filter.key as keyof typeof row];
+          if (filter.kind === "in") return (filter.value as unknown[]).includes(value);
+          if (filter.kind === "gt") return String(value) > String(filter.value);
           return filter.kind === "eq"
             ? value === filter.value
             : value === null && filter.value === null;
@@ -265,7 +297,13 @@ function makeSupabaseStub(seed: SeedData) {
   }
 
   return {
-    rpc(_name: string, args: { p_conversation_id: string }) {
+    rpc(_name: string, args: { p_conversation_id?: string; p_after?: string }) {
+      if (_name === "fn_has_acquisition_attempt_recorded_after") {
+        return Promise.resolve({
+          data: seed.acquisition_attempts?.some((attempt) => attempt.recorded_at > (args.p_after ?? "")) ?? false,
+          error: null,
+        });
+      }
       const orgIds = [
         ...new Set(
           seed.messages
@@ -948,5 +986,150 @@ describe("fetchInboxDetail", () => {
     expect(detail?.threadCustomerPhone).toBe("+15550000004");
     expect(detail?.threadBusinessPhone).toBe("+18162804181");
     expect(detail?.replyToPhone).toBe("+15550000004");
+  });
+
+  it("attributes only step-run messages and marks the reply to the paused drip", async () => {
+    const seed: SeedData = {
+      messages: [
+        makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
+        makeMessage({ id: "manual-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T11:59:00Z" }),
+        makeMessage({ id: "reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, contact_id: CONTACT_ID, sequence_id: "drip", status: "paused", pause_reason: "inbound_reply", current_step_index: 1, enrolled_at: "2026-06-09T11:00:00Z", updated_at: "2026-06-09T12:02:00Z" }],
+      sequence_step_runs: [{ message_id: "drip-text", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1", sequence_id: "drip" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+      sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
+      sequence_steps: [{ id: "step-1", sequence_id: "drip" }, { id: "step-2", sequence_id: "drip" }],
+    };
+    const supabase = makeSupabaseStub(seed);
+    const detail = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+    expect(detail?.drip).toMatchObject({ name: "Seller follow-up", step: 2, total: 2, replied: true, stoppedAt: "2026-06-09T12:02:00Z", timeZone: "America/Chicago" });
+    expect(detail?.dripMessageLabels).toEqual({ "drip-text": "Drip · Seller follow-up · text 1 of 2" });
+    expect(detail?.dripReplyMessageIds).toEqual(["reply"]);
+    expect(detail?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
+    seed.messages.push(makeMessage({ id: "rep-reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:03:00Z" }));
+    const afterRepAction = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+    expect(afterRepAction?.drip?.replied).toBe(false);
+    expect(afterRepAction?.dripReplyMessageIds).toEqual(["reply"]);
+    seed.sequence_enrollments![0].pause_reason = "rep_sms_human_takeover";
+    const takeover = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+    expect(takeover?.drip?.replied).toBe(false);
+    seed.sequence_enrollments![0].pause_reason = "manual";
+    const manuallyPaused = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+    expect(manuallyPaused?.drip).toMatchObject({ status: "paused", replied: false, stoppedAt: null });
+    seed.sequence_enrollments![0].status = "active";
+    seed.sequence_enrollments![0].pause_reason = null;
+    const resumed = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
+    expect(resumed?.drip).toMatchObject({ status: "active", step: 2, total: 2, replied: false, stoppedAt: null });
+    expect(resumed?.dripReplyMessageIds).toEqual(["reply"]);
+    expect(resumed?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
+  });
+
+  it.each(["dispo", "logged attempt", ...DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS])(
+    "clears outstanding reply after %s", async (action) => {
+    const seed: SeedData = {
+      messages: [
+        makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
+        makeMessage({ id: "reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })], properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "drip", status: "paused", pause_reason: "inbound_reply", current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" }],
+      sequence_step_runs: [{ message_id: "drip-text", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+      sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
+      sequence_steps: [{ id: "step-1", sequence_id: "drip" }],
+      lead_events: action === "dispo" ? [{ id: "event", org_id: "org-1", property_id: RECENT_PROPERTY_ID, event_type: "dispo_set", actor_type: "user", created_at: "2026-06-09T12:03:00Z" }] :
+        DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS.some((operation) => operation === action)
+          ? [{ id: "event", org_id: "org-1", property_id: RECENT_PROPERTY_ID, event_type: "my_leads_workflow", actor_type: "user", payload: { operation: action }, created_at: "2026-06-09T12:03:00Z" }] : [],
+      acquisition_attempts: action === "logged attempt" ? [{ recorded_at: "2026-06-09T12:03:00Z", occurred_at: "2026-06-09T11:00:00Z" }] : [],
+    };
+    const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
+    expect(detail?.drip?.replied).toBe(false);
+    expect(detail?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
+  });
+
+  it.each(["call", "campaign", "ai", "step-run", "other workflow", "old attempt"])(
+    "keeps the reply outstanding after %s", async (action) => {
+      const seed: SeedData = {
+        messages: [
+          makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
+          makeMessage({ id: "reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+        ],
+        contacts: [makeContact({ id: CONTACT_ID })], properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+        sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "drip", status: "paused", pause_reason: "inbound_reply", current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" }],
+        sequence_step_runs: [{ message_id: "drip-text", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+        sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
+        sequence_steps: [{ id: "step-1", sequence_id: "drip" }],
+        call_activities: action === "call" ? [{ id: "call", org_id: "org-1", property_id: RECENT_PROPERTY_ID, call_purpose: "customer", created_at: "2026-06-09T12:03:00Z" }] : [],
+        lead_events: action === "other workflow" ? [{ id: "event", org_id: "org-1", property_id: RECENT_PROPERTY_ID, event_type: "my_leads_workflow", actor_type: "user", payload: { operation: "unrelated" }, created_at: "2026-06-09T12:03:00Z" }] : [],
+        acquisition_attempts: action === "old attempt" ? [{ recorded_at: "2026-06-09T12:01:00Z", occurred_at: "2026-06-09T12:03:00Z" }] : [],
+      };
+      if (["campaign", "ai", "step-run"].includes(action)) {
+        seed.messages.push(makeMessage({ id: "later-outbound", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:03:00Z", campaign_id: action === "campaign" ? "campaign" : null, metadata: action === "ai" ? { generated_by: "another_generator" } : null }));
+        if (action === "step-run") seed.sequence_step_runs!.push({ message_id: "later-outbound", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } });
+      }
+      const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
+      expect(detail?.drip?.replied).toBe(true);
+    });
+
+  it("keeps attribution after a drip completed before the inbound reply", async () => {
+    const seed: SeedData = {
+      messages: [
+        makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
+        makeMessage({ id: "reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })], properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "drip", status: "completed", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" }],
+      sequence_step_runs: [{ message_id: "drip-text", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+      sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
+      sequence_steps: [{ id: "step-1", sequence_id: "drip" }],
+    };
+    const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
+    expect(detail?.drip).toMatchObject({ name: "Seller follow-up", status: "completed", replied: true });
+    expect(detail?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
+  });
+
+  it("keeps an old drip reply marker without stopping a newer active enrollment", async () => {
+    const seed: SeedData = {
+      messages: [
+        makeMessage({ id: "a-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
+        makeMessage({ id: "a-reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+        makeMessage({ id: "rep-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:03:00Z" }),
+        makeMessage({ id: "b-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T13:00:00Z" }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [
+        { id: "a-enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "a", status: "completed", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" },
+        { id: "b-enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "b", status: "active", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-09T12:30:00Z" },
+      ],
+      sequence_step_runs: [
+        { message_id: "a-text", enrollment_id: "a-enrollment", sequence_enrollments: { org_id: "org-1", sequence_id: "a" }, sequence_steps: { sequence_id: "a", step_index: 0 } },
+        { message_id: "b-text", enrollment_id: "b-enrollment", sequence_enrollments: { org_id: "org-1", sequence_id: "b" }, sequence_steps: { sequence_id: "b", step_index: 0 } },
+      ],
+      sequences: [{ id: "a", org_id: "org-1", name: "A" }, { id: "b", org_id: "org-1", name: "B" }],
+      sequence_steps: [{ id: "a-step", sequence_id: "a" }, { id: "b-step", sequence_id: "b" }, { id: "b-step-2", sequence_id: "b" }],
+    };
+    const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
+    expect(detail?.drip).toMatchObject({ enrollmentId: "b-enrollment", name: "B", status: "active", step: 1, total: 2, replied: false, stoppedAt: null });
+    expect(detail?.dripReplyLabels).toEqual({ "a-reply": "Reply to drip text 1" });
+    expect(detail?.dripReplyMessageIds).toEqual(["a-reply"]);
+  });
+
+  it("prefers a live drip over newer completed drips and breaks ties by id", async () => {
+    const seed: SeedData = {
+      messages: [makeMessage({ id: "inbound", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound" })],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [
+        { id: "a-live", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "a", status: "paused", pause_reason: "manual", current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" },
+        { id: "z-completed", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "z", status: "completed", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-10T11:00:00Z" },
+        { id: "b-live", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "b", status: "active", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" },
+      ],
+      sequences: [{ id: "a", org_id: "org-1", name: "A" }, { id: "b", org_id: "org-1", name: "B" }],
+      sequence_steps: [{ id: "a-step", sequence_id: "a" }, { id: "b-step", sequence_id: "b" }],
+    };
+    const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
+    expect(detail?.drip).toMatchObject({ enrollmentId: "b-live", name: "B", status: "active" });
   });
 });

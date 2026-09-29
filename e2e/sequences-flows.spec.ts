@@ -18,8 +18,8 @@ import {
  * had only typecheck coverage:
  *
  *   1. Create → edit → archive → restore
- *   5. Enroll from lead detail (change_status step, no real SMS)
- *   6. Cancel an enrollment from the lead-detail widget
+ *   5. Start a drip from lead detail (change_status step, no real SMS)
+ *   6. Stop a drip from the lead-detail card
  *   7. Impact modal confirm on save with active enrollments
  *   8. Sidebar nav links all route correctly
  *
@@ -140,12 +140,15 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     await page.getByRole("button", { name: /^save$/i }).first().click();
     await waitForSettled(page);
 
-    // Archive via the index page row action
+    // Archive through the overview row's Actions menu and confirmation dialog.
     await page.goto("/sequences");
-    const row = page.locator("tr", { hasText: uniqueName });
+    const row = page.getByTestId("drips-table").getByRole("row").filter({ hasText: uniqueName });
     await expect(row).toBeVisible();
-    page.once("dialog", (d) => void d.accept());
-    await row.getByRole("button", { name: /archive/i }).click();
+    await row.getByRole("button", { name: "Actions" }).click();
+    await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
+    const archiveDialog = page.getByRole("dialog", { name: "Archive this drip?" });
+    await expect(archiveDialog).toBeVisible();
+    await archiveDialog.getByRole("button", { name: "Archive drip" }).click();
 
     // Poll the DB — the server action + router.refresh() aren't instant.
     await expect(async () => {
@@ -155,33 +158,31 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
         .eq("name", uniqueName)
         .single();
       expect(data!.archived_at).not.toBeNull();
-      expect(data!.active).toBe(false);
+      expect(data!.active).toBe(true);
     }).toPass({ timeout: 5_000 });
 
     // UI caught up
-    await page.reload();
-    const archivedSection = page
-      .locator("section")
-      .filter({ hasText: "Archived" });
-    await expect(archivedSection.getByText(uniqueName)).toBeVisible();
+    await page.getByRole("link", { name: "View archived" }).click();
+    await expect(page).toHaveURL(/\/sequences\?archived=1$/);
+    const archivedRow = page.getByTestId("drips-table").getByRole("row").filter({ hasText: uniqueName });
+    await expect(archivedRow).toBeVisible();
 
     // Restore
-    await archivedSection
-      .locator("tr", { hasText: uniqueName })
-      .getByRole("button", { name: /restore/i })
-      .click();
+    await archivedRow.getByRole("button", { name: "Actions" }).click();
+    await page.getByRole("menuitem", { name: "Restore" }).click();
 
     await expect(async () => {
       const { data } = await admin
         .from("sequences")
-        .select("active")
+        .select("archived_at, active")
         .eq("name", uniqueName)
         .single();
+      expect(data!.archived_at).toBeNull();
       expect(data!.active).toBe(true);
     }).toPass({ timeout: 5_000 });
   });
 
-  test("5. enroll from lead detail widget creates an active enrollment (change_status, no SMS)", async ({
+  test("5. start a drip from lead detail creates an active enrollment (change_status, no SMS)", async ({
     page,
   }) => {
     const admin = adminClient();
@@ -203,16 +204,23 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     });
 
     await page.goto(`/leads/${propertyId}`);
-    const enrollBtn = page.getByTestId("enroll-in-sequence-button");
-    await expect(enrollBtn).toBeVisible();
-    await enrollBtn.click();
+    const card = page.getByTestId("lead-drip-card");
+    const startButton = card.getByRole("button", { name: "Start drip", exact: true });
+    await expect(startButton).toBeVisible();
+    await page.waitForFunction(() => {
+      const card = document.querySelector('[data-testid="lead-drip-card"]');
+      const button = Array.from(card?.querySelectorAll("button") ?? [])
+        .find((candidate) => candidate.textContent?.trim() === "Start drip");
+      return Boolean(button && Object.keys(button).some((key) => key.startsWith("__reactProps")));
+    });
+    await startButton.click();
 
-    // Dropdown row with the sequence name appears
-    const option = page.getByRole("button", {
+    // The start-drip picker lists the seeded sequence.
+    const option = card.getByRole("dialog", { name: "Start follow-up drip" }).getByRole("button", {
       name: new RegExp(`^${sequenceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
     });
     await expect(option).toBeVisible({ timeout: 5_000 });
-    await option.evaluate((element) => (element as HTMLButtonElement).click());
+    await option.click();
 
     // DB: enrollment exists in active status
     await expect(async () => {
@@ -226,7 +234,7 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     }).toPass({ timeout: 5_000 });
   });
 
-  test("6. cancel an enrollment flips status to completed", async ({ page }) => {
+  test("6. stop a drip flips enrollment status to completed", async ({ page }) => {
     const admin = adminClient();
     const orgId = await seedOrgId();
     const { sequenceId } = await seedSequenceWithOneStep(admin, {
@@ -253,15 +261,9 @@ test.describe("Sequences V1 — UI flows (browser)", () => {
     await page.goto(`/leads/${propertyId}`);
     // Accept the confirm() dialog
     page.once("dialog", (d) => d.accept());
-    // The widget's Cancel button lives inside the active-enrollments list.
-    // Match by the text "Cancel" inside a row that references the sequence name.
-    const enrollmentRow = page.locator("div", {
-      hasText: /Flow-6/i,
-    });
-    await enrollmentRow
-      .getByRole("button", { name: /^cancel$/i })
-      .first()
-      .click();
+    const card = page.getByTestId("lead-drip-card");
+    await expect(card.getByText(/Flow-6/i)).toBeVisible();
+    await card.getByRole("button", { name: "Stop", exact: true }).click();
     await waitForSettled(page);
 
     await expect(async () => {

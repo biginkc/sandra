@@ -160,18 +160,18 @@ async function gotoLeadPage(page: Page, propertyId: string): Promise<void> {
   // remained pending. DOMContentLoaded is the useful navigation boundary;
   // callers assert the CTA they need before interacting with the page.
   await page.goto(`/leads/${propertyId}`, { waitUntil: "domcontentloaded" });
-  await waitForLeadWidgetHydration(page);
+  await waitForDripCardHydration(page);
 }
 
-async function waitForLeadWidgetHydration(page: Page): Promise<void> {
+async function waitForDripCardHydration(page: Page): Promise<void> {
   await page.waitForFunction(
     () => {
-      const enrollButton = document.querySelector(
-        '[data-testid="enroll-in-sequence-button"]',
-      );
+      const card = document.querySelector('[data-testid="lead-drip-card"]');
+      const dripButton = Array.from(card?.querySelectorAll("button") ?? [])
+        .find((button) => ["Start drip", "Switch drip"].includes(button.textContent?.trim() ?? ""));
       return Boolean(
-        enrollButton &&
-          Object.keys(enrollButton).some((key) => key.startsWith("__reactProps")),
+        card && dripButton &&
+          Object.keys(dripButton).some((key) => key.startsWith("__reactProps")),
       );
     },
     undefined,
@@ -183,12 +183,14 @@ async function enrollInSequence(
   page: Page,
   sequenceName: string,
 ): Promise<void> {
-  await page.getByTestId("enroll-in-sequence-button").click();
-  const option = page.getByRole("button", {
+  const card = page.getByTestId("lead-drip-card");
+  await card.getByRole("button", { name: "Start drip", exact: true }).click();
+  const picker = card.getByRole("dialog", { name: "Start follow-up drip" });
+  const option = picker.getByRole("button", {
     name: new RegExp(`^${sequenceName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
   });
-  // The widget renders its empty-state copy while loadSequences() is still
-  // pending because the initial sequences state is empty. Wait for the
+  // The picker renders its empty state while listDripChoices() is still
+  // pending. Wait for the
   // requested option instead; failure diagnostics retain the picker state.
   await expect(option).toBeVisible({ timeout: 15_000 });
   await option.click({ timeout: 5_000 });
@@ -347,7 +349,7 @@ type BrowserDiagnostics = {
       reactFiberPresent: boolean;
     } | null;
     createButtonDisabled: boolean | null;
-    enrollmentWidget: {
+    dripCard: {
       buttonPresent: boolean;
       buttonDisabled: boolean | null;
       reactPropsPresent: boolean;
@@ -459,10 +461,10 @@ async function attachBrowserDiagnostics(page: Page, testInfo: TestInfo): Promise
       const form = nameInput?.closest("form");
       const submit = form?.querySelector('button[type="submit"]');
       const reactKeys = nameInput ? Object.keys(nameInput) : [];
-      const enrollButton = document.querySelector(
-        '[data-testid="enroll-in-sequence-button"]',
-      );
-      const picker = document.querySelector("div.bg-popover");
+      const dripCard = document.querySelector('[data-testid="lead-drip-card"]');
+      const dripButton = Array.from(dripCard?.querySelectorAll("button") ?? [])
+        .find((button) => ["Start drip", "Switch drip"].includes(button.textContent?.trim() ?? ""));
+      const picker = dripCard?.querySelector('[role="dialog"][aria-label="Start follow-up drip"]');
       const pickerText = picker?.textContent ?? "";
       return {
         readyState: document.readyState,
@@ -482,20 +484,20 @@ async function attachBrowserDiagnostics(page: Page, testInfo: TestInfo): Promise
           : null,
         createButtonDisabled:
           submit instanceof HTMLButtonElement ? submit.disabled : null,
-        enrollmentWidget: {
-          buttonPresent: Boolean(enrollButton),
+        dripCard: {
+          buttonPresent: Boolean(dripButton),
           buttonDisabled:
-            enrollButton instanceof HTMLButtonElement
-              ? enrollButton.disabled
+            dripButton instanceof HTMLButtonElement
+              ? dripButton.disabled
               : null,
           reactPropsPresent: Boolean(
-            enrollButton &&
-              Object.keys(enrollButton).some((key) =>
+            dripButton &&
+              Object.keys(dripButton).some((key) =>
                 key.startsWith("__reactProps"),
               ),
           ),
           pickerVisible: Boolean(picker),
-          emptyStateVisible: pickerText.includes("No active sequences with steps"),
+          emptyStateVisible: pickerText.includes("No active drips with steps"),
           optionTexts: picker
             ? Array.from(picker.querySelectorAll("button"))
                 .map((button) => (button.textContent?.trim() ?? "").slice(0, 200))
@@ -505,8 +507,8 @@ async function attachBrowserDiagnostics(page: Page, testInfo: TestInfo): Promise
         },
       };
     });
-    diagnostics.dom.enrollmentWidget.optionTexts =
-      diagnostics.dom.enrollmentWidget.optionTexts.map(diagnosticText);
+    diagnostics.dom.dripCard.optionTexts =
+      diagnostics.dom.dripCard.optionTexts.map(diagnosticText);
   } catch (error) {
     diagnostics.dom = {
       readyState: "unavailable",
@@ -514,7 +516,7 @@ async function attachBrowserDiagnostics(page: Page, testInfo: TestInfo): Promise
       url: { origin: "[unavailable]", path: "[unavailable]" },
       nameInput: null,
       createButtonDisabled: null,
-      enrollmentWidget: {
+      dripCard: {
         buttonPresent: false,
         buttonDisabled: null,
         reactPropsPresent: false,
@@ -630,7 +632,7 @@ test.describe("sequence readiness — local browser contract", () => {
 
     const { propertyId } = await seedLead(admin, "enroll");
     await gotoLeadPage(page, propertyId);
-    await expect(page.getByTestId("enroll-in-sequence-button")).toBeVisible();
+    await expect(page.getByTestId("lead-drip-card").getByRole("button", { name: "Start drip", exact: true })).toBeVisible();
     await enrollInSequence(page, sequenceName);
     await expect
       .poll(() => enrollmentStatus(admin, sequenceId, propertyId), {
@@ -638,17 +640,17 @@ test.describe("sequence readiness — local browser contract", () => {
       })
       .toBe("active");
 
-    // Mutate persisted state out-of-band to exercise the same reload path the
-    // cron/reply handlers use, then perform the user-visible resume action.
-    const { error: pauseError } = await admin
-      .from("sequence_enrollments")
-      .update({ status: "paused", pause_reason: "manual", next_run_at: null })
-      .eq("sequence_id", sequenceId)
-      .eq("property_id", propertyId);
-    if (pauseError) throw pauseError;
+    const card = page.getByTestId("lead-drip-card");
+    await expect(card.getByText(sequenceName, { exact: true })).toBeVisible();
+    await card.getByRole("button", { name: "Pause", exact: true }).click();
+    await expect
+      .poll(() => enrollmentStatus(admin, sequenceId, propertyId), {
+        timeout: 10_000,
+      })
+      .toBe("paused");
     await page.reload();
-    await expect(page.getByText(/paused \(manual\)/i)).toBeVisible();
-    await page.getByRole("button", { name: /^resume$/i }).click();
+    await expect(card.getByText("Drip was paused by a person.")).toBeVisible();
+    await card.getByRole("button", { name: "Resume", exact: true }).click();
     await expect
       .poll(() => enrollmentStatus(admin, sequenceId, propertyId), {
         timeout: 10_000,
@@ -656,9 +658,10 @@ test.describe("sequence readiness — local browser contract", () => {
       .toBe("active");
 
     await page.reload();
-    await expect(page.getByText(sequenceName, { exact: false })).toBeVisible();
+    await expect(card.getByText(sequenceName, { exact: true })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
     page.once("dialog", (dialog) => void dialog.accept());
-    await page.getByRole("button", { name: /^cancel$/i }).click();
+    await card.getByRole("button", { name: "Stop", exact: true }).click();
     await expect
       .poll(() => enrollmentStatus(admin, sequenceId, propertyId), {
         timeout: 10_000,
@@ -675,6 +678,9 @@ test.describe("sequence readiness — local browser contract", () => {
     expect(persisted.status).toBe("completed");
     expect(persisted.pause_reason).toBeNull();
     expect(persisted.current_step_index).toBe(0);
+    await page.reload();
+    await expect(card.getByText(sequenceName, { exact: true })).toBeVisible();
+    await expect(card.getByText("Stopped", { exact: true })).toBeVisible();
   });
 
   test("mock SMS send, inbound reply, thread, and provider ledger stay local", async ({
@@ -694,7 +700,7 @@ test.describe("sequence readiness — local browser contract", () => {
     const { propertyId } = await seedLead(admin, "sms");
 
     await gotoLeadPage(page, propertyId);
-    await expect(page.getByTestId("enroll-in-sequence-button")).toBeVisible();
+    await expect(page.getByTestId("lead-drip-card").getByRole("button", { name: "Start drip", exact: true })).toBeVisible();
     await enrollInSequence(page, sequenceName);
     await expect
       .poll(() => enrollmentStatus(admin, sequenceId, propertyId), {
@@ -781,7 +787,7 @@ test.describe("sequence readiness — local browser contract", () => {
 
     await gotoLeadPage(page, propertyId);
     await expect(page.getByText(replyBody)).toBeVisible();
-    await expect(page.getByText(/paused \(inbound_reply\)/i)).toBeVisible();
+    await expect(page.getByTestId("lead-drip-card").getByText("Lead replied to a drip text.")).toBeVisible();
     expect(outbound.external_id).toBe(sendEvent?.externalId);
   });
 

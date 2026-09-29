@@ -33,4 +33,11 @@ describe("startFollowUpDrip", () => {
     expect((await startFollowUpDrip({} as never, { propertyIds: ["p1"], sequenceId: "s1", userId: "u1" })).results)
       .toEqual([{ propertyId: "p1", status: "skipped", reason: "This contact is marked do not contact." }]);
   });
+
+  it("reports a different active drip as a skip with its name and step", async () => {
+    const message = "Already in Quiet check-in, text 2 of 4. Stop it or switch.";
+    enrollLead.mockResolvedValueOnce({ status: "already_in_drip", message });
+    expect((await startFollowUpDrip({} as never, { propertyIds: ["p1"], sequenceId: "s1", userId: "u1" })).results)
+      .toEqual([{ propertyId: "p1", status: "skipped", reason: message }]);
+  });
 });

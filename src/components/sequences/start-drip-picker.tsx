@@ -9,21 +9,34 @@ export type PickResult = { status: "enrolled" | "skipped" | "failed"; reason: st
 export function StartDripPicker({
   triggerLabel = "Start follow-up drip",
   onChoose,
+  onSelect,
   onLeave,
   disabled = false,
   inline = false,
+  triggerTone = "teal",
+  selectionOnly = false,
+  selectedSequenceId,
+  previewChoices,
+  onResult,
 }: {
   triggerLabel?: string;
-  onChoose: (sequenceId: string) => Promise<PickResult>;
+  onChoose?: (sequenceId: string) => Promise<PickResult>;
+  onSelect?: (sequenceId: string) => void;
   onLeave?: () => Promise<void>;
   disabled?: boolean;
   inline?: boolean;
+  triggerTone?: "teal" | "outline" | "primary";
+  selectionOnly?: boolean;
+  selectedSequenceId?: string | null;
+  previewChoices?: DripChoice[];
+  onResult?: (result: PickResult, sequenceId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [choices, setChoices] = useState<DripChoice[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // Dialogs can embed the same choice and preview surface without a second popup.
   useEffect(() => {
@@ -34,6 +47,7 @@ export function StartDripPicker({
   async function openPicker() {
     setOpen(true);
     setMessage("");
+    if (previewChoices) { setChoices(previewChoices); return; }
     setLoading(true);
     try {
       const result = await listDripChoices();
@@ -47,9 +61,12 @@ export function StartDripPicker({
   }
 
   async function choose(id: string) {
+    if (selectionOnly) { setSelectedId(id); onSelect?.(id); return; }
+    if (!onChoose) return;
     setBusy(true);
     try {
       const result = await onChoose(id);
+      onResult?.(result, id);
       setMessage(result.status === "enrolled" ? "Drip started." : `${result.saved === false ? "Not enrolled" : "Saved. Not enrolled"}: ${result.reason}`);
       if (result.status === "enrolled") setOpen(false);
     } catch {
@@ -76,14 +93,15 @@ export function StartDripPicker({
   return (
     <div className={inline ? "relative" : "relative inline-block"}>
       {!inline && <button type="button" onClick={() => open ? setOpen(false) : void openPicker()} disabled={disabled || busy}
-        className="min-h-11 rounded-md border border-teal-200 bg-teal-50 px-3 py-1 text-[11px] font-medium text-teal-800">
+        className={`rounded-md border px-3 py-1 text-[11px] font-medium ${triggerTone === "primary" ? "min-h-9 border-primary bg-primary text-primary-foreground" : triggerTone === "outline" ? "min-h-9 border-border bg-card text-foreground" : "min-h-11 border-teal-200 bg-teal-50 text-teal-800"}`}>
         {triggerLabel}
       </button>}
       {(inline || open) && <div className={inline ? "space-y-2" : "absolute left-0 top-full z-50 mt-1 w-80 rounded-md border bg-white p-3 shadow-lg"} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
         {!inline && <p className="mb-2 text-sm font-semibold">Start follow-up drip</p>}
         {loading ? <p className="text-xs">Loading drips…</p> : choices.length === 0 ? <p className="text-xs">No active drips with steps are available.</p> : choices.map((choice) => (
           <button key={choice.id} type="button" disabled={busy} onClick={() => void choose(choice.id)}
-            className="mb-2 block w-full rounded-md border p-2 text-left hover:bg-stone-50">
+            aria-pressed={selectionOnly ? (selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id : undefined}
+            className={`mb-2 block w-full rounded-md border p-2 text-left hover:bg-stone-50 ${(selectedSequenceId === undefined ? selectedId : selectedSequenceId) === choice.id ? 'border-teal-600 bg-teal-50' : ''}`}>
             <span className="block text-sm font-medium">{choice.name}</span>
             <span className="block text-xs text-stone-600">{choice.textCount} texts · over {choice.days} days</span>
             {choice.firstSend && <span className="block text-xs text-stone-600">First text: {choice.firstSend}</span>}

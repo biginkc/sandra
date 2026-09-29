@@ -113,7 +113,7 @@ describe("MyLeadsQueue", () => {
     expect(onLoadDetail).toHaveBeenCalledTimes(1)
   })
 
-  it("renders the five PRD sections and the nine KPI tiles in order", () => {
+  it("renders the stage and drip sections with the attention metrics in order", () => {
     render(<MyLeadsQueue {...buildProps()} />)
 
     expect(screen.getByRole("heading", { name: "My Leads" })).toBeInTheDocument()
@@ -125,6 +125,7 @@ describe("MyLeadsQueue", () => {
       "Needs offer / Interested",
       "Offer Sent",
       "Under Contract",
+      "In a drip",
     ])
     expect(screen.getByTestId("kpi-contacts")).toHaveTextContent("Contacts6 / 12")
     expect(screen.getByTestId("kpi-average-talk-time")).toHaveTextContent("Average talk time3m 0s")

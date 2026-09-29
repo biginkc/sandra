@@ -40,6 +40,7 @@ import {
   enrollLeadInSequence,
   pauseEnrollmentAction,
   resumeEnrollmentAction,
+  restoreSequence,
   updateSequence,
   upsertSequenceStep,
 } from "./actions";
@@ -295,6 +296,31 @@ describe("sequence admin guard", () => {
     it("blocks step deletion before table access", async () => {
       await expectForbidden(user, () => deleteSequenceStep("step-1", "seq-1"));
     });
+  });
+});
+
+describe("archive and restore sequence", () => {
+  it.each([true, false])("preserves active=%s through archive and restore", async (active) => {
+    const sequence = { id: "seq-1", active, archived_at: null as string | null };
+    const update = vi.fn((patch: { active?: boolean; archived_at: string | null }) => ({
+      eq: vi.fn(async (column: string, id: string) => {
+        expect([column, id]).toEqual(["id", sequence.id]);
+        Object.assign(sequence, patch);
+        return { error: null };
+      }),
+    }));
+    createClient.mockResolvedValue({
+      auth: { getUser: vi.fn().mockResolvedValue({ data: { user: { email: "admin@bmhgroupkc.com" } } }) },
+      from: vi.fn(() => ({ update })),
+    });
+
+    expect((await archiveSequence(sequence.id)).ok).toBe(true);
+    expect(sequence.archived_at).not.toBeNull();
+    expect(sequence.active).toBe(active);
+    expect((await restoreSequence(sequence.id)).ok).toBe(true);
+    expect(sequence).toMatchObject({ active, archived_at: null });
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(update.mock.calls.every(([patch]) => !("active" in patch))).toBe(true);
   });
 });
 

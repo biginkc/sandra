@@ -11,11 +11,12 @@ test.beforeAll(async () => {
   js = (await esbuild.build({ entryPoints: ["e2e/synthetic/fixtures/my-leads-metrics-harness.tsx"], bundle: true, platform: "browser", format: "iife", jsx: "automatic", alias: { "@": path.resolve("src") }, define: { "process.env.NODE_ENV": '"test"' }, write: false })).outputFiles[0].text
 })
 for (const width of [390, 1440]) {
-  test(`nine metrics are readable and contained at ${width}px`, async ({ page }) => {
+  test(`ten metrics are readable and contained at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 })
     await page.setContent(`<style>${css}</style><div id="root"></div>`)
     await page.addScriptTag({ content: js })
-    await expect(page.locator('[data-testid^="kpi-"]')).toHaveCount(9)
+    await expect(page.locator('[data-testid^="kpi-"]')).toHaveCount(10)
+    await expect(page.getByTestId("kpi-replied-to-drip")).toContainText("2")
     await expect(page.getByTestId("kpi-contacts")).toContainText("8 / 25")
     await expect(page.getByTestId("kpi-average-talk-time")).toContainText("3m 42s")
     for (const card of await page.locator('[data-testid^="kpi-"]').all()) {
@@ -43,7 +44,8 @@ for (const width of [390, 1440]) {
     expect(stickyBox!.y).toBeCloseTo(inset, 0)
     expect(stickyBox!.x).toBeGreaterThanOrEqual(width < 768 ? 0 : 256)
     expect(stickyBox!.x + stickyBox!.width).toBeLessThanOrEqual(width)
-    await expect(strip.locator("dt")).toHaveCount(9)
+    await expect(strip.locator("dt")).toHaveCount(10)
+    await expect(strip).toContainText("Replied to drip")
     await expect(strip).toContainText("8 / 25")
     await expect(strip).toContainText("3m 42s")
     const positions = await strip.locator("dt").evaluateAll(nodes => nodes.map(n => n.getBoundingClientRect().top))

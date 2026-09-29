@@ -13,7 +13,7 @@ function Metric({ id, label, children, detail }: { id: string; label: string; ch
   </div>
 }
 
-export function MyLeadsMetrics({ kpis }: { kpis: MyLeadsKpis }) {
+export function MyLeadsMetrics({ kpis, repliedToDrip = 0 }: { kpis: MyLeadsKpis; repliedToDrip?: number }) {
   // During a rolling deployment the RPC can still return its legacy shape.
   const count = (value: number | undefined) => Number.isFinite(value) ? value : "—"
   const hasSnapshot = typeof kpis.asOf === "string" && Number.isFinite(Date.parse(kpis.asOf))
@@ -28,10 +28,11 @@ export function MyLeadsMetrics({ kpis }: { kpis: MyLeadsKpis }) {
     {!hasSnapshot && <p role="status" className="text-sm text-muted-foreground">Some metrics are temporarily unavailable.</p>}
     <section aria-labelledby="my-leads-attention-heading" className="space-y-2">
       <h2 id="my-leads-attention-heading" className="text-sm font-semibold">Needs attention <span className="font-normal text-muted-foreground">· Includes previous days</span></h2>
-      <dl className="grid grid-cols-1 gap-px overflow-hidden rounded-2xl border border-border bg-border sm:grid-cols-3">
+      <dl className="grid grid-cols-1 gap-px overflow-hidden rounded-2xl border border-border bg-border sm:grid-cols-4">
         <Metric id="contact-without-follow-up" label="Contact: no follow-up appointment">{count(kpis.contactWithoutFollowUp)}</Metric>
         <Metric id="needs-offers" label="Leads needing offers">{count(kpis.needsOffers)}</Metric>
         <Metric id="appointments-overdue" label="Overdue appointments">{count(kpis.appointmentsOverdue)}</Metric>
+        <Metric id="replied-to-drip" label="Replied to drip">{repliedToDrip}</Metric>
       </dl>
     </section>
     <section aria-labelledby="my-leads-activity-heading" className="space-y-2">
