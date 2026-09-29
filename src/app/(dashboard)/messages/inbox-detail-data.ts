@@ -301,7 +301,7 @@ async function loadMessageDripContext(
       : Promise.resolve({ data: null, error: null }),
     outboundIds.length
       ? supabase.from("sequence_step_runs")
-          .select("message_id, sequence_steps!inner(step_index, sequence_id), sequence_enrollments!inner(sequence_id, org_id)")
+          .select("message_id, enrollment_id, sequence_steps!inner(step_index, sequence_id), sequence_enrollments!inner(sequence_id, org_id)")
           .in("message_id", outboundIds)
       : Promise.resolve({ data: [], error: null }),
   ]);
@@ -329,29 +329,39 @@ async function loadMessageDripContext(
   const totals = new Map<string, number>();
   for (const step of stepsResult.data ?? []) totals.set(step.sequence_id, (totals.get(step.sequence_id) ?? 0) + 1);
   const dripMessageLabels: Record<string, string> = {};
+  const dripMessageEnrollmentIds: Record<string, string> = {};
   for (const run of runs) {
     if (!run.message_id || run.sequence_enrollments?.org_id !== orgId) continue;
     const sequenceId = run.sequence_steps.sequence_id;
     const name = names.get(sequenceId);
     if (!name) continue;
     dripMessageLabels[run.message_id] = `Drip · ${name} · text ${run.sequence_steps.step_index + 1} of ${totals.get(sequenceId) ?? run.sequence_steps.step_index + 1}`;
+    dripMessageEnrollmentIds[run.message_id] = run.enrollment_id;
   }
   const dripReplyLabels: Record<string, string> = {};
+  const dripReplyEnrollmentIds: Record<string, string> = {};
   let pendingDripText: string | null = null;
+  let pendingEnrollmentId: string | null = null;
   for (const message of messages) {
     if (dripMessageLabels[message.id]) {
       pendingDripText = dripMessageLabels[message.id];
+      pendingEnrollmentId = dripMessageEnrollmentIds[message.id];
     } else if (message.direction === "inbound" && pendingDripText) {
       const match = pendingDripText.match(/text (\d+) of/);
-      if (match) dripReplyLabels[message.id] = `Reply to drip text ${match[1]}`;
+      if (match) {
+        dripReplyLabels[message.id] = `Reply to drip text ${match[1]}`;
+        if (pendingEnrollmentId) dripReplyEnrollmentIds[message.id] = pendingEnrollmentId;
+      }
       pendingDripText = null;
+      pendingEnrollmentId = null;
     } else if (message.direction === "outbound" &&
       (message.metadata as { generated_by?: string } | null)?.generated_by !== "ai_responder_v1") {
       pendingDripText = null;
+      pendingEnrollmentId = null;
     }
   }
   const dripReplyMessageIds = Object.keys(dripReplyLabels);
-  const reply = messages.findLast((message) => Boolean(dripReplyLabels[message.id])) ?? null;
+  const reply = messages.findLast((message) => dripReplyEnrollmentIds[message.id] === enrollment?.id) ?? null;
   const pausedForReply = enrollment?.status === "paused" &&
     ["inbound_reply", "rep_sms_human_takeover"].includes(enrollment.pause_reason ?? "");
   const actionSinceReply = reply && propertyId ? await Promise.all([

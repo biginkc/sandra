@@ -532,6 +532,9 @@ export function InboxDetail({
     );
   }
 
+  const activeDrip = data.drip?.status === "active" || data.drip?.status === "paused"
+    ? data.drip
+    : null;
   const assigneeEmail = data.assigneeId
     ? (assigneeEmails[data.assigneeId] ?? null)
     : null;
@@ -985,11 +988,11 @@ export function InboxDetail({
                 initialDispo={data.outreachDispo}
                 propertyStatus={data.propertyStatus}
                 currentUserId={currentUserId}
-                activeDripEnrollmentId={data.drip?.enrollmentId}
-                activeDripSequenceId={data.drip?.sequenceId}
-                activeDripName={data.drip?.name}
-                activeDripStep={data.drip?.step}
-                activeDripTotal={data.drip?.total}
+                activeDripEnrollmentId={activeDrip?.enrollmentId}
+                activeDripSequenceId={activeDrip?.sequenceId}
+                activeDripName={activeDrip?.name}
+                activeDripStep={activeDrip?.step}
+                activeDripTotal={activeDrip?.total}
                 initialFailedStart={previewFailedStart}
                 onDispositionChanged={
                   data.aiDispositionReview

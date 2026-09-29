@@ -1501,7 +1501,7 @@ describe("<InboxDetail />", () => {
   it("preserves the saved outcome and offers switch when enrollment reports an active drip", async () => {
     changeDripActionMock.mockResolvedValueOnce({ ok: true, data: { status: "enrolled", reason: "Enrolled" } });
     const user = userEvent.setup();
-    render(<InboxDetail data={makeData({ contactId: "duplicate-drip", drip: { enrollmentId: "e1", sequenceId: "current", name: "Current drip", step: 1, total: 2, replied: false, stoppedAt: null } })} assigneeEmails={{}} currentUserId="user-1" />);
+    render(<InboxDetail data={makeData({ contactId: "duplicate-drip", drip: { enrollmentId: "e1", sequenceId: "current", name: "Current drip", step: 1, total: 2, status: "active", replied: false, stoppedAt: null } })} assigneeEmails={{}} currentUserId="user-1" />);
     await user.click(screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
     await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
     expect(await screen.findByTestId("drip-cant-start")).toHaveTextContent("The outcome was saved. Already in Current drip, text 1 of 2. Stop it or switch.");
@@ -1510,6 +1510,18 @@ describe("<InboxDetail />", () => {
     expect(screen.getByRole("link", { name: "Open lead" })).toHaveAttribute("href", "/leads/prop-1");
     await user.click(screen.getByRole("button", { name: "Switch to this drip" }));
     expect(changeDripActionMock).toHaveBeenCalledWith("e1", "s1");
+  });
+
+  it("starts another drip after the previous enrollment completed", async () => {
+    setInboxDispoAndStartDripMock.mockClear();
+    const user = userEvent.setup();
+    render(<InboxDetail data={makeData({ contactId: "finished-drip", drip: { enrollmentId: "finished", sequenceId: "old", name: "Old drip", step: 2, total: 2, status: "completed", replied: false, stoppedAt: null } })} assigneeEmails={{}} currentUserId="user-1" />);
+    await user.click(screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
+    await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
+    await waitFor(() => expect(setInboxDispoAndStartDripMock).toHaveBeenCalledWith("prop-1", "needs_sequence", "s1"));
+    expect(screen.queryByTestId("drip-cant-start")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Switch to this drip" })).not.toBeInTheDocument();
+    expect(changeDripActionMock).not.toHaveBeenCalled();
   });
 
   it("offers switch for a drip paused after a reply and never labels it as sending", async () => {
@@ -1530,7 +1542,7 @@ describe("<InboxDetail />", () => {
 
   it("does not offer a same-drip switch or start a parallel enrollment", async () => {
     const user = userEvent.setup();
-    render(<InboxDetail data={makeData({ contactId: "same-drip", drip: { enrollmentId: "e1", sequenceId: "s1", name: "Seller follow-up", step: 1, total: 2, replied: false, stoppedAt: null } })} assigneeEmails={{}} currentUserId="user-1" />);
+    render(<InboxDetail data={makeData({ contactId: "same-drip", drip: { enrollmentId: "e1", sequenceId: "s1", name: "Seller follow-up", step: 1, total: 2, status: "active", replied: false, stoppedAt: null } })} assigneeEmails={{}} currentUserId="user-1" />);
     await user.click(screen.getByTestId("dispo-needs-sequence").querySelector("button")!);
     await user.click(await screen.findByRole("button", { name: /Seller follow-up/ }));
     expect(await screen.findByTestId("drip-cant-start")).toHaveTextContent("Already in Seller follow-up, text 1 of 2.");

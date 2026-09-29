@@ -998,7 +998,7 @@ describe("fetchInboxDetail", () => {
       contacts: [makeContact({ id: CONTACT_ID })],
       properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
       sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, contact_id: CONTACT_ID, sequence_id: "drip", status: "paused", pause_reason: "inbound_reply", current_step_index: 1, enrolled_at: "2026-06-09T11:00:00Z", updated_at: "2026-06-09T12:02:00Z" }],
-      sequence_step_runs: [{ message_id: "drip-text", sequence_enrollments: { org_id: "org-1", sequence_id: "drip" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+      sequence_step_runs: [{ message_id: "drip-text", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1", sequence_id: "drip" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
       sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
       sequence_steps: [{ id: "step-1", sequence_id: "drip" }, { id: "step-2", sequence_id: "drip" }],
     };
@@ -1029,7 +1029,7 @@ describe("fetchInboxDetail", () => {
       ],
       contacts: [makeContact({ id: CONTACT_ID })], properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
       sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "drip", status: "paused", pause_reason: "inbound_reply", current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" }],
-      sequence_step_runs: [{ message_id: "drip-text", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+      sequence_step_runs: [{ message_id: "drip-text", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
       sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
       sequence_steps: [{ id: "step-1", sequence_id: "drip" }],
       lead_events: action === "dispo" ? [{ id: "event", org_id: "org-1", property_id: RECENT_PROPERTY_ID, event_type: "dispo_set", actor_type: "user", created_at: "2026-06-09T12:03:00Z" }] :
@@ -1051,7 +1051,7 @@ describe("fetchInboxDetail", () => {
         ],
         contacts: [makeContact({ id: CONTACT_ID })], properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
         sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "drip", status: "paused", pause_reason: "inbound_reply", current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" }],
-        sequence_step_runs: [{ message_id: "drip-text", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+        sequence_step_runs: [{ message_id: "drip-text", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
         sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
         sequence_steps: [{ id: "step-1", sequence_id: "drip" }],
         call_activities: action === "call" ? [{ id: "call", org_id: "org-1", property_id: RECENT_PROPERTY_ID, call_purpose: "customer", created_at: "2026-06-09T12:03:00Z" }] : [],
@@ -1060,7 +1060,7 @@ describe("fetchInboxDetail", () => {
       };
       if (["campaign", "ai", "step-run"].includes(action)) {
         seed.messages.push(makeMessage({ id: "later-outbound", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:03:00Z", campaign_id: action === "campaign" ? "campaign" : null, metadata: action === "ai" ? { generated_by: "another_generator" } : null }));
-        if (action === "step-run") seed.sequence_step_runs!.push({ message_id: "later-outbound", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } });
+        if (action === "step-run") seed.sequence_step_runs!.push({ message_id: "later-outbound", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } });
       }
       const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
       expect(detail?.drip?.replied).toBe(true);
@@ -1074,12 +1074,39 @@ describe("fetchInboxDetail", () => {
       ],
       contacts: [makeContact({ id: CONTACT_ID })], properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
       sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "drip", status: "completed", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" }],
-      sequence_step_runs: [{ message_id: "drip-text", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+      sequence_step_runs: [{ message_id: "drip-text", enrollment_id: "enrollment", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
       sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
       sequence_steps: [{ id: "step-1", sequence_id: "drip" }],
     };
     const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
     expect(detail?.drip).toMatchObject({ name: "Seller follow-up", status: "completed", replied: true });
     expect(detail?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
+  });
+
+  it("keeps an old drip reply marker without stopping a newer active enrollment", async () => {
+    const seed: SeedData = {
+      messages: [
+        makeMessage({ id: "a-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
+        makeMessage({ id: "a-reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+        makeMessage({ id: "rep-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:03:00Z" }),
+        makeMessage({ id: "b-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T13:00:00Z" }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [
+        { id: "a-enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "a", status: "completed", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" },
+        { id: "b-enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "b", status: "active", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-09T12:30:00Z" },
+      ],
+      sequence_step_runs: [
+        { message_id: "a-text", enrollment_id: "a-enrollment", sequence_enrollments: { org_id: "org-1", sequence_id: "a" }, sequence_steps: { sequence_id: "a", step_index: 0 } },
+        { message_id: "b-text", enrollment_id: "b-enrollment", sequence_enrollments: { org_id: "org-1", sequence_id: "b" }, sequence_steps: { sequence_id: "b", step_index: 0 } },
+      ],
+      sequences: [{ id: "a", org_id: "org-1", name: "A" }, { id: "b", org_id: "org-1", name: "B" }],
+      sequence_steps: [{ id: "a-step", sequence_id: "a" }, { id: "b-step", sequence_id: "b" }, { id: "b-step-2", sequence_id: "b" }],
+    };
+    const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
+    expect(detail?.drip).toMatchObject({ enrollmentId: "b-enrollment", name: "B", status: "active", step: 1, total: 2, replied: false, stoppedAt: null });
+    expect(detail?.dripReplyLabels).toEqual({ "a-reply": "Reply to drip text 1" });
+    expect(detail?.dripReplyMessageIds).toEqual(["a-reply"]);
   });
 });
