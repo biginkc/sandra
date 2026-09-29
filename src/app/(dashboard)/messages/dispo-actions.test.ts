@@ -9,6 +9,8 @@ const {
   recordConsentEvent,
   reportError,
   revalidatePath,
+  startFollowUpDrip,
+  assertNotTrainingTarget,
 } = vi.hoisted(() => ({
   createClient: vi.fn(),
   getCallerMembershipsOrThrow: vi.fn(),
@@ -18,10 +20,13 @@ const {
   recordConsentEvent: vi.fn(),
   reportError: vi.fn(),
   revalidatePath: vi.fn(),
+  startFollowUpDrip: vi.fn(),
+  assertNotTrainingTarget: vi.fn(),
 }));
 
 vi.mock("next/cache", () => ({ revalidatePath }));
 vi.mock("@/lib/leads/qualify", () => ({ qualifyProperty }));
+vi.mock("@/lib/leads/training", () => ({ assertNotTrainingTarget }));
 vi.mock("@/lib/errors/report", () => ({ reportError }));
 vi.mock("@/lib/events", () => ({
   LEAD_EVENT_TYPES: { DISPO_SET: "dispo_set", OPTED_OUT: "opted_out" },
@@ -29,6 +34,7 @@ vi.mock("@/lib/events", () => ({
 }));
 vi.mock("@/lib/messaging/consent", () => ({ recordConsentEvent }));
 vi.mock("@/lib/sequences/enrollment", () => ({ pauseContactEnrollments }));
+vi.mock("@/lib/sequences/start-drip", () => ({ startFollowUpDrip }));
 vi.mock("@/lib/supabase/server", () => ({ createClient }));
 vi.mock("@/lib/auth/memberships", () => ({ getCallerMembershipsOrThrow }));
 
@@ -36,6 +42,7 @@ import {
   confirmAiDispositionReview,
   moveMessageThreadToLead,
   setOutreachDispo,
+  setInboxDispoAndStartDrip,
 } from "./dispo-actions";
 
 type Response = { data?: unknown; error?: { message: string } | null };
@@ -56,6 +63,7 @@ beforeEach(() => {
     inserted: true,
     id: CONSENT_EVENT_ID,
   });
+  startFollowUpDrip.mockResolvedValue({ results: [{ propertyId: "property-1", status: "enrolled", reason: "Enrolled" }] });
 });
 
 afterEach(() => {
@@ -160,6 +168,46 @@ describe("setOutreachDispo", () => {
     });
     expect(recordConsentEvent).not.toHaveBeenCalled();
     expect(pauseContactEnrollments).not.toHaveBeenCalled();
+    expect(startFollowUpDrip).not.toHaveBeenCalled();
+  });
+
+  it("starts the selected drip after saving needs_sequence", async () => {
+    responseQueue = [{ data: property(), error: null }, { data: { id: "property-1" }, error: null }];
+    const result = await setInboxDispoAndStartDrip("property-1", "needs_sequence", "sequence-1");
+    expect(result).toEqual({ ok: true, enrollment: { status: "enrolled", reason: "Enrolled" } });
+    expect(startFollowUpDrip).toHaveBeenCalledWith(expect.anything(), { propertyIds: ["property-1"], sequenceId: "sequence-1", userId: "actor-1" });
+    expect(updatePayloads[0].payload).toMatchObject({ outreach_dispo: "needs_sequence" });
+  });
+
+  it.each(["dnc", "opted_out"])("refuses to overwrite %s with needs_sequence", async (dispo) => {
+    responseQueue = [{ data: property(dispo), error: null }];
+    const result = await setInboxDispoAndStartDrip("property-1", "needs_sequence", "sequence-1");
+    expect(result.ok).toBe(false);
+    expect(updatePayloads).toEqual([]);
+    expect(startFollowUpDrip).not.toHaveBeenCalled();
+  });
+
+  it("refuses a locked lead's nurture disposition", async () => {
+    responseQueue = [{ data: { ...property(), is_dnc_locked: true }, error: null }];
+    expect((await setOutreachDispo("property-1", "nurture")).ok).toBe(false);
+    expect(updatePayloads).toEqual([]);
+  });
+
+  it("keeps the saved disposition when enrollment fails", async () => {
+    responseQueue = [{ data: property(), error: null }, { data: { id: "property-1" }, error: null }];
+    startFollowUpDrip.mockResolvedValueOnce({ results: [{ propertyId: "property-1", status: "failed", reason: "Lead only has a landline." }] });
+    expect(await setInboxDispoAndStartDrip("property-1", "needs_sequence", "sequence-1"))
+      .toEqual({ ok: true, enrollment: { status: "failed", reason: "Lead only has a landline." } });
+    expect(updatePayloads[0].payload).toMatchObject({ outreach_dispo: "needs_sequence" });
+  });
+
+  it("reports an unexpected enrollment throw after saving the outcome", async () => {
+    responseQueue = [{ data: property(), error: null }, { data: { id: "property-1" }, error: null }];
+    startFollowUpDrip.mockRejectedValueOnce(new Error("sequence unavailable"));
+    expect(await setInboxDispoAndStartDrip("property-1", "needs_sequence", "sequence-1"))
+      .toEqual({ ok: true, enrollment: { status: "failed", reason: "Could not enroll this lead." } });
+    expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ message: "sequence unavailable" }),
+      expect.objectContaining({ tags: { surface: "manual_dispo_enroll_after_commit" } }));
   });
 
   it("rejects legacy task dispositions from the manual Messages action", async () => {
