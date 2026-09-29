@@ -1,0 +1,105 @@
+name: Inbox heavy verification
+run-name: Inbox heavy ${{ inputs.lane }} ${{ inputs.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: scripts/inbox-ci/<lane>.sh
+        required: true
+        type: string
+      sha:
+        description: Exact 40-hex candidate commit
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/inbox-heavy-verification.yml
+      - scripts/inbox-ci/**
+      - scripts/ci/provision-disposable-stack.mjs
+      - scripts/ci/pull-heavy-record.mjs
+      - scripts/outbox-run-record.mjs
+      - experiments/inbox-release/sealed_evidence.py
+      - experiments/inbox-release/test_sealed_evidence.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inbox-heavy-${{ github.event_name }}-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  static:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm run lint -- scripts/ci scripts/outbox-run-record.mjs
+      - run: npm run typecheck
+      - run: node --test scripts/outbox-run-record.test.mjs scripts/ci/*.test.mjs
+      - run: python3 -m unittest discover -s experiments/inbox-release -p 'test_sealed_evidence.py'
+
+  lane:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GITHUB_ACTIONS: 'true'
+      PLAYWRIGHT_BROWSER_CHANNEL: chrome
+      HEAVY_LANE: ${{ inputs.lane }}
+      HEAVY_TESTED_SHA: ${{ inputs.sha }}
+    steps:
+      - name: Validate dispatch inputs
+        run: |
+          [[ "$HEAVY_TESTED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$HEAVY_LANE" =~ ^[a-z0-9-]+$ ]]
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Verify exact checkout and lane
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$HEAVY_TESTED_SHA" ]]
+          test -f "scripts/inbox-ci/$HEAVY_LANE.sh"
+          test -x "scripts/inbox-ci/$HEAVY_LANE.sh"
+          git diff --quiet
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+      - name: Provision disposable stack
+        if: env.HEAVY_LANE == 'outbox'
+        run: node scripts/ci/provision-disposable-stack.mjs --api-port 55421 --db-port 55422
+      - name: Verify Chrome
+        if: env.HEAVY_LANE == 'outbox'
+        run: google-chrome --version
+      - name: Run lane
+        env:
+          CI: ''
+        run: bash "scripts/inbox-ci/$HEAVY_LANE.sh"
+      - name: Upload run records
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: heavy-${{ inputs.lane }}-${{ inputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: docs/performance/inbox-redesign/evidence/
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Stop disposable stack
+        if: always() && env.E2E_LOCAL_WORKDIR != ''
+        run: supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup
