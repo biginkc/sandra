@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { listDripChoices, type DripChoice } from "@/app/(dashboard)/sequences/actions";
 
@@ -11,17 +11,25 @@ export function StartDripPicker({
   onChoose,
   onLeave,
   disabled = false,
+  inline = false,
 }: {
   triggerLabel?: string;
   onChoose: (sequenceId: string) => Promise<PickResult>;
   onLeave?: () => Promise<void>;
   disabled?: boolean;
+  inline?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [choices, setChoices] = useState<DripChoice[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+
+  // Dialogs can embed the same choice and preview surface without a second popup.
+  useEffect(() => {
+    if (inline) void openPicker();
+    // The inline picker loads once when its dialog mounts.
+  }, [inline]);
 
   async function openPicker() {
     setOpen(true);
@@ -66,13 +74,13 @@ export function StartDripPicker({
   }
 
   return (
-    <div className="relative inline-block">
-      <button type="button" onClick={() => open ? setOpen(false) : void openPicker()} disabled={disabled || busy}
+    <div className={inline ? "relative" : "relative inline-block"}>
+      {!inline && <button type="button" onClick={() => open ? setOpen(false) : void openPicker()} disabled={disabled || busy}
         className="min-h-11 rounded-md border border-teal-200 bg-teal-50 px-3 py-1 text-[11px] font-medium text-teal-800">
         {triggerLabel}
-      </button>
-      {open && <div className="absolute left-0 top-full z-50 mt-1 w-80 rounded-md border bg-white p-3 shadow-lg" role="dialog" aria-label="Start follow-up drip">
-        <p className="mb-2 text-sm font-semibold">Start follow-up drip</p>
+      </button>}
+      {(inline || open) && <div className={inline ? "space-y-2" : "absolute left-0 top-full z-50 mt-1 w-80 rounded-md border bg-white p-3 shadow-lg"} role={inline ? undefined : "dialog"} aria-label="Start follow-up drip">
+        {!inline && <p className="mb-2 text-sm font-semibold">Start follow-up drip</p>}
         {loading ? <p className="text-xs">Loading drips…</p> : choices.length === 0 ? <p className="text-xs">No active drips with steps are available.</p> : choices.map((choice) => (
           <button key={choice.id} type="button" disabled={busy} onClick={() => void choose(choice.id)}
             className="mb-2 block w-full rounded-md border p-2 text-left hover:bg-stone-50">

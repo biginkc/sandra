@@ -60,6 +60,7 @@ import type {
   InboundOwnershipFilter,
 } from "./inbound-filters";
 import { loadLeadBoardAction, setLeadNextActionAction } from "./board-actions";
+import { BulkStartDripDialog } from "./bulk-start-drip-dialog";
 import type {
   CustomTag,
   LeadBoardCursor,
@@ -180,6 +181,9 @@ export function Kanban({
 }: KanbanProps) {
   const router = useRouter();
   const [leads, setLeads] = useState<Lead[]>(initialLeads);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDripOpen, setBulkDripOpen] = useState(false);
+  const [bulkDripLeads, setBulkDripLeads] = useState<{ id: string; address: string }[]>([]);
   const [totals, setTotals] = useState(initialTotals);
   const [baselineTotals, setBaselineTotals] = useState(initialBaselineTotals);
   const [urgencyCounts, setUrgencyCounts] = useState(initialUrgencyCounts);
@@ -284,6 +288,8 @@ export function Kanban({
       ),
     [dayEnd, dayStart, motivationFiltered, search, urgency],
   );
+  const selectedLeads = filteredLeads.filter((lead) => selectedIds.has(lead.id));
+  const allVisibleSelected = filteredLeads.length > 0 && filteredLeads.every((lead) => selectedIds.has(lead.id));
 
   const activeFilterCount =
     Number(search.trim().length > 0) +
@@ -882,6 +888,25 @@ export function Kanban({
         </div>
       ) : null}
 
+      <div className="border-border bg-card flex flex-wrap items-center gap-2 rounded-2xl border px-3 py-2 text-sm" aria-label="Lead bulk actions">
+        <Button variant="outline" size="sm" onClick={() => setSelectedIds((previous) => {
+          const next = new Set(previous);
+          if (allVisibleSelected) filteredLeads.forEach((lead) => next.delete(lead.id));
+          else filteredLeads.forEach((lead) => next.add(lead.id));
+          return next;
+        })}>{allVisibleSelected ? "Clear visible selection" : `Select all ${filteredLeads.length} loaded leads`}</Button>
+        {selectedLeads.length > 0 ? <>
+          <span>{selectedLeads.length} selected</span>
+          <Button size="sm" onClick={() => { setBulkDripLeads(selectedLeads.map((lead) => ({ id: lead.id, address: lead.address }))); setBulkDripOpen(true); }}>Start drip</Button>
+          <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>Clear selection</Button>
+        </> : null}
+      </div>
+      {bulkDripOpen ? <BulkStartDripDialog open leads={bulkDripLeads} onClose={() => setBulkDripOpen(false)} onComplete={() => {
+        setSelectedIds(new Set());
+        void refreshBoard();
+        router.refresh();
+      }} /> : null}
+
       {loadError ? (
         <div
           className="border-destructive/30 bg-destructive/5 text-destructive flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm"
@@ -936,6 +961,12 @@ export function Kanban({
                 isCollapsed={collapsed.has(status)}
                 onToggleCollapsed={() => toggleCollapsed(status)}
                 onLeadClick={(id) => router.push(`/leads/${id}`)}
+                selectedIds={selectedIds}
+                onToggleSelected={(id) => setSelectedIds((previous) => {
+                  const next = new Set(previous);
+                  if (next.has(id)) next.delete(id); else next.add(id);
+                  return next;
+                })}
                 unreadSet={unreadSet}
                 assigneeEmails={assigneeEmails}
                 currentUserId={currentUserId}
@@ -1102,6 +1133,8 @@ function Column({
   isCollapsed,
   onToggleCollapsed,
   onLeadClick,
+  selectedIds,
+  onToggleSelected,
   unreadSet,
   assigneeEmails,
   currentUserId,
@@ -1129,6 +1162,8 @@ function Column({
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
   onLeadClick: (id: string) => void;
+  selectedIds: Set<string>;
+  onToggleSelected: (id: string) => void;
   unreadSet: Set<string>;
   assigneeEmails: Record<string, string>;
   currentUserId: string | null;
@@ -1246,6 +1281,8 @@ function Column({
               key={lead.id}
               lead={lead}
               onClick={() => onLeadClick(lead.id)}
+              selected={selectedIds.has(lead.id)}
+              onToggleSelected={() => onToggleSelected(lead.id)}
               hasUnread={unreadSet.has(lead.id)}
               assigneeEmails={assigneeEmails}
               currentUserId={currentUserId}
@@ -1285,6 +1322,8 @@ function LeadCard({
   lead,
   overlay = false,
   onClick,
+  selected = false,
+  onToggleSelected,
   hasUnread = false,
   assigneeEmails,
   currentUserId,
@@ -1304,6 +1343,8 @@ function LeadCard({
   lead: Lead;
   overlay?: boolean;
   onClick?: () => void;
+  selected?: boolean;
+  onToggleSelected?: () => void;
   hasUnread?: boolean;
   assigneeEmails: Record<string, string>;
   currentUserId: string | null;
@@ -1406,6 +1447,7 @@ function LeadCard({
       tabIndex={-1}
       aria-label={`Lead at ${lead.address}`}
     >
+      {!overlay && onToggleSelected ? <input type="checkbox" checked={selected} aria-label={`Select ${lead.address}`} onChange={onToggleSelected} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} className="mr-2" /> : null}
       {hasUnread ? (
         <span
           aria-label="Unread inbound message"

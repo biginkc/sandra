@@ -28,6 +28,10 @@ vi.mock("./board-actions", () => ({
   setLeadNextActionAction,
 }));
 
+vi.mock("./bulk-start-drip-dialog", () => ({
+  BulkStartDripDialog: () => <div role="dialog">Drip choices</div>,
+}));
+
 vi.mock("@/lib/errors/call-action", () => ({
   callAction: (promise: Promise<unknown>) => promise,
 }));
@@ -194,6 +198,17 @@ beforeEach(() => {
 });
 
 describe("Leads Kanban foundation", () => {
+  it("shows Start drip only after selecting a lead and supports select all loaded leads", async () => {
+    const user = userEvent.setup();
+    renderBoard([makeLead(), makeLead({ id: "lead-b", address: "456 Oak St" })]);
+    expect(screen.queryByRole("button", { name: "Start drip" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Select 123 Main St" }));
+    expect(screen.getByRole("button", { name: "Start drip" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /Select all 2 loaded leads/ }));
+    expect(screen.getByText("2 selected")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Start drip" }));
+    expect(screen.getByRole("dialog", { name: "" })).toHaveTextContent("Drip choices");
+  });
   it("renders exactly one latest-contract badge in the first badge row", () => {
     renderBoard([
       makeLead({
