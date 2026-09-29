@@ -32,6 +32,7 @@ const MAX_TRANSCRIPT_LINES = 500;
  * is heavier (three-beat Acknowledge/Disarm/Overcome layout) and stays up
  * longer than a nudge (a one-line coaching prompt). */
 export const OBJECTION_CARD_TTL_MS = 45_000;
+export const OBJECTION_PROMPT_TTL_MS = 30_000;
 export const NUDGE_TTL_MS = 20_000;
 
 /** Bounds how many simultaneously-visible guidance cards/nudges the
@@ -55,6 +56,7 @@ export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"
     transcript: [],
     transcriptFragments: [],
     objectionCards: [],
+    objectionPrompt: null,
     nudges: [],
     probeCount: 0,
     gates: {},
@@ -208,6 +210,17 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
           : nextObjectionCards,
       };
     }
+    case "objection_prompt":
+      return {
+        ...state,
+        connected: true,
+        lastEventAt: action.ts,
+        objectionPrompt: {
+          objectionId: action.objectionId, label: action.label, sellerTurn: action.sellerTurn,
+          classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
+          ts: action.ts, expiresAt: Date.now() + OBJECTION_PROMPT_TTL_MS,
+        },
+      };
     case "counter":
       return {
         ...state,
