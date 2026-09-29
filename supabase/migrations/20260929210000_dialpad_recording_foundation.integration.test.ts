@@ -36,6 +36,7 @@ const recordingSql = readSql("20260929210000_dialpad_recording_foundation.sql");
 const transportSql = readSql("20260929220000_dialpad_recording_transport_contract.sql");
 const playbackSql = readSql("20260929221000_dialpad_recording_playback.sql");
 const browserSessionSql = readSql("20260930001000_dialpad_recording_browser_session.sql");
+const shadowSql = readSql("20260930001100_dialpad_recording_shadow_measurements.sql");
 
 const uuid = () => crypto.randomUUID();
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -419,6 +420,8 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
     await pg.query(playbackSql);
     await pg.query(browserSessionSql);
     await pg.query(browserSessionSql);
+    await pg.query(shadowSql);
+    await pg.query(shadowSql);
   });
 
   afterAll(async () => {
@@ -467,6 +470,9 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
           "fn_dialpad_recording_playback_file",
           "fn_get_dialpad_recording_browser_status",
           "fn_mint_dialpad_recording_next_epoch",
+          "fn_get_dialpad_recording_shadow_input",
+          "fn_finalize_dialpad_recording_shadow",
+          "fn_get_dialpad_recording_shadow_measurement",
         ].sort(),
       );
       const { captureId } = await openedCapture();
@@ -1255,6 +1261,106 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       const activity = String((await captureRow(captureId)).call_activity_id);
       expect((await pg.query("select count(*)::int as n from public.call_recordings where call_activity_id=$1", [activity])).rows[0]!.n).toBe(1);
       expect((await failure(() => service(() => pg.query("insert into public.call_recordings(call_activity_id,status) values ($1,'pending')", [activity])))).code).toBe("23505");
+    });
+  });
+
+  describe("provider-window shadow evidence", () => {
+    it("snapshots terminal evidence, preserves null eligibility, and replays finalization", async () => {
+      const { captureId, token } = await sealedReady();
+      await register(captureId, token, [decoded("tab"), decoded("mic")]);
+      const activityBefore = await pg.query("select provider, provider_call_id, seller_speech_seconds_measured, seller_speech_seconds_estimated, seller_speech_confidence, recording_status from public.call_activities where id=(select call_activity_id from public.dialpad_recording_captures where id=$1)", [captureId]);
+
+      const input = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
+      expect(input).toMatchObject({
+        algorithmVersion: "provider-window-shadow-v1",
+        eligibleSamples: null,
+        timingStatus: "unmapped",
+        snapshotOnly: true,
+      });
+      expect(Array.isArray(input.reasons)).toBe(true);
+      expect((input.manifest as Json).timingEvidence).toBeNull();
+      expect(JSON.stringify(input.manifest).length).toBeLessThan(32 * 1024);
+
+      const finalized = await rpc("fn_finalize_dialpad_recording_shadow", [orgId, captureId, input.inputDigest]);
+      expect(finalized).toMatchObject({ inputDigest: input.inputDigest, eligibleSamples: null, timingStatus: "unmapped", replayed: false, snapshotOnly: true });
+      const replayed = await rpc("fn_finalize_dialpad_recording_shadow", [orgId, captureId, input.inputDigest]);
+      expect(replayed).toMatchObject({ inputDigest: input.inputDigest, replayed: true, eligibleSamples: null });
+
+      const current = await rpc("fn_get_dialpad_recording_shadow_measurement", [orgId, captureId]);
+      expect(current).toMatchObject({ currentAtRead: true, currentInputDigest: input.inputDigest, staleReason: null, snapshotOnly: true });
+      expect(current.measurement).toMatchObject({ captureId, orgId, eligibleSamples: null, timingStatus: "unmapped" });
+      for (const sql of [
+        "insert into public.dialpad_recording_shadow_measurements(capture_id,org_id,call_activity_id,intent_id,algorithm_version,input_digest,evidence_manifest,observed_samples,observed_samples_by_epoch,eligible_samples,timing_status,evidence_status,reasons) values ($1,$2,$3,$4,'provider-window-shadow-v1',$5,'{}',0,'{}',null,'unmapped','insufficient','[\"timing_mapping_missing\"]')",
+        "update public.dialpad_recording_shadow_measurements set evidence_status='conflicting' where capture_id=$1",
+        "delete from public.dialpad_recording_shadow_measurements where capture_id=$1",
+      ]) {
+        const args = sql.startsWith("insert") ? [captureId, orgId, (current.measurement as Json).callActivityId, (current.measurement as Json).intentId, input.inputDigest] : [captureId];
+        expect((await failure(() => service(() => pg.query(sql, args)))).code).toBe("42501");
+      }
+      expect(await pg.query("select provider, provider_call_id, seller_speech_seconds_measured, seller_speech_seconds_estimated, seller_speech_confidence, recording_status from public.call_activities where id=(select call_activity_id from public.dialpad_recording_captures where id=$1)", [captureId])).toEqual(activityBefore);
+    });
+
+    it("unions authoritative half-open VAD ranges per epoch and never awards eligibility", async () => {
+      const { call, captureId } = await openedCapture();
+      await authorizedEpoch(captureId);
+      await fullTrack(captureId, "tab");
+      await fullTrack(captureId, "mic");
+      await rpc("fn_record_dialpad_recording_vad_ranges", [orgId, captureId, "tab", 1, uuid(), JSON.stringify([
+        { startSample: 0, endSample: 10, evidenceRef: "vad:a" },
+        { startSample: 5, endSample: 15, evidenceRef: "vad:b" },
+      ])]);
+      await rpc("fn_record_dialpad_recording_vad_ranges", [orgId, captureId, "tab", 1, uuid(), JSON.stringify([
+        { startSample: 20, endSample: 25, evidenceRef: "vad:c" },
+        { startSample: 20, endSample: 25, evidenceRef: "vad:c-replay" },
+      ])]);
+      await endCall(call);
+      const claimed = await claim();
+      expect(claimed.status).toBe("claimed");
+      await register(captureId, claimed.claimToken, [decoded("tab"), decoded("mic")]);
+      const input = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
+      expect(input).toMatchObject({ observedSamples: 20, observedSamplesByEpoch: { "1": 20 }, eligibleSamples: null, timingStatus: "unmapped" });
+    });
+
+    it("rejects a stale expected digest without creating a measurement", async () => {
+      const { captureId, token } = await sealedReady();
+      await register(captureId, token, [decoded("tab"), decoded("mic")]);
+      const input = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
+      expect((await failure(() => rpc("fn_finalize_dialpad_recording_shadow", [orgId, captureId, sha("wrong-shadow-digest")]))).code).toBe("40001");
+      expect((await pg.query("select count(*)::int as n from public.dialpad_recording_shadow_measurements where capture_id=$1", [captureId])).rows[0]!.n).toBe(0);
+      await rpc("fn_finalize_dialpad_recording_shadow", [orgId, captureId, input.inputDigest]);
+    });
+
+    it("marks provider evidence insertion stale without changing historical evidence", async () => {
+      const { call, captureId, token } = await sealedReady();
+      await register(captureId, token, [decoded("tab"), decoded("mic")]);
+      const input = await rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]);
+      await rpc("fn_finalize_dialpad_recording_shadow", [orgId, captureId, input.inputDigest]);
+      const ingested = await service(() => pg.query<{ v: { eventId: string } }>(
+        "select public.fn_ingest_dialpad_call_event($1,$2,1,$3) as v",
+        [orgId, connectionId, payload("calling", call.start + 5000, call.custom, { date_started: call.start }, call.callId)],
+      ));
+      const marker = await pg.query<{ n: string }>("select count(*)::int as n from public.dialpad_recording_shadow_event_changes where event_id=$1", [ingested.rows[0]!.v.eventId]);
+      expect(Number(marker.rows[0]!.n)).toBe(1);
+      await pg.query("set local role postgres");
+      await pg.query("update public.dialpad_call_events set disposition_reason='shadow-attribution-change' where id=$1", [ingested.rows[0]!.v.eventId]);
+      await pg.query("reset role");
+      const attributionMarkers = await pg.query<{ n: string }>("select count(*)::int as n from public.dialpad_recording_shadow_event_changes where event_id=$1", [ingested.rows[0]!.v.eventId]);
+      expect(Number(attributionMarkers.rows[0]!.n)).toBe(2);
+      const stale = await rpc("fn_get_dialpad_recording_shadow_measurement", [orgId, captureId]);
+      expect(stale).toMatchObject({ currentAtRead: false, staleReason: "provider_evidence_changed", snapshotOnly: true });
+      expect((stale.measurement as Json).inputDigest).toBe(input.inputDigest);
+    });
+
+    it("requires a terminal capture and service-role execution", async () => {
+      const { captureId } = await openedCapture();
+      expect((await failure(() => rpc("fn_get_dialpad_recording_shadow_input", [orgId, captureId]))).code).toBe("55000");
+      expect((await failure(() => rpc("fn_get_dialpad_recording_shadow_input", [otherOrgId, captureId]))).code).toBe("P0002");
+      expect((await failure(() => authenticated(repA, () => pg.query("select public.fn_get_dialpad_recording_shadow_input($1,$2)", [orgId, captureId])))).code).toBe("42501");
+      expect((await failure(() => anonymous(() => pg.query("select public.fn_get_dialpad_recording_shadow_input($1,$2)", [orgId, captureId])))).code).toBe("42501");
+      for (const wrap of [(run: () => Promise<unknown>) => authenticated(repA, run), (run: () => Promise<unknown>) => anonymous(run)]) {
+        expect((await failure(() => wrap(() => pg.query("select * from public.dialpad_recording_shadow_measurements")))).code).toBe("42501");
+        expect((await failure(() => wrap(() => pg.query("select * from public.dialpad_recording_shadow_event_changes")))).code).toBe("42501");
+      }
     });
   });
 });
