@@ -22,6 +22,7 @@ describe("BulkStartDripDialog", () => {
     render(<BulkStartDripDialog open leads={[{ id: "a", address: "1 Main" }, { id: "b", address: "2 Main" }, { id: "c", address: "3 Main" }]} onClose={vi.fn()} onComplete={vi.fn()} />);
     const choice = await screen.findByRole("button", { name: /Follow up/ });
     expect(choice).toHaveTextContent("First text: Monday at 9 AM");
+    expect(screen.getByLabelText("Drip choices")).toHaveClass("min-h-0", "overflow-y-auto");
     await user.click(choice);
     await waitFor(() => expect(screen.getByText(/1 started/)).toBeVisible());
     expect(screen.getByRole("dialog")).toHaveClass("max-h-[calc(100dvh-2rem)]", "overflow-hidden");

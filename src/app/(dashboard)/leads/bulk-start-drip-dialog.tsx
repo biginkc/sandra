@@ -35,7 +35,7 @@ export function BulkStartDripDialog({ open, leads, onClose, onComplete }: {
     <DialogContent showCloseButton={!running} className="flex max-h-[calc(100dvh-2rem)] grid-rows-none flex-col overflow-hidden sm:max-w-lg">
       <DialogHeader><DialogTitle>Start drip for {leads.length} selected leads</DialogTitle></DialogHeader>
       {running ? <p role="status" className="text-sm">Starting drips… {done} of {leads.length} processed</p> : null}
-      {!running && !results ? <StartDripPicker inline onChoose={choose} /> : null}
+      {!running && !results ? <div className="min-h-0 flex-1 overflow-y-auto pr-1" aria-label="Drip choices"><StartDripPicker inline onChoose={choose} /></div> : null}
       {results ? <div className="flex min-h-0 flex-1 flex-col gap-3 text-sm" aria-label="Drip results">
         <p role="status">{started} started · {results.length - started} skipped or failed</p>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1" aria-label="Drip result details">
