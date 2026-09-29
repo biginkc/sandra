@@ -46,10 +46,11 @@ class ApprovalDecision(unittest.TestCase):
         self.assertIn('origin/main workflow definition hash mismatch', self.check())
 
 
-class RecordedAcquisition(unittest.TestCase):
+class HandAuthoredAcquisition(unittest.TestCase):
+    """Hand-authored synthetic GitHub API fixture; not recorded from GitHub."""
     def setUp(self):
-        self.recorded = json.loads(Path(__file__).with_name('github-approval-api-fixture.json').read_text())
-        self.fixture = copy.deepcopy(self.recorded)
+        self.synthetic = json.loads(Path(__file__).with_name('github-approval-api-fixture.json').read_text())
+        self.fixture = copy.deepcopy(self.synthetic)
 
     def fetch(self, path, binary=False):
         run = self.fixture['production_run']
@@ -69,7 +70,7 @@ class RecordedAcquisition(unittest.TestCase):
 
     def test_only_correct_binding_passes(self):
         binding, jobs = self.acquire()
-        self.assertEqual(binding, self.recorded['binding'])
+        self.assertEqual(binding, self.synthetic['binding'])
         self.assertEqual(len(jobs), 2)
 
     def test_full_rerun_rejects_earlier_artifact(self):
@@ -78,6 +79,11 @@ class RecordedAcquisition(unittest.TestCase):
         self.fixture['attempt_jobs']['jobs'][0]['started_at'] = '2026-09-28T11:00:00Z'
         self.fixture['attempt_jobs']['jobs'][0]['completed_at'] = '2026-09-28T11:02:00Z'
         with self.assertRaisesRegex(ValueError, 'current-attempt bind job'):
+            self.acquire()
+
+    def test_bind_job_missing_run_attempt_fails(self):
+        del self.fixture['attempt_jobs']['jobs'][0]['run_attempt']
+        with self.assertRaisesRegex(ValueError, 'Bind job missing required run_attempt'):
             self.acquire()
 
     def test_migration_job_only_rerun_rejects_old_artifact(self):

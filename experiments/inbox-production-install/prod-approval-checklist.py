@@ -68,7 +68,9 @@ def acquire_binding(prod, fetch=api):
     bind = [j for j in jobs if j.get('name') == 'Bind upstream test run']
     if len(bind) != 1 or bind[0].get('conclusion') != 'success' or bind[0].get('status') != 'completed':
         raise ValueError('Current-attempt bind-upstream job did not succeed')
-    if bind[0].get('run_attempt', attempt) != attempt:
+    if 'run_attempt' not in bind[0]:
+        raise ValueError('Bind job missing required run_attempt')
+    if bind[0]['run_attempt'] != attempt:
         raise ValueError('Bind job attempt mismatch')
     artifacts_response = fetch(f'actions/runs/{run_id}/artifacts?per_page=100')
     artifacts = artifacts_response['artifacts']
