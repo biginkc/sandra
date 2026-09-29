@@ -1,7 +1,9 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ChevronDown, ChevronRight, Search } from "lucide-react"
+import { ChevronDown, ChevronRight, Droplet, Search } from "lucide-react"
+import Link from "next/link"
+import type { MyLeadDrip } from "@/lib/my-leads/drip-queries"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -33,9 +35,11 @@ const STAGE_BAR: Record<MyLeadStage, string> = {
   offer_sent: "bg-violet-600",
   under_contract: "bg-green-700",
 }
+const DRIP_BAR = "bg-cyan-800"
 
 export function MyLeadsQueue({
   stages,
+  drips,
   kpis,
   search,
   selectedRepId,
@@ -56,7 +60,7 @@ export function MyLeadsQueue({
   const scopeKey = JSON.stringify([search, selectedRepId])
   const [expansionScope, setExpansionScope] = useState(scopeKey)
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
-  const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<MyLeadStage>>(new Set())
+  const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<MyLeadStage | 'in_drip'>>(new Set())
   const [detailStates, setDetailStates] = useState<
     Readonly<Record<string, MyLeadDetailState>>
   >({})
@@ -250,7 +254,7 @@ export function MyLeadsQueue({
         </div>}
       />
 
-      <div ref={expandedMetricsRef}><MyLeadsMetrics kpis={kpis} /></div>
+      <div ref={expandedMetricsRef}><MyLeadsMetrics kpis={kpis} repliedToDrip={drips?.repliedCount ?? 0} /></div>
       <StickyMyLeadsMetrics kpis={kpis} expandedRef={expandedMetricsRef} repLabel={selectedRepLabel} />
 
       <div className="flex flex-wrap items-center justify-between gap-3" aria-label="Queue controls">
@@ -289,6 +293,18 @@ export function MyLeadsQueue({
             onStageAction={onStageAction}
           />
         ))}
+        <MyLeadStageSection
+          stage="in_drip"
+          page={{stage:'not_contacted',rows:[],totalCount:drips?.active.length??0,hasMore:false}}
+          dripRows={drips?.active??[]}
+          collapsed={collapsedSections.has('in_drip')}
+          onToggleSection={() => setCollapsedSections(previous => {
+            const next = new Set(previous); if (next.has('in_drip')) next.delete('in_drip'); else next.add('in_drip'); return next;
+          })}
+          expandedIds={expandedIds} detailStates={detailStates} onToggleDetails={toggleDetails}
+          onRetryDetails={retryDetails} onDetailChanged={handleDetailChanged}
+          onLoadMore={onLoadMore} onStageAction={onStageAction}
+        />
       </div>
     </div>
   )
@@ -297,6 +313,7 @@ export function MyLeadsQueue({
 function MyLeadStageSection({
   stage,
   page,
+  dripRows,
   collapsed,
   onToggleSection,
   expandedIds,
@@ -308,8 +325,9 @@ function MyLeadStageSection({
   onLoadMore,
   onStageAction,
 }: {
-  stage: MyLeadStage
+  stage: MyLeadStage | 'in_drip'
   page: MyLeadsQueueProps["stages"][MyLeadStage]
+  dripRows?: readonly MyLeadDrip[]
   collapsed: boolean
   onToggleSection: () => void
   expandedIds: ReadonlySet<string>
@@ -325,7 +343,7 @@ function MyLeadStageSection({
   onLoadMore: MyLeadsQueueProps["onLoadMore"]
   onStageAction: (action: MyLeadAction, row: MyLeadQueueRowDto) => void
 }) {
-  const label = MY_LEAD_STAGE_LABELS[stage]
+  const label = stage === 'in_drip' ? 'In a drip' : MY_LEAD_STAGE_LABELS[stage]
   const ChevronIcon = collapsed ? ChevronRight : ChevronDown
 
   return (
@@ -338,10 +356,11 @@ function MyLeadStageSection({
         aria-controls={`my-leads-rows-${stage}`}
         className={cn(
           "flex w-full items-center gap-2.5 rounded-[10px] px-4 py-2.5 text-left text-white outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white",
-          STAGE_BAR[stage]
+          stage === 'in_drip' ? DRIP_BAR : STAGE_BAR[stage]
         )}
       >
         <ChevronIcon className="size-4 shrink-0" aria-hidden="true" />
+        {stage === 'in_drip' && <Droplet className="size-3 shrink-0" aria-hidden="true" />}
         <span className="text-xs font-bold uppercase tracking-widest text-white">{label}</span>
         <span
           aria-label={`${page.totalCount} leads`}
@@ -349,19 +368,26 @@ function MyLeadStageSection({
         >
           {page.totalCount}
         </span>
-        <span className="ml-auto hidden max-w-full truncate pl-3 text-[11.5px] text-white sm:block">{STAGE_NEXT[stage]}</span>
+        <span className="ml-auto hidden max-w-full truncate pl-3 text-[11.5px] text-white sm:block">{stage === 'in_drip' ? 'Texts go out on their own. A reply moves the lead back to its section.' : STAGE_NEXT[stage]}</span>
       </button>
 
       <div id={`my-leads-rows-${stage}`} hidden={collapsed}>
         {/* Keep loaded rows mounted so collapsing a stage preserves local drafts. */}
           <div className="space-y-2">
-            {page.totalCount > page.rows.length && (
+            {stage !== 'in_drip' && page.totalCount > page.rows.length && (
               <p className="px-1 text-xs text-muted-foreground">
                 Showing {page.rows.length} of {page.totalCount}
               </p>
             )}
 
-            {page.rows.length === 0 ? (
+            {stage === 'in_drip' ? (dripRows?.length ? <div className="overflow-x-auto rounded-xl border bg-card">{dripRows.map(row => <article key={row.propertyId} className="grid min-w-[950px] grid-cols-[minmax(150px,1.4fr)_minmax(125px,1fr)_90px_minmax(180px,1.5fr)_minmax(120px,.8fr)_90px] items-center gap-3 border-t px-3 py-2 text-xs first:border-t-0" data-testid={`my-lead-drip-${row.propertyId}`}>
+              <div className="min-w-0"><p className="truncate font-semibold">{row.queueRow?.homeownerName || 'Homeowner unavailable'}</p><p className="truncate text-muted-foreground">{row.queueRow?.address}</p></div>
+              <p className="flex min-w-0 items-center gap-1 truncate font-semibold text-cyan-800"><Droplet className="size-3 shrink-0" />{row.sequenceName}</p>
+              <p className="font-semibold">text {row.step} of {row.totalSteps}</p>
+              <div className="min-w-0"><p className="text-[10px] uppercase text-muted-foreground">Last text {row.lastText ? new Date(row.lastText.sentAt).toLocaleDateString() : ''}</p><p className="truncate">{row.lastText?.preview ?? 'None yet'}</p></div>
+              <div><p className="text-[10px] uppercase text-muted-foreground">Next text</p><p className="font-semibold">{row.nextTextAt ? new Date(row.nextTextAt).toLocaleString() : 'Not scheduled'}</p></div>
+              <Link href={`/leads/${row.propertyId}`} className="rounded-full border px-2 py-1 text-center font-semibold hover:bg-muted">Open lead</Link>
+            </article>)}</div> : <div className="rounded-xl border border-dashed px-4 py-5 text-sm text-muted-foreground">No leads in a drip.</div>) : page.rows.length === 0 ? (
               <div className="rounded-xl border border-dashed px-4 py-5 text-sm text-muted-foreground">
                 No leads in this section.
               </div>
@@ -386,7 +412,7 @@ function MyLeadStageSection({
               </div>
             )}
 
-            {page.hasMore && (
+            {stage !== 'in_drip' && page.hasMore && (
               <Button
                 type="button"
                 variant="outline"

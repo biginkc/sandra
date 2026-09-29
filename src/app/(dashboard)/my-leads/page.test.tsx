@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getAcquisitionRoster: vi.fn(),
   getAcquisitionQueue: vi.fn(),
   getAcquisitionKpis: vi.fn(),
+  listMyLeadsInDrip: vi.fn(),
   MyLeadsClient: vi.fn(() => <div data-testid="my-leads-client" />),
   loadDialpadPanelBootstrap: vi.fn(),
   reportError: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("@/lib/my-leads/queries", () => ({
     }
   },
 }));
+vi.mock('@/lib/my-leads/drip-queries', () => ({listMyLeadsInDrip: mocks.listMyLeadsInDrip}));
 vi.mock("@/lib/dialpad-cti/dispatch", () => ({
   loadDialpadPanelBootstrap: mocks.loadDialpadPanelBootstrap,
   createSupabaseDialpadDispatchDb: vi.fn(() => ({})),
@@ -96,6 +98,7 @@ beforeEach(() => {
   mocks.getAcquisitionRoster.mockResolvedValue({ viewer, roster: baseRoster });
   mocks.getAcquisitionQueue.mockResolvedValue({});
   mocks.getAcquisitionKpis.mockResolvedValue({});
+  mocks.listMyLeadsInDrip.mockResolvedValue({active:[],replied:[],repliedCount:0,counts:{}});
   mocks.loadDialpadPanelBootstrap.mockResolvedValue(null);
 });
 

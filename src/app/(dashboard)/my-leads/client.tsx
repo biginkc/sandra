@@ -7,6 +7,7 @@ import { useOptionalSoftphone } from '@/components/softphone/softphone-provider'
 import { BookAppointmentPopover } from '@/components/appointments/book-appointment-popover';
 import type { Json } from '@/lib/supabase/types';
 import type { AcquisitionKpis,AcquisitionRoster,QueueSnapshot,QueueRow } from '@/lib/my-leads/queries';
+import type { MyLeadDripSnapshot } from '@/lib/my-leads/drip-queries';
 import { WorkflowRecoveryContext, type WorkflowReconciliation } from './_components/workflow-form';
 import { MyLeadsQueue } from './_components/queue';
 import { AcquisitionAttemptDialog } from './_components/attempt-dialog';
@@ -17,17 +18,18 @@ import { DialpadPanel,type DialpadCallRequest } from './_components/dialpad-pane
 import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
 import type { MyLeadAction,MyLeadStage,AcquisitionLifecycleMode } from './_components/types';
 import { detailView,kpiTiles,stagePages } from './adapter';
-import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,submitMyLeadCommand,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
+import { loadMyLeadCallReferences,loadMyLeads,loadMyLeadsStage,loadMyLeadDetail,submitMyLeadCommand,submitMyLeadHandoffDrip,changeAcquisitionDesignation,changeAcquisitionSettings } from './actions';
 
-type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;dialpad?:DialpadPanelBootstrap|null};
+type Props={viewer:{userId:string;orgId:string;isOwner:boolean};roster:AcquisitionRoster;initialMemberId:string;initialSnapshot:QueueSnapshot|null;initialKpis:AcquisitionKpis|null;initialDrips?:MyLeadDripSnapshot|null;dialpad?:DialpadPanelBootstrap|null};
 
 const REFRESH_INTERVAL_MS = 30_000;
 const refreshTime = new Intl.DateTimeFormat('en-US', {month:'short',day:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',timeZone:'America/Chicago',timeZoneName:'short'});
 
-export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,dialpad=null}:Props) {
+export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,initialKpis,initialDrips=null,dialpad=null}:Props) {
   const router=useRouter();const softphone=useOptionalSoftphone();
   const [member,setMember]=useState(initialMemberId);const [search,setSearch]=useState('');
   const [snapshot,setSnapshot]=useState(initialSnapshot);const [kpis,setKpis]=useState(initialKpis);
+  const [drips,setDrips]=useState(initialDrips);
   const tiles=useMemo(()=>kpis?kpiTiles(kpis):null,[kpis]);
   const [lastCheckedAt,setLastCheckedAt]=useState(initialSnapshot?.snapshotAt??null);
   const reviewingDetails=useRef(false);
@@ -112,7 +114,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
             if(barrier.scope===JSON.stringify([member,search])&&barrier.requestId<=id)mutationReads.current.set(propertyId,{...barrier,requestId:id,read:Promise.resolve(result)});
           }
         }
-        setKpis(result.kpis);setLastCheckedAt(result.snapshot.snapshotAt);setError(null);setRefreshError(null);
+        setKpis(result.kpis);setDrips(result.drips);setLastCheckedAt(result.snapshot.snapshotAt);setError(null);setRefreshError(null);
       }
       else setRefreshError(result.message);
       return result;
@@ -126,7 +128,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     const scopeChanged=previousServerScope.current!==serverScopeKey;
     previousServerScope.current=serverScopeKey;
     ++request.current;
-    if(scopeChanged){setSnapshot(null);setKpis(null);}
+    if(scopeChanged){setSnapshot(null);setKpis(null);setDrips(null);}
     const timer=setTimeout(()=>void refresh(),250);
     return()=>{clearTimeout(timer);};
   },[refresh,serverScopeKey]);
@@ -225,7 +227,10 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     submission.current.payload=input;
     let result: Awaited<ReturnType<typeof submitMyLeadCommand>>;
     try {
-      result=await submitMyLeadCommand(command,input);
+      result=command==='handoff'&&typeof input.sequenceId==='string'&&input.sequenceId
+        ? await submitMyLeadHandoffDrip({memberId:member,propertyId:row.propertyId,sequenceId:input.sequenceId,
+            reason:'not_interested',expectedEpisodeId:row.assignmentEpisodeId,expectedQueueVersion:row.queueVersion,expectedSharedStatus:row.sharedStatus})
+        : await submitMyLeadCommand(command,input);
     } catch(error) {
       // A rejected server action can mean the request reached Postgres but its
       // response did not reach the browser. Retain the exact request so the
@@ -238,25 +243,32 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       submission.current.uncertain=true;
       if(activeDialog.current===dialog)setRecovery({opening:dialog,message:'Sandra could not confirm this save. The original request is preserved for reconciliation.',blocked:false,busy:false,reconciliation:{command,payload:submission.current.payload??input}});
     }
-    if(!result.ok&&'code' in result&&(result.code==='FORBIDDEN'||result.code==='STALE_STATE')&&activeDialog.current===dialog)setRecovery({opening:dialog,message:result.message,blocked:true,busy:false});
+    if(!result.ok){
+      const failure=result as {message:string;code?:string};
+      if((failure.code==='FORBIDDEN'||failure.code==='STALE_STATE')&&activeDialog.current===dialog)
+        setRecovery({opening:dialog,message:failure.message,blocked:true,busy:false});
+    }
     if(result.ok){
+      const dripFailure='dripFailure' in result && result.dripFailure ? `Outcome saved. Drip not started: ${result.dripFailure}` : null;
       setRecovery(null);
       // Publish the refresh barrier before closing so a rapid next click is retained
       // and initialized from authorized post-command metadata, never the old row.
       const read=refresh();mutationReads.current.set(dialog.row.propertyId,{scope:openingScope,episodeId:dialog.row.assignmentEpisodeId,requestId:request.current,read});
       const followUpPending = dialog.action === 'log-attempt' && input.outcome === 'no_answer' &&
         (!result.followUp || !['accepted','delivered'].includes(result.followUp.status));
-      if(!followUpPending){
+      if(!followUpPending && dialog.action!=='log-attempt' && dialog.action!=='handoff'){
         setDialog(current=>current===dialog?null:current);
         // This result is the confirmed terminal outcome for the opening.
         // A subsequent dialog gets a fresh idempotency key.
         submission.current=null;
       }
-      setDetailRevision(revision=>revision+1);await read;router.refresh();
+      setDetailRevision(revision=>revision+1);
+      if(dialog.action==='log-attempt'||dialog.action==='handoff') void read.then(()=>{if(dripFailure)setError(dripFailure);router.refresh();});
+      else {await read;router.refresh();}
     }
     return result;
   },[dialog,refresh,router,recovery,openingScope]);
-  const pages=snapshot?stagePages(snapshot):null;
+  const pages=snapshot?stagePages(snapshot,drips):null;
   if(pages)for(const stage of loadingStages)pages[stage].isLoadingMore=true;
   const motivation=dialog?.row.motivationKind==='specified'?{kind:'specified' as const,text:dialog.row.motivationText??''}:dialog?.row.motivationKind==='no_motivation'?{kind:'no_motivation' as const,text:null}:null;
   // Completion callbacks belong to one opening, even when the same lead is reopened.
@@ -281,7 +293,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       onCallRequestHandled={nonce=>setDialpadRequest(current=>current?.nonce===nonce?null:current)}
       onLogOutcome={(propertyId,callActivityId)=>{if(!rawRow(propertyId)){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId,callActivityId);}}/>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
-      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} kpis={tiles} search={search} selectedRepId={member}
+      <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} drips={drips} kpis={tiles} search={search} selectedRepId={member}
         onReviewingChange={onReviewingChange}
         detailRevision={detailRevision}
         repOptions={roster.members.filter(m=>m.acquisitionsEnabled||m.hasHistory||m.id===viewer.userId).map(m=>({id:m.id,label:m.label+(m.acquisitionsEnabled?'':' — Acquisitions disabled')}))}
@@ -311,7 +323,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
       <p className="mt-3 text-xs text-muted-foreground">{kpis.firstCallPending} first calls pending · {kpis.pendingOutcomes} call outcomes pending{kpis.orgAppointmentsUnattributed?` · ${kpis.orgAppointmentsUnattributed} appointments in this organization have unknown historical attribution`:''}</p>
     </>}
     <WorkflowRecoveryContext.Provider value={recovery?.opening===dialog?{...recovery,refresh:()=>void recoverDialog()}:null}>
-    {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} key={`${dialog.row.propertyId}:${dialog.callActivityId??''}`} initialCallActivityId={dialog.callActivityId??null} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]} callReferencesLoading={!callOptions} callReferencesError={callOptions?.error} onRetryCallReferences={()=>setCallRetry(value=>value+1)}/>}
+    {common&&dialog?.action==='log-attempt'&&<AcquisitionAttemptDialog {...common} onSubmit={payload=>submit(payload)} onDripChanged={()=>{void refresh();router.refresh();}} key={`${dialog.row.propertyId}:${dialog.callActivityId??''}`} initialCallActivityId={dialog.callActivityId??null} callReferenceOptions={callOptions?.propertyId===dialog.row.propertyId?callOptions.options:[]} callReferencesLoading={!callOptions} callReferencesError={callOptions?.error} onRetryCallReferences={()=>setCallRetry(value=>value+1)}/>}
     {common&&dialog?.action==='ready-for-offer'&&<AcquisitionReadinessDialog {...common} onSubmit={payload=>submit(payload)} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog?.action==='log-offer'&&<AcquisitionOfferDialog {...common} onSubmit={payload=>submit(payload)} motivationRequired={!motivation} initialTemperature={dialog.row.temperature} initialMotivationResponse={motivation}/>}
     {common&&dialog&&['contract-signed','decline-offer','handoff','archive'].includes(dialog.action)&&<AcquisitionLifecycleDialog {...common} onSubmit={payload=>submit(payload)} mode={dialog.action as AcquisitionLifecycleMode}

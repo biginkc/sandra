@@ -8,6 +8,8 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { StartDripPicker } from "@/components/sequences/start-drip-picker"
+import { startDripForLeads } from "@/app/(dashboard)/sequences/actions"
 import { Textarea } from "@/components/ui/textarea"
 import {
   DIALOG_CONTENT_CLASS,
@@ -71,6 +73,7 @@ export type AcquisitionAttemptDialogProps = {
   callReferencesLoading?: boolean
   callReferencesError?: string | null
   onRetryCallReferences?: () => void
+  onDripChanged?: () => void
   onOpenChange: (open: boolean) => void
   onSubmit: AcquisitionSubmit<AcquisitionAttemptFormPayload>
 }
@@ -84,6 +87,7 @@ export function AcquisitionAttemptDialog({
   callReferencesLoading = false,
   callReferencesError = null,
   onRetryCallReferences,
+  onDripChanged,
   onOpenChange,
   onSubmit,
 }: AcquisitionAttemptDialogProps) {
@@ -103,6 +107,7 @@ export function AcquisitionAttemptDialog({
   // user from changing a field and accidentally generating a second attempt
   // with a new idempotency key while the follow-up is still unresolved.
   const [attemptRecorded, setAttemptRecorded] = useState(false)
+  const [savedForDrip, setSavedForDrip] = useState(false)
   const [clientError, setClientError] = useState<string | null>(null)
   const [clientFieldErrors, setClientFieldErrors] = useState<Record<string, string>>({})
   const recovery = useContext(WorkflowRecoveryContext)
@@ -156,6 +161,7 @@ export function AcquisitionAttemptDialog({
     setRemainder("")
     setFollowUpState(null)
     setAttemptRecorded(false)
+    setSavedForDrip(false)
     setClientError(null)
     setClientFieldErrors({})
   }
@@ -167,15 +173,13 @@ export function AcquisitionAttemptDialog({
         : { status: "required", message: "Attempt recorded. Follow-up still needs to be accepted or delivered." }
       setFollowUpState(nextFollowUp)
       if (nextFollowUp.status === "accepted" || nextFollowUp.status === "delivered") {
-        resetFields()
-        onOpenChange(false)
+        setSavedForDrip(true)
       } else {
         setClientError(nextFollowUp.message ?? `Attempt recorded. Follow-up is ${nextFollowUp.status.replaceAll("_", " ")}. Your draft is retained.`)
       }
       return
     }
-    resetFields()
-    onOpenChange(false)
+    setSavedForDrip(true)
   })
   const closeDialog = () => {
     if (submitState.submitting) return
@@ -290,7 +294,17 @@ export function AcquisitionAttemptDialog({
           title="Log an attempt"
           description={`Record the external outcome for ${propertyLabel}. Opening this dialog does not count as a call.`}
         />
-        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+        {savedForDrip ? <div className="space-y-4 overflow-y-auto">
+          <p role="status" className="text-sm text-teal-800">Attempt saved. Add to a drip (optional).</p>
+          <StartDripPicker inline onChoose={async sequenceId => {
+            const result = await startDripForLeads(sequenceId, [propertyId]);
+            if (!result.ok) return {status:'failed',reason:result.error.message};
+            const item=result.data.results[0];
+            if (item?.status === 'enrolled') { onDripChanged?.(); onOpenChange(false); return {status:'enrolled',reason:item.reason}; }
+            return {status:item?.status??'failed',reason:item?.reason??'Could not start drip.'};
+          }} />
+          <button type="button" className="text-sm underline" onClick={() => onOpenChange(false)}>Done without a drip</button>
+        </div> : <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
             <WorkflowFormError message={clientError || submitState.error} />
 
@@ -555,7 +569,7 @@ export function AcquisitionAttemptDialog({
             onCancel={closeDialog}
             disabled={attemptRecorded}
           />
-        </form>
+        </form>}
       </DialogContent>
     </Dialog>
   )

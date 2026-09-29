@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { detailView, queueRow } from './adapter';
-import type { AcquisitionDetail, AcquisitionRoster, QueueRow } from '@/lib/my-leads/queries';
+import { detailView, queueRow, stagePages } from './adapter';
+import type { AcquisitionDetail, AcquisitionRoster, QueueRow, QueueSnapshot } from '@/lib/my-leads/queries';
+import type { MyLeadDripSnapshot } from '@/lib/my-leads/drip-queries';
+
+it('subtracts all active drip rows from their exact stage count and pins replied rows',()=>{
+  const base={propertyId:'one',stage:'contacted',address:'1 Main',warningReasons:[],offer:null} as unknown as QueueRow;
+  const snapshot={search:'',snapshotAt:'2026-09-29T12:00:00Z',stages:{contacted:{rows:[base],totalCount:3,filteredCount:3,hasMore:false,cursor:null}}} as QueueSnapshot;
+  const drip={propertyId:'one',stage:'contacted',queueRow:base,repliedAt:null,sequenceName:'Follow-up',step:2,totalSteps:4} as MyLeadDripSnapshot['active'][number];
+  const active={active:[drip],replied:[],repliedCount:0,counts:{not_contacted:0,contacted:1,needs_offer:0,offer_sent:0,under_contract:0}};
+  expect(stagePages(snapshot,active).contacted.totalCount).toBe(2);
+  expect(stagePages(snapshot,active).contacted.rows).toHaveLength(0);
+  const replied={...active,active:[],replied:[{...drip,propertyId:'reply',queueRow:{...base,propertyId:'reply'},repliedAt:'2026-09-29T13:00:00Z'}],repliedCount:1,counts:{...active.counts,contacted:0}};
+  expect(stagePages(snapshot,replied).contacted.rows[0]).toMatchObject({propertyId:'reply',dripReply:{sequenceName:'Follow-up'}});
+});
 
 it('preserves SMS direction, full text, delivery state, and newest-first pagination',()=>{
   const detail:AcquisitionDetail={groups:{messages:{rows:[

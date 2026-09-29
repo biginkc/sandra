@@ -33,6 +33,11 @@ vi.mock("./actions", () => ({
   changeAcquisitionSettings: vi.fn(),
 }))
 
+vi.mock("@/app/(dashboard)/sequences/actions", () => ({
+  listDripChoices: vi.fn(async () => ({ ok: true, data: [] })),
+  startDripForLeads: vi.fn(),
+}))
+
 vi.mock("./_components/queue", () => ({
   MyLeadsQueue: ({
     stages,
@@ -378,6 +383,7 @@ it.each(["log-offer", "log-attempt"])("retains a rapid %s opening intent until a
   await user.selectOptions(screen.getByLabelText("External outcome"),"reached");
   fireEvent.change(screen.getByLabelText("When did the outreach occur?"),{target:{value:"2026-09-11T09:00"}});
   await user.click(screen.getByRole("button",{name:"Save attempt"}));
+  await user.click(await screen.findByRole('button',{name:'Done without a drip'}));
   await waitFor(()=>expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(mocks.loadMyLeads).toHaveBeenCalledTimes(1);
   await user.click(screen.getByRole("button",{name:nextAction==="log-offer"?"Log offer":"Log attempt"}));
