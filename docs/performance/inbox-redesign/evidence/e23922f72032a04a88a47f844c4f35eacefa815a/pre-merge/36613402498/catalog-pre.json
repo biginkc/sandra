@@ -1,0 +1,4118 @@
+{
+  "section_sha256": {
+    "created_objects_present": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "extensions": "83d437bcb9373fde6172a87835bf23a9814fa252fb8ea0ffa30834125303c774",
+    "functions": "6fa19699ef872d0511986b202a1125647306787cfed91878fbf05b97aa3b183d",
+    "index_names": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "relations": "c64cdc7c3ac333d86349d2bf642006a75de2a149347ff02a32173e32567eea4b",
+    "schema_migrations": "846a15d6c56f6e52bf62e40d2bdd23fe1d2b0e08fa852c3ce003a2ac7a232a07",
+    "schemas": "4260fb03ab4da3e156dcb9dc3b22b0876860caa15bf986badb45b310364a451f",
+    "trigger_names": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "types": "17d87eedb080944063624980b8d3a26b0286e292452f05c92e6b4633159a3def"
+  },
+  "sections": {
+    "created_objects_present": [],
+    "extensions": [
+      {
+        "name": "btree_gist",
+        "version": "1.7"
+      },
+      {
+        "name": "pg_stat_statements",
+        "version": "1.11"
+      },
+      {
+        "name": "pg_trgm",
+        "version": "1.6"
+      },
+      {
+        "name": "pgcrypto",
+        "version": "1.3"
+      },
+      {
+        "name": "plpgsql",
+        "version": "1.0"
+      },
+      {
+        "name": "supabase_vault",
+        "version": "0.3.1"
+      },
+      {
+        "name": "uuid-ossp",
+        "version": "1.1"
+      }
+    ],
+    "functions": [
+      {
+        "acl": "{=X/supabase_auth_admin,postgres=X/supabase_auth_admin,supabase_auth_admin=X/supabase_auth_admin,dashboard_user=X/supabase_auth_admin}",
+        "config": null,
+        "definition": "CREATE OR REPLACE FUNCTION auth.jwt()\n RETURNS jsonb\n LANGUAGE sql\n STABLE\nAS $function$\n  select \n    coalesce(\n        nullif(current_setting('request.jwt.claim', true), ''),\n        nullif(current_setting('request.jwt.claims', true), '')\n    )::jsonb\n$function$\n",
+        "identity": "auth.jwt",
+        "owner": "supabase_auth_admin",
+        "security_definer": false,
+        "signature": "auth.jwt()"
+      },
+      {
+        "acl": "{=X/supabase_auth_admin,supabase_auth_admin=X/supabase_auth_admin,dashboard_user=X/supabase_auth_admin}",
+        "config": null,
+        "definition": "CREATE OR REPLACE FUNCTION auth.role()\n RETURNS text\n LANGUAGE sql\n STABLE\nAS $function$\n  select \n  coalesce(\n    nullif(current_setting('request.jwt.claim.role', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role')\n  )::text\n$function$\n",
+        "identity": "auth.role",
+        "owner": "supabase_auth_admin",
+        "security_definer": false,
+        "signature": "auth.role()"
+      },
+      {
+        "acl": "{=X/supabase_auth_admin,supabase_auth_admin=X/supabase_auth_admin,dashboard_user=X/supabase_auth_admin}",
+        "config": null,
+        "definition": "CREATE OR REPLACE FUNCTION auth.uid()\n RETURNS uuid\n LANGUAGE sql\n STABLE\nAS $function$\n  select \n  coalesce(\n    nullif(current_setting('request.jwt.claim.sub', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')\n  )::uuid\n$function$\n",
+        "identity": "auth.uid",
+        "owner": "supabase_auth_admin",
+        "security_definer": false,
+        "signature": "auth.uid()"
+      },
+      {
+        "acl": "{postgres=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+        "config": [
+          "search_path=public, pg_temp"
+        ],
+        "definition": "CREATE OR REPLACE FUNCTION public.assert_property_dnc_unlocked(p_property_id uuid)\n RETURNS void\n LANGUAGE plpgsql\n SET search_path TO 'public', 'pg_temp'\nAS $function$\ndeclare\n  property_is_locked boolean;\nbegin\n  select p.is_dnc_locked\n    into property_is_locked\n  from public.properties p\n  where p.id = p_property_id\n    and p.deleted_at is null;\n\n  if not found then\n    raise exception using\n      errcode = 'P0002',\n      message = 'PROPERTY_NOT_FOUND';\n  end if;\n\n  if property_is_locked then\n    raise exception using\n      errcode = 'P0001',\n      message = 'DNC_LOCKED: permanently locked properties are read-only';\n  end if;\nend;\n$function$\n",
+        "identity": "public.assert_property_dnc_unlocked",
+        "owner": "postgres",
+        "security_definer": false,
+        "signature": "assert_property_dnc_unlocked(uuid)"
+      },
+      {
+        "acl": "{=X/postgres,postgres=X/postgres,anon=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+        "config": [
+          "search_path=public, pg_temp"
+        ],
+        "definition": "CREATE OR REPLACE FUNCTION public.search_prefix_tsquery(q text)\n RETURNS tsquery\n LANGUAGE sql\n IMMUTABLE\n SET search_path TO 'public', 'pg_temp'\nAS $function$\n  select case when bool_or(length(token) >= 3)\n    then to_tsquery('simple', string_agg(token || ':*', ' & ' order by ordinal))\n    else null end\n  from (\n    select token, ordinal\n    from regexp_split_to_table(regexp_replace(lower(coalesce(q,'')), '[^[:alnum:]]+', ' ', 'g'), ' +') with ordinality as tokens(token, ordinal)\n    where token <> ''\n    order by ordinal\n    limit 6\n  ) words;\n$function$\n",
+        "identity": "public.search_prefix_tsquery",
+        "owner": "postgres",
+        "security_definer": false,
+        "signature": "search_prefix_tsquery(text)"
+      }
+    ],
+    "index_names": [],
+    "relations": [
+      {
+        "acl": "{postgres=ar*wdDxtm/supabase_auth_admin,supabase_auth_admin=arwdDxtm/supabase_auth_admin,dashboard_user=arwdDxtm/supabase_auth_admin}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "aal",
+            "not_null": false,
+            "type": "auth.aal_level"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "created_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "factor_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "ip",
+            "not_null": false,
+            "type": "inet"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "not_after",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "oauth_client_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "refresh_token_counter",
+            "not_null": false,
+            "type": "bigint"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "refresh_token_hmac_key",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "refreshed_at",
+            "not_null": false,
+            "type": "timestamp without time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "scopes",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "tag",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "updated_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "user_agent",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "user_id",
+            "not_null": true,
+            "type": "uuid"
+          }
+        ],
+        "constraints": [
+          "FOREIGN KEY (oauth_client_id) REFERENCES auth.oauth_clients(id) ON DELETE CASCADE",
+          "PRIMARY KEY (id)",
+          "CHECK ((char_length(scopes) <= 4096))",
+          "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+        ],
+        "identity": "auth.sessions",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX sessions_not_after_idx ON auth.sessions USING btree (not_after DESC)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX sessions_oauth_client_id_idx ON auth.sessions USING btree (oauth_client_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX sessions_user_id_idx ON auth.sessions USING btree (user_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX user_id_created_at_idx ON auth.sessions USING btree (user_id, created_at)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX sessions_pkey ON auth.sessions USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": []
+      },
+      {
+        "acl": "{supabase_auth_admin=arwdDxtm/supabase_auth_admin,dashboard_user=arwdDxtm/supabase_auth_admin,postgres=ar*wdDxtm/supabase_auth_admin}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "aud",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "banned_until",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "confirmation_sent_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "confirmation_token",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": "LEAST(email_confirmed_at, phone_confirmed_at)",
+            "name": "confirmed_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "created_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "deleted_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "email",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "email_change",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": "0",
+            "name": "email_change_confirm_status",
+            "not_null": false,
+            "type": "smallint"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "email_change_sent_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "''::character varying",
+            "name": "email_change_token_current",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "email_change_token_new",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "email_confirmed_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "encrypted_password",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "instance_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "invited_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "is_anonymous",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "is_sso_user",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "is_super_admin",
+            "not_null": false,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "last_sign_in_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "NULL::character varying",
+            "name": "phone",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "''::character varying",
+            "name": "phone_change",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "phone_change_sent_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "''::character varying",
+            "name": "phone_change_token",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "phone_confirmed_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "raw_app_meta_data",
+            "not_null": false,
+            "type": "jsonb"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "raw_user_meta_data",
+            "not_null": false,
+            "type": "jsonb"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "reauthentication_sent_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "''::character varying",
+            "name": "reauthentication_token",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "recovery_sent_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "recovery_token",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "role",
+            "not_null": false,
+            "type": "character varying(255)"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "updated_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          }
+        ],
+        "constraints": [
+          "CHECK (((email_change_confirm_status >= 0) AND (email_change_confirm_status <= 2)))",
+          "UNIQUE (phone)",
+          "PRIMARY KEY (id)"
+        ],
+        "identity": "auth.users",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX users_instance_id_email_idx ON auth.users USING btree (instance_id, lower((email)::text))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX users_instance_id_idx ON auth.users USING btree (instance_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX users_is_anonymous_idx ON auth.users USING btree (is_anonymous)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX confirmation_token_idx ON auth.users USING btree (confirmation_token) WHERE ((confirmation_token)::text !~ '^[0-9 ]*$'::text)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX email_change_token_current_idx ON auth.users USING btree (email_change_token_current) WHERE ((email_change_token_current)::text !~ '^[0-9 ]*$'::text)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX email_change_token_new_idx ON auth.users USING btree (email_change_token_new) WHERE ((email_change_token_new)::text !~ '^[0-9 ]*$'::text)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX reauthentication_token_idx ON auth.users USING btree (reauthentication_token) WHERE ((reauthentication_token)::text !~ '^[0-9 ]*$'::text)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX recovery_token_idx ON auth.users USING btree (recovery_token) WHERE ((recovery_token)::text !~ '^[0-9 ]*$'::text)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX users_email_partial_key ON auth.users USING btree (email) WHERE (is_sso_user = false)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX users_phone_key ON auth.users USING btree (phone)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX users_pkey ON auth.users USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": [
+          {
+            "definition": "CREATE TRIGGER hugo_auth_users_lifecycle_lock BEFORE INSERT OR UPDATE OF email ON auth.users FOR EACH STATEMENT EXECUTE FUNCTION hugo_lock_auth_identity_key_lifecycle()",
+            "enabled": "O"
+          }
+        ]
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,authenticated=r/postgres,service_role=r/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "ai_reason",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "classification_run_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "conversation_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "true",
+            "name": "dispo_applied",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "disposition",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "property_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "resolved_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "reviewed_by",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "source_inbound_message_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "'pending'::text",
+            "name": "status",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "superseded_reason",
+            "not_null": false,
+            "type": "text"
+          }
+        ],
+        "constraints": [
+          "FOREIGN KEY (classification_run_id) REFERENCES sms_classification_runs(id)",
+          "CHECK ((disposition = ANY (ARRAY['wrong_number'::text, 'not_interested'::text, 'opted_out'::text, 'dnc'::text])))",
+          "CHECK ((NOT ((disposition = 'dnc'::text) AND (status = 'auto_accepted'::text))))",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE",
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (property_id, org_id) REFERENCES properties(id, org_id)",
+          "CHECK ((((status = 'pending'::text) AND (resolved_at IS NULL) AND (reviewed_by IS NULL) AND (superseded_reason IS NULL)) OR ((status = 'confirmed'::text) AND (resolved_at IS NOT NULL) AND (reviewed_by IS NOT NULL) AND (superseded_reason IS NULL)) OR ((status = 'superseded'::text) AND (resolved_at IS NOT NULL) AND (reviewed_by IS NULL) AND (superseded_reason IS NOT NULL)) OR ((status = 'auto_accepted'::text) AND (resolved_at IS NOT NULL) AND (reviewed_by IS NULL) AND (superseded_reason IS NULL) AND (classification_run_id IS NOT NULL))))",
+          "FOREIGN KEY (source_inbound_message_id) REFERENCES messages(id)",
+          "CHECK ((status = ANY (ARRAY['pending'::text, 'confirmed'::text, 'superseded'::text, 'auto_accepted'::text])))"
+        ],
+        "identity": "public.ai_disposition_reviews",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_ai_disposition_reviews_pending_lookup ON public.ai_disposition_reviews USING btree (org_id, conversation_id, created_at DESC) WHERE (status = 'pending'::text)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_ai_disposition_reviews_property ON public.ai_disposition_reviews USING btree (property_id, created_at DESC)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX ai_disposition_reviews_pkey ON public.ai_disposition_reviews USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_ai_disposition_reviews_one_pending_conversation ON public.ai_disposition_reviews USING btree (org_id, conversation_id) WHERE (status = 'pending'::text)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_ai_disposition_reviews_source_message ON public.ai_disposition_reviews USING btree (source_inbound_message_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "r",
+            "name": "ai_disposition_reviews_org_select",
+            "permissive": true,
+            "qual": "hugo_has_active_org_access(org_id)",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": []
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "channel",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "contact_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "event_type",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "idempotency_key",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "occurred_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "'00000000-0000-0000-0000-000000000bbb'::uuid",
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "source",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "source_detail",
+            "not_null": false,
+            "type": "jsonb"
+          },
+          {
+            "acl": null,
+            "default": "(source_detail ->> 'externalId'::text)",
+            "name": "source_external_id",
+            "not_null": false,
+            "type": "text"
+          }
+        ],
+        "constraints": [
+          "CHECK ((channel = ANY (ARRAY['sms'::text, 'email'::text, 'voice'::text])))",
+          "FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE",
+          "FOREIGN KEY (contact_id, org_id) REFERENCES contacts(id, org_id) ON DELETE CASCADE",
+          "CHECK ((event_type = ANY (ARRAY['opt_in_marketing_written'::text, 'opt_in_informational'::text, 'opt_in_confirmed'::text, 'opt_out'::text, 'help_request'::text, 'provider_auto_opt_out'::text])))",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id)",
+          "PRIMARY KEY (id)"
+        ],
+        "identity": "public.consent_events",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_consent_events_lookup ON public.consent_events USING btree (contact_id, channel, occurred_at DESC)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_consent_events_org ON public.consent_events USING btree (org_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX consent_events_pkey ON public.consent_events USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_consent_events_external_idempotency ON public.consent_events USING btree (contact_id, channel, event_type, source, source_external_id) WHERE ((source_external_id IS NOT NULL) AND (event_type = ANY (ARRAY['opt_out'::text, 'help_request'::text])))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "d",
+            "name": "consent_events_org_delete",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "a",
+            "name": "consent_events_org_insert",
+            "permissive": true,
+            "qual": null,
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          },
+          {
+            "cmd": "r",
+            "name": "consent_events_org_select",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "w",
+            "name": "consent_events_org_update",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": [
+          {
+            "definition": "CREATE TRIGGER a_sync_contact_org BEFORE INSERT OR UPDATE OF contact_id, org_id ON public.consent_events FOR EACH ROW EXECUTE FUNCTION sync_contact_owned_org_id()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER aa_serialize_consent_safety_before_csv_consent BEFORE INSERT OR UPDATE ON public.consent_events FOR EACH ROW EXECUTE FUNCTION serialize_consent_safety_before_csv_consent()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER csv_import_consent_events_immutable BEFORE DELETE OR UPDATE ON public.consent_events FOR EACH ROW EXECUTE FUNCTION reject_csv_import_consent_event_mutation()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER guard_training_consent BEFORE INSERT OR UPDATE ON public.consent_events FOR EACH ROW EXECUTE FUNCTION guard_training_customer_action()",
+            "enabled": "O"
+          }
+        ]
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": "'person'::text",
+            "name": "contact_type",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "do_not_contact",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "email",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "email_opted_out",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "email_opted_out_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "entity_name",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "first_name",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "last_name",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "notes",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "'00000000-0000-0000-0000-000000000bbb'::uuid",
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "phone_1",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "'unknown'::text",
+            "name": "phone_1_type",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "phone_2",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "'unknown'::text",
+            "name": "phone_2_type",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "phone_3",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "'unknown'::text",
+            "name": "phone_3_type",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "((((regexp_replace(COALESCE(phone_1, ''::text), '[^0-9]'::text, ''::text, 'g'::text) || ' '::text) || regexp_replace(COALESCE(phone_2, ''::text), '[^0-9]'::text, ''::text, 'g'::text)) || ' '::text) || regexp_replace(COALESCE(phone_3, ''::text), '[^0-9]'::text, ''::text, 'g'::text))",
+            "name": "phone_digits",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "lower(((((((COALESCE(first_name, ''::text) || ' '::text) || COALESCE(last_name, ''::text)) || ' '::text) || COALESCE(entity_name, ''::text)) || ' '::text) || COALESCE(email, ''::text)))",
+            "name": "search_text",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "sms_opted_out",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "sms_opted_out_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          }
+        ],
+        "constraints": [
+          "CHECK (((contact_type = 'person'::text) OR ((contact_type = 'entity'::text) AND (entity_name IS NOT NULL))))",
+          "CHECK ((contact_type = ANY (ARRAY['person'::text, 'entity'::text])))",
+          "UNIQUE (id, org_id)",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id)",
+          "CHECK ((phone_1_type = ANY (ARRAY['mobile'::text, 'landline'::text, 'unknown'::text])))",
+          "CHECK ((phone_2_type = ANY (ARRAY['mobile'::text, 'landline'::text, 'unknown'::text])))",
+          "CHECK ((phone_3_type = ANY (ARRAY['mobile'::text, 'landline'::text, 'unknown'::text])))",
+          "PRIMARY KEY (id)"
+        ],
+        "identity": "public.contacts",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX contacts_phone_digits_gin ON public.contacts USING gin (phone_digits gin_trgm_ops)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX contacts_search_text_gin ON public.contacts USING gin (search_text gin_trgm_ops)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_contacts_org ON public.contacts USING btree (org_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_contacts_phone_2 ON public.contacts USING btree (phone_2) WHERE (phone_2 IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_contacts_phone_3 ON public.contacts USING btree (phone_3) WHERE (phone_3 IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX contacts_email_key ON public.contacts USING btree (org_id, lower(email)) WHERE ((email IS NOT NULL) AND (phone_1 IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX contacts_entity_name_key ON public.contacts USING btree (org_id, lower(entity_name)) WHERE ((contact_type = 'entity'::text) AND (phone_1 IS NULL) AND (email IS NULL) AND (entity_name IS NOT NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX contacts_id_org_id_key ON public.contacts USING btree (id, org_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX contacts_person_name_key ON public.contacts USING btree (org_id, lower(last_name), lower(first_name)) WHERE ((contact_type = 'person'::text) AND (phone_1 IS NULL) AND (email IS NULL) AND (last_name IS NOT NULL) AND (first_name IS NOT NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX contacts_phone_1_key ON public.contacts USING btree (org_id, phone_1) WHERE (phone_1 IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX contacts_pkey ON public.contacts USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "d",
+            "name": "contacts_org_delete",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "a",
+            "name": "contacts_org_insert",
+            "permissive": true,
+            "qual": null,
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          },
+          {
+            "cmd": "r",
+            "name": "contacts_org_select",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "w",
+            "name": "contacts_org_update",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": [
+          {
+            "definition": "CREATE TRIGGER aa_serialize_contact_safety_before_csv_consent BEFORE UPDATE ON public.contacts FOR EACH ROW EXECUTE FUNCTION serialize_contact_safety_before_csv_consent()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER contacts_phone_type_required BEFORE INSERT OR UPDATE ON public.contacts FOR EACH ROW EXECUTE FUNCTION enforce_phone_type_on_write()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER contacts_propagate_true_dnc_lock AFTER INSERT OR UPDATE OF do_not_contact ON public.contacts FOR EACH ROW EXECUTE FUNCTION contacts_propagate_true_dnc_lock()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER contacts_reject_dnc_locked_property BEFORE DELETE OR UPDATE ON public.contacts FOR EACH ROW EXECUTE FUNCTION reject_locked_property_contact_mutation()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER contacts_true_dnc_lock_guard BEFORE UPDATE ON public.contacts FOR EACH ROW EXECUTE FUNCTION contacts_true_dnc_lock_guard()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER global_dnc_contacts_write_barrier BEFORE INSERT OR DELETE OR UPDATE ON public.contacts FOR EACH STATEMENT EXECUTE FUNCTION acquire_global_dnc_write_barrier()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER global_phone_dnc_propagate_contact_lock AFTER UPDATE OF org_id, phone_1, phone_2, phone_3 ON public.contacts FOR EACH ROW WHEN ((new.do_not_contact AND (NOT old.do_not_contact))) EXECUTE FUNCTION contacts_propagate_true_dnc_lock()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER guard_training_contact BEFORE DELETE OR UPDATE ON public.contacts FOR EACH ROW EXECUTE FUNCTION guard_training_contact()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER zz_apply_global_phone_dnc_to_contact BEFORE INSERT OR UPDATE OF org_id, phone_1, phone_2, phone_3 ON public.contacts FOR EACH ROW EXECUTE FUNCTION apply_global_phone_dnc_to_contact()",
+            "enabled": "O"
+          }
+        ]
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "first_consumer_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "first_evidence_sha256",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "first_source_event_id",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "first_webhook_event_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "extensions.gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "phone_e164",
+            "not_null": true,
+            "type": "text"
+          }
+        ],
+        "constraints": [
+          "CHECK ((first_evidence_sha256 ~ '^[0-9a-f]{64}$'::text))",
+          "FOREIGN KEY (first_webhook_event_id) REFERENCES webhook_events(id)",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id)",
+          "UNIQUE (org_id, phone_e164)",
+          "CHECK ((phone_e164 ~ '^\\+[1-9][0-9]{7,14}$'::text))",
+          "PRIMARY KEY (id)"
+        ],
+        "identity": "public.global_phone_dnc_registry",
+        "indexes": [
+          {
+            "definition": "CREATE UNIQUE INDEX global_phone_dnc_registry_org_phone_key ON public.global_phone_dnc_registry USING btree (org_id, phone_e164)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX global_phone_dnc_registry_pkey ON public.global_phone_dnc_registry USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": [
+          {
+            "definition": "CREATE TRIGGER global_phone_dnc_registry_append_only BEFORE DELETE OR UPDATE ON public.global_phone_dnc_registry FOR EACH ROW EXECUTE FUNCTION reject_global_phone_dnc_registry_mutation()",
+            "enabled": "O"
+          }
+        ]
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,authenticated=r/postgres,service_role=ar/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "actor_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "actor_type",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "event_type",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "'{}'::jsonb",
+            "name": "payload",
+            "not_null": true,
+            "type": "jsonb"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "property_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "source_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "source_type",
+            "not_null": false,
+            "type": "text"
+          }
+        ],
+        "constraints": [
+          "CHECK (((actor_type = 'user'::text) OR (actor_id IS NULL)))",
+          "CHECK ((actor_type = ANY (ARRAY['user'::text, 'ai'::text, 'system'::text])))",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE",
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (property_id, org_id) REFERENCES properties(id, org_id)",
+          "CHECK (((source_type IS NULL) = (source_id IS NULL)))"
+        ],
+        "identity": "public.lead_events",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_lead_events_org ON public.lead_events USING btree (org_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_lead_events_property_created ON public.lead_events USING btree (property_id, created_at DESC)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_lead_events_source_identity ON public.lead_events USING btree (source_type, source_id) WHERE (source_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX lead_events_pkey ON public.lead_events USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "r",
+            "name": "lead_events_org_select",
+            "permissive": true,
+            "qual": "hugo_has_active_org_access(org_id)",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": []
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "access_expires_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "'active'::text",
+            "name": "access_status",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "acquisitions_enabled",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "deletion_operation_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "deletion_prepared_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "'{}'::jsonb",
+            "name": "hugo_config",
+            "not_null": true,
+            "type": "jsonb"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "0",
+            "name": "my_leads_revision",
+            "not_null": true,
+            "type": "bigint"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "'member'::text",
+            "name": "role",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "user_id",
+            "not_null": true,
+            "type": "uuid"
+          }
+        ],
+        "constraints": [
+          "CHECK ((access_status = ANY (ARRAY['active'::text, 'suspended'::text, 'revoked'::text])))",
+          "CHECK ((my_leads_revision >= 0))",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE",
+          "PRIMARY KEY (id)",
+          "CHECK ((role = ANY (ARRAY['owner'::text, 'member'::text])))",
+          "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE",
+          "UNIQUE (user_id, org_id)"
+        ],
+        "identity": "public.memberships",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_memberships_access_status ON public.memberships USING btree (org_id, access_status, access_expires_at)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_memberships_org_id ON public.memberships USING btree (org_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_memberships_user_id ON public.memberships USING btree (user_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX memberships_org_acquisitions_idx ON public.memberships USING btree (org_id, acquisitions_enabled, user_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX memberships_pkey ON public.memberships USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX memberships_user_id_org_id_key ON public.memberships USING btree (user_id, org_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "r",
+            "name": "memberships_self_select",
+            "permissive": true,
+            "qual": "((user_id = ( SELECT auth.uid() AS uid)) AND (access_status = 'active'::text) AND (deletion_prepared_at IS NULL) AND ((access_expires_at IS NULL) OR (access_expires_at > now())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": [
+          {
+            "definition": "CREATE TRIGGER trg_bump_my_leads_membership_revision BEFORE UPDATE OF acquisitions_enabled, access_status, access_expires_at, deletion_prepared_at, role ON public.memberships FOR EACH ROW EXECUTE FUNCTION bump_my_leads_membership_revision()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER trg_hugo_membership_lifecycle_service_guard BEFORE UPDATE OF role, access_status, hugo_config, access_expires_at, deletion_prepared_at, deletion_operation_id ON public.memberships FOR EACH ROW EXECUTE FUNCTION hugo_membership_lifecycle_service_guard()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER trg_hugo_membership_owner_guard BEFORE INSERT OR DELETE OR UPDATE ON public.memberships FOR EACH ROW EXECUTE FUNCTION hugo_membership_owner_guard()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER trg_my_leads_designation_guard BEFORE INSERT OR UPDATE OF acquisitions_enabled ON public.memberships FOR EACH ROW EXECUTE FUNCTION my_leads_guard_designation_update()",
+            "enabled": "O"
+          }
+        ]
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "ai_last_delivery_error",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "ai_last_delivery_status",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "ai_responder_message_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "ai_responder_reason",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "ai_responder_status",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "ai_responder_status_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "channel",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "contact_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "conversation_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "'00000000-0000-0000-0000-000000000bbb'::uuid",
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "property_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "updated_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          }
+        ],
+        "constraints": [
+          "CHECK (((ai_responder_status IS NULL) OR (ai_responder_status = ANY (ARRAY['handled'::text, 'escalated'::text]))))",
+          "CHECK ((channel = 'sms'::text))",
+          "UNIQUE (channel, contact_id, property_id)",
+          "FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id)",
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE CASCADE"
+        ],
+        "identity": "public.message_threads",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_message_threads_conversation ON public.message_threads USING btree (conversation_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX message_threads_channel_contact_id_property_id_key ON public.message_threads USING btree (channel, contact_id, property_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX message_threads_pkey ON public.message_threads USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX uq_message_threads_contact_only ON public.message_threads USING btree (channel, contact_id) WHERE (property_id IS NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "d",
+            "name": "message_threads_org_delete",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "a",
+            "name": "message_threads_org_insert",
+            "permissive": true,
+            "qual": null,
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          },
+          {
+            "cmd": "r",
+            "name": "message_threads_org_select",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "w",
+            "name": "message_threads_org_update",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": []
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "attributed_outbound_message_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "body",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "campaign_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "channel",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "contact_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "conversation_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "delivered_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "direction",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "dismissed_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "error_message",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "external_id",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "failed_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "from_address",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "to_tsvector('simple'::regconfig, regexp_replace(lower(COALESCE(body, ''::text)), '[^[:alnum:]]+'::text, ' '::text, 'g'::text))",
+            "name": "fts",
+            "not_null": false,
+            "type": "tsvector"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "idempotency_key",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "inbound_intent_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "metadata",
+            "not_null": false,
+            "type": "jsonb"
+          },
+          {
+            "acl": null,
+            "default": "'00000000-0000-0000-0000-000000000bbb'::uuid",
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "property_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "provider",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "read_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "scheduled_for",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "sent_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "'pending'::text",
+            "name": "status",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "subject",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "to_address",
+            "not_null": false,
+            "type": "text"
+          }
+        ],
+        "constraints": [
+          "FOREIGN KEY (attributed_outbound_message_id) REFERENCES messages(id) ON DELETE SET NULL",
+          "FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE RESTRICT",
+          "CHECK ((channel = ANY (ARRAY['sms'::text, 'email'::text])))",
+          "FOREIGN KEY (contact_id) REFERENCES contacts(id)",
+          "CHECK ((direction = ANY (ARRAY['outbound'::text, 'inbound'::text])))",
+          "FOREIGN KEY (inbound_intent_id) REFERENCES sms_inbound_intents(id) ON DELETE SET NULL",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id)",
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (property_id) REFERENCES properties(id)",
+          "CHECK ((provider = ANY (ARRAY['dialpad'::text, 'twilio'::text, 'resend'::text, 'sendgrid'::text, 'internal'::text, 'mock'::text, 'sendillo'::text])))",
+          "CHECK ((status = ANY (ARRAY['pending'::text, 'queued'::text, 'paused'::text, 'sent'::text, 'delivered'::text, 'failed'::text, 'received'::text, 'bounced'::text])))"
+        ],
+        "identity": "public.messages",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_messages_attributed_outbound_message_id ON public.messages USING btree (attributed_outbound_message_id) WHERE (attributed_outbound_message_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_campaign_id_status ON public.messages USING btree (campaign_id, status) WHERE (campaign_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_campaign_queue_controls ON public.messages USING btree (campaign_id, status, scheduled_for) WHERE ((campaign_id IS NOT NULL) AND (channel = 'sms'::text) AND (direction = 'outbound'::text) AND (status = ANY (ARRAY['queued'::text, 'paused'::text])))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_contact ON public.messages USING btree (contact_id) WHERE (contact_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_conversation ON public.messages USING btree (conversation_id) WHERE (conversation_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_created ON public.messages USING btree (created_at DESC)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_external_id ON public.messages USING btree (external_id) WHERE (external_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_org ON public.messages USING btree (org_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_property ON public.messages USING btree (property_id) WHERE (property_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_property_created_id ON public.messages USING btree (property_id, created_at DESC, id DESC) WHERE (property_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_property_direction_created ON public.messages USING btree (property_id, direction, created_at DESC) WHERE (property_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_queued_scheduled ON public.messages USING btree (scheduled_for) WHERE ((status = 'queued'::text) AND (scheduled_for IS NOT NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_rep_sms_takeover_lookup ON public.messages USING btree (conversation_id, property_id, contact_id, direction, sent_at DESC, created_at DESC, id DESC) WHERE ((channel = 'sms'::text) AND (conversation_id IS NOT NULL) AND (property_id IS NOT NULL) AND (contact_id IS NOT NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_sms_inbox_org_conversation_latest ON public.messages USING btree (org_id, conversation_id, created_at DESC, id DESC) INCLUDE (contact_id, property_id, direction, read_at) WHERE ((channel = 'sms'::text) AND (contact_id IS NOT NULL) AND (conversation_id IS NOT NULL) AND (status <> ALL (ARRAY['queued'::text, 'paused'::text])))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_unknown_active ON public.messages USING btree (from_address, created_at DESC) WHERE ((contact_id IS NULL) AND (dismissed_at IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_messages_unread_inbound ON public.messages USING btree (property_id, created_at DESC) WHERE ((direction = 'inbound'::text) AND (read_at IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX messages_fts_gin ON public.messages USING gin (fts)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_messages_ai_responder_inbound_unique ON public.messages USING btree (((metadata ->> 'inbound_message_id'::text))) WHERE ((channel = 'sms'::text) AND (direction = 'outbound'::text) AND ((metadata ->> 'generated_by'::text) = 'ai_responder_v1'::text) AND (metadata ? 'inbound_message_id'::text))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_messages_campaign_property_contact_unique ON public.messages USING btree (campaign_id, property_id, contact_id) NULLS NOT DISTINCT WHERE ((campaign_id IS NOT NULL) AND (direction = 'outbound'::text))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_messages_inbound_intent_unique ON public.messages USING btree (inbound_intent_id) WHERE ((channel = 'sms'::text) AND (direction = 'inbound'::text) AND (inbound_intent_id IS NOT NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_messages_inbound_provider_external_unique ON public.messages USING btree (provider, external_id) WHERE ((direction = 'inbound'::text) AND (external_id IS NOT NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX messages_outbound_sms_idempotency_idx ON public.messages USING btree (org_id, idempotency_key) WHERE ((channel = 'sms'::text) AND (direction = 'outbound'::text) AND (idempotency_key IS NOT NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX messages_pkey ON public.messages USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "d",
+            "name": "messages_org_delete",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "a",
+            "name": "messages_org_insert",
+            "permissive": true,
+            "qual": null,
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          },
+          {
+            "cmd": "r",
+            "name": "messages_org_select",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "w",
+            "name": "messages_org_update",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": [
+          {
+            "definition": "CREATE TRIGGER guard_training_messages BEFORE INSERT OR UPDATE ON public.messages FOR EACH ROW EXECUTE FUNCTION guard_training_customer_action()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER messages_reject_dnc_locked_read BEFORE UPDATE OF read_at ON public.messages FOR EACH ROW EXECUTE FUNCTION reject_locked_property_message_read_mutation()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER trg_messages_fill_sms_conversation_id BEFORE INSERT OR UPDATE OF contact_id ON public.messages FOR EACH ROW EXECUTE FUNCTION messages_fill_sms_conversation_id()",
+            "enabled": "O"
+          }
+        ]
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "name",
+            "not_null": true,
+            "type": "text"
+          }
+        ],
+        "constraints": [
+          "UNIQUE (name)",
+          "PRIMARY KEY (id)"
+        ],
+        "identity": "public.organizations",
+        "indexes": [
+          {
+            "definition": "CREATE UNIQUE INDEX organizations_name_key ON public.organizations USING btree (name)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX organizations_pkey ON public.organizations USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "d",
+            "name": "organizations_org_delete",
+            "permissive": true,
+            "qual": "(id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "a",
+            "name": "organizations_org_insert",
+            "permissive": true,
+            "qual": null,
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          },
+          {
+            "cmd": "r",
+            "name": "organizations_org_select",
+            "permissive": true,
+            "qual": "(id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "w",
+            "name": "organizations_org_update",
+            "permissive": true,
+            "qual": "(id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": []
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "absentee_flag",
+            "not_null": false,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "address",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "address_normalized",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "agent_contact_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "ai_responder_disabled",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "apn",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "apn_normalized",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "arv",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "assigned_user_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "attom_id",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "baths",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "beds",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "cass_raw_response",
+            "not_null": false,
+            "type": "jsonb"
+          },
+          {
+            "acl": null,
+            "default": "'unverified'::text",
+            "name": "cass_status",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "cass_verified_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "city",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "county_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "deleted_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "'{}'::text[]",
+            "name": "distress_flags",
+            "not_null": true,
+            "type": "text[]"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "equity_estimate",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": "((equity_estimate * 100.0) / NULLIF(arv, (0)::numeric))",
+            "name": "equity_pct",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "fips_code",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "follow_up_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "homeowner_contact_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "is_dnc_locked",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "is_residential",
+            "not_null": false,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "is_seasonal",
+            "not_null": false,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "is_training",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "is_vacant",
+            "not_null": false,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "last_ai_escalation_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "last_ai_escalation_reason",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "lat",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "listing_price",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "lon",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "market",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "mls_number",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "mortgage_balance",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "motivation_level",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "ncoa_verified_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "needs_human_attention",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "notes",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "'00000000-0000-0000-0000-000000000bbb'::uuid",
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "outreach_dispo",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "owner_moved_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "qualified_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "qualified_by",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "regrid_id",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "repair_estimate",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": "lower(((((((((((((COALESCE(address, ''::text) || ' '::text) || COALESCE(city, ''::text)) || ' '::text) || COALESCE(state, ''::text)) || ' '::text) || COALESCE(zip, ''::text)) || ' '::text) || COALESCE(market, ''::text)) || ' '::text) || COALESCE(apn, ''::text)) || ' '::text) || COALESCE(mls_number, ''::text)))",
+            "name": "search_text",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "skip_trace_disabled",
+            "not_null": true,
+            "type": "boolean"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "source",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "source_import_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "source_imported_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "sqft",
+            "not_null": false,
+            "type": "numeric"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "state",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "'new_lead'::text",
+            "name": "status",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "updated_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "vacant_since",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "year_built",
+            "not_null": false,
+            "type": "integer"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "zip",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "zpid",
+            "not_null": false,
+            "type": "text"
+          }
+        ],
+        "constraints": [
+          "FOREIGN KEY (agent_contact_id) REFERENCES contacts(id) ON DELETE SET NULL NOT VALID",
+          "FOREIGN KEY (agent_contact_id, org_id) REFERENCES contacts(id, org_id) ON DELETE SET NULL (agent_contact_id) NOT VALID",
+          "FOREIGN KEY (assigned_user_id) REFERENCES auth.users(id) ON DELETE SET NULL",
+          "CHECK ((cass_status = ANY (ARRAY['unverified'::text, 'verified'::text, 'invalid'::text, 'ambiguous'::text])))",
+          "FOREIGN KEY (county_id) REFERENCES counties(id)",
+          "FOREIGN KEY (homeowner_contact_id) REFERENCES contacts(id) ON DELETE SET NULL NOT VALID",
+          "FOREIGN KEY (homeowner_contact_id, org_id) REFERENCES contacts(id, org_id) ON DELETE SET NULL (homeowner_contact_id) NOT VALID",
+          "UNIQUE (id, org_id)",
+          "CHECK (((motivation_level IS NULL) OR (motivation_level = ANY (ARRAY['hot'::text, 'warm'::text, 'cold'::text]))))",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id)",
+          "CHECK (((outreach_dispo IS NULL) OR (outreach_dispo = ANY (ARRAY['wrong_number'::text, 'bad_number'::text, 'not_interested'::text, 'opted_out'::text, 'dnc'::text, 'nurture'::text, 'callback_requested'::text, 'needs_sequence'::text, 'booked_appointment'::text]))))",
+          "PRIMARY KEY (id)",
+          "CHECK (((source IS NULL) OR (source = ANY (ARRAY['assigns'::text, 'dealmachine'::text, 'propstream'::text, 'titlepro'::text, 'reisift'::text, 'agent_outreach'::text, 'driving_for_dollars'::text, 'referral'::text, 'cold_call'::text, 'sms'::text, 'web_form'::text, 'direct_mail'::text, 'zillow'::text]))))",
+          "FOREIGN KEY (source_import_id, org_id) REFERENCES csv_imports(id, org_id)",
+          "CHECK ((status = ANY (ARRAY['prospect'::text, 'new_lead'::text, 'contacted'::text, 'interested'::text, 'offer_sent'::text, 'offer_declined'::text, 'under_contract'::text, 'closed'::text, 'dead'::text])))"
+        ],
+        "identity": "public.properties",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_properties_absentee ON public.properties USING btree (owner_moved_at) WHERE (owner_moved_at IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_active ON public.properties USING btree (created_at DESC) WHERE (deleted_at IS NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_agent_contact ON public.properties USING btree (agent_contact_id) WHERE (agent_contact_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_ai_responder_disabled ON public.properties USING btree (id) WHERE (ai_responder_disabled = true)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_assigned_user ON public.properties USING btree (assigned_user_id) WHERE (assigned_user_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_county ON public.properties USING btree (county_id) WHERE (county_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_equity_pct ON public.properties USING btree (equity_pct) WHERE ((deleted_at IS NULL) AND (equity_pct IS NOT NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_homeowner_contact ON public.properties USING btree (homeowner_contact_id) WHERE (homeowner_contact_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_locked_prospects ON public.properties USING btree (org_id, created_at DESC, id) WHERE ((deleted_at IS NULL) AND (is_dnc_locked = true))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_market ON public.properties USING btree (market) WHERE (market IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_motivation ON public.properties USING btree (motivation_level) WHERE (motivation_level IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_needs_human_attention ON public.properties USING btree (updated_at DESC) WHERE (needs_human_attention = true)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_org ON public.properties USING btree (org_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_org_source_imported_at ON public.properties USING btree (org_id, source_imported_at) WHERE ((source_import_id IS NOT NULL) AND (source_imported_at IS NOT NULL) AND (deleted_at IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_outreach_dispo ON public.properties USING btree (outreach_dispo) WHERE (outreach_dispo IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_source_import ON public.properties USING btree (source_import_id) WHERE (source_import_id IS NOT NULL)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_status ON public.properties USING btree (status)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_unlocked_leads ON public.properties USING btree (org_id, status, created_at DESC) WHERE ((deleted_at IS NULL) AND (is_dnc_locked = false) AND (status <> 'prospect'::text))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_properties_vacant ON public.properties USING btree (is_vacant) WHERE (is_vacant = true)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX properties_search_text_gin ON public.properties USING gin (search_text gin_trgm_ops)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX properties_training_contact_idx ON public.properties USING btree (homeowner_contact_id) WHERE is_training",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX properties_address_normalized_key ON public.properties USING btree (org_id, address_normalized) WHERE ((address_normalized IS NOT NULL) AND (deleted_at IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX properties_attom_key ON public.properties USING btree (org_id, attom_id) WHERE ((attom_id IS NOT NULL) AND (deleted_at IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX properties_fips_apn_key ON public.properties USING btree (org_id, fips_code, apn_normalized) WHERE ((fips_code IS NOT NULL) AND (apn_normalized IS NOT NULL) AND (deleted_at IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX properties_id_org_id_key ON public.properties USING btree (id, org_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX properties_mls_number_key ON public.properties USING btree (org_id, mls_number) WHERE ((mls_number IS NOT NULL) AND (deleted_at IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX properties_pkey ON public.properties USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX properties_regrid_key ON public.properties USING btree (org_id, regrid_id) WHERE ((regrid_id IS NOT NULL) AND (deleted_at IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX properties_zpid_key ON public.properties USING btree (org_id, zpid) WHERE ((zpid IS NOT NULL) AND (deleted_at IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "d",
+            "name": "properties_org_delete",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "a",
+            "name": "properties_org_insert",
+            "permissive": true,
+            "qual": null,
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          },
+          {
+            "cmd": "r",
+            "name": "properties_org_select",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "w",
+            "name": "properties_org_update",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": [
+          {
+            "definition": "CREATE TRIGGER global_dnc_properties_write_barrier BEFORE INSERT OR DELETE OR UPDATE ON public.properties FOR EACH STATEMENT EXECUTE FUNCTION acquire_global_dnc_write_barrier()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER guard_training_property BEFORE INSERT OR DELETE OR UPDATE ON public.properties FOR EACH ROW EXECUTE FUNCTION guard_training_property()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER preserve_promote_leads_item_on_property_delete BEFORE DELETE ON public.properties FOR EACH ROW EXECUTE FUNCTION preserve_promote_leads_item_on_property_delete()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER properties_true_dnc_lock_guard BEFORE INSERT OR DELETE OR UPDATE ON public.properties FOR EACH ROW EXECUTE FUNCTION properties_true_dnc_lock_guard()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER trg_my_leads_property_assignment AFTER INSERT OR UPDATE OF assigned_user_id ON public.properties FOR EACH ROW EXECUTE FUNCTION observe_my_leads_property_assignment()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER trg_properties_active_assignee BEFORE INSERT OR UPDATE OF assigned_user_id, org_id ON public.properties FOR EACH ROW EXECUTE FUNCTION enforce_active_property_assignee_membership()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER trg_properties_supersede_ai_disposition_reviews AFTER UPDATE OF outreach_dispo ON public.properties FOR EACH ROW EXECUTE FUNCTION supersede_ai_disposition_reviews_on_outcome_change()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER zz_serialize_property_safety_before_csv_consent BEFORE UPDATE ON public.properties FOR EACH ROW EXECUTE FUNCTION serialize_property_safety_before_csv_consent()",
+            "enabled": "O"
+          }
+        ]
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "last_synced_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "messaging_status",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "phone_e164",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "provider",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "provider_number_id",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "raw",
+            "not_null": false,
+            "type": "jsonb"
+          },
+          {
+            "acl": null,
+            "default": "'active'::text",
+            "name": "status",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "updated_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          }
+        ],
+        "constraints": [
+          "FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE",
+          "UNIQUE (org_id, provider, phone_e164)",
+          "CHECK ((length(TRIM(BOTH FROM phone_e164)) > 0))",
+          "PRIMARY KEY (id)",
+          "CHECK ((status = ANY (ARRAY['active'::text, 'inactive'::text])))"
+        ],
+        "identity": "public.provider_sender_numbers",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_provider_sender_numbers_org_provider_status ON public.provider_sender_numbers USING btree (org_id, provider, status)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX provider_sender_numbers_org_id_provider_phone_e164_key ON public.provider_sender_numbers USING btree (org_id, provider, phone_e164)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX provider_sender_numbers_pkey ON public.provider_sender_numbers USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "r",
+            "name": "provider_sender_numbers_org_select",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": []
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "completed_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "contact_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "0",
+            "name": "current_step_index",
+            "not_null": true,
+            "type": "integer"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "enrolled_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "enrolled_by_user_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "next_run_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "pause_reason",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "property_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "sequence_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "'active'::text",
+            "name": "status",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "updated_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          }
+        ],
+        "constraints": [
+          "FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL",
+          "CHECK ((current_step_index >= 0))",
+          "FOREIGN KEY (enrolled_by_user_id) REFERENCES auth.users(id) ON DELETE SET NULL",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE",
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE CASCADE",
+          "FOREIGN KEY (sequence_id) REFERENCES sequences(id) ON DELETE CASCADE",
+          "CHECK ((status = ANY (ARRAY['active'::text, 'paused'::text, 'completed'::text, 'opted_out'::text])))"
+        ],
+        "identity": "public.sequence_enrollments",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_enrollments_due ON public.sequence_enrollments USING btree (next_run_at) WHERE ((status = 'active'::text) AND (next_run_at IS NOT NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_enrollments_property ON public.sequence_enrollments USING btree (property_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_enrollments_sequence_status ON public.sequence_enrollments USING btree (sequence_id, status)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_sequence_enrollments_latest_per_property ON public.sequence_enrollments USING btree (org_id, property_id, enrolled_at DESC, id DESC)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_one_live_per_property ON public.sequence_enrollments USING btree (property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_enrollments_unique_active ON public.sequence_enrollments USING btree (sequence_id, property_id) WHERE (status = ANY (ARRAY['active'::text, 'paused'::text]))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX sequence_enrollments_pkey ON public.sequence_enrollments USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "d",
+            "name": "sequence_enrollments_org_delete",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "a",
+            "name": "sequence_enrollments_org_insert",
+            "permissive": true,
+            "qual": null,
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          },
+          {
+            "cmd": "r",
+            "name": "sequence_enrollments_org_select",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "w",
+            "name": "sequence_enrollments_org_update",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": [
+          {
+            "definition": "CREATE TRIGGER aa_apply_global_dnc_to_sequence_enrollment BEFORE INSERT ON public.sequence_enrollments FOR EACH ROW EXECUTE FUNCTION apply_global_dnc_to_sequence_enrollment()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER global_dnc_enrollments_write_barrier BEFORE INSERT OR DELETE OR UPDATE ON public.sequence_enrollments FOR EACH STATEMENT EXECUTE FUNCTION acquire_global_dnc_write_barrier()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER guard_training_enrollments BEFORE INSERT OR UPDATE ON public.sequence_enrollments FOR EACH ROW EXECUTE FUNCTION guard_training_customer_action()",
+            "enabled": "O"
+          },
+          {
+            "definition": "CREATE TRIGGER sequence_enrollments_reject_dnc_locked BEFORE INSERT OR DELETE OR UPDATE ON public.sequence_enrollments FOR EACH ROW EXECUTE FUNCTION guard_locked_property_sequence_enrollment()",
+            "enabled": "O"
+          }
+        ]
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=arwdDxtm/postgres,authenticated=arwdDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": "'sms'::text",
+            "name": "channel",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "created_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "first_contact_id",
+            "not_null": false,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "phone_e164",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "provider",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "source",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "source_detail",
+            "not_null": false,
+            "type": "jsonb"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "suppressed_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "updated_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          }
+        ],
+        "constraints": [
+          "CHECK ((channel = 'sms'::text))",
+          "FOREIGN KEY (first_contact_id) REFERENCES contacts(id) ON DELETE SET NULL",
+          "FOREIGN KEY (org_id) REFERENCES organizations(id)",
+          "CHECK ((phone_e164 ~ '^\\+[1-9][0-9]{7,14}$'::text))",
+          "PRIMARY KEY (id)"
+        ],
+        "identity": "public.sms_phone_suppressions",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_sms_phone_suppressions_org ON public.sms_phone_suppressions USING btree (org_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_sms_phone_suppressions_phone ON public.sms_phone_suppressions USING btree (phone_e164)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX idx_sms_phone_suppressions_org_channel_phone ON public.sms_phone_suppressions USING btree (org_id, channel, phone_e164)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX sms_phone_suppressions_pkey ON public.sms_phone_suppressions USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "a",
+            "name": "sms_phone_suppressions_authenticated_insert",
+            "permissive": true,
+            "qual": null,
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          },
+          {
+            "cmd": "r",
+            "name": "sms_phone_suppressions_authenticated_select",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          },
+          {
+            "cmd": "w",
+            "name": "sms_phone_suppressions_authenticated_update",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": "(org_id IN ( SELECT memberships.org_id\n   FROM memberships\n  WHERE (memberships.user_id = auth.uid())))"
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": [
+          {
+            "definition": "CREATE TRIGGER aa_serialize_phone_suppression_before_csv_consent BEFORE INSERT OR DELETE OR UPDATE ON public.sms_phone_suppressions FOR EACH ROW EXECUTE FUNCTION serialize_phone_suppression_before_csv_consent()",
+            "enabled": "O"
+          }
+        ]
+      },
+      {
+        "acl": "{postgres=arwdDxtm/postgres,anon=rDxtm/postgres,authenticated=rDxtm/postgres,service_role=arwdDxtm/postgres}",
+        "columns": [
+          {
+            "acl": null,
+            "default": null,
+            "name": "error_message",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "event_type",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "external_id",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "gen_random_uuid()",
+            "name": "id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": "'00000000-0000-0000-0000-000000000bbb'::uuid",
+            "name": "org_id",
+            "not_null": true,
+            "type": "uuid"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "payload",
+            "not_null": true,
+            "type": "jsonb"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "processed_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "processing_started_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "'pending'::text",
+            "name": "processing_status",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "provider",
+            "not_null": true,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "received_at",
+            "not_null": true,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": "0",
+            "name": "reconciliation_attempts",
+            "not_null": true,
+            "type": "integer"
+          },
+          {
+            "acl": null,
+            "default": "now()",
+            "name": "reconciliation_next_attempt_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "reconciliation_quarantined_at",
+            "not_null": false,
+            "type": "timestamp with time zone"
+          },
+          {
+            "acl": null,
+            "default": null,
+            "name": "request_hash",
+            "not_null": false,
+            "type": "text"
+          },
+          {
+            "acl": null,
+            "default": "false",
+            "name": "signature_verified",
+            "not_null": true,
+            "type": "boolean"
+          }
+        ],
+        "constraints": [
+          "FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE",
+          "PRIMARY KEY (id)",
+          "CHECK ((processing_status = ANY (ARRAY['pending'::text, 'processing'::text, 'processed'::text, 'ignored'::text, 'error'::text])))",
+          "CHECK ((reconciliation_attempts >= 0))"
+        ],
+        "identity": "public.webhook_events",
+        "indexes": [
+          {
+            "definition": "CREATE INDEX idx_webhook_events_org_received ON public.webhook_events USING btree (org_id, received_at DESC)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX idx_webhook_events_processing_status ON public.webhook_events USING btree (processing_status) WHERE (processing_status = 'pending'::text)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE INDEX webhook_events_sendillo_reconciliation_due_idx ON public.webhook_events USING btree (provider, reconciliation_next_attempt_at, received_at) WHERE ((processing_status = ANY (ARRAY['pending'::text, 'error'::text])) AND (reconciliation_quarantined_at IS NULL))",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX webhook_events_org_idempotency_key ON public.webhook_events USING btree (org_id, provider, event_type, external_id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          },
+          {
+            "definition": "CREATE UNIQUE INDEX webhook_events_pkey ON public.webhook_events USING btree (id)",
+            "live": true,
+            "ready": true,
+            "valid": true
+          }
+        ],
+        "kind": "r",
+        "policies": [
+          {
+            "cmd": "r",
+            "name": "webhook_events_org_select",
+            "permissive": true,
+            "qual": "(org_id IN ( SELECT m.org_id\n   FROM memberships m\n  WHERE (m.user_id = auth.uid())))",
+            "roles": [
+              "authenticated"
+            ],
+            "with_check": null
+          }
+        ],
+        "rls": true,
+        "rls_forced": false,
+        "triggers": []
+      }
+    ],
+    "schema_migrations": [
+      "001",
+      "002",
+      "003",
+      "004",
+      "005",
+      "006",
+      "007",
+      "008",
+      "009",
+      "010",
+      "011",
+      "012",
+      "013",
+      "014",
+      "015",
+      "016",
+      "017",
+      "018",
+      "019",
+      "020",
+      "021",
+      "022",
+      "023",
+      "024",
+      "025",
+      "026",
+      "027",
+      "028",
+      "029",
+      "030",
+      "031",
+      "032",
+      "033",
+      "034",
+      "035",
+      "036",
+      "037",
+      "038",
+      "039",
+      "040",
+      "041",
+      "042",
+      "043",
+      "044",
+      "045",
+      "046",
+      "047",
+      "048",
+      "049",
+      "050",
+      "051",
+      "052",
+      "053",
+      "054",
+      "055",
+      "056",
+      "057",
+      "058",
+      "059",
+      "060",
+      "061",
+      "062",
+      "063",
+      "064",
+      "065",
+      "066",
+      "067",
+      "068",
+      "069",
+      "070",
+      "071",
+      "072",
+      "073",
+      "074",
+      "075",
+      "076",
+      "077",
+      "078",
+      "079",
+      "080",
+      "081",
+      "082",
+      "083",
+      "084",
+      "085",
+      "086",
+      "087",
+      "20260612054256",
+      "20260612055011",
+      "20260612160101",
+      "20260612161144",
+      "20260612161742",
+      "20260612162310",
+      "20260612162426",
+      "20260612202924",
+      "20260612202953",
+      "20260612214607",
+      "20260612214638",
+      "20260612220902",
+      "20260612221144",
+      "20260612222041",
+      "20260612222645",
+      "20260612223619",
+      "20260612223729",
+      "20260612233436",
+      "20260614120708",
+      "20260614120748",
+      "20260614141804",
+      "20260614141832",
+      "20260622145423",
+      "20260624120000",
+      "20260624133349",
+      "20260624143000",
+      "20260624220000",
+      "20260630153000",
+      "20260701120000",
+      "20260701160000",
+      "20260701170000",
+      "20260702013000",
+      "20260702143000",
+      "20260702143100",
+      "20260727150000",
+      "20260728090000",
+      "20260728110000",
+      "20260728130000",
+      "20260728150000",
+      "20260729010000",
+      "20260729170000",
+      "20260731205451",
+      "20260803193000",
+      "20260804130000",
+      "20260810163000",
+      "20260811120000",
+      "20260811144500",
+      "20260814150000",
+      "20260814170000",
+      "20260814200000",
+      "20260814210000",
+      "20260814230000",
+      "20260815120000",
+      "20260815190000",
+      "20260815230000",
+      "20260815233000",
+      "20260816010000",
+      "20260816020000",
+      "20260816030000",
+      "20260816040000",
+      "20260816050000",
+      "20260816060000",
+      "20260816070000",
+      "20260816080000",
+      "20260816090000",
+      "20260816093000",
+      "20260816100000",
+      "20260816110000",
+      "20260816120000",
+      "20260816130000",
+      "20260816140000",
+      "20260816150000",
+      "20260816170000",
+      "20260817100000",
+      "20260817110000",
+      "20260819150000",
+      "20260819151000",
+      "20260819152000",
+      "20260819200000",
+      "20260819201000",
+      "20260819202000",
+      "20260819203000",
+      "20260819204000",
+      "20260819210000",
+      "20260820100000",
+      "20260820110000",
+      "20260820120000",
+      "20260821100000",
+      "20260822220500",
+      "20260823010000",
+      "20260823020000",
+      "20260825010000",
+      "20260825170000",
+      "20260825220000",
+      "20260826170000",
+      "20260827110000",
+      "20260827220000",
+      "20260827230000",
+      "20260828022800",
+      "20260828053000",
+      "20260828170000",
+      "20260829194500",
+      "20260830080000",
+      "20260830092331",
+      "20260830100000",
+      "20260830103000",
+      "20260901010000",
+      "20260901020000",
+      "20260901193023",
+      "20260902010000",
+      "20260902030000",
+      "20260902110000",
+      "20260902111000",
+      "20260902112000",
+      "20260902120000",
+      "20260902120100",
+      "20260902174035",
+      "20260902180000",
+      "20260902230000",
+      "20260903070000",
+      "20260907120000",
+      "20260908120000",
+      "20260909000000",
+      "20260909020000",
+      "20260909080000",
+      "20260909080600",
+      "20260909084500",
+      "20260909121500",
+      "20260909140000",
+      "20260909150529",
+      "20260912080000",
+      "20260912090000",
+      "20260912090100",
+      "20260912090200",
+      "20260912100000",
+      "20260912101000",
+      "20260912110000",
+      "20260912111000",
+      "20260912112000",
+      "20260912113000",
+      "20260912120000",
+      "20260912130000",
+      "20260912140000",
+      "20260912150000",
+      "20260912190000",
+      "20260912220000",
+      "20260912233000",
+      "20260912233100",
+      "20260913100000",
+      "20260913121000",
+      "20260913203019",
+      "20260913230000",
+      "20260914120000",
+      "20260914121000",
+      "20260914130000",
+      "20260914235900",
+      "20260915000100",
+      "20260915001000",
+      "20260915001100",
+      "20260916090000",
+      "20260916100000",
+      "20260916153000",
+      "20260917080000",
+      "20260917100000",
+      "20260917110000",
+      "20260917120000",
+      "20260917130000",
+      "20260917140000",
+      "20260917150000",
+      "20260917160000",
+      "20260917170000",
+      "20260917193000",
+      "20260917200000",
+      "20260919090000",
+      "20260920120000",
+      "20260924165149",
+      "20260924180619",
+      "20260924190000",
+      "20260924192336",
+      "20260926100000",
+      "20260927023443",
+      "20260928120000",
+      "20260929034021",
+      "20260929120000",
+      "20260929180000",
+      "20260929190000",
+      "20260929200000",
+      "20260929210000",
+      "20260929220000",
+      "20260929221000",
+      "20260929230000",
+      "20260929235900",
+      "20260929236000",
+      "20260929236500",
+      "20260929237000",
+      "20260929238000",
+      "20260929239000",
+      "20260930001000",
+      "20260930001100"
+    ],
+    "schemas": [
+      {
+        "acl": "{supabase_admin=UC/supabase_admin,anon=U/supabase_admin,authenticated=U/supabase_admin,service_role=U/supabase_admin,supabase_auth_admin=UC/supabase_admin,dashboard_user=UC/supabase_admin,postgres=U/supabase_admin}",
+        "name": "auth"
+      },
+      {
+        "acl": "{pg_database_owner=UC/pg_database_owner,=U/pg_database_owner,postgres=U/pg_database_owner,anon=U/pg_database_owner,authenticated=U/pg_database_owner,service_role=U/pg_database_owner}",
+        "name": "public"
+      }
+    ],
+    "trigger_names": [],
+    "types": [
+      {
+        "acl": null,
+        "definition": "auth.sessions",
+        "identity": "auth.sessions",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "auth.users",
+        "identity": "auth.users",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "ai_disposition_reviews",
+        "identity": "public.ai_disposition_reviews",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "consent_events",
+        "identity": "public.consent_events",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "contacts",
+        "identity": "public.contacts",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "global_phone_dnc_registry",
+        "identity": "public.global_phone_dnc_registry",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "lead_events",
+        "identity": "public.lead_events",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "memberships",
+        "identity": "public.memberships",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "message_threads",
+        "identity": "public.message_threads",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "messages",
+        "identity": "public.messages",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "organizations",
+        "identity": "public.organizations",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "properties",
+        "identity": "public.properties",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "provider_sender_numbers",
+        "identity": "public.provider_sender_numbers",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "sequence_enrollments",
+        "identity": "public.sequence_enrollments",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "sms_phone_suppressions",
+        "identity": "public.sms_phone_suppressions",
+        "kind": "c"
+      },
+      {
+        "acl": null,
+        "definition": "webhook_events",
+        "identity": "public.webhook_events",
+        "kind": "c"
+      }
+    ]
+  },
+  "sha256": "67fc1bad7cedaec0ef5c84c88544e26baabe7bbec898c75f63435f7ea6d5e327"
+}
