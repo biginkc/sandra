@@ -5662,6 +5662,7 @@ export type Database = {
       }
     }
     Functions: {
+      delete_sequence_canary_lead_events: { Args: { p_sequence_id: string; p_property_id: string; p_canary_user_id: string }; Returns: number }
       sequence_overview_stats: { Args: { p_org: string }; Returns: Array<{
         id: string; name: string; description: string | null; active: boolean;
         append_opt_out: boolean; archived_at: string | null; created_at: string;

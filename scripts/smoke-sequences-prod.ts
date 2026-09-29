@@ -12,8 +12,8 @@
  *      (scheduled every 5 min on the Pro plan).
  *   6. Polls `test_sms_log` until the Twilio webhook persists the
  *      incoming SMS from Dialpad.
- *   7. Cleans up: deletes the enrollment, sequence, property, consent
- *      events, messages, contact. Leaves the test_sms_log row for
+ *   7. Cleans up: deletes the enrollment, sequence, property, tasks, lead
+ *      events, consent events, messages, contact. Leaves the test_sms_log row for
  *      audit.
  *
  * Cost: ~$0.005 for one outbound Dialpad SMS + pennies for the Twilio
@@ -25,7 +25,7 @@
  * Required env (from `.env.local` or the shell):
  *   SUPABASE_SERVICE_ROLE_KEY   — prod service-role key
  *   NEXT_PUBLIC_SUPABASE_URL    — prod URL
- *   SEQUENCE_CANARY_USER_ID     — dedicated auth.users UUID, also set in the app
+ *   SEQUENCE_CANARY_USER_ID     — existing dedicated auth.users UUID, also set in the app
  *
  * Safe tags the script writes so you can find stragglers manually:
  *   sequences.name      = "SMOKE TEST — safe to delete ${ts}"
@@ -145,6 +145,7 @@ async function main() {
         first_name: "Smoke",
         last_name: `Prod ${TS}`,
         phone_1: TWILIO_NUMBER,
+        phone_1_type: "mobile",
       })
       .select("id")
       .single();

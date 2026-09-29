@@ -14,7 +14,7 @@ permissions:
 # Failure mode: exit code non-zero → red run + email to repo watchers.
 # Success leaves a `PROD-SMOKE` row in `test_sms_log` for audit; the
 # script cleans up its own seed data (sequence, property, contact,
-# enrollment, consent_events, messages).
+# enrollment, tasks, lead_events, consent_events, messages).
 #
 # Cost: one Dialpad outbound SMS + one Twilio inbound per run
 # (~$0.005). ~22 weekday runs/month → ~$0.11/month.

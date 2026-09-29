@@ -59,7 +59,14 @@ export async function cleanupCanary(
   for (const id of contactIds) await checked("consent", client.from("consent_events").delete().eq("contact_id", id));
   await checked("enrollments", client.from("sequence_enrollments").delete().eq("sequence_id", sequenceId));
   await checked("steps", client.from("sequence_steps").delete().eq("sequence_id", sequenceId));
-  for (const id of propertyIds) await checked("property", client.from("properties").delete().eq("id", id));
+  for (const id of propertyIds) {
+    await checked("tasks", client.from("tasks").delete().eq("org_id", sequence.org_id).eq("related_property_id", id));
+    const { error } = await client.rpc("delete_sequence_canary_lead_events", {
+      p_sequence_id: sequenceId, p_property_id: id, p_canary_user_id: canaryUserId,
+    });
+    if (error) throw new Error(`Canary cleanup lead_events: ${error.message}`);
+    await checked("property", client.from("properties").delete().eq("id", id));
+  }
   for (const id of contactIds) await checked("contact", client.from("contacts").delete().eq("id", id));
   await checked("sequence", client.from("sequences").delete().eq("id", sequenceId));
 }

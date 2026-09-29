@@ -6,6 +6,7 @@ import { cleanupCanary } from "../../../scripts/sequence-canary-cleanup";
 const owner = "11111111-1111-4111-8111-111111111111";
 function fakeClient(failingTable?: string) {
   const deletes: string[] = [];
+  const operations: string[] = [];
   const rows: Record<string, unknown[]> = {
     sequences: [{ id: "s", org_id: "org", name: "SMOKE TEST — safe to delete 2026-09-28", created_by: owner }],
     sequence_enrollments: [{ id: "e", property_id: "p", contact_id: "c" }],
@@ -14,14 +15,19 @@ function fakeClient(failingTable?: string) {
   };
   return {
     deletes,
-    client: { from(table: string) {
+    operations,
+    client: { rpc: async (name: string, args: { p_sequence_id: string; p_property_id: string; p_canary_user_id: string }) => {
+      operations.push(name);
+      expect(args).toEqual({ p_sequence_id: "s", p_property_id: "p", p_canary_user_id: owner });
+      return { data: 1, error: failingTable === "lead_events" ? { message: "forced delete error" } : null };
+    }, from(table: string) {
       let deleting = false;
       const query = {
         select: () => query,
         eq: () => query,
         in: () => query,
         maybeSingle: async () => ({ data: rows[table]?.[0] ?? null, error: null }),
-        delete: () => { deleting = true; deletes.push(table); return query; },
+        delete: () => { deleting = true; deletes.push(table); operations.push(table); return query; },
         then(resolve: (value: unknown) => unknown) {
           return Promise.resolve(resolve(deleting
             ? { error: table === failingTable ? { message: "forced delete error" } : null }
@@ -34,10 +40,18 @@ function fakeClient(failingTable?: string) {
 }
 
 it("cascades step runs from enrollment and checks each delete", async () => {
-  const { client, deletes } = fakeClient();
+  const { client, deletes, operations } = fakeClient();
   await cleanupCanary(client, "s", owner);
-  expect(deletes).toEqual(["messages", "consent_events", "sequence_enrollments", "sequence_steps", "properties", "contacts", "sequences"]);
+  expect(deletes).toEqual(["messages", "consent_events", "sequence_enrollments", "sequence_steps", "tasks", "properties", "contacts", "sequences"]);
   expect(deletes).not.toContain("sequence_step_runs");
+  expect(operations.indexOf("tasks")).toBeLessThan(operations.indexOf("delete_sequence_canary_lead_events"));
+  expect(operations.indexOf("delete_sequence_canary_lead_events")).toBeLessThan(operations.indexOf("properties"));
+});
+
+it("stops before property deletion if lead event cleanup fails", async () => {
+  const { client, deletes } = fakeClient("lead_events");
+  await expect(cleanupCanary(client, "s", owner)).rejects.toThrow("Canary cleanup lead_events: forced delete error");
+  expect(deletes).not.toContain("properties");
 });
 
 it("turns a failed delete into a red canary", async () => {
