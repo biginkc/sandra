@@ -59,6 +59,10 @@ jobs:
 
       - name: Preflight E2E identity and arm browser-QA circuit breaker
         run: npx tsx scripts/e2e-identity-lifecycle.ts preflight
+      - name: Verify inbox drip snapshot migration on disposable database
+        env:
+          TEST_SUPABASE_DB_URL: ${{ env.E2E_CI_SUPABASE_DB_URL }}
+        run: npx vitest run --config vitest.integration.config.ts supabase/migrations/20260928120000_messages_drip_snapshot.integration.test.ts
       - name: Verify Chrome browser
         run: |
           google-chrome --version
