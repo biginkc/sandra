@@ -431,9 +431,9 @@ function createLocalSpool(maxBytes: number, maxMs: number): LocalSpool {
   return { maxBytes, maxMs, startedAt: Date.now(), formats: {}, webm: [], pcm: [], tails: [], bytes: 0, overflow: null };
 }
 
-function spoolBytes(spool: LocalSpool, bytes: number): boolean {
+function spoolBytes(spool: LocalSpool, bytes: number, enforceElapsedBound: boolean): boolean {
   if (spool.overflow) return false;
-  if (Date.now() - spool.startedAt > spool.maxMs || spool.bytes + bytes > spool.maxBytes) {
+  if ((enforceElapsedBound && Date.now() - spool.startedAt > spool.maxMs) || spool.bytes + bytes > spool.maxBytes) {
     spool.overflow = new BrowserCaptureError("buffer_overflow", "The pre-call recording buffer reached its bounded capacity.");
     return false;
   }
@@ -511,7 +511,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
       };
       const appendSpool = (bytes: number): boolean => {
         if (!spool) return false;
-        if (spoolBytes(spool, bytes)) return true;
+        if (spoolBytes(spool, bytes, spoolMode === "buffering")) return true;
         fail(spool.overflow ?? new BrowserCaptureError("buffer_overflow", "The pre-call recording buffer reached its bounded capacity."));
         return false;
       };
@@ -604,6 +604,10 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
           throw failed ?? new BrowserCaptureError("interrupted", "Capture is not available for authenticated attachment.");
         }
         captureEpoch = nextEpoch;
+        if (Date.now() - spool.startedAt > spool.maxMs) {
+          spool.overflow = new BrowserCaptureError("buffer_overflow", "The pre-call recording buffer expired before authenticated attachment.");
+          throw spool.overflow;
+        }
         spoolMode = "draining";
         pcmPrefixDraining = true;
         attachedSinks = nextSinks;

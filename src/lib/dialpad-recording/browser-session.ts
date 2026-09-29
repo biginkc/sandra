@@ -146,7 +146,6 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   let queuedBytes = 0;
   let sendQueue = Promise.resolve();
   let captureStartPromise: Promise<void> | null = null;
-  let captureAttachmentInProgress = false;
   let cleanupPromise: Promise<void> | null = null;
   let lifecycleGeneration = 0;
   let mediaAdmissionOpen = true;
@@ -407,7 +406,6 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         if ('attach' in options.capture && options.capture.attach) {
           activeCapture = options.capture;
           state = 'recording';
-          captureAttachmentInProgress = true;
           let timer: ReturnType<typeof setTimeout> | undefined;
           try {
             await Promise.race([
@@ -417,7 +415,6 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
               }),
             ]);
           } finally {
-            captureAttachmentInProgress = false;
             if (timer) clearTimeout(timer);
           }
           startedCapture = options.capture;
@@ -595,25 +592,26 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         return;
       }
       state = 'stopping';
-      let abortedCaptureStart = false;
+      let abortedCaptureStartup = false;
       try {
         const pendingCaptureStart = captureStartPromise;
-        if (pendingCaptureStart && captureAttachmentInProgress) {
-          // A prefix attachment can be waiting on a server receipt. Release
-          // those waits before disposing the capture so an explicit stop
-          // cannot deadlock behind its own authenticated sink.
-          abortedCaptureStart = true;
+        // Provider closure is graceful: stop acquisition first, then let an
+        // authenticated prefix finish its bounded receipt drain. Abortive
+        // disposal remains responsible for settling these waits immediately.
+        if (pendingCaptureStart && !activeCapture) {
+          // A prepared capture has not become an active resource yet. Fence
+          // the generation, release permission resources, and return without
+          // waiting on a startup promise that may never observe cancellation.
+          abortedCaptureStartup = true;
           mediaAdmissionOpen = false;
           lifecycleGeneration += 1;
-          const interrupted = new DialpadBrowserSessionError('interrupted', 'Recording session stopped during capture attachment.');
-          settlePendingChunkAcks(interrupted);
-          settlePendingPcmAcks(interrupted);
           await disposeCapture();
-          await pendingCaptureStart;
+        } else {
+          await activeCapture?.stop();
+          if (pendingCaptureStart) await pendingCaptureStart;
         }
-        await activeCapture?.stop();
         await sendQueue;
-        if (!failed && !disposed && !abortedCaptureStart) await finishControls();
+        if (!failed && !disposed && !abortedCaptureStartup) await finishControls();
         mediaAdmissionOpen = false;
         await disposeCapture();
         state = failed ? 'failed' : 'stopped';

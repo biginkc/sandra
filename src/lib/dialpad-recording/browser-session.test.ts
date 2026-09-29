@@ -343,6 +343,53 @@ describe('Dialpad browser session', () => {
     await prepared.dispose();
   });
 
+  it('gracefully drains an authenticated prefix when the provider closes mid-attachment', async () => {
+    const { active, callbacks, recorders, prepared } = await realLocalCapture();
+    for (let index = 0; index < 64; index += 1) {
+      await callbacks.tab?.(pcmFrame('tab', index));
+      await callbacks.mic?.(pcmFrame('mic', index));
+    }
+    recorders[0]!.emit(new Blob([new Uint8Array([1, 2, 3])]));
+    recorders[1]!.emit(new Blob([new Uint8Array([4, 5, 6])]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const socket = new FakeSocket();
+    const originalSend = socket.send.bind(socket);
+    const events: string[] = [];
+    let closingSent = false;
+    socket.send = (data) => {
+      originalSend(data);
+      if (data instanceof Uint8Array) {
+        const binary = decodeDialpadBrowserBinary(data);
+        if (binary.kind === 'recording') {
+          setTimeout(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })), 10);
+          if (!closingSent) {
+            closingSent = true;
+            setTimeout(() => socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(Date.now() + 1_000).toISOString() })), 0);
+          }
+        } else {
+          setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_frame_ack', epoch: 1, track: binary.track, seq: binary.sequence })), 10);
+        }
+        return;
+      }
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; track?: 'tab' | 'mic'; lastSeq?: number; endSample?: number };
+      events.push(`send:${message.type ?? 'unknown'}`);
+      if (message.type === 'recording_eof') setTimeout(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })), 10);
+      if (message.type === 'pcm_eof') setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })), 10);
+    };
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 500, attachmentTimeoutMs: 500, capture: active });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started.catch((error) => expect(error).toMatchObject({ code: 'interrupted' }));
+    await waitUntil(() => session.state() === 'stopped', 2_000);
+    expect(events).toContain('send:recording_eof');
+    expect(events).toContain('send:pcm_eof');
+    expect(session.state()).toBe('stopped');
+    await prepared.dispose();
+  });
+
   it('reserves PCM credits across waiter wakeups instead of admitting a competing frame into the slot', async () => {
     const socket = new FakeSocket();
     let sinksRef: BrowserCaptureSinks | null = null;
@@ -486,6 +533,32 @@ describe('Dialpad browser session', () => {
     expect(disposed).toBe(1);
     await session.dispose();
     expect(disposed).toBe(1);
+  });
+
+  it('fences a prepared capture that is still starting when the provider closes', async () => {
+    const socket = new FakeSocket();
+    let releaseStart!: (capture: ActiveDialpadCapture) => void;
+    let startCalls = 0;
+    let disposed = 0;
+    const capture: PreparedDialpadCapture = {
+      proof: { handle: 'h', origin: 'https://app.example.test' },
+      start: async () => {
+        startCalls += 1;
+        return new Promise<ActiveDialpadCapture>((resolve) => { releaseStart = resolve; });
+      },
+      dispose: async () => { disposed += 1; },
+    };
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, capture });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await waitUntil(() => startCalls === 1);
+    await session.stop();
+    await expect(started).rejects.toMatchObject({ code: 'interrupted' });
+    expect(session.state()).toBe('stopped');
+    expect(disposed).toBe(1);
+    releaseStart({ state: () => 'recording', stop: async () => undefined, dispose: async () => undefined });
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
   it('rejects untrusted endpoint shapes before opening a socket', () => {

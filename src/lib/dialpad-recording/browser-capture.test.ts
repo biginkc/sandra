@@ -449,6 +449,43 @@ describe("Dialpad capture preparation", () => {
     clock.mockRestore();
   });
 
+  it("ends the unauthenticated spool clock at attachment while retaining a bounded late prefix drain", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    let tabFrame: ((frame: PcmFrame) => void | Promise<void>) | null = null;
+    const recorders = [new FakeRecorder(), new FakeRecorder()];
+    let recorderIndex = 0;
+    const createPcmSession = vi.fn(async (_stream: MediaStream, track: "tab" | "mic", epoch: number, onFrame: (value: PcmFrame) => void | Promise<void>) => {
+      if (track === "tab") tabFrame = onFrame;
+      return { sourceSampleRateHz: 48_000, inputChannels: 1, stop: async () => ({ track, epoch, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 }) };
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" },
+      localSpoolMaxMs: 120_000,
+      runtime: runtime(mediaStream(new FakeTrack(), new FakeTrack()), new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => recorders[recorderIndex++]!, createPcmSession),
+    });
+    const active = await prepared.startLocal!(1);
+    const frame = (index: number): PcmFrame => ({ track: "tab", epoch: 1, frameIndex: index, samples: new Int16Array(PCM_FRAME_SAMPLES), bytes: new Uint8Array(PCM_FRAME_SAMPLES * 2) });
+    const emitTabFrame = tabFrame as unknown as (value: PcmFrame) => void | Promise<void>;
+    await emitTabFrame(frame(0));
+    recorders[0]!.emit(new Blob(["webm-prefix"]));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const seen: number[] = [];
+    clock.mockReturnValue(120_999);
+    const attach = active.attach!({ onTrackFormat: vi.fn(), onWebmChunk: async () => held, onPcmFrame: (value) => { seen.push(value.frameIndex); } }, 7);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    clock.mockReturnValue(121_500);
+    await emitTabFrame(frame(1));
+    release();
+    await attach;
+    expect(seen).toEqual([0, 1]);
+    expect(active.state()).toBe("recording");
+    await active.dispose();
+    await prepared.dispose();
+    clock.mockRestore();
+  });
+
   it("rejects wrong-tab and missing-tab-audio preparation", async () => {
     const wrongVideo = new FakeTrack("other-handle");
     await expect(prepareDialpadBrowserCapture({
