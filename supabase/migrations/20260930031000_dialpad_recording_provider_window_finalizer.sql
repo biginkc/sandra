@@ -25,6 +25,9 @@ create table public.dialpad_recording_provider_window_policies (
   supported_anchor_cadence_ms integer not null check (supported_anchor_cadence_ms > 0),
   supported_stall_max_ms integer not null check (supported_stall_max_ms >= 0),
   supported_drift_ppm numeric not null check (supported_drift_ppm >= 0),
+  supported_capture_margin_us numeric not null check (supported_capture_margin_us >= 0),
+  supported_provider_start_margin_us numeric not null check (supported_provider_start_margin_us >= 0),
+  supported_provider_end_margin_us numeric not null check (supported_provider_end_margin_us >= 0),
   evidence_digest text not null check (evidence_digest ~ '^[0-9a-f]{64}$'),
   evidence_refs jsonb not null check (jsonb_typeof(evidence_refs) = 'array' and jsonb_array_length(evidence_refs) between 1 and 32),
   acceptance_note text not null check (length(btrim(acceptance_note)) between 1 and 4000),
@@ -83,6 +86,9 @@ begin
     or new.supported_duration_max_seconds is distinct from old.supported_duration_max_seconds
     or new.supported_anchor_cadence_ms is distinct from old.supported_anchor_cadence_ms
     or new.supported_stall_max_ms is distinct from old.supported_stall_max_ms or new.supported_drift_ppm is distinct from old.supported_drift_ppm
+    or new.supported_capture_margin_us is distinct from old.supported_capture_margin_us
+    or new.supported_provider_start_margin_us is distinct from old.supported_provider_start_margin_us
+    or new.supported_provider_end_margin_us is distinct from old.supported_provider_end_margin_us
     or new.evidence_digest is distinct from old.evidence_digest or new.evidence_refs is distinct from old.evidence_refs
     or new.acceptance_note is distinct from old.acceptance_note
     or (old.accepted_at is not null and (new.accepted_at is distinct from old.accepted_at or new.accepted_by is distinct from old.accepted_by))
@@ -173,6 +179,7 @@ declare
   tab_final_context numeric;
   tab_start_output numeric;
   tab_final_output numeric;
+  tab_final_discarded numeric;
   tab_start_rate numeric;
   tab_final_rate numeric;
   tab_start_k numeric;
@@ -189,12 +196,19 @@ declare
   exchange_server_send_wall numeric;
   context_browser_lower numeric;
   context_browser_upper numeric;
+  context_offset_lower numeric;
+  context_offset_upper numeric;
   exchange_browser_lower numeric;
   exchange_browser_upper numeric;
   exchange_offset_lower numeric;
   exchange_offset_upper numeric;
   source_rate numeric;
   expected_final_output numeric;
+  mapping_domain_span_ms numeric;
+  mapping_drift_margin_ms numeric;
+  mapping_capture_margin_ms numeric;
+  provider_start_margin_us numeric;
+  provider_end_margin_us numeric;
   timing_digest text;
   digest text;
   r record;
@@ -238,6 +252,9 @@ begin
       'supportedDurationMaxSeconds', p.supported_duration_max_seconds,
       'supportedAnchorCadenceMs', p.supported_anchor_cadence_ms,
       'supportedStallMaxMs', p.supported_stall_max_ms, 'supportedDriftPpm', p.supported_drift_ppm,
+      'supportedCaptureMarginUs', p.supported_capture_margin_us,
+      'supportedProviderStartMarginUs', p.supported_provider_start_margin_us,
+      'supportedProviderEndMarginUs', p.supported_provider_end_margin_us,
       'evidenceDigest', p.evidence_digest, 'evidenceRefs', p.evidence_refs
     );
   end if;
@@ -369,12 +386,17 @@ begin
     if timing_max_stall > p.supported_stall_max_ms or timing_max_anchor_gap > p.supported_anchor_cadence_ms then
       reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_scope_unsupported');
     end if;
-    select coalesce(max(abs((context_delta - browser_delta) / nullif(browser_delta,0) * 1000000)),0)
+    select coalesce(max(case
+      when context_delta between browser_delta_lower and browser_delta_upper then 0
+      else least(abs(context_delta - browser_delta_lower), abs(context_delta - browser_delta_upper))
+        / nullif(context_delta,0) * 1000000
+    end),0)
       into timing_max_drift_ppm
       from (
         select stream,
                max((record->>'contextTimeMs')::numeric) - min((record->>'contextTimeMs')::numeric) as context_delta,
-               max((record->>'browserAfterMs')::numeric) - min((record->>'browserBeforeMs')::numeric) as browser_delta
+               max((record->>'browserBeforeMs')::numeric) - min((record->>'browserAfterMs')::numeric) as browser_delta_lower,
+               max((record->>'browserAfterMs')::numeric) - min((record->>'browserBeforeMs')::numeric) as browser_delta_upper
           from public.dialpad_recording_timing_records
          where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream in ('tab:context','mic:context')
          group by stream
@@ -390,7 +412,7 @@ begin
         from public.dialpad_recording_timing_records a
         join public.dialpad_recording_pcm_progress pcm on pcm.capture_id=a.capture_id and pcm.org_id=a.org_id and pcm.epoch=a.epoch and pcm.track=(a.record->>'track')
        where a.capture_id=p_capture_id and a.org_id=p_org_id and a.epoch=selected_epoch and a.stream in ('tab:anchor','mic:anchor') and a.record->>'anchor'='final'
-         and (a.record->>'outputCursor')::numeric <> pcm.pcm_eof_sample
+         and ((a.record->>'outputCursor')::numeric - coalesce((a.record->>'discardedTailSamples')::numeric, 0)) <> pcm.pcm_eof_sample
     ) then
       timing_output_mismatch := true;
       reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_output_tail_mismatch');
@@ -409,8 +431,9 @@ begin
      where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='tab:anchor' and record->>'anchor'='start'
      order by seq limit 1;
     select (record->>'sourceCursor')::numeric, (record->>'contextFrame')::numeric,
-           (record->>'outputCursor')::numeric, (record->>'sourceRateHz')::numeric
-      into tab_final_source, tab_final_context, tab_final_output, tab_final_rate
+           (record->>'outputCursor')::numeric, (record->>'sourceRateHz')::numeric,
+           (record->>'discardedTailSamples')::numeric
+      into tab_final_source, tab_final_context, tab_final_output, tab_final_rate, tab_final_discarded
       from public.dialpad_recording_timing_records
      where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='tab:anchor' and record->>'anchor'='final'
      order by seq desc limit 1;
@@ -434,27 +457,37 @@ begin
     tab_final_k := tab_final_context - tab_final_source;
     source_rate := tab_start_rate;
     expected_final_output := floor(tab_final_source * 16000 / nullif(tab_final_rate, 0));
-    context_browser_lower := greatest(
-      tab_start_browser_before - (1000 * tab_start_k / nullif(source_rate, 0) + tab_start_output / 16),
-      tab_final_browser_before - (1000 * tab_final_k / nullif(source_rate, 0) + tab_final_output / 16)
-    );
-    context_browser_upper := least(
-      tab_start_browser_after - (1000 * tab_start_k / nullif(source_rate, 0) + tab_start_output / 16),
-      tab_final_browser_after - (1000 * tab_final_k / nullif(source_rate, 0) + tab_final_output / 16)
-    );
+    mapping_domain_span_ms := (p.domain_end_sample - p.domain_start_sample)::numeric / 16;
+    mapping_drift_margin_ms := mapping_domain_span_ms * p.supported_drift_ppm / 1000000;
+    mapping_capture_margin_ms := p.supported_capture_margin_us / 1000;
+    -- Context observations are independent currentTime reads. Their own
+    -- before/after brackets constrain browser-minus-context; they need not
+    -- coincide with an anchor boundary. Expand each interval over the
+    -- supported finite domain before intersecting the observations.
+    select min((record->>'browserBeforeMs')::numeric - (record->>'contextTimeMs')::numeric),
+           max((record->>'browserAfterMs')::numeric - (record->>'contextTimeMs')::numeric)
+      into context_offset_lower, context_offset_upper
+      from public.dialpad_recording_timing_records
+     where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='tab:context';
+    context_browser_lower := context_offset_lower - mapping_drift_margin_ms - mapping_capture_margin_ms;
+    context_browser_upper := context_offset_upper + mapping_drift_margin_ms + mapping_capture_margin_ms;
     -- [serverReceive - browserReceive, serverSend - browserSend] is a
     -- conservative causal bracket; no RTT midpoint is treated as truth.
-    select max((record->>'serverReceiveWallMs')::numeric - (record->>'browserReceiveMs')::numeric),
-           min((record->>'serverSendWallMs')::numeric - (record->>'browserSendMs')::numeric)
+    select max((record->>'serverSendWallMs')::numeric - (record->>'browserReceiveMs')::numeric),
+           min((record->>'serverReceiveWallMs')::numeric - (record->>'browserSendMs')::numeric)
       into exchange_offset_lower, exchange_offset_upper
       from public.dialpad_recording_timing_records
      where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange';
-    exchange_browser_lower := exchange_offset_lower;
-    exchange_browser_upper := exchange_offset_upper;
-    mapping_lower_slope_us := 1000000 / 16000;
-    mapping_upper_slope_us := 1000000 / 16000;
-    mapping_lower_intercept_us := (context_browser_lower + exchange_browser_lower) * 1000;
-    mapping_upper_intercept_us := (context_browser_upper + exchange_browser_upper) * 1000;
+    exchange_browser_lower := exchange_offset_lower - mapping_drift_margin_ms - mapping_capture_margin_ms;
+    exchange_browser_upper := exchange_offset_upper + mapping_drift_margin_ms + mapping_capture_margin_ms;
+    mapping_lower_slope_us := 1000000.0 / 16000.0;
+    mapping_upper_slope_us := 1000000.0 / 16000.0;
+    -- Add K/R exactly once: contextTime is already the independently
+    -- measured clock value, while q/16 is the output-domain coordinate.
+    mapping_lower_intercept_us := (1000 * tab_start_k / nullif(source_rate, 0) + context_browser_lower + exchange_browser_lower) * 1000;
+    mapping_upper_intercept_us := (1000 * tab_start_k / nullif(source_rate, 0) + context_browser_upper + exchange_browser_upper) * 1000;
+    provider_start_margin_us := p.supported_provider_start_margin_us;
+    provider_end_margin_us := p.supported_provider_end_margin_us;
     mapping_support := p.policy_version is not null
       and tab_start_source is not null and tab_final_source is not null
       and tab_start_context is not null and tab_final_context is not null
@@ -467,14 +500,72 @@ begin
       and exchange_server_send_wall >= exchange_server_receive_wall
       and context_browser_lower <= context_browser_upper
       and exchange_browser_lower <= exchange_browser_upper
-      and tab_start_context_time = 1000 * tab_start_k / nullif(source_rate, 0) + tab_start_output / 16
-      and tab_final_context_time = 1000 * tab_final_k / nullif(source_rate, 0) + tab_final_output / 16
       and tab_final_output = expected_final_output
+      and tab_final_discarded >= 0
+      and tab_final_output - tab_final_discarded = tab_eof
+      and tab_start_browser_before <= tab_start_browser_after
+      and tab_final_browser_before <= tab_final_browser_after
+      and context_offset_lower <= context_offset_upper
+      and not exists (
+        select 1
+          from public.dialpad_recording_timing_records clock
+         where clock.capture_id=p_capture_id and clock.org_id=p_org_id and clock.epoch=selected_epoch
+           and clock.stream in ('tab:context','mic:context')
+           and ((clock.record->>'browserBeforeMs')::numeric > (clock.record->>'browserAfterMs')::numeric
+             or (clock.record->>'contextTimeMs')::numeric is null
+             or (clock.record->>'browserTimeOriginMs')::numeric is null)
+      )
+      and not exists (
+        select 1
+          from public.dialpad_recording_timing_records cur
+          join public.dialpad_recording_timing_records prev
+            on prev.capture_id=cur.capture_id and prev.org_id=cur.org_id and prev.epoch=cur.epoch
+           and prev.stream=cur.stream and prev.seq=cur.seq-1
+         where cur.capture_id=p_capture_id and cur.org_id=p_org_id and cur.epoch=selected_epoch
+           and cur.stream in ('tab:context','mic:context')
+           and (
+             (cur.record->>'browserBeforeMs')::numeric - (cur.record->>'contextTimeMs')::numeric
+               > (prev.record->>'browserAfterMs')::numeric - (prev.record->>'contextTimeMs')::numeric
+                 + mapping_drift_margin_ms + mapping_capture_margin_ms
+             or
+             (prev.record->>'browserBeforeMs')::numeric - (prev.record->>'contextTimeMs')::numeric
+               > (cur.record->>'browserAfterMs')::numeric - (cur.record->>'contextTimeMs')::numeric
+                 + mapping_drift_margin_ms + mapping_capture_margin_ms
+           )
+      )
+      and not exists (
+        select 1
+          from public.dialpad_recording_timing_records cur
+          join public.dialpad_recording_timing_records prev
+            on prev.capture_id=cur.capture_id and prev.org_id=cur.org_id and prev.epoch=cur.epoch
+           and prev.stream=cur.stream and prev.seq=cur.seq-1
+         where cur.capture_id=p_capture_id and cur.org_id=p_org_id and cur.epoch=selected_epoch
+           and cur.stream='exchange'
+           and abs(
+             ((cur.record->>'serverReceiveWallMs')::numeric - (cur.record->>'browserSendMs')::numeric)
+             - ((prev.record->>'serverSendWallMs')::numeric - (prev.record->>'browserReceiveMs')::numeric)
+           ) > 2 * (mapping_drift_margin_ms + mapping_capture_margin_ms)
+      )
+      and not exists (
+        select 1
+          from public.dialpad_recording_timing_records clock
+         where clock.capture_id=p_capture_id and clock.org_id=p_org_id and clock.epoch=selected_epoch
+           and clock.stream='tab:context'
+         group by clock.stream
+        having count(distinct clock.record->>'browserTimeOriginMs') <> 1
+      )
       and not exists (
         select 1 from public.dialpad_recording_timing_records a
          where a.capture_id=p_capture_id and a.org_id=p_org_id and a.epoch=selected_epoch
            and a.stream in ('tab:anchor','mic:anchor')
-           and ((a.record->>'contextFrame')::numeric - (a.record->>'sourceCursor')::numeric) <> tab_start_k
+           and exists (
+             select 1
+               from public.dialpad_recording_timing_records other
+              where other.capture_id=a.capture_id and other.org_id=a.org_id and other.epoch=a.epoch
+                and other.stream=a.stream
+                and ((other.record->>'contextFrame')::numeric - (other.record->>'sourceCursor')::numeric)
+                    <> ((a.record->>'contextFrame')::numeric - (a.record->>'sourceCursor')::numeric)
+           )
       )
       and not exists (
         select 1 from public.dialpad_recording_timing_records x
@@ -488,8 +579,8 @@ begin
   end if;
 
   if p.accepted_at is not null and p.revoked_at is null and selected_epoch is not null and connected_count=1 and ended_count=1 and provider_count=1 and connected_us is not null and ended_us is not null and ended_us >= connected_us and tab_eof > 0 and epoch_count=1 and timing_support then
-    lower_sample := greatest(0::bigint, p.domain_start_sample, ceil((connected_us::numeric - mapping_lower_intercept_us) / mapping_lower_slope_us)::bigint);
-    upper_sample := least(tab_eof, p.domain_end_sample, floor((ended_us::numeric - mapping_upper_intercept_us) / mapping_upper_slope_us)::bigint);
+    lower_sample := greatest(0::bigint, p.domain_start_sample, ceil((connected_us + provider_start_margin_us - mapping_lower_intercept_us) / mapping_lower_slope_us)::bigint);
+    upper_sample := least(tab_eof, p.domain_end_sample, floor((ended_us - provider_end_margin_us - mapping_upper_intercept_us) / mapping_upper_slope_us)::bigint);
     if upper_sample < lower_sample then upper_sample := lower_sample; end if;
     select coalesce(sum(greatest(0::bigint, least(upper_sample, upper(u.r)::bigint)-greatest(lower_sample, lower(u.r)::bigint))),0)::bigint into clipped
       from (select unnest(range_agg(int8range(start_sample,end_sample,'[)'))) r
@@ -732,12 +823,24 @@ begin
   select count(*) into v_offers from public.acquisition_offers where org_id=p_org_id and actor_user_id=p_member_id and sent_at>=p_start and sent_at<p_end;
   with queue as materialized (select * from public.my_leads_queue_rows(p_org_id,p_member_id,v_at)) select count(*) filter(where q.stage='needs_offer'),count(*) filter(where q.stage='contacted' and not exists(select 1 from public.tasks t where t.org_id=p_org_id and t.related_property_id=q.property_id and t.type='appointment' and t.status in ('open','snoozed') and greatest(t.due_at,case when t.status='snoozed' then t.snoozed_until end)>v_at)),array_agg(q.property_id),count(*) filter(where q.warning_rank>0) into v_needs_offer,v_contact,v_properties,v_stale from queue q;
   select count(*) into v_overdue from public.tasks t where t.org_id=p_org_id and t.assignee_id=p_member_id and t.related_property_id is not null and t.type='appointment' and t.status in ('open','snoozed') and t.due_at<=v_at and t.related_property_id=any(v_properties);
-  with eligible_dialpad as materialized (
+  with candidate_calls as materialized (
+    select distinct a.org_id, a.call_activity_id
+      from public.acquisition_attempts a
+      join public.call_activities c
+        on c.id=a.call_activity_id and c.org_id=a.org_id and c.property_id=a.property_id
+      join public.properties candidate_property
+        on candidate_property.id=c.property_id and candidate_property.org_id=c.org_id
+     where a.org_id=p_org_id and a.actor_user_id=p_member_id and a.attempt_kind='call'
+       and a.outcome='reached' and a.occurred_at>=p_start and a.occurred_at<p_end
+       and c.provider='dialpad'
+  ), eligible_dialpad as materialized (
     select r.org_id, r.call_activity_id
-      from public.dialpad_recording_provider_window_results r
+      from candidate_calls cc
+      join public.dialpad_recording_provider_window_results r
+        on r.org_id=cc.org_id and r.call_activity_id=cc.call_activity_id
       join public.dialpad_recording_provider_window_policies p
         on p.org_id=r.org_id and p.policy_version=r.policy_version
-     where r.org_id=p_org_id and r.status='eligible' and r.eligible_samples>4800000
+     where r.status='eligible' and r.eligible_samples>4800000
        and p.accepted_at is not null and p.revoked_at is null and r.policy_hash=p.policy_hash
        and r.input_digest=(public.dialpad_recording_provider_window_input(r.org_id,r.capture_id,r.policy_version)->>'inputDigest')
   )

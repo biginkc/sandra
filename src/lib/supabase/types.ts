@@ -148,7 +148,7 @@ export type Database = {
       }
 
       dialpad_recording_provider_window_policies: {
-        Row: { org_id: string; policy_version: string; algorithm_version: string; policy_hash: string; mapping_method: string; time_unit: string; sample_rate_hz: number; domain_start_sample: number; domain_end_sample: number; lower_slope_us_per_sample: number; lower_intercept_us: number; upper_slope_us_per_sample: number; upper_intercept_us: number; classification_overcount_samples: number; supported_duration_max_seconds: number; supported_anchor_cadence_ms: number; supported_stall_max_ms: number; supported_drift_ppm: number; evidence_digest: string; evidence_refs: Json; acceptance_note: string; accepted_at: string | null; accepted_by: string | null; revoked_at: string | null; created_at: string }
+        Row: { org_id: string; policy_version: string; algorithm_version: string; policy_hash: string; mapping_method: string; time_unit: string; sample_rate_hz: number; domain_start_sample: number; domain_end_sample: number; lower_slope_us_per_sample: number; lower_intercept_us: number; upper_slope_us_per_sample: number; upper_intercept_us: number; classification_overcount_samples: number; supported_duration_max_seconds: number; supported_anchor_cadence_ms: number; supported_stall_max_ms: number; supported_drift_ppm: number; supported_capture_margin_us: number; supported_provider_start_margin_us: number; supported_provider_end_margin_us: number; evidence_digest: string; evidence_refs: Json; acceptance_note: string; accepted_at: string | null; accepted_by: string | null; revoked_at: string | null; created_at: string }
         Insert: Record<string, never>
         Update: Record<string, never>
         Relationships: []
