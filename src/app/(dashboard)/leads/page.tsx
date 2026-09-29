@@ -267,7 +267,7 @@ function describeFilter(
   if (params.status === "hot")
     return { label: "Hot leads", note: "interested + offer sent" };
   if (params.no_active_sequence === "true")
-    return { label: "Not in a sequence" };
+    return { label: "Not in a drip" };
   if (params.skip_traced === "false")
     return { label: "Not skip-traced", note: "no phone numbers gathered yet" };
   if (params.skip_traced === "true") return { label: "Skip-traced" };

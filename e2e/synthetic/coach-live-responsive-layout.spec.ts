@@ -77,6 +77,7 @@ for (const viewport of [
     await expect(page.getByTestId("current-section-title")).toHaveText("Open the call");
     await expect(page.getByTestId("next-section-preview")).toContainText("Set the qualification frame");
     await expect(page.getByTestId("coach-recommendations")).toBeVisible();
+    await expect(page.getByTestId("coach-objection-prompt-label")).toHaveText("Price concern");
     await expect(page.getByTestId("coach-call-dock-row")).toBeVisible();
 
     const transcript = await page.getByLabel("Live transcript").boundingBox();

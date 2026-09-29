@@ -196,7 +196,7 @@ const errorMessages: Record<LaunchErrorCode, string> = {
   DNC_LOCKED: "A launch target is protected by its do-not-call lock.",
   INVALID_INPUT: "Review the launch inputs and try again.",
   IDEMPOTENCY_CONFLICT: "That launch request ID was already used for different data.",
-  RECIPIENT_UNAVAILABLE: "The configured sequence recipient is unavailable.",
+  RECIPIENT_UNAVAILABLE: "The configured drip recipient is unavailable.",
   PENDING_OFFER_EXISTS: "A launch target already has a pending offer.",
   PROVIDER_EVIDENCE_PENDING: "Call evidence is still being recorded.",
   LAUNCH_INVALIDATED: "The preview is stale. Refresh it before applying the launch.",

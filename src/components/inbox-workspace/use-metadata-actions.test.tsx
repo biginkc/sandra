@@ -121,7 +121,7 @@ it("reviews canonical assignee choice and both ordered changes before acceptance
 it("discloses authoritative linked-property and sequence impact before applying", async () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => Response.json({ ...prepared(JSON.parse(String(init?.body))), smsSafetySummary: { contacts: 1, linkedProperties: 2, activeEnrollments: 1 } })));
     render(<Harness />); fireEvent.click(screen.getByRole("button", { name: "Bad number" }));
-    expect(await screen.findByRole("note")).toHaveTextContent("1 contacts across 2 linked properties and 1 active sequence enrollments");
+    expect(await screen.findByRole("note")).toHaveTextContent("1 contacts across 2 linked properties and 1 active drip enrollments");
     expect(screen.getByRole("note")).toHaveTextContent("Linked properties can extend beyond the selected conversations");
 });
 it("assigns without forcing an outcome and reviews the canonical assignee", async () => {

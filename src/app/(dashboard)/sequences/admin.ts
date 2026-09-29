@@ -20,7 +20,7 @@ export async function requireSequenceAdmin(): Promise<
     ok: false,
     error: {
       code: "FORBIDDEN",
-      message: "Only admins can create or edit sequences.",
+      message: "Only admins can create or edit drips.",
     },
   };
 }

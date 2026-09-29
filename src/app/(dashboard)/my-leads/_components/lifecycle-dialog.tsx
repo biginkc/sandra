@@ -53,12 +53,12 @@ const COPY: Record<AcquisitionLifecycleMode, { title: string; description: strin
   },
   "decline-offer": {
     title: "Record offer declined",
-    description: "Record the declined offer, apply Needs sequence, and reassign the lead. Nothing is enrolled or scheduled automatically.",
+    description: "Record the declined offer, apply Needs drip, and reassign the lead. Nothing is enrolled or scheduled automatically.",
     submitLabel: "Record decline",
   },
   handoff: {
     title: "Hand off lead",
-    description: "Move this lead out of the active queue with an explicit Needs sequence decision.",
+    description: "Move this lead out of the active queue with an explicit Needs drip decision.",
     submitLabel: "Hand off lead",
   },
   archive: {

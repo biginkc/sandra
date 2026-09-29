@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { errFromUnknown, ok, type Result } from "@/lib/errors/result";
 import { reportError } from "@/lib/errors/report";
+import { LEAD_EVENT_TYPES, recordLeadEvent } from "@/lib/events";
 import {
   enrollLead,
   resumeEnrollment,
@@ -75,14 +76,14 @@ export async function listSequenceNeedsPerson(): Promise<Result<NeedsPersonRow[]
     const orgId = await activeOrgId(supabase, user.id);
     if (!orgId) return ok([]);
     const { data, error } = await supabase.rpc("sequence_needs_person", { p_org: orgId });
-    if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Sequence stats are being prepared." : error.message } };
+    if (error) return { ok: false, error: { code: "SEQ_STATS_UNAVAILABLE", message: error.code === "PGRST202" ? "Drip stats are being prepared." : error.message } };
     return ok((data ?? []).filter((row) =>
       !process.env.SEQUENCE_CANARY_USER_ID || row.sequence_created_by !== process.env.SEQUENCE_CANARY_USER_ID)
       .map((row) => ({
         property_id: row.property_id,
         sequence_id: row.sequence_id,
         bucket: row.bucket as NeedsPersonRow["bucket"],
-        reason: row.bucket === "needs_sequence" ? "Needs a sequence" :
+        reason: row.bucket === "needs_sequence" ? "Needs a drip" :
           DRIP_BUCKET_LABELS[row.bucket as "finished_no_reply" | "couldnt_send"],
       })));
   } catch (error) {
@@ -335,7 +336,7 @@ export async function createSequence(input: {
           ok: false,
           error: {
             code: "DUPLICATE_NAME",
-            message: `A sequence named "${name}" already exists.`,
+            message: `A drip named "${name}" already exists.`,
           },
         };
       }
@@ -563,7 +564,7 @@ export async function deleteSequenceStep(
         error: {
           code: "STEP_DELETE_HAS_HISTORY",
           message:
-            "This step has execution history and cannot be deleted. Archive the sequence or create a replacement step.",
+            "This step has execution history and cannot be deleted. Archive the drip or create a replacement step.",
         },
       };
     }
@@ -579,7 +580,7 @@ export async function deleteSequenceStep(
           error: {
             code: "STEP_DELETE_HAS_HISTORY",
             message:
-              "This step has execution history and cannot be deleted. Archive the sequence or create a replacement step.",
+              "This step has execution history and cannot be deleted. Archive the drip or create a replacement step.",
           },
         };
       }
@@ -706,6 +707,63 @@ export async function cancelEnrollment(
   }
 }
 
+export async function pauseEnrollmentAction(enrollmentId: string): Promise<Result<null>> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+    const { data, error } = await supabase.from("sequence_enrollments")
+      .update({ status: "paused", pause_reason: "manual", updated_at: new Date().toISOString() })
+      .eq("id", enrollmentId).eq("status", "active")
+      .select("property_id, sequence_id");
+    if (error) return { ok: false, error: { code: "PAUSE_FAILED", message: error.message } };
+    if (!data?.length) return { ok: false, error: { code: "NOT_ACTIVE", message: "Enrollment is no longer active." } };
+    await recordLeadEvent({ propertyId: data[0].property_id, actorType: "user", actorId: user.id,
+      eventType: LEAD_EVENT_TYPES.SEQUENCE_PAUSED,
+      payload: { enrollment_id: enrollmentId, sequence_id: data[0].sequence_id, reason: "manual" } });
+    revalidatePath(`/leads/${data[0].property_id}`);
+    revalidatePath("/sequences");
+    return ok(null);
+  } catch (e) {
+    reportError(e, { tags: { surface: "pause_enrollment" }, extra: { enrollmentId } });
+    return errFromUnknown(e, "PAUSE_FAILED");
+  }
+}
+
+/** Stop the old enrollment before invoking the normal guarded enrollment path. */
+export async function changeDripAction(enrollmentId: string, sequenceId: string): Promise<Result<DripResult>> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: { code: "UNAUTHENTICATED", message: "Not signed in" } };
+    const { data: old, error: loadError } = await supabase.from("sequence_enrollments")
+      .select("property_id, sequence_id, status").eq("id", enrollmentId).maybeSingle();
+    if (loadError) return { ok: false, error: { code: "CHANGE_FAILED", message: loadError.message } };
+    if (!old || !["active", "paused"].includes(old.status)) return { ok: false, error: { code: "NOT_ACTIVE", message: "Enrollment is no longer active." } };
+    if (old.sequence_id === sequenceId) return { ok: false, error: { code: "SAME_DRIP", message: "Choose a different drip." } };
+    const { data: canceled, error: cancelError } = await supabase.rpc("cancel_sequence_enrollment", {
+      p_enrollment_id: enrollmentId, p_actor_user_id: user.id,
+    });
+    if (cancelError || canceled?.[0]?.outcome !== "canceled") return { ok: false, error: { code: "CANCEL_FAILED", message: cancelError?.message ?? "Enrollment could not be canceled." } };
+    let result: DripResult;
+    try {
+      const outcome = await enrollLead(supabase, { propertyId: old.property_id, sequenceId, enrolledByUserId: user.id });
+      result = { propertyId: old.property_id,
+        status: outcome.status === "enrolled" ? "enrolled" : ["duplicate_active", "no_phone", "landline_phone", "no_consent", "suppressed"].includes(outcome.status) ? "skipped" : "failed",
+        reason: outcome.status === "enrolled" ? enrollmentReason(outcome) : `Previous drip stopped. ${enrollmentReason(outcome)}` };
+    } catch (error) {
+      reportError(error, { tags: { surface: "change_drip_enroll" }, extra: { enrollmentId, sequenceId } });
+      result = { propertyId: old.property_id, status: "failed", reason: "Previous drip stopped. Could not enroll this lead." };
+    }
+    revalidatePath(`/leads/${old.property_id}`);
+    revalidatePath("/sequences");
+    return ok(result);
+  } catch (e) {
+    reportError(e, { tags: { surface: "change_drip" }, extra: { enrollmentId, sequenceId } });
+    return errFromUnknown(e, "CHANGE_FAILED");
+  }
+}
+
 export async function resumeEnrollmentAction(
   enrollmentId: string,
 ): Promise<Result<null>> {
@@ -806,7 +864,7 @@ export async function getImpactAction(
 
 /**
  * Listed sequences for a given property's lead detail page — the drip
- * chip + "Sequences" panel need both names and enrollment states.
+ * chip + "Drips" panel need both names and enrollment states.
  */
 export async function listPropertyEnrollments(propertyId: string): Promise<
   Result<

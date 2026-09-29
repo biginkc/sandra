@@ -188,7 +188,7 @@ export function useCoachChannel(
     if (!result.ok) {
       if (result.reason === "malformed") {
         setMalformedEventCount((value) => value + 1);
-        console.warn("[coach] dropped malformed event", result.rawType, payload);
+        console.warn("[coach] dropped malformed event", result.rawType);
       }
       // Only a VALIDATED event counts as liveness proof — armLiveness
       // /setDegraded(false) run below, never here. Malformed traffic

@@ -275,7 +275,7 @@ describe("<ProspectsTable />", () => {
     renderTable(rows);
 
     expect(screen.getByText("Follow up")).toBeInTheDocument();
-    expect(screen.getByText("Needs sequence")).toBeInTheDocument();
+    expect(screen.getByText("Needs drip")).toBeInTheDocument();
     expect(screen.queryByText("Nurture")).not.toBeInTheDocument();
   });
 

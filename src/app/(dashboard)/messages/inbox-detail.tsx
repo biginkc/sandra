@@ -70,7 +70,7 @@ const DISPO_LABELS: Record<string, string> = {
   wrong_number: "Wrong #",
   bad_number: "Bad / disconnected #",
   not_interested: "Not interested",
-  needs_sequence: "Needs sequence",
+  needs_sequence: "Needs drip",
   opted_out: "SMS opted out",
   dnc: "Do not call",
   nurture: "Follow up",
@@ -238,7 +238,7 @@ function DispoBar({
       </button>
 
       <div data-testid="dispo-needs-sequence">
-        <StartDripPicker triggerLabel="Needs sequence" onChoose={chooseDrip} onLeave={leaveToOwner} disabled={pending} />
+        <StartDripPicker triggerLabel="Needs drip" onChoose={chooseDrip} onLeave={leaveToOwner} disabled={pending} />
       </div>
 
       <button

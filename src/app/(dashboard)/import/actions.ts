@@ -292,7 +292,7 @@ export async function createImportJob(
         error: {
           code: "SEQUENCE_REQUIRES_CONSENT",
           message:
-            "Sequence enrollment requires the written SMS consent attestation.",
+            "Drip enrollment requires the written SMS consent attestation.",
         },
       };
     }
@@ -337,7 +337,7 @@ export async function createImportJob(
           error: {
             code: "INVALID_SEQUENCE",
             message:
-              "Choose an active sequence from the selected organization.",
+              "Choose an active drip from the selected organization.",
           },
         };
       }
@@ -1334,7 +1334,7 @@ export async function retryCsvImportJob(
       if (sequenceError || !sequence) {
         throw (
           sequenceError ??
-          new Error("Import sequence is no longer active in this organization")
+          new Error("Import drip is no longer active in this organization")
         );
       }
     }

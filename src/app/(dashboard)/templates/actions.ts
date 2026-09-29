@@ -295,7 +295,7 @@ export async function deleteTemplate(
         ok: false,
         error: {
           code: "TPL_IN_USE",
-          message: `Used by ${refCount} sequence step${
+          message: `Used by ${refCount} drip step${
             refCount === 1 ? "" : "s"
           }. Detach the template from those steps before deleting.`,
         },

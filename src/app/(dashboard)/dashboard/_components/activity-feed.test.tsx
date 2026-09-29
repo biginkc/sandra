@@ -48,7 +48,7 @@ describe("<ActivityFeed />", () => {
       "href",
       "/leads/lead-1",
     );
-    expect(screen.getByText(/Sequence completed/)).toBeVisible();
+    expect(screen.getByText(/Drip completed/)).toBeVisible();
     expect(
       screen.queryByText(/Sensitive seller message|Sensitive contact-only message/),
     ).not.toBeInTheDocument();
