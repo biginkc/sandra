@@ -184,7 +184,7 @@ env -u GITHUB_ACTIONS -u CATALOG_FINGERPRINT_SCRATCH python3 scripts/inbox-ci/ru
 python3 "$ASSERT" offline-suite "$WORK/production-install-unit.txt"
 # Live catalog mutation tests require their own blank postgres:17 database:
 # Supabase already owns supabase_migrations.schema_migrations.
-docker --host "$DOCKER_SOCKET" run -d --name "$CATALOG_CONTAINER" -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 public.ecr.aws/docker/library/postgres:17 > /dev/null
+docker --host "$DOCKER_SOCKET" run -d --name "$CATALOG_CONTAINER" -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17 > /dev/null
 CATALOG_PORT=$(docker --host "$DOCKER_SOCKET" inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$CATALOG_CONTAINER")
 for _ in {1..30}; do
   if docker --host "$DOCKER_SOCKET" exec "$CATALOG_CONTAINER" pg_isready -U postgres -d postgres >/dev/null 2>&1; then break; fi
