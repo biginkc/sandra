@@ -1,16 +1,47 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
 import { readonlyGet, comparePlatform } from './outbox-db-contract/platform.mjs';
 import { assertTarget } from './outbox-db-contract-readonly.mjs';
 
 const row = (id, body='a') => ({ id, body, status:'queued', updated_at:'2026-01-01', from_address:'x', to_address:'y', created_at:'2026-01-01', scheduled_for:null, property_id:null, contact_id:null });
 function fails(label, fn, pattern) { assert.throws(fn, pattern, label); }
-test('NC-T5, NC-A5 target boundary', () => {
+const TEST_REF='ncsngxlcyxylaeskiteu';
+const PROD_REF='copflsklaefwzipsrjqz';
+const hosted=ref=>`postgres://postgres.${ref}:unused@aws-0-us-east-1.pooler.supabase.com:5432/postgres`;
+const api=ref=>`https://${ref}.supabase.co`;
+test('NC-T5a, NC-A5 target boundary', () => {
   fails('shared loopback', () => assertTarget('shared-readonly','postgres://postgres@127.0.0.1:55422/test'), /TARGET_REFUSED/);
   fails('disposable hosted', () => assertTarget('disposable-readonly','postgres://postgres@db.example.supabase.co/test'), /TARGET_REFUSED/);
-  fails('prod ref', () => assertTarget('shared-readonly','postgres://postgres@copflsklaefwzipsrjqz.example/test'), /TARGET_REFUSED/);
+  for (const target of ['disposable','disposable-readonly','shared-readonly']) fails(`${target} prod ref`, () => assertTarget(target, hosted(PROD_REF), {apiUrl:api(PROD_REF)}), /TARGET_REFUSED/);
+  assert.doesNotThrow(()=>assertTarget('shared-readonly',hosted(TEST_REF),{apiUrl:api(TEST_REF)}));
+});
+test('NC-T5b Production binding and acknowledgement', () => {
+  for (const dsn of [hosted(TEST_REF),'postgres://postgres@127.0.0.1:55422/postgres']) fails('wrong database',()=>assertTarget('production',dsn,{apiUrl:api(PROD_REF),ack:PROD_REF}),/TARGET_REFUSED/);
+  for (const ack of [undefined,'wrong']) fails('ack',()=>assertTarget('production',hosted(PROD_REF),{apiUrl:api(PROD_REF),ack}),/TARGET_REFUSED/);
+  fails('wrong api',()=>assertTarget('production',hosted(PROD_REF),{apiUrl:api(TEST_REF),ack:PROD_REF}),/TARGET_REFUSED/);
+  assert.doesNotThrow(()=>assertTarget('production',hosted(PROD_REF),{apiUrl:api(PROD_REF),ack:PROD_REF}));
+  const run=spawnSync(process.execPath,['scripts/outbox-db-contract-readonly.mjs','--target','production','--phase','pre'],{env:{...process.env,DATABASE_URL:hosted(PROD_REF),INBOX_PROD_READONLY_ACK:'wrong'},encoding:'utf8',timeout:5000});
+  assert.equal(run.status,1); assert.match(run.stderr,/TARGET_REFUSED/);
+});
+test('NC-T5c Production uses the asserted read-only transaction path', async () => {
+  const entry=readFileSync(new URL('./outbox-db-contract-readonly.mjs',import.meta.url),'utf8');
+  assert.match(entry,/const hostedReadOnly = \['shared-readonly', 'production'\]\.includes\(args\.target\)/);
+  assert.match(entry,/await collect\(client, args\.org/);
+  const seen=[]; const c={query:async sql=>{seen.push(sql);return {rows:[sql.includes('transaction_isolation')?{transaction_isolation:'read committed'}:{transaction_read_only:'on'}]}}};
+  await assert.rejects(openReadTxn(c,'BEGIN READ ONLY'),/READ_PRECONDITION_FAILED/);
+  assert.deepEqual(seen,['BEGIN READ ONLY','SHOW transaction_isolation','SHOW transaction_read_only']);
+});
+test('NC-T5d Production module graph excludes write modules and service-role key', () => {
+  const entry=readFileSync(new URL('./outbox-db-contract-readonly.mjs',import.meta.url),'utf8');
+  const ro=readFileSync(new URL('./outbox-db-contract/readonly.mjs',import.meta.url),'utf8');
+  const plat=readFileSync(new URL('./outbox-db-contract/platform.mjs',import.meta.url),'utf8');
+  for (const source of [entry,ro,plat]) {
+    assert.doesNotMatch(source,/\b(?:fixture|contracts|mutations|privileges)(?:\.mjs)?\b/);
+    assert.doesNotMatch(source,/SUPABASE_SERVICE_ROLE_KEY/);
+  }
 });
 test('NC-B4 HTTP allowlist', async () => {
   for (const path of ['/messages?tab=outbox','/auth/v1/token','/rest/v1/messages']) await assert.rejects(readonlyGet('http://127.0.0.1:1'+path), /READONLY_HTTP_DENIED/);

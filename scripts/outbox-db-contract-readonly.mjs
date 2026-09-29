@@ -8,15 +8,32 @@ import { platformFingerprint, comparePlatform } from './outbox-db-contract/platf
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((a, v, i, all) => (v.startsWith('--') && (a.push([v.slice(2), all[i + 1]])), a), []));
 const fail = (message, code = 1) => { console.error(message); process.exit(code); };
-function assertTarget(target, dsn) {
-  if (/copflsklaefwzipsrjqz/i.test(dsn) || /copflsklaefwzipsrjqz/i.test(process.env.SUPABASE_URL ?? '')) throw new Error('TARGET_REFUSED');
-  const u = new URL(dsn);
+const TEST_REF = 'ncsngxlcyxylaeskiteu';
+const PROD_REF = 'copflsklaefwzipsrjqz';
+function assertTarget(target, dsn, { apiUrl, ack = process.env.INBOX_PROD_READONLY_ACK } = {}) {
+  if (!['shared-readonly', 'production', 'disposable-readonly'].includes(target)) throw new Error('TARGET_REFUSED');
+  const suppliedUrls = [dsn, apiUrl ?? '', process.env.SUPABASE_URL ?? ''];
+  if ((target === 'production' && suppliedUrls.some(value => value.includes(TEST_REF))) ||
+      (target !== 'production' && suppliedUrls.some(value => value.includes(PROD_REF))) ||
+      (target === 'disposable-readonly' && suppliedUrls.some(value => value.includes(TEST_REF)))) throw new Error('TARGET_REFUSED');
+  let u;
+  try { u = new URL(dsn); } catch { throw new Error('TARGET_REFUSED'); }
   if (!['postgres:', 'postgresql:'].includes(u.protocol)) throw new Error('TARGET_REFUSED');
   const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname);
-  if (target === 'shared-readonly' && (loopback || !u.hostname.endsWith('.pooler.supabase.com') || !/^postgres\.[a-z0-9]+$/.test(decodeURIComponent(u.username)))) throw new Error('TARGET_REFUSED');
-  if (target === 'disposable-readonly' && (!loopback || process.env.E2E_DISPOSABLE_DATABASE !== '1')) throw new Error('TARGET_REFUSED');
-  if (target === 'shared-readonly' && !['ncsngxlcyxylaeskiteu','copflsklaefwzipsrjqz'].includes(decodeURIComponent(u.username).slice('postgres.'.length))) throw new Error('TARGET_REFUSED');
-  if (!['shared-readonly', 'disposable-readonly'].includes(target)) throw new Error('TARGET_REFUSED');
+  if (target === 'disposable-readonly') {
+    if (!loopback || process.env.E2E_DISPOSABLE_DATABASE !== '1') throw new Error('TARGET_REFUSED');
+  } else {
+    const ref = target === 'production' ? PROD_REF : TEST_REF;
+    if (loopback || !u.hostname.endsWith('.pooler.supabase.com') || decodeURIComponent(u.username) !== `postgres.${ref}` || u.pathname !== '/postgres') throw new Error('TARGET_REFUSED');
+    if (target === 'production' && ack !== PROD_REF) throw new Error('TARGET_REFUSED');
+  }
+  if (apiUrl) {
+    let api;
+    try { api = new URL(apiUrl); } catch { throw new Error('TARGET_REFUSED'); }
+    if (target === 'disposable-readonly') {
+      if (!['127.0.0.1', 'localhost', '[::1]'].includes(api.hostname)) throw new Error('TARGET_REFUSED');
+    } else if (api.protocol !== 'https:' || api.hostname !== `${target === 'production' ? PROD_REF : TEST_REF}.supabase.co` || api.pathname !== '/' || api.search || api.hash || api.username || api.password) throw new Error('TARGET_REFUSED');
+  }
 }
 export { assertTarget };
 async function catalog(dsn) {
@@ -29,26 +46,21 @@ async function catalog(dsn) {
 async function main() {
   const dsn = process.env.DATABASE_URL;
   if (!dsn) throw new Error('DATABASE_URL_REQUIRED');
-  assertTarget(args.target, dsn);
-  if (args.target === 'shared-readonly' && !['test','production'].includes(args.boundary)) throw new Error('BOUNDARY_REQUIRED');
-  if (args.target === 'shared-readonly' && ((args.boundary === 'test' && new URL(dsn).username !== 'postgres.ncsngxlcyxylaeskiteu') || (args.boundary === 'production' && new URL(dsn).username !== 'postgres.copflsklaefwzipsrjqz'))) throw new Error('TARGET_REFUSED');
-  if (args['api-url']) {
-    const api = new URL(args['api-url']);
-    const loopbackApi = ['127.0.0.1', 'localhost', '[::1]'].includes(api.hostname);
-    if ((args.target === 'shared-readonly' && (loopbackApi || api.hostname !== (args.boundary === 'test' ? 'ncsngxlcyxylaeskiteu.supabase.co' : 'copflsklaefwzipsrjqz.supabase.co'))) || (args.target === 'disposable-readonly' && !loopbackApi)) throw new Error('TARGET_REFUSED');
-  }
-  if (args.target === 'shared-readonly' && !process.env.SUPABASE_ANON_KEY) throw new Error('READ_PRECONDITION_FAILED');
-  if (args.target === 'shared-readonly' && (!args['api-url'] || !args['catalog'] || !args['platform-compare'] || (args.phase === 'post' && (!args['pre-file'] || !args['plan-compare'] || !args['catalog-compare'])))) throw new Error('READ_PRECONDITION_FAILED');
+  assertTarget(args.target, dsn, { apiUrl: args['api-url'] });
+  if (args.boundary) throw new Error('TARGET_REFUSED');
+  const hostedReadOnly = ['shared-readonly', 'production'].includes(args.target);
+  if (hostedReadOnly && !process.env.SUPABASE_ANON_KEY) throw new Error('READ_PRECONDITION_FAILED');
+  if (hostedReadOnly && (!args['api-url'] || !args['catalog'] || !args['platform-compare'] || (args.phase === 'post' && (!args['pre-file'] || !args['plan-compare'] || !args['catalog-compare'])))) throw new Error('READ_PRECONDITION_FAILED');
   if (!['pre','post'].includes(args.phase)) throw new Error('PHASE_REQUIRED');
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(args.org ?? '')) throw new Error('ORG_ID_REQUIRED');
-  const client = new Client({ connectionString: dsn, ssl: args.target === 'shared-readonly' ? { rejectUnauthorized: true } : false });
+  const client = new Client({ connectionString: dsn, ssl: hostedReadOnly ? { rejectUnauthorized: true } : false });
   await client.connect();
   try {
     const pre = args['pre-file'] ? JSON.parse(await readFile(args['pre-file'], 'utf8')) : null;
     const data = await collect(client, args.org, { previousIds: pre ? Object.keys(pre.queued.per_row) : [] });
     const major = (await client.query('SHOW server_version_num')).rows[0].server_version_num.slice(0, 2);
     const result = { verdict: 'PASS', items: {}, summary: 'no hosted HTTP 200 was observed at the shared boundary; hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog-fingerprint, platform-config and claim-plumbing equality; a GoTrue major match does not prove identical hosted claim configuration.', target: args.target, phase: args.phase, ...data };
-    if (args.boundary === 'production') { result.member_org_count = data.member_orgs.length; delete result.member_orgs; }
+    if (args.target === 'production') { result.member_org_count = data.member_orgs.length; delete result.member_orgs; }
     if (args['pre-file']) {
       result.items.queued_invariants = reconcile(pre.queued, data.queued, data.current_status);
       if (args['plan-compare']) {
@@ -56,8 +68,8 @@ async function main() {
         const indexes = p => [...new Set(Object.values(p).flatMap(shapes => Object.values(shapes).flat()).map(x => x.index).filter(Boolean))].sort();
         if (JSON.stringify(indexes(pinned.plans)) !== JSON.stringify(indexes(data.plans))) throw new Error('FAIL PLAN_INDEX_DRIFT');
       }
-      if (result.items.queued_invariants.verdict === 'INCONCLUSIVE' && args.boundary === 'test' && args.phase === 'post') result.items.queued_invariants.stability_probe = await stabilityProbe(client, args.org);
-      if (result.items.queued_invariants.verdict === 'INCONCLUSIVE' && args.boundary === 'production') result.verdict = 'INCONCLUSIVE';
+      if (result.items.queued_invariants.verdict === 'INCONCLUSIVE' && args.target === 'shared-readonly' && args.phase === 'post') result.items.queued_invariants.stability_probe = await stabilityProbe(client, args.org);
+      if (result.items.queued_invariants.verdict === 'INCONCLUSIVE' && args.target === 'production') result.verdict = 'INCONCLUSIVE';
     }
     delete result.current_status;
     if (args['api-url']) result.platform_config = await platformFingerprint(args['api-url'], process.env.SUPABASE_ANON_KEY, major);
