@@ -1,33 +1,32 @@
 import { expect, it } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "../supabase/types";
-import { cleanupCanary } from "../../../scripts/sequence-canary-cleanup";
+import { cleanupAllCanaries, cleanupCanary } from "../../../scripts/sequence-canary-cleanup";
+import { preflightFixture } from "../../../scripts/sequence-canary-fixture";
 
 const owner = "11111111-1111-4111-8111-111111111111";
-function fakeClient(failingTable?: string) {
-  const deletes: string[] = [];
-  const operations: string[] = [];
+const property = "22222222-2222-4222-8222-222222222222";
+const contact = "33333333-3333-4333-8333-333333333333";
+function fakeClient(failingTable?: string, wrongProperty = false) {
+  const deletes: { table: string; column?: string; values?: string[] }[] = [];
   const rows: Record<string, unknown[]> = {
-    sequences: [{ id: "s", org_id: "org", name: "SMOKE TEST — safe to delete 2026-09-28", created_by: owner }],
-    sequence_enrollments: [{ id: "e", property_id: "p", contact_id: "c" }],
-    properties: [{ id: "p", org_id: "org", address: "E2E PROD SMOKE 2026-09-28", homeowner_contact_id: "c" }],
-    contacts: [{ id: "c", org_id: "org", first_name: "Smoke", last_name: "Prod 2026-09-28", phone_1: "+10000000000" }],
+    sequences: [{ id: "s", name: "SMOKE TEST — safe to delete 2026-09-28", created_by: owner }],
+    sequence_enrollments: [{ id: "e", property_id: wrongProperty ? "other" : property }],
+    sequence_step_runs: [{ message_id: "m1" }, { message_id: "m1" }, { message_id: null }],
   };
   return {
     deletes,
-    operations,
-    client: { rpc: async (name: string, args: { p_sequence_id: string; p_property_id: string; p_canary_user_id: string }) => {
-      operations.push(name);
-      expect(args).toEqual({ p_sequence_id: "s", p_property_id: "p", p_canary_user_id: owner });
-      return { data: 1, error: failingTable === "lead_events" ? { message: "forced delete error" } : null };
-    }, from(table: string) {
+    client: { from(table: string) {
       let deleting = false;
       const query = {
         select: () => query,
         eq: () => query,
-        in: () => query,
+        in: (column: string, values: string[]) => {
+          if (deleting) deletes.push({ table, column, values });
+          return query;
+        },
         maybeSingle: async () => ({ data: rows[table]?.[0] ?? null, error: null }),
-        delete: () => { deleting = true; deletes.push(table); operations.push(table); return query; },
+        delete: () => { deleting = true; if (table !== "messages") deletes.push({ table }); return query; },
         then(resolve: (value: unknown) => unknown) {
           return Promise.resolve(resolve(deleting
             ? { error: table === failingTable ? { message: "forced delete error" } : null }
@@ -39,29 +38,71 @@ function fakeClient(failingTable?: string) {
   };
 }
 
-it("cascades step runs from enrollment and checks each delete", async () => {
-  const { client, deletes, operations } = fakeClient();
-  await cleanupCanary(client, "s", owner);
-  expect(deletes).toEqual(["messages", "consent_events", "sequence_enrollments", "sequence_steps", "tasks", "properties", "contacts", "sequences"]);
-  expect(deletes).not.toContain("sequence_step_runs");
-  expect(operations.indexOf("tasks")).toBeLessThan(operations.indexOf("delete_sequence_canary_lead_events"));
-  expect(operations.indexOf("delete_sequence_canary_lead_events")).toBeLessThan(operations.indexOf("properties"));
+it("deletes only run-linked message IDs, enrollment, steps, and sequence", async () => {
+  const { client, deletes } = fakeClient();
+  await cleanupCanary(client, "s", owner, property);
+  expect(deletes).toEqual([
+    { table: "messages", column: "id", values: ["m1"] },
+    { table: "sequence_enrollments" }, { table: "sequence_steps" }, { table: "sequences" },
+  ]);
 });
 
-it("stops before property deletion if lead event cleanup fails", async () => {
-  const { client, deletes } = fakeClient("lead_events");
-  await expect(cleanupCanary(client, "s", owner)).rejects.toThrow("Canary cleanup lead_events: forced delete error");
-  expect(deletes).not.toContain("properties");
+it("refuses a non-fixture enrollment before any delete", async () => {
+  const { client, deletes } = fakeClient(undefined, true);
+  await expect(cleanupCanary(client, "s", owner, property)).rejects.toThrow("non-fixture property");
+  expect(deletes).toEqual([]);
+});
+
+it("cleanup-only validates every discovered enrollment before deleting any sequence", async () => {
+  const deletes: string[] = [];
+  let sequenceId = "";
+  const client = { from(table: string) {
+    let deleting = false;
+    const query = {
+      select: () => query,
+      eq: (column: string, value: string) => { if (column === "sequence_id") sequenceId = value; return query; },
+      like: () => query,
+      limit: () => query,
+      delete: () => { deleting = true; deletes.push(table); return query; },
+      then(resolve: (value: unknown) => unknown) {
+        const data = table === "sequences" ? [{ id: "safe" }, { id: "unsafe" }]
+          : [{ property_id: sequenceId === "safe" ? property : "other" }];
+        return Promise.resolve(resolve({ data: deleting ? null : data, error: null }));
+      },
+    };
+    return query;
+  } } as unknown as SupabaseClient<Database>;
+  await expect(cleanupAllCanaries(client, owner, property)).rejects.toThrow("non-fixture property");
+  expect(deletes).toEqual([]);
 });
 
 it("turns a failed delete into a red canary", async () => {
   const { client, deletes } = fakeClient("sequence_enrollments");
-  await expect(cleanupCanary(client, "s", owner)).rejects.toThrow("Canary cleanup enrollments: forced delete error");
-  expect(deletes).not.toContain("sequences");
+  await expect(cleanupCanary(client, "s", owner, property)).rejects.toThrow("Canary cleanup enrollments: forced delete error");
+  expect(deletes.map((row) => row.table)).not.toContain("sequences");
 });
 
 it("refuses a sequence without the canary owner", async () => {
   const { client, deletes } = fakeClient();
-  await expect(cleanupCanary(client, "s", "22222222-2222-4222-8222-222222222222")).rejects.toThrow("Refusing to clean unowned");
+  await expect(cleanupCanary(client, "s", property, property)).rejects.toThrow("Refusing to clean unowned");
   expect(deletes).toEqual([]);
+});
+
+it("fixture preflight failure makes zero inserts", async () => {
+  const inserts: string[] = [];
+  const client = {
+    auth: { admin: { getUserById: async () => ({ data: { user: { id: owner } }, error: null }) } },
+    from(table: string) {
+      const query = {
+        select: () => query,
+        eq: () => query,
+        maybeSingle: async () => ({ data: null, error: null }),
+        insert: () => { inserts.push(table); return query; },
+      };
+      return query;
+    },
+  } as unknown as SupabaseClient<Database>;
+  await expect(preflightFixture(client, { userId: owner, propertyId: property, contactId: contact }))
+    .rejects.toThrow("Canary property missing");
+  expect(inserts).toEqual([]);
 });

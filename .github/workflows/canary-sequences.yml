@@ -13,8 +13,8 @@ permissions:
 #
 # Failure mode: exit code non-zero → red run + email to repo watchers.
 # Success leaves a `PROD-SMOKE` row in `test_sms_log` for audit; the
-# script cleans up its own seed data (sequence, property, contact,
-# enrollment, tasks, lead_events, consent_events, messages).
+# script cleans up only its sequence, step, enrollment, and linked messages.
+# The owner-provisioned property, contact, and consent remain permanent.
 #
 # Cost: one Dialpad outbound SMS + one Twilio inbound per run
 # (~$0.005). ~22 weekday runs/month → ~$0.11/month.
@@ -41,6 +41,8 @@ jobs:
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PROD_SUPABASE_SERVICE_ROLE_KEY }}
       SEQUENCE_CANARY_USER_ID: ${{ secrets.SEQUENCE_CANARY_USER_ID }}
+      SEQUENCE_CANARY_PROPERTY_ID: ${{ secrets.SEQUENCE_CANARY_PROPERTY_ID }}
+      SEQUENCE_CANARY_CONTACT_ID: ${{ secrets.SEQUENCE_CANARY_CONTACT_ID }}
       CI: "1"
 
     steps:
@@ -55,7 +57,7 @@ jobs:
         run: npm ci
 
       - name: Run Sequences V1 prod canary
-        # Script seeds throwaway data in prod Supabase, waits up to 6
+        # Script uses the provisioned fixture, waits up to 6
         # min for the Vercel `sequence-tick` cron to fire, polls
         # `test_sms_log` for the Dialpad-delivered SMS, asserts
         # enrollment advanced to `completed`, then cleans up. Exits 0

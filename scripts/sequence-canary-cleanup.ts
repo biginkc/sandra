@@ -2,79 +2,55 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "../src/lib/supabase/types";
 
 const MARKER = "SMOKE TEST — safe to delete";
-const PROPERTY_MARKER = "E2E PROD SMOKE";
 
 export async function cleanupCanary(
-  client: SupabaseClient<Database>,
-  sequenceId: string,
-  canaryUserId: string,
+  client: SupabaseClient<Database>, sequenceId: string, canaryUserId: string, fixturePropertyId: string,
 ): Promise<void> {
   const { data: sequence, error: sequenceError } = await client.from("sequences")
-    .select("id, org_id, name, created_by").eq("id", sequenceId).maybeSingle();
+    .select("id, name, created_by").eq("id", sequenceId).maybeSingle();
   if (sequenceError) throw new Error(`Canary lookup: ${sequenceError.message}`);
   if (!sequence) return;
-  if (!sequence.name.startsWith(MARKER) || sequence.created_by !== canaryUserId) {
+  if (!sequence.name.startsWith(`${MARKER} `) || sequence.created_by !== canaryUserId) {
     throw new Error(`Refusing to clean unowned sequence ${sequenceId}`);
   }
   const { data: enrollments, error: enrollmentError } = await client.from("sequence_enrollments")
-    .select("id, property_id, contact_id").eq("sequence_id", sequenceId);
+    .select("id, property_id").eq("sequence_id", sequenceId);
   if (enrollmentError) throw new Error(`Canary enrollments lookup: ${enrollmentError.message}`);
-  const stamp = sequence.name.slice(MARKER.length).trim();
-  const { data: taggedProperties, error: taggedError } = await client.from("properties")
-    .select("id, homeowner_contact_id").eq("org_id", sequence.org_id).eq("address", `${PROPERTY_MARKER} ${stamp}`);
-  if (taggedError) throw new Error(`Canary property discovery: ${taggedError.message}`);
-  const { data: taggedContacts, error: contactsError } = await client.from("contacts")
-    .select("id").eq("org_id", sequence.org_id).eq("last_name", `Prod ${stamp}`).eq("first_name", "Smoke");
-  if (contactsError) throw new Error(`Canary contact discovery: ${contactsError.message}`);
-  const propertyIds = [...new Set([
-    ...(enrollments ?? []).map((row) => row.property_id),
-    ...(taggedProperties ?? []).map((row) => row.id),
-  ])];
-  const contactIds = [...new Set([
-    ...(enrollments ?? []).flatMap((row) => row.contact_id ? [row.contact_id] : []),
-    ...(taggedProperties ?? []).flatMap((row) => row.homeowner_contact_id ? [row.homeowner_contact_id] : []),
-    ...(taggedContacts ?? []).map((row) => row.id),
-  ])];
-  if (propertyIds.length) {
-    const { data: properties, error } = await client.from("properties").select("id, org_id, address").in("id", propertyIds);
-    if (error) throw new Error(`Canary properties lookup: ${error.message}`);
-    if (properties?.length !== propertyIds.length || properties.some((row) => row.org_id !== sequence.org_id || row.address !== `${PROPERTY_MARKER} ${stamp}`)) {
-      throw new Error(`Refusing cleanup: sequence ${sequenceId} has a non-canary property`);
-    }
+  if ((enrollments ?? []).some((row) => row.property_id !== fixturePropertyId)) {
+    throw new Error(`Refusing cleanup: sequence ${sequenceId} has a non-fixture property`);
   }
-  if (contactIds.length) {
-    const { data: contacts, error } = await client.from("contacts").select("id, org_id, first_name, last_name").in("id", contactIds);
-    if (error) throw new Error(`Canary contacts lookup: ${error.message}`);
-    if (contacts?.length !== contactIds.length || contacts.some((row) => row.org_id !== sequence.org_id || row.first_name !== "Smoke" || row.last_name !== `Prod ${stamp}`)) {
-      throw new Error(`Refusing cleanup: sequence ${sequenceId} has a non-canary contact`);
-    }
+  const enrollmentIds = (enrollments ?? []).map((row) => row.id);
+  let messageIds: string[] = [];
+  if (enrollmentIds.length) {
+    const { data: runs, error: runsError } = await client.from("sequence_step_runs")
+      .select("message_id").in("enrollment_id", enrollmentIds);
+    if (runsError) throw new Error(`Canary step runs lookup: ${runsError.message}`);
+    messageIds = [...new Set((runs ?? []).flatMap((row) => row.message_id ? [row.message_id] : []))];
   }
   async function checked(label: string, request: PromiseLike<{ error: { message: string } | null }>) {
     const { error } = await request;
     if (error) throw new Error(`Canary cleanup ${label}: ${error.message}`);
   }
-  // Enrollment deletion cascades to runtime-owned step runs. Their write guard
-  // forbids direct app deletes, even with an authenticated user session.
-  for (const id of contactIds) await checked("messages", client.from("messages").delete().eq("contact_id", id));
-  for (const id of contactIds) await checked("consent", client.from("consent_events").delete().eq("contact_id", id));
+  if (messageIds.length) await checked("messages", client.from("messages").delete().in("id", messageIds));
   await checked("enrollments", client.from("sequence_enrollments").delete().eq("sequence_id", sequenceId));
   await checked("steps", client.from("sequence_steps").delete().eq("sequence_id", sequenceId));
-  for (const id of propertyIds) {
-    await checked("tasks", client.from("tasks").delete().eq("org_id", sequence.org_id).eq("related_property_id", id));
-    const { error } = await client.rpc("delete_sequence_canary_lead_events", {
-      p_sequence_id: sequenceId, p_property_id: id, p_canary_user_id: canaryUserId,
-    });
-    if (error) throw new Error(`Canary cleanup lead_events: ${error.message}`);
-    await checked("property", client.from("properties").delete().eq("id", id));
-  }
-  for (const id of contactIds) await checked("contact", client.from("contacts").delete().eq("id", id));
   await checked("sequence", client.from("sequences").delete().eq("id", sequenceId));
 }
 
-export async function cleanupAllCanaries(client: SupabaseClient<Database>, canaryUserId: string): Promise<number> {
-  const { data, error } = await client.from("sequences").select("id, name")
-    .eq("created_by", canaryUserId).like("name", `${MARKER}%`).limit(500);
+export async function cleanupAllCanaries(client: SupabaseClient<Database>, canaryUserId: string, fixturePropertyId: string): Promise<number> {
+  const { data, error } = await client.from("sequences").select("id")
+    .eq("created_by", canaryUserId).like("name", `${MARKER}%`).limit(501);
   if (error) throw new Error(`Canary discovery: ${error.message}`);
-  for (const row of data ?? []) await cleanupCanary(client, row.id, canaryUserId);
+  if ((data?.length ?? 0) > 500) throw new Error("Canary discovery exceeded 500; refusing partial cleanup");
+  // Validate all candidate enrollments before the first destructive action.
+  for (const row of data ?? []) {
+    const { data: enrollments, error: enrollmentError } = await client.from("sequence_enrollments")
+      .select("property_id").eq("sequence_id", row.id);
+    if (enrollmentError) throw new Error(`Canary enrollments lookup: ${enrollmentError.message}`);
+    if ((enrollments ?? []).some((enrollment) => enrollment.property_id !== fixturePropertyId)) {
+      throw new Error(`Refusing cleanup: sequence ${row.id} has a non-fixture property`);
+    }
+  }
+  for (const row of data ?? []) await cleanupCanary(client, row.id, canaryUserId, fixturePropertyId);
   return data?.length ?? 0;
 }

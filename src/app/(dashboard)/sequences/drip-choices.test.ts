@@ -47,6 +47,7 @@ it("excludes the dedicated canary creator from drip choices", async () => {
         ? { select: () => ({ eq: () => ({ is: () => ({ order: async () => ({ data: sequences, error: null }) }) }) }) }
         : { select: () => ({ in: () => ({ order: async () => ({ data: [
           { sequence_id: "live", step_index: 0, delay_after_previous_minutes: 0, action_type: "send_sms" },
+          { sequence_id: "canary", step_index: 0, delay_after_previous_minutes: 0, action_type: "send_sms" },
         ], error: null }) }) }) },
     });
     expect(await listDripChoices()).toMatchObject({ ok: true, data: [{ id: "live" }] });

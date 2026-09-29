@@ -1,37 +1,5 @@
 #!/usr/bin/env tsx
-/**
- * Sequences V1 — full-stack production smoke.
- *
- * Proves the pipe end-to-end in prod:
- *   1. Seeds a throwaway sequence (1 step, 0 delay, send_sms) in prod Supabase.
- *   2. Seeds a contact with phone_1 = +18148097074 (our Twilio test
- *      receiver, wired up during Tier 1).
- *   3. Seeds a consent_events opt_in + a property linked to the contact.
- *   4. Creates an active enrollment with next_run_at = now.
- *   5. Waits up to 6 minutes for the Vercel sequence-tick cron to fire
- *      (scheduled every 5 min on the Pro plan).
- *   6. Polls `test_sms_log` until the Twilio webhook persists the
- *      incoming SMS from Dialpad.
- *   7. Cleans up: deletes the enrollment, sequence, property, tasks, lead
- *      events, consent events, messages, contact. Leaves the test_sms_log row for
- *      audit.
- *
- * Cost: ~$0.005 for one outbound Dialpad SMS + pennies for the Twilio
- * inbound receive. Single run is effectively free on credit balances.
- *
- * Usage:
- *   npm run smoke:sequences-prod
- *
- * Required env (from `.env.local` or the shell):
- *   SUPABASE_SERVICE_ROLE_KEY   — prod service-role key
- *   NEXT_PUBLIC_SUPABASE_URL    — prod URL
- *   SEQUENCE_CANARY_USER_ID     — existing dedicated auth.users UUID, also set in the app
- *
- * Safe tags the script writes so you can find stragglers manually:
- *   sequences.name      = "SMOKE TEST — safe to delete ${ts}"
- *   properties.address  = "E2E PROD SMOKE ${ts}"
- *   contacts.first_name = "Smoke"
- */
+/** Production sequence smoke using the permanent owner-provisioned fixture. */
 
 import { createClient } from "@supabase/supabase-js";
 import fs from "node:fs";
@@ -39,6 +7,7 @@ import path from "node:path";
 
 import type { Database } from "../src/lib/supabase/types";
 import { cleanupAllCanaries, cleanupCanary } from "./sequence-canary-cleanup";
+import { fixtureIds, preflightFixture } from "./sequence-canary-fixture";
 
 // ---------- env bootstrap ---------------------------------------------------
 
@@ -65,12 +34,9 @@ function loadLocalEnv(file: string): Record<string, string> {
 const env = { ...loadLocalEnv(".env.local"), ...process.env };
 const URL = env.NEXT_PUBLIC_SUPABASE_URL;
 const KEY = env.SUPABASE_SERVICE_ROLE_KEY;
-const CANARY_USER_ID = env.SEQUENCE_CANARY_USER_ID;
-
-if (!URL || !KEY || !CANARY_USER_ID || !/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(CANARY_USER_ID)) {
-  console.error(
-    "Missing URL, service key, or valid SEQUENCE_CANARY_USER_ID",
-  );
+const ids = fixtureIds(env);
+if (!URL || !KEY) {
+  console.error("Missing URL or service key");
   process.exit(2);
 }
 if (URL.includes("ncsngxlcyxylaeskiteu")) {
@@ -86,26 +52,18 @@ const supabase = createClient<Database>(URL, KEY, {
 
 // ---------- run ------------------------------------------------------------
 
-const TWILIO_NUMBER = "+18148097074";
 const TS = new Date().toISOString().replace(/[:.]/g, "-");
 const UNIQUE_BODY = `PROD-SMOKE ${TS}`;
 
 async function main() {
+  const orgId = await preflightFixture(supabase, ids);
   if (process.argv.includes("--cleanup-only")) {
-    console.log(`[smoke] cleaned ${await cleanupAllCanaries(supabase, CANARY_USER_ID!) } canary sequences`);
+    console.log(`[smoke] cleaned ${await cleanupAllCanaries(supabase, ids.userId, ids.propertyId)} canary sequences`);
     return;
   }
   let sequenceId: string | null = null;
   try {
     console.log(`[smoke] start   ${TS}`);
-
-    // Resolve org
-    const { data: org, error: orgError } = await supabase
-      .from("organizations")
-      .select("id")
-      .limit(1)
-      .single();
-    if (orgError || !org) throw orgError ?? new Error("no organization in prod");
 
     // Seed sequence (no opt-out append — body already carries the STOP word
     // via our test string so we're not hiding it from the seller-side
@@ -113,11 +71,11 @@ async function main() {
     const { data: seq, error: seqErr } = await supabase
       .from("sequences")
       .insert({
-        org_id: org.id,
+        org_id: orgId,
         name: `SMOKE TEST — safe to delete ${TS}`,
         description: "One-off prod smoke; script deletes this when it exits",
         append_opt_out: false,
-        created_by: CANARY_USER_ID,
+        created_by: ids.userId,
       })
       .select("id")
       .single();
@@ -138,49 +96,14 @@ async function main() {
       .single();
     if (stepErr || !step) throw stepErr ?? new Error("step insert failed");
 
-    // Seed contact + consent
-    const { data: contact, error: contactErr } = await supabase
-      .from("contacts")
-      .insert({
-        first_name: "Smoke",
-        last_name: `Prod ${TS}`,
-        phone_1: TWILIO_NUMBER,
-        phone_1_type: "mobile",
-      })
-      .select("id")
-      .single();
-    if (contactErr || !contact) throw contactErr ?? new Error("contact insert failed");
-
-    const { error: consentErr } = await supabase.from("consent_events").insert({
-      contact_id: contact.id,
-      channel: "sms",
-      event_type: "opt_in_marketing_written",
-      source: "e2e-prod-smoke",
-    });
-    if (consentErr) throw consentErr;
-
-    // Seed a tagged property. Runtime quiet-hour rules determine send time.
-    const { data: property, error: propErr } = await supabase
-      .from("properties")
-      .insert({
-        address: `E2E PROD SMOKE ${TS}`,
-        state: "MO",
-        status: "new_lead",
-        homeowner_contact_id: contact.id,
-      })
-      .select("id")
-      .single();
-    if (propErr || !property) throw propErr ?? new Error("property insert failed");
-    console.log(`[smoke] prop    ${property.id}`);
-
     // Enroll (next_run_at = now so the next cron tick picks it up)
     const { data: enrollment, error: enrErr } = await supabase
       .from("sequence_enrollments")
       .insert({
-        org_id: org.id,
+        org_id: orgId,
         sequence_id: seq.id,
-        property_id: property.id,
-        contact_id: contact.id,
+        property_id: ids.propertyId,
+        contact_id: ids.contactId,
         status: "active",
         current_step_index: 0,
         next_run_at: new Date().toISOString(),
@@ -231,7 +154,7 @@ async function main() {
     console.log(`[smoke]         enrollment.status = ${after.status}`);
   } finally {
     if (sequenceId) {
-      await cleanupCanary(supabase, sequenceId, CANARY_USER_ID!);
+      await cleanupCanary(supabase, sequenceId, ids.userId, ids.propertyId);
       console.log("[smoke] cleaned");
     }
   }
