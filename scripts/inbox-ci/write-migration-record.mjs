@@ -62,10 +62,10 @@ const dryRunFiles = [
   'second-apply.stdout.txt', 'second-apply.stderr.txt', 'mutation-role.txt', 'mutation-harness.txt', 'mutation-cases.json',
   'catalog-post-harness.json',
   'production-install-unit.txt',
-  'apply-20260929000000.txt', 'apply-20260929000100.txt', 'apply-20260929000200.txt',
+  'apply-20260930000000.txt', 'apply-20260930000100.txt', 'apply-20260930000200.txt',
 ];
 const catalogFiles = [
   'catalog-manifest-check.txt', 'catalog-pre.json', 'catalog-post.json', 'catalog-live.txt',
 ];
-if (lane === 'migration-dry-run') record(lane, dryRunFiles, { migration_versions: ['20260929000000', '20260929000100', '20260929000200'], second_apply_refused: true, mutation_cases: 41, private_helper_exposure_count: 0 });
+if (lane === 'migration-dry-run') record(lane, dryRunFiles, { migration_versions: ['20260930000000', '20260930000100', '20260930000200'], second_apply_refused: true, mutation_cases: 41, private_helper_exposure_count: 0 });
 else record(lane, catalogFiles, { pre_sha256: pre.sha256, post_sha256: post.sha256, pre_section_sha256: pre.section_sha256, post_section_sha256: post.section_sha256, live_mutation_tests: 5 });

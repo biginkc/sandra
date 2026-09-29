@@ -140,7 +140,7 @@ class RecordContractTests(unittest.TestCase):
             relative = run('python3', 'experiments/inbox-production-install/perf/record.py', str(source), 'perf-120k', 'PASS', cwd=repo, env=env)
             manifest = json.loads((repo / relative / 'manifest.json').read_text())
             self.assertEqual((manifest['kind'], manifest['phase'], manifest['target']), ('perf-120k', 'n/a', 'disposable'))
-            workflow_run = {'event': 'workflow_dispatch', 'head_branch': 'main', 'path': '.github/workflows/inbox-heavy-verification.yml', 'conclusion': 'success', 'head_sha': sha, 'run_attempt': 1, 'id': 2001, 'display_title': f'Inbox heavy perf-120k {sha}'}
+            workflow_run = {'status': 'completed', 'event': 'workflow_dispatch', 'head_branch': 'main', 'path': '.github/workflows/inbox-heavy-verification.yml', 'conclusion': 'success', 'head_sha': sha, 'run_attempt': 1, 'id': 2001, 'display_title': f'Inbox heavy perf-120k {sha}'}
             artifact = {'name': manifest['artifact_name'], 'expired': False, 'size_in_bytes': 1}
             downloaded = Path(temp) / 'download'
             shutil.copytree(repo / 'docs', downloaded / 'docs')
@@ -250,7 +250,7 @@ class RecordContractTests(unittest.TestCase):
                                cwd=workrepo, env=local_env)
                 manifest = json.loads((workrepo / relative / 'manifest.json').read_text())
                 artifact = {'name': manifest['artifact_name'], 'expired': False, 'size_in_bytes': 1}
-                workflow_run = {'event': 'workflow_dispatch', 'head_branch': 'main',
+                workflow_run = {'status': 'completed', 'event': 'workflow_dispatch', 'head_branch': 'main',
                                 'path': '.github/workflows/inbox-heavy-verification.yml', 'conclusion': 'success',
                                 'head_sha': sha, 'run_attempt': 1, 'id': int(run_id),
                                 'display_title': f'Inbox heavy burst {sha}'}
