@@ -166,6 +166,46 @@ BEGIN
  IF NOT failed THEN RAISE EXCEPTION 'WHITESPACE-ONLY REVIEW REPLY ADMITTED AT SAVE'; END IF;
  RAISE NOTICE 'PASS whitespace-only review_reply rejected at save';
 
+ -- JS trim() also removes tabs, line terminators, NBSP, and ideographic space.
+ failed:=false;
+ BEGIN
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  PERFORM public.inbox_saved_action_create('Tab reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','review_reply','text',chr(9)))));
+  EXECUTE 'RESET ROLE';
+ EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM='INBOX_SAVED_ACTION_INVALID_DEFINITION' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
+ END;
+ IF NOT failed THEN RAISE EXCEPTION 'TAB-ONLY REVIEW REPLY ADMITTED AT SAVE'; END IF;
+ RAISE NOTICE 'PASS tab-only review_reply rejected at save';
+
+ failed:=false;
+ BEGIN
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  PERFORM public.inbox_saved_action_create('Unicode whitespace reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','review_reply','text',chr(10)||chr(160)||chr(12288)))));
+  EXECUTE 'RESET ROLE';
+ EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM='INBOX_SAVED_ACTION_INVALID_DEFINITION' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
+ END;
+ IF NOT failed THEN RAISE EXCEPTION 'UNICODE-WHITESPACE-ONLY REVIEW REPLY ADMITTED AT SAVE'; END IF;
+ RAISE NOTICE 'PASS newline/NBSP/ideographic-space review_reply rejected at save';
+
+ EXECUTE 'SET LOCAL ROLE authenticated';
+ a:=public.inbox_saved_action_create('Trimmed boundary reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','review_reply','text',chr(9)||repeat('a',1600)||chr(10)))));
+ EXECUTE 'RESET ROLE';
+ IF a->'definition'->'steps'->0->>'text'<>chr(9)||repeat('a',1600)||chr(10) THEN RAISE EXCEPTION 'TRIMMED 1600-UNIT REVIEW REPLY WAS NOT SAVED'; END IF;
+ RAISE NOTICE 'PASS tab + 1600 letters + newline accepted after trim';
+
+ failed:=false;
+ BEGIN
+  EXECUTE 'SET LOCAL ROLE authenticated';
+  PERFORM public.inbox_saved_action_create('Over trimmed boundary reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','review_reply','text',chr(8232)||repeat('a',1601)))));
+  EXECUTE 'RESET ROLE';
+ EXCEPTION WHEN raise_exception THEN
+  IF SQLERRM='INBOX_SAVED_ACTION_INVALID_DEFINITION' THEN failed:=true; ELSE EXECUTE 'RESET ROLE'; RAISE; END IF;
+ END;
+ IF NOT failed THEN RAISE EXCEPTION 'TRIMMED 1601-UNIT REVIEW REPLY ADMITTED AT SAVE'; END IF;
+ RAISE NOTICE 'PASS line-separator + 1601 letters rejected at save';
+
  -- 9c) Astral characters occupy two JavaScript UTF-16 code units each.
  EXECUTE 'SET LOCAL ROLE authenticated';
  a:=public.inbox_saved_action_create('Boundary emoji reply',jsonb_build_object('version',1,'steps',jsonb_build_array(jsonb_build_object('type','review_reply','text',repeat('😀',800)))));

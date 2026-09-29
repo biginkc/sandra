@@ -98,6 +98,7 @@ print('APPLIED inbox_action_api.prepare savedAction shape guard + snapshot bindi
 
 ORG_TABLES, USER_TABLES, ALL_TABLES = owned_cleanup.discover(sql)
 BASELINE = owned_cleanup.snapshot_baseline(sql, ALL_TABLES)
+validator_hash = sql("SELECT md5(pg_get_functiondef('inbox_saved_actions.validate_definition(uuid,jsonb)'::regprocedure))")
 
 TEST = (P / 'proof-scenario.sql').read_text()
 REQUIRED_MARKERS = ('ALL SAVED-ACTION SQL PROOFS PASSED', 'ALL SAVED-ACTION END-TO-END PREPARE PROOFS PASSED')
@@ -113,6 +114,9 @@ if len(PASS_LINES) < 17:
 for line in PASS_LINES:
     print(line)
 
+if sql("SELECT md5(pg_get_functiondef('inbox_saved_actions.validate_definition(uuid,jsonb)'::regprocedure))") != validator_hash:
+    raise RuntimeError('Validator changed during rolled-back proof scenario')
+print(f'VALIDATOR HASH UNCHANGED DURING PROOF: {validator_hash}')
 advanced = owned_cleanup.assert_clean(sql, ALL_TABLES, BASELINE, set(), set())
 print(f'RESIDUAL CHECK CLEAN (advanced counters: {advanced})')
 print('SAVED-ACTIONS PROOF: ALL GREEN')
