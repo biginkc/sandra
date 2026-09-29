@@ -219,6 +219,15 @@ def main() -> int:
         raw_bytes = git_show(repo, actual, path)
         raw = raw_bytes.decode()
         body, _ = transform_sql(raw, path)
+        if name == "operation_domain_apply":
+            # P3's pinned blob predates the reviewed source correction. Insert
+            # each REVOKE immediately after its replacement definition.
+            boundary = "END $$;\n\n-- Unknown sender actions consume only the frozen message IDs"
+            if body.count(boundary) != 1 or not body.rstrip().endswith("END $$;"):
+                raise RuntimeError("Operation-domain grant correction anchors drifted")
+            body = body.replace(boundary,
+                "END $$;\nREVOKE ALL ON FUNCTION inbox_operation_domain.apply_promotion_step(uuid,uuid,uuid,bigint) FROM PUBLIC,anon,authenticated;\n\n-- Unknown sender actions consume only the frozen message IDs")
+            body = body.rstrip() + "\nREVOKE ALL ON FUNCTION inbox_operation_domain.apply_unknown_step(uuid,uuid,uuid,bigint) FROM PUBLIC,anon,authenticated;\n"
         if name == "reply_accept_recovery":
             body = remove_recovery_admission(body)
         source_hash = hashlib.sha256(raw_bytes).hexdigest()
