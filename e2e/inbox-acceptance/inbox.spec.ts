@@ -271,14 +271,14 @@ test("A03 — Not interested bulk outcome applies", async ({ page }) => {
   await runBulkOutcome(page, thread.contactName, "Not interested", "A03");
 });
 
-test("A05 — Needs sequence bulk outcome applies", async ({ page }) => {
+test("A05 — Needs drip bulk outcome applies", async ({ page }) => {
   const thread = await seedAcceptanceThread(admin, {
     phone: "+18165551013",
     addressTag: "ACC-A05-SEQ",
     contactName: { first: "Needs", last: "SequenceA05" },
     messages: [{ direction: "inbound", body: "a05 probe", createdAtOffsetMin: -2 }],
   });
-  await runBulkOutcome(page, thread.contactName, "Needs sequence", "A05");
+  await runBulkOutcome(page, thread.contactName, "Needs drip", "A05");
 });
 
 test("A06 — SMS opt-out bulk outcome applies", async ({ page }) => {

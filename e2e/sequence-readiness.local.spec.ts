@@ -50,7 +50,7 @@ async function signIn(
     waitUntil: "domcontentloaded",
   });
   await expect(
-    page.getByRole("link", { name: "Sequences", exact: true }),
+    page.getByRole("link", { name: "Drips", exact: true }),
   ).toBeVisible({ timeout: 10_000 });
 }
 
@@ -791,7 +791,7 @@ test.describe("sequence readiness — local browser contract", () => {
     await signIn(page, ASSIGNEE);
     await page.goto("/sequences/new");
     await expect(page).toHaveURL(/\/leads$/);
-    await expect(page.getByRole("heading", { name: /new sequence/i })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: /new drip/i })).toHaveCount(0);
   });
 
   test("a user without a second-org membership cannot see that org's sequence", async ({
