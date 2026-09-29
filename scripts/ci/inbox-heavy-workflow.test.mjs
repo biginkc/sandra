@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import yaml from 'js-yaml';
 
 const workflow = readFileSync('.github/workflows/inbox-heavy-verification.yml', 'utf8');
 export function validateWorkflow(source) {
@@ -32,6 +33,11 @@ export function validateWorkflow(source) {
   if (!/github\.event_name\s*==\s*'pull_request'\s*&&\s*github\.event\.pull_request\.head\.repo\.full_name\s*==\s*github\.repository/.test(source)) throw new Error('Same-repo PR gate');
   if (!/\[a-z0-9-\]\+/.test(source) || !/test -f "scripts\/inbox-ci\/\$HEAVY_LANE\.sh"/.test(source)) throw new Error('File-resolved lane guard');
   if (!/if:\s*always\(\)/.test(source) || !/github\.event_name/.test(source)) throw new Error('Artifact or event guard');
+  const laneSteps = yaml.load(source).jobs.lane.steps;
+  const stage = laneSteps.find(step => step.name === 'Stage current run record');
+  const upload = laneSteps.find(step => step.uses?.startsWith('actions/upload-artifact@'));
+  if (stage?.if !== 'always()' || stage.run !== 'node scripts/ci/stage-heavy-artifact.mjs' || upload?.if !== 'always()' || upload.with?.path !== '${{ runner.temp }}/heavy-upload/') throw new Error('Upload must stage the current run directory only');
+  if (upload.with['include-hidden-files'] !== true) throw new Error('Upload must include hidden files');
 }
 test('workflow static guard passes reviewed file', () => assert.doesNotThrow(() => validateWorkflow(workflow)));
 test('workflow static guard accepts exact job-level read permissions', () => assert.doesNotThrow(() => validateWorkflow(workflow.replace(/^  static:$/m, '  static:\n    permissions:\n      contents: read\n      packages: read'))));
@@ -51,4 +57,6 @@ for (const [label, mutated] of [
   ['pull_request_target', workflow.replace(/^  pull_request:$/m, '  pull_request_target:')],
   ['job-level write permissions', workflow.replace(/^jobs:\s*$/m, 'jobs:\n  injected-job:\n    permissions: {id-token: write, contents: write}')],
   ['job-level multiline write permissions', workflow.replace(/^  static:$/m, '  static:\n    permissions:\n      contents: read\n      packages: read\n      id-token: write')],
+  ['whole evidence tree upload', workflow.replace('path: ${{ runner.temp }}/heavy-upload/', 'path: docs/performance/inbox-redesign/evidence/')],
+  ['hidden files excluded', workflow.replace('include-hidden-files: true', 'include-hidden-files: false')],
 ]) test(`mutation-first workflow guard rejects ${label}`, () => assert.throws(() => validateWorkflow(mutated)));

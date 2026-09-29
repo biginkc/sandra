@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import yaml from 'js-yaml';
 import { verifyDownload, seal } from './pull-heavy-record.mjs';
 import { validateOutboxResults, writeManifest } from '../outbox-run-record.mjs';
 const hash = b => createHash('sha256').update(b).digest('hex');
-function fixture() {
+function fixture({ historical = false } = {}) {
   const repo = mkdtempSync(path.join(tmpdir(), 'heavy-pull-repo-'));
   execFileSync('git', ['init', '-q', repo]);
   execFileSync('git', ['-C', repo, 'config', 'user.name', 'Evidence Test']);
@@ -21,6 +22,11 @@ function fixture() {
   writeFileSync(path.join(repo, 'scripts/inbox-ci/outbox.sh'), 'echo safe\n');
   writeFileSync(path.join(repo, 'scripts/inbox-ci/migration.sh'), 'echo migration\n');
   writeFileSync(path.join(repo, 'e2e/inbox-acceptance/fault-proxy.mjs'), 'safe\n');
+  if (historical) {
+    const old = path.join(repo, `docs/performance/inbox-redesign/evidence/${'a'.repeat(40)}/pre-merge/122`);
+    mkdirSync(old, { recursive: true });
+    writeFileSync(path.join(old, 'manifest.json'), '{}');
+  }
   execFileSync('git', ['-C', repo, 'add', '.']);
   execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base']);
   const sha = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
@@ -43,6 +49,47 @@ function fixture() {
   return { repo, root, dir, sha, manifest, run, artifact, save() { writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest)); }, check() { return verifyDownload(repo, root, run, artifact, sha); } };
 }
 test('valid downloaded evidence verifies', () => assert.equal(fixture().check().manifest.verdict, 'PASS'));
+test('workflow upload round trip selects only the new run and preserves its dotfile', () => {
+  const f = fixture({ historical: true });
+  const hidden = 'playwright/.last-run.json';
+  mkdirSync(path.join(f.dir, 'playwright'), { recursive: true });
+  writeFileSync(path.join(f.dir, hidden), '{"status":"passed"}');
+  f.manifest.artifacts[hidden] = hash('{"status":"passed"}');
+  f.save();
+  cpSync(f.dir, path.join(f.repo, path.relative(f.root, f.dir)), { recursive: true });
+  const workflow = readFileSync('.github/workflows/inbox-heavy-verification.yml', 'utf8');
+  const stage = yaml.load(workflow).jobs.lane.steps.find(step => step.name === 'Stage current run record');
+  assert.equal(stage.run, 'node scripts/ci/stage-heavy-artifact.mjs');
+  const stageScript = path.resolve('scripts/ci/stage-heavy-artifact.mjs');
+  assert.throws(() => execFileSync(process.execPath, [stageScript], { cwd: f.repo, env: { ...process.env, HEAVY_TESTED_SHA: f.sha, GITHUB_RUN_ID: '123', HEAVY_RUN_DIR: 'docs/performance/inbox-redesign/evidence/', RUNNER_TEMP: mkdtempSync(path.join(tmpdir(), 'heavy-runner-')) }, stdio: 'pipe' }), /Lane did not export its exact run directory/);
+  function roundTrip(source) {
+    const upload = yaml.load(source).jobs.lane.steps.find(step => step.uses?.startsWith('actions/upload-artifact@'));
+    const runnerTemp = mkdtempSync(path.join(tmpdir(), 'heavy-runner-'));
+    const runDir = `docs/performance/inbox-redesign/evidence/${f.sha}/pre-merge/123`;
+    execFileSync(process.execPath, [stageScript], { cwd: f.repo, env: { ...process.env, HEAVY_TESTED_SHA: f.sha, GITHUB_RUN_ID: '123', HEAVY_RUN_DIR: runDir, RUNNER_TEMP: runnerTemp } });
+    const uploadRoot = upload.with.path.replace('${{ runner.temp }}', runnerTemp);
+    const sourceRoot = path.isAbsolute(uploadRoot) ? uploadRoot : path.join(f.repo, uploadRoot);
+    const download = mkdtempSync(path.join(tmpdir(), 'heavy-downloaded-'));
+    const targetRoot = path.join(download, 'docs/performance/inbox-redesign/evidence');
+    function transfer(dir, relative = '') {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (!upload.with['include-hidden-files'] && entry.name.startsWith('.')) continue;
+        const next = path.join(relative, entry.name);
+        if (entry.isDirectory()) transfer(path.join(dir, entry.name), next);
+        else {
+          const target = path.join(targetRoot, next);
+          mkdirSync(path.dirname(target), { recursive: true });
+          copyFileSync(path.join(dir, entry.name), target);
+        }
+      }
+    }
+    transfer(sourceRoot);
+    return verifyDownload(f.repo, download, f.run, f.artifact, f.sha);
+  }
+  assert.equal(roundTrip(workflow).manifest.artifacts[hidden], f.manifest.artifacts[hidden]);
+  assert.throws(() => roundTrip(workflow.replace('path: ${{ runner.temp }}/heavy-upload/', 'path: docs/performance/inbox-redesign/evidence/')), /Artifact path or sensitive filename refused/);
+  assert.throws(() => roundTrip(workflow.replace('include-hidden-files: true', 'include-hidden-files: false')), /Incomplete artifact inventory/);
+});
 test('non-outbox record does not require a fault proxy hash', () => {
   const f = fixture();
   f.manifest.lane = 'migration';

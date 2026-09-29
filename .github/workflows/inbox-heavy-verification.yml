@@ -93,12 +93,16 @@ jobs:
         env:
           CI: ''
         run: bash "scripts/inbox-ci/$HEAVY_LANE.sh"
+      - name: Stage current run record
+        if: always()
+        run: node scripts/ci/stage-heavy-artifact.mjs
       - name: Upload run records
         if: always()
         uses: actions/upload-artifact@v5
         with:
           name: heavy-${{ inputs.lane }}-${{ inputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: docs/performance/inbox-redesign/evidence/
+          path: ${{ runner.temp }}/heavy-upload/
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 90
       - name: Stop disposable stack

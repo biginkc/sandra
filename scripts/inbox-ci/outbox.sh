@@ -8,4 +8,5 @@ export TEST_SUPABASE_URL=http://127.0.0.1:54321
 export E2E_CI_SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres
 export NEXT_PUBLIC_SOFTPHONE_TRANSPORT=simulated
 [[ "$(git rev-parse HEAD)" == "${HEAVY_TESTED_SHA:-}" ]]
+printf 'HEAVY_RUN_DIR=docs/performance/inbox-redesign/evidence/%s/pre-merge/%s\n' "$HEAVY_TESTED_SHA" "$GITHUB_RUN_ID" >> "$GITHUB_ENV"
 node scripts/outbox-run-record.mjs pre-merge
