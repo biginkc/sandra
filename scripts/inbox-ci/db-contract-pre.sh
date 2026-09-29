@@ -20,4 +20,6 @@ if [[ -n "$original_env" ]]; then cat "$lane_env" >> "$original_env"; fi
 export GITHUB_ENV="$original_env"
 export MESSAGING_PROVIDER=mock
 mutations="${RUNNER_TEMP:-/tmp}/db-contract-pre-mutations-${HEAVY_TESTED_SHA}.json"
+db_contract_cleanup
+lane_env=''
 node scripts/outbox-db-contract-mutations.mjs "$mutations" --phase pre
