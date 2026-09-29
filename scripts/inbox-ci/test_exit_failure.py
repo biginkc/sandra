@@ -130,14 +130,16 @@ fi
 exit 7
 ''', expected_error='Non-local Supabase endpoint')
 
-    def test_outbox_post_provision_guard(self):
-        self.run_lane('outbox', '''
+    def test_outbox_pre_and_post_provision_guard(self):
+        for lane in ('outbox-pre', 'outbox-post'):
+            with self.subTest(lane=lane):
+                self.run_lane(lane, '''
 if [[ "$1" == *write-failure-record.mjs ]]; then
   printf '{"verdict":"FAIL"}' > "$FAIL_TEST_DIR/manifest.json"
   exit 0
 fi
 exit 7
-''', env_extra={'E2E_DISPOSABLE_DATABASE': '1', 'TEST_SUPABASE_URL': 'http://127.0.0.1:55421', 'CI': 'unexpected'})
+''', env_extra={'CI': 'unexpected'})
 
 
 if __name__ == '__main__':
