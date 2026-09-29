@@ -56,12 +56,9 @@ def fingerprint(sections):
 
 
 def normalize(value, key=''):
-    if isinstance(value, dict):
-        return {k: normalize(v, k) for k, v in value.items()}
-    if isinstance(value, list):
-        return [normalize(v, key) for v in value]
-    if isinstance(value, str) and key in ('definition', 'default', 'qual', 'with_check'):
-        return ' '.join(value.split())
+    # pg_get_* output is already deterministic for one server version. SQL
+    # whitespace can occur in literals (including dollar-quoted bodies), so
+    # even an apparently harmless collapse changes the behavioral fingerprint.
     return value
 
 
@@ -86,14 +83,14 @@ types AS (SELECT w.schema_name||'.'||w.object_name AS identity,t.oid
  JOIN pg_catalog.pg_type t ON t.typnamespace=n.oid AND t.typname=w.object_name)
 SELECT jsonb_build_object(
  'relations',(SELECT coalesce(jsonb_agg(jsonb_build_object('identity',r.identity,'kind',c.relkind,
-   'acl',c.relacl::text,'rls',c.relrowsecurity,
+   'acl',c.relacl::text,'rls',c.relrowsecurity,'rls_forced',c.relforcerowsecurity,
    'columns',(SELECT coalesce(jsonb_agg(jsonb_build_object('name',a.attname,'type',pg_catalog.format_type(a.atttypid,a.atttypmod),'not_null',a.attnotnull,'default',pg_catalog.pg_get_expr(d.adbin,d.adrelid),'acl',a.attacl::text) ORDER BY a.attname),'[]'::jsonb) FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped),
    'constraints',(SELECT coalesce(jsonb_agg(pg_catalog.pg_get_constraintdef(k.oid) ORDER BY k.conname),'[]'::jsonb) FROM pg_catalog.pg_constraint k WHERE k.conrelid=c.oid),
-   'indexes',(SELECT coalesce(jsonb_agg(pg_catalog.pg_get_indexdef(i.indexrelid) ORDER BY pg_catalog.pg_get_indexdef(i.indexrelid)),'[]'::jsonb) FROM pg_catalog.pg_index i WHERE i.indrelid=c.oid),
-   'triggers',(SELECT coalesce(jsonb_agg(pg_catalog.pg_get_triggerdef(t.oid) ORDER BY t.tgname),'[]'::jsonb) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal),
-   'policies',(SELECT coalesce(jsonb_agg(jsonb_build_object('name',p.polname,'cmd',p.polcmd,'roles',(SELECT coalesce(jsonb_agg(CASE WHEN role_oid=0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(role_oid) END ORDER BY role_oid),'[]'::jsonb) FROM unnest(p.polroles) role_oid),'qual',pg_catalog.pg_get_expr(p.polqual,p.polrelid),'with_check',pg_catalog.pg_get_expr(p.polwithcheck,p.polrelid)) ORDER BY p.polname),'[]'::jsonb) FROM pg_catalog.pg_policy p WHERE p.polrelid=c.oid)
+   'indexes',(SELECT coalesce(jsonb_agg(jsonb_build_object('definition',pg_catalog.pg_get_indexdef(i.indexrelid),'valid',i.indisvalid,'ready',i.indisready,'live',i.indislive) ORDER BY pg_catalog.pg_get_indexdef(i.indexrelid)),'[]'::jsonb) FROM pg_catalog.pg_index i WHERE i.indrelid=c.oid),
+   'triggers',(SELECT coalesce(jsonb_agg(jsonb_build_object('definition',pg_catalog.pg_get_triggerdef(t.oid),'enabled',t.tgenabled) ORDER BY t.tgname),'[]'::jsonb) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal),
+   'policies',(SELECT coalesce(jsonb_agg(jsonb_build_object('name',p.polname,'cmd',p.polcmd,'permissive',p.polpermissive,'roles',(SELECT coalesce(jsonb_agg(CASE WHEN role_oid=0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(role_oid) END ORDER BY role_oid),'[]'::jsonb) FROM unnest(p.polroles) role_oid),'qual',pg_catalog.pg_get_expr(p.polqual,p.polrelid),'with_check',pg_catalog.pg_get_expr(p.polwithcheck,p.polrelid)) ORDER BY p.polname),'[]'::jsonb) FROM pg_catalog.pg_policy p WHERE p.polrelid=c.oid)
  ) ORDER BY r.identity),'[]'::jsonb) FROM rels r JOIN pg_catalog.pg_class c ON c.oid=r.oid),
- 'functions',(SELECT coalesce(jsonb_agg(jsonb_build_object('identity',f.identity,'signature',p.oid::pg_catalog.regprocedure::text,'definition',regexp_replace(pg_catalog.pg_get_functiondef(p.oid),'[[:space:]]+',' ','g'),'acl',p.proacl::text) ORDER BY f.identity,p.oid::pg_catalog.regprocedure::text),'[]'::jsonb) FROM funcs f JOIN pg_catalog.pg_proc p ON p.oid=f.oid),
+ 'functions',(SELECT coalesce(jsonb_agg(jsonb_build_object('identity',f.identity,'signature',p.oid::pg_catalog.regprocedure::text,'definition',pg_catalog.pg_get_functiondef(p.oid),'security_definer',p.prosecdef,'owner',pg_catalog.pg_get_userbyid(p.proowner),'config',p.proconfig,'acl',p.proacl::text) ORDER BY f.identity,p.oid::pg_catalog.regprocedure::text),'[]'::jsonb) FROM funcs f JOIN pg_catalog.pg_proc p ON p.oid=f.oid),
  'types',(SELECT coalesce(jsonb_agg(jsonb_build_object('identity',t.identity,'kind',y.typtype,'definition',pg_catalog.format_type(y.oid,NULL),'acl',y.typacl::text) ORDER BY t.identity),'[]'::jsonb) FROM types t JOIN pg_catalog.pg_type y ON y.oid=t.oid),
  'extensions',(SELECT coalesce(jsonb_agg(jsonb_build_object('name',e.extname,'version',e.extversion) ORDER BY e.extname),'[]'::jsonb) FROM pg_catalog.pg_extension e),
  'schemas',(SELECT coalesce(jsonb_agg(jsonb_build_object('name',n.nspname,'acl',n.nspacl::text) ORDER BY n.nspname),'[]'::jsonb) FROM pg_catalog.pg_namespace n WHERE n.nspname IN (SELECT schema_name FROM wanted)),
