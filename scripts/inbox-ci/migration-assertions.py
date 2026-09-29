@@ -61,6 +61,19 @@ def assert_catalog_live(output):
         raise ValueError('Five live catalog mutation tests did not run without skips')
 
 
+def assert_offline_suite(output):
+    match = re.search(r'(?m)^Ran (\d+) tests? in ', output)
+    if not match or int(match.group(1)) < 64 or output.rstrip().splitlines()[-1] != 'OK':
+        raise ValueError('Reviewed production-install unit suite incomplete or skipped')
+
+
+def assert_catalog_unchanged(first, second):
+    before = json.loads(Path(first).read_text()).get('section_sha256')
+    after = json.loads(Path(second).read_text()).get('section_sha256')
+    if not before or before != after:
+        raise ValueError('Catalog changed after mutation harness')
+
+
 if __name__ == '__main__':
     root = Path(__file__).resolve().parents[2]
     try:
@@ -77,6 +90,10 @@ if __name__ == '__main__':
             assert_mutations(sys.argv[2])
         elif command == 'catalog-live':
             assert_catalog_live(Path(sys.argv[2]).read_text())
+        elif command == 'offline-suite':
+            assert_offline_suite(Path(sys.argv[2]).read_text())
+        elif command == 'catalog-unchanged':
+            assert_catalog_unchanged(sys.argv[2], sys.argv[3])
         elif command == 'history':
             assert_full_history(root, Path(sys.argv[2]).read_text().splitlines())
         elif command != 'preflight':

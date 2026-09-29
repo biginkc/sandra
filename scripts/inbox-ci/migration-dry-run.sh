@@ -50,10 +50,9 @@ export GITHUB_ENV="$ORIGINAL_GITHUB_ENV"
 mapfile -t DBS < <(docker --host unix:///var/run/docker.sock ps --format '{{.Names}}' --filter 'name=^supabase_db_')
 [[ ${#DBS[@]} -eq 1 && ${DBS[0]} =~ ^supabase_db_[a-z0-9_-]+$ && ${DBS[0]} != *_sandra ]] || { echo 'Expected exactly one local non-Sandra supabase_db_<id> container' >&2; exit 3; }
 CONTAINER=${DBS[0]}
-PORT=$(docker --host unix:///var/run/docker.sock inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' "$CONTAINER")
-HOST_IP=$(docker --host unix:///var/run/docker.sock inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostIp}}' "$CONTAINER")
-[[ "$PORT" =~ ^[0-9]+$ ]] || { echo 'Disposable DB has no local port' >&2; exit 3; }
-[[ "$HOST_IP" == 127.0.0.1 ]] || { echo 'Disposable DB port must bind loopback' >&2; exit 3; }
+DB_URL=$(sed -n 's/^E2E_CI_SUPABASE_DB_URL=//p' "$WORK/provision.env")
+[[ "$DB_URL" == 'postgresql://postgres:postgres@127.0.0.1:55422/postgres' ]] || { echo 'Provisioner did not report the requested local DB URL' >&2; exit 3; }
+PORT=55422
 export PGHOST=127.0.0.1 PGPORT="$PORT" PGUSER=postgres PGDATABASE=postgres PGPASSWORD=postgres
 [[ "$(psql -X -At -v ON_ERROR_STOP=1 -c 'SHOW server_version' )" == 17.* ]] || { echo 'Disposable database must run PostgreSQL 17' >&2; exit 3; }
 [[ "$(psql -X -At -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version LIKE '2026092900%'" )" == 0 ]] || { echo 'Inbox migration versions already applied before rehearsal' >&2; exit 3; }
@@ -89,6 +88,7 @@ PY
 export INBOX_CATALOG_EVIDENCE_PATH="$WORK/installed-catalog.json"
 python3 "$INSTALL/verify.py" --installed > "$WORK/verify-installed.txt"
 python3 "$ASSERT" verify "$WORK/verify-installed.txt"
+python3 "$INSTALL/catalog_fingerprint.py" > "$WORK/catalog-post.json"
 set +e
 docker --host unix:///var/run/docker.sock exec -i "$CONTAINER" psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 -v VERBOSITY=verbose < supabase/migrations/20260929000000_inbox_control_foundation.sql > "$WORK/second-apply.stdout.txt" 2> "$WORK/second-apply.stderr.txt"
 second_status=$?
@@ -96,20 +96,15 @@ set -e
 mapfile -t ledger < <(psql -X -At -v ON_ERROR_STOP=1 -c "SELECT version FROM supabase_migrations.schema_migrations WHERE version LIKE '2026092900%' ORDER BY version")
 python3 "$ASSERT" second-apply "$second_status" "$WORK/second-apply.stderr.txt" "${ledger[@]}"
 export INBOX_MUTATION_EVIDENCE_PATH="$WORK/mutation-cases.json"
-python3 "$INSTALL/verify-mutation-harness.py" --owned-fixture > "$WORK/mutation-harness.txt"
+INBOX_CATALOG_EVIDENCE_PATH="$WORK/harness-installed-catalog.json" python3 "$INSTALL/verify-mutation-harness.py" --owned-fixture > "$WORK/mutation-harness.txt"
 python3 "$ASSERT" mutations "$WORK/mutation-cases.json"
-python3 "$INSTALL/catalog_fingerprint.py" > "$WORK/catalog-post.json"
+python3 "$INSTALL/catalog_fingerprint.py" > "$WORK/catalog-post-harness.json"
+python3 "$ASSERT" catalog-unchanged "$WORK/catalog-post.json" "$WORK/catalog-post-harness.json"
 # The checkout's offline production-install suite is the reviewed 64-test
 # baseline. The pre-existing scratch-mode unit tests use a Colima example
 # target, so run only this offline suite with the runner flag unset.
-env -u GITHUB_ACTIONS -u CATALOG_FINGERPRINT_SCRATCH python3 -m unittest discover -s "$INSTALL" -p 'test_*.py' > "$WORK/production-install-unit.txt" 2>&1
-python3 - "$WORK/production-install-unit.txt" <<'PY'
-import re,sys
-text=open(sys.argv[1]).read()
-match=re.search(r'Ran (\d+) tests?',text)
-if not match or int(match.group(1))<64 or not text.rstrip().endswith('OK'):
-    raise SystemExit('Reviewed production-install unit suite incomplete')
-PY
+env -u GITHUB_ACTIONS -u CATALOG_FINGERPRINT_SCRATCH python3 scripts/inbox-ci/run-offline-suite.py "$INSTALL" > "$WORK/production-install-unit.txt" 2>&1
+python3 "$ASSERT" offline-suite "$WORK/production-install-unit.txt"
 # Live catalog mutation tests require their own blank postgres:17 database:
 # Supabase already owns supabase_migrations.schema_migrations.
 docker --host unix:///var/run/docker.sock run -d --name "$CATALOG_CONTAINER" -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17 > /dev/null

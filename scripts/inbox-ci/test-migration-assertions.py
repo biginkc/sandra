@@ -68,6 +68,23 @@ class MigrationAssertionsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Five live catalog'):
                 a.assert_catalog_live(output)
 
+    def test_offline_suite_skip_fails(self):
+        a.assert_offline_suite('Ran 67 tests in 1.000s\n\nOK\n')
+        for output in ('Ran 72 tests in 1.000s\n\nOK (skipped=5)\n',
+                       'Ran 63 tests in 1.000s\n\nOK\n'):
+            with self.assertRaises(ValueError):
+                a.assert_offline_suite(output)
+
+    def test_catalog_harness_drift_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first, second = Path(tmp) / 'first.json', Path(tmp) / 'second.json'
+            first.write_text(json.dumps({'section_sha256': {'schema': 'a'}}))
+            second.write_text(json.dumps({'section_sha256': {'schema': 'b'}}))
+            with self.assertRaisesRegex(ValueError, 'Catalog changed'):
+                a.assert_catalog_unchanged(first, second)
+            second.write_text(first.read_text())
+            a.assert_catalog_unchanged(first, second)
+
 
 if __name__ == '__main__':
     unittest.main()

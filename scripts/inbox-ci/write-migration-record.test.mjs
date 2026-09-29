@@ -27,10 +27,24 @@ test('each W2 lane produces a pullable record and the W1 gate selects both keys'
     writeFileSync(path.join(work, 'installed-catalog.json'), '{}\n');
     writeFileSync(path.join(work, 'mutation-cases.json'), JSON.stringify({ passed: true, cases: Array(41).fill({ drift_caught: true, restored_pass: true }) }));
     for (const phase of ['pre', 'post']) writeFileSync(path.join(work, `catalog-${phase}.json`), JSON.stringify({ sha256: phase, section_sha256: { catalog: phase } }));
+    cpSync(path.join(work, 'catalog-post.json'), path.join(work, 'catalog-post-harness.json'));
     const bin = path.join(root, 'bin'); mkdirSync(bin);
     for (const name of ['supabase', 'docker']) { const file = path.join(bin, name); writeFileSync(file, '#!/bin/sh\necho synthetic-version\n', { mode: 0o755 }); }
+    const writer = path.join(repo, 'scripts/inbox-ci/write-migration-record.mjs');
+    const baseEnv = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF_NAME: 'main', GITHUB_RUN_ID: '901', GITHUB_RUN_ATTEMPT: '2', HEAVY_LANE: 'migration-dry-run', HEAVY_TESTED_SHA: sha };
+    const invoke = env => execFileSync('node', [writer, work], { cwd: repo, env: { ...baseEnv, ...env }, encoding: 'utf8', stdio: 'pipe' });
+    for (const [env, message] of [[{ GITHUB_EVENT_NAME: 'push' }, 'Untrusted dispatch provenance'], [{ GITHUB_REF_NAME: 'feature' }, 'Untrusted dispatch provenance'], [{ HEAVY_TESTED_SHA: '0'.repeat(40) }, 'Invalid heavy lane identity']]) {
+      assert.throws(() => invoke(env), error => error.stderr?.toString().includes(message));
+    }
+    const completeCases = readFileSync(path.join(work, 'mutation-cases.json'));
+    writeFileSync(path.join(work, 'mutation-cases.json'), JSON.stringify({ passed: true, cases: Array(40).fill({ drift_caught: true, restored_pass: true }) }));
+    assert.throws(() => invoke({}), error => error.stderr?.toString().includes('Missing 41-case proof'));
+    writeFileSync(path.join(work, 'mutation-cases.json'), completeCases);
+    writeFileSync(path.join(repo, 'unrelated.txt'), 'unexpected edit\n');
+    assert.throws(() => invoke({}), error => error.stderr?.toString().includes('Non-record working-tree changes at end'));
+    rmSync(path.join(repo, 'unrelated.txt'));
     for (const [lane, id] of [['migration-dry-run', '901'], ['catalog-fingerprint', '902']]) {
-      execFileSync('node', [path.join(repo, 'scripts/inbox-ci/write-migration-record.mjs'), work], { cwd: repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF_NAME: 'main', GITHUB_RUN_ID: id, GITHUB_RUN_ATTEMPT: '2', HEAVY_LANE: lane, HEAVY_TESTED_SHA: sha } });
+      invoke({ HEAVY_LANE: lane, GITHUB_RUN_ID: id });
       const prefix = `docs/performance/inbox-redesign/evidence/${sha}/pre-merge/${id}`;
       const manifest = JSON.parse(readFileSync(path.join(repo, prefix, 'manifest.json')));
       const download = path.join(root, `download-${id}`);
@@ -48,9 +62,12 @@ test('each W2 lane produces a pullable record and the W1 gate selects both keys'
       assert.throws(() => verifyDownload(repo, download, run, artifact, sha), /Manifest provenance/);
       manifest.workflow_input_sha = saved;
       writeFileSync(path.join(download, prefix, 'manifest.json'), JSON.stringify(manifest));
+      rmSync(path.join(repo, prefix), { recursive: true, force: true });
     }
     for (const id of ['901', '902']) {
       const prefix = `docs/performance/inbox-redesign/evidence/${sha}/pre-merge/${id}`;
+      mkdirSync(path.dirname(path.join(repo, prefix)), { recursive: true });
+      cpSync(path.join(root, `download-${id}`, prefix), path.join(repo, prefix), { recursive: true });
       git(repo, 'add', '--', prefix);
       git(repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', `evidence ${id}`);
     }

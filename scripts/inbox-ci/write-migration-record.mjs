@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { writeManifest, runPath } from '../../scripts/outbox-run-record.mjs';
+import { assertOnlyRunDirDirty, writeManifest, runPath } from '../../scripts/outbox-run-record.mjs';
 
 const repo = path.resolve(import.meta.dirname, '../..');
 const work = process.argv[2];
@@ -33,7 +33,6 @@ const common = {
   supabase_cli_version: execFileSync('supabase', ['--version'], { encoding: 'utf8' }).trim(),
   docker_version: execFileSync('docker', ['--version'], { encoding: 'utf8' }).trim(),
   lane,
-  clean_tree: { start: true, end_excluding_run_dir: true, end_status: [] },
   exit_status: 0, verdict: 'PASS',
 };
 function record(kind, files, summary) {
@@ -46,8 +45,9 @@ function record(kind, files, summary) {
     copyFileSync(source, path.join(absolute, file));
   }
   writeFileSync(path.join(absolute, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
+  const endStatus = assertOnlyRunDirDirty(repo, relative);
   writeManifest(repo, relative, { ...common, kind, run_id: runId,
-    clean_tree: { ...common.clean_tree, excluded_path: relative }, summary,
+    clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative, end_status: endStatus }, summary,
     ...(kind === 'catalog-fingerprint' ? { catalog_fingerprint_post_artifact: 'catalog-post.json' } : {}),
   });
 }
@@ -59,6 +59,7 @@ const dryRunFiles = [
   'indexes.txt', 'index-preconditions.txt', 'verify-installed.txt', 'installed-catalog.json',
   'pre-migration-ledger.txt',
   'second-apply.stdout.txt', 'second-apply.stderr.txt', 'mutation-harness.txt', 'mutation-cases.json',
+  'catalog-post-harness.json',
   'production-install-unit.txt',
   'apply-20260929000000.txt', 'apply-20260929000100.txt', 'apply-20260929000200.txt',
 ];
