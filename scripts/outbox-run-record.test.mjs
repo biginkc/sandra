@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { artifactHashes, assertCleanStart, assertOnlyRunDirDirty, buildOutboxIdentityEnvironment, runPath, sha256, validateOutboxResults, writeManifest } from './outbox-run-record.mjs';
+import { artifactHashes, assertCleanStart, assertOnlyRunDirDirty, buildOutboxIdentityEnvironment, isGitHubE2ERun, recordOutboxResult, runOutboxPlaywright, runPath, sha256, validateOutboxResults, writeManifest } from './outbox-run-record.mjs';
 import { ensureE2ERunEnvironment } from '../src/lib/supabase/e2e-identity-guard.ts';
 test('GitHub Outbox identity matches the real E2E guard', () => {
   assert.throws(() => ensureE2ERunEnvironment({ GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '2', E2E_RUN_SLUG: 'local-123-abcdef123456', E2E_TEST_USER_EMAIL: 'e2e-ci+local-123-abcdef123456@bmhgroupkc.com', E2E_TEST_USER_PASSWORD: 'x'.repeat(32) }), /does not match this run ID and attempt/);
@@ -18,6 +18,53 @@ test('CI=1 takes the same GitHub identity path as the real guard', () => {
   const env = buildOutboxIdentityEnvironment({ CI: '1', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '3' });
   assert.equal(env.E2E_RUN_SLUG, 'gha-36550350156-3');
   assert.doesNotThrow(() => ensureE2ERunEnvironment(env));
+});
+test('producer rejects malformed GitHub run ID and attempt itself', () => {
+  const validIdentity = () => ({ runSlug: 'gha-36550350156-2', email: 'e2e-ci+gha-36550350156-2@bmhgroupkc.com', password: 'x'.repeat(32) });
+  assert.throws(() => buildOutboxIdentityEnvironment({ GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: 'bad', GITHUB_RUN_ATTEMPT: '2' }, validIdentity), /numeric GITHUB_RUN_ID/);
+  assert.throws(() => buildOutboxIdentityEnvironment({ GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: 'bad' }, validIdentity), /numeric GITHUB_RUN_ATTEMPT/);
+});
+test('CI=1 without GITHUB_ACTIONS runs both identity lifecycle steps', () => {
+  const env = buildOutboxIdentityEnvironment({ CI: '1', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '3' });
+  assert.equal(isGitHubE2ERun(env), true);
+  const steps = [];
+  const outcome = runOutboxPlaywright(env, '.', {
+    lifecycle: step => steps.push(step),
+    playwright: () => ({ status: 0, stdout: '{}', stderr: '' }),
+  });
+  assert.deepEqual(steps, ['preflight', 'cleanup']);
+  assert.equal(outcome.cleanupError, undefined);
+});
+test('cleanup failure after Playwright seals a FAIL record and returns non-zero', () => {
+  const dir = repo();
+  mkdirSync(path.join(dir, 'scripts/inbox-ci'), { recursive: true });
+  mkdirSync(path.join(dir, 'e2e/inbox-acceptance'), { recursive: true });
+  writeFileSync(path.join(dir, 'scripts/inbox-ci/outbox.sh'), '#!/bin/sh\n');
+  writeFileSync(path.join(dir, 'e2e/inbox-acceptance/fault-proxy.mjs'), '// proxy\n');
+  execFileSync('git', ['-C', dir, 'add', '.']);
+  execFileSync('git', ['-C', dir, 'commit', '-qm', 'record fixtures']);
+  const sha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const relative = runPath(sha, 'pre-merge', 'cleanup-failure');
+  const full = path.join(dir, relative);
+  mkdirSync(full, { recursive: true });
+  const rows = Array.from({ length: 10 }, (_, i) => ({ id: `O${String(i + 1).padStart(2, '0')}`, status: 'pass' }));
+  const passed = () => ({ status: 'expected', results: [{ retry: 0, status: 'passed' }] });
+  const results = { stats: { expected: 8, skipped: 0, unexpected: 0, flaky: 0 }, suites: [{ specs: Array.from({ length: 8 }, () => ({ tests: [passed()] })) }] };
+  writeFileSync(path.join(full, 'row-results.json'), JSON.stringify(rows));
+  const env = { CI: '1', GITHUB_RUN_ID: '36550350156', GITHUB_RUN_ATTEMPT: '3', HEAVY_LANE: 'outbox' };
+  const outcome = runOutboxPlaywright(env, dir, {
+    lifecycle: step => { if (step === 'cleanup') throw new Error('injected exact-run cleanup failure'); },
+    playwright: () => ({ status: 0, stdout: JSON.stringify(results), stderr: '' }),
+  });
+  const exitStatus = recordOutboxResult({ repo: dir, relativeDir: relative, sha, tier: 'pre-merge', runId: 'cleanup-failure', startedAt: new Date().toISOString(), env, ...outcome });
+  const manifest = JSON.parse(readFileSync(path.join(full, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.verdict, 'FAIL');
+  assert.notEqual(manifest.exit_status, 0);
+  assert.notEqual(exitStatus, 0);
+  assert.equal(manifest.cleanup_failure, true);
+  assert.match(readFileSync(path.join(full, 'validation.log'), 'utf8'), /Exact-run cleanup failed/);
+  assert.ok(existsSync(path.join(full, 'results.json')));
+  assert.equal(manifest.artifacts['results.json'], sha256(readFileSync(path.join(full, 'results.json'))));
 });
 test('local Outbox identity stays local and satisfies the real E2E guard', () => {
   const env = buildOutboxIdentityEnvironment({});

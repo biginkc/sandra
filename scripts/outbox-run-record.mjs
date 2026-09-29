@@ -7,9 +7,10 @@ import { createGitHubRunEnvironment, ensureE2ERunEnvironment } from '../src/lib/
 
 export const EVIDENCE_ROOT = 'docs/performance/inbox-redesign/evidence';
 export const TIERS = new Set(['pre-merge', 'test-env', 'prod-deploy']);
-export function buildOutboxIdentityEnvironment(baseEnv = process.env) {
-  const run = baseEnv.CI === '1' || baseEnv.GITHUB_ACTIONS === 'true'
-    ? createGitHubRunEnvironment(baseEnv)
+export function isGitHubE2ERun(env) { return env.CI === '1' || env.GITHUB_ACTIONS === 'true'; }
+export function buildOutboxIdentityEnvironment(baseEnv = process.env, githubRunEnvironment = createGitHubRunEnvironment) {
+  const run = isGitHubE2ERun(baseEnv)
+    ? githubRunEnvironment(baseEnv)
     : { runSlug: `local-${process.pid}-${randomUUID().replaceAll('-', '').slice(0, 12)}`, password: `${randomUUID()}${randomUUID()}` };
   const env = {
     ...baseEnv,
@@ -24,6 +25,19 @@ function runIdentityLifecycle(command, env, repo) {
   const result = spawnSync('npx', ['tsx', 'scripts/e2e-identity-lifecycle.ts', command], { cwd: repo, env, encoding: 'utf8' });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`E2E identity ${command} failed: ${result.stderr || result.stdout || result.status}`);
+}
+export function runOutboxPlaywright(env, repo, { lifecycle = runIdentityLifecycle, playwright = () => spawnSync('npx', ['playwright', 'test', '--config', 'playwright.outbox-regression.config.ts', '--reporter=json'], { cwd: repo, env, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 }) } = {}) {
+  if (isGitHubE2ERun(env)) lifecycle('preflight', env, repo);
+  let result;
+  let cleanupError;
+  try {
+    result = playwright();
+  } finally {
+    if (isGitHubE2ERun(env)) {
+      try { lifecycle('cleanup', env, repo); } catch (error) { cleanupError = error; }
+    }
+  }
+  return { result, cleanupError };
 }
 const TEXT_ARTIFACT = /\.(?:json|log|txt|html|csv|md)$/i;
 const ALLOWED_ARTIFACT = /\.(?:json|log|txt|html|png|csv|gz|md)$/i;
@@ -189,58 +203,63 @@ async function stopProxy(proxy) {
   });
 }
 
+export function recordOutboxResult({ repo, relativeDir, sha, tier, runId, startedAt, env, result, cleanupError }) {
+  const absoluteDir = path.join(repo, relativeDir);
+  writeFileSync(path.join(absoluteDir, 'results.json'), redactResultsJson(result.stdout || '', env, repo));
+  writeFileSync(path.join(absoluteDir, 'runner.log'), redactText(`${result.stderr || ''}\nexit_status=${result.status ?? 'signal'}\n`, env));
+  const failures = [];
+  if (result.error) failures.push(`Playwright execution failed: ${result.error}`);
+  if (cleanupError) failures.push(`Exact-run cleanup failed: ${cleanupError}`);
+  try { validateOutboxResults(absoluteDir); } catch (error) { failures.push(String(error)); }
+  const verdict = failures.length || result.status !== 0 ? 'FAIL' : 'PASS';
+  if (failures.length) writeFileSync(path.join(absoluteDir, 'validation.log'), failures.join('\n'));
+  const status = assertOnlyRunDirDirty(repo, relativeDir);
+  const exitStatus = verdict === 'PASS' ? 0 : (result.status || 1);
+  writeManifest(repo, relativeDir, {
+    tested_sha: sha, tier, kind: 'browser', phase: env.HEAVY_PHASE ?? 'pre', target: 'disposable', verdict, run_id: runId, started_at: startedAt, completed_at: new Date().toISOString(),
+    summary: cleanupError ? 'Exact-run cleanup failed' : '', cleanup_failure: Boolean(cleanupError),
+    workflow_path: env.GITHUB_WORKFLOW_REF?.split('@')[0]?.replace(/^[^/]+\/[^/]+\//, '') ?? '',
+    workflow_input_sha: env.HEAVY_TESTED_SHA ?? '',
+    github_run_id: env.GITHUB_RUN_ID ?? '', github_run_attempt: env.GITHUB_RUN_ATTEMPT ?? '',
+    artifact_name: isGitHubE2ERun(env) ? `heavy-${env.HEAVY_LANE}-${sha}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}` : '',
+    event: env.GITHUB_EVENT_NAME ?? '', head_branch: env.GITHUB_REF_NAME ?? '', lane: env.HEAVY_LANE ?? '',
+    runner_script_sha256: sha256(readFileSync(path.join(repo, 'scripts/inbox-ci', `${env.HEAVY_LANE ?? 'outbox'}.sh`))),
+    fault_proxy_script_sha256: sha256(readFileSync(path.join(repo, 'e2e/inbox-acceptance/fault-proxy.mjs'))),
+    clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relativeDir, end_status: status },
+    exit_status: exitStatus,
+    fixture_rows: existsSync(path.join(absoluteDir, 'fixture-rows.json')) ? JSON.parse(readFileSync(path.join(absoluteDir, 'fixture-rows.json'), 'utf8')) : [],
+    retained_rows: existsSync(path.join(absoluteDir, 'retained-rows.json')) ? JSON.parse(readFileSync(path.join(absoluteDir, 'retained-rows.json'), 'utf8')) : [],
+  }, env);
+  return exitStatus;
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const repo = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
   const tier = process.argv[2] ?? 'pre-merge';
   assertCleanStart(repo);
   const sha = git(repo, 'rev-parse', 'HEAD');
-  const runId = process.env.GITHUB_ACTIONS === 'true' ? process.env.GITHUB_RUN_ID : `${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${randomUUID()}`;
-  if (process.env.GITHUB_ACTIONS === 'true' && (!/^\d+$/.test(runId ?? '') || process.env.HEAVY_TESTED_SHA !== sha)) throw new Error('Invalid CI run identity');
+  const runId = isGitHubE2ERun(process.env) ? process.env.GITHUB_RUN_ID : `${new Date().toISOString().replace(/[-:.TZ]/g, '')}-${randomUUID()}`;
+  if (isGitHubE2ERun(process.env) && (!/^[1-9][0-9]*$/.test(runId ?? '') || process.env.HEAVY_TESTED_SHA !== sha)) throw new Error('Invalid CI run identity');
   const relativeDir = runPath(sha, tier, runId);
   const absoluteDir = path.join(repo, relativeDir);
   const startedAt = new Date().toISOString();
   mkdirSync(absoluteDir, { recursive: true });
   const token = `${randomUUID()}${randomUUID()}`;
   const env = buildOutboxIdentityEnvironment({ ...process.env, OUTBOX_RUN_DIR: absoluteDir, OUTBOX_FAULT_TOKEN: token, INBOX_ACCEPTANCE_ORG_ID: '00000000-0000-0000-0000-000000000bbb', MESSAGING_PROVIDER: 'mock' });
-  if (env.GITHUB_ACTIONS === 'true') {
+  if (isGitHubE2ERun(env)) {
     if (!env.RUNNER_TEMP) throw new Error('GitHub Outbox identity requires RUNNER_TEMP');
     env.E2E_QA_GUARD_STATE = path.join(env.RUNNER_TEMP, `sandra-e2e-browser-qa-${env.E2E_RUN_SLUG}.json`);
   }
-  let result;
+  let outcome;
   const proxy = spawn(process.execPath, ['e2e/inbox-acceptance/fault-proxy.mjs'], { cwd: repo, env, stdio: 'ignore' });
   let proxyError;
   proxy.on('error', error => { proxyError = error; });
   try {
     await waitForProxy(proxy, token);
     if (proxyError) throw proxyError;
-    if (env.GITHUB_ACTIONS === 'true') runIdentityLifecycle('preflight', env, repo);
-    try {
-      result = spawnSync('npx', ['playwright', 'test', '--config', 'playwright.outbox-regression.config.ts', '--reporter=json'], { cwd: repo, env, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
-    } finally {
-      if (env.GITHUB_ACTIONS === 'true') runIdentityLifecycle('cleanup', env, repo);
-    }
+    outcome = runOutboxPlaywright(env, repo);
   } finally {
     await stopProxy(proxy);
   }
-  if (result.error) throw result.error;
-  writeFileSync(path.join(absoluteDir, 'results.json'), redactResultsJson(result.stdout || '', env, repo));
-  writeFileSync(path.join(absoluteDir, 'runner.log'), redactText(`${result.stderr || ''}\nexit_status=${result.status ?? 'signal'}\n`, env));
-  let verdict = 'PASS';
-  try { validateOutboxResults(absoluteDir); } catch (error) { verdict = 'FAIL'; writeFileSync(path.join(absoluteDir, 'validation.log'), String(error)); }
-  const status = assertOnlyRunDirDirty(repo, relativeDir);
-  writeManifest(repo, relativeDir, {
-    tested_sha: sha, tier, kind: 'browser', phase: process.env.HEAVY_PHASE ?? 'pre', target: 'disposable', verdict, run_id: runId, started_at: startedAt, completed_at: new Date().toISOString(),
-    workflow_path: process.env.GITHUB_WORKFLOW_REF?.split('@')[0]?.replace(/^[^/]+\/[^/]+\//, '') ?? '',
-    workflow_input_sha: process.env.HEAVY_TESTED_SHA ?? '',
-    github_run_id: process.env.GITHUB_RUN_ID ?? '', github_run_attempt: process.env.GITHUB_RUN_ATTEMPT ?? '',
-    artifact_name: process.env.GITHUB_ACTIONS === 'true' ? `heavy-${process.env.HEAVY_LANE}-${sha}-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}` : '',
-    event: process.env.GITHUB_EVENT_NAME ?? '', head_branch: process.env.GITHUB_REF_NAME ?? '', lane: process.env.HEAVY_LANE ?? '',
-    runner_script_sha256: sha256(readFileSync(path.join(repo, 'scripts/inbox-ci', `${process.env.HEAVY_LANE ?? 'outbox'}.sh`))),
-    fault_proxy_script_sha256: sha256(readFileSync(path.join(repo, 'e2e/inbox-acceptance/fault-proxy.mjs'))),
-    clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relativeDir, end_status: status },
-    exit_status: result.status === 0 && verdict === 'PASS' ? 0 : (result.status || 1),
-    fixture_rows: existsSync(path.join(absoluteDir, 'fixture-rows.json')) ? JSON.parse(readFileSync(path.join(absoluteDir, 'fixture-rows.json'), 'utf8')) : [],
-    retained_rows: existsSync(path.join(absoluteDir, 'retained-rows.json')) ? JSON.parse(readFileSync(path.join(absoluteDir, 'retained-rows.json'), 'utf8')) : [],
-  }, env);
-  process.exitCode = result.status === 0 && verdict === 'PASS' ? 0 : (result.status || 1);
+  process.exitCode = recordOutboxResult({ repo, relativeDir, sha, tier, runId, startedAt, env, ...outcome });
 }
