@@ -89,7 +89,7 @@ class EmitMigrationsTests(unittest.TestCase):
         self.assertEqual(len(emitted), 3)
 
     def test_reply_context_versions_has_rls(self) -> None:
-        sql = emit_migrations.compute_emitted()["20260930000200_inbox_backend_operation_reply.sql"]
+        sql = emit_migrations.compute_emitted()["20260930020200_inbox_backend_operation_reply.sql"]
         table = "CREATE TABLE inbox_reply_context.versions("
         rls = "ALTER TABLE inbox_reply_context.versions ENABLE ROW LEVEL SECURITY;"
         self.assertIn(table, sql)
@@ -182,7 +182,7 @@ class EmitMigrationsTests(unittest.TestCase):
         self.assertEqual(emit_migrations.write_mode(), 0)
         self.assertEqual(emit_migrations.check_mode(), 0)
 
-        edited = emit_migrations.MIGRATIONS_DIR / "20260930000000_inbox_control_foundation.sql"
+        edited = emit_migrations.MIGRATIONS_DIR / "20260930020000_inbox_control_foundation.sql"
         text = edited.read_text()
         edited.write_text(text + "\n-- hand-edited, should never be byte-stable\n")
 
@@ -190,7 +190,7 @@ class EmitMigrationsTests(unittest.TestCase):
 
     def test_deleting_an_emitted_migration_fails_check(self) -> None:
         self.assertEqual(emit_migrations.write_mode(), 0)
-        target = emit_migrations.MIGRATIONS_DIR / "20260930000200_inbox_backend_operation_reply.sql"
+        target = emit_migrations.MIGRATIONS_DIR / "20260930020200_inbox_backend_operation_reply.sql"
         target.unlink()
         self.assertEqual(emit_migrations.check_mode(), 1)
 
@@ -206,9 +206,9 @@ class EmitMigrationsTests(unittest.TestCase):
         with self.assertRaises(emit_migrations.EmitError):
             emit_migrations.assert_no_cross_file_object_collisions(
                 {
-                    "20260930000000_inbox_control_foundation.sql": "CREATE TABLE public.widgets(id int);",
-                    "20260930000100_inbox_read_companion.sql": "CREATE TABLE public.widgets(id int);",
-                    "20260930000200_inbox_backend_operation_reply.sql": "",
+                    "20260930020000_inbox_control_foundation.sql": "CREATE TABLE public.widgets(id int);",
+                    "20260930020100_inbox_read_companion.sql": "CREATE TABLE public.widgets(id int);",
+                    "20260930020200_inbox_backend_operation_reply.sql": "",
                 }
             )
 
@@ -219,11 +219,11 @@ class EmitMigrationsTests(unittest.TestCase):
         with self.assertRaises(emit_migrations.EmitError) as ctx:
             emit_migrations.assert_no_cross_file_object_collisions(
                 {
-                    "20260930000000_inbox_control_foundation.sql": "",
-                    "20260930000100_inbox_read_companion.sql": (
+                    "20260930020000_inbox_control_foundation.sql": "",
+                    "20260930020100_inbox_read_companion.sql": (
                         "CREATE INDEX unknown_history_retention ON inbox_read.unknown_history_cursors(id);"
                     ),
-                    "20260930000200_inbox_backend_operation_reply.sql": (
+                    "20260930020200_inbox_backend_operation_reply.sql": (
                         "CREATE INDEX unknown_history_retention ON inbox_read.unknown_history_cursors(id);"
                     ),
                 }
@@ -238,17 +238,17 @@ class EmitMigrationsTests(unittest.TestCase):
         with self.assertRaises(emit_migrations.EmitError):
             emit_migrations.assert_no_cross_file_object_collisions(
                 {
-                    "20260930000000_inbox_control_foundation.sql": "CREATE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
-                    "20260930000100_inbox_read_companion.sql": "CREATE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
-                    "20260930000200_inbox_backend_operation_reply.sql": "",
+                    "20260930020000_inbox_control_foundation.sql": "CREATE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+                    "20260930020100_inbox_read_companion.sql": "CREATE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+                    "20260930020200_inbox_backend_operation_reply.sql": "",
                 }
             )
         # No exception for the OR REPLACE shape repeated across files.
         emit_migrations.assert_no_cross_file_object_collisions(
             {
-                "20260930000000_inbox_control_foundation.sql": "CREATE OR REPLACE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
-                "20260930000100_inbox_read_companion.sql": "CREATE OR REPLACE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
-                "20260930000200_inbox_backend_operation_reply.sql": "",
+                "20260930020000_inbox_control_foundation.sql": "CREATE OR REPLACE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+                "20260930020100_inbox_read_companion.sql": "CREATE OR REPLACE FUNCTION inbox_read.f(x int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+                "20260930020200_inbox_backend_operation_reply.sql": "",
             }
         )
 
