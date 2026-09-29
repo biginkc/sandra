@@ -13,6 +13,7 @@ let originalDefinitions: string[];
 let org: string;
 let otherOrg: string;
 let actor: string;
+let owner: string;
 let source: string;
 let target: string;
 let otherSource: string;
@@ -45,11 +46,12 @@ beforeAll(async () => {
 afterAll(async () => { await pg.query("rollback"); await pg.end(); });
 beforeEach(async () => {
   await pg.query("savepoint detail_test");
-  org = randomUUID(); otherOrg = randomUUID(); actor = randomUUID();
+  org = randomUUID(); otherOrg = randomUUID(); actor = randomUUID(); owner = randomUUID();
   source = randomUUID(); target = randomUUID(); otherSource = randomUUID();
-  await pg.query("insert into auth.users(id) values ($1)", [actor]);
+  await pg.query("insert into auth.users(id) values ($1),($2)", [owner, actor]);
   await pg.query("insert into public.organizations(id,name) values ($1,'Detail A'),($2,'Detail B')", [org, otherOrg]);
-  await pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner')", [actor, org]);
+  await pg.query("insert into public.memberships(user_id,org_id,role,access_status) values ($1,$2,'owner','active')", [owner, org]);
+  await pg.query("insert into public.memberships(user_id,org_id,role,access_status) values ($1,$2,'member','active')", [actor, org]);
   await pg.query("insert into public.sequences(id,org_id,name) values ($1,$2,'Source'),($3,$2,'Target'),($4,$5,'Other')",
     [source, org, target, otherSource, otherOrg]);
   const first = await pg.query<{ id: string }>("insert into public.sequence_steps(sequence_id,step_index,delay_after_previous_minutes,action_type,template_body) values ($1,0,0,'send_sms','First') returning id", [source]);
@@ -91,6 +93,22 @@ it("copies ordered steps into an empty same-org target without changing the sour
   await rejected("select public.sequence_copy_steps($1,$2)", [target, source], "23514");
   await rejected("select public.sequence_copy_steps($1,$2)", [target, otherSource], "P0002");
   await rejected("select public.sequence_copy_steps($1,$2)", [source, source], "22023");
+});
+
+it("allows an active non-admin member to insert sequence steps directly under existing RLS", async () => {
+  await asActor();
+  const inserted = await pg.query<{ sequence_id: string; template_body: string }>(
+    "insert into public.sequence_steps(sequence_id,step_index,action_type,template_body) values ($1,0,'send_sms','Member insert') returning sequence_id,template_body",
+    [target],
+  );
+  expect(inserted.rows).toEqual([{ sequence_id: target, template_body: "Member insert" }]);
+});
+
+it("rejects a copy into a cross-org target when the actor is not a target-org member", async () => {
+  const foreignTarget = randomUUID();
+  await pg.query("insert into public.sequences(id,org_id,name) values ($1,$2,'Foreign target')", [foreignTarget, otherOrg]);
+  await rejected("select public.sequence_copy_steps($1,$2)", [foreignTarget, source], "42501");
+  expect((await pg.query("select count(*) from public.sequence_steps where sequence_id=$1", [foreignTarget])).rows[0].count).toBe("0");
 });
 
 it("rejects a cross-org source and a nonempty target before writing", async () => {

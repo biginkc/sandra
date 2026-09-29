@@ -45,8 +45,15 @@ export async function getDripDetail(sequenceId: string): Promise<Result<DripDeta
     if (enrollmentsResult.error) throw enrollmentsResult.error;
     const enrollments = enrollmentsResult.data ?? [];
     const ids = [...new Set(enrollments.map((row) => row.property_id))];
+    // The embedded limit is per property, so a newer conversation on a
+    // different property of the same homeowner cannot replace this thread.
     const properties = ids.length ? await supabase.from("properties")
-      .select("id, address, homeowner_contact_id").in("id", ids).eq("org_id", sequenceOrg.org_id) : { data: [], error: null };
+      .select("id, address, homeowner_contact_id, thread_messages:messages!messages_property_id_fkey(conversation_id)")
+      .in("id", ids).eq("org_id", sequenceOrg.org_id)
+      .eq("thread_messages.channel", "sms")
+      .not("thread_messages.conversation_id", "is", null)
+      .order("created_at", { referencedTable: "thread_messages", ascending: false })
+      .limit(1, { referencedTable: "thread_messages" }) : { data: [], error: null };
     if (properties.error) throw properties.error;
     const contactsIds = [...new Set((properties.data ?? []).flatMap((row) => row.homeowner_contact_id ? [row.homeowner_contact_id] : []))];
     const contacts = contactsIds.length ? await supabase.from("contacts")
@@ -102,7 +109,7 @@ export async function getDripDetail(sequenceId: string): Promise<Result<DripDeta
         const repliedAfterLast = (lastInbound.get(row.property_id) ?? "") > (lastSent.get(row.id) ?? row.enrolled_at);
         const bucketStatus = dripStatus(row.status, row.pause_reason, canceled.has(row.id), repliedAfterLast);
         const status = bucketStatus ?? "Paused";
-        return { enrollmentId: row.id, propertyId: row.property_id, threadId: property?.homeowner_contact_id ?? null,
+        return { enrollmentId: row.id, propertyId: row.property_id, threadId: property?.thread_messages[0]?.conversation_id ?? null,
           address: property?.address ?? "Address unavailable", name: name || property?.address || "Lead",
           status, detail: pauseReasonText(row.pause_reason) ?? (bucketStatus ? null : repliedAfterLast ? "Lead replied after the last drip text." : "Review this drip before continuing."), step: count ? Math.min(count, Math.max(1, row.current_step_index + 1)) : 0,
           nextRunAt: row.status === "active" ? row.next_run_at : null,

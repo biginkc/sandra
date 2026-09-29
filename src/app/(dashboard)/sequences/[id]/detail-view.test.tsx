@@ -44,3 +44,15 @@ it("offers only unarchived drips with steps as copy sources", async () => {
   expect(screen.getByRole("button", { name: /Live source/ })).toBeVisible();
   expect(screen.queryByRole("button", { name: /Archived source/ })).not.toBeInTheDocument();
 });
+
+it("opens the selected property's conversation and omits the link without one", () => {
+  const detail = { ...sampleDetail, peopleCount: 3, people: [
+    { ...sampleDetail.people[0], propertyId: "property-a", threadId: "conversation-a" },
+    { ...sampleDetail.people[1], propertyId: "property-b", threadId: "conversation-b" },
+    { ...sampleDetail.people[2], propertyId: "property-c", threadId: null },
+  ] };
+  render(<DripDetailView detail={detail} sources={[]} isAdmin />);
+  expect(screen.getAllByRole("link", { name: "Open thread" }).map((link) => link.getAttribute("href"))).toEqual([
+    "/messages?thread=conversation-a", "/messages?thread=conversation-b",
+  ]);
+});
