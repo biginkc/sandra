@@ -168,7 +168,11 @@ def verify_backend_source_content(manifest: dict[str, Any], packet: str) -> dict
             worktree_expected = expected
             correction = entry.get("reviewed_correction")
             if correction is not None:
-                if group != "sql_sources" or entry.get("name") != "operation_domain_apply" or path != "experiments/inbox-operation-domain/restrictive-apply.sql" or not isinstance(correction, dict):
+                reviewed_paths = {
+                    "operation_domain_apply": "experiments/inbox-operation-domain/restrictive-apply.sql",
+                    "reply_context": "experiments/inbox-reply-boundary/context.sql",
+                }
+                if group != "sql_sources" or path != reviewed_paths.get(entry.get("name")) or not isinstance(correction, dict):
                     mismatches.append(f"{group}:{path}: unexpected reviewed correction")
                     continue
                 correction_base = correction.get("base_commit")

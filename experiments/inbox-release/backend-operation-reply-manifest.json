@@ -6,7 +6,7 @@
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
-    "sha256": "c82750aecab9a2081f6a8ebbbfb1f6d7705c5649de481d8f666e1e2a881518bb"
+    "sha256": "3ac5b47555ef66079fbfc18d297d2ed972056b9f4698ca87e50d92cb5f9ce1f2"
   },
   "sql_sources": [
     {
@@ -132,7 +132,12 @@
       "path": "experiments/inbox-reply-boundary/context.sql",
       "sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
       "bytes": 5946,
-      "transformed_sha256": "d37e2d745aac9cd34c38b6199beb8bb6cd803dabe75cd249faaacf97e50479f4"
+      "transformed_sha256": "477b32e6d174b2d4719ed9479befdbddfb864c31e941a6b7cb01e09b393a5bd5",
+      "reviewed_correction": {
+        "base_commit": "87e0a164294b7740c38b1ca926e3503e3f3ea7eb",
+        "sha256": "942c9e7b117e73b941eeb0874d5928f37b670df264ba59114d8bf9c0838b8e3f",
+        "bytes": 6014
+      }
     },
     {
       "name": "reply_recipient",
