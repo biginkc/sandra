@@ -7,7 +7,7 @@
   "command-admission.sql": "466dcbf7f7e2f69073291a1f55c86cc01ace5f93f57e10f5c80d6024a1351b99",
   "components.json": "db107ff336a10809a1b7b46ba45113141bb95e6eee4caf59cfc6131bc08990f6",
   "electric-replication-role.sql": "72b52d829f176940fb2d935d00193fa670fd0ac5562b69419de513782dffd7ad",
-  "emit-migrations.py": "b51f0e3043978e2ee8f99209bcc73b8b47a9ebf434be67ebad2b65c89596cb2d",
+  "emit-migrations.py": "fd91a8d0e4822ae96cc6c0ca20f5af69960bf3ea35363bdf3d113063f34c4e62",
   "fixture_db.py": "c53037a3d5718cef4a01553490a3e93a96c47bed6cac09a32f042a1f69752c15",
   "function-grants.json": "00e891fa0b42a4efb0d741738fb9b1caaa839c588309ba8ec77cda3aef7fe3b7",
   "function-owners.json": "a07acd64007dcd8b056fb94e6a9b20844c58e9cc4fa5fb29ad55f65edd500a09",
