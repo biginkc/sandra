@@ -29,6 +29,7 @@ import {
   selectSpokenLine,
   type CoachLiveViewProps,
 } from "./coach-live-view";
+import { ObjectionPromptProvider } from "./objection-prompt-context";
 
 type BroadcastHandler = (message: { payload: unknown }) => void;
 type SubscribeCallback = (status: string) => void;
@@ -215,6 +216,46 @@ function broadcast(payload: Record<string, unknown>) {
 }
 
 describe("<CoachLiveView /> manual navigation", () => {
+  const promptPayload = {
+    type: "objection_prompt", objectionId: "price", label: "Price concern", sellerTurn: 1,
+    classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z",
+  };
+
+  it("hides a valid prompt when display is disabled and leaves legacy objections hidden", async () => {
+    render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    broadcast(promptPayload);
+    broadcast({ type: "objection", objectionId: "price", ts: "legacy" });
+    expect(screen.queryByTestId("coach-objection-prompt")).toBeNull();
+  });
+
+  it("shows the exact label only when enabled", async () => {
+    render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    broadcast(promptPayload);
+    expect(screen.getByTestId("coach-objection-prompt-label")).toHaveTextContent("Price concern");
+    expect(screen.getByTestId("coach-objection-prompt")).not.toHaveTextContent("jev-1.13.0");
+    expect(screen.getByTestId("coach-objection-prompt")).not.toHaveTextContent("price");
+    broadcast({ type: "objection", objectionId: "legacy", ts: "legacy" });
+    expect(screen.getAllByTestId("coach-objection-prompt")).toHaveLength(1);
+  });
+
+  it("removes the prompt after thirty seconds", async () => {
+    render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    vi.useFakeTimers();
+    const timerSpy = vi.spyOn(window, "setTimeout");
+    try {
+      broadcast(promptPayload);
+      expect(screen.getByTestId("coach-objection-prompt")).toBeVisible();
+      expect(timerSpy.mock.calls.some(([, delay]) => typeof delay === "number" && delay >= 29_900 && delay <= 30_000)).toBe(true);
+      act(() => vi.advanceTimersByTime(30_000));
+      expect(screen.queryByTestId("coach-objection-prompt")).toBeNull();
+    } finally {
+      timerSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
   afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     channels = [];
