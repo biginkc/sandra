@@ -1,0 +1,389 @@
+{
+  "schema_version": 2,
+  "status": "PENDING_REVIEW_NO_INSTALL",
+  "source_repository": ".",
+  "source_commit": "87e0a164294b7740c38b1ca926e3503e3f3ea7eb",
+  "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
+  "sql_packet": {
+    "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
+    "sha256": "e895bd6fe1f7c0eb58ca467122bda792a0191353cec40fa8218d20b25eb96064"
+  },
+  "sql_sources": [
+    {
+      "name": "operation_foundation",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-acceptance/setup.sql",
+      "sha256": "37218be75c5c6b6aec0e4320b6189fc6687b674c72eb04f86ff2d37447fad012",
+      "bytes": 15121,
+      "transformed_sha256": "d54582e698e94a24e76803ad6713d29d9b38353ba92a4e754049b76656972f51"
+    },
+    {
+      "name": "saved_actions_setup",
+      "kind": "sql",
+      "path": "experiments/inbox-saved-actions/setup.sql",
+      "sha256": "11219f96df6cc1e44d50135a1a7707d184c53aab0f6dff4e27d307fe32678bb1",
+      "bytes": 12972,
+      "transformed_sha256": "991a42c7c8ab010afd634032584fea352d4af34200807aaad4ba9b303ad95190"
+    },
+    {
+      "name": "saved_actions_public_api",
+      "kind": "sql",
+      "path": "experiments/inbox-saved-actions/public-api.sql",
+      "sha256": "f0229a3e1062c06ba13a7209532579b6eba67d7961b8362b2fc6469999ab369c",
+      "bytes": 3583,
+      "transformed_sha256": "52ced83124bed432436d1a3d8ccf02134b16e447e08f43fafbb3fa531ef2db47"
+    },
+    {
+      "name": "operation_domain_setup",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-domain/setup.sql",
+      "sha256": "b7ca70de5cfe321ad3996b98de2f6097ba9b0545e7e2eb7bb0c955e9cc2a35ff",
+      "bytes": 15034,
+      "transformed_sha256": "b990e5f19bff89988f6e58a3bc12ef1a2c751c96942b8c9fc80a692ac636b587"
+    },
+    {
+      "name": "operation_domain_scope",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-domain/restrictive-scope.sql",
+      "sha256": "8b21a491160fedfb84ef85d1156fcede5ffdb8f56855786d430faed1784776d9",
+      "bytes": 3746,
+      "transformed_sha256": "8d3bedfdd5775ffdec0cd94a7d8e26870396922988050ff03168254afb2f0576"
+    },
+    {
+      "name": "operation_domain_effect",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-domain/restrictive-effect.sql",
+      "sha256": "3e643d1cd5b370f7cea3588a4caf9146a29e25da6eec808b0c4621ca424124df",
+      "bytes": 7746,
+      "transformed_sha256": "f2c5013d756882fbf2298b3af47644d23ffbb14808c34017e1097c4ab1885022"
+    },
+    {
+      "name": "operation_domain_apply",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-domain/restrictive-apply.sql",
+      "sha256": "79dec51b3a2e8ed0cd87fc6f4e545a02c0550e539aebaf2edb4d33d152b24ab5",
+      "bytes": 31410,
+      "transformed_sha256": "edaee5650127238e91e0207125b2aae5f4cf170c57ecde7dec9ec3359eb5455d"
+    },
+    {
+      "name": "operation_setup",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-preparation/setup.sql",
+      "sha256": "c4e131938309b88f6d1b6a7ed8216846b551a2287fd0caaad8676c37a0b62917",
+      "bytes": 19508,
+      "transformed_sha256": "802e8fbeeab342379f6df9bce25920233b7b1544b5ae570ad60e135dd4cbe2ea"
+    },
+    {
+      "name": "saved_actions_prepare_reference",
+      "kind": "sql",
+      "path": "experiments/inbox-saved-actions/action-prepare-saved-reference.sql",
+      "sha256": "8ad5f6977e166ecb2ed91c2f8609728349faaf20c11935d3ef7d1c5fcd72fdf7",
+      "bytes": 19048,
+      "transformed_sha256": "da6d3ccead5cc5c7767f15a0914f7430dc4783b148d52e84b75450410e6da7a8"
+    },
+    {
+      "name": "operation_worker",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-preparation/worker.sql",
+      "sha256": "7e9c67e47951abcb0e353d481d51372b9f39ba1fe6ca585189a5d08be5d769b8",
+      "bytes": 10600,
+      "transformed_sha256": "726a2e106f722f5dfe98ddf201e9cc9090fc72a4841178b7422be0728ee91122"
+    },
+    {
+      "name": "operation_accept",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-preparation/accept.sql",
+      "sha256": "64e8c37a9c7131e9801231985197ec90fb1071021c88bc613dfb82755968da04",
+      "bytes": 10854,
+      "transformed_sha256": "319217bdd80507d46ea83419ce62de5b26a5c991ee85f8bfd643a0f0a36c310b"
+    },
+    {
+      "name": "operation_public_api",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-preparation/public-api.sql",
+      "sha256": "4169ce78710ccddbf33011b7572a95b7c06599016d29df2ec51d1e4ac7f966d8",
+      "bytes": 1177,
+      "transformed_sha256": "e8cb1dcd9727b757f41da4f1574b8669a25f3988d24aaa95a28944c87b2e7f6a"
+    },
+    {
+      "name": "operation_review_recovery",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-preparation/review.sql",
+      "sha256": "78c7a3c4d388f49c5600ab8f76660ad11f6c89d49d652a6c2256f537f4416ede",
+      "bytes": 5058,
+      "transformed_sha256": "7b86921b88f6fcc8b86bd58c506da05fee44c056619dea5a38f10ec217bffee0"
+    },
+    {
+      "name": "operation_worker_role",
+      "kind": "sql",
+      "path": "experiments/inbox-operation-preparation/worker-role.sql",
+      "sha256": "a686aec664667bf60e2a7507e5fad03508de5bc9d3d49265a3480797d3039948",
+      "bytes": 2835,
+      "transformed_sha256": "ce652a4d4d61241f2a3c7353e1f878ecfafffd0a6713e19b3ca5410f46a024eb"
+    },
+    {
+      "name": "reply_context",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-boundary/context.sql",
+      "sha256": "f78d36d03f1d8386a781f200cef6cd2d361735a8dfbc9f4a5f4117c72a536eeb",
+      "bytes": 5946,
+      "transformed_sha256": "d37e2d745aac9cd34c38b6199beb8bb6cd803dabe75cd249faaacf97e50479f4"
+    },
+    {
+      "name": "reply_recipient",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-preparation/recipient.sql",
+      "sha256": "90d1e6d24f954a7ae809962c8f7181a4f9a21b973303163c9655940e4c18cdf1",
+      "bytes": 17992,
+      "transformed_sha256": "fb6982d179edf847c23ce6a8611fab843cbb5a2628860451be7e7026ddc91543"
+    },
+    {
+      "name": "reply_batch",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-preparation/batch.sql",
+      "sha256": "858f72acad3bc6dc26c8560cf4e5f13dac2f5222d89539e43d416c24342c4ce2",
+      "bytes": 4980,
+      "transformed_sha256": "77946239834b08941f28803ab4153b606f47036e62971a60b5cdb53b3186ebca"
+    },
+    {
+      "name": "reply_review_setup",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-review/setup.sql",
+      "sha256": "86f5ef25c7f0e753d847d7e75567795d1a3e596023955d886bfdbc817e790b57",
+      "bytes": 14194,
+      "transformed_sha256": "553bf5a3e4b0a76b83a4fb36bce57eb34997eec164b1c26a0a7274873f4d8684"
+    },
+    {
+      "name": "reply_source_operation",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-review/source-operation.sql",
+      "sha256": "769d1ebed24f1a301926955a43c77d8e4b95c46f3a8c9c2c288befdbd39e0f50",
+      "bytes": 2927,
+      "transformed_sha256": "dc3c704d407a2c6efbe0199c22d9f5d2ffda5a5b462d6b9aae2eea3ce6444369"
+    },
+    {
+      "name": "reply_review_public_api",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-review/public-api.sql",
+      "sha256": "0711295976fce7ff258f4948a08ed71e49374ccd1a5759034c230c505e3cb263",
+      "bytes": 2913,
+      "transformed_sha256": "bef029825b645e034b5a922a04c7d22f66f474b7184de4c92dc8cbc5275c4dc7"
+    },
+    {
+      "name": "reply_attempts",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-send/attempts.sql",
+      "sha256": "9109db7267aad7921c4002611ede5d05f14b5bb46f182c17282d2bc4b04a63f9",
+      "bytes": 36291,
+      "transformed_sha256": "c6348607c788276209b35e7379c6decca5a99616b65172d0467e3135a21cb280"
+    },
+    {
+      "name": "reply_accept_recovery",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-send/accept.sql",
+      "sha256": "375fcb63bdd59e14168f49b05e46ab33f2f4f55c04e72ea5242b4165f6a54621",
+      "bytes": 18742,
+      "transformed_sha256": "8a91056d2d8ac00000213f02f2c045e3be233c09a47e0d2b57f81569e02d7280"
+    },
+    {
+      "name": "reply_callback",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-send/callback.sql",
+      "sha256": "71ec54276bbd13e70408586c2efd151f5811b06ac8b31d238a542ae30a39f66c",
+      "bytes": 21025,
+      "transformed_sha256": "9f10280479e65bc823c5bfd73a5b1a0d313aa49296afc0384a96c42704aee5d4"
+    },
+    {
+      "name": "reply_public_api",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-send/public-api.sql",
+      "sha256": "4d5e1c7d76bd3464ca12c68d0a173bc6a58c3bc1e743d2e6f69b0b57da79fe0e",
+      "bytes": 2899,
+      "transformed_sha256": "0e2e04b57f57496251cf1568c85b0635e49e336ef521401036dfaaf404cca1f5"
+    },
+    {
+      "name": "reply_worker",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-send-worker/worker.sql",
+      "sha256": "a4c4a5229a74a538addeec29e153e4633c1c3dbf2bd5e91cc5fa1f28a475486c",
+      "bytes": 12627,
+      "transformed_sha256": "dfc89631f9018713e7f23e25a6d3c2a0ef328ea6886f6ddee92d2c4252fa49b7"
+    },
+    {
+      "name": "reply_worker_role",
+      "kind": "sql",
+      "path": "experiments/inbox-reply-send-worker/worker-role.sql",
+      "sha256": "086f384ecb54a0966e16aa3d007cd767a73e3ba06faa120141c36926858de465",
+      "bytes": 3862,
+      "transformed_sha256": "0adddb892eb49706ba2d8fe6b06445f38d442616455890a95c541d978d28f7ae"
+    }
+  ],
+  "runtime_sources": [
+    {
+      "name": "operation_worker_Dockerfile",
+      "kind": "runtime",
+      "path": "experiments/inbox-operation-worker/Dockerfile",
+      "sha256": "253488776860278dd5abd1eb2a2f6babb4f6760d706f37ea837262948913afaf",
+      "bytes": 389
+    },
+    {
+      "name": "operation_worker_package",
+      "kind": "runtime",
+      "path": "experiments/inbox-operation-worker/package.json",
+      "sha256": "0bdc3fa5f6ffb7cea32841bf1d3307aef1f7beeec8794d689cda5ce25f2cff24",
+      "bytes": 211
+    },
+    {
+      "name": "operation_worker_lock",
+      "kind": "runtime",
+      "path": "experiments/inbox-operation-worker/package-lock.json",
+      "sha256": "0b6abafac1b331c4857c9459659a11d425a4b52d9be76ae2c72322ac7a11d7e8",
+      "bytes": 6398
+    },
+    {
+      "name": "operation_worker_core",
+      "kind": "runtime",
+      "path": "experiments/inbox-operation-worker/core.mjs",
+      "sha256": "7bbc4c01faa5e82e0ec211b4d396342df02ae7e51f2371a9797153366dd07c03",
+      "bytes": 8290
+    },
+    {
+      "name": "operation_worker_server",
+      "kind": "runtime",
+      "path": "experiments/inbox-operation-worker/server.mjs",
+      "sha256": "cdde01d18962dec67f68324bce668ea1be326ba17ec69acd658a0bbf4b71343c",
+      "bytes": 3200
+    },
+    {
+      "name": "reply_worker_Dockerfile",
+      "kind": "runtime",
+      "path": "experiments/inbox-reply-send-worker/Dockerfile",
+      "sha256": "98ec0bc8335b2db7b5ef40eb1237a37fc3350896a385c7762d06ee0c6fd04c66",
+      "bytes": 477
+    },
+    {
+      "name": "reply_worker_package",
+      "kind": "runtime",
+      "path": "experiments/inbox-reply-send-worker/package.json",
+      "sha256": "d1b67cc34e2ffc6250407aa145d5f63666b6ec89c9deb99bbf417533831d8286",
+      "bytes": 228
+    },
+    {
+      "name": "reply_worker_lock",
+      "kind": "runtime",
+      "path": "experiments/inbox-reply-send-worker/package-lock.json",
+      "sha256": "c40f2cf81253d61988e9d90438fbde767c4b4bf30eec9796a63c702bea494a2b",
+      "bytes": 6400
+    },
+    {
+      "name": "reply_worker_core",
+      "kind": "runtime",
+      "path": "experiments/inbox-reply-send-worker/core.mjs",
+      "sha256": "348635dd33ce979d503b8489fc581c071f271bc93f5a5e17bcc3dbd87d5ef4e5",
+      "bytes": 9274
+    },
+    {
+      "name": "reply_worker_runner",
+      "kind": "runtime",
+      "path": "experiments/inbox-reply-send-worker/runner.mjs",
+      "sha256": "6cc46d4cb25943611a3c91d80c83b451278a8611225ce33ff4931f85191beb0b",
+      "bytes": 6789
+    },
+    {
+      "name": "reply_worker_server",
+      "kind": "runtime",
+      "path": "experiments/inbox-reply-send-worker/server.mjs",
+      "sha256": "e071daa5b94c70426001955686cb967ac5dc9a42da372534596ff7a45af6ef7b",
+      "bytes": 6872
+    },
+    {
+      "name": "reply_provider_adapter",
+      "kind": "runtime",
+      "path": "experiments/inbox-reply-send-worker/vendor/reply-provider.mjs",
+      "sha256": "2847add8a5d1e87e671c04949f13487e10f6af81209635fb622ea253c659b75f",
+      "bytes": 4497
+    },
+    {
+      "name": "sync_relay_Dockerfile",
+      "kind": "runtime",
+      "path": "services/inbox-sync-relay/Dockerfile",
+      "sha256": "1e33ec793747bee85f0e390017074658da88b027a273c944faeda6625b0e5bbe",
+      "bytes": 232
+    },
+    {
+      "name": "sync_relay_server",
+      "kind": "runtime",
+      "path": "services/inbox-sync-relay/server.mjs",
+      "sha256": "7c8e7d73dd69045676bce17aaad6479739ef129b89157a02b144b7207c9f5e2b",
+      "bytes": 5324
+    },
+    {
+      "name": "sync_relay_railway",
+      "kind": "runtime",
+      "path": "services/inbox-sync-relay/railway.json",
+      "sha256": "b551f369a14ae01cb3c2b0ebaed8946ad939cb40c4981ab9d4c7abe901a5e221",
+      "bytes": 357
+    }
+  ],
+  "install_order": [
+    "operation_foundation",
+    "saved_actions_setup",
+    "saved_actions_public_api",
+    "operation_domain_setup",
+    "operation_domain_scope",
+    "operation_domain_effect",
+    "operation_domain_apply",
+    "operation_setup",
+    "saved_actions_prepare_reference",
+    "operation_worker",
+    "operation_accept",
+    "operation_public_api",
+    "operation_review_recovery",
+    "operation_worker_role",
+    "reply_context",
+    "reply_recipient",
+    "reply_batch",
+    "reply_review_setup",
+    "reply_source_operation",
+    "reply_review_public_api",
+    "reply_attempts",
+    "reply_accept_recovery",
+    "reply_callback",
+    "reply_public_api",
+    "reply_worker",
+    "reply_worker_role",
+    "admission_overlay"
+  ],
+  "compiler_transforms_required": [
+    "replace historical inbox_t2_fixture guards with the marked release database identity",
+    "replace inbox_t2_ namespaces with inbox_",
+    "gate authenticated action prepare/accept, saved CRUD and reply prepare/accept wrappers with inbox_control.admit_command",
+    "retain inbox_reply_review.require_admission as an additional reply gate",
+    "remove the existing reply-review admission check from private reply recovery only so authenticated receipt recovery survives rollback",
+    "leave action/reply status and recovery wrappers session-authorized and available with serving disabled"
+  ],
+  "required_proofs_before_install_receipt": [
+    "operation/reply source and generated packet hashes match this manifest",
+    "authenticated direct action/reply prepare/accept deny with INBOX_COMMAND_DISABLED after rollback",
+    "authenticated action/reply status and recovery reads remain available after rollback",
+    "reply admission remains independently closed unless explicitly enabled in a reviewed pilot",
+    "worker roles and runtime images are built from these exact sources",
+    "no customer sends or provider traffic"
+  ],
+  "runtime": {
+    "operation_worker": "experiments/inbox-operation-worker",
+    "reply_worker": "experiments/inbox-reply-send-worker",
+    "sync_relay": "services/inbox-sync-relay",
+    "projection": "services/inbox-projection-worker",
+    "local_release_fixture_profile": "SOURCE_ONLY_READY_UNBUILT: operation/reply adapters accept only marked 127.0.0.1:54322/postgres with constrained worker logins; production TLS and historical aliases remain unchanged",
+    "provider_traffic": false,
+    "customer_sends": false
+  },
+  "safety": {
+    "target_database": "postgres",
+    "target_marker": "sandra-inbox-http-owned-synthetic-20260917",
+    "production_install": false,
+    "provider_traffic": false,
+    "customer_sends": false
+  }
+}
