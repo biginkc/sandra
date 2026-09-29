@@ -235,7 +235,58 @@ const mint = (captureId: unknown, hash: string, epoch = 1, ttl = 60, org = orgId
 const consume = (hash: string, worker = "worker-1") => rpc("fn_consume_dialpad_recording_ingest_grant", [hash, worker]);
 const chunk = (captureId: unknown, track: string, epoch: number, seq: number, opts: { size?: number; sha?: string; eof?: boolean } = {}) =>
   rpc("fn_record_dialpad_recording_chunk", [orgId, captureId, track, epoch, seq, opts.size ?? 1000, opts.sha ?? sha(`${track}-${epoch}-${seq}`), opts.eof ?? false]);
-const claim = (worker = "worker-1", lease = 300) => rpc("fn_claim_dialpad_recording_seal_work", [worker, lease]);
+async function publishPcmEofForClaim(): Promise<void> {
+  const rows = await pg.query<{
+    capture_id: string;
+    epoch: number;
+    track: "tab" | "mic";
+    processed_through_sample: number;
+    pcm_eof_sample: number | null;
+    source_sample_rate_hz: number | null;
+    source_channels: number | null;
+    source_codec: string | null;
+    degraded_reasons: unknown;
+  }>(
+    `select c.id as capture_id, g.epoch, s.track,
+            coalesce(p.processed_through_sample, 0) as processed_through_sample,
+            p.pcm_eof_sample, p.source_sample_rate_hz, p.source_channels, p.source_codec,
+            coalesce(p.degraded_reasons, '[]'::jsonb) as degraded_reasons
+       from public.dialpad_recording_captures c
+       join public.dialpad_recording_ingest_grants g
+         on g.capture_id = c.id and g.consumed_at is not null
+       join public.dialpad_recording_segments s
+         on s.capture_id = c.id and s.epoch = g.epoch
+       left join public.dialpad_recording_pcm_progress p
+         on p.capture_id = c.id and p.epoch = g.epoch and p.track = s.track
+      where c.status = 'open'
+         or (c.status = 'closing' and c.drain_deadline_at is not null and c.drain_deadline_at > now())
+      group by c.id, g.epoch, s.track, p.processed_through_sample, p.pcm_eof_sample,
+               p.source_sample_rate_hz, p.source_channels, p.source_codec, p.degraded_reasons
+      order by c.opened_at, c.id, g.epoch, s.track`,
+  );
+  for (const row of rows.rows) {
+    const processed = Number(row.processed_through_sample);
+    const reasons = Array.isArray(row.degraded_reasons) ? row.degraded_reasons : [];
+    await rpc("fn_record_dialpad_recording_pcm_progress", [
+      orgId,
+      row.capture_id,
+      row.track,
+      row.epoch,
+      uuid(),
+      processed,
+      processed,
+      row.source_sample_rate_hz,
+      row.source_channels,
+      row.source_codec,
+      JSON.stringify(reasons),
+    ]);
+  }
+}
+
+const claim = async (worker = "worker-1", lease = 300) => {
+  await publishPcmEofForClaim();
+  return rpc("fn_claim_dialpad_recording_seal_work", [worker, lease]);
+};
 const register = (captureId: unknown, token: unknown, tracks: unknown[], failureCode: string | null = null) =>
   rpc("fn_register_dialpad_recording_result", [captureId, token, JSON.stringify(tracks), failureCode]);
 
@@ -1343,14 +1394,14 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
       await fullTrack(first.captureId, "mic");
       await rpc("fn_record_dialpad_recording_vad_ranges", [orgId, first.captureId, "tab", 1, uuid(), JSON.stringify([{ startSample: 0, endSample: 100, evidenceRef: "pending:vad" }])]);
       await endCall(first.call);
-      expect(await claim("before-measurement")).toEqual({ status: "none" });
+      expect(await rpc("fn_claim_dialpad_recording_seal_work", ["before-measurement", 300])).toEqual({ status: "none" });
 
       for (const track of ["tab", "mic"] as const) {
         expect(await rpc("fn_record_dialpad_recording_pcm_progress", [
           orgId, first.captureId, track, 1, uuid(), 640, 640, 48000, 1, "opus", JSON.stringify([]),
         ])).toMatchObject({ status: "recorded", processedThroughSample: 640, pcmEofSample: 640 });
       }
-      expect((await claim("after-measurement")).status).toBe("claimed");
+      expect((await rpc("fn_claim_dialpad_recording_seal_work", ["after-measurement", 300])).status).toBe("claimed");
 
       const expired = await openedCapture();
       await authorizedEpoch(expired.captureId);
@@ -1360,9 +1411,24 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
       await endCall(expired.call);
       await rpc("fn_get_dialpad_recording_lifecycle", [orgId, expired.captureId]);
       await withoutTriggers("update public.dialpad_recording_captures set drain_deadline_at=now()-interval '1 second' where id=$1", [expired.captureId]);
-      expect((await claim("expired-drain")).status).toBe("claimed");
+      expect((await rpc("fn_claim_dialpad_recording_seal_work", ["expired-drain", 300])).status).toBe("claimed");
       const snapshot = parseDialpadRecordingVadSnapshot(await rpc("fn_get_dialpad_recording_vad_snapshot", [orgId, expired.captureId]) as never);
       expect(snapshot).toMatchObject({ measurementStatus: "provisional", degradedReasons: [] });
+    });
+
+    it("does not claim a zero-measurement capture between retention EOF and PCM EOF", async () => {
+      const { call, captureId } = await openedCapture();
+      await authorizedEpoch(captureId);
+      await fullTrack(captureId, "tab");
+      await fullTrack(captureId, "mic");
+      await endCall(call);
+      expect((await pg.query("select count(*)::int as n from public.dialpad_recording_pcm_batches where capture_id=$1", [captureId])).rows[0]!.n).toBe(0);
+      expect((await pg.query("select count(*)::int as n from public.dialpad_recording_vad_batches where capture_id=$1", [captureId])).rows[0]!.n).toBe(0);
+      expect(await rpc("fn_claim_dialpad_recording_seal_work", ["zero-before-pcm", 300])).toEqual({ status: "none" });
+      for (const track of ["tab", "mic"] as const) {
+        await rpc("fn_record_dialpad_recording_pcm_progress", [orgId, captureId, track, 1, uuid(), 640, 640, null, null, null, JSON.stringify([])]);
+      }
+      expect((await rpc("fn_claim_dialpad_recording_seal_work", ["zero-after-pcm", 300])).status).toBe("claimed");
     });
 
     it("normalizes missing EOF to false in partial seal inputs and result registration", async () => {
@@ -1373,7 +1439,7 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
       await endCall(call);
       await rpc("fn_get_dialpad_recording_lifecycle", [orgId, captureId]);
       await withoutTriggers("update public.dialpad_recording_captures set drain_deadline_at=now()-interval '1 second' where id=$1", [captureId]);
-      const claimed = await claim("partial-expiry");
+      const claimed = await rpc("fn_claim_dialpad_recording_seal_work", ["partial-expiry", 300]);
       expect(claimed.status).toBe("claimed");
       const inputs = parseDialpadRecordingSealInputs(await rpc("fn_get_dialpad_recording_seal_inputs", [captureId, claimed.claimToken]) as never);
       expect(inputs.inputs).toHaveLength(2);

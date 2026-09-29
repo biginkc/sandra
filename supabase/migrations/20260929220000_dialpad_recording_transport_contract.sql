@@ -834,10 +834,9 @@ $$;
 -- Once transport measurement evidence has started, a retention-complete
 -- capture is not claimable until every consumed epoch has durable normalized
 -- PCM EOF at its processed boundary on both tracks. This closes the race
--- between retention EOF and a final VAD/PCM flush. Captures with no transport
--- measurement rows retain the foundation claim behavior, and deadline expiry
--- still permits partial artifact classification with its missing continuity
--- evidence left degraded/provisional.
+-- between retention EOF and a final VAD/PCM flush. Deadline expiry still
+-- permits partial artifact classification with its missing continuity evidence
+-- left degraded/provisional.
 create or replace function public.fn_claim_dialpad_recording_seal_work(
   p_worker_id text, p_lease_seconds integer default 300
 ) returns jsonb
@@ -884,26 +883,19 @@ begin
                   or s.eof_seq <> s.max_seq
                   or s.chunk_count <> s.max_seq + 1
             )
-            and (
-              not exists (
-                select 1 from public.dialpad_recording_vad_batches b where b.capture_id = c.id
-                union all
-                select 1 from public.dialpad_recording_pcm_batches b where b.capture_id = c.id
-              )
-              or not exists (
-                select 1
-                  from (
-                    select distinct g.epoch
-                      from public.dialpad_recording_ingest_grants g
-                     where g.capture_id = c.id and g.consumed_at is not null
-                  ) epochs
-                  cross join (values ('tab'::text), ('mic'::text)) expected(track)
-                  left join public.dialpad_recording_pcm_progress p
-                    on p.capture_id = c.id and p.epoch = epochs.epoch and p.track = expected.track
-                   and p.pcm_eof_sample is not null
-                   and p.processed_through_sample = p.pcm_eof_sample
-                 where p.capture_id is null
-              )
+            and not exists (
+              select 1
+                from (
+                  select distinct g.epoch
+                    from public.dialpad_recording_ingest_grants g
+                   where g.capture_id = c.id and g.consumed_at is not null
+                ) epochs
+                cross join (values ('tab'::text), ('mic'::text)) expected(track)
+                left join public.dialpad_recording_pcm_progress p
+                  on p.capture_id = c.id and p.epoch = epochs.epoch and p.track = expected.track
+                 and p.pcm_eof_sample is not null
+                 and p.processed_through_sample = p.pcm_eof_sample
+               where p.capture_id is null
             )
           )
         )
