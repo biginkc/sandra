@@ -20,7 +20,7 @@ it('keeps a reply flag until a human text, logged attempt, or outcome, while ope
     await db.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner')",[rep,org]);
     await db.query('insert into public.acquisition_org_settings(org_id,my_leads_enabled) values ($1,true)',[org]);
     await db.query("insert into public.sequences(id,org_id,name) values ($1,$2,'Follow-up')",[sequence,org]);
-    const ids=Object.fromEntries(['active','open','sms','attempt','outcome'].map(key=>[key,randomUUID()]));
+    const ids=Object.fromEntries(['active','open','sms','ai','attempt','outcome','command','loggedAttempt'].map(key=>[key,randomUUID()]));
     for(const [key,id] of Object.entries(ids)) {
       await db.query("insert into public.properties(id,org_id,address,state,status,assigned_user_id) values ($1,$2,$3,'MO','new_lead',$4)",[id,org,`${key} Main`,rep]);
       await db.query("insert into public.sequence_enrollments(org_id,sequence_id,property_id,status,pause_reason,enrolled_at) values ($1,$2,$3,$4,$5,'2026-09-02T00:00:00Z')",
@@ -41,10 +41,15 @@ it('keeps a reply flag until a human text, logged attempt, or outcome, while ope
     // Reading/opening the lead writes no action and therefore leaves the flag.
     expect((await read()).get(ids.open).replied_at).toBeTruthy();
     await db.query("insert into public.messages(org_id,property_id,channel,direction,body,status,created_at) values ($1,$2,'sms','outbound','Human reply','sent','2026-09-04T00:00:00Z')",[org,ids.sms]);
+    await db.query("insert into public.messages(org_id,property_id,channel,direction,body,status,metadata,created_at) values ($1,$2,'sms','outbound','AI reply','sent','{\"generated_by\":\"ai_responder_v1\"}','2026-09-04T00:00:00Z')",[org,ids.ai]);
     await db.query("insert into public.acquisition_attempts(org_id,property_id,actor_user_id,attempt_kind,source,outcome,occurred_at,recorded_at,idempotency_key) values ($1,$2,$3,'outreach','manual','reached','2026-09-04T00:00:00Z','2026-09-04T00:00:00Z',$4)",[org,ids.attempt,rep,randomUUID()]);
     await db.query("insert into public.lead_events(org_id,property_id,actor_type,actor_id,event_type,created_at) values ($1,$2,'user',$3,'dispo_set','2026-09-04T00:00:00Z')",[org,ids.outcome,rep]);
+    for(const [key,operation] of [['command','ready_acquisition_offer'],['loggedAttempt','log_acquisition_attempt']]) {
+      await db.query("insert into public.lead_events(org_id,property_id,actor_type,actor_id,event_type,payload,created_at) values ($1,$2,'user',$3,'my_leads_workflow',jsonb_build_object('operation',$4::text),'2026-09-04T00:00:00Z')",[org,ids[key],rep,operation]);
+    }
     const after=await read();
-    for(const key of ['sms','attempt','outcome']) expect(after.get(ids[key]).replied_at).toBeNull();
+    for(const key of ['sms','attempt','outcome','command','loggedAttempt']) expect(after.get(ids[key]).replied_at).toBeNull();
+    expect(after.get(ids.ai).replied_at).toBeTruthy();
     expect(after.get(ids.open).replied_at).toBeTruthy();
   } finally {await db.query('rollback').catch(()=>{});await db.end();}
 });

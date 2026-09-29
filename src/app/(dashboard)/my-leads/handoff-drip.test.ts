@@ -1,10 +1,10 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-  viewer: vi.fn(), detail: vi.fn(), admin: vi.fn(), dispo: vi.fn(), start: vi.fn(), rpc: vi.fn(),
+  viewer: vi.fn(), admin: vi.fn(), dispo: vi.fn(), start: vi.fn(), rpc: vi.fn(),
 }));
 vi.mock('@/lib/my-leads/queries', () => ({
-  myLeadsViewer: mocks.viewer, getAcquisitionDetail: mocks.detail,
+  myLeadsViewer: mocks.viewer, getAcquisitionDetail: vi.fn(),
   getAcquisitionQueue: vi.fn(), getAcquisitionKpis: vi.fn(),
 }));
 vi.mock('@/lib/my-leads/drip-queries', () => ({listMyLeadsInDrip: vi.fn()}));
@@ -19,11 +19,12 @@ const input = {memberId:'rep',propertyId:'lead',sequenceId:'drip',reason:'not_in
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.viewer.mockResolvedValue({userId:'rep',orgId:'org',isOwner:false,client:{rpc:mocks.rpc}});
-  mocks.detail.mockResolvedValue({groups:{}});
   mocks.admin.mockReturnValue({from:(name:string) => {
     const query = {
       select:() => query, eq:() => query, is:() => query,
-      maybeSingle:async() => ({data:name==='properties'?{id:'lead',status:'active',assigned_user_id:'rep',is_dnc_locked:false,deleted_at:null}
+      maybeSingle:async() => ({data:name==='acquisition_org_settings'?{my_leads_enabled:true}
+        :name==='memberships'?{user_id:'rep',access_status:'active',deletion_prepared_at:null,access_expires_at:null}
+        :name==='properties'?{id:'lead',status:'active',assigned_user_id:'rep',is_dnc_locked:false,deleted_at:null}
         :name==='acquisition_assignment_episodes'?{id:'episode'}:{version:2,archived_at:null},error:null}),
     };
     return query;
@@ -42,4 +43,14 @@ it('saves the outcome, starts the drip, and never calls the reassignment RPC', a
 it('keeps the saved outcome successful when enrollment fails', async () => {
   mocks.start.mockResolvedValue({ok:false,error:{message:'No approved sender'}});
   expect(await submitMyLeadHandoffDrip(input)).toEqual({ok:true,dripFailure:'No approved sender'});
+});
+
+it('rejects a lead when direct organization scope is disabled', async () => {
+  mocks.admin.mockReturnValue({from:(name:string) => {
+    const query = {select:() => query, eq:() => query, is:() => query,
+      maybeSingle:async() => ({data:name==='acquisition_org_settings'?{my_leads_enabled:false}:null,error:null})};
+    return query;
+  }});
+  expect((await submitMyLeadHandoffDrip(input)).ok).toBe(false);
+  expect(mocks.dispo).not.toHaveBeenCalled();
 });

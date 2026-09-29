@@ -30,7 +30,8 @@ begin
   select f.id, f.queue_stage, f.active_drip,
     case when f.latest_reply is not null and not exists (
       select 1 from public.messages m where m.org_id = p_org_id and m.property_id = f.id
-        and m.direction = 'outbound' and m.campaign_id is null and m.created_at > f.latest_reply
+        and m.direction = 'outbound' and m.campaign_id is null
+        and not (m.metadata ? 'generated_by') and m.created_at > f.latest_reply
         and not exists (select 1 from public.sequence_step_runs r where r.message_id = m.id)
     ) and not exists (
       select 1 from public.acquisition_attempts a where a.org_id = p_org_id and a.property_id = f.id
@@ -38,8 +39,10 @@ begin
     ) and not exists (
       select 1 from public.lead_events l where l.org_id = p_org_id and l.property_id = f.id
         and l.actor_type = 'user' and l.created_at > f.latest_reply
-        and l.event_type in ('dispo_set', 'ready_acquisition_offer', 'log_acquisition_offer',
-          'record_acquisition_contract', 'decline_acquisition_offer', 'handoff_acquisition_lead')
+        and (l.event_type = 'dispo_set' or (l.event_type = 'my_leads_workflow'
+          and l.payload->>'operation' in ('ready_acquisition_offer', 'log_acquisition_offer',
+            'record_acquisition_contract', 'decline_acquisition_offer', 'handoff_acquisition_lead',
+            'log_acquisition_attempt')))
     ) then f.latest_reply end,
     f.search_value, f.row_data
   from facts f where f.active_drip or f.latest_reply is not null;

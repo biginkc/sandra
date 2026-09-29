@@ -29,20 +29,26 @@ export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:
     if(input.reason!=='not_interested'||!input.sequenceId) return {ok:false as const,message:'Choose an eligible handoff reason and drip.'};
     const viewer=await myLeadsViewer();
     if(!viewer.isOwner&&viewer.userId!==input.memberId) return {ok:false as const,message:'You can update only your own queue.'};
-    await getAcquisitionDetail({memberId:input.memberId,propertyId:input.propertyId,group:'history'});
     const admin=createAdminClient();
-    const [property,episode,queue]=await Promise.all([
+    const [settings,member,property,episode,queue]=await Promise.all([
+      admin.from('acquisition_org_settings').select('my_leads_enabled').eq('org_id',viewer.orgId).maybeSingle(),
+      admin.from('memberships').select('user_id,access_status,deletion_prepared_at,access_expires_at').eq('org_id',viewer.orgId).eq('user_id',input.memberId).maybeSingle(),
       admin.from('properties').select('id,status,assigned_user_id,is_dnc_locked,deleted_at').eq('org_id',viewer.orgId).eq('id',input.propertyId).maybeSingle(),
       admin.from('acquisition_assignment_episodes').select('id').eq('org_id',viewer.orgId).eq('property_id',input.propertyId).eq('assignee_user_id',input.memberId).is('ended_at',null).maybeSingle(),
       admin.from('acquisition_queue_states').select('version,archived_at').eq('org_id',viewer.orgId).eq('property_id',input.propertyId).maybeSingle(),
     ]);
-    if(property.error||episode.error||queue.error||!property.data||!episode.data) return {ok:false as const,message:'This lead is unavailable. Refresh and try again.'};
+    if(settings.error||member.error||property.error||episode.error||queue.error||!settings.data?.my_leads_enabled||
+      !member.data||member.data.access_status!=='active'||member.data.deletion_prepared_at||
+      (member.data.access_expires_at&&new Date(member.data.access_expires_at)<=new Date())||
+      !property.data||!episode.data) return {ok:false as const,message:'This lead is unavailable. Refresh and try again.'};
     if(property.data.assigned_user_id!==input.memberId||property.data.deleted_at||property.data.is_dnc_locked||
       ['closed','dead','dnc'].includes(property.data.status)||queue.data?.archived_at||
       property.data.status!==input.expectedSharedStatus||episode.data.id!==input.expectedEpisodeId||
       (queue.data?.version??0)!==input.expectedQueueVersion) return {ok:false as const,message:'This lead changed. Refresh before trying again.'};
     const saved=await setOutreachDispo(input.propertyId,'needs_sequence');
     if(!saved.ok) return {ok:false as const,message:saved.error};
+    // Dispo uses a compare-and-swap on the current value. On a retry after a
+    // saved outcome, enrollLead checks for an existing active enrollment.
     const enrolled=await startDripForLeads(input.sequenceId,[input.propertyId]);
     if(!enrolled.ok) return {ok:true as const,dripFailure:enrolled.error.message};
     const item=enrolled.data.results[0];
