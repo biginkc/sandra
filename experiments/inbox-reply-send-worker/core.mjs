@@ -69,8 +69,9 @@ export function createReadinessProbe(check, clock = Date.now) {
 }
 export function databaseConfiguration(env) {
   const url = new URL(env.INBOX_REPLY_SEND_DATABASE_URL ?? '');
-  if (!['postgres:', 'postgresql:'].includes(url.protocol) || url.search || url.hash || !url.username || !url.password || url.port !== '5432') throw Error('Invalid dedicated database connection');
+  if (!['postgres:', 'postgresql:'].includes(url.protocol) || url.search || url.hash || !url.username || !url.password || !['5432', '54322'].includes(url.port)) throw Error('Invalid dedicated database connection');
   const database = decodeURIComponent(url.pathname.slice(1));
+  const port = Number(url.port);
   let ssl = { rejectUnauthorized: true, servername: url.hostname };
   if (env.INBOX_ACTION_LOCAL_FIXTURE === '1') {
     const profile = env.INBOX_ACTION_FIXTURE_PROFILE ?? 'proof';
@@ -79,16 +80,25 @@ export function databaseConfiguration(env) {
     // reply-lane proof script in this repo installs its schemas into —
     // unlike the metadata worker, this PR does not stand up a second,
     // dedicated runtime-only database.
-    const approved = profile === 'proof' ? url.hostname === 'sandra-inbox-actions-db-owned' && database === 'sandra_inbox_action_runtime_20260913'
-      : profile === 'reply-runtime' ? url.hostname === 'sandra-inbox-actions-db-owned' && database === 'postgres'
-      : profile === 'preview' && url.hostname === 'sandra-inbox-preview-db-owned' && database === 'sandra_inbox_install_20260913';
+    const approved = profile === 'proof' ? url.hostname === 'sandra-inbox-actions-db-owned' && port === 5432 && database === 'sandra_inbox_action_runtime_20260913'
+      : profile === 'reply-runtime' ? url.hostname === 'sandra-inbox-actions-db-owned' && port === 5432 && database === 'postgres'
+      : profile === 'preview' ? url.hostname === 'sandra-inbox-preview-db-owned' && port === 5432 && database === 'sandra_inbox_install_20260913'
+      : profile === 'release-http' && url.hostname === '127.0.0.1' && port === 54322 && database === 'postgres';
     if (env.NODE_ENV !== 'test' || !approved) throw Error('Unapproved plaintext fixture database');
+    if (profile === 'release-http' && (
+      env.INBOX_REPLY_SEND_OWNED_FIXTURE_PLAINTEXT !== 'true' ||
+      env.INBOX_REPLY_SEND_FIXTURE_MARKER !== 'sandra-inbox-http-owned-synthetic-20260917' ||
+      env.INBOX_REPLY_SEND_FIXTURE_OWNER !== 'release-infra' ||
+      env.INBOX_REPLY_SEND_FIXTURE_PURPOSE !== 'sandra-inbox-release-http' ||
+      env.INBOX_REPLY_SEND_FIXTURE_LABELS_VERIFIED !== 'true' ||
+      decodeURIComponent(url.username) !== 'inbox_reply_send_worker')) throw Error('Invalid owned HTTP fixture guard');
     ssl = false;
   } else {
+    if (port !== 5432) throw Error('Unapproved production database port');
     if (!url.hostname.endsWith('.supabase.co') && !url.hostname.endsWith('.pooler.supabase.com')) throw Error('Unapproved production database host');
     if (env.INBOX_REPLY_SEND_DATABASE_CA) { if (!env.INBOX_REPLY_SEND_DATABASE_CA.includes('-----BEGIN CERTIFICATE-----')) throw Error('Invalid database CA'); ssl.ca = env.INBOX_REPLY_SEND_DATABASE_CA; }
   }
-  return { host: url.hostname, port: 5432, user: decodeURIComponent(url.username), password: decodeURIComponent(url.password), database, ssl };
+  return { host: url.hostname, port, user: decodeURIComponent(url.username), password: decodeURIComponent(url.password), database, ssl };
 }
 async function readBoundedJson(response, limit) {
   if (!response.ok) { try { await response.body?.cancel(); } catch { } throw Error('Durable dispatch rejected'); }

@@ -1,0 +1,24 @@
+name: Inbox projection worker checks
+on:
+  pull_request:
+    paths:
+      - 'services/inbox-projection-worker/**'
+      - '.github/workflows/inbox-projection-worker.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'services/inbox-projection-worker/**'
+      - '.github/workflows/inbox-projection-worker.yml'
+permissions:
+  contents: read
+jobs:
+  projection-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - run: node --test core.test.mjs server.test.mjs config.test.mjs
+        working-directory: services/inbox-projection-worker
