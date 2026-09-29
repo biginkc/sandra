@@ -114,7 +114,7 @@ const baseProps = {
     escalated: 0,
     dispo: 0,
     needs_outcome: 0,
-    drip_replied: 0,
+    drip_replied: 0, in_drip: 0,
   } satisfies InboxFilterCounts,
   assigneeEmails: {},
   currentUserId: "user-1",
@@ -131,7 +131,7 @@ const baseProps = {
   nowMs: Date.parse("2026-08-17T12:00:00.000Z"),
 };
 
-it("shows the replied-to-drip filter and keeps the in-drip filter for PR-8", () => {
+it("shows adjacent In a drip and Replied to drip filters", () => {
   const onFilterChange = vi.fn();
   render(<InboxFilters active="all" filterCounts={{ ...baseProps.filterCounts, drip_replied: 6 }}
     showAssignmentChips hideDnc hiddenDncCount={0} pendingChange={null} completedChange={null} errorMessage={null}
@@ -140,7 +140,12 @@ it("shows the replied-to-drip filter and keeps the in-drip filter for PR-8", () 
   expect(replied).toHaveAccessibleName("Replied to drip (6)");
   fireEvent.click(replied);
   expect(onFilterChange).toHaveBeenCalledWith("drip_replied");
-  expect(screen.queryByRole("button", { name: /^In a drip/ })).not.toBeInTheDocument();
+  const inDrip = screen.getByTestId("filter-in-drip");
+  expect(inDrip).toHaveAccessibleName("In a drip");
+  expect(inDrip.querySelector("svg.lucide-droplet")).toBeInTheDocument();
+  expect(inDrip.nextElementSibling).toBe(replied);
+  fireEvent.click(inDrip);
+  expect(onFilterChange).toHaveBeenCalledWith("in_drip");
 });
 
 describe("<CockpitView /> assignment chips", () => {
@@ -423,6 +428,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       "filter-mine",
       "filter-escalated",
       "filter-dispo",
+      "filter-in-drip",
       "filter-drip-replied",
       "filter-unassigned",
       "filter-all",
@@ -461,6 +467,7 @@ describe("<CockpitView /> chip order (feedback-f E2b)", () => {
       "filter-needs-outcome",
       "filter-escalated",
       "filter-dispo",
+      "filter-in-drip",
       "filter-drip-replied",
       "filter-all",
       "filter-unknown",

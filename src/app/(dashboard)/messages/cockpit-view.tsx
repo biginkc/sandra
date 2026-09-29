@@ -71,6 +71,7 @@ const THREAD_FILTERS = new Set<InboxFilter>([
   "dispo",
   "needs_outcome",
   "drip_replied",
+  "in_drip",
 ]);
 const LIVE_CLOCK_INTERVAL_MS = 30_000;
 const INBOX_CHANGE_TIMEOUT_MS = 10_000;

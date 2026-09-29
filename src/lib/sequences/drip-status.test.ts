@@ -1,18 +1,19 @@
 import { expect, it } from "vitest";
 import { dripBucket, dripStatus, DRIP_BUCKET_LABELS, latestEnrollmentBucket, pauseReasonText, type DripBucket } from "./drip-status";
 
-// Expected buckets are hand-computed from sequence_overview_stats in
-// 20260929120000_sequence_stats.sql. Null means the SQL counts no bucket.
+// Expected buckets follow the widened sequence stats migration. The local
+// integration parity test checks this table against both SQL RPCs.
 it.each([
   ["active", null, false, false, "waiting"],
   ["paused", "inbound_reply", false, false, "replied"],
   ["paused", "rep_sms_human_takeover", false, false, "replied"],
   ["paused", "provider_failed", false, false, "couldnt_send"],
   ["paused", "reconciliation_required", false, false, "couldnt_send"],
-  ["paused", "template_missing", false, false, null],
-  ["paused", "step_misconfigured", false, false, null],
-  ["paused", "no_phone", false, false, null],
-  ["paused", "no approved sender for first-touch sequence send", false, false, null],
+  ["paused", "template_missing", false, false, "couldnt_send"],
+  ["paused", "step_misconfigured", false, false, "couldnt_send"],
+  ["paused", "no_phone", false, false, "couldnt_send"],
+  ["paused", "no_approved_sender", false, false, "couldnt_send"],
+  ["paused", "no approved sender for first-touch sequence send", false, false, "couldnt_send"],
   ["paused", "manual", false, false, null],
   ["paused", null, false, false, null],
   ["opted_out", null, false, false, "stopped"],
