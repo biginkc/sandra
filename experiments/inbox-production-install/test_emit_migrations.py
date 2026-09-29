@@ -88,6 +88,14 @@ class EmitMigrationsTests(unittest.TestCase):
         # and Batch B's backend-operation-reply.sql are emitted.
         self.assertEqual(len(emitted), 3)
 
+    def test_reply_context_versions_has_rls(self) -> None:
+        sql = emit_migrations.compute_emitted()["20260929000200_inbox_backend_operation_reply.sql"]
+        table = "CREATE TABLE inbox_reply_context.versions("
+        rls = "ALTER TABLE inbox_reply_context.versions ENABLE ROW LEVEL SECURITY;"
+        self.assertIn(table, sql)
+        self.assertEqual(sql.count(rls), 1)
+        self.assertLess(sql.index(table), sql.index(rls))
+
     def test_dropped_r1_files_are_not_emitted(self) -> None:
         emitted = emit_migrations.compute_emitted()
         for name in emit_migrations.DROPPED_BY_R1_AMENDMENT:
