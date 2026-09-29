@@ -44,10 +44,29 @@ class RecordContractTests(unittest.TestCase):
             sha = run('git', 'rev-parse', 'HEAD', cwd=repo)
             source = Path(temp) / 'source'
             source.mkdir()
-            (source / 'analysis.json').write_text(json.dumps({'kind': 'perf-120k', 'verdict': 'PASS', 'thresholds': {'p95_ms': 5}, 'latencies': {'insert': {'p95_ms': 2}}, 'foundation_file_wall_upper_ms': 100}) + '\n')
+            (source / 'analysis.json').write_text(json.dumps({'kind': 'perf-120k', 'verdict': 'PASS', 'thresholds': {'p95_ms': 5}, 'latencies': {'insert': {'p95_ms': 2}}, 'foundation_file_wall_upper_ms': 100, 'foundation_access_exclusive_messages_observed_ms': 75}) + '\n')
             env = {**os.environ, 'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
                    'GITHUB_REF_NAME': 'main', 'GITHUB_WORKFLOW_REF': 'biginkc/sandra/.github/workflows/inbox-heavy-verification.yml@refs/heads/main',
                    'HEAVY_TESTED_SHA': sha, 'HEAVY_LANE': 'perf-120k', 'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_RUN_ID': '2001'}
+            local = subprocess.run(['python3', 'experiments/inbox-production-install/perf/record.py', str(source), 'perf-120k', 'PASS'],
+                                   cwd=repo, env={**env, 'PERF_LOCAL_EXECUTION': '1'}, text=True, capture_output=True)
+            self.assertNotEqual(local.returncode, 0, 'local mode sealed a record')
+            self.assertFalse((repo / 'docs').exists())
+            print(f'NEGATIVE CONTROL local record: {local.stderr.strip().splitlines()[-1]}')
+
+            (source / 'pg-server.log').write_text('token=sb_secret_abcdefghijklmnopqrstuvwxyz123456\n')
+            leaked = subprocess.run(['python3', 'experiments/inbox-production-install/perf/record.py', str(source), 'perf-120k', 'PASS'],
+                                    cwd=repo, env=env, text=True, capture_output=True)
+            self.assertNotEqual(leaked.returncode, 0, 'secret-bearing log sealed a record')
+            self.assertFalse((repo / 'docs').exists())
+            print(f'NEGATIVE CONTROL residual secret: {leaked.stderr.strip().splitlines()[-1]}')
+            (source / 'pg-server.log').write_text('bearer eyJabcdefghij.eyJpayload.signature\n')
+            jwt_leaked = subprocess.run(['python3', 'experiments/inbox-production-install/perf/record.py', str(source), 'perf-120k', 'PASS'],
+                                        cwd=repo, env=env, text=True, capture_output=True)
+            self.assertNotEqual(jwt_leaked.returncode, 0, 'JWT-bearing log sealed a record')
+            self.assertFalse((repo / 'docs').exists())
+            print(f'NEGATIVE CONTROL residual JWT: {jwt_leaked.stderr.strip().splitlines()[-1]}')
+            (source / 'pg-server.log').unlink()
             relative = run('python3', 'experiments/inbox-production-install/perf/record.py', str(source), 'perf-120k', 'PASS', cwd=repo, env=env)
             manifest = json.loads((repo / relative / 'manifest.json').read_text())
             self.assertEqual((manifest['kind'], manifest['phase'], manifest['target']), ('perf-120k', 'n/a', 'disposable'))

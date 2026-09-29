@@ -15,6 +15,10 @@ psql "$PERF_DATABASE_URL" -X -v ON_ERROR_STOP=1 -At -F ',' -c "SELECT relname,re
 node "$PERF_SOURCE/bench.js" after > "$PERF_RUN_DIR/after.log"
 if python3 "$PERF_SOURCE/analyze_120k.py" "$PERF_RUN_DIR" > "$PERF_RUN_DIR/analysis.txt"; then verdict=PASS; else verdict=FAIL; fi
 perf_stop
-python3 "$PERF_SOURCE/record.py" "$PERF_RUN_DIR" perf-120k "$verdict"
+if [[ "${PERF_LOCAL_EXECUTION:-}" == 1 ]]; then
+  echo "Local diagnostic: $PERF_RUN_DIR ($verdict). No approval record."
+else
+  python3 "$PERF_SOURCE/record.py" "$PERF_RUN_DIR" perf-120k "$verdict"
+fi
 echo "120k synthetic measurements: $PERF_RUN_DIR ($verdict)"
 [[ "$verdict" == PASS ]]

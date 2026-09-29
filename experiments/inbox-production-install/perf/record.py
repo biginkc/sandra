@@ -5,12 +5,15 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 repo = Path(__file__).resolve().parents[3]
+if 'PERF_LOCAL_EXECUTION' in os.environ:
+    raise RuntimeError('Local perf execution cannot seal an approval record')
 source = Path(sys.argv[1])
 lane = sys.argv[2]
 if lane not in ('burst', 'perf-120k'):
@@ -33,15 +36,18 @@ if dest.exists():
     raise RuntimeError('Run directory already exists')
 if subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True).strip():
     raise RuntimeError('Dirty tree before perf sealing')
+text_artifact = re.compile(r'\.(?:json|log|txt|html|csv)$', re.I)
+residual_secret = re.compile(rb'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sb_secret_[A-Za-z0-9_-]+')
+files = [file for file in sorted(source.rglob('*')) if file.is_file()
+         and file.name != 'manifest.json' and not any(part.startswith('.') for part in file.relative_to(source).parts)]
+for file in files:
+    if text_artifact.search(file.name) and residual_secret.search(file.read_bytes()):
+        raise RuntimeError(f'Residual secret in run artifact: {file.relative_to(source)}')
 dest.mkdir(parents=True)
 raw_inflated = {}
 artifacts = {}
-for file in sorted(source.rglob('*')):
-    if not file.is_file():
-        continue
+for file in files:
     rel = file.relative_to(source)
-    if rel.name == 'manifest.json' or any(part.startswith('.') for part in rel.parts):
-        continue
     target = dest / rel
     target.parent.mkdir(parents=True, exist_ok=True)
     data = file.read_bytes()
@@ -69,7 +75,7 @@ if lane == 'burst':
         raise RuntimeError('Burst aggregate verdict disagrees with attempts')
 else:
     analysis = json.loads((source / 'analysis.json').read_text())
-    if analysis.get('kind') != lane or analysis.get('verdict') != verdict or not all(k in analysis for k in ('thresholds', 'latencies', 'foundation_file_wall_upper_ms')):
+    if analysis.get('kind') != lane or analysis.get('verdict') != verdict or not all(k in analysis for k in ('thresholds', 'latencies', 'foundation_file_wall_upper_ms', 'foundation_access_exclusive_messages_observed_ms')):
         raise RuntimeError('120k analysis/verdict mismatch')
 script = repo / 'scripts/inbox-ci' / f'{lane}.sh'
 manifest = {
@@ -87,6 +93,7 @@ manifest = {
     'summary': ('Three synthetic disposable PostgreSQL attempts with runner hardware recorded per attempt. No production equivalence is claimed.'
                 if lane == 'burst' else {'thresholds': analysis['thresholds'], 'latencies': analysis['latencies'],
                                          'foundation_file_wall_upper_ms': analysis['foundation_file_wall_upper_ms'],
+                                         'foundation_access_exclusive_messages_observed_ms': analysis['foundation_access_exclusive_messages_observed_ms'],
                                          'informational': True, 'production_equivalence': False})
 }
 if lane == 'burst':
