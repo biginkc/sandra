@@ -428,6 +428,39 @@ describe('DialpadPanel recording capture', () => {
     expect(await screen.findByText(/status did not settle before the deadline/)).toBeInTheDocument();
     expect(mocks.recordingStatus).toHaveBeenCalledTimes(2);
   });
+
+  it('does not let a delayed reload hydration replace an owned active capture', async () => {
+    let resolveRecent!: (value: unknown) => void;
+    mocks.recent.mockReturnValue(new Promise((resolve) => { resolveRecent = resolve; }));
+    mocks.start.mockResolvedValue(released);
+    const { call } = await chooseAndCall({ bootstrap: recordingBootstrap, pollMs: 5 });
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    mocks.status.mockResolvedValue(status('connected'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'End recording' })).toBeInTheDocument());
+    resolveRecent({ ok: true, calls: [status('ended', { recordingCaptureId: 'stale-capture' }).status] });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getByRole('button', { name: 'End recording' })).toBeInTheDocument();
+    expect(mocks.recordingStatus).not.toHaveBeenCalledWith('stale-capture');
+  });
+
+  it('does not start the finalization deadline while a long provider session is live', async () => {
+    mocks.start.mockResolvedValue(released);
+    mocks.recordingStatus
+      .mockResolvedValueOnce({ ok: true, status: { latestConsumedEpoch: 0, captureStatus: 'open', totalSamples: 0, measurementStatus: 'provisional' } })
+      .mockResolvedValueOnce({ ok: true, status: { latestConsumedEpoch: 1, captureStatus: 'partial', totalSamples: 4_800_001, measurementStatus: 'partial', finalResult: null } })
+      .mockResolvedValue({ ok: true, status: { latestConsumedEpoch: 1, captureStatus: 'sealed', totalSamples: 4_800_001, measurementStatus: 'finalized', finalResult: { status: 'eligible', observedSamples: 4_800_001, eligibleSamples: 4_800_001, reasons: ['eligible'], evaluatedAt: '2026-09-29T15:00:00.000Z' } } });
+    const { call } = await chooseAndCall({ bootstrap: recordingBootstrap, pollMs: 5, recordingStatusDeadlineMs: 20 });
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    mocks.status.mockResolvedValue(status('connected'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'End recording' })).toBeInTheDocument());
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(screen.queryByText(/status did not settle before the deadline/)).not.toBeInTheDocument();
+    mocks.status.mockResolvedValue(status('ended'));
+    await waitFor(() => expect(mocks.closeCapture).toHaveBeenCalledWith('capture-1'));
+    expect(await screen.findByText(/Verified seller speech: 300s/)).toBeInTheDocument();
+  });
 });
 
 describe('DialpadPanel authorization race', () => {
@@ -505,7 +538,7 @@ describe('DialpadPanel durability', () => {
     const onRecordingFinalResult = vi.fn();
     mocks.recent.mockResolvedValue({ ok: true, calls: [status('ended', { recordingCaptureId: 'capture-9' }).status] });
     mocks.recordingStatus.mockResolvedValue({ ok: true, status: {
-      captureId: 'capture-9', captureStatus: 'sealed', totalSamples: 4_800_001, measurementStatus: 'complete',
+      captureId: 'capture-9', captureStatus: 'sealed', totalSamples: 4_800_001, measurementStatus: 'finalized',
       crossing: null, finalResult: { status: 'eligible', observedSamples: 4_800_001, eligibleSamples: 4_800_001, reasons: ['eligible'], evaluatedAt: '2026-09-29T15:00:00.000Z' },
     } });
     await readyPanel({ onRecordingFinalResult });

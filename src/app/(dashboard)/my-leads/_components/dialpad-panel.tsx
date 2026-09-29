@@ -232,13 +232,19 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
 
   useEffect(() => {
     let cancelled = false;
+    const hydrationGeneration = recordingGenerationRef.current;
+    const mayHydrate = () => !cancelled
+      && mountedRef.current
+      && recordingGenerationRef.current === hydrationGeneration
+      && recordingRef.current === null;
     void listRecentDialpadCallsAction().then(async (result) => {
-      if (cancelled || !result.ok || !('calls' in result)) return;
+      if (!mayHydrate() || !result.ok || !('calls' in result)) return;
       setCalls(result.calls);
       const latest = result.calls.find((call) => call.recordingCaptureId !== null);
       if (!latest?.recordingCaptureId) return;
+      if (!mayHydrate()) return;
       const status = await getDialpadRecordingBrowserStatusAction(latest.recordingCaptureId);
-      if (cancelled || !status.ok || !('status' in status)) return;
+      if (!mayHydrate() || !status.ok || !('status' in status)) return;
       setRecording({
         intentId: latest.intentId,
         prepared: null,
@@ -589,7 +595,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
 
   useEffect(() => {
     const current = recordingRef.current;
-    if (!current?.captureId) return;
+    if (!current?.captureId || current.session) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
@@ -649,7 +655,7 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
     deadlineTimer = setTimeout(markDeadline, deadlineMs);
     void poll();
     return () => { cancelled = true; stopTimers(); };
-  }, [recording?.captureId, pollMs, recordingStatusDeadlineMs, statusRetryNonce]);
+  }, [recording?.captureId, recording?.session, pollMs, recordingStatusDeadlineMs, statusRetryNonce]);
 
   const lastNotifiedFinalResult = useRef<string | null>(null);
   useEffect(() => {

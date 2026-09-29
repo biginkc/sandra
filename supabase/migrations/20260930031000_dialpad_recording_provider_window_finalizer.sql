@@ -142,7 +142,6 @@ declare
   ended_us bigint;
   timing_count bigint := 0;
   reason_list text[] := '{}';
-  ranges jsonb := '[]'::jsonb;
   summary jsonb := '{}'::jsonb;
   base jsonb;
   manifest jsonb;
@@ -163,6 +162,39 @@ declare
   timing_max_drift_ppm numeric;
   timing_output_mismatch boolean := false;
   timing_support boolean := false;
+  mapping_support boolean := false;
+  mapping_lower_slope_us numeric;
+  mapping_upper_slope_us numeric;
+  mapping_lower_intercept_us numeric;
+  mapping_upper_intercept_us numeric;
+  tab_start_source numeric;
+  tab_final_source numeric;
+  tab_start_context numeric;
+  tab_final_context numeric;
+  tab_start_output numeric;
+  tab_final_output numeric;
+  tab_start_rate numeric;
+  tab_final_rate numeric;
+  tab_start_k numeric;
+  tab_final_k numeric;
+  tab_start_context_time numeric;
+  tab_final_context_time numeric;
+  tab_start_browser_before numeric;
+  tab_start_browser_after numeric;
+  tab_final_browser_before numeric;
+  tab_final_browser_after numeric;
+  exchange_browser_send numeric;
+  exchange_browser_receive numeric;
+  exchange_server_receive_wall numeric;
+  exchange_server_send_wall numeric;
+  context_browser_lower numeric;
+  context_browser_upper numeric;
+  exchange_browser_lower numeric;
+  exchange_browser_upper numeric;
+  exchange_offset_lower numeric;
+  exchange_offset_upper numeric;
+  source_rate numeric;
+  expected_final_output numeric;
   timing_digest text;
   digest text;
   r record;
@@ -233,11 +265,6 @@ begin
       from (select unnest(range_agg(int8range(start_sample,end_sample,'[)'))) r
               from public.dialpad_recording_vad_ranges
              where capture_id=p_capture_id and org_id=p_org_id and track='tab' and epoch=selected_epoch) u;
-    select coalesce(jsonb_agg(jsonb_build_object('startSample',lower(u.r),'endSample',upper(u.r)) order by lower(u.r)), '[]'::jsonb)
-      into ranges
-      from (select unnest(range_agg(int8range(start_sample,end_sample,'[)'))) r
-              from public.dialpad_recording_vad_ranges
-             where capture_id=p_capture_id and org_id=p_org_id and track='tab' and epoch=selected_epoch) u;
   end if;
 
   select count(distinct public.dialpad_cti_payload_ms(e.payload,'date_connected')) filter (where public.dialpad_cti_payload_ms(e.payload,'date_connected') is not null),
@@ -263,19 +290,36 @@ begin
   if selected_epoch is null or timing_status is distinct from 'collected' or timing_count=0 then
     reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_not_collected');
   else
-    select encode(extensions.digest(convert_to(coalesce(jsonb_agg(jsonb_build_object('stream', t.stream, 'seq', t.seq, 'record', t.record) order by t.stream, t.seq)::text, '[]'), 'utf8'), 'sha256'), 'hex')
-      into timing_digest
-      from public.dialpad_recording_timing_records t
-     where t.capture_id=p_capture_id and t.org_id=p_org_id and t.epoch=selected_epoch;
+    -- Fold each canonical record into a fixed-size digest state. A complete
+    -- JSON/text aggregate here would make long calls scale with retained
+    -- timing bytes even though the finalizer only needs the deterministic
+    -- evidence digest.
+    with recursive ordered as (
+      select row_number() over (order by t.stream,t.seq)::bigint as n,
+             jsonb_build_object('stream', t.stream, 'seq', t.seq, 'record', t.record)::text as piece
+        from public.dialpad_recording_timing_records t
+       where t.capture_id=p_capture_id and t.org_id=p_org_id and t.epoch=selected_epoch
+    ), fold as (
+      select 0::bigint as n, encode(extensions.digest(convert_to('', 'utf8'), 'sha256'), 'hex') as h
+      union all
+      select o.n, encode(extensions.digest(convert_to(f.h || '|' || o.piece, 'utf8'), 'sha256'), 'hex')
+        from fold f
+        join ordered o on o.n=f.n+1
+    )
+    select h into timing_digest from fold order by n desc limit 1;
     select count(*) filter (where stream in ('tab:anchor','mic:anchor') and record->>'anchor'='start'),
            count(*) filter (where stream in ('tab:anchor','mic:anchor') and record->>'anchor'='final'),
            count(*) filter (where stream in ('tab:context','mic:context') and record->>'observation'='start'),
            count(*) filter (where stream in ('tab:context','mic:context') and record->>'observation'='final'),
            count(*) filter (where stream='exchange'),
            count(distinct record->>'serverClockId') filter (where stream='exchange'),
-           min((record->>'serverReceiveWallMs')::numeric) filter (where stream='exchange'),
-           max((record->>'serverSendWallMs')::numeric) filter (where stream='exchange'),
-           coalesce(max((record->>'serverSendMonoMs')::numeric - (record->>'serverReceiveMonoMs')::numeric) filter (where stream='exchange'), 0),
+           min((record->>'serverReceiveWallMs')::numeric * 1000) filter (where stream='exchange'),
+           max((record->>'serverSendWallMs')::numeric * 1000) filter (where stream='exchange'),
+           greatest(
+             coalesce(max((record->>'serverSendMonoMs')::numeric - (record->>'serverReceiveMonoMs')::numeric) filter (where stream='exchange'), 0),
+             coalesce(max((record->>'browserReceiveMs')::numeric - (record->>'browserSendMs')::numeric) filter (where stream='exchange'), 0),
+             coalesce(max((record->>'browserAfterMs')::numeric - (record->>'browserBeforeMs')::numeric) filter (where stream in ('tab:context','mic:context')), 0)
+           ),
            0
       into timing_start_count,timing_final_count,timing_context_start_count,timing_context_final_count,
            timing_exchange_count,timing_server_clock_count,timing_server_wall_min,timing_server_wall_max,
@@ -354,12 +398,98 @@ begin
     if timing_server_wall_max - timing_server_wall_min > p.supported_duration_max_seconds::numeric * 1000000 then
       reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_scope_unsupported');
     end if;
-    timing_support := timing_start_count >= 2 and timing_final_count >= 2 and timing_context_start_count >= 2 and timing_context_final_count >= 2 and timing_exchange_count >= 1 and timing_server_clock_count = 1 and timing_max_stall <= p.supported_stall_max_ms and timing_max_anchor_gap <= p.supported_anchor_cadence_ms and coalesce(timing_max_drift_ppm,0) <= p.supported_drift_ppm and not timing_output_mismatch;
+    -- Build the sample-to-provider envelope from this capture's source,
+    -- context, browser and authenticated exchange observations. Policy slope
+    -- and intercept values remain part of the immutable manifest, but an
+    -- absolute UTC intercept cannot be reused across captures.
+    select (record->>'sourceCursor')::numeric, (record->>'contextFrame')::numeric,
+           (record->>'outputCursor')::numeric, (record->>'sourceRateHz')::numeric
+      into tab_start_source, tab_start_context, tab_start_output, tab_start_rate
+      from public.dialpad_recording_timing_records
+     where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='tab:anchor' and record->>'anchor'='start'
+     order by seq limit 1;
+    select (record->>'sourceCursor')::numeric, (record->>'contextFrame')::numeric,
+           (record->>'outputCursor')::numeric, (record->>'sourceRateHz')::numeric
+      into tab_final_source, tab_final_context, tab_final_output, tab_final_rate
+      from public.dialpad_recording_timing_records
+     where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='tab:anchor' and record->>'anchor'='final'
+     order by seq desc limit 1;
+    select (record->>'contextTimeMs')::numeric, (record->>'browserBeforeMs')::numeric, (record->>'browserAfterMs')::numeric
+      into tab_start_context_time, tab_start_browser_before, tab_start_browser_after
+      from public.dialpad_recording_timing_records
+     where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='tab:context' and record->>'observation'='start'
+     order by seq limit 1;
+    select (record->>'contextTimeMs')::numeric, (record->>'browserBeforeMs')::numeric, (record->>'browserAfterMs')::numeric
+      into tab_final_context_time, tab_final_browser_before, tab_final_browser_after
+      from public.dialpad_recording_timing_records
+     where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='tab:context' and record->>'observation'='final'
+     order by seq desc limit 1;
+    select (record->>'browserSendMs')::numeric, (record->>'browserReceiveMs')::numeric,
+           (record->>'serverReceiveWallMs')::numeric, (record->>'serverSendWallMs')::numeric
+      into exchange_browser_send, exchange_browser_receive, exchange_server_receive_wall, exchange_server_send_wall
+      from public.dialpad_recording_timing_records
+     where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange'
+     order by seq limit 1;
+    tab_start_k := tab_start_context - tab_start_source;
+    tab_final_k := tab_final_context - tab_final_source;
+    source_rate := tab_start_rate;
+    expected_final_output := floor(tab_final_source * 16000 / nullif(tab_final_rate, 0));
+    context_browser_lower := greatest(
+      tab_start_browser_before - (1000 * tab_start_k / nullif(source_rate, 0) + tab_start_output / 16),
+      tab_final_browser_before - (1000 * tab_final_k / nullif(source_rate, 0) + tab_final_output / 16)
+    );
+    context_browser_upper := least(
+      tab_start_browser_after - (1000 * tab_start_k / nullif(source_rate, 0) + tab_start_output / 16),
+      tab_final_browser_after - (1000 * tab_final_k / nullif(source_rate, 0) + tab_final_output / 16)
+    );
+    -- [serverReceive - browserReceive, serverSend - browserSend] is a
+    -- conservative causal bracket; no RTT midpoint is treated as truth.
+    select max((record->>'serverReceiveWallMs')::numeric - (record->>'browserReceiveMs')::numeric),
+           min((record->>'serverSendWallMs')::numeric - (record->>'browserSendMs')::numeric)
+      into exchange_offset_lower, exchange_offset_upper
+      from public.dialpad_recording_timing_records
+     where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange';
+    exchange_browser_lower := exchange_offset_lower;
+    exchange_browser_upper := exchange_offset_upper;
+    mapping_lower_slope_us := 1000000 / 16000;
+    mapping_upper_slope_us := 1000000 / 16000;
+    mapping_lower_intercept_us := (context_browser_lower + exchange_browser_lower) * 1000;
+    mapping_upper_intercept_us := (context_browser_upper + exchange_browser_upper) * 1000;
+    mapping_support := p.policy_version is not null
+      and tab_start_source is not null and tab_final_source is not null
+      and tab_start_context is not null and tab_final_context is not null
+      and tab_start_output is not null and tab_final_output is not null
+      and tab_start_rate is not null and tab_final_rate = tab_start_rate
+      and tab_start_k = tab_final_k
+      and tab_start_context_time is not null and tab_final_context_time is not null
+      and tab_start_browser_before is not null and tab_final_browser_after is not null
+      and exchange_browser_send is not null and exchange_browser_receive >= exchange_browser_send
+      and exchange_server_send_wall >= exchange_server_receive_wall
+      and context_browser_lower <= context_browser_upper
+      and exchange_browser_lower <= exchange_browser_upper
+      and tab_start_context_time = 1000 * tab_start_k / nullif(source_rate, 0) + tab_start_output / 16
+      and tab_final_context_time = 1000 * tab_final_k / nullif(source_rate, 0) + tab_final_output / 16
+      and tab_final_output = expected_final_output
+      and not exists (
+        select 1 from public.dialpad_recording_timing_records a
+         where a.capture_id=p_capture_id and a.org_id=p_org_id and a.epoch=selected_epoch
+           and a.stream in ('tab:anchor','mic:anchor')
+           and ((a.record->>'contextFrame')::numeric - (a.record->>'sourceCursor')::numeric) <> tab_start_k
+      )
+      and not exists (
+        select 1 from public.dialpad_recording_timing_records x
+         where x.capture_id=p_capture_id and x.org_id=p_org_id and x.epoch=selected_epoch and x.stream='exchange'
+           and (x.record->>'serverSendWallMs')::numeric < (x.record->>'serverReceiveWallMs')::numeric
+      );
+    if not mapping_support then
+      reason_list := public.dialpad_recording_provider_window_add_reason(reason_list,'timing_mapping_unsupported');
+    end if;
+    timing_support := timing_start_count >= 2 and timing_final_count >= 2 and timing_context_start_count >= 2 and timing_context_final_count >= 2 and timing_exchange_count >= 1 and timing_server_clock_count = 1 and timing_max_stall <= p.supported_stall_max_ms and timing_max_anchor_gap <= p.supported_anchor_cadence_ms and coalesce(timing_max_drift_ppm,0) <= p.supported_drift_ppm and not timing_output_mismatch and mapping_support;
   end if;
 
   if p.accepted_at is not null and p.revoked_at is null and selected_epoch is not null and connected_count=1 and ended_count=1 and provider_count=1 and connected_us is not null and ended_us is not null and ended_us >= connected_us and tab_eof > 0 and epoch_count=1 and timing_support then
-    lower_sample := greatest(0::bigint, p.domain_start_sample, ceil((connected_us::numeric - p.lower_intercept_us) / p.lower_slope_us_per_sample)::bigint);
-    upper_sample := least(tab_eof, p.domain_end_sample, floor((ended_us::numeric - p.upper_intercept_us) / p.upper_slope_us_per_sample)::bigint);
+    lower_sample := greatest(0::bigint, p.domain_start_sample, ceil((connected_us::numeric - mapping_lower_intercept_us) / mapping_lower_slope_us)::bigint);
+    upper_sample := least(tab_eof, p.domain_end_sample, floor((ended_us::numeric - mapping_upper_intercept_us) / mapping_upper_slope_us)::bigint);
     if upper_sample < lower_sample then upper_sample := lower_sample; end if;
     select coalesce(sum(greatest(0::bigint, least(upper_sample, upper(u.r)::bigint)-greatest(lower_sample, lower(u.r)::bigint))),0)::bigint into clipped
       from (select unnest(range_agg(int8range(start_sample,end_sample,'[)'))) r
@@ -373,7 +503,7 @@ begin
   elsif cardinality(reason_list) = 0 then
     reason_list := array['unsupported'];
   end if;
-  summary := jsonb_build_object('providerCallId', c.provider_call_id, 'connectedUs', connected_us, 'endedUs', ended_us, 'timingRecords', timing_count, 'timingStatus', timing_status, 'timingDigest', timing_digest, 'timingMaxStallMs', timing_max_stall, 'timingMaxAnchorGapMs', timing_max_anchor_gap, 'timingMaxDriftPpm', timing_max_drift_ppm, 'shadowDigest', shadow_digest);
+  summary := jsonb_build_object('providerCallId', c.provider_call_id, 'connectedUs', connected_us, 'endedUs', ended_us, 'timingRecords', timing_count, 'timingStatus', timing_status, 'timingDigest', timing_digest, 'timingMaxStallMs', timing_max_stall, 'timingMaxAnchorGapMs', timing_max_anchor_gap, 'timingMaxDriftPpm', timing_max_drift_ppm, 'mappingLowerSlopeUsPerSample', mapping_lower_slope_us, 'mappingUpperSlopeUsPerSample', mapping_upper_slope_us, 'mappingLowerInterceptUs', mapping_lower_intercept_us, 'mappingUpperInterceptUs', mapping_upper_intercept_us, 'shadowDigest', shadow_digest);
   manifest := jsonb_build_object('captureId',p_capture_id,'orgId',p_org_id,'epoch',selected_epoch,'policyVersion',p_policy_version,'policy',policy_manifest,'shadowDigest',shadow_digest,'timingDigest',timing_digest,'observedSamples',observed,'sampleWindow',jsonb_build_object('lowerSample',lower_sample,'upperSample',upper_sample),'ranges',jsonb_build_object('digest',shadow->'manifest'->'relations'->'vadRanges'->>'digest','count',shadow->'manifest'->'relations'->'vadRanges'->>'count'),'summary',summary,'reasons',to_jsonb(reason_list));
   digest := encode(extensions.digest(convert_to(manifest::text,'utf8'),'sha256'),'hex');
   return jsonb_build_object('algorithmVersion','provider-window-finalizer-v1','policyVersion',p_policy_version,'policyHash',coalesce(p.policy_hash,repeat('0',64)),'epoch',selected_epoch,'inputDigest',digest,'observedSamples',observed,'eligibleSamples',case when cardinality(reason_list)=1 and (reason_list[1] in ('eligible','below_threshold')) then eligible else null end,'status',case when cardinality(reason_list)=1 and reason_list[1]='eligible' then 'eligible' when cardinality(reason_list)=1 and reason_list[1]='below_threshold' then 'ineligible' else 'unknown' end,'reasons',to_jsonb(reason_list),'sampleWindow',jsonb_build_object('lowerSample',lower_sample,'upperSample',upper_sample),'selectedSummary',summary);
@@ -412,33 +542,9 @@ begin
 end;
 $$;
 
--- Bounded browser-independent reconciliation selection. It uses terminal
--- capture/result state as the durable work signal; duplicate workers are safe
--- because finalization is digest-fenced and replayable.
-create or replace function public.fn_list_dialpad_recording_provider_window_candidates(p_limit integer default 25)
-returns jsonb language sql stable security definer set search_path = '' as $$
-  select coalesce(jsonb_agg(jsonb_build_object('orgId',q.org_id,'captureId',q.capture_id,'policyVersion',q.policy_version) order by q.result_at,q.capture_id),'[]'::jsonb)
-    from (
-      select c.org_id,c.id as capture_id,c.result_at,p.policy_version
-        from public.dialpad_recording_captures c
-        join lateral (
-          select policy_version from public.dialpad_recording_provider_window_policies p
-           where p.org_id=c.org_id and p.accepted_at is not null and p.revoked_at is null
-           order by p.accepted_at desc,p.policy_version desc limit 1
-        ) p on true
-        left join public.dialpad_recording_provider_window_results r on r.capture_id=c.id and r.org_id=c.org_id
-       where c.status in ('sealed','partial','failed')
-         and (r.capture_id is null or r.input_digest is distinct from (public.dialpad_recording_provider_window_input(c.org_id,c.id,r.policy_version)->>'inputDigest') or r.policy_version is distinct from p.policy_version)
-       order by c.result_at,c.id
-       limit greatest(1,least(coalesce(p_limit,25),100))
-    ) q;
-$$;
-
 -- Keyset-paginated variant for a bounded reconciliation worker. The cursor is
--- the last terminal capture examined, rather than the last candidate returned;
--- this lets a worker defer a repeatedly failing oldest capture and continue
--- making progress without a generic jobs table. The workset is bounded before
--- digest evaluation, and the page is bounded again before it is returned.
+-- the last candidate returned. A bounded workset is used only to cap digest
+-- evaluation; the cursor never skips candidates that did not fit this page.
 create or replace function public.fn_list_dialpad_recording_provider_window_candidates(
   p_limit integer,
   p_after_result_at timestamptz,
@@ -481,8 +587,22 @@ returns jsonb language sql stable security definer set search_path = '' as $$
   )
   select jsonb_build_object(
     'candidates', coalesce((select jsonb_agg(jsonb_build_object('orgId',c.org_id,'captureId',c.capture_id,'policyVersion',c.policy_version) order by c.result_at,c.capture_id) from candidates c), '[]'::jsonb),
-    'nextCursor', coalesce((select jsonb_build_object('resultAt',w.result_at,'captureId',w.capture_id) from workset w order by w.result_at desc,w.capture_id desc limit 1), 'null'::jsonb)
+    'nextCursor', coalesce(
+      (select jsonb_build_object('resultAt',c.result_at,'captureId',c.capture_id) from candidates c order by c.result_at desc,c.capture_id desc limit 1),
+      (select jsonb_build_object('resultAt',w.result_at,'captureId',w.capture_id) from workset w order by w.result_at desc,w.capture_id desc limit 1),
+      'null'::jsonb
+    )
   );
+$$;
+
+-- Keep the historical one-argument entry point bounded and route it through
+-- the same cursor-aware implementation. Callers that need to resume use the
+-- three-argument form directly.
+create or replace function public.fn_list_dialpad_recording_provider_window_candidates(p_limit integer default 25)
+returns jsonb language sql stable security definer set search_path = '' as $$
+  select coalesce((public.fn_list_dialpad_recording_provider_window_candidates(
+    greatest(1, least(coalesce(p_limit,25),100)), null, null
+  )->'candidates'), '[]'::jsonb);
 $$;
 
 create or replace function public.fn_get_dialpad_recording_provider_window_result(p_org_id uuid,p_rep_user_id uuid,p_capture_id uuid)
@@ -612,7 +732,16 @@ begin
   select count(*) into v_offers from public.acquisition_offers where org_id=p_org_id and actor_user_id=p_member_id and sent_at>=p_start and sent_at<p_end;
   with queue as materialized (select * from public.my_leads_queue_rows(p_org_id,p_member_id,v_at)) select count(*) filter(where q.stage='needs_offer'),count(*) filter(where q.stage='contacted' and not exists(select 1 from public.tasks t where t.org_id=p_org_id and t.related_property_id=q.property_id and t.type='appointment' and t.status in ('open','snoozed') and greatest(t.due_at,case when t.status='snoozed' then t.snoozed_until end)>v_at)),array_agg(q.property_id),count(*) filter(where q.warning_rank>0) into v_needs_offer,v_contact,v_properties,v_stale from queue q;
   select count(*) into v_overdue from public.tasks t where t.org_id=p_org_id and t.assignee_id=p_member_id and t.related_property_id is not null and t.type='appointment' and t.status in ('open','snoozed') and t.due_at<=v_at and t.related_property_id=any(v_properties);
-  select count(*) filter(where coalesce(c.provider_ended_at,c.ended_at,c.started_at,a.occurred_at)<=v_at-interval '5 minutes' and nullif(btrim(c.recording_path),'') is null and nullif(btrim(a.recording_url),'') is null and not exists(select 1 from public.call_recordings r where r.call_activity_id=c.id and r.status='available' and nullif(btrim(r.storage_path),'') is not null)),count(*) filter(where false),count(*) filter(where a.outcome='reached' and c.talk_duration_seconds is not null),count(*) filter(where a.outcome='reached' and c.talk_duration_seconds is null),avg(c.talk_duration_seconds) filter(where a.outcome='reached' and c.talk_duration_seconds is not null),count(*) filter(where a.outcome='reached' and ((c.provider='dialpad' and exists (select 1 from public.dialpad_recording_captures rc where rc.org_id=a.org_id and rc.call_activity_id=a.call_activity_id and public.dialpad_recording_provider_window_is_eligible(a.org_id,rc.id,a.call_activity_id))) or (c.provider is distinct from 'dialpad' and c.talk_duration_seconds>300))) into v_missing,v_recording_unknown,v_talk_samples,v_talk_unknown,v_talk_average,v_long from public.acquisition_attempts a left join public.call_activities c on c.id=a.call_activity_id and c.org_id=a.org_id and c.property_id=a.property_id where a.org_id=p_org_id and a.actor_user_id=p_member_id and a.attempt_kind='call' and a.occurred_at>=p_start and a.occurred_at<p_end;
+  with eligible_dialpad as materialized (
+    select r.org_id, r.call_activity_id
+      from public.dialpad_recording_provider_window_results r
+      join public.dialpad_recording_provider_window_policies p
+        on p.org_id=r.org_id and p.policy_version=r.policy_version
+     where r.org_id=p_org_id and r.status='eligible' and r.eligible_samples>4800000
+       and p.accepted_at is not null and p.revoked_at is null and r.policy_hash=p.policy_hash
+       and r.input_digest=(public.dialpad_recording_provider_window_input(r.org_id,r.capture_id,r.policy_version)->>'inputDigest')
+  )
+  select count(*) filter(where coalesce(c.provider_ended_at,c.ended_at,c.started_at,a.occurred_at)<=v_at-interval '5 minutes' and nullif(btrim(c.recording_path),'') is null and nullif(btrim(a.recording_url),'') is null and not exists(select 1 from public.call_recordings r where r.call_activity_id=c.id and r.status='available' and nullif(btrim(r.storage_path),'') is not null)),count(*) filter(where false),count(*) filter(where a.outcome='reached' and c.talk_duration_seconds is not null),count(*) filter(where a.outcome='reached' and c.talk_duration_seconds is null),avg(c.talk_duration_seconds) filter(where a.outcome='reached' and c.talk_duration_seconds is not null),count(*) filter(where a.outcome='reached' and ((c.provider='dialpad' and exists (select 1 from eligible_dialpad ed where ed.org_id=a.org_id and ed.call_activity_id=a.call_activity_id)) or (c.provider is distinct from 'dialpad' and c.talk_duration_seconds>300))) into v_missing,v_recording_unknown,v_talk_samples,v_talk_unknown,v_talk_average,v_long from public.acquisition_attempts a left join public.call_activities c on c.id=a.call_activity_id and c.org_id=a.org_id and c.property_id=a.property_id where a.org_id=p_org_id and a.actor_user_id=p_member_id and a.attempt_kind='call' and a.occurred_at>=p_start and a.occurred_at<p_end;
   select count(*) filter(where first_call_started_at is not null),count(*) filter(where first_call_started_at is null),avg(extract(epoch from(first_call_started_at-assigned_at))) filter(where first_call_started_at is not null) into v_samples,v_first_pending,v_first_seconds from public.acquisition_assignment_episodes where org_id=p_org_id and assignee_user_id=p_member_id and eligible and episode_kind='live' and assigned_at>=p_start and assigned_at<p_end;
   select count(*),count(*) filter(where t.outcome='held') into v_due,v_held from public.tasks t join public.acquisition_appointment_attribution a on a.task_id=t.id and a.org_id=t.org_id where t.org_id=p_org_id and a.accountable_user_id=p_member_id and t.type='appointment' and t.related_property_id is not null and t.status<>'cancelled' and t.outcome is distinct from 'rescheduled' and t.due_at>=p_start and t.due_at<p_end;
   select count(*) into v_unattributed from public.tasks t where t.org_id=p_org_id and t.type='appointment' and t.related_property_id is not null and t.status<>'cancelled' and t.outcome is distinct from 'rescheduled' and t.due_at>=p_start and t.due_at<p_end and not exists(select 1 from public.acquisition_appointment_attribution a where a.task_id=t.id and a.org_id=t.org_id);
