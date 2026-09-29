@@ -44,7 +44,7 @@
     "smoke.py": "48fb552e52de31bdce662f44c149ed87fef84e2efd2cbb8748069fd5edec6e96",
     "test_backend_grants.py": "67661b24ef48c74f9483c9034c0ab3686987a18370fbb407bd1e3b6fb85afee3",
     "test_catalog_fingerprint.py": "ab883c2e3b6bff841efcde98247e7a9db34b1d685d676a428fd37aecd84c2d04",
-    "test_emit_migrations.py": "1a6762fae76a80f592342b499b150f3a2412c3658b8d39a60dd37f877e9a65dd",
+    "test_emit_migrations.py": "cf4b24717cf401fbf607131c05ad748eeefd7eb9a2c219c625525bc375fa69b7",
     "test_read_companion_upgrade.py": "3f7ace254a191a6154ad5590c808c54b0b60a3a987ba24660278858f005f930c",
     "unknown-retention-test.py": "15c027cc365b46d2fdc21e7ff4e0ca6ea74afef21949f8a9c70424a9eb1d99c7",
     "unknown-retention.sql": "974eab36185aa70d78099eb1867e35c741a51bf5b5b0d68155be74e5604e6504",
