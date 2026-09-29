@@ -16,7 +16,7 @@ const rows = {
     { enrollment_id: "e3", message_id: "m3", run_at: "2026-09-02T11:00:00Z" },
   ],
   messages: [{ id: "m1", property_id: "p1", direction: "outbound", body: "Hello first lead", created_at: "2026-09-02T10:00:00Z", sent_at: "2026-09-02T10:00:00Z" }, { id: "m2", property_id: "p2", direction: "outbound", body: "Hello second lead", created_at: "2026-09-02T11:00:00Z", sent_at: "2026-09-02T11:00:00Z" }, { id: "m3", property_id: "p3", direction: "outbound", body: "Hello third lead", created_at: "2026-09-02T11:00:00Z", sent_at: "2026-09-02T11:00:00Z" }, { id: "m4", property_id: "p3", direction: "inbound", body: "Thanks", created_at: "2026-09-02T12:00:00Z", sent_at: null }],
-  lead_events: [{ property_id: "p2", event_type: "sequence_canceled", payload: { enrollment_id: "e2" } }],
+  lead_events: [{ property_id: "p2", event_type: "sequence_canceled", source_id: "e2", payload: {} }],
 };
 
 function client(overrides: Partial<typeof rows> = {}) {
@@ -88,6 +88,15 @@ describe("drip status", () => {
 });
 
 describe("listDripProgress", () => {
+  it.each([
+    ["matching source and property", "p2", "e2", "Stopped"],
+    ["different source", "p2", "e3", "Finished, no reply"],
+    ["different property", "p3", "e2", "Finished, no reply"],
+  ])("matches SQL cancellation for %s with empty payload", async (_case, propertyId, sourceId, status) => {
+    const stub = client({ lead_events: [{ property_id: propertyId, event_type: "sequence_canceled", source_id: sourceId, payload: {} }] });
+    expect(await listDripProgress(stub as never, ["p2"]))
+      .toMatchObject([{ propertyId: "p2", status }]);
+  });
   it("prefers an older paused enrollment to a newer completed enrollment", async () => {
     const stub = client({ sequence_enrollments: [
       rows.sequence_enrollments[0],

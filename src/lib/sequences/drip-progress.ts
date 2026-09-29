@@ -92,10 +92,13 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
   const canceled = new Set<string>();
   for (const batch of chunks(chosen.filter((row) => row.status === "completed").map((row) => row.property_id))) {
     for (let offset = 0; ; offset += 1000) {
-      const { data, error } = await client.from("lead_events").select("property_id, event_type, payload")
+      const { data, error } = await client.from("lead_events").select("property_id, event_type, source_id")
         .in("property_id", batch).eq("event_type", "sequence_canceled").range(offset, offset + 999);
       assertQuery(error, "lead events");
-      for (const event of data ?? []) if (event.payload && typeof event.payload === "object" && !Array.isArray(event.payload) && typeof event.payload.enrollment_id === "string") canceled.add(event.payload.enrollment_id);
+      for (const event of data ?? []) {
+        const enrollment = selected.get(event.property_id);
+        if (enrollment?.status === "completed" && event.source_id === enrollment.id) canceled.add(enrollment.id);
+      }
       if (!data || data.length < 1000) break;
     }
   }
