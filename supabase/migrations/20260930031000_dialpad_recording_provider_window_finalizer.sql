@@ -505,28 +505,23 @@ begin
     -- late final probe or an independently sampled context read after source
     -- capture ended.
     with observation_outputs as (
-      select tab_start_output +
-             (((record->>'contextTimeMs')::numeric - tab_start_context_time) * 16) as output_sample
+      select ((record->>'contextTimeMs')::numeric - (1000 * tab_start_k / nullif(source_rate, 0))) * 16 as output_sample
         from public.dialpad_recording_timing_records
        where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='tab:context'
       union all
-      select tab_start_output +
-             ((((record->>'browserSendMs')::numeric - context_offset_upper) - tab_start_context_time) * 16)
+      select ((record->>'browserSendMs')::numeric - context_offset_upper - (1000 * tab_start_k / nullif(source_rate, 0))) * 16
         from public.dialpad_recording_timing_records
        where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange'
       union all
-      select tab_start_output +
-             ((((record->>'browserSendMs')::numeric - context_offset_lower) - tab_start_context_time) * 16)
+      select ((record->>'browserSendMs')::numeric - context_offset_lower - (1000 * tab_start_k / nullif(source_rate, 0))) * 16
         from public.dialpad_recording_timing_records
        where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange'
       union all
-      select tab_start_output +
-             ((((record->>'browserReceiveMs')::numeric - context_offset_upper) - tab_start_context_time) * 16)
+      select ((record->>'browserReceiveMs')::numeric - context_offset_upper - (1000 * tab_start_k / nullif(source_rate, 0))) * 16
         from public.dialpad_recording_timing_records
        where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange'
       union all
-      select tab_start_output +
-             ((((record->>'browserReceiveMs')::numeric - context_offset_lower) - tab_start_context_time) * 16)
+      select ((record->>'browserReceiveMs')::numeric - context_offset_lower - (1000 * tab_start_k / nullif(source_rate, 0))) * 16
         from public.dialpad_recording_timing_records
        where capture_id=p_capture_id and org_id=p_org_id and epoch=selected_epoch and stream='exchange'
     )

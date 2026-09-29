@@ -205,13 +205,19 @@ describe('provider-window finalizer migration', () => {
     };
     expect((await kpi()).conversationsOverFiveMinutes).toBe(1);
 
-    await replica(`insert into public.dialpad_recording_vad_batches(batch_id,capture_id,org_id,track,epoch,range_count,ranges_sha256)
-      select ('00000000-0000-4002-8000-'||lpad(batch_no::text,12,'0'))::uuid,$1,$2,'tab',1,256,repeat('e',64)
-      from generate_series(1,16) batch_no`, [captureId, ORG]);
-    await replica(`insert into public.dialpad_recording_vad_ranges(capture_id,org_id,track,epoch,batch_id,range_index,start_sample,end_sample,evidence_ref)
-      select $1,$2,'tab',1,('00000000-0000-4002-8000-'||lpad(batch_no::text,12,'0'))::uuid,range_index::smallint,
+    const longPathBatchIds = Array.from({ length: 16 }, () => uuid());
+    await replica(`with batches as (
+        select batch_id, ordinality::int as batch_no from unnest($3::uuid[]) with ordinality as b(batch_id, ordinality)
+      )
+      insert into public.dialpad_recording_vad_batches(batch_id,capture_id,org_id,track,epoch,range_count,ranges_sha256)
+      select batch_id,$1,$2,'tab',1,256,repeat('e',64) from batches`, [captureId, ORG, longPathBatchIds]);
+    await replica(`with batches as (
+        select batch_id, ordinality::int as batch_no from unnest($3::uuid[]) with ordinality as b(batch_id, ordinality)
+      )
+      insert into public.dialpad_recording_vad_ranges(capture_id,org_id,track,epoch,batch_id,range_index,start_sample,end_sample,evidence_ref)
+      select $1,$2,'tab',1,batch_id,range_index::smallint,
         (batch_no*100000 + range_index*100)::bigint,(batch_no*100000 + range_index*100 + 1)::bigint,'long-path:'||batch_no::text||':'||range_index::text
-      from generate_series(1,16) batch_no cross join generate_series(0,255) range_index`, [captureId, ORG]);
+      from batches cross join generate_series(0,255) range_index`, [captureId, ORG, longPathBatchIds]);
     const stale = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_provider_window_result($1,$2,$3) v',[ORG,OWNER,captureId]);
     expect(stale.rows[0]!.v).toMatchObject({ status: 'stale', currentAtRead: false });
     expect((await kpi()).conversationsOverFiveMinutes).toBe(0);
@@ -221,6 +227,116 @@ describe('provider-window finalizer migration', () => {
     expect(refreshed.rows[0]!.v.inputDigest).not.toBe(before.rows[0]!.v.inputDigest);
     await pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)', [ORG,captureId,POLICY,refreshed.rows[0]!.v.inputDigest]);
     expect((await kpi()).conversationsOverFiveMinutes).toBe(1);
+  });
+
+  it('keeps the 4096 digest compatible', async () => {
+    await replica(`insert into public.dialpad_recording_timing_records(capture_id,org_id,epoch,stream,seq,content_hash,record,payload_bytes)
+      select $1,$2,1,'exchange',seq,
+        encode(extensions.digest(convert_to(record::text,'utf8'),'sha256'),'hex'),record,octet_length(record::text)
+      from (
+        select seq, jsonb_build_object(
+          'kind','exchange','seq',seq,'serverClockId','00000000-0000-4000-8000-000000000003',
+          'browserSendMs',seq*100,'browserReceiveMs',seq*100+1,
+          'serverReceiveMonoMs',seq*100,'serverSendMonoMs',seq*100+1,
+          'serverReceiveWallMs',1699999998750+seq*100+1,'serverSendWallMs',1699999998750+seq*100+2
+        ) record
+        from generate_series(3,4087) seq
+      ) generated`, [captureId, ORG]);
+    const at4096 = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
+    expect(at4096.rows[0]!.v.status).toBe('eligible');
+    expect(at4096.rows[0]!.v.selectedSummary!.timingRecords).toBe(4096);
+    const ordered = await pg.query<{piece:string}>(`select jsonb_build_object('stream',stream,'seq',seq,'record',record)::text piece
+      from public.dialpad_recording_timing_records where capture_id=$1 and org_id=$2 and epoch=1 order by stream,seq`, [captureId, ORG]);
+    let expectedRecursive = hash('');
+    for (const row of ordered.rows) expectedRecursive = hash(`${expectedRecursive}|${row.piece}`);
+    expect(at4096.rows[0]!.v.selectedSummary!.timingDigest).toBe(expectedRecursive);
+
+  }, 60_000);
+
+  it('switches at 4097, invalidates an old long digest, and preserves Unicode ordering', async () => {
+    await replica(`insert into public.dialpad_recording_timing_records(capture_id,org_id,epoch,stream,seq,content_hash,record,payload_bytes)
+      select $1,$2,1,'exchange',seq,
+        encode(extensions.digest(convert_to(record::text,'utf8'),'sha256'),'hex'),record,octet_length(record::text)
+      from (
+        select seq, jsonb_build_object(
+          'kind','exchange','seq',seq,'serverClockId','00000000-0000-4000-8000-000000000003',
+          'browserSendMs',seq*100,'browserReceiveMs',seq*100+1,
+          'serverReceiveMonoMs',seq*100,'serverSendMonoMs',seq*100+1,
+          'serverReceiveWallMs',1699999998750+seq*100+1,'serverSendWallMs',1699999998750+seq*100+2
+        ) record
+        from generate_series(3,4088) seq
+      ) generated`, [captureId, ORG]);
+    const at4097 = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
+    expect(at4097.rows[0]!.v.status).toBe('eligible');
+    expect(at4097.rows[0]!.v.selectedSummary!.timingRecords).toBe(4097);
+    const aggregate = await pg.query<{digest:string}>(`select encode(extensions.digest(
+        convert_to('provider-window-finalizer-v1:timing-records','utf8') || coalesce(string_agg(
+          int4send(octet_length(piece)) || convert_to(piece,'utf8'), ''::bytea order by stream,seq
+        ), ''::bytea), 'sha256'), 'hex') digest
+      from (
+        select stream,seq,jsonb_build_object('stream',stream,'seq',seq,'record',record)::text piece
+        from public.dialpad_recording_timing_records where capture_id=$1 and org_id=$2 and epoch=1
+      ) ordered`, [captureId, ORG]);
+    expect(at4097.rows[0]!.v.selectedSummary!.timingDigest).toBe(aggregate.rows[0]!.digest);
+
+    await pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)', [ORG,captureId,POLICY,at4097.rows[0]!.v.inputDigest]);
+    const kpi = async () => {
+      await pg.query('set role authenticated');
+      await pg.query('select set_config(\'request.jwt.claim.sub\',$1,false)', [OWNER]);
+      try {
+        return (await pg.query<{v:FinalizerJson}>('select public.fn_get_acquisition_kpis($1,$2,now()-interval \'1 day\',now()+interval \'1 day\') v',[ORG,OWNER])).rows[0]!.v;
+      } finally {
+        await pg.query('reset role');
+      }
+    };
+    expect((await kpi()).conversationsOverFiveMinutes).toBe(1);
+    const oldOrdered = await pg.query<{piece:string}>(`select jsonb_build_object('stream',stream,'seq',seq,'record',record)::text piece
+      from public.dialpad_recording_timing_records where capture_id=$1 and org_id=$2 and epoch=1 order by stream,seq`, [captureId, ORG]);
+    let historicalTimingDigest = hash('');
+    for (const row of oldOrdered.rows) historicalTimingDigest = hash(`${historicalTimingDigest}|${row.piece}`);
+    const historicalDigestResult = await pg.query<{digest:string}>(`with input as (
+        select public.fn_get_dialpad_recording_final_input($1,$2,$3) v
+      ), policy as (
+        select * from public.dialpad_recording_provider_window_policies where org_id=$1 and policy_version=$3
+      ), shadow as (
+        select public.dialpad_recording_shadow_input($1,$2) value
+      )
+      select encode(extensions.digest(convert_to((jsonb_build_object(
+        'captureId',$2::uuid,'orgId',$1::uuid,'epoch',(input.v->>'epoch')::smallint,'policyVersion',$3,
+        'policy',jsonb_build_object(
+          'algorithmVersion',policy.algorithm_version,'policyHash',policy.policy_hash,
+          'mappingMethod',policy.mapping_method,'timeUnit',policy.time_unit,'sampleRateHz',policy.sample_rate_hz,
+          'domainStartSample',policy.domain_start_sample,'domainEndSample',policy.domain_end_sample,
+          'lowerSlope',policy.lower_slope_us_per_sample,'lowerIntercept',policy.lower_intercept_us,
+          'upperSlope',policy.upper_slope_us_per_sample,'upperIntercept',policy.upper_intercept_us,
+          'classificationOvercountSamples',policy.classification_overcount_samples,
+          'supportedDurationMaxSeconds',policy.supported_duration_max_seconds,
+          'supportedAnchorCadenceMs',policy.supported_anchor_cadence_ms,
+          'supportedStallMaxMs',policy.supported_stall_max_ms,'supportedDriftPpm',policy.supported_drift_ppm,
+          'supportedCaptureMarginUs',policy.supported_capture_margin_us,
+          'supportedProviderStartMarginUs',policy.supported_provider_start_margin_us,
+          'supportedProviderEndMarginUs',policy.supported_provider_end_margin_us,
+          'evidenceDigest',policy.evidence_digest,'evidenceRefs',policy.evidence_refs
+        ),
+        'shadowDigest',input.v->'selectedSummary'->>'shadowDigest','timingDigest',$4::text,
+        'observedSamples',(input.v->>'observedSamples')::bigint,'sampleWindow',input.v->'sampleWindow',
+        'ranges',jsonb_build_object('digest',shadow.value->'manifest'->'relations'->'vadRanges'->>'digest','count',shadow.value->'manifest'->'relations'->'vadRanges'->>'count'),
+        'summary',jsonb_set(input.v->'selectedSummary','{timingDigest}',to_jsonb($4::text),true),
+        'reasons',input.v->'reasons'
+      ))::text,'utf8'),'sha256'),'hex') digest from input,policy,shadow`, [ORG,captureId,POLICY,historicalTimingDigest]);
+    const historicalLongDigest = historicalDigestResult.rows[0]!.digest;
+    expect(historicalLongDigest).not.toBe(at4097.rows[0]!.v.inputDigest);
+    await replica('update public.dialpad_recording_provider_window_results set input_digest=$3 where capture_id=$1 and org_id=$2', [captureId, ORG, historicalLongDigest]);
+    expect((await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_provider_window_result($1,$2,$3) v',[ORG,OWNER,captureId])).rows[0]!.v.status).toBe('stale');
+    expect((await kpi()).conversationsOverFiveMinutes).toBe(0);
+    await pg.query('select public.fn_finalize_dialpad_recording_provider_window($1,$2,$3,$4)', [ORG,captureId,POLICY,at4097.rows[0]!.v.inputDigest]);
+    expect((await kpi()).conversationsOverFiveMinutes).toBe(1);
+
+    await replica(`update public.dialpad_recording_timing_records
+      set record=record || '{"unicode":"café"}'::jsonb
+      where capture_id=$1 and org_id=$2 and stream='exchange' and seq=4088`, [captureId, ORG]);
+    const unicode = await pg.query<{v:FinalizerJson}>('select public.fn_get_dialpad_recording_final_input($1,$2,$3) v',[ORG,captureId,POLICY]);
+    expect(unicode.rows[0]!.v.inputDigest).not.toBe(at4097.rows[0]!.v.inputDigest);
   });
 
   it('invalidates the awarded KPI after a late provider conflict at a repeatable-read boundary', async () => {
@@ -321,10 +437,10 @@ describe('provider-window finalizer migration', () => {
       track: 'tab',
       seq: 2,
       contextId: '00000000-0000-4000-8000-000000000001',
-      observation: 'post_flush',
-      browserBeforeMs: 301269.5625,
-      contextTimeMs: 301020.0625,
-      browserAfterMs: 301270.5625,
+      observation: 'periodic',
+      browserBeforeMs: 301259.5,
+      contextTimeMs: 301010,
+      browserAfterMs: 301260.5,
       browserTimeOriginMs: 1700000000000,
       state: 'closed',
     };
@@ -349,7 +465,10 @@ describe('provider-window finalizer migration', () => {
     const lateSummary = late.rows[0]!.v.selectedSummary!;
     const lateWidth = lateSummary.mappingUpperInterceptUs! - lateSummary.mappingLowerInterceptUs!;
     expect(lateWidth).toBeGreaterThan(baselineWidth);
-    expect(lateWidth - baselineWidth).toBeGreaterThan(3);
+    // K/R is 1,000 ms for this fixture. The periodic observation lands at
+    // 300,010 ms in output coordinates, and the joined observation envelope
+    // expands the two-sided intercept width by exactly 4 us at 100 ppm.
+    expect(lateWidth - baselineWidth).toBe(4);
   });
 
   it('rejects an interior context-clock discontinuity while preserving asynchronous brackets', async () => {
