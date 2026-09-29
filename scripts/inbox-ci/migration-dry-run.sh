@@ -1,17 +1,50 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$PWD
 ASSERT=scripts/inbox-ci/migration-assertions.py
 INSTALL=experiments/inbox-production-install
 LOCAL=${MIGRATION_LOCAL_EXECUTION:-0}
-[[ "$LOCAL" == 0 || "$LOCAL" == 1 ]] || { echo 'Invalid local diagnostic mode' >&2; exit 3; }
-[[ "$LOCAL" != 1 || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]] || { echo 'Local diagnostic refused on github-hosted runner' >&2; exit 3; }
+WORK=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/inbox-migration.XXXXXX")
+ORIGINAL_GITHUB_ENV=${GITHUB_ENV:-}
+CATALOG_CONTAINER="inbox-catalog-${GITHUB_RUN_ID:-preflight}-${GITHUB_RUN_ATTEMPT:-1}"
+export INBOX_LANE_STARTED_MS
+INBOX_LANE_STARTED_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
+export_run_dir() {
+  printf 'HEAVY_RUN_DIR=docs/performance/inbox-redesign/evidence/%s/pre-merge/%s\n' "$HEAVY_TESTED_SHA" "$GITHUB_RUN_ID" >> "$ORIGINAL_GITHUB_ENV"
+}
+cleanup() {
+  if [[ -n "${DOCKER_SOCKET:-}" ]]; then docker --host "$DOCKER_SOCKET" rm -f "$CATALOG_CONTAINER" >/dev/null 2>&1 || true; fi
+  if [[ -z "${E2E_LOCAL_WORKDIR:-}" && -f "$WORK/provision.env" ]]; then
+    while IFS='=' read -r key value; do
+      if [[ "$key" == E2E_LOCAL_WORKDIR ]]; then E2E_LOCAL_WORKDIR="$value"; fi
+    done < "$WORK/provision.env"
+  fi
+  if [[ -n "${E2E_LOCAL_WORKDIR:-}" ]]; then supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup >/dev/null 2>&1 || true; fi
+}
+on_error() {
+  local status=$1 command=$2 line=$3
+  trap - ERR
+  printf 'Migration lane failed at line %s: %s (exit %s)\n' "$line" "$command" "$status" >&2
+  printf 'line=%s\ncommand=%s\nexit_status=%s\n' "$line" "$command" "$status" > "$WORK/failure.log"
+  for log in "$WORK"/catalog-live.txt "$WORK"/production-install-unit.txt; do
+    if [[ -s "$log" ]]; then printf 'Last lines of %s:\n' "${log##*/}" >&2; tail -80 "$log" >&2; fi
+  done
+  if [[ "$LOCAL" == 0 ]]; then
+    if node scripts/inbox-ci/write-migration-record.mjs "$WORK" --fail "$status"; then export_run_dir; fi
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'on_error "$?" "$BASH_COMMAND" "$LINENO"' ERR
+preflight() {
+[[ "$LOCAL" == 0 || "$LOCAL" == 1 ]] || { echo 'Invalid local diagnostic mode' >&2; return 3; }
+[[ "$LOCAL" != 1 || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]] || { echo 'Local diagnostic refused on github-hosted runner' >&2; return 3; }
 if [[ "$LOCAL" == 1 ]]; then
-  [[ "${DOCKER_HOST:-}" == unix:///* && "$DOCKER_HOST" != unix:///var/run/docker.sock && -S "${DOCKER_HOST#unix://}" ]] || { echo 'Local diagnostic requires a Colima Unix DOCKER_HOST' >&2; exit 3; }
-  [[ "${MIGRATION_LOCAL_API_PORT:-}" =~ ^[0-9]{4,5}$ && "${MIGRATION_LOCAL_DB_PORT:-}" =~ ^[0-9]{4,5}$ ]] || { echo 'Local diagnostic ports required' >&2; exit 3; }
+  [[ "${DOCKER_HOST:-}" == unix:///* && "$DOCKER_HOST" != unix:///var/run/docker.sock && -S "${DOCKER_HOST#unix://}" ]] || { echo 'Local diagnostic requires a Colima Unix DOCKER_HOST' >&2; return 3; }
+  [[ "${MIGRATION_LOCAL_API_PORT:-}" =~ ^[0-9]{4,5}$ && "${MIGRATION_LOCAL_DB_PORT:-}" =~ ^[0-9]{4,5}$ ]] || { echo 'Local diagnostic ports required' >&2; return 3; }
 else
-  [[ "${DOCKER_HOST:-unix:///var/run/docker.sock}" == unix:///var/run/docker.sock && -S /var/run/docker.sock ]] || { echo 'Runner requires /var/run/docker.sock' >&2; exit 3; }
+  [[ "${DOCKER_HOST:-unix:///var/run/docker.sock}" == unix:///var/run/docker.sock && -S /var/run/docker.sock ]] || { echo 'Runner requires /var/run/docker.sock' >&2; return 3; }
 fi
 DOCKER_SOCKET=${DOCKER_HOST:-unix:///var/run/docker.sock}
 API_PORT=55421 DB_PORT=55422
@@ -36,55 +69,26 @@ PY
 fi
 python3 "$ASSERT" preflight
 for required in "$INSTALL/catalog_fingerprint.py" "$INSTALL/catalog-scope.json" "$INSTALL/test_catalog_fingerprint.py" "$INSTALL/test_catalog_fingerprint_live.py" "$INSTALL/operator/concurrent-indexes.sql" "$INSTALL/operator/precondition-check.sql" "$INSTALL/operator/validate-constraints.sql"; do
-  test -f "$required" || { echo "Missing checkout input: $required" >&2; exit 3; }
+  test -f "$required" || { echo "Missing checkout input: $required" >&2; return 3; }
 done
-if [[ "${1:-}" == --preflight-only ]]; then exit 0; fi
+if [[ "${1:-}" == --preflight-only ]]; then return 0; fi
 if [[ -n "${SUPABASE_ACCESS_TOKEN:-}" || -n "${TEST_SUPABASE_URL:-}" || -n "${SUPABASE_DB_PASSWORD:-}" ]]; then
-  echo 'Refusing hosted Supabase credentials in migration dry-run lane' >&2; exit 3
+  echo 'Refusing hosted Supabase credentials in migration dry-run lane' >&2; return 3
 fi
-: "${RUNNER_TEMP:?GitHub runner scratch directory required}"
-: "${GITHUB_RUN_ID:?workflow_dispatch run id required}"
-[[ "${GITHUB_EVENT_NAME:-}" == workflow_dispatch ]] || { echo 'workflow_dispatch required' >&2; exit 3; }
-[[ "${GITHUB_REF_NAME:-}" == main ]] || { echo 'main workflow ref required' >&2; exit 3; }
-[[ "$(git rev-parse HEAD)" =~ ^[0-9a-f]{40}$ ]] || exit 3
+[[ -n "${RUNNER_TEMP:-}" ]] || { echo "GitHub runner scratch directory required" >&2; return 3; }
+[[ -n "${GITHUB_RUN_ID:-}" ]] || { echo "workflow_dispatch run id required" >&2; return 3; }
+[[ "${GITHUB_EVENT_NAME:-}" == workflow_dispatch ]] || { echo 'workflow_dispatch required' >&2; return 3; }
+[[ "${GITHUB_REF_NAME:-}" == main ]] || { echo 'main workflow ref required' >&2; return 3; }
+[[ "$(git rev-parse HEAD)" =~ ^[0-9a-f]{40}$ ]] || return 3
 if [[ "$LOCAL" == 0 ]]; then
-  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || { echo 'Checkout must start clean' >&2; exit 3; }
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || { echo 'Checkout must start clean' >&2; return 3; }
 fi
 command -v docker >/dev/null
 command -v psql >/dev/null
 command -v node >/dev/null
-WORK=$(mktemp -d "$RUNNER_TEMP/inbox-migration.XXXXXX")
-ORIGINAL_GITHUB_ENV=${GITHUB_ENV:-}
-CATALOG_CONTAINER="inbox-catalog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
-cleanup() {
-  docker --host "$DOCKER_SOCKET" rm -f "$CATALOG_CONTAINER" >/dev/null 2>&1 || true
-  if [[ -z "${E2E_LOCAL_WORKDIR:-}" && -f "$WORK/provision.env" ]]; then
-    while IFS='=' read -r key value; do
-      if [[ "$key" == E2E_LOCAL_WORKDIR ]]; then E2E_LOCAL_WORKDIR="$value"; fi
-    done < "$WORK/provision.env"
-  fi
-  if [[ -n "${E2E_LOCAL_WORKDIR:-}" ]]; then supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup >/dev/null 2>&1 || true; fi
 }
-trap cleanup EXIT
-export INBOX_LANE_STARTED_MS
-INBOX_LANE_STARTED_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
-export_run_dir() {
-  printf 'HEAVY_RUN_DIR=docs/performance/inbox-redesign/evidence/%s/pre-merge/%s\n' "$HEAVY_TESTED_SHA" "$GITHUB_RUN_ID" >> "$ORIGINAL_GITHUB_ENV"
-}
-on_error() {
-  local status=$1 command=$2 line=$3
-  trap - ERR
-  printf 'Migration lane failed at line %s: %s (exit %s)\n' "$line" "$command" "$status" >&2
-  printf 'line=%s\ncommand=%s\nexit_status=%s\n' "$line" "$command" "$status" > "$WORK/failure.log"
-  for log in "$WORK"/catalog-live.txt "$WORK"/production-install-unit.txt; do
-    if [[ -s "$log" ]]; then printf 'Last lines of %s:\n' "${log##*/}" >&2; tail -80 "$log" >&2; fi
-  done
-  if [[ "$LOCAL" == 0 ]]; then
-    if node scripts/inbox-ci/write-migration-record.mjs "$WORK" --fail "$status"; then export_run_dir; fi
-  fi
-  exit "$status"
-}
-trap 'on_error "$?" "$BASH_COMMAND" "$LINENO"' ERR
+preflight "$@"
+if [[ "${1:-}" == --preflight-only ]]; then exit 0; fi
 
 # W1's provisioner replays the complete checked-out history except these three.
 # It must leave the disposable stack running; no hosted URL is accepted.

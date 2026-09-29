@@ -49,6 +49,8 @@ function record(kind, files, summary) {
     copyFileSync(source, path.join(absolute, file));
   }
   writeFileSync(path.join(absolute, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
+  // FAIL sealing is best-effort: this rejects dirt anywhere outside the run dir,
+  // including changes caused by a preflight failure before a stack starts.
   const endStatus = assertOnlyRunDirDirty(repo, relative);
   writeManifest(repo, relative, { ...common, kind, run_id: runId,
     clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative, end_status: endStatus }, summary,
