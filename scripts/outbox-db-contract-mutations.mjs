@@ -9,12 +9,15 @@ import { makeRest } from './outbox-db-contract/postgrest.mjs';
 import { createFixture } from './outbox-db-contract/fixture.mjs';
 
 const MUTATIONS = [
-  ['M1', 'REVOKE SELECT ON public.messages FROM authenticated', 'GRANT SELECT ON public.messages TO authenticated', ['C01']],
-  ['M2', 'ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct', 'ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct', ['PIN_TRIGGERS']],
-  ['M3', 'ALTER POLICY messages_org_select ON public.messages USING (true)', null, ['D02']],
-  ['M3b', 'ALTER POLICY messages_org_insert ON public.messages WITH CHECK (true)', null, ['D02']],
-  ['M4', 'ALTER FUNCTION inbox_message_capture.capture() SECURITY INVOKER', 'ALTER FUNCTION inbox_message_capture.capture() SECURITY DEFINER', ['PIN_FUNCTIONS']],
-  ['M4b', 'ALTER FUNCTION public.inbox_guard_inbound_revision() SECURITY DEFINER', 'ALTER FUNCTION public.inbox_guard_inbound_revision() SECURITY INVOKER', ['PIN_FUNCTIONS']],
+  ['M1', 'REVOKE SELECT ON public.messages FROM authenticated', 'GRANT SELECT ON public.messages TO authenticated', ['PIN_BASE_GRANTS', 'C00', 'C01', 'C02', 'C03', 'C04', 'C05', 'C06', 'C07', 'C08', 'C08b', 'C09', 'D02', 'D03']],
+  // C00's fresh row and C06 detect capture loss; C05 edits still pass on already captured rows.
+  ['M2', 'ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct', 'ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct', ['PIN_TRIGGERS', 'C00', 'C06']],
+  // The policy is TO authenticated, so anon D01 cannot change; tenant reads and D02/D03 do.
+  ['M3', 'ALTER POLICY messages_org_select ON public.messages USING (true)', null, ['C01', 'C02', 'C03', 'D02', 'D03']],
+  // Other INSERT/UPDATE policy predicates leave C00's O2 insert denied; D02/D03 detect the widened path.
+  ['M3b', 'ALTER POLICY messages_org_insert ON public.messages WITH CHECK (true)', null, ['D02', 'D03']],
+  ['M4', 'ALTER FUNCTION inbox_message_capture.capture() SECURITY INVOKER', 'ALTER FUNCTION inbox_message_capture.capture() SECURITY DEFINER', ['PIN_FUNCTIONS', 'C00', 'C05', 'C06', 'C07', 'C08', 'C08b']],
+  ['M4b', 'ALTER FUNCTION public.inbox_guard_inbound_revision() SECURITY DEFINER', 'ALTER FUNCTION public.inbox_guard_inbound_revision() SECURITY INVOKER', ['PIN_FUNCTIONS', 'D04']],
   ['M5', 'GRANT DELETE ON inbox_maintained.queue TO service_role', 'REVOKE DELETE ON inbox_maintained.queue FROM service_role', ['PIN_RELATIONS']],
   ['M5b', 'GRANT EXECUTE ON FUNCTION inbox_maintained.claim_work(integer,integer) TO authenticated', 'REVOKE EXECUTE ON FUNCTION inbox_maintained.claim_work(integer,integer) FROM authenticated', ['PIN_FUNCTIONS']],
   ['M5c', 'ALTER FUNCTION inbox_maintained.enqueue_dirty() SET search_path = public', "ALTER FUNCTION inbox_maintained.enqueue_dirty() SET search_path = ''", ['PIN_FUNCTIONS']],
@@ -22,7 +25,8 @@ const MUTATIONS = [
   ['M6', 'ALTER TABLE public.messages DISABLE TRIGGER zzz_inbox_guard_inbound_revision_update', 'ALTER TABLE public.messages ENABLE TRIGGER zzz_inbox_guard_inbound_revision_update', ['PIN_TRIGGERS', 'D04']],
   ['M6b', 'ALTER TABLE public.messages DISABLE TRIGGER inbox_capture_inbound_head', 'ALTER TABLE public.messages ENABLE TRIGGER inbox_capture_inbound_head', ['PIN_TRIGGERS', 'C00']],
   ['M7', 'UPDATE inbox_control.rollout SET serving_enabled=true', 'UPDATE inbox_control.rollout SET serving_enabled=false', ['PIN_SCHEMAS_ROLLOUT_ROLES']],
-  ['M10', 'ALTER TABLE public.messages DISABLE ROW LEVEL SECURITY', 'ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY', ['PIN_BASE_GRANTS', 'D01'], ['pre', 'post']],
+  // Disabling RLS also changes pagination and tenant/revocation denials; all are pinned.
+  ['M10', 'ALTER TABLE public.messages DISABLE ROW LEVEL SECURITY', 'ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY', ['PIN_BASE_GRANTS', 'C00', 'C01', 'C02', 'C03', 'D01', 'D02', 'D03'], ['pre', 'post']],
 ];
 
 function runContract(phase, extra = [], fixture = null) {

@@ -40,25 +40,19 @@
       "secdef": true,
       "owner": "postgres",
       "search_path": "",
-      "execute": [
-        "authenticated"
-      ]
+      "execute": []
     },
     "inbox_authenticated_detail.detail_v2": {
       "secdef": true,
       "owner": "postgres",
       "search_path": "",
-      "execute": [
-        "authenticated"
-      ]
+      "execute": []
     },
     "inbox_capture_boundary.detail": {
       "secdef": true,
       "owner": "postgres",
       "search_path": "",
-      "execute": [
-        "authenticated"
-      ]
+      "execute": []
     },
     "inbox_message_capture.sender_id": {
       "secdef": true,
@@ -285,13 +279,13 @@
     "inbox_bridge.assert_serving": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET statement_timeout='2s",
+      "search_path": "",
       "execute": []
     },
     "inbox_bridge.authorize_serving": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET statement_timeout='5s",
+      "search_path": "",
       "execute": []
     },
     "inbox_bridge.scope_json": {
@@ -443,7 +437,7 @@
     "inbox_control.admit_command": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET statement_timeout='2s' SET lock_timeout='2s",
+      "search_path": "",
       "execute": []
     },
     "inbox_read.authoritative_context": {
@@ -456,17 +450,13 @@
       "secdef": true,
       "owner": "postgres",
       "search_path": "",
-      "execute": [
-        "authenticated"
-      ]
+      "execute": []
     },
     "inbox_read.acknowledge": {
       "secdef": true,
       "owner": "postgres",
       "search_path": "",
-      "execute": [
-        "authenticated"
-      ]
+      "execute": []
     },
     "public.inbox_read_detail": {
       "secdef": true,
@@ -709,7 +699,7 @@
     "public.inbox_saved_action_create": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -717,7 +707,7 @@
     "public.inbox_saved_action_update": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -725,7 +715,7 @@
     "public.inbox_saved_action_deactivate": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -733,7 +723,7 @@
     "public.inbox_saved_action_list": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -741,7 +731,7 @@
     "public.inbox_saved_action_get": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -875,7 +865,7 @@
     "public.inbox_prepare_action": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -883,7 +873,7 @@
     "public.inbox_accept_action": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -891,7 +881,7 @@
     "public.inbox_operation_status": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -911,7 +901,7 @@
     "public.inbox_action_assignees": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -925,7 +915,7 @@
     "public.inbox_recover_operation": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -987,7 +977,7 @@
     "inbox_reply_preparation.destination_policy": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": []
     },
     "inbox_reply_preparation.recipient": {
@@ -1047,7 +1037,7 @@
     "public.inbox_capture_reply_recipients": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -1055,7 +1045,7 @@
     "public.inbox_freeze_reply_review": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -1063,7 +1053,7 @@
     "public.inbox_reply_source_context": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -1149,7 +1139,7 @@
     "public.inbox_reply_sweep_unmatched_callbacks": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='20s",
+      "search_path": "",
       "execute": [
         "service_role"
       ]
@@ -1157,7 +1147,7 @@
     "public.inbox_reply_reconcile_callback": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "service_role"
       ]
@@ -1165,7 +1155,7 @@
     "public.inbox_accept_reply": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -1173,7 +1163,7 @@
     "public.inbox_recover_reply": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
@@ -1181,7 +1171,7 @@
     "public.inbox_reply_operation_status": {
       "secdef": true,
       "owner": "postgres",
-      "search_path": "' SET lock_timeout='3s' SET statement_timeout='15s",
+      "search_path": "",
       "execute": [
         "authenticated"
       ]
