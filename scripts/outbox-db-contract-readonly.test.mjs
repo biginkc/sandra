@@ -9,7 +9,7 @@ import { compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, ACTIVE, 
 import { readonlyGet, comparePlatform, platformFingerprint } from './outbox-db-contract/platform.mjs';
 import { assertTarget, parseArgs, compareCatalog, assertSealedPre } from './outbox-db-contract-readonly.mjs';
 import { connectionConfig, assertBackendTls } from './outbox-db-contract/connection.mjs';
-import { describePlan, comparePlans, catalogIndexes, compareIndexes, OPERATOR_INDEXES } from './outbox-db-contract/plan-contract.mjs';
+import { describePlan, comparePlans, catalogIndexes, compareIndexes, OPERATOR_INDEXES, OPERATOR_RELATIONS } from './outbox-db-contract/plan-contract.mjs';
 
 const row = (id, body='a') => ({ id, body, status:'queued', from_address:'x', to_address:'y', created_at:'2026-01-01', scheduled_for:null, property_id:null, contact_id:null });
 function fails(label, fn, pattern) { assert.throws(fn, pattern, label); }
@@ -285,12 +285,13 @@ test('SEQ changed index passes and cost ratio is informational', () => {
 });
 test('SEQ index absence, invalidity and pre-build inconclusive remain distinct', () => {
   const pre = { old_queue: { relation:'public.messages', valid:true } };
-  const full = Object.fromEntries([...OPERATOR_INDEXES,'old_queue'].map(name => [name,{relation:'public.messages',valid:true}]));
+  const full = Object.fromEntries([...OPERATOR_INDEXES,'old_queue'].map(name => [name,{relation:OPERATOR_RELATIONS[name] ?? 'public.messages',valid:true}]));
   assert.deepEqual(compareIndexes(pre, {old_queue:full.old_queue}), {verdict:'INCONCLUSIVE',reason:'INDEXES_NOT_BUILT'});
   const absent = {...full}; delete absent.old_queue;
   fails('absent',()=>compareIndexes(pre,absent),/FAIL INDEX_ABSENT old_queue/);
   const invalid = {...full,old_queue:{relation:'public.messages',valid:false}};
   fails('invalid',()=>compareIndexes(pre,invalid),/FAIL INDEX_INVALID old_queue/);
+  fails('wrong relation',()=>compareIndexes(pre,{...full,inbox_backfill_reviews:{relation:'public.messages',valid:true}}),/FAIL INDEX_ABSENT inbox_backfill_reviews/);
   assert.equal(compareIndexes(pre,full).verdict,'PASS');
   const fingerprint = { sections:{relations:[{identity:'public.messages',indexes:[{definition:'CREATE INDEX old_queue ON public.messages USING btree (id)',valid:true,ready:true}]}]}};
   assert.equal(catalogIndexes(fingerprint).old_queue.valid,true);
