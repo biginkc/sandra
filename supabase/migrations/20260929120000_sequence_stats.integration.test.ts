@@ -4,7 +4,7 @@ import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 import { loadTestEnv } from "@tests/integration/env";
 
-const sql = readFileSync("supabase/migrations/20260928150000_sequence_stats.sql", "utf8");
+const sql = readFileSync("supabase/migrations/20260929120000_sequence_stats.sql", "utf8");
 const url = process.env.TEST_SUPABASE_DB_URL ?? loadTestEnv().TEST_SUPABASE_DB_URL;
 if (!url) throw new Error("Missing TEST_SUPABASE_DB_URL");
 const pg = new Client({ connectionString: url });
