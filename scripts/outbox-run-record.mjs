@@ -10,6 +10,8 @@ const TEXT_ARTIFACT = /\.(?:json|log|txt|html|csv)$/i;
 const ALLOWED_ARTIFACT = /\.(?:json|log|txt|html|png|csv|gz)$/i;
 const MAX_RUN_BYTES = 40 * 1024 * 1024;
 const O_IDS = Array.from({length: 10}, (_, i) => `O${String(i + 1).padStart(2, '0')}`);
+// Seven Outbox specs plus the auth setup dependency; the source test pins both spec sets.
+const OUTBOX_PLAYWRIGHT_TEST_COUNT = 8;
 const SECRET_ENV_KEY = /KEY|SECRET|TOKEN|PASSWORD|DATABASE_URL|DB_URL|JWT/i;
 const JWT = /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
 const SB_KEY = /sb_(?:secret|publishable)_[A-Za-z0-9_-]+/g;
@@ -107,9 +109,11 @@ export function validateOutboxResults(dir) {
     if (matches.length !== 1 || matches[0].status !== 'pass') throw new Error(`Outbox ${id} missing, skipped, failed or duplicated`);
   }
   if (rows.some(row => !O_IDS.includes(row.id))) throw new Error('Unexpected Outbox row');
+  let observedTests = 0;
   const visit = suites => {
     for (const suite of suites ?? []) {
       for (const spec of suite.specs ?? []) for (const test of spec.tests ?? []) {
+        observedTests++;
         if ((test.results ?? []).length !== 1 || (test.results ?? []).some(result => result.retry !== 0 || result.status !== 'passed')) throw new Error('Playwright skipped, failed or retried test');
         if (test.status !== 'expected') throw new Error('Playwright non-expected test');
       }
@@ -117,7 +121,7 @@ export function validateOutboxResults(dir) {
     }
   };
   visit(results.suites);
-  if ((results.stats?.expected ?? 0) < 10 || (results.stats?.skipped ?? 0) || (results.stats?.unexpected ?? 0) || (results.stats?.flaky ?? 0)) throw new Error('Playwright incomplete, skipped or flaky');
+  if (results.stats?.expected !== OUTBOX_PLAYWRIGHT_TEST_COUNT || observedTests !== OUTBOX_PLAYWRIGHT_TEST_COUNT || results.stats.skipped !== 0 || results.stats.unexpected !== 0 || results.stats.flaky !== 0) throw new Error('Playwright incomplete, skipped or flaky');
 }
 export function writeManifest(repo, relativeDir, fields, env = process.env) {
   const absoluteDir = path.join(repo, relativeDir);
