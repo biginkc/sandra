@@ -11,7 +11,7 @@ const rows = {
   sequences: [{ id: "s1", name: "Follow up" }],
   sequence_steps: [{ id: "st1", sequence_id: "s1", step_index: 0, action_type: "send_sms", delay_after_previous_minutes: 0 }, { id: "st2", sequence_id: "s1", step_index: 1, action_type: "send_sms", delay_after_previous_minutes: 30 }],
   sequence_step_runs: [
-    { enrollment_id: "e1", message_id: "m1", run_at: "2026-09-02T10:00:00Z" },
+    { enrollment_id: "e1", message_id: "m1" as string | null, run_at: "2026-09-02T10:00:00Z" },
     { enrollment_id: "e2", message_id: "m2", run_at: "2026-09-02T11:00:00Z" },
     { enrollment_id: "e3", message_id: "m3", run_at: "2026-09-02T11:00:00Z" },
   ],
@@ -140,6 +140,16 @@ describe("listDripProgress", () => {
   it("calls a completed drip Replied when an inbound arrives after its last send", async () => {
     expect(await listDripProgress(client() as never, ["p3"]))
       .toMatchObject([{ propertyId: "p3", status: "Replied", lastText: { preview: "Hello third lead" } }]);
+  });
+  it("uses the last sent text, not a later status change, as the reply cutoff", async () => {
+    const stub = client({
+      sequence_step_runs: [
+        { enrollment_id: "e3", message_id: "m3", run_at: "2026-09-02T11:00:00Z" },
+        { enrollment_id: "e3", message_id: null, run_at: "2026-09-02T13:00:00Z" },
+      ],
+    });
+    expect(await listDripProgress(stub as never, ["p3"]))
+      .toMatchObject([{ status: "Replied", lastText: { preview: "Hello third lead" } }]);
   });
   it("uses one bounded reply lookup for thousands of later inbound messages", async () => {
     const later = Array.from({ length: 3_001 }, (_, index) => ({

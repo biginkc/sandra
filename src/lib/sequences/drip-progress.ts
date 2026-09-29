@@ -81,8 +81,8 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
       if (!data || data.length < 1000) break;
     }
   }
-  const lastRunAt = new Map<string, string>();
-  for (const run of runs) if (run.run_at && (!lastRunAt.has(run.enrollment_id) || run.run_at > lastRunAt.get(run.enrollment_id)!)) lastRunAt.set(run.enrollment_id, run.run_at);
+  const lastTextRunAt = new Map<string, string>();
+  for (const run of runs) if (run.message_id && run.run_at && (!lastTextRunAt.has(run.enrollment_id) || run.run_at > lastTextRunAt.get(run.enrollment_id)!)) lastTextRunAt.set(run.enrollment_id, run.run_at);
   const messages = new Map<string, { body: string; created_at: string; sent_at: string | null }>();
   for (const batch of chunks([...new Set(runs.flatMap((run) => run.message_id ? [run.message_id] : []))])) {
     const { data, error } = await client.from("messages").select("id, body, created_at, sent_at").in("id", batch);
@@ -100,12 +100,12 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
     }
   }
   const repliedAfterLast = new Set<string>();
-  const completed = chosen.filter((row) => row.status === "completed" && !canceled.has(row.id) && lastRunAt.has(row.id));
+  const completed = chosen.filter((row) => row.status === "completed" && !canceled.has(row.id) && lastTextRunAt.has(row.id));
   for (const batch of chunks(completed)) {
     const earliest = batch.reduce((min, row) => {
-      const at = lastRunAt.get(row.id)!;
+      const at = lastTextRunAt.get(row.id)!;
       return at < min ? at : min;
-    }, lastRunAt.get(batch[0].id)!);
+    }, lastTextRunAt.get(batch[0].id)!);
     // One newest inbound per property is enough to answer every enrollment in this chunk.
     const { data, error } = await client.from("properties")
       .select("id, inbound_messages:messages!messages_property_id_fkey(created_at)")
@@ -118,7 +118,7 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
     const latestInbound = new Map((data ?? []).map((property) => [property.id, property.inbound_messages[0]?.created_at]));
     for (const row of batch) {
       const at = latestInbound.get(row.property_id);
-      if (at && at > lastRunAt.get(row.id)!) repliedAfterLast.add(row.id);
+      if (at && at > lastTextRunAt.get(row.id)!) repliedAfterLast.add(row.id);
     }
   }
   return chosen.map((row) => {
