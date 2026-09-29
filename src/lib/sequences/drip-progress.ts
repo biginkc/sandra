@@ -11,7 +11,7 @@ export type DripProgress = {
   totalSteps: number;
   nextTextAt: string | null;
   lastText: { sentAt: string; preview: string } | null;
-  status: DripStatus;
+  status: DripStatus | null;
   reason: string | null;
 };
 
@@ -100,12 +100,12 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
     }
   }
   const repliedAfterLast = new Set<string>();
-  const completed = chosen.filter((row) => row.status === "completed" && !canceled.has(row.id) && lastTextRunAt.has(row.id));
+  const completed = chosen.filter((row) => row.status === "completed" && !canceled.has(row.id));
   for (const batch of chunks(completed)) {
     const earliest = batch.reduce((min, row) => {
-      const at = lastTextRunAt.get(row.id)!;
+      const at = lastTextRunAt.get(row.id) ?? row.enrolled_at;
       return at < min ? at : min;
-    }, lastTextRunAt.get(batch[0].id)!);
+    }, lastTextRunAt.get(batch[0].id) ?? batch[0].enrolled_at);
     // One newest inbound per property is enough to answer every enrollment in this chunk.
     const { data, error } = await client.from("properties")
       .select("id, inbound_messages:messages!messages_property_id_fkey(created_at)")
@@ -118,7 +118,7 @@ export async function listDripProgress(client: SupabaseClient<Database>, propert
     const latestInbound = new Map((data ?? []).map((property) => [property.id, property.inbound_messages[0]?.created_at]));
     for (const row of batch) {
       const at = latestInbound.get(row.property_id);
-      if (at && at > lastTextRunAt.get(row.id)!) repliedAfterLast.add(row.id);
+      if (at && at > (lastTextRunAt.get(row.id) ?? row.enrolled_at)) repliedAfterLast.add(row.id);
     }
   }
   return chosen.map((row) => {

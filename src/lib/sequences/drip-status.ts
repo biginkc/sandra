@@ -36,13 +36,9 @@ export function pauseReasonText(reason: string | null): string | null {
   return REASONS[reason] ?? "Drip was paused; review the lead before continuing.";
 }
 
-export function dripStatus(status: string, pauseReason: string | null, canceled: boolean, repliedAfterLast = false): DripStatus {
-  if (status === "active") return DRIP_BUCKET_LABELS.waiting;
-  if (status === "opted_out" || (status === "completed" && canceled)) return DRIP_BUCKET_LABELS.stopped;
-  if (status === "completed") return repliedAfterLast ? DRIP_BUCKET_LABELS.replied : DRIP_BUCKET_LABELS.finished_no_reply;
-  if (pauseReason === "inbound_reply" || pauseReason === "rep_sms_human_takeover") return DRIP_BUCKET_LABELS.replied;
-  if (pauseReason === "provider_failed" || pauseReason === "reconciliation_required" || pauseReason === "template_missing" || pauseReason === "step_misconfigured" || pauseReason === "no_phone" || pauseReason === "no approved sender for first-touch sequence send") return DRIP_BUCKET_LABELS.couldnt_send;
-  return DRIP_BUCKET_LABELS.stopped;
+export function dripStatus(status: string, pauseReason: string | null, canceled: boolean, repliedAfterLast = false): DripStatus | null {
+  const bucket = dripBucket({ status, pause_reason: pauseReason, canceled, inboundAfterLastRun: repliedAfterLast });
+  return bucket ? DRIP_BUCKET_LABELS[bucket] : null;
 }
 
 export function dripBucket(input: {

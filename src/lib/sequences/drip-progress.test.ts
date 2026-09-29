@@ -69,8 +69,8 @@ describe("drip status", () => {
     ["paused", "rep_sms_human_takeover", false, "Replied"],
     ["paused", "provider_failed", false, "Couldn't send"],
     ["paused", "reconciliation_required", false, "Couldn't send"],
-    ["paused", "step_misconfigured", false, "Couldn't send"],
-    ["paused", "no_phone", false, "Couldn't send"],
+    ["paused", "step_misconfigured", false, null],
+    ["paused", "no_phone", false, null],
     ["opted_out", "consent_revoked", false, "Stopped"],
     ["completed", null, true, "Stopped"],
     ["completed", null, false, "Finished, no reply"],
@@ -137,9 +137,9 @@ describe("listDripProgress", () => {
       { propertyId: "p2", status: "Stopped", lastText: { preview: "Hello second lead" } },
     ]);
   });
-  it("calls a completed drip Replied when an inbound arrives after its last send", async () => {
+  it("leaves a completed drip unbucketed when an inbound arrives after its last send", async () => {
     expect(await listDripProgress(client() as never, ["p3"]))
-      .toMatchObject([{ propertyId: "p3", status: "Replied", lastText: { preview: "Hello third lead" } }]);
+      .toMatchObject([{ propertyId: "p3", status: null, lastText: { preview: "Hello third lead" } }]);
   });
   it("uses the last sent text, not a later status change, as the reply cutoff", async () => {
     const stub = client({
@@ -149,7 +149,16 @@ describe("listDripProgress", () => {
       ],
     });
     expect(await listDripProgress(stub as never, ["p3"]))
-      .toMatchObject([{ status: "Replied", lastText: { preview: "Hello third lead" } }]);
+      .toMatchObject([{ status: null, lastText: { preview: "Hello third lead" } }]);
+  });
+  it("uses enrollment time when a completed drip sent no texts", async () => {
+    const stub = client({
+      sequence_enrollments: [{ ...rows.sequence_enrollments[2], enrolled_at: "2026-09-01T00:00:00Z" }],
+      sequence_step_runs: [{ enrollment_id: "e3", message_id: null, run_at: "2026-09-03T00:00:00Z" }],
+      messages: [{ id: "inbound", property_id: "p3", direction: "inbound", body: "Hello", created_at: "2026-09-02T12:00:00Z", sent_at: null }],
+    });
+    expect(await listDripProgress(stub as never, ["p3"]))
+      .toMatchObject([{ status: null, lastText: null }]);
   });
   it("uses one bounded reply lookup for thousands of later inbound messages", async () => {
     const later = Array.from({ length: 3_001 }, (_, index) => ({
@@ -158,7 +167,7 @@ describe("listDripProgress", () => {
     }));
     const stub = client({ messages: [...rows.messages, ...later] });
     expect(await listDripProgress(stub as never, ["p3"]))
-      .toMatchObject([{ status: "Replied" }]);
+      .toMatchObject([{ status: null }]);
     const inboundReads = stub.reads.filter((read) => read.inbound);
     expect(inboundReads).toHaveLength(1);
     expect(inboundReads[0].rows).toBeLessThanOrEqual(1);
