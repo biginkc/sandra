@@ -297,8 +297,8 @@ async function loadMessageDripContext(
           .select("id, sequence_id, status, pause_reason, current_step_index, enrolled_at, updated_at")
           .eq("org_id", orgId).eq("property_id", propertyId)
           .in("status", ["active", "paused", "completed"])
-          .order("enrolled_at", { ascending: false }).limit(1).maybeSingle()
-      : Promise.resolve({ data: null, error: null }),
+          .order("enrolled_at", { ascending: false }).order("id", { ascending: false })
+      : Promise.resolve({ data: [], error: null }),
     outboundIds.length
       ? supabase.from("sequence_step_runs")
           .select("message_id, enrollment_id, sequence_steps!inner(step_index, sequence_id), sequence_enrollments!inner(sequence_id, org_id)")
@@ -307,7 +307,14 @@ async function loadMessageDripContext(
   ]);
   if (enrollmentResult.error) throw new Error(`fetchInboxDetail drip: ${enrollmentResult.error.message}`);
   if (runsResult.error) throw new Error(`fetchInboxDetail drip messages: ${runsResult.error.message}`);
-  const enrollment = enrollmentResult.data;
+  const enrollment = (enrollmentResult.data ?? []).reduce<NonNullable<typeof enrollmentResult.data>[number] | null>((chosen, row) => {
+    const live = (status: string) => status === "active" || status === "paused";
+    if (!chosen || (live(row.status) && !live(chosen.status)) ||
+      (live(row.status) === live(chosen.status) &&
+        (row.enrolled_at > chosen.enrolled_at ||
+          (row.enrolled_at === chosen.enrolled_at && row.id > chosen.id)))) return row;
+    return chosen;
+  }, null);
   const runs = runsResult.data ?? [];
   const stepRunMessageIds = new Set(runs.map((run) => run.message_id));
   const sequenceIds = [...new Set([

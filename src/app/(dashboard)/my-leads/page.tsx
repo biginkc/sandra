@@ -10,6 +10,7 @@ import { shouldRestrictMessagesAndLeadsBoard } from "@/lib/auth/surface-access";
 import { reportError } from "@/lib/errors/report";
 import { createSupabaseDialpadDispatchDb, loadDialpadPanelBootstrap } from "@/lib/dialpad-cti/dispatch";
 import { canViewMyLeads } from "@/lib/my-leads/access";
+import { listMyLeadsInDrip } from "@/lib/my-leads/drip-queries";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getAcquisitionKpis,
@@ -109,6 +110,7 @@ export default async function MyLeadsPage() {
         memberId: string;
         snapshot: Awaited<ReturnType<typeof getAcquisitionQueue>> | null;
         kpis: Awaited<ReturnType<typeof getAcquisitionKpis>> | null;
+        drips: Awaited<ReturnType<typeof listMyLeadsInDrip>> | null;
       }
     | null = null;
   try {
@@ -116,13 +118,14 @@ export default async function MyLeadsPage() {
       ? roster.members.find((member) => member.active && member.acquisitionsEnabled)
           ?.id ?? viewer.userId
       : viewer.userId;
-    const [snapshot, kpis] = roster.settings.enabled
+    const [snapshot, kpis, drips] = roster.settings.enabled
       ? await Promise.all([
           getAcquisitionQueue({ memberId }),
           getAcquisitionKpis({ memberId, period: "today" }),
+          listMyLeadsInDrip(memberId),
         ])
-      : [null, null];
-    data = { viewer, roster, memberId, snapshot, kpis };
+      : [null, null, null];
+    data = { viewer, roster, memberId, snapshot, kpis, drips };
   } catch (error) {
     return loadFailureState(error);
   }
@@ -152,6 +155,7 @@ export default async function MyLeadsPage() {
         initialMemberId={data.memberId}
         initialSnapshot={data.snapshot}
         initialKpis={data.kpis}
+        initialDrips={data.drips}
       />
     </Page>
   );

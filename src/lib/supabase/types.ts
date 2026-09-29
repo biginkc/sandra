@@ -5936,6 +5936,17 @@ export type Database = {
         }
         Returns: Json
       }
+      fn_list_my_leads_drip_scope: {
+        Args: { p_org_id: string; p_member_id: string }
+        Returns: {
+          property_id: string
+          stage: string
+          in_drip: boolean
+          replied_at: string | null
+          search_text: string
+          row_data: Json
+        }[]
+      }
       fn_ready_acquisition_offer: {
         Args: { p_input: Json }
         Returns: Json

@@ -10,7 +10,7 @@ export default defineConfig({
   expect: { toHaveScreenshot: { pathTemplate: "docs/design/screenshots/drips/{arg}{ext}" } },
   use: { baseURL, ...devices["Desktop Chrome"] },
   webServer: {
-    command: `pnpm exec next dev --webpack -p ${port}`,
+    command: `pnpm exec next dev --webpack -H 127.0.0.1 -p ${port}`,
     url: `${baseURL}/brand/drips/sidebar`,
     reuseExistingServer: false,
     timeout: 120_000,

@@ -7,7 +7,7 @@ import { isSmsPhoneSuppressed } from "@/lib/messaging/opt-out-phone";
 
 import { DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS, fetchInboxDetail } from "./inbox-detail-data";
 
-const dripScopeMigration = resolve(process.cwd(), "supabase/migrations/20260929235000_my_leads_drip_scope.sql");
+const dripScopeMigration = resolve(process.cwd(), "supabase/migrations/20260929236500_my_leads_drip_scope.sql");
 
 it.skipIf(!existsSync(dripScopeMigration))("matches the drip scope SQL workflow operations", () => {
   const sql = readFileSync(dripScopeMigration, "utf8");
@@ -1114,5 +1114,22 @@ describe("fetchInboxDetail", () => {
     expect(detail?.drip).toMatchObject({ enrollmentId: "b-enrollment", name: "B", status: "active", step: 1, total: 2, replied: false, stoppedAt: null });
     expect(detail?.dripReplyLabels).toEqual({ "a-reply": "Reply to drip text 1" });
     expect(detail?.dripReplyMessageIds).toEqual(["a-reply"]);
+  });
+
+  it("prefers a live drip over newer completed drips and breaks ties by id", async () => {
+    const seed: SeedData = {
+      messages: [makeMessage({ id: "inbound", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound" })],
+      contacts: [makeContact({ id: CONTACT_ID })],
+      properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [
+        { id: "a-live", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "a", status: "paused", pause_reason: "manual", current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" },
+        { id: "z-completed", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "z", status: "completed", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-10T11:00:00Z" },
+        { id: "b-live", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "b", status: "active", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" },
+      ],
+      sequences: [{ id: "a", org_id: "org-1", name: "A" }, { id: "b", org_id: "org-1", name: "B" }],
+      sequence_steps: [{ id: "a-step", sequence_id: "a" }, { id: "b-step", sequence_id: "b" }],
+    };
+    const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
+    expect(detail?.drip).toMatchObject({ enrollmentId: "b-live", name: "B", status: "active" });
   });
 });

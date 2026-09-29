@@ -3,22 +3,46 @@ import { revalidatePath } from 'next/cache';
 import { reportError } from '@/lib/errors/report';
 import type { Json } from '@/lib/supabase/types';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { startDripForLeads } from '@/app/(dashboard)/sequences/actions';
 import { composeRepSms, type RepSmsComposition, type RepSmsCompositionInput } from '@/lib/messaging/rep-sms-composition';
 import { createRepSmsObligationFence, dispatchRepSms } from '@/lib/messaging/rep-sms';
 import { getAcquisitionQueue,getAcquisitionKpis,getAcquisitionDetail,myLeadsViewer,type DetailGroup } from '@/lib/my-leads/queries';
+import { listMyLeadsInDrip } from '@/lib/my-leads/drip-queries';
 import { setAcquisitionDesignation,setAcquisitionSettings } from '@/lib/my-leads/settings';
 import type { SetAcquisitionDesignationInput,SetAcquisitionSettingsInput } from '@/lib/my-leads/types';
 import type { QueueStage } from '@/lib/my-leads/types';
 
 export async function loadMyLeads(input:{memberId:string;search:string;period:'today'|'week'|'month'|'custom';startDate?:string;endDate?:string}) {
   try {
-    const [snapshot,kpis]=await Promise.all([getAcquisitionQueue(input),getAcquisitionKpis({memberId:input.memberId,period:'today'})]);
-    return {ok:true as const,snapshot,kpis};
+    const [snapshot,kpis,drips]=await Promise.all([getAcquisitionQueue(input),getAcquisitionKpis({memberId:input.memberId,period:'today'}),listMyLeadsInDrip(input.memberId,input.search)]);
+    return {ok:true as const,snapshot,kpis,drips};
   } catch(error) {reportMyLeadsReadFailure('my_leads_queue');return {ok:false as const,message:error instanceof Error?error.message:'Could not load My Leads.'};}
 }
 export async function loadMyLeadsStage(input:{memberId:string;search:string;stage:QueueStage;cursor:string}) {
   try {return {ok:true as const,snapshot:await getAcquisitionQueue(input)};}
   catch(error){reportMyLeadsReadFailure('my_leads_stage');return {ok:false as const,message:error instanceof Error?error.message:'Could not load this section.'};}
+}
+/** Handoff with a drip records the outcome while keeping the current owner. */
+export async function submitMyLeadHandoffDrip(input:{memberId:string;propertyId:string;sequenceId:string;reason:'not_interested';expectedEpisodeId:string;expectedQueueVersion:number;expectedSharedStatus:string;idempotencyKey:string}) {
+  try {
+    if(input.reason!=='not_interested'||!input.sequenceId||!input.idempotencyKey) return {ok:false as const,message:'Choose an eligible handoff reason and drip.'};
+    const viewer=await myLeadsViewer();
+    if(!viewer.isOwner&&viewer.userId!==input.memberId) return {ok:false as const,message:'You can update only your own queue.'};
+    const {data,error}=await (viewer.client as unknown as {rpc(name:string,args:Record<string,string|number>):Promise<{data:{ok?:boolean}|null;error:{message:string}|null}>}).rpc('fn_handoff_acquisition_lead_to_drip',{
+      p_org_id:viewer.orgId,p_member_id:input.memberId,p_property_id:input.propertyId,
+      p_expected_episode_id:input.expectedEpisodeId,p_expected_queue_version:input.expectedQueueVersion,
+      p_expected_shared_status:input.expectedSharedStatus,p_idempotency_key:input.idempotencyKey,
+    });
+    if(error||data?.ok!==true) return error?.message?.includes('STALE_')
+      ? {ok:false as const,code:'STALE_STATE' as const,message:'This lead changed. Refresh before trying again.'}
+      : {ok:false as const,message:'This lead is unavailable. Refresh and try again.'};
+    revalidatePath('/my-leads');revalidatePath('/leads');revalidatePath(`/leads/${input.propertyId}`);
+    // The RPC commits the guarded outcome before enrollment starts.
+    const enrolled=await startDripForLeads(input.sequenceId,[input.propertyId]);
+    if(!enrolled.ok) return {ok:true as const,dripFailure:enrolled.error.message};
+    const item=enrolled.data.results[0];
+    return {ok:true as const,...(item?.status==='enrolled'?{}:{dripFailure:item?.reason??'Could not start drip.'})};
+  } catch {return {ok:false as const,message:'Could not save the handoff outcome. Please retry.'};}
 }
 export async function loadMyLeadDetail(input:{memberId:string;propertyId:string;group?:DetailGroup;cursor?:string|null}) {
   try {return {ok:true as const,detail:await getAcquisitionDetail(input)};}
