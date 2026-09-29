@@ -10,10 +10,46 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import sealed_evidence as evidence
 from sealed_evidence import ROOT, EvidenceError, evaluate, evaluate_deploy, evaluate_migration, J5A, MIGRATION_VERSIONS, CATALOG_SECTIONS
 
 
 class SealedEvidenceTests(unittest.TestCase):
+    def test_real_heavy_manifest_contract(self):
+        """Exercise the seven sealed manifest projections; artifacts remain digests only."""
+        fixture = Path(__file__).with_name("fixtures") / "real-heavy-manifests-e23922f7.json"
+        manifests = json.loads(fixture.read_text())
+        self.assertEqual(len(manifests), 7)
+        tested_sha = "e23922f72032a04a88a47f844c4f35eacefa815a"
+        selected = {}
+        rejected = []
+        for manifest in manifests:
+            directory = f"{ROOT}/{tested_sha}/{manifest['tier']}/{manifest['run_id']}"
+            paths = {f"{directory}/manifest.json", *(f"{directory}/{name}" for name in manifest["artifacts"])}
+            # Fixture contains real digest claims, without raw artifact bytes. Only
+            # the byte hashing boundary is stubbed; all manifest checks run here.
+            with patch.object(evidence, "parse_manifest", return_value=manifest), patch.object(
+                evidence, "artifact_sha256", side_effect=lambda repo, commit, path: manifest["artifacts"][path.removeprefix(directory + "/")]
+            ):
+                try:
+                    run = evidence.validate_manifest(Path("."), "fixture", directory, paths, tested_sha)
+                except EvidenceError as exc:
+                    rejected.append((manifest["kind"], manifest["phase"], str(exc)))
+                    if manifest["kind"] != "db-contract":
+                        raise
+                    self.assertIn("invalid collection clean-tree attestation", str(exc))
+                    repaired = {**manifest, "clean_tree": {"start": True, "end_excluding_run_dir": True, "excluded_path": directory}}
+                    with patch.object(evidence, "parse_manifest", return_value=repaired):
+                        run = evidence.validate_manifest(Path("."), "fixture", directory, paths, tested_sha)
+                selected[run["key"]] = run
+        self.assertEqual([(kind, phase) for kind, phase, _ in rejected], [("db-contract", "pre"), ("db-contract", "post")])
+        for key in selected:
+            evidence._require(selected, (key,), Path("."))
+        self.assertEqual(set(J5A) - set(selected), {
+            ("pre-merge", "browser", "post", "disposable"),
+            ("pre-merge", "shared-readonly", "pre", "shared-test"),
+        })
+
     def test_catalog_section_contract_matches_node_checker(self):
         source = Path(__file__).resolve().parents[2]
         sections = subprocess.check_output(
