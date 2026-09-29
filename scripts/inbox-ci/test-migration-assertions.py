@@ -41,7 +41,12 @@ class MigrationAssertionsTest(unittest.TestCase):
             for version, name in zip(a.VERSIONS, a.NAMES):
                 (directory / f'{version}_{name}.sql').write_text('SELECT 1;\n')
             self.assertEqual(len(a.migration_files(tmp)), 3)
-            (directory / '20260929000300_unreviewed.sql').write_text('SELECT 1;\n')
+            (directory / '20260930000300_unreviewed.sql').write_text('SELECT 1;\n')
+            with self.assertRaisesRegex(ValueError, 'exactly the three'):
+                a.migration_files(tmp)
+            (directory / '20260930000300_unreviewed.sql').unlink()
+            stale = directory / ('20260929' + '000000_inbox_control_foundation.sql')
+            stale.write_text('SELECT 1;\n')
             with self.assertRaisesRegex(ValueError, 'exactly the three'):
                 a.migration_files(tmp)
 
