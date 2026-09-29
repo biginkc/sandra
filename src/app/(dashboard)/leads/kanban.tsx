@@ -156,6 +156,7 @@ type KanbanProps = {
   inboundScopeLabel?: string | null;
   renderedAt: string;
   initialDripsByLead?: Record<string, DripProgress>;
+  previewBoardData?: LeadBoardData;
 };
 
 export function Kanban({
@@ -183,6 +184,7 @@ export function Kanban({
   inboundScopeLabel = null,
   renderedAt,
   initialDripsByLead,
+  previewBoardData,
 }: KanbanProps) {
   const router = useRouter();
   const [leads, setLeads] = useState<Lead[]>(initialLeads);
@@ -294,11 +296,11 @@ export function Kanban({
       ),
     [dayEnd, dayStart, motivationFiltered, search, urgency],
   );
-  const visibleDripIds = filteredLeads.map((lead) => lead.id).join(",");
+  const loadedDripIds = leads.map((lead) => lead.id).join(",");
   useEffect(() => {
     if (initialDripsByLead) return;
     let current = true;
-    const ids = visibleDripIds ? visibleDripIds.split(",") : [];
+    const ids = loadedDripIds ? loadedDripIds.split(",") : [];
     if (!ids.length) return;
     void listDripProgress(createClient(), ids).then((rows) => {
       if (current) setDripsByLead((previous) => {
@@ -308,7 +310,7 @@ export function Kanban({
       });
     }).catch(() => { if (current) setDripsByLead((previous) => Object.keys(previous).length ? {} : previous); });
     return () => { current = false; };
-  }, [visibleDripIds, initialDripsByLead]);
+  }, [loadedDripIds, initialDripsByLead]);
   useEffect(() => {
     const visibleIds = new Set(filteredLeads.map((lead) => lead.id));
     // eslint-disable-next-line react-hooks/set-state-in-effect -- discard selections hidden by a changed board view.
@@ -412,7 +414,7 @@ export function Kanban({
     setLoadError(null);
     let result: Awaited<ReturnType<typeof loadLeadBoardAction>>;
     try {
-      result = await loadLeadBoardAction({ filters });
+      result = previewBoardData ? { ok: true, data: previewBoardData } : await loadLeadBoardAction({ filters });
     } catch {
       if (
         request !== requestSequence.current ||
@@ -437,7 +439,6 @@ export function Kanban({
   };
 
   useEffect(() => {
-    if (initialDripsByLead) return;
     if (initialRender.current) {
       initialRender.current = false;
       return;

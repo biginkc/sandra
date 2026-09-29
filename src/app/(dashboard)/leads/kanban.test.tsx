@@ -183,11 +183,14 @@ function renderBoard(leads: Lead[]) {
   return render(<Kanban {...baseProps} initialLeads={leads} />);
 }
 
-it("shows the drip chip from one visible-card progress read", async () => {
+it("loads drip progress for all loaded leads in one read without fetching per card or keystroke", async () => {
+  const user = userEvent.setup();
   listDripProgress.mockResolvedValueOnce([{ propertyId: "lead-a", status: "Waiting", step: 2, totalSteps: 4 }]);
-  renderBoard([makeLead()]);
+  renderBoard([makeLead(), makeLead({ id: "lead-b", address: "456 Oak St" })]);
   expect(await screen.findByTestId("lead-drip-chip-lead-a")).toHaveTextContent("Drip · 2 of 4");
-  expect(listDripProgress).toHaveBeenCalledWith(expect.anything(), ["lead-a"]);
+  expect(listDripProgress).toHaveBeenCalledExactlyOnceWith(expect.anything(), ["lead-a", "lead-b"]);
+  await user.type(screen.getByRole("textbox", { name: "Search leads" }), "Main");
+  expect(listDripProgress).toHaveBeenCalledTimes(1);
 });
 
 function column(status: string): HTMLElement {
@@ -200,6 +203,8 @@ function column(status: string): HTMLElement {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  listDripProgress.mockReset();
+  listDripProgress.mockResolvedValue([]);
   window.localStorage.clear();
   updatePropertyStatus.mockReset();
   loadLeadBoardAction.mockReset();

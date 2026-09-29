@@ -37,22 +37,15 @@ export async function messageDripLabels(client: SupabaseClient<Database>, messag
     allSteps.push(...(steps.data ?? []));
     for (const sequence of sequences.data ?? []) names[sequence.id] = sequence.name;
   }
-  const bySequence = new Map<string, typeof allSteps>();
-  for (const step of allSteps) if (step.action_type === "send_sms") {
-    const group = bySequence.get(step.sequence_id) ?? [];
-    group.push(step);
-    bySequence.set(step.sequence_id, group);
-  }
-  for (const group of bySequence.values()) group.sort((a, b) => a.step_index - b.step_index);
+  const stepCountBySequence = new Map<string, number>();
+  for (const step of allSteps) stepCountBySequence.set(step.sequence_id, (stepCountBySequence.get(step.sequence_id) ?? 0) + 1);
   const stepsById = new Map(sentSteps.map((step) => [step.id, step]));
   const labels: Record<string, string> = {};
   for (const run of runs) {
     if (!run.message_id) continue;
     const step = stepsById.get(run.step_id);
     if (!step) continue;
-    const group = bySequence.get(step.sequence_id) ?? [];
-    const text = group.findIndex((candidate) => candidate.id === step.id) + 1;
-    const label = formatMessageDripLabel(names[step.sequence_id] ?? "Drip", text, group.length);
+    const label = formatMessageDripLabel(names[step.sequence_id] ?? "Drip", step.step_index + 1, stepCountBySequence.get(step.sequence_id) ?? 0);
     if (label) labels[run.message_id] = label;
   }
   return labels;

@@ -37,6 +37,12 @@ export default function LeadsBoardDripPreview() {
       currentUserId="brand-rep" listMemberships={{}} customTags={{}} lastMessageByPropertyId={{}}
       renderedAt="2026-09-29T14:00:00Z"
       initialDripsByLead={{ "brand-lead": { ...activeLeadDrip, step: 2 }, "brand-interested-2": { ...activeLeadDrip, propertyId: "brand-interested-2", step: 3 } }}
+      previewBoardData={{
+        leads, totals, baselineTotals: totals,
+        urgencyCounts: { all: 5, overdue: 0, today: 0, scheduled: 0, none: 5 },
+        nextCursors: {}, hasMore: {}, snapshotGenerations: {},
+        unreadPropertyIds: [], listMemberships: {}, customTags: {}, lastMessageByPropertyId: {}, latestContractByPropertyId: {},
+      }}
     />
   </DripPreviewShell>;
 }

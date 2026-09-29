@@ -1,21 +1,23 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DripProgress } from "@/lib/sequences/drip-progress";
 import { DripCard } from "./drip-card";
 
-const { pauseEnrollmentAction, cancelEnrollment, changeDripAction, listDripProgress } = vi.hoisted(() => ({
+const { pauseEnrollmentAction, resumeEnrollmentAction, cancelEnrollment, changeDripAction, listDripProgress, pickResult } = vi.hoisted(() => ({
   pauseEnrollmentAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
+  resumeEnrollmentAction: vi.fn().mockResolvedValue({ ok: true, data: null }),
   cancelEnrollment: vi.fn().mockResolvedValue({ ok: true, data: null }),
   changeDripAction: vi.fn().mockResolvedValue({ ok: true, data: { status: "skipped", reason: "Already enrolled" } }),
   listDripProgress: vi.fn().mockResolvedValue([]),
+  pickResult: vi.fn(),
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
-vi.mock("@/app/(dashboard)/sequences/actions", () => ({ pauseEnrollmentAction, cancelEnrollment, changeDripAction, startDripForLeads: vi.fn() }));
+vi.mock("@/app/(dashboard)/sequences/actions", () => ({ pauseEnrollmentAction, resumeEnrollmentAction, cancelEnrollment, changeDripAction, startDripForLeads: vi.fn() }));
 vi.mock("@/lib/sequences/drip-progress", () => ({ listDripProgress }));
 vi.mock("@/lib/supabase/client", () => ({ createClient: () => ({}) }));
 vi.mock("@/lib/errors/call-action", () => ({ callAction: (promise: Promise<unknown>) => promise }));
-vi.mock("@/components/sequences/start-drip-picker", () => ({ StartDripPicker: ({ triggerLabel, onChoose }: { triggerLabel: string; onChoose: (id: string) => Promise<unknown> }) => <button onClick={() => void onChoose("drip-2")}>{triggerLabel}</button> }));
+vi.mock("@/components/sequences/start-drip-picker", () => ({ StartDripPicker: ({ triggerLabel, onChoose }: { triggerLabel: string; onChoose: (id: string) => Promise<unknown> }) => <button onClick={() => void onChoose("drip-2").then(pickResult)}>{triggerLabel}</button> }));
 
 const progress: DripProgress = {
   propertyId: "lead-1", enrollmentId: "enrollment-1", enrollmentStatus: "active", sequenceId: "drip-1",
@@ -25,6 +27,11 @@ const progress: DripProgress = {
 };
 
 describe("DripCard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    listDripProgress.mockResolvedValue([]);
+    changeDripAction.mockResolvedValue({ ok: true, data: { status: "skipped", reason: "Already enrolled" } });
+  });
   it("shows an active drip with progress and controls", () => {
     render(<DripCard propertyId="lead-1" initialProgress={progress} />);
     expect(screen.getByText("90-day follow-up")).toBeInTheDocument();
@@ -40,6 +47,14 @@ describe("DripCard", () => {
     expect(screen.getByText("Paused")).toBeInTheDocument();
     expect(screen.getByText("Drip was paused by a person.")).toBeInTheDocument();
     expect(screen.queryByText("Waiting")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+  });
+
+  it("resumes the shown paused enrollment", async () => {
+    const user = userEvent.setup();
+    render(<DripCard propertyId="lead-1" initialProgress={{ ...progress, enrollmentStatus: "paused", status: null }} />);
+    await user.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(resumeEnrollmentAction).toHaveBeenCalledWith("enrollment-1"));
   });
 
   it("shows the empty state", () => {
@@ -68,8 +83,13 @@ describe("DripCard", () => {
 
   it("switches through the guarded change action", async () => {
     const user = userEvent.setup();
+    listDripProgress.mockResolvedValue([{ ...progress, enrollmentStatus: "completed", status: "Stopped", nextTextAt: null }]);
+    changeDripAction.mockResolvedValue({ ok: true, data: { status: "skipped", reason: "Previous drip stopped. No consent." } });
     render(<DripCard propertyId="lead-1" initialProgress={progress} />);
     await user.click(screen.getByRole("button", { name: "Switch drip" }));
     expect(changeDripAction).toHaveBeenCalledWith("enrollment-1", "drip-2");
+    await waitFor(() => expect(listDripProgress).toHaveBeenCalledWith(expect.anything(), ["lead-1"]));
+    expect(await screen.findByText("Stopped")).toBeInTheDocument();
+    expect(pickResult).toHaveBeenCalledWith({ status: "skipped", reason: "Previous drip stopped. No consent.", saved: false });
   });
 });

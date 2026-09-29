@@ -4,7 +4,7 @@ import { Droplet } from "lucide-react";
 import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
-import { changeDripAction, cancelEnrollment, pauseEnrollmentAction, startDripForLeads } from "@/app/(dashboard)/sequences/actions";
+import { changeDripAction, cancelEnrollment, pauseEnrollmentAction, resumeEnrollmentAction, startDripForLeads } from "@/app/(dashboard)/sequences/actions";
 import { StartDripPicker, type PickResult } from "@/components/sequences/start-drip-picker";
 import { Button } from "@/components/ui/button";
 import { callAction } from "@/lib/errors/call-action";
@@ -45,25 +45,30 @@ export function DripCard({ propertyId, initialProgress }: { propertyId: string; 
   }, [propertyId, initialProgress]);
 
   async function choose(sequenceId: string): Promise<PickResult> {
-    const result = progress && ["active", "paused"].includes(progress.enrollmentStatus)
+    const changing = Boolean(progress && ["active", "paused"].includes(progress.enrollmentStatus));
+    const result = changing && progress
       ? await changeDripAction(progress.enrollmentId, sequenceId)
       : await startDripForLeads(sequenceId, [propertyId]);
+    if (changing) {
+      await refresh();
+      router.refresh();
+    }
     if (!result.ok) return { status: "failed", reason: result.error.message, saved: false };
     const outcome = "results" in result.data ? result.data.results[0] : result.data;
-    if (outcome.status === "enrolled") {
+    if (!changing && outcome.status === "enrolled") {
       await refresh();
       router.refresh();
     }
     return { ...outcome, saved: false };
   }
 
-  function mutate(kind: "pause" | "stop") {
+  function mutate(kind: "pause" | "resume" | "stop") {
     if (!progress) return;
     if (kind === "stop" && !window.confirm("Stop this drip? No more texts will be sent.")) return;
     startTransition(async () => {
-      const result = await callAction(kind === "pause" ? pauseEnrollmentAction(progress.enrollmentId) : cancelEnrollment(progress.enrollmentId), {
-        successMessage: kind === "pause" ? "Drip paused" : "Drip stopped",
-        fallbackMessage: kind === "pause" ? "Could not pause the drip" : "Could not stop the drip",
+      const result = await callAction(kind === "pause" ? pauseEnrollmentAction(progress.enrollmentId) : kind === "resume" ? resumeEnrollmentAction(progress.enrollmentId) : cancelEnrollment(progress.enrollmentId), {
+        successMessage: kind === "pause" ? "Drip paused" : kind === "resume" ? "Drip resumed" : "Drip stopped",
+        fallbackMessage: kind === "pause" ? "Could not pause the drip" : kind === "resume" ? "Could not resume the drip" : "Could not stop the drip",
       });
       if (result.ok) { await refresh(); router.refresh(); }
     });
@@ -84,6 +89,7 @@ export function DripCard({ propertyId, initialProgress }: { propertyId: string; 
           <div className="flex justify-between gap-3"><span className="text-muted-foreground">Last text sent</span><span>{progress.lastText ? dateLabel(progress.lastText.sentAt) : "—"}</span></div>
           <div className="flex flex-wrap gap-1.5 pt-1">
             {progress.enrollmentStatus === "active" ? <Button variant="outline" size="sm" disabled={pending} onClick={() => mutate("pause")}>Pause</Button> : null}
+            {progress.enrollmentStatus === "paused" ? <Button variant="outline" size="sm" disabled={pending} onClick={() => mutate("resume")}>Resume</Button> : null}
             <StartDripPicker triggerLabel={live ? "Switch drip" : "Start drip"} triggerTone={live ? "outline" : "primary"} onChoose={choose} disabled={pending} />
             {live ? <Button variant="outline" size="sm" className="text-destructive" disabled={pending} onClick={() => mutate("stop")}>Stop</Button> : null}
           </div>

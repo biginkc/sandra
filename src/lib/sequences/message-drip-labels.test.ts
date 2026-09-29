@@ -7,7 +7,7 @@ describe("message drip labels", () => {
     expect(formatMessageDripLabel("90-day follow-up", 0, 4)).toBeNull();
   });
 
-  it("joins message IDs to durable runs and counts text steps only", async () => {
+  it("joins message IDs to durable runs and counts every sequence step", async () => {
     const rows = {
       sequence_step_runs: [{ message_id: "m1", step_id: "st1" }, { message_id: "m2", step_id: "st3" }],
       sequence_steps: [
@@ -21,8 +21,8 @@ describe("message drip labels", () => {
       data: rows[table].filter((row) => ids.includes(String(row[field as keyof typeof row]))), error: null,
     }) }) })) };
     expect(await messageDripLabels(client as never, ["m1", "m2", "m3"])).toEqual({
-      m1: "Drip · 90-day follow-up · text 1 of 2",
-      m2: "Drip · 90-day follow-up · text 2 of 2",
+      m1: "Drip · 90-day follow-up · text 1 of 3",
+      m2: "Drip · 90-day follow-up · text 3 of 3",
     });
     expect(client.from).toHaveBeenCalledWith("sequence_step_runs");
   });
