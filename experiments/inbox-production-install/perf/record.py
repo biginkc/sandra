@@ -66,11 +66,24 @@ if size > 40 * 1024 * 1024:
 now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 attempts = []
 if lane == 'burst':
-    attempts = [(source / f'attempt-{n}' / 'verdict.txt').read_text().strip() for n in range(1, 4)]
-    if any(value not in ('PASS', 'FAIL') for value in attempts):
-        raise RuntimeError('Burst attempt verdict missing or invalid')
-    if any(not (source / f'attempt-{n}' / 'runner-hardware.txt').is_file() for n in range(1, 4)):
-        raise RuntimeError('Burst attempt hardware missing')
+    from analyze import analyze
+    required = ('runner-hardware.txt', 'verdict.txt', 'burst-summary.json', 'before.json',
+                'pg-server.log', 'pg-stat-statements.json', 'client-latencies.csv',
+                'backlog.csv', 'writer-distribution.json', 'final-db.json',
+                'lock-config-observed.txt', 'analysis.json')
+    for n in range(1, 4):
+        attempt = source / f'attempt-{n}'
+        for name in required:
+            if not (attempt / name).is_file():
+                raise RuntimeError(f'Burst attempt {n} missing {name}')
+        claimed = (attempt / 'verdict.txt').read_text().strip()
+        if claimed not in ('PASS', 'FAIL'):
+            raise RuntimeError(f'Burst attempt {n} verdict missing or invalid')
+        recomputed = analyze(attempt)
+        recorded = json.loads((attempt / 'analysis.json').read_text())
+        if recorded != recomputed or claimed != recomputed['verdict']:
+            raise RuntimeError(f'Burst attempt {n} analysis/verdict mismatch')
+        attempts.append(claimed)
     if (verdict == 'PASS') != all(value == 'PASS' for value in attempts):
         raise RuntimeError('Burst aggregate verdict disagrees with attempts')
 else:

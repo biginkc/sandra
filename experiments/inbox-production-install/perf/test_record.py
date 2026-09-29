@@ -1,5 +1,6 @@
 """Synthetic W3 records must satisfy W1's pull and sealed-evidence interfaces."""
 import json
+import csv
 import os
 from pathlib import Path
 import shutil
@@ -7,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 import importlib.util
+from analyze import analyze
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -14,6 +16,50 @@ spec = importlib.util.spec_from_file_location('sealed_evidence', ROOT / 'experim
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 PULL = ROOT / 'scripts/ci/pull-heavy-record.mjs'
+
+
+def write_burst_attempt(attempt, verdict='PASS'):
+    attempt.mkdir(parents=True, exist_ok=True)
+    (attempt / 'verdict.txt').write_text(verdict + '\n')
+    (attempt / 'runner-hardware.txt').write_text('4 CPU, 16 GB\n')
+    (attempt / 'lock-config-observed.txt').write_text('on\n10ms\n')
+    (attempt / 'before.json').write_text(json.dumps({'before': {'deadlocks': 0}}))
+    (attempt / 'burst-summary.json').write_text(json.dumps({'counts': {
+        'scheduled': {'update': 10200, 'inbound': 2400},
+        'completed': {'update': 10200, 'inbound': 2400},
+        'failed': {'update': 0, 'inbound': 0},
+        'worker': {'errors': 0, 'parent': 60, 'finish': 12000, 'parent_sources': 60}}, 'errors': []}))
+    (attempt / 'final-db.json').write_text(json.dumps({'inbound': 2400, 'unknown': 240, 'total': 149400}))
+    (attempt / 'pg-stat-statements.json').write_text(json.dumps([
+        {'query': 'UPDATE public.messages SET status= $1', 'calls': 10200},
+        {'query': 'INSERT INTO public.messages(id,org_id,conversation_id', 'calls': 2400}]))
+    writer_distribution = {'update': {}, 'inbound': {}}
+    with (attempt / 'client-latencies.csv').open('w', newline='') as stream:
+        rows = csv.writer(stream)
+        rows.writerow(('kind', 'scheduled_ms', 'started_ms', 'finished_ms', 'wall_ms', 'error', 'writer'))
+        for index in range(10200):
+            rows.writerow(('update', index, index, index + 1, 1, '', index % 16))
+            writer = str(index % 16)
+            writer_distribution['update'][writer] = writer_distribution['update'].get(writer, 0) + 1
+        for second in range(120):
+            offsets = (0, 25, 200, 225, 400, 425) + tuple(500 + i for i in range(14))
+            for index, offset in enumerate(offsets):
+                ms = second * 1000 + offset
+                rows.writerow(('inbound', ms, ms, ms + 1, 1, '', index % 16))
+                writer = str(index % 16)
+                writer_distribution['inbound'][writer] = writer_distribution['inbound'].get(writer, 0) + 1
+    with (attempt / 'backlog.csv').open('w', newline='') as stream:
+        rows = csv.writer(stream)
+        rows.writerow(('elapsed_s', 'dirty_pending', 'maintained_queue', 'parent_pending', 'deadlocks', 'xact_rollback', 'n_dead_tup'))
+        for second in range(181):
+            rows.writerow((second, int(second < 120), 0, 0, 0, 0, 0))
+    (attempt / 'pg-server.log').write_text(
+        ('duration: 1 ms execute <unnamed>: UPDATE public.messages SET status=\n' * 10200) +
+        ('duration: 1 ms execute <unnamed>: INSERT INTO public.messages(id,org_id,conversation_id\n' * 2400) +
+        'acquired ShareLock after 1 ms\n')
+    (attempt / 'writer-distribution.json').write_text(json.dumps(writer_distribution))
+    # The checked-in analyzer will generate this after the raw files are written.
+    subprocess.run(['python3', str(HERE / 'analyze.py'), str(attempt)], capture_output=True, check=verdict == 'PASS')
 
 
 def run(*args, cwd, env=None):
@@ -24,6 +70,30 @@ def run(*args, cwd, env=None):
 
 
 class RecordContractTests(unittest.TestCase):
+    def test_raw_truncation_controls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            attempt = Path(temp)
+            write_burst_attempt(attempt)
+            self.assertEqual(analyze(attempt)['verdict'], 'PASS')
+            client = attempt / 'client-latencies.csv'
+            backlog = attempt / 'backlog.csv'
+            original_client = client.read_text()
+            original_backlog = backlog.read_text()
+            controls = {
+                'missing_update_samples': (client, '\n'.join(row for row in original_client.splitlines() if not row.startswith('update,')) + '\n'),
+                'missing_inbound_samples': (client, '\n'.join(row for row in original_client.splitlines() if not row.startswith('inbound,')) + '\n'),
+                'truncated_backlog': (backlog, '\n'.join(original_backlog.splitlines()[:123]) + '\n'),
+                'backlog_gap': (backlog, '\n'.join(row for row in original_backlog.splitlines() if not row.startswith(('90,', '91,', '92,'))) + '\n'),
+                'missing_end_observation': (backlog, '\n'.join(original_backlog.splitlines()[:-1]) + '\n'),
+            }
+            for name, (path, changed) in controls.items():
+                with self.subTest(name=name):
+                    path.write_text(changed)
+                    scored = analyze(attempt)
+                    print(f'NEGATIVE CONTROL raw {name}: {scored["verdict"]} {scored["failures"]}')
+                    self.assertEqual(scored['verdict'], 'FAIL')
+                    path.write_text(original_client if path == client else original_backlog)
+
     def test_perf_120k_record_is_sealable_but_cannot_satisfy_burst(self):
         with tempfile.TemporaryDirectory() as temp:
             repo = Path(temp) / 'repo'
@@ -95,6 +165,8 @@ class RecordContractTests(unittest.TestCase):
             run('git', 'config', 'user.email', 'test@example.invalid', cwd=repo)
             for relative, source in [
                 ('experiments/inbox-production-install/perf/record.py', HERE / 'record.py'),
+                ('experiments/inbox-production-install/perf/analyze.py', HERE / 'analyze.py'),
+                ('experiments/inbox-production-install/perf/thresholds.json', HERE / 'thresholds.json'),
                 ('scripts/inbox-ci/burst.sh', ROOT / 'scripts/inbox-ci/burst.sh'),
                 ('e2e/inbox-acceptance/fault-proxy.mjs', ROOT / 'e2e/inbox-acceptance/fault-proxy.mjs'),
                 ('.github/workflows/inbox-heavy-verification.yml', ROOT / '.github/workflows/inbox-heavy-verification.yml'),
@@ -109,7 +181,8 @@ class RecordContractTests(unittest.TestCase):
             source.mkdir()
             env = {**os.environ, 'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': 'workflow_dispatch',
                    'GITHUB_REF_NAME': 'main', 'GITHUB_WORKFLOW_REF': 'biginkc/sandra/.github/workflows/inbox-heavy-verification.yml@refs/heads/main',
-                   'HEAVY_TESTED_SHA': sha, 'HEAVY_LANE': 'burst', 'GITHUB_RUN_ATTEMPT': '1'}
+                   'HEAVY_TESTED_SHA': sha, 'HEAVY_LANE': 'burst', 'GITHUB_RUN_ATTEMPT': '1',
+                   'PYTHONDONTWRITEBYTECODE': '1'}
 
             (source / 'oversize.csv').write_bytes(os.urandom(41 * 1024 * 1024))
             oversized = subprocess.run(['python3', 'experiments/inbox-production-install/perf/record.py',
@@ -129,17 +202,47 @@ class RecordContractTests(unittest.TestCase):
                                          str(source), 'burst', 'PASS'], cwd=repo, env={**env, 'GITHUB_RUN_ID': '998'},
                                         text=True, capture_output=True)
             self.assertNotEqual(incomplete.returncode, 0)
-            self.assertIn('attempt-2/verdict.txt', incomplete.stderr)
+            self.assertIn('Burst attempt 1 missing burst-summary.json', incomplete.stderr)
             print('NEGATIVE CONTROL one attempt cannot seal a PASS burst record')
             shutil.rmtree(repo / 'docs')
+
+            for n in range(1, 4):
+                write_burst_attempt(source / f'attempt-{n}')
+            required = ('pg-server.log', 'pg-stat-statements.json', 'client-latencies.csv',
+                        'backlog.csv', 'writer-distribution.json', 'final-db.json',
+                        'lock-config-observed.txt', 'analysis.json')
+            for name in required:
+                with self.subTest(missing=name):
+                    path = source / 'attempt-1' / name
+                    saved = path.read_bytes()
+                    path.unlink()
+                    missing = subprocess.run(['python3', 'experiments/inbox-production-install/perf/record.py',
+                                              str(source), 'burst', 'PASS'], cwd=repo,
+                                             env={**env, 'GITHUB_RUN_ID': '997'}, text=True, capture_output=True)
+                    path.write_bytes(saved)
+                    if (repo / 'docs').exists():
+                        shutil.rmtree(repo / 'docs')
+                    print(f'NEGATIVE CONTROL missing {name}: {missing.returncode} {missing.stderr.strip().splitlines()[-1] if missing.stderr.strip() else "sealed"}')
+                    self.assertNotEqual(missing.returncode, 0, f'{name} deletion sealed a PASS')
+            final_path = source / 'attempt-2' / 'final-db.json'
+            good_final = final_path.read_bytes()
+            final_path.write_text(json.dumps({'inbound': 0, 'unknown': 0, 'total': 0}))
+            tampered = subprocess.run(['python3', 'experiments/inbox-production-install/perf/record.py',
+                                       str(source), 'burst', 'PASS'], cwd=repo,
+                                      env={**env, 'GITHUB_RUN_ID': '996'}, text=True, capture_output=True)
+            self.assertNotEqual(tampered.returncode, 0, 'PASS verdict over failing raw analysis sealed')
+            print(f'NEGATIVE CONTROL verdict tamper: {tampered.stderr.strip().splitlines()[-1]}')
+            final_path.write_bytes(good_final)
+            if (repo / 'docs').exists():
+                shutil.rmtree(repo / 'docs')
 
             def produce(run_id, verdicts, workrepo=repo):
                 for n, verdict in enumerate(verdicts, 1):
                     attempt = source / f'attempt-{n}'
-                    attempt.mkdir(parents=True, exist_ok=True)
-                    (attempt / 'verdict.txt').write_text(verdict + '\n')
-                    (attempt / 'runner-hardware.txt').write_text('4 CPU, 16 GB\n')
-                    (attempt / 'raw.csv').write_text('x,y\n1,2\n')
+                    write_burst_attempt(attempt, verdict)
+                    if verdict == 'FAIL':
+                        (attempt / 'final-db.json').write_text(json.dumps({'inbound': 0, 'unknown': 0, 'total': 0}))
+                        subprocess.run(['python3', str(HERE / 'analyze.py'), str(attempt)], capture_output=True, check=False)
                 local_env = {**env, 'GITHUB_RUN_ID': run_id}
                 verdict = 'PASS' if all(v == 'PASS' for v in verdicts) else 'FAIL'
                 relative = run('python3', 'experiments/inbox-production-install/perf/record.py', str(source), 'burst', verdict,
