@@ -58,7 +58,7 @@ else:
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(received, {"TEST_SUPABASE_URL": "http://127.0.0.1:54321", "E2E_CI_SUPABASE_DB_URL": "postgresql://postgres:postgres@127.0.0.1:54322/postgres", "HEAVY_PHASE": phase})
                 self.assertIn("--api-port 55421 --db-port 55422", args)
-                self.assertEqual("--exclude-migrations 2026093002*" in args, phase == "pre")
+                self.assertEqual("--exclude-migrations 2026093004*" in args, phase == "pre")
                 broken, _, received = self.run_lane(phase, remove_proxy_exports=True)
                 self.assertNotEqual(broken.returncode, 0)
                 self.assertIn("runner bypassed fault proxy", broken.stderr)
