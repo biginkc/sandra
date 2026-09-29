@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 const SELECT = 'id,body,from_address,to_address,created_at,scheduled_for,property_id,contact_id,property:properties(id,address,city,state),contact:contacts(id,first_name,last_name,entity_name,phone_1)';
 const PAGE = `/rest/v1/messages?select=${encodeURIComponent(SELECT)}&status=eq.queued&order=scheduled_for.asc.nullslast,id.asc&limit=101`;
@@ -35,6 +36,11 @@ export async function runContracts({ fixture, db, phase, provider }) {
       assert.equal(versions.length, 2);
       const head = await sql('select revision from public.inbox_inbound_heads where org_id=$1 and conversation_id=$2', [ids.O1, row('m11').conversation_id]);
       assert.equal(head[0]?.revision, '1');
+      const fresh = await q('member', 'POST', '/rest/v1/messages', { ...payload('m11'), id: randomUUID(), body: `contract-${fixture.slug}-fresh-inbound` }, { Prefer: 'return=representation' });
+      assert.equal(fresh.status, 201, JSON.stringify(fresh));
+      assert.equal(fresh.data?.[0]?.inbox_inbound_revision, 0);
+      const freshRead = await q('member', 'GET', `/rest/v1/messages?id=eq.${fresh.data[0].id}&select=id,inbox_inbound_revision`);
+      assert.equal(freshRead.data?.[0]?.inbox_inbound_revision, 2);
     }
     return { inserted: Object.keys(ids.messages).length, crossTenantStatus: cross.status };
   });
@@ -135,7 +141,10 @@ export async function runContracts({ fixture, db, phase, provider }) {
   });
   await run('D01', async () => {
     const page = await q('anon', 'GET', PAGE); assert.equal(page.status, 200);
-    if (page.data.length) throw new Error(`ANON_ROW_EXPOSURE count=${page.data.length} fixture=${page.data.some(r => Object.values(ids.messages).some(m => m.id === r.id))}`);
+    if (page.data.length) {
+      const own = await q('anon', 'GET', `/rest/v1/messages?id=eq.${row('m1').id}&select=id`);
+      throw new Error(`ANON_ROW_EXPOSURE count=${page.data.length} fixture=${own.data?.some(r => r.id === row('m1').id)}`);
+    }
     assert.deepEqual(page.data, []);
     const before = await get('member', 'm1');
     for (const method of ['PATCH', 'DELETE']) { const response = await q('anon', method, `/rest/v1/messages?id=eq.${row('m1').id}&select=id`, method === 'PATCH' ? { body: 'bad' } : undefined, { Prefer: 'return=representation' }); assert(response.status >= 400 || (Array.isArray(response.data) && response.data.length === 0)); }

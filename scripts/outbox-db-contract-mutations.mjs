@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import pg from 'pg';
 import { assertWriteMode } from './outbox-db-contract/guards.mjs';
+import { makeRest } from './outbox-db-contract/postgrest.mjs';
+import { createFixture } from './outbox-db-contract/fixture.mjs';
 
 const MUTATIONS = [
   ['M1', 'REVOKE SELECT ON public.messages FROM authenticated', 'GRANT SELECT ON public.messages TO authenticated', ['C01']],
   ['M2', 'ALTER TABLE public.messages DISABLE TRIGGER zzzzz_inbox_message_direct', 'ALTER TABLE public.messages ENABLE TRIGGER zzzzz_inbox_message_direct', ['PIN_TRIGGERS']],
-  ['M3', 'ALTER POLICY messages_org_select ON public.messages USING (true)', null, ['D01']],
-  ['M3b', 'ALTER POLICY messages_org_insert ON public.messages WITH CHECK (true)', null, ['C00']],
+  ['M3', 'ALTER POLICY messages_org_select ON public.messages USING (true)', null, ['D02']],
+  ['M3b', 'ALTER POLICY messages_org_insert ON public.messages WITH CHECK (true)', null, ['D02']],
   ['M4', 'ALTER FUNCTION inbox_message_capture.capture() SECURITY INVOKER', 'ALTER FUNCTION inbox_message_capture.capture() SECURITY DEFINER', ['PIN_FUNCTIONS']],
   ['M4b', 'ALTER FUNCTION public.inbox_guard_inbound_revision() SECURITY DEFINER', 'ALTER FUNCTION public.inbox_guard_inbound_revision() SECURITY INVOKER', ['PIN_FUNCTIONS']],
   ['M5', 'GRANT DELETE ON inbox_maintained.queue TO service_role', 'REVOKE DELETE ON inbox_maintained.queue FROM service_role', ['PIN_RELATIONS']],
@@ -21,11 +25,21 @@ const MUTATIONS = [
   ['M10', 'ALTER TABLE public.messages DISABLE ROW LEVEL SECURITY', 'ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY', ['PIN_BASE_GRANTS', 'D01']],
 ];
 
-function runContract(extra = []) {
-  const result = spawnSync(process.execPath, ['scripts/outbox-db-contract.mjs', '--target', 'disposable', '--phase', 'post', ...extra], { encoding: 'utf8', env: process.env, maxBuffer: 20 * 1024 * 1024 });
+function runContract(extra = [], fixture = null) {
+  const env = fixture ? { ...process.env, MUTATION_FIXTURE_JSON: JSON.stringify(fixture) } : process.env;
+  const result = spawnSync(process.execPath, ['scripts/outbox-db-contract.mjs', '--target', 'disposable', '--phase', 'post', ...extra], { encoding: 'utf8', env, maxBuffer: 20 * 1024 * 1024 });
   const line = result.stdout?.split('\n').find(value => value.startsWith('CONTRACT_RESULT '));
   assert(line, `No contract result: ${result.stderr}\n${result.stdout}`);
   return { exit: result.status, ...JSON.parse(line.slice('CONTRACT_RESULT '.length)) };
+}
+
+async function prepareFixture() {
+  const runDir = mkdtempSync(path.join(os.tmpdir(), 'w4w-fixture-'));
+  try {
+    const rest = makeRest(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, process.env.TEST_SUPABASE_SERVICE_ROLE_KEY);
+    const { rest: ignored, ...fixture } = await createFixture({ apiUrl: process.env.TEST_SUPABASE_URL, serviceKey: process.env.TEST_SUPABASE_SERVICE_ROLE_KEY, anonKey: process.env.TEST_SUPABASE_ANON_KEY, rest, runDir });
+    return fixture;
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
 }
 
 export async function runMutations(output) {
@@ -43,24 +57,30 @@ export async function runMutations(output) {
         assert(original, `${id}: original policy missing`);
         revert = `ALTER POLICY ${name} ON public.messages ${id === 'M3' ? 'USING' : 'WITH CHECK'} (${original})`;
       }
-      await db.query(apply);
       let observed, exact;
-      try {
-        observed = runContract();
-        assert.equal(observed.exit, 1, `${id}: mutated run did not fail`);
-        assert.equal(observed.verdict, 'FAIL');
-        assert(!observed.error || observed.error.startsWith('Error: CONTRACT_FAILURE'), `${id}: ${observed.error}`);
-        for (const check of required) assert(observed.failed.includes(check), `${id}: ${check} did not fail; got ${observed.failed}`);
-        if (id === 'M10') {
-          const contracts = (await import('node:fs')).readFileSync(`${observed.runDir}/contracts.json`, 'utf8');
-          assert.match(contracts, /ANON_ROW_EXPOSURE count=[1-9]\d* fixture=true/);
-        }
-        exact = runContract(['--expect-fail', observed.failed.join(',')]);
-        assert.equal(exact.exit, 1, `${id}: --expect-fail must exit nonzero`);
-        assert.equal(exact.verdict, 'FAIL');
-        assert.equal(exact.error, '', `${id}: expected-fail mismatch: ${exact.error}`);
-        assert.deepEqual(new Set(exact.failed), new Set(observed.failed), `${id}: failed IDs drifted`);
-      } finally { await db.query(revert); }
+      for (const mode of ['observe', 'exact']) {
+        const fixture = await prepareFixture();
+        await db.query(apply);
+        try {
+          if (mode === 'observe') observed = runContract([], fixture);
+          else exact = runContract(['--expect-fail', observed.failed.join(',')], fixture);
+          if (mode === 'observe') {
+            assert.equal(observed.exit, 1, `${id}: mutated run did not fail`);
+            assert.equal(observed.verdict, 'FAIL');
+            assert(!observed.error || observed.error.startsWith('Error: CONTRACT_FAILURE'), `${id}: ${observed.error}`);
+            for (const check of required) assert(observed.failed.includes(check), `${id}: ${check} did not fail; got ${observed.failed}`);
+            if (id === 'M10') {
+              const contracts = readFileSync(`${observed.runDir}/contracts.json`, 'utf8');
+              assert(/ANON_ROW_EXPOSURE count=[1-9]\d* fixture=true/.test(contracts), `${id}: anon did not read its own fixture row`);
+            }
+          } else {
+            assert.equal(exact.exit, 1, `${id}: --expect-fail must exit nonzero`);
+            assert.equal(exact.verdict, 'FAIL');
+            assert.equal(exact.error, '', `${id}: expected-fail mismatch: ${exact.error}`);
+            assert.deepEqual(new Set(exact.failed), new Set(observed.failed), `${id}: failed IDs drifted`);
+          }
+        } finally { await db.query(revert); }
+      }
       const restored = runContract();
       assert.equal(restored.exit, 0, `${id}: restore run: ${restored.error}; failed=${restored.failed}`);
       assert.equal(restored.verdict, 'PASS');

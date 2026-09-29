@@ -2,7 +2,7 @@
 set -euo pipefail
 [[ "${HEAVY_LANE:-}" == db-contract ]]
 [[ "$(git rev-parse HEAD)" == "${HEAVY_TESTED_SHA:-}" ]]
-[[ -z "$(git status --porcelain --untracked-files=all)" ]]
+if [[ "${HEAVY_OVERLAY_EXEC:-}" != 1 ]]; then [[ -z "$(git status --porcelain --untracked-files=all)" ]]; fi
 if [[ "$(uname)" == Darwin ]]; then [[ "$(df -g /System/Volumes/Data | awk 'NR==2 {print $4}')" -ge 8 ]]; fi
 
 original_env="${GITHUB_ENV:-}"
@@ -21,7 +21,7 @@ for phase in pre post; do
       fi
     done
     supabase stop --workdir "$E2E_LOCAL_WORKDIR" --no-backup
-    unset E2E_LOCAL_WORKDIR
+    unset E2E_LOCAL_WORKDIR E2E_DISPOSABLE_DATABASE E2E_CI_SUPABASE_DB_URL TEST_SUPABASE_URL TEST_SUPABASE_ANON_KEY TEST_SUPABASE_SERVICE_ROLE_KEY HEAVY_UPSTREAM_API_URL HEAVY_UPSTREAM_DB_URL
     : > "$lane_env"
   fi
   export GITHUB_ENV="$lane_env"
