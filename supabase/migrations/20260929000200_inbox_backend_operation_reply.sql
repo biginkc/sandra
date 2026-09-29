@@ -195,7 +195,7 @@ END $$;
 
 
 -- Pinned saved_actions_setup: experiments/inbox-saved-actions/setup.sql
--- source_sha256=bbe17876c87e5192665b43f0cbafadd2668a56904f25d463308218392b5b7b6d
+-- source_sha256=11219f96df6cc1e44d50135a1a7707d184c53aab0f6dff4e27d307fe32678bb1
 -- Personal saved-action definitions (DoD#3 backend). Immutable per-version
 -- rows feeding the EXISTING `saved` seam in action-definition.ts
 -- (parseInboxActionIntent's 3rd argument). No picker/builder UI, no
@@ -278,7 +278,9 @@ BEGIN
    unknown_action:=step->>'type';
   ELSIF step->>'type'='review_reply' THEN
    IF has_review_reply OR position<>array_length(types,1) THEN RAISE EXCEPTION 'INBOX_SAVED_ACTION_STEP_COMBINATION_UNSUPPORTED';END IF;
-   reply:=btrim(step->>'text');
+   -- Match ECMAScript String.prototype.trim() exactly. The second argument
+   -- contains only WhiteSpace and LineTerminator code points from that set.
+   reply:=btrim(step->>'text',U&'\0009\000A\000B\000C\000D\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF');
    SELECT char_length(reply)+count(*) INTO reply_units
    FROM generate_series(1,char_length(reply)) AS g(pos)
    WHERE get_byte(convert_to(substr(reply,pos,1),'UTF8'),0)>=240;
