@@ -4,7 +4,9 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+import ntpath
 from pathlib import Path
+import posixpath
 import re
 import subprocess
 
@@ -16,6 +18,22 @@ HASH = re.compile(r"[0-9a-f]{64}\Z")
 
 class EvidenceError(RuntimeError):
     pass
+
+
+def unique_object_pairs(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def parse_manifest(repo: Path, commit: str, path: str) -> dict:
+    try:
+        return json.loads(blob(repo, commit, path), object_pairs_hook=unique_object_pairs)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise EvidenceError(f"invalid manifest: {path}: {exc}") from exc
 
 
 def git(repo: Path, *args: str) -> bytes:
@@ -66,10 +84,7 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
     manifest_path = f"{directory}/manifest.json"
     if manifest_path not in paths:
         raise EvidenceError(f"incomplete run: missing manifest at {directory}")
-    try:
-        manifest = json.loads(blob(repo, commit, manifest_path))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise EvidenceError(f"invalid manifest: {manifest_path}") from exc
+    manifest = parse_manifest(repo, commit, manifest_path)
     if not isinstance(manifest, dict) or manifest.get("tested_sha") != tested_sha or manifest.get("tier") != parts[5] or manifest.get("run_id") != parts[6]:
         raise EvidenceError(f"manifest identity mismatch: {directory}")
     completed = timestamp(manifest.get("completed_at"))
@@ -83,12 +98,18 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or not artifacts:
         raise EvidenceError(f"missing artifact hashes: {directory}")
+    normalized_paths: set[str] = set()
+    for relative, expected in artifacts.items():
+        if (not isinstance(relative, str) or relative in ("", ".") or posixpath.isabs(relative)
+                or ntpath.isabs(relative) or ".." in relative or "\\" in relative
+                or posixpath.normpath(relative) != relative
+                or relative in normalized_paths or not HASH.fullmatch(str(expected))):
+            raise EvidenceError(f"invalid artifact entry: {directory}/{relative}")
+        normalized_paths.add(relative)
     actual_paths = {p.removeprefix(directory + "/") for p in paths if p != manifest_path}
-    if set(artifacts) != actual_paths:
+    if normalized_paths != actual_paths:
         raise EvidenceError(f"artifact inventory mismatch: {directory}")
     for relative, expected in artifacts.items():
-        if not isinstance(relative, str) or relative.startswith("/") or any(p in ("", ".", "..") for p in relative.split("/")) or not HASH.fullmatch(str(expected)):
-            raise EvidenceError(f"invalid artifact entry: {directory}/{relative}")
         observed = hashlib.sha256(blob(repo, commit, f"{directory}/{relative}")).hexdigest()
         if observed != expected:
             raise EvidenceError(f"artifact hash mismatch: {directory}/{relative}")
@@ -173,7 +194,7 @@ def evaluate_deploy(repo: Path, tested_sha: str, tier: str, head: str = "HEAD") 
     sealed = evaluate(repo, tested_sha, tier, head)
     directory = sealed["selected"][tier]
     run = next(run for run in sealed["runs"] if run["directory"] == directory)
-    manifest = json.loads(blob(Path(repo), run["commit"], directory + "/manifest.json"))
+    manifest = parse_manifest(Path(repo), run["commit"], directory + "/manifest.json")
     observed = manifest.get("observed_deployment")
     if not isinstance(observed, dict) or not all(isinstance(observed.get(key), str) and observed[key] for key in ("vercel_git_commit_sha", "railway_git_commit_sha", "railway_deployment_id")):
         raise EvidenceError(f"deploy tier {tier} lacks observed Vercel/Railway commit identities and Railway deployment ID: {directory}")

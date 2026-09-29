@@ -60,6 +60,56 @@ class SealedEvidenceTests(unittest.TestCase):
             evaluate(self.repo, self.sha, "pre-merge")
         self.assertIn(phrase, str(caught.exception))
 
+    def tamper_manifest(self, old: str, new: str) -> None:
+        directory = self.record(commit=False)
+        path = directory / "manifest.json"
+        raw = path.read_text()
+        self.assertIn(old, raw)
+        path.write_text(raw.replace(old, new, 1))
+        self.commit("tampered manifest")
+
+    def test_duplicate_exit_status_rejected(self) -> None:
+        self.tamper_manifest('"exit_status": 0', '"exit_status": 1, "exit_status": 0')
+        self.assert_fails("duplicate JSON key: exit_status")
+
+    def test_duplicate_identity_fields_rejected(self) -> None:
+        for field, bad in (("tested_sha", "0" * 40), ("tier", "test-env"), ("run_id", "other")):
+            with self.subTest(field=field):
+                # Each field needs a fresh repository because the record is sealed.
+                case = SealedEvidenceTests(methodName="test_valid_sealed_record")
+                case.setUp()
+                try:
+                    value = {"tested_sha": case.sha, "tier": "pre-merge", "run_id": "one"}[field]
+                    case.tamper_manifest(json.dumps(field) + ": " + json.dumps(value),
+                                         json.dumps(field) + ": " + json.dumps(bad) + ", " + json.dumps(field) + ": " + json.dumps(value))
+                    case.assert_fails("duplicate JSON key: " + field)
+                finally:
+                    case.doCleanups()
+
+    def test_duplicate_artifact_path_rejected(self) -> None:
+        good = hashlib.sha256(b"screenshot").hexdigest()
+        old = json.dumps("screenshots/O01.png") + ": " + json.dumps(good)
+        self.tamper_manifest(old, json.dumps("screenshots/O01.png") + ": " + json.dumps("0" * 64) + ", " + old)
+        self.assert_fails("duplicate JSON key: screenshots/O01.png")
+
+    def test_nested_duplicate_artifact_object_key_rejected(self) -> None:
+        self.tamper_manifest('"artifacts": {',
+                             '"artifact_details": [{"artifact": {"path": "wrong", "path": "screenshots/O01.png"}}], "artifacts": {')
+        self.assert_fails("duplicate JSON key: path")
+
+    def test_invalid_artifact_paths_rejected(self) -> None:
+        for path in ("/screenshots/O01.png", "C:/screenshots/O01.png", "../screenshots/O01.png",
+                     "screenshots/../O01.png", "screenshots\\O01.png", "screenshots//O01.png",
+                     "screenshots/./O01.png", "screenshots/a..b.png"):
+            with self.subTest(path=path):
+                case = SealedEvidenceTests(methodName="test_valid_sealed_record")
+                case.setUp()
+                try:
+                    case.tamper_manifest('"screenshots/O01.png":', json.dumps(path) + ":")
+                    case.assert_fails("invalid artifact entry")
+                finally:
+                    case.doCleanups()
+
     def test_valid_sealed_record(self) -> None:
         self.record()
         self.assertEqual(evaluate(self.repo, self.sha, "pre-merge")["status"], "PASS")
