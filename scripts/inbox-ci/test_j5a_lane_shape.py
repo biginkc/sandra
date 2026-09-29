@@ -19,6 +19,7 @@ class LaneRoutingTests(unittest.TestCase):
                 "git": f'#!/bin/sh\ncase "$1" in status) exit 0;; rev-parse) echo {SHA};; esac\n',
                 "uname": '#!/bin/sh\necho Linux\n',
                 "google-chrome": '#!/bin/sh\nexit 0\n',
+                "psql": '#!/bin/sh\ncase "$*" in *precondition-check.sql*) for i in 1 2 3 4 5 6 7 8; do echo "index_$i|t|8|t"; done;; esac\nexit 0\n',
                 "node": '''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
