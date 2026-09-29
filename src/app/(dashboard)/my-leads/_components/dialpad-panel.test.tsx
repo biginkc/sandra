@@ -28,6 +28,7 @@ const INTENT = '66666666-6666-4666-8666-666666666666';
 const verifiedBootstrap: DialpadPanelBootstrap = {
   connectionId: 'c1', allowedOrigins: ['https://dialpad.com'], binding: { status: 'verified', dialpadUserId: '5551234' }, grants: [],
 };
+const recordingBootstrap: DialpadPanelBootstrap = { ...verifiedBootstrap, recording: { ingestEndpoint: 'wss://recording.example.test/dialpad-browser-ingest' } };
 const unboundBootstrap: DialpadPanelBootstrap = { ...verifiedBootstrap, binding: { status: 'none' } };
 const request: DialpadCallRequest = { nonce: 1, propertyId: 'property-1', contactId: 'contact-1', label: 'Fixture Homeowner' };
 
@@ -125,6 +126,13 @@ describe('DialpadPanel trusted binding', () => {
 });
 
 describe('DialpadPanel dialing', () => {
+  it('requires an explicit user gesture before preparing recording for a connected call', async () => {
+    mocks.recent.mockResolvedValue({ ok: true, calls: [status('connected').status] });
+    await readyPanel({ bootstrap: recordingBootstrap });
+    expect(await screen.findByRole('button', { name: 'Prepare recording' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start recording' })).not.toBeInTheDocument();
+  });
+
   async function chooseAndCall(props: Partial<React.ComponentProps<typeof DialpadPanel>> = {}) {
     const ctx = await readyPanel({ callRequest: request, ...props });
     fromDialpad(ctx.iframe, authMessage(5551234));

@@ -21,6 +21,8 @@ import {
   parseDialpadRecordingCloseResult,
   parseDialpadRecordingConsumeResult,
   parseDialpadRecordingGrantResult,
+  parseDialpadRecordingBrowserGrantResult,
+  parseDialpadRecordingBrowserStatus,
   parseDialpadRecordingOpenResult,
   parseDialpadRecordingRegisterResult,
   parseDialpadRecordingEofResult,
@@ -36,6 +38,7 @@ import {
   type DialpadRecordingConsumeResult,
   type DialpadRecordingConsumeDenial,
   type DialpadRecordingMintDenial,
+  type DialpadRecordingBrowserMintDenial,
   type DialpadRecordingOpenDenial,
   type DialpadRecordingRegisterResult,
   type DialpadRecordingEofResult,
@@ -47,6 +50,7 @@ import {
   type DialpadRecordingVadSnapshot,
   type DialpadRecordingTrack,
   type DialpadRecordingTrackReport,
+  type DialpadRecordingBrowserStatus,
 } from './contracts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -61,6 +65,7 @@ export interface DialpadRecordingDb {
   get(orgId: string, repUserId: string, captureId: string): Promise<Json>;
   close(orgId: string, captureId: string, repUserId: string | null, reason: 'call_ended' | 'service_closed' | null): Promise<Json>;
   mintGrant(args: { orgId: string; repUserId: string; captureId: string; epoch: number; tokenHash: string; ttlSeconds: number }): Promise<Json>;
+  mintNextEpoch?(args: { orgId: string; repUserId: string; captureId: string; expectedConsumedEpoch: number; tokenHash: string; ttlSeconds: number }): Promise<Json>;
   consumeGrant(tokenHash: string, workerId: string): Promise<Json>;
   recordChunk(args: {
     orgId: string;
@@ -80,6 +85,7 @@ export interface DialpadRecordingDb {
   getVadSnapshot(orgId: string, captureId: string): Promise<Json>;
   claimSealWork(workerId: string, leaseSeconds: number): Promise<Json>;
   registerResult(captureId: string, claimToken: string, tracks: Json, failureCode: string | null): Promise<Json>;
+  getBrowserStatus?(orgId: string, repUserId: string, captureId: string): Promise<Json>;
 }
 
 type DbError = { code?: string | null; details?: string | null; message?: string } | null;
@@ -106,6 +112,16 @@ export function createSupabaseDialpadRecordingDb(client: SupabaseClient<Database
         p_rep_user_id: args.repUserId,
         p_capture_id: args.captureId,
         p_epoch: args.epoch,
+        p_token_hash: args.tokenHash,
+        p_ttl_seconds: args.ttlSeconds,
+      }));
+    },
+    async mintNextEpoch(args) {
+      return unwrap(await client.rpc('fn_mint_dialpad_recording_next_epoch', {
+        p_org_id: args.orgId,
+        p_rep_user_id: args.repUserId,
+        p_capture_id: args.captureId,
+        p_expected_consumed_epoch: args.expectedConsumedEpoch,
         p_token_hash: args.tokenHash,
         p_ttl_seconds: args.ttlSeconds,
       }));
@@ -180,6 +196,13 @@ export function createSupabaseDialpadRecordingDb(client: SupabaseClient<Database
         p_failure_code: failureCode,
       }));
     },
+    async getBrowserStatus(orgId, repUserId, captureId) {
+      return unwrap(await client.rpc('fn_get_dialpad_recording_browser_status', {
+        p_org_id: orgId,
+        p_rep_user_id: repUserId,
+        p_capture_id: captureId,
+      }));
+    },
   };
 }
 
@@ -195,7 +218,7 @@ export interface DialpadRecordingFailure {
   ok: false;
   code: DialpadRecordingFailureCode;
   message: string;
-  reason?: DialpadRecordingOpenDenial | DialpadRecordingMintDenial | DialpadRecordingConsumeDenial;
+  reason?: DialpadRecordingOpenDenial | DialpadRecordingMintDenial | DialpadRecordingBrowserMintDenial | DialpadRecordingConsumeDenial;
 }
 
 function fail(code: DialpadRecordingFailureCode, message: string, reason?: DialpadRecordingFailure['reason']): DialpadRecordingFailure {
@@ -211,6 +234,9 @@ const REASON_MESSAGES: Record<string, string> = {
   epoch_already_authorized: 'Recording was already started for this call segment.',
   epoch_out_of_order: 'Recording segments must be started in order.',
   grant_limit: 'Too many recording connections were requested for this call.',
+  epoch_stale: 'This recording session is out of date. Refresh and try again.',
+  grant_pending: 'A recording session is already active for this call.',
+  ingest_not_configured: 'Recording transport is not configured for this call.',
 };
 
 function failureFromDbError(error: unknown): DialpadRecordingFailure {
@@ -315,6 +341,80 @@ export async function mintDialpadRecordingGrant(
     );
     if (result.status === 'denied') return fail('denied', REASON_MESSAGES[result.reason] ?? 'Recording is not available for this call.', result.reason);
     return { ok: true, replayed: result.status === 'replayed', grantId: result.grantId, captureId: result.captureId, epoch: result.epoch, expiresAt: result.expiresAt, token };
+  } catch (error) {
+    return failureFromDbError(error);
+  }
+}
+
+export type MintNextEpochResult =
+  | {
+      ok: true;
+      replayed: boolean;
+      grantId: string;
+      captureId: string;
+      epoch: number;
+      expiresAt: string;
+      token: string;
+      ingestEndpoint: string;
+      controlVersion: 2;
+    }
+  | DialpadRecordingFailure;
+
+export interface MintNextEpochDeps {
+  generateToken?: () => { token: string; tokenHash: string };
+  ttlSeconds?: number;
+}
+
+/** Allocates a recovery epoch from the authoritative consumed-grant watermark. */
+export async function mintDialpadRecordingNextEpoch(
+  db: DialpadRecordingDb,
+  actor: DialpadRecordingActor,
+  input: { captureId: unknown; expectedConsumedEpoch: unknown },
+  deps: MintNextEpochDeps = {},
+): Promise<MintNextEpochResult> {
+  if (!db.mintNextEpoch) return fail('unavailable', 'Browser recording transport is unavailable.');
+  if (!isUuid(input.captureId) || !isIntIn(input.expectedConsumedEpoch, 0, DIALPAD_RECORDING_MAX_EPOCH)) return fail('invalid_input', 'Choose a recording and current session first.');
+  const ttlSeconds = deps.ttlSeconds ?? DIALPAD_RECORDING_GRANT_TTL_SECONDS.default;
+  if (!isIntIn(ttlSeconds, DIALPAD_RECORDING_GRANT_TTL_SECONDS.min, DIALPAD_RECORDING_GRANT_TTL_SECONDS.max)) return fail('invalid_input', 'Invalid grant lifetime.');
+  const { token, tokenHash } = (deps.generateToken ?? generateDialpadIngestToken)();
+  try {
+    const result = parseDialpadRecordingBrowserGrantResult(await db.mintNextEpoch({
+      orgId: actor.orgId,
+      repUserId: actor.userId,
+      captureId: input.captureId,
+      expectedConsumedEpoch: input.expectedConsumedEpoch,
+      tokenHash,
+      ttlSeconds,
+    }));
+    if (result.status === 'denied') return fail('denied', REASON_MESSAGES[result.reason] ?? 'Recording is not available for this call.', result.reason);
+    return {
+      ok: true,
+      replayed: result.status === 'replayed',
+      grantId: result.grantId,
+      captureId: result.captureId,
+      epoch: result.epoch,
+      expiresAt: result.expiresAt,
+      token,
+      ingestEndpoint: result.ingestEndpoint,
+      controlVersion: result.controlVersion,
+    };
+  } catch (error) {
+    return failureFromDbError(error);
+  }
+}
+
+export type BrowserStatusResult = { ok: true; status: DialpadRecordingBrowserStatus } | DialpadRecordingFailure;
+
+/** Returns lifecycle/bootstrap facts safe for the browser; storage locators are excluded by the parser. */
+export async function getDialpadRecordingBrowserStatus(
+  db: DialpadRecordingDb,
+  actor: DialpadRecordingActor,
+  captureId: unknown,
+): Promise<BrowserStatusResult> {
+  if (!db.getBrowserStatus) return fail('unavailable', 'Browser recording transport is unavailable.');
+  if (!isUuid(captureId)) return fail('invalid_input', 'Choose a recording first.');
+  try {
+    return { ok: true, status: parseDialpadRecordingBrowserStatus(await db.getBrowserStatus(actor.orgId, actor.userId, captureId)) };
   } catch (error) {
     return failureFromDbError(error);
   }

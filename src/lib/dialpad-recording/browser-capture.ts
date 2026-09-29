@@ -360,10 +360,22 @@ function browserRuntime(): BrowserCaptureRuntime {
 }
 
 export type BrowserCaptureSinks = {
+  /** Actual worklet format, emitted before either binary sink is allowed. */
+  readonly onTrackFormat?: (format: BrowserCaptureTrackFormat) => void | Promise<void>;
   readonly onWebmChunk: (chunk: EncodedMediaChunk) => void | Promise<void>;
   readonly onPcmFrame: (frame: PcmFrame) => void | Promise<void>;
   readonly onPcmTail?: (tail: PcmTailReport) => void | Promise<void>;
   readonly onFailure?: (error: BrowserCaptureError) => void;
+};
+
+export type BrowserCaptureTrackFormat = {
+  readonly track: PcmTrack;
+  readonly contextSampleRateHz: number;
+  readonly inputChannels: number;
+  readonly recordingMimeType: typeof MEDIA_RECORDER_MIME_TYPE;
+  readonly pcmSampleRateHz: 16_000;
+  readonly pcmChannels: 1;
+  readonly pcmEncoding: "s16le";
 };
 
 export type PreparedDialpadCapture = {
@@ -441,6 +453,8 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
       let stopPromise: Promise<void> | null = null;
       let stopRequested = false;
       let pcmAdmissionOpen = true;
+      let formatReady = false;
+      const startupPcmFrames: PcmFrame[] = [];
       const startupAbort = new AbortController();
       const fail = (error: BrowserCaptureError) => {
         if (!failed) {
@@ -463,6 +477,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
           }
         }
         pcmAdmissionOpen = false;
+        startupPcmFrames.length = 0;
         stopTracks(tabStream);
         stopTracks(micStream);
         stopTracks(display);
@@ -484,7 +499,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         return stopPromise;
       };
       let pendingPcmFrames = 0;
-      const emitPcmFrame = async (frame: PcmFrame) => {
+      const deliverPcmFrame = async (frame: PcmFrame) => {
         if (!pcmAdmissionOpen || failed) return;
         if (pendingPcmFrames >= MAX_PENDING_PCM_FRAMES) {
           fail(new BrowserCaptureError("buffer_overflow", "PCM sink capacity was exceeded."));
@@ -498,6 +513,18 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         } finally {
           pendingPcmFrames -= 1;
         }
+      };
+      const emitPcmFrame = async (frame: PcmFrame) => {
+        if (!pcmAdmissionOpen || failed) return;
+        if (!formatReady) {
+          if (startupPcmFrames.length >= MAX_PENDING_PCM_FRAMES) {
+            fail(new BrowserCaptureError("buffer_overflow", "PCM startup buffer capacity was exceeded."));
+            return;
+          }
+          startupPcmFrames.push(frame);
+          return;
+        }
+        await deliverPcmFrame(frame);
       };
       const emitPcmTail = async (tail: PcmTailReport) => {
         if (!pcmAdmissionOpen) return;
@@ -521,10 +548,6 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         if (runtime.supportsMediaRecorder && !runtime.supportsMediaRecorder(MEDIA_RECORDER_MIME_TYPE)) {
           throw new BrowserCaptureError("unsupported", `MediaRecorder does not support ${MEDIA_RECORDER_MIME_TYPE}.`);
         }
-        tabCollector = new MediaRecorderCollector({ track: "tab", stream: tabStream, epoch, createRecorder: runtime.createRecorder, onChunk: sinks.onWebmChunk, onFailure: fail });
-        micCollector = new MediaRecorderCollector({ track: "mic", stream: micStream, epoch, createRecorder: runtime.createRecorder, onChunk: sinks.onWebmChunk, onFailure: fail });
-        tabCollector.start(epoch);
-        micCollector.start(epoch);
         if (!runtime.createPcmSession) throw new BrowserCaptureError("unsupported", "AudioWorklet capture is unavailable.");
         const pcmFailure = (error: Error) => {
           fail(new BrowserCaptureError(error.name === "TimeoutError" ? "timeout" : "sink_failure", error.message));
@@ -547,6 +570,24 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         if (tabResult.status === "rejected") throw tabResult.reason;
         if (micResult.status === "rejected") throw micResult.reason;
         if (!tabPcm || !micPcm) throw new BrowserCaptureError("interrupted", "PCM capture did not start.");
+        const formats: BrowserCaptureTrackFormat[] = [
+          { track: "tab", contextSampleRateHz: tabPcm.sourceSampleRateHz, inputChannels: tabPcm.inputChannels, recordingMimeType: MEDIA_RECORDER_MIME_TYPE, pcmSampleRateHz: 16_000, pcmChannels: 1, pcmEncoding: "s16le" },
+          { track: "mic", contextSampleRateHz: micPcm.sourceSampleRateHz, inputChannels: micPcm.inputChannels, recordingMimeType: MEDIA_RECORDER_MIME_TYPE, pcmSampleRateHz: 16_000, pcmChannels: 1, pcmEncoding: "s16le" },
+        ];
+        try {
+          await sinks.onTrackFormat?.(formats[0]!);
+          await sinks.onTrackFormat?.(formats[1]!);
+        } catch (error) {
+          throw new BrowserCaptureError("sink_failure", error instanceof Error ? error.message : "Track format sink failed.");
+        }
+        formatReady = true;
+        const queuedFrames = startupPcmFrames.splice(0);
+        for (const frame of queuedFrames) await deliverPcmFrame(frame);
+        if (failed) throw failed;
+        tabCollector = new MediaRecorderCollector({ track: "tab", stream: tabStream, epoch, createRecorder: runtime.createRecorder, onChunk: sinks.onWebmChunk, onFailure: fail });
+        micCollector = new MediaRecorderCollector({ track: "mic", stream: micStream, epoch, createRecorder: runtime.createRecorder, onChunk: sinks.onWebmChunk, onFailure: fail });
+        tabCollector.start(epoch);
+        micCollector.start(epoch);
         state = "recording";
         return active;
       } catch (error) {

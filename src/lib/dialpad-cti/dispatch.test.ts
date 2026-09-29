@@ -76,6 +76,12 @@ describe('loadDialpadPanelBootstrap', () => {
     expect(bootstrap).toEqual({ connectionId: 'c', allowedOrigins: ['https://dialpad.com'], binding: { status: 'none' }, grants: [] });
     expect(JSON.stringify(bootstrap)).not.toContain('DIALPAD_CTI_DIRECTORY_KEY');
   });
+  it('exposes only a server-validated private WSS recording endpoint', async () => {
+    const valid = await loadDialpadPanelBootstrap(fakeDb({ loadConnection: async () => ({ id: 'c', status: 'active', allowedOrigins: ['https://dialpad.com'], companyId: null, directoryKeyRef: null, recordingIngestEndpoint: 'wss://recording.example.test/dialpad-browser-ingest' }) }), actor);
+    expect(valid?.recording).toEqual({ ingestEndpoint: 'wss://recording.example.test/dialpad-browser-ingest' });
+    const invalid = await loadDialpadPanelBootstrap(fakeDb({ loadConnection: async () => ({ id: 'c', status: 'active', allowedOrigins: ['https://dialpad.com'], companyId: null, directoryKeyRef: null, recordingIngestEndpoint: 'https://evil.example.test/dialpad-browser-ingest' }) }), actor);
+    expect(invalid).not.toHaveProperty('recording');
+  });
 });
 
 describe('verifyDialpadBinding (trusted path)', () => {

@@ -11,6 +11,8 @@ import {
   generateDialpadIngestToken,
   hashDialpadIngestToken,
   mintDialpadRecordingGrant,
+  mintDialpadRecordingNextEpoch,
+  getDialpadRecordingBrowserStatus,
   getDialpadRecordingLifecycle,
   getDialpadRecordingSealInputs,
   markDialpadRecordingEof,
@@ -39,9 +41,9 @@ type FakeDb = DialpadRecordingDb & { [K in keyof DialpadRecordingDb]: DialpadRec
 
 function fakeDb(): FakeDb {
   return {
-    open: vi.fn(), get: vi.fn(), close: vi.fn(), mintGrant: vi.fn(), consumeGrant: vi.fn(),
+    open: vi.fn(), get: vi.fn(), close: vi.fn(), mintGrant: vi.fn(), mintNextEpoch: vi.fn(), consumeGrant: vi.fn(),
     recordChunk: vi.fn(), claimSealWork: vi.fn(), registerResult: vi.fn(),
-    markEof: vi.fn(), getLifecycle: vi.fn(), getSealInputs: vi.fn(), recordVadRanges: vi.fn(), recordPcmProgress: vi.fn(), getVadSnapshot: vi.fn(),
+    markEof: vi.fn(), getLifecycle: vi.fn(), getSealInputs: vi.fn(), recordVadRanges: vi.fn(), recordPcmProgress: vi.fn(), getVadSnapshot: vi.fn(), getBrowserStatus: vi.fn(),
   } as unknown as FakeDb;
 }
 
@@ -118,6 +120,28 @@ describe('session-owned capture operations', () => {
     }
     expect(await mintDialpadRecordingGrant(db, ACTOR, { captureId: ID, epoch: 1 }, { ttlSeconds: 301 })).toMatchObject({ ok: false, code: 'invalid_input' });
     expect(db.mintGrant).toHaveBeenCalledTimes(1);
+  });
+
+  it('allocates browser epochs from the consumed watermark and returns only a trusted ingest endpoint', async () => {
+    const db = fakeDb();
+    const mintNextEpoch = db.mintNextEpoch!;
+    const generated = { token: 'T'.repeat(43), tokenHash: 'b'.repeat(64) };
+    mintNextEpoch.mockResolvedValue({ status: 'minted', grantId: ID, captureId: ID, epoch: 1, expiresAt: '2026-09-29T00:01:00Z', ingestEndpoint: 'wss://recording.example.test/dialpad-browser-ingest', controlVersion: 2 });
+    const result = await mintDialpadRecordingNextEpoch(db, ACTOR, { captureId: ID, expectedConsumedEpoch: 0 }, { generateToken: () => generated });
+    expect(result).toMatchObject({ ok: true, epoch: 1, token: generated.token, ingestEndpoint: 'wss://recording.example.test/dialpad-browser-ingest', controlVersion: 2 });
+    expect(mintNextEpoch).toHaveBeenCalledWith({ orgId: ACTOR.orgId, repUserId: ACTOR.userId, captureId: ID, expectedConsumedEpoch: 0, tokenHash: generated.tokenHash, ttlSeconds: 60 });
+    expect(JSON.stringify(mintNextEpoch.mock.calls)).not.toContain(generated.token);
+    mintNextEpoch.mockResolvedValue({ status: 'denied', reason: 'epoch_stale', latestConsumedEpoch: 1 });
+    expect(await mintDialpadRecordingNextEpoch(db, ACTOR, { captureId: ID, expectedConsumedEpoch: 0 }, { generateToken: () => generated })).toMatchObject({ ok: false, reason: 'epoch_stale' });
+  });
+
+  it('projects browser lifecycle status without private storage paths', async () => {
+    const db = fakeDb();
+    db.getBrowserStatus!.mockResolvedValue({ captureId: ID, captureStatus: 'open', closedAt: null, drainDeadlineAt: null, latestConsumedEpoch: 1, ingestEndpoint: 'wss://recording.example.test/dialpad-browser-ingest', controlVersion: 2, tracks: ['tab', 'mic'], totalSamples: 640, measurementStatus: 'provisional' });
+    const result = await getDialpadRecordingBrowserStatus(db, ACTOR, ID);
+    expect(result).toMatchObject({ ok: true, status: { latestConsumedEpoch: 1, ingestEndpoint: 'wss://recording.example.test/dialpad-browser-ingest', totalSamples: 640, measurementStatus: 'provisional' } });
+    expect(JSON.stringify(result)).not.toContain('storagePath');
+    expect(db.getBrowserStatus).toHaveBeenCalledWith(ACTOR.orgId, ACTOR.userId, ID);
   });
 });
 
@@ -255,6 +279,10 @@ describe('createSupabaseDialpadRecordingDb', () => {
     expect(rpc).toHaveBeenCalledWith('fn_claim_dialpad_recording_seal_work', { p_worker_id: 'w', p_lease_seconds: 300 });
     await db.mintGrant({ orgId: 'o', repUserId: 'r', captureId: 'c', epoch: 1, tokenHash: 'h', ttlSeconds: 60 });
     expect(rpc).toHaveBeenLastCalledWith('fn_mint_dialpad_recording_ingest_grant', { p_org_id: 'o', p_rep_user_id: 'r', p_capture_id: 'c', p_epoch: 1, p_token_hash: 'h', p_ttl_seconds: 60 });
+    await db.mintNextEpoch!({ orgId: 'o', repUserId: 'r', captureId: 'c', expectedConsumedEpoch: 0, tokenHash: 'h', ttlSeconds: 60 });
+    expect(rpc).toHaveBeenLastCalledWith('fn_mint_dialpad_recording_next_epoch', { p_org_id: 'o', p_rep_user_id: 'r', p_capture_id: 'c', p_expected_consumed_epoch: 0, p_token_hash: 'h', p_ttl_seconds: 60 });
+    await db.getBrowserStatus!('o', 'r', 'c');
+    expect(rpc).toHaveBeenLastCalledWith('fn_get_dialpad_recording_browser_status', { p_org_id: 'o', p_rep_user_id: 'r', p_capture_id: 'c' });
     rpc.mockResolvedValueOnce({ data: null, error: { code: '40001', message: 'x', details: 'chunk_conflict' } });
     await expect(db.consumeGrant('h', 'w')).rejects.toMatchObject({ name: 'DialpadRecordingDbError', sqlstate: '40001', failure: { kind: 'conflict' } });
   });

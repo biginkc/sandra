@@ -5,6 +5,8 @@ import {
   closeDialpadRecordingCapture,
   createSupabaseDialpadRecordingDb,
   mintDialpadRecordingGrant,
+  mintDialpadRecordingNextEpoch,
+  getDialpadRecordingBrowserStatus,
   openDialpadRecordingCapture,
   type DialpadRecordingActor,
   type DialpadRecordingDb,
@@ -47,4 +49,16 @@ export async function mintDialpadRecordingGrantAction(input: { captureId: unknow
   const s = await session();
   if (!s) return unauthenticated;
   return mintDialpadRecordingGrant(s.db, s.actor, { captureId: input?.captureId, epoch: input?.epoch });
+}
+
+export async function mintDialpadRecordingNextEpochAction(input: { captureId: unknown; expectedConsumedEpoch: unknown }) {
+  const s = await session();
+  if (!s) return unauthenticated;
+  return mintDialpadRecordingNextEpoch(s.db, s.actor, { captureId: input?.captureId, expectedConsumedEpoch: input?.expectedConsumedEpoch });
+}
+
+export async function getDialpadRecordingBrowserStatusAction(captureId: unknown) {
+  const s = await session();
+  if (!s) return unauthenticated;
+  return getDialpadRecordingBrowserStatus(s.db, s.actor, captureId);
 }

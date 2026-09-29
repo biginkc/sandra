@@ -5,6 +5,12 @@ import { Button } from '@/components/ui/button';
 import type { DialpadCallStatus } from '@/lib/dialpad-cti/contracts';
 import type { DialpadPanelBootstrap } from '@/lib/dialpad-cti/dispatch';
 import {
+  createSandraCaptureHandleProof,
+  prepareDialpadBrowserCapture,
+  type PreparedDialpadCapture,
+} from '@/lib/dialpad-recording/browser-capture';
+import { createDialpadBrowserSession, type DialpadBrowserSession } from '@/lib/dialpad-recording/browser-session';
+import {
   buildEnableCurrentTabMessage,
   buildInitiateCallMessage,
   DIALPAD_CTI_IFRAME_ALLOW,
@@ -23,6 +29,12 @@ import {
   startDialpadCallAction,
   verifyDialpadBindingAction,
 } from '../dialpad-actions';
+import {
+  closeDialpadRecordingCaptureAction,
+  getDialpadRecordingBrowserStatusAction,
+  mintDialpadRecordingNextEpochAction,
+  openDialpadRecordingCaptureAction,
+} from '../dialpad-recording-actions';
 
 export interface DialpadCallRequest {
   nonce: number;
@@ -56,6 +68,17 @@ type Chooser = {
   notice: string | null;
 };
 
+type RecordingPanelState = {
+  intentId: string;
+  prepared: PreparedDialpadCapture | null;
+  captureId: string | null;
+  session: DialpadBrowserSession | null;
+  busy: boolean;
+  message: string | null;
+  measuredSamples: number | null;
+  measurementStatus: 'provisional' | 'partial' | 'finalized' | null;
+};
+
 const ACTIVE_STATES: ReadonlySet<string> = new Set(['prepared', 'awaiting_provider', 'dialing', 'connected']);
 
 const STATE_LABEL: Record<DialpadCallStatus['state'], string> = {
@@ -83,6 +106,8 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
   const [chooser, setChooser] = useState<Chooser | null>(null);
   const [calls, setCalls] = useState<DialpadCallStatus[]>([]);
   const [labels, setLabels] = useState<Record<string, string>>({});
+  const [recording, setRecording] = useState<RecordingPanelState | null>(null);
+  const recordingRef = useRef<RecordingPanelState | null>(null);
   const attemptedUser = useRef<string | null>(null);
   const enabledTab = useRef(false);
   const startFired = useRef<string | null>(null);
@@ -119,6 +144,12 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
   useEffect(() => { bindingRef.current = binding; }, [binding]);
 
   const canDial = binding.status === 'verified' && iframeUser !== null && iframeUser === binding.dialpadUserId;
+
+  useEffect(() => { recordingRef.current = recording; }, [recording]);
+  useEffect(() => () => {
+    const current = recordingRef.current;
+    void (current?.session ? current.session.dispose() : current?.prepared?.dispose());
+  }, []);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -291,6 +322,65 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
     setChooser(null);
   };
 
+  const prepareRecording = async (call: DialpadCallStatus) => {
+    if (!bootstrap.recording || recording?.busy) return;
+    if (recording?.intentId !== call.intentId) {
+      if (recording?.session) await recording.session.dispose();
+      else await recording?.prepared?.dispose();
+    }
+    setRecording({ intentId: call.intentId, prepared: null, captureId: null, session: null, busy: true, message: null, measuredSamples: null, measurementStatus: null });
+    try {
+      const mediaDevices = navigator.mediaDevices as MediaDevices & { setCaptureHandleConfig?: (config: { handle: string; exposeOrigin: boolean; permittedOrigins: readonly string[] }) => void };
+      const proof = createSandraCaptureHandleProof({ origin: window.location.origin, setCaptureHandleConfig: mediaDevices.setCaptureHandleConfig?.bind(mediaDevices) });
+      const prepared = await prepareDialpadBrowserCapture({ proof });
+      setRecording({ intentId: call.intentId, prepared, captureId: null, session: null, busy: false, message: 'Capture ready. Start recording when the call is connected.', measuredSamples: null, measurementStatus: null });
+    } catch (error) {
+      setRecording({ intentId: call.intentId, prepared: null, captureId: null, session: null, busy: false, message: error instanceof Error ? error.message : 'Browser capture could not be prepared.', measuredSamples: null, measurementStatus: null });
+    }
+  };
+
+  const startRecording = async (call: DialpadCallStatus) => {
+    const current = recording;
+    if (!current?.prepared || current.intentId !== call.intentId || current.busy || !bootstrap.recording) return;
+    setRecording({ ...current, busy: true, message: null });
+    try {
+      const opened = await openDialpadRecordingCaptureAction(call.intentId);
+      if (!opened.ok || !('capture' in opened)) throw new Error(opened.message);
+      const captureId = opened.capture.captureId;
+      const status = await getDialpadRecordingBrowserStatusAction(captureId);
+      if (!status.ok || !('status' in status)) throw new Error(status.message);
+      const grant = await mintDialpadRecordingNextEpochAction({ captureId, expectedConsumedEpoch: status.status.latestConsumedEpoch });
+      if (!grant.ok || !('token' in grant)) throw new Error(grant.message);
+      const session = createDialpadBrowserSession({
+        endpoint: grant.ingestEndpoint,
+        token: grant.token,
+        epoch: grant.epoch,
+        capture: current.prepared,
+        onSnapshot: (snapshot) => setRecording((latest) => latest?.intentId === call.intentId ? { ...latest, measuredSamples: snapshot.totalSamples, measurementStatus: snapshot.measurementStatus } : latest),
+        onFailure: (failure) => setRecording((latest) => latest?.intentId === call.intentId ? { ...latest, busy: false, message: failure.message } : latest),
+      });
+      await session.start();
+      setRecording((latest) => latest?.intentId === call.intentId ? { ...latest, prepared: current.prepared, captureId, session, busy: false, message: 'Recording is active.' } : latest);
+    } catch (error) {
+      setRecording((latest) => latest?.intentId === call.intentId ? { ...latest, busy: false, message: error instanceof Error ? error.message : 'Recording could not start.' } : latest);
+    }
+  };
+
+  const stopRecording = async (call: DialpadCallStatus) => {
+    const current = recording;
+    if (!current?.session || !current.captureId || current.intentId !== call.intentId || current.busy) return;
+    setRecording({ ...current, busy: true, message: null });
+    try {
+      await current.session.stop();
+      const closed = await closeDialpadRecordingCaptureAction(current.captureId);
+      const status = await getDialpadRecordingBrowserStatusAction(current.captureId);
+      const message = !closed.ok ? closed.message : !status.ok || !('status' in status) ? status.message : `Recording ${status.status.captureStatus}.`;
+      setRecording({ ...current, busy: false, message, measuredSamples: status.ok && 'status' in status ? status.status.totalSamples : current.measuredSamples, measurementStatus: status.ok && 'status' in status ? status.status.measurementStatus : current.measurementStatus });
+    } catch (error) {
+      setRecording({ ...current, busy: false, message: error instanceof Error ? error.message : 'Recording could not finish.' });
+    }
+  };
+
   if (!originOk) return null;
 
   const blocked = binding.status !== 'verified'
@@ -357,6 +447,15 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
               {call.state === 'ended' && call.callActivityId && (
                 <Button type="button" variant="outline" className="ml-2" onClick={() => onLogOutcome(call.propertyId, call.callActivityId!)}>Log outcome</Button>
               )}
+              {bootstrap.recording && call.state === 'connected' && (
+                <span className="ml-2 inline-flex items-center gap-2">
+                  {recording?.intentId !== call.intentId && <Button type="button" variant="outline" onClick={() => void prepareRecording(call)}>Prepare recording</Button>}
+                  {recording?.intentId === call.intentId && !recording.session && <Button type="button" variant="outline" disabled={recording.busy || !recording.prepared} onClick={() => void startRecording(call)}>{recording.busy ? 'Starting…' : 'Start recording'}</Button>}
+                  {recording?.intentId === call.intentId && recording.session && <Button type="button" variant="outline" disabled={recording.busy} onClick={() => void stopRecording(call)}>{recording.busy ? 'Finishing…' : 'End recording'}</Button>}
+                </span>
+              )}
+              {recording?.intentId === call.intentId && recording.message && <span role="status" className="ml-2 text-xs text-muted-foreground">{recording.message}</span>}
+              {recording?.intentId === call.intentId && recording.measuredSamples !== null && <span className="ml-2 text-xs text-muted-foreground">{Math.floor(recording.measuredSamples / 16_000)}s measured ({recording.measurementStatus ?? 'provisional'})</span>}
             </li>
           ))}
         </ul>

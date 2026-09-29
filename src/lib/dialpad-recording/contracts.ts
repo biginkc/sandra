@@ -44,6 +44,15 @@ export const DIALPAD_RECORDING_MINT_DENIALS = [
 ] as const;
 export type DialpadRecordingMintDenial = (typeof DIALPAD_RECORDING_MINT_DENIALS)[number];
 
+/** Denials returned by the browser-session epoch allocator. */
+export const DIALPAD_RECORDING_BROWSER_MINT_DENIALS = [
+  ...DIALPAD_RECORDING_MINT_DENIALS,
+  'epoch_stale',
+  'grant_pending',
+  'ingest_not_configured',
+] as const;
+export type DialpadRecordingBrowserMintDenial = (typeof DIALPAD_RECORDING_BROWSER_MINT_DENIALS)[number];
+
 export const DIALPAD_RECORDING_CONSUME_DENIALS = [
   'unknown',
   'consumed',
@@ -258,6 +267,84 @@ export function parseDialpadRecordingGrantResult(value: Json | null | undefined)
     captureId: str(data.captureId, 'captureId'),
     epoch: int(data.epoch, 'epoch'),
     expiresAt: str(data.expiresAt, 'expiresAt'),
+  };
+}
+
+export type DialpadRecordingBrowserGrantResult =
+  | {
+      status: 'minted' | 'replayed';
+      grantId: string;
+      captureId: string;
+      epoch: number;
+      expiresAt: string;
+      ingestEndpoint: string;
+      controlVersion: 2;
+    }
+  | { status: 'denied'; reason: DialpadRecordingBrowserMintDenial; latestConsumedEpoch?: number };
+
+function trustedIngestEndpoint(value: Json | undefined): string {
+  const endpoint = str(value, 'ingestEndpoint');
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    throw new Error('Invalid ingestEndpoint.');
+  }
+  if (parsed.protocol !== 'wss:' || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== '/dialpad-browser-ingest') {
+    throw new Error('Invalid ingestEndpoint.');
+  }
+  return endpoint;
+}
+
+export function parseDialpadRecordingBrowserGrantResult(value: Json | null | undefined): DialpadRecordingBrowserGrantResult {
+  const data = record(value, 'browser ingest grant');
+  const status = oneOf(data.status, ['minted', 'replayed', 'denied'] as const, 'status');
+  if (status === 'denied') {
+    const latest = data.latestConsumedEpoch;
+    if (latest !== undefined && latest !== null && (typeof latest !== 'number' || !Number.isSafeInteger(latest) || latest < 0 || latest > DIALPAD_RECORDING_MAX_EPOCH)) throw new Error('Invalid latestConsumedEpoch.');
+    return { status, reason: oneOf(data.reason, DIALPAD_RECORDING_BROWSER_MINT_DENIALS, 'reason'), ...(latest === undefined || latest === null ? {} : { latestConsumedEpoch: latest }) };
+  }
+  if (data.controlVersion !== 2) throw new Error('Invalid controlVersion.');
+  return {
+    status,
+    grantId: str(data.grantId, 'grantId'),
+    captureId: str(data.captureId, 'captureId'),
+    epoch: int(data.epoch, 'epoch'),
+    expiresAt: str(data.expiresAt, 'expiresAt'),
+    ingestEndpoint: trustedIngestEndpoint(data.ingestEndpoint),
+    controlVersion: 2,
+  };
+}
+
+export interface DialpadRecordingBrowserStatus {
+  captureId: string;
+  captureStatus: DialpadCaptureState;
+  closedAt: string | null;
+  drainDeadlineAt: string | null;
+  latestConsumedEpoch: number;
+  ingestEndpoint: string | null;
+  controlVersion: 2;
+  tracks: DialpadRecordingTrack[];
+  totalSamples: number;
+  measurementStatus: 'provisional' | 'partial' | 'finalized';
+}
+
+export function parseDialpadRecordingBrowserStatus(value: Json | null | undefined): DialpadRecordingBrowserStatus {
+  const data = record(value, 'browser recording status');
+  if (data.controlVersion !== 2) throw new Error('Invalid controlVersion.');
+  if (!Array.isArray(data.tracks) || data.tracks.length !== 2 || data.tracks[0] !== 'tab' || data.tracks[1] !== 'mic') throw new Error('Invalid tracks.');
+  const endpoint = data.ingestEndpoint === null || data.ingestEndpoint === undefined ? null : trustedIngestEndpoint(data.ingestEndpoint);
+  return {
+    captureId: str(data.captureId, 'captureId'),
+    captureStatus: oneOf(data.captureStatus, DIALPAD_CAPTURE_STATES, 'captureStatus'),
+    closedAt: nullableStr(data.closedAt, 'closedAt'),
+    drainDeadlineAt: nullableStr(data.drainDeadlineAt, 'drainDeadlineAt'),
+    latestConsumedEpoch: int(data.latestConsumedEpoch, 'latestConsumedEpoch'),
+    ingestEndpoint: endpoint,
+    controlVersion: 2,
+    tracks: ['tab', 'mic'],
+    totalSamples: bigish(data.totalSamples, 'totalSamples'),
+    measurementStatus: oneOf(data.measurementStatus, ['provisional', 'partial', 'finalized'] as const, 'measurementStatus'),
   };
 }
 

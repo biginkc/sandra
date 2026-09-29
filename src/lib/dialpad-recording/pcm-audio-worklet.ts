@@ -263,6 +263,8 @@ export type PcmWorkletPort = {
 
 export type PcmWorkletSession = {
   readonly sourceSampleRateHz: number;
+  /** Actual input layout observed by the AudioContext source before collection starts. */
+  readonly inputChannels: number;
   stop(): Promise<PcmTailReport>;
 };
 
@@ -391,6 +393,10 @@ export async function startPcmWorkletSession(
     node = runtime.createNode ? runtime.createNode(context) : new AudioWorkletNode(context, PCM_WORKLET_PROCESSOR_NAME);
     const actualRate = context.sampleRate;
     assertSampleRate(actualRate);
+    const inputChannels = source.channelCount;
+    if (!Number.isInteger(inputChannels) || inputChannels < 1 || inputChannels > 2) {
+      throw new Error("Unsupported input channel layout; expected one or two channels.");
+    }
     node.port.onmessage = (event: MessageEvent) => {
       const message = event.data as { type?: string; frameIndex?: number; samples?: ArrayBuffer; totalInputSamples?: number; creditedSamples?: number; uncreditedTailSamples?: number; sourceSampleRateHz?: number };
       if (message.type === "unsupported-rate") {
@@ -436,6 +442,7 @@ export async function startPcmWorkletSession(
   let stopPromise: Promise<PcmTailReport> | null = null;
   return {
     sourceSampleRateHz: context.sampleRate,
+    inputChannels: source.channelCount,
     stop: async () => {
       if (stopPromise) return stopPromise;
       stopPromise = (async () => {

@@ -118,7 +118,7 @@ describe("stateful Dialpad PCM capture", () => {
       },
       close: portClose,
     };
-    const source = { connect: () => undefined, disconnect: () => undefined };
+    const source = { channelCount: 1, connect: () => undefined, disconnect: () => undefined };
     const gain = { gain: { value: 1 }, connect: () => undefined };
     const context = {
       sampleRate: 44_100,
@@ -151,7 +151,7 @@ describe("stateful Dialpad PCM capture", () => {
       sampleRate: 48_000,
       state: "running",
       audioWorklet: { addModule: async () => undefined },
-      createMediaStreamSource: () => ({ connect: () => undefined, disconnect: () => undefined }),
+      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
       createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
       close: async () => undefined,
     } as unknown as AudioContext;
@@ -181,7 +181,7 @@ describe("stateful Dialpad PCM capture", () => {
       sampleRate: 48_000,
       state: "running",
       audioWorklet: { addModule: async () => undefined },
-      createMediaStreamSource: () => ({ connect: () => undefined, disconnect: () => undefined }),
+      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
       createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
       close: async () => undefined,
     } as unknown as AudioContext;
@@ -229,7 +229,7 @@ describe("stateful Dialpad PCM capture", () => {
       sampleRate: 48_000,
       state: "suspended",
       audioWorklet: { addModule: async () => undefined },
-      createMediaStreamSource: () => ({ connect: () => undefined, disconnect: () => undefined }),
+      createMediaStreamSource: () => ({ channelCount: 1, connect: () => undefined, disconnect: () => undefined }),
       createGain: () => ({ gain: { value: 0 }, connect: () => undefined }),
       destination: {},
       resume: () => new Promise<void>(() => undefined),
