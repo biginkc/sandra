@@ -103,7 +103,10 @@ def timestamp(value: object) -> datetime:
     return result
 
 
-def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], tested_sha: str) -> dict:
+def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], tested_sha: str,
+                      *, manifest_reader=None, artifact_hasher=None) -> dict:
+    manifest_reader = manifest_reader or parse_manifest
+    artifact_hasher = artifact_hasher or artifact_sha256
     parts = directory.split("/")
     if len(parts) != 7 or "/".join(parts[:4]) != ROOT or parts[4] != tested_sha or parts[5] not in TIERS or not re.fullmatch(r"[A-Za-z0-9_-]+", parts[6]):
         raise EvidenceError(f"run filed under wrong SHA or malformed run directory: {directory}")
@@ -111,7 +114,7 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
     manifest_path = f"{directory}/manifest.json"
     if manifest_path not in paths:
         raise EvidenceError(f"incomplete run: missing manifest at {directory}")
-    manifest = parse_manifest(repo, commit, manifest_path)
+    manifest = manifest_reader(repo, commit, manifest_path)
     if not isinstance(manifest, dict) or manifest.get("tested_sha") != tested_sha or manifest.get("tier") != parts[5] or manifest.get("run_id") != parts[6]:
         raise EvidenceError(f"manifest identity mismatch: {directory}")
     for field, allowed in (("kind", KINDS), ("phase", PHASES), ("target", TARGETS)):
@@ -176,12 +179,29 @@ def validate_manifest(repo: Path, commit: str, directory: str, paths: set[str], 
     if normalized_paths != actual_paths:
         raise EvidenceError(f"artifact inventory mismatch: {directory}")
     for relative, expected in artifacts.items():
-        observed = artifact_sha256(repo, commit, f"{directory}/{relative}")
+        observed = artifact_hasher(repo, commit, f"{directory}/{relative}")
         if observed != expected:
             raise EvidenceError(f"artifact hash mismatch: {directory}/{relative}")
     if type(manifest.get("exit_status")) is not int:
         raise EvidenceError(f"missing numeric exit_status: {directory}")
     return {"directory": directory, "tier": parts[5], "key": (parts[5], manifest["kind"], manifest["phase"], manifest["target"]), "commit": commit, "completed_at": completed.isoformat(), "exit_status": manifest.get("exit_status"), "manifest": manifest}
+
+
+def validate_downloaded_manifest(root: Path, directory: str, paths: set[str], tested_sha: str) -> dict:
+    """Apply the sealed gate's per-record rules to a downloaded run directory."""
+    root = Path(root)
+
+    def read_manifest(_repo: Path, _commit: str, path: str) -> dict:
+        try:
+            return json.loads((root / path).read_bytes(), object_pairs_hook=unique_object_pairs)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise EvidenceError(f"invalid manifest: {path}: {exc}") from exc
+
+    def hash_artifact(_repo: Path, _commit: str, path: str) -> str:
+        return hashlib.sha256((root / path).read_bytes()).hexdigest()
+
+    return validate_manifest(root, "download", directory, paths, tested_sha,
+                             manifest_reader=read_manifest, artifact_hasher=hash_artifact)
 
 
 def collect(repo: Path, tested_sha: str, head: str = "HEAD") -> dict:

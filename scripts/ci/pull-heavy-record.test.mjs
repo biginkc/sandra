@@ -49,6 +49,12 @@ function fixture({ historical = false } = {}) {
   return { repo, root, dir, sha, manifest, run, artifact, save() { writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest)); }, check() { return verifyDownload(repo, root, run, artifact, sha); } };
 }
 test('valid downloaded evidence verifies', () => assert.equal(fixture().check().manifest.verdict, 'PASS'));
+test('gate refuses a downloaded manifest without clean-tree attestation', () => {
+  const f = fixture();
+  delete f.manifest.clean_tree;
+  f.save();
+  assert.throws(() => f.check(), /Command failed/);
+});
 test('failed workflow cannot supply a PASS or zero-exit manifest', () => {
   for (const [verdict, exitStatus] of [['PASS', 0], ['PASS', 7], ['FAIL', 0]]) {
     const f = fixture();
