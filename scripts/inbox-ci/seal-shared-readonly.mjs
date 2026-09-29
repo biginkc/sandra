@@ -28,9 +28,10 @@ function record(repo, sha, directory, kind, phase, artifact, ref) {
   return { directory, artifact, sha256: digest, data: JSON.parse(bytes) };
 }
 export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, platformRecord, inputSha = sha, inputRef = 'HEAD', now = new Date() }) {
-  if (!/^[0-9a-f]{40}$/.test(sha) || !['pre', 'post'].includes(phase)) throw new Error('Invalid SHA or phase');
-  if (!/^[0-9a-f]{40}$/.test(inputSha) || (phase === 'pre' && (inputSha !== sha || inputRef !== 'HEAD')) || (phase === 'post' && inputSha !== sha && inputRef === 'HEAD') || !/^[A-Za-z0-9._/-]+$/.test(inputRef) || inputRef.includes('..') || inputRef.startsWith('-')) throw new Error('Invalid input evidence reference');
-  if (git(repo, 'merge-base', '--is-ancestor', sha, 'HEAD').length) throw new Error('Input SHA is not ancestor');
+  if (!/^[0-9a-f]{40}$/.test(sha) || phase !== 'pre') throw new Error('Invalid SHA or phase: only pre is supported');
+  if (!/^[0-9a-f]{40}$/.test(inputSha) || inputSha !== sha || inputRef !== 'HEAD') throw new Error('Invalid input evidence reference');
+  try { git(repo, 'merge-base', '--is-ancestor', sha, 'HEAD'); }
+  catch { throw new Error('Input SHA is not ancestor'); }
   if (git(repo, 'status', '--porcelain', '--untracked-files=all').toString().trim()) throw new Error('Evidence worktree must start clean');
   const catalog = record(repo, inputSha, catalogRecord, 'catalog-fingerprint', 'n/a', 'catalog-pre.json', inputRef);
   const platform = record(repo, inputSha, platformRecord, 'db-contract', 'pre', 'platform-config.json', inputRef);
@@ -49,7 +50,7 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   const runId = `shared-readonly-${phase}-${now.toISOString().replace(/[-:.]/g, '').replace('Z', 'Z')}`;
   const relative = `${ROOT}/${sha}/pre-merge/${runId}`;
   const absolute = path.join(repo, relative);
-  const readonly = { verdict: 'PASS', target: 'shared-test', phase, comparisons: { catalog: { verdict: 'PASS', input_sha256: catalog.sha256, observed_section_sha256: observedSections }, platform: { verdict: 'PASS', input_sha256: platform.sha256, observed_sha256: source.comparisons.platform.observed_sha256 } }, counts: { member_orgs: source.member_orgs?.length ?? 0, queued: Object.keys(source.queued?.per_row ?? {}).length }, items: {} };
+  const readonly = { verdict: source.verdict, target: 'shared-test', phase, comparisons: { catalog: { verdict: 'PASS', input_sha256: catalog.sha256, observed_section_sha256: observedSections }, platform: { verdict: 'PASS', input_sha256: platform.sha256, observed_sha256: source.comparisons.platform.observed_sha256 } }, counts: { member_orgs: source.member_orgs?.length ?? 0, queued: Object.keys(source.queued?.per_row ?? {}).length }, items: {} };
   const queued = source.items?.queued_invariants;
   if (queued) readonly.items.queued_invariants = { verdict: queued.verdict, ...(queued.diff ? { diff: hash(Buffer.from(JSON.stringify(queued.diff))) } : {}), ...(queued.stability_probe ? { stability_probe: queued.stability_probe } : {}) };
   inspect(readonly);
@@ -57,7 +58,7 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   const scripts = ['scripts/inbox-ci/seal-shared-readonly.mjs', 'scripts/outbox-db-contract-readonly.mjs'];
   const operator_script_sha256 = Object.fromEntries(scripts.map(script => [script, hash(git(repo, 'show', `${sha}:${script}`))]));
   if (scripts.some(script => operator_script_sha256[script] !== hash(readFileSync(path.join(repo, script))))) throw new Error('Operator script differs from tested SHA');
-  const manifest = { tested_sha: sha, tier: 'pre-merge', kind: 'shared-readonly', phase, target: 'shared-test', verdict: 'PASS', exit_status: 0, run_id: runId, started_at: source.started_at ?? now.toISOString(), completed_at: now.toISOString(), clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative }, artifacts: { 'readonly.json': hash(bytes) }, target_binding: { project_ref: REF, pooler_user: `postgres.${REF}` }, inputs: { catalog_record: { directory: catalog.directory, artifact: catalog.artifact, sha256: catalog.sha256 }, platform_record: { directory: platform.directory, artifact: platform.artifact, sha256: platform.sha256 } }, operator_script_sha256, event: 'operator', workflow_path: '', github_run_id: '', github_run_attempt: '', items: readonly.items };
+  const manifest = { tested_sha: sha, tier: 'pre-merge', kind: 'shared-readonly', phase, target: 'shared-test', verdict: source.verdict, exit_status: 0, run_id: runId, started_at: source.started_at ?? now.toISOString(), completed_at: now.toISOString(), clean_tree: { start: true, end_excluding_run_dir: true, excluded_path: relative }, artifacts: { 'readonly.json': hash(bytes) }, target_binding: { project_ref: REF, pooler_user: `postgres.${REF}` }, inputs: { catalog_record: { directory: catalog.directory, artifact: catalog.artifact, sha256: catalog.sha256 }, platform_record: { directory: platform.directory, artifact: platform.artifact, sha256: platform.sha256 } }, operator_script_sha256, event: 'operator', workflow_path: '', github_run_id: '', github_run_attempt: '', items: readonly.items };
   mkdirSync(path.dirname(absolute), { recursive: true });
   mkdirSync(absolute, { recursive: false });
   writeFileSync(path.join(absolute, 'readonly.json'), bytes, { flag: 'wx' });

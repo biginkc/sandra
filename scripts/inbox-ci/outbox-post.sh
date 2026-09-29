@@ -15,6 +15,8 @@ set +a
 [[ "${E2E_DISPOSABLE_DATABASE:-}" == 1 ]] || { echo 'Provisioner did not publish E2E_DISPOSABLE_DATABASE=1' >&2; exit 1; }
 if [[ -n "$original_env" ]]; then cat "$lane_env" >> "$original_env"; fi
 export GITHUB_ENV="$original_env"
+export TEST_SUPABASE_URL=http://127.0.0.1:54321
+export E2E_CI_SUPABASE_DB_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres
 export HEAVY_PHASE=post
 google-chrome --version
 export NEXT_PUBLIC_SOFTPHONE_TRANSPORT=simulated

@@ -47,8 +47,18 @@ for (const [label, mutate] of [
   ['platform mismatch', f => { f.source.platform_config.postgres_major = '16'; f.save(); }],
   ['consumed hash mismatch', f => { f.source.comparisons.catalog.input_sha256 = '0'.repeat(64); f.save(); }],
   ['wrong phase', f => { f.args.phase = 'post'; }],
+  ['INCONCLUSIVE source verdict', f => { f.source.verdict = 'INCONCLUSIVE'; f.save(); }],
+  ['FAIL source verdict', f => { f.source.verdict = 'FAIL'; f.save(); }],
   ['missing input', f => { f.args.catalogRecord = `${f.root}/missing`; }],
   ['substituted input', f => { f.args.catalogRecord = f.args.platformRecord; }],
   ['non-PASS input', f => { const file = path.join(f.repo, f.args.catalogRecord, 'manifest.json'); const manifest = JSON.parse(readFileSync(file)); manifest.verdict = 'FAIL'; writeFileSync(file, JSON.stringify(manifest)); git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'mutate input'); }],
   ['input hash mismatch', f => { const file = path.join(f.repo, f.args.catalogRecord, 'manifest.json'); const manifest = JSON.parse(readFileSync(file)); manifest.artifacts['catalog-pre.json'] = '0'.repeat(64); writeFileSync(file, JSON.stringify(manifest)); git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'mutate hash'); }],
 ]) test(`sealer refuses ${label}`, () => { const f = fixture(); assert.throws(() => { mutate(f); sealSharedReadonly(f.args); }); });
+test('sealer rejects post before reading evidence', () => {
+  const f = fixture(); f.args.phase = 'post';
+  assert.throws(() => sealSharedReadonly(f.args), /only pre is supported/);
+});
+test('sealer reports a non-ancestor input SHA', () => {
+  const f = fixture(); f.args.sha = 'f'.repeat(40); f.args.inputSha = f.args.sha;
+  assert.throws(() => sealSharedReadonly(f.args), /Input SHA is not ancestor/);
+});
