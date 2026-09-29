@@ -409,7 +409,11 @@ export class JitterCallTransport implements CallTransport {
         !this.hasLiveMediaCapability()
       )
         this.releaseRecoveryClient(recoveryClient, recoveryAudio);
-      else recoveryAudio?.remove();
+      else if (
+        recoveryAudio !== this.remoteAudio &&
+        !this.hasLiveMediaCapability()
+      )
+        recoveryAudio?.remove();
       if (!this.isRecoverySetupCurrent(recoveryGeneration, handle.id))
         return handle;
       this.requireAudioReconnect(error);

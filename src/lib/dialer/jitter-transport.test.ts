@@ -3327,12 +3327,18 @@ describe("JitterCallTransport", () => {
     try {
       const client = new FakeRtcClient();
       client.connect.mockResolvedValue(undefined);
+      const audio = {
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        remove: vi.fn(),
+      } as unknown as HTMLAudioElement;
       const getProviderStatus = vi.fn(async () => ({
         ok: true as const,
         data: { state: "active" as const },
       }));
       const harness = transportHarness({
         createRtcClient: vi.fn(async () => client),
+        createRemoteAudio: vi.fn(() => audio),
         getProviderStatus,
         registrationTimeoutMs: 100,
       });
@@ -3363,6 +3369,7 @@ describe("JitterCallTransport", () => {
       expect(
         (harness.transport as unknown as { rtcClient: unknown }).rtcClient,
       ).toBe(client);
+      expect(audio.remove).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(10_000);
       expect(getProviderStatus).toHaveBeenCalledTimes(3);
       await expect(harness.transport.reconnectAudio()).resolves.toBe(true);
