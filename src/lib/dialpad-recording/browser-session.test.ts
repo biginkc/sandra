@@ -150,6 +150,172 @@ describe('Dialpad browser session', () => {
     expect(session.state()).toBe('recording');
   });
 
+  it('binds the server-owned timing nonce and waits for timing batch and exchange ACKs', async () => {
+    const socket = new FakeSocket();
+    const timingAnchor = {
+      kind: 'anchor', track: 'tab', seq: 0, contextId: '00000000-0000-4000-8000-000000000001', anchor: 'start',
+      contextFrame: 0, sourceCursor: 0, blockLength: 128, sourceRateHz: 48_000, outputCursor: 0,
+      outputFrameIndex: 0, phaseNumerator: 0, continuity: 'continuous', previousContextEndFrame: null, discardedTailSamples: null,
+    } as const;
+    socket.send = (data) => {
+      socket.sent.push(data);
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; seq?: number; batchId?: string; nonce?: string };
+      if (message.type === 'timing_probe') {
+        expect(message.nonce).toBeUndefined();
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_probe_reply', epoch: 1, seq: message.seq, nonce: 'a'.repeat(64), serverClockId: '00000000-0000-4000-8000-000000000003', serverReceiveMonoMs: 1, serverSendMonoMs: 2, serverReceiveWallMs: 100, serverSendWallMs: 90 })));
+      } else if (message.type === 'timing_confirm') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_exchange_ack', epoch: 1, seq: message.seq, status: 'recorded' })));
+      } else if (message.type === 'timing_batch') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_batch_ack', epoch: 1, batchId: message.batchId, status: 'recorded' })));
+      } else if (message.type === 'timing_end') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_end_ack', epoch: 1, status: 'collected', reasons: [] })));
+      }
+    };
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, enableTiming: true, ackTimeoutMs: 100,
+      capture: fakeCapture((sinks) => { void sinks.onTiming?.(timingAnchor); }),
+    });
+    const started = session.start();
+    socket.open();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.message(JSON.stringify({ type: 'ready', epoch: 1, controlVersion: 2, capabilities: ['capture_timing_v1'] }));
+    socket.message(JSON.stringify({ type: 'measurement_snapshot', epoch: 1, revision: 0, totalSamples: 0, measurementStatus: 'provisional', threshold: { crossed: false, crossingEpoch: null, crossingSample: null }, degradedReasons: [] }));
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'open', drainDeadlineAt: null }));
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await session.stop();
+    const probes = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string; lastSeq?: { tabAnchor?: number } }).filter((entry) => entry.type === 'timing_probe');
+    expect(probes.length).toBeGreaterThanOrEqual(1);
+    const ends = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string; lastSeq?: { tabAnchor?: number } }).filter((entry) => entry.type === 'timing_end');
+    expect(ends.at(-1)?.lastSeq?.tabAnchor).toBe(0);
+    const timingBatches = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string; records?: Array<{ kind?: string }> }).filter((entry) => entry.type === 'timing_batch');
+    expect(timingBatches.length).toBeGreaterThan(0);
+    expect(timingBatches.flatMap((batch) => batch.records ?? []).every((record) => record.kind !== 'exchange')).toBe(true);
+    expect(session.state()).toBe('stopped');
+  });
+
+  it('degrades timing when a confirm send fails and suppresses late replies after the timing barrier', async () => {
+    const socket = new FakeSocket();
+    const failures: string[] = [];
+    let confirmAttempts = 0;
+    let lateReply: string | null = null;
+    socket.send = (data) => {
+      socket.sent.push(data);
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; seq?: number };
+      if (message.type === 'timing_probe') {
+        lateReply = JSON.stringify({ type: 'timing_probe_reply', epoch: 1, seq: message.seq, nonce: 'c'.repeat(64), serverClockId: '00000000-0000-4000-8000-000000000003', serverReceiveMonoMs: 1, serverSendMonoMs: 2, serverReceiveWallMs: 100, serverSendWallMs: 90 });
+        queueMicrotask(() => socket.message(lateReply!));
+      } else if (message.type === 'timing_confirm') {
+        confirmAttempts += 1;
+        throw new Error('confirm transport failed');
+      } else if (message.type === 'timing_end') {
+        socket.message(lateReply!);
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_end_ack', epoch: 1, status: 'incomplete', reasons: ['persistence_failed'] })));
+      }
+    };
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, enableTiming: true, ackTimeoutMs: 25,
+      onFailure: (error) => failures.push(error.code), capture: fakeCapture(() => {}),
+    });
+    const started = session.start();
+    socket.open();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.message(JSON.stringify({ type: 'ready', epoch: 1, controlVersion: 2, capabilities: ['capture_timing_v1'] }));
+    socket.message(JSON.stringify({ type: 'measurement_snapshot', epoch: 1, revision: 0, totalSamples: 0, measurementStatus: 'provisional', threshold: { crossed: false, crossingEpoch: null, crossingSample: null }, degradedReasons: [] }));
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'open', drainDeadlineAt: null }));
+    await started;
+    await waitUntil(() => confirmAttempts === 1);
+    await session.stop();
+    const confirms = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string }).filter((entry) => entry.type === 'timing_confirm');
+    expect(confirms).toHaveLength(1);
+    expect(failures).toEqual([]);
+    expect(session.state()).toBe('stopped');
+  });
+
+  it('replays an exact late timing reply with the original browser receive timestamp', async () => {
+    const socket = new FakeSocket();
+    socket.send = (data) => {
+      socket.sent.push(data);
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; seq?: number; batchId?: string };
+      if (message.type === 'timing_probe') {
+        const reply = { type: 'timing_probe_reply', epoch: 1, seq: message.seq, nonce: 'b'.repeat(64), serverClockId: '00000000-0000-4000-8000-000000000003', serverReceiveMonoMs: 1, serverSendMonoMs: 2, serverReceiveWallMs: 100, serverSendWallMs: 90 };
+        queueMicrotask(() => socket.message(JSON.stringify(reply)));
+        queueMicrotask(() => socket.message(JSON.stringify(reply)));
+      } else if (message.type === 'timing_confirm') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_exchange_ack', epoch: 1, seq: message.seq, status: 'recorded' })));
+      } else if (message.type === 'timing_batch') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_batch_ack', epoch: 1, batchId: message.batchId, status: 'recorded' })));
+      } else if (message.type === 'timing_end') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_end_ack', epoch: 1, status: 'collected', reasons: [] })));
+      }
+    };
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, enableTiming: true, ackTimeoutMs: 100, capture: fakeCapture(() => {}) });
+    const started = session.start();
+    socket.open();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.message(JSON.stringify({ type: 'ready', epoch: 1, controlVersion: 2, capabilities: ['capture_timing_v1'] }));
+    socket.message(JSON.stringify({ type: 'measurement_snapshot', epoch: 1, revision: 0, totalSamples: 0, measurementStatus: 'provisional', threshold: { crossed: false, crossingEpoch: null, crossingSample: null }, degradedReasons: [] }));
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'open', drainDeadlineAt: null }));
+    await started;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await session.stop();
+    const confirms = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string; seq?: number; browserReceiveMs?: number }).filter((entry) => entry.type === 'timing_confirm' && entry.seq === 0);
+    expect(confirms.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(confirms.map((confirm) => confirm.browserReceiveMs)).size).toBe(1);
+    expect(session.state()).toBe('stopped');
+  });
+
+  it('bounds timing records at 32 including an in-flight batch without failing media', async () => {
+    const socket = new FakeSocket();
+    const batches: string[] = [];
+    let timingBatchSent!: () => void;
+    const firstBatchSent = new Promise<void>((resolve) => { timingBatchSent = resolve; });
+    socket.send = (data) => {
+      socket.sent.push(data);
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; batchId?: string };
+      if (message.type === 'timing_batch') {
+        batches.push(message.batchId!);
+        timingBatchSent();
+      } else if (message.type === 'timing_end') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_end_ack', epoch: 1, status: 'incomplete', reasons: ['persistence_failed'] })));
+      }
+    };
+    const timingAnchor = (seq: number) => ({
+      kind: 'anchor' as const, track: 'tab' as const, seq, contextId: '00000000-0000-4000-8000-000000000001', anchor: 'periodic' as const,
+      contextFrame: seq * 128, sourceCursor: seq * 128, blockLength: 128, sourceRateHz: 48_000, outputCursor: seq * 40,
+      outputFrameIndex: 0, phaseNumerator: 0, continuity: 'continuous' as const, previousContextEndFrame: seq === 0 ? null : seq * 128, discardedTailSamples: null,
+    });
+    const failures: string[] = [];
+    const capture = fakeCapture((sinks) => {
+      void (async () => {
+        for (let seq = 0; seq < 16; seq += 1) await sinks.onTiming?.(timingAnchor(seq));
+        await firstBatchSent;
+        for (let seq = 16; seq < 33; seq += 1) await sinks.onTiming?.(timingAnchor(seq));
+        await sinks.onPcmTail?.({ track: 'tab', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 });
+        await sinks.onPcmTail?.({ track: 'mic', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 });
+      })();
+    });
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, enableTiming: true, ackTimeoutMs: 100, capture, onFailure: (error) => failures.push(error.code) });
+    const started = session.start();
+    socket.open();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.message(JSON.stringify({ type: 'ready', epoch: 1, controlVersion: 2, capabilities: ['capture_timing_v1'] }));
+    socket.message(JSON.stringify({ type: 'measurement_snapshot', epoch: 1, revision: 0, totalSamples: 0, measurementStatus: 'provisional', threshold: { crossed: false, crossingEpoch: null, crossingSample: null }, degradedReasons: [] }));
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'open', drainDeadlineAt: null }));
+    await started;
+    await waitUntil(() => batches.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await session.stop();
+    const timingEnd = socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry) as { type?: string; outcome?: string; lastSeq?: Record<string, number> }).find((entry) => entry.type === 'timing_end');
+    expect(failures).toEqual([]);
+    expect(timingEnd).toMatchObject({ outcome: 'incomplete', lastSeq: { tabAnchor: -1, micAnchor: -1, tabContext: -1, micContext: -1, exchange: -1 } });
+    expect(session.state()).toBe('stopped');
+  });
+
   it('holds a recording chunk until its matching ACK and finishes both tracks only after drain responses', async () => {
     const socket = new FakeSocket();
     let chunk: EncodedMediaChunk | null = null;
