@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createRelayServer, columns } from './server.mjs';
+// Shared with src/lib/inbox/sync-upstream-config.test.ts (G4 / #592): both suites must agree on
+// which tokens are accepted. Do not fork this file; edit deployment/inbox/relay-token-fixtures.json instead.
+const fixturePath = fileURLToPath(new URL('../../deployment/inbox/relay-token-fixtures.json', import.meta.url));
+const tokenFixtures = JSON.parse(readFileSync(fixturePath, 'utf8'));
 const token = 'synthetic-test-token-with-more-than-32-characters';
 const params = new URLSearchParams({table:'inbox_bridge.projection',columns,replica:'default',offset:'-1',where:'org_id=$1','params[1]':'synthetic-org'});
 async function fixture(transport, run, maxConcurrent = 32) {
@@ -96,4 +102,20 @@ test('an idle upstream cannot exceed the relay deadline or retain its admission 
   assert.ok(Date.now()-started<16000);
   assert.equal((await fetch(`${base}/v1/shape?${params}`,{headers})).status,200);
  },1);
+});
+
+async function fixtureWithToken(transport, run, maxConcurrent, tokenOverride) {
+ const server=createRelayServer({upstream:'http://electric.invalid/',token:tokenOverride,projectionTable:'inbox_bridge.projection',transport,maxConcurrent});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try { await run(`http://127.0.0.1:${server.address().port}`); }
+ finally { await new Promise(resolve=>server.close(resolve)); }
+}
+
+test('accepts every Next-valid relay token from the shared parity fixture (G4 / #592)',async()=>{
+ for (const fixtureToken of tokenFixtures.valid) {
+  await fixtureWithToken(async()=>new Response('[]',{headers:{'electric-offset':'0_0'}}),async base=>{
+   const r=await fetch(`${base}/v1/shape?${params}`,{headers:{authorization:`Bearer ${fixtureToken}`}});
+   assert.equal(r.status,200,`relay must accept Next-valid fixture token: ${JSON.stringify(fixtureToken)}`);
+  },32,fixtureToken);
+ }
 });
