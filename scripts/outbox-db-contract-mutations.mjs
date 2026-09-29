@@ -78,6 +78,7 @@ export async function runMutations(output, phase) {
     if (process.env.HEAVY_LOCAL_FAILURE_INJECTION === '1' && process.env.OUTBOX_INJECT_AT === step) throw new Error(`INJECTED_ORCHESTRATION_FAILURE ${step}`);
   };
   let baseline;
+  let readonlyRehearsal;
   let failure;
   try {
     await db.connect();
@@ -134,6 +135,16 @@ export async function runMutations(output, phase) {
       inject(`${id}:recorded`);
     }
     inject('aggregate');
+    if (process.env.HEAVY_LANE === `db-contract-${phase}`) {
+      const rehearsalFile = `${output}.readonly-rehearsal.json`;
+      const fixtureFile = `${output}.fixture-rows.json`;
+      writeFileSync(fixtureFile, baseline.fixtureRows);
+      const pre = phase === 'post' ? ['--pre-file', process.env.HEAVY_PRE_READONLY_OUTPUT ?? ''] : [];
+      const scope = phase === 'post' ? ['--org', process.env.HEAVY_REHEARSAL_ORG ?? ''] : ['--fixture-rows', fixtureFile];
+      const rehearsal = spawnSync(process.execPath, ['scripts/inbox-ci/rehearse-readonly.mjs','--phase',phase,...scope,'--record',rehearsalFile,...pre], { encoding:'utf8', env:process.env, maxBuffer:20*1024*1024 });
+      assert.equal(rehearsal.status, 0, `readonly rehearsal: ${rehearsal.stderr}`);
+      readonlyRehearsal = JSON.parse(readFileSync(rehearsalFile));
+    }
   } catch (error) { failure = error; }
   finally {
     let platformConfig;
@@ -146,7 +157,7 @@ export async function runMutations(output, phase) {
     await db.end();
     const checks = baseline?.contracts ?? [];
     const fixtureRows = baseline?.fixtureRows;
-    const sealed = sealPhaseRecord({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, platformConfig, verdict: failure ? 'FAIL' : 'PASS', errorText: failure ? String(failure.stack ?? failure) : '' });
+    const sealed = sealPhaseRecord({ phase, checks, schemaState: baseline?.schemaState, mutations: results, fixtureRows, platformConfig, readonlyRehearsal, verdict: failure ? 'FAIL' : 'PASS', errorText: failure ? String(failure.stack ?? failure) : '' });
     if (process.env.GITHUB_ACTIONS === 'true') stagePhaseRunDir(sealed.runDir, process.cwd(), process.env.GITHUB_ENV);
     if (sealed.verdict !== 'PASS' && !failure) failure = new Error('INCOMPLETE_PHASE_INVENTORY');
   }

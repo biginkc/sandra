@@ -74,7 +74,7 @@ export async function run(args = process.argv.slice(2), env = process.env) {
   return status;
 }
 
-export function sealPhaseRecord({ phase, checks = [], schemaState = {}, mutations = [], fixtureRows, platformConfig, verdict = 'FAIL', errorText = '', env = process.env, runId, startedAt }) {
+export function sealPhaseRecord({ phase, checks = [], schemaState = {}, mutations = [], fixtureRows, platformConfig, readonlyRehearsal, verdict = 'FAIL', errorText = '', env = process.env, runId, startedAt }) {
   const binding = assertWriteMode('disposable', { apiUrl: env.TEST_SUPABASE_URL, dbUrl: env.E2E_CI_SUPABASE_DB_URL, env });
   const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
   runId ??= env.GITHUB_ACTIONS === 'true' ? env.GITHUB_RUN_ID : `${Date.now()}-${randomUUID().slice(0, 8)}-${phase}`;
@@ -86,6 +86,7 @@ export function sealPhaseRecord({ phase, checks = [], schemaState = {}, mutation
   writeFileSync(path.join(runDir, 'contracts.json'), `${JSON.stringify(checks, null, 2)}\n`);
   writeFileSync(path.join(runDir, 'mutations.json'), `${JSON.stringify(mutations, null, 2)}\n`);
   if (platformConfig) writeFileSync(path.join(runDir, 'platform-config.json'), `${JSON.stringify(platformConfig, null, 2)}\n`);
+  if (readonlyRehearsal) writeFileSync(path.join(runDir, 'readonly-rehearsal.json'), `${JSON.stringify(readonlyRehearsal, null, 2)}\n`);
   if (fixtureRows) writeFileSync(path.join(runDir, 'fixture-rows.json'), fixtureRows);
   if (errorText) writeFileSync(path.join(runDir, 'failure.log'), `${errorText}\n`);
   const lane = env.HEAVY_LANE || `db-contract-${phase}`;

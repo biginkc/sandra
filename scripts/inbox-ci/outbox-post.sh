@@ -16,6 +16,7 @@ set -a
 source "$lane_env"
 set +a
 [[ "${E2E_DISPOSABLE_DATABASE:-}" == 1 ]] || { echo 'Provisioner did not publish E2E_DISPOSABLE_DATABASE=1' >&2; exit 1; }
+bash scripts/inbox-ci/build-operator-indexes.sh
 if [[ -n "$original_env" ]]; then cat "$lane_env" >> "$original_env"; fi
 export GITHUB_ENV="$original_env"
 export TEST_SUPABASE_URL=http://127.0.0.1:54321
