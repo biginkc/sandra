@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import { expect, test } from "@playwright/test";
 
 test("Drips sidebar wording and water drop", async ({ page }) => {
@@ -11,5 +9,5 @@ test("Drips sidebar wording and water drop", async ({ page }) => {
   await expect(drips).toHaveAttribute("data-active", "true");
   await expect(drips.locator("svg.lucide-droplet")).toBeVisible();
   await expect(sidebar.getByRole("link", { name: "Sequences" })).toHaveCount(0);
-  await sidebar.screenshot({ path: path.resolve("docs/design/screenshots/drips/sidebar.png") });
+  await expect(sidebar).toHaveScreenshot("sidebar.png");
 });
