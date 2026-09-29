@@ -88,8 +88,8 @@ export async function enrollLead(
     };
   }
 
-  // The database index only prevents duplicates within one sequence. Keep the
-  // operator rule across sequences here, including drips paused for a reply.
+  // Keep this pre-check for a useful reason. The property-level unique index
+  // enforces the same rule when two requests race past this read.
   const { data: existing, error: existingErr } = await client
     .from("sequence_enrollments")
     .select("sequence_id, current_step_index, sequences(name)")
@@ -196,9 +196,8 @@ export async function enrollLead(
   // Calculate first fire time — delay of step 0 from enrollment moment.
   const nextRunAt = delayToDate(step0.delay_after_previous_minutes, new Date());
 
-  // INSERT — unique partial index prevents a second active/paused enrollment
-  // on the same (sequence, property) pair; catch 23505 and return a friendly
-  // outcome instead of surfacing the raw constraint error.
+  // INSERT — partial unique indexes enforce both the same-sequence and
+  // property-wide live enrollment rules atomically.
   const { data: inserted, error: insertErr } = await client
     .from("sequence_enrollments")
     .insert({
@@ -216,6 +215,30 @@ export async function enrollLead(
 
   if (insertErr) {
     if (insertErr.code === "23505") {
+      if (insertErr.message.includes("idx_enrollments_one_live_per_property")) {
+        const { data: winner, error: winnerErr } = await client
+          .from("sequence_enrollments")
+          .select("sequence_id, current_step_index, sequences(name)")
+          .eq("org_id", prop.org_id)
+          .eq("property_id", params.propertyId)
+          .in("status", ["active", "paused"])
+          .limit(1)
+          .maybeSingle();
+        if (winnerErr) return { status: "failed", message: winnerErr.message };
+        if (winner) {
+          const { count, error: countErr } = await client
+            .from("sequence_steps")
+            .select("id", { count: "exact", head: true })
+            .eq("sequence_id", winner.sequence_id);
+          if (countErr) return { status: "failed", message: countErr.message };
+          const name = winner.sequences?.name ?? "the current drip";
+          const total = count ?? 0;
+          if (total < 1) return { status: "already_in_drip", message: `Already in ${name}. Stop it or switch.` };
+          const step = Math.min(total, Math.max(1, winner.current_step_index + 1));
+          return { status: "already_in_drip", message: `Already in ${name}, text ${step} of ${total}. Stop it or switch.` };
+        }
+        return { status: "already_in_drip", message: "Already in another drip. Stop it or switch." };
+      }
       return { status: "duplicate_active" };
     }
     return { status: "failed", message: insertErr.message };

@@ -17,8 +17,8 @@ beforeEach(() => {
   selectBestSmsPhone.mockReturnValue({ phone: "+18165550001", lineType: "mobile" });
 });
 
-function clientFor(property: Record<string, unknown>, existingEnrollment?: { sequence_id: string; current_step_index: number; status: string; sequences: { name: string } }) {
-  const insert = vi.fn(() => ({ select: () => ({ single: async () => ({ data: { id: "enrollment-1" }, error: null }) }) }));
+function clientFor(property: Record<string, unknown>, existingEnrollment?: { sequence_id: string; current_step_index: number; status: string; sequences: { name: string } }, insertError?: { code: string; message: string }) {
+  const insert = vi.fn(() => ({ select: () => ({ single: async () => ({ data: insertError ? null : { id: "enrollment-1" }, error: insertError ?? null }) }) }));
   const rows: Record<string, unknown> = {
     sequences: { id: "sequence-1", org_id: "org-1", name: "Drip", active: true, archived_at: null },
     sequence_steps: { id: "step-1", delay_after_previous_minutes: 0 },
@@ -46,6 +46,29 @@ it.each(["active", "paused"])("refuses another drip while a lead has an %s enrol
     .toEqual({ status: "already_in_drip", message: "Already in Quiet check-in, text 2 of 4. Stop it or switch." });
   expect(inStatus).toHaveBeenCalledWith("status", ["active", "paused"]);
   expect(insert).not.toHaveBeenCalled();
+});
+
+it("maps the property-wide index race to the same plain reason", async () => {
+  const { client, insert } = clientFor({}, undefined, {
+    code: "23505", message: 'duplicate key value violates unique constraint "idx_enrollments_one_live_per_property"',
+  });
+  let enrollmentReads = 0;
+  const originalFrom = client.from;
+  client.from = vi.fn((table: string) => {
+    const builder = originalFrom(table);
+    if (table === "sequence_enrollments") {
+      builder.maybeSingle = async () => {
+        enrollmentReads++;
+        return enrollmentReads === 1
+          ? { data: null, error: null }
+          : { data: { sequence_id: "other-sequence", current_step_index: 1, sequences: { name: "Quiet check-in" } }, error: null };
+      };
+    }
+    return builder;
+  }) as typeof client.from;
+  expect(await enrollLead(client as never, { sequenceId: "sequence-1", propertyId: "property-1" }))
+    .toEqual({ status: "already_in_drip", message: "Already in Quiet check-in, text 2 of 4. Stop it or switch." });
+  expect(insert).toHaveBeenCalledOnce();
 });
 
 it.each([

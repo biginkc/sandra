@@ -36,6 +36,7 @@ type Props = {
   scrollContainerRef?: RefObject<HTMLDivElement | null>;
   dripMessageLabels?: Record<string, string>;
   dripReplyMessageIds?: string[];
+  dripReplyLabels?: Record<string, string>;
 };
 
 export type LeadMessageScope = {
@@ -89,6 +90,7 @@ export function MessagesThread({
   scrollContainerRef,
   dripMessageLabels = {},
   dripReplyMessageIds = [],
+  dripReplyLabels = {},
 }: Props) {
   const [fallbackNowMs] = useState(Date.now);
   const renderNowMs = useLiveNow(nowMs ?? fallbackNowMs);
@@ -208,6 +210,7 @@ export function MessagesThread({
             isMostRecentOutbound={it.msg.id === mostRecentOutboundId}
             dripLabel={dripMessageLabels[it.msg.id]}
             dripReply={dripReplyMessageIds.includes(it.msg.id)}
+            dripReplyLabel={dripReplyLabels[it.msg.id]}
           />
         ),
       )}
@@ -413,6 +416,7 @@ export function MessageBubble({
   presentation = "thread",
   dripLabel,
   dripReply = false,
+  dripReplyLabel,
 }: {
   message: Message;
   isContinuation: boolean;
@@ -421,6 +425,7 @@ export function MessageBubble({
   presentation?: "thread" | "timeline";
   dripLabel?: string;
   dripReply?: boolean;
+  dripReplyLabel?: string;
 }) {
   const outbound = message.direction === "outbound";
   const timeline = presentation === "timeline";
@@ -550,7 +555,7 @@ export function MessageBubble({
             )}
           {aiGenerated ? <SandraReplyBadge message={message} /> : null}
           {outbound && dripLabel ? <span className="font-semibold text-teal-700" data-testid="messages-thread-drip-label">{dripLabel}</span> : null}
-          {!outbound && dripReply ? <span className="font-semibold text-amber-700" data-testid="messages-thread-drip-reply">Replied to drip</span> : null}
+          {!outbound && dripReply ? <span className="font-semibold text-amber-700" data-testid="messages-thread-drip-reply">{dripReplyLabel ?? "Replied to drip"}</span> : null}
         </div>
       ) : null}
       {!showMetadataFooter && deliveryStatusLabel ? (

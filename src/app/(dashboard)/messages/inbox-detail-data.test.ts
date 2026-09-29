@@ -160,11 +160,14 @@ type SeedData = {
   sequence_step_runs?: Array<Record<string, unknown>>;
   sequences?: Array<Record<string, unknown>>;
   sequence_steps?: Array<Record<string, unknown>>;
+  lead_events?: Array<Record<string, unknown>>;
+  call_activities?: Array<Record<string, unknown>>;
+  acquisition_attempts?: Array<{ kind: string; at: string }>;
 };
 
 function makeSupabaseStub(seed: SeedData) {
   function makeBuilder(table: keyof SeedData) {
-    const filters: Array<{ kind: "eq" | "is" | "in"; key: string; value: unknown }> =
+    const filters: Array<{ kind: "eq" | "is" | "in" | "gt"; key: string; value: unknown }> =
       [];
     const negativeFilters: Array<{ key: string; value: unknown }> = [];
     let orderBy: { key: string; ascending: boolean } | null = null;
@@ -181,6 +184,10 @@ function makeSupabaseStub(seed: SeedData) {
       },
       in(key: string, values: unknown[]) {
         filters.push({ kind: "in", key, value: values });
+        return builder;
+      },
+      gt(key: string, value: string) {
+        filters.push({ kind: "gt", key, value });
         return builder;
       },
       is(key: string, value: unknown) {
@@ -238,6 +245,7 @@ function makeSupabaseStub(seed: SeedData) {
         rows = rows.filter((row) => {
           const value = row[filter.key as keyof typeof row];
           if (filter.kind === "in") return (filter.value as unknown[]).includes(value);
+          if (filter.kind === "gt") return String(value) > String(filter.value);
           return filter.kind === "eq"
             ? value === filter.value
             : value === null && filter.value === null;
@@ -274,7 +282,10 @@ function makeSupabaseStub(seed: SeedData) {
   }
 
   return {
-    rpc(_name: string, args: { p_conversation_id: string }) {
+    rpc(_name: string, args: { p_conversation_id?: string }) {
+      if (_name === "fn_get_lead_acquisition_history") {
+        return Promise.resolve({ data: { rows: seed.acquisition_attempts ?? [] }, error: null });
+      }
       const orgIds = [
         ...new Set(
           seed.messages
@@ -963,7 +974,7 @@ describe("fetchInboxDetail", () => {
     const seed: SeedData = {
       messages: [
         makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
-        makeMessage({ id: "manual-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:01:00Z" }),
+        makeMessage({ id: "manual-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T11:59:00Z" }),
         makeMessage({ id: "reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
       ],
       contacts: [makeContact({ id: CONTACT_ID })],
@@ -978,15 +989,53 @@ describe("fetchInboxDetail", () => {
     expect(detail?.drip).toMatchObject({ name: "Seller follow-up", step: 2, total: 2, replied: true, stoppedAt: "2026-06-09T12:02:00Z", timeZone: "America/Chicago" });
     expect(detail?.dripMessageLabels).toEqual({ "drip-text": "Drip · Seller follow-up · text 1 of 2" });
     expect(detail?.dripReplyMessageIds).toEqual(["reply"]);
+    expect(detail?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
     seed.messages.push(makeMessage({ id: "rep-reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:03:00Z" }));
     const afterRepAction = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
-    expect(afterRepAction?.drip?.replied).toBe(true);
+    expect(afterRepAction?.drip?.replied).toBe(false);
     expect(afterRepAction?.dripReplyMessageIds).toEqual(["reply"]);
     seed.sequence_enrollments![0].pause_reason = "rep_sms_human_takeover";
     const takeover = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
-    expect(takeover?.drip?.replied).toBe(true);
+    expect(takeover?.drip?.replied).toBe(false);
     seed.sequence_enrollments![0].pause_reason = "manual";
     const manuallyPaused = await fetchInboxDetail(supabase as never, CONVERSATION_ID);
     expect(manuallyPaused?.drip).toMatchObject({ status: "paused", replied: false });
+  });
+
+  it.each(["dispo", "call", "logged attempt"])("clears outstanding reply after a rep %s", async (action) => {
+    const seed: SeedData = {
+      messages: [
+        makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
+        makeMessage({ id: "reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })], properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "drip", status: "paused", pause_reason: "inbound_reply", current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" }],
+      sequence_step_runs: [{ message_id: "drip-text", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+      sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
+      sequence_steps: [{ id: "step-1", sequence_id: "drip" }],
+      lead_events: action === "dispo" ? [{ id: "event", org_id: "org-1", property_id: RECENT_PROPERTY_ID, event_type: "dispo_set", actor_type: "user", created_at: "2026-06-09T12:03:00Z" }] : [],
+      call_activities: action === "call" ? [{ id: "call", org_id: "org-1", property_id: RECENT_PROPERTY_ID, call_purpose: "customer", created_at: "2026-06-09T12:03:00Z" }] : [],
+      acquisition_attempts: action === "logged attempt" ? [{ kind: "attempt", at: "2026-06-09T12:03:00Z" }] : [],
+    };
+    const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
+    expect(detail?.drip?.replied).toBe(false);
+    expect(detail?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
+  });
+
+  it("keeps attribution after a drip completed before the inbound reply", async () => {
+    const seed: SeedData = {
+      messages: [
+        makeMessage({ id: "drip-text", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "outbound", created_at: "2026-06-09T12:00:00Z" }),
+        makeMessage({ id: "reply", contact_id: CONTACT_ID, property_id: RECENT_PROPERTY_ID, conversation_id: CONVERSATION_ID, direction: "inbound", created_at: "2026-06-09T12:02:00Z" }),
+      ],
+      contacts: [makeContact({ id: CONTACT_ID })], properties: [makeProperty({ id: RECENT_PROPERTY_ID })],
+      sequence_enrollments: [{ id: "enrollment", org_id: "org-1", property_id: RECENT_PROPERTY_ID, sequence_id: "drip", status: "completed", pause_reason: null, current_step_index: 0, enrolled_at: "2026-06-09T11:00:00Z" }],
+      sequence_step_runs: [{ message_id: "drip-text", sequence_enrollments: { org_id: "org-1" }, sequence_steps: { sequence_id: "drip", step_index: 0 } }],
+      sequences: [{ id: "drip", org_id: "org-1", name: "Seller follow-up" }],
+      sequence_steps: [{ id: "step-1", sequence_id: "drip" }],
+    };
+    const detail = await fetchInboxDetail(makeSupabaseStub(seed) as never, CONVERSATION_ID);
+    expect(detail?.drip).toMatchObject({ name: "Seller follow-up", status: "completed", replied: true });
+    expect(detail?.dripReplyLabels).toEqual({ reply: "Reply to drip text 1" });
   });
 });

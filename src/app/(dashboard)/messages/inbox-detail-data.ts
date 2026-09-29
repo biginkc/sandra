@@ -65,12 +65,13 @@ export type InboxDetail = {
     step: number;
     total: number;
     replied: boolean;
-    status?: "active" | "paused";
+    status?: "active" | "paused" | "completed";
     timeZone?: string;
     stoppedAt: string | null;
   } | null;
   dripMessageLabels: Record<string, string>;
   dripReplyMessageIds: string[];
+  dripReplyLabels?: Record<string, string>;
   initialMessages: Database["public"]["Tables"]["messages"]["Row"][];
 };
 
@@ -279,14 +280,14 @@ async function loadMessageDripContext(
   orgId: string,
   propertyId: string | null,
   messages: Database["public"]["Tables"]["messages"]["Row"][],
-): Promise<Pick<InboxDetail, "drip" | "dripMessageLabels" | "dripReplyMessageIds">> {
+): Promise<Pick<InboxDetail, "drip" | "dripMessageLabels" | "dripReplyMessageIds" | "dripReplyLabels">> {
   const outboundIds = messages.filter((m) => m.direction === "outbound").map((m) => m.id);
   const [enrollmentResult, runsResult] = await Promise.all([
     propertyId
       ? supabase.from("sequence_enrollments")
           .select("id, sequence_id, status, pause_reason, current_step_index, enrolled_at, updated_at")
           .eq("org_id", orgId).eq("property_id", propertyId)
-          .in("status", ["active", "paused"])
+          .in("status", ["active", "paused", "completed"])
           .order("enrolled_at", { ascending: false }).limit(1).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
     outboundIds.length
@@ -325,15 +326,49 @@ async function loadMessageDripContext(
     if (!name) continue;
     dripMessageLabels[run.message_id] = `Drip · ${name} · text ${run.sequence_steps.step_index + 1} of ${totals.get(sequenceId) ?? run.sequence_steps.step_index + 1}`;
   }
-  const pausedForReply = enrollment?.status === "paused" && ["inbound_reply", "rep_sms_human_takeover"].includes(enrollment.pause_reason ?? "");
-  const lastDripText = enrollment
-    ? messages.filter((m) => Boolean(dripMessageLabels[m.id]) && m.created_at >= enrollment.enrolled_at).at(-1)
+  const dripReplyLabels: Record<string, string> = {};
+  let pendingDripText: string | null = null;
+  for (const message of messages) {
+    if (dripMessageLabels[message.id]) {
+      pendingDripText = dripMessageLabels[message.id];
+    } else if (message.direction === "inbound" && pendingDripText) {
+      const match = pendingDripText.match(/text (\d+) of/);
+      if (match) dripReplyLabels[message.id] = `Reply to drip text ${match[1]}`;
+      pendingDripText = null;
+    } else if (message.direction === "outbound" &&
+      (message.metadata as { generated_by?: string } | null)?.generated_by !== "ai_responder_v1") {
+      pendingDripText = null;
+    }
+  }
+  const dripReplyMessageIds = Object.keys(dripReplyLabels);
+  const reply = messages.findLast((message) => Boolean(dripReplyLabels[message.id])) ?? null;
+  const pausedForReply = enrollment?.status === "paused" &&
+    ["inbound_reply", "rep_sms_human_takeover"].includes(enrollment.pause_reason ?? "");
+  const actionSinceReply = reply && propertyId ? await Promise.all([
+    supabase.from("lead_events").select("id").eq("org_id", orgId)
+      .eq("property_id", propertyId).eq("event_type", "dispo_set")
+      .eq("actor_type", "user").gt("created_at", reply.created_at).limit(1),
+    supabase.from("call_activities").select("id").eq("org_id", orgId)
+      .eq("property_id", propertyId).eq("call_purpose", "customer")
+      .gt("created_at", reply.created_at).limit(1),
+  ]) : null;
+  // Acquisition attempts are exposed through the authenticated history RPC;
+  // direct table reads are intentionally denied to browser sessions.
+  const attemptHistory = reply && propertyId
+    ? await supabase.rpc("fn_get_lead_acquisition_history" as never, { p_property_id: propertyId, p_limit: 100 } as never)
     : null;
-  const reply = enrollment && pausedForReply
-    ? messages.find((m) => m.direction === "inbound" && m.created_at > (lastDripText?.created_at ?? enrollment.enrolled_at)) ?? null
-    : null;
-  const replied = pausedForReply;
-  const dripReplyMessageIds = reply && replied ? [reply.id] : [];
+  if (actionSinceReply?.[0].error) throw new Error(`fetchInboxDetail drip outcome: ${actionSinceReply[0].error.message}`);
+  if (actionSinceReply?.[1].error) throw new Error(`fetchInboxDetail drip attempt: ${actionSinceReply[1].error.message}`);
+  if (attemptHistory?.error) throw new Error(`fetchInboxDetail acquisition attempts: ${attemptHistory.error.message}`);
+  const attempts = (attemptHistory?.data as unknown as { rows?: Array<{ kind?: string; at?: string }> } | null)?.rows ?? [];
+  const humanOutboundAfterReply = reply && messages.some((message) =>
+    message.direction === "outbound" && message.created_at > reply.created_at &&
+    !dripMessageLabels[message.id] &&
+    (message.metadata as { generated_by?: string } | null)?.generated_by !== "ai_responder_v1");
+  const repActed = Boolean(humanOutboundAfterReply || actionSinceReply?.some((result) => (result.data?.length ?? 0) > 0) ||
+    (reply && attempts.some((attempt) => attempt.kind === "attempt" && attempt.at && attempt.at > reply.created_at)));
+  const replied = Boolean(reply && !repActed && (pausedForReply || enrollment?.status === "completed"));
+  // TODO(PR-8): Align the inbox row icon and filter snapshot with this outstanding state.
   const name = enrollment ? names.get(enrollment.sequence_id) : null;
   return {
     drip: enrollment && name ? {
@@ -343,11 +378,12 @@ async function loadMessageDripContext(
       step: Math.min(enrollment.current_step_index + 1, totals.get(enrollment.sequence_id) ?? 0),
       total: totals.get(enrollment.sequence_id) ?? 0,
       replied,
-      status: enrollment.status as "active" | "paused",
+      status: enrollment.status as "active" | "paused" | "completed",
       timeZone: OPERATOR_TIME_ZONE,
-      stoppedAt: replied ? (reply?.created_at ?? enrollment.updated_at) : null,
+      stoppedAt: reply?.created_at ?? null,
     } : null,
     dripMessageLabels,
     dripReplyMessageIds,
+    dripReplyLabels,
   };
 }

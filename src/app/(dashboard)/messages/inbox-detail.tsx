@@ -772,8 +772,10 @@ export function InboxDetail({
               </p>
               {data.drip ? <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-teal-800" data-testid="inbox-detail-drip-line">
                 <Droplet aria-hidden="true" className="h-3.5 w-3.5" />
-                {data.drip.replied
-                  ? `Was in ${data.drip.name} · stopped ${data.drip.stoppedAt ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: data.drip.timeZone ?? "America/Chicago" }).format(new Date(data.drip.stoppedAt)) + " " : ""}when they replied`
+                {data.drip.status === "completed" && data.drip.stoppedAt
+                  ? `Was in ${data.drip.name} · finished, then they replied`
+                  : data.drip.stoppedAt
+                  ? `Was in ${data.drip.name} · stopped ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: data.drip.timeZone ?? "America/Chicago" }).format(new Date(data.drip.stoppedAt))} when they replied`
                   : `${data.drip.status === "paused" ? "Paused in" : "In"} ${data.drip.name} · text ${data.drip.step} of ${data.drip.total}`}
               </p> : null}
               <p
@@ -968,6 +970,7 @@ export function InboxDetail({
           nowMs={renderNowMs}
           dripMessageLabels={data.dripMessageLabels}
           dripReplyMessageIds={data.dripReplyMessageIds}
+          dripReplyLabels={data.dripReplyLabels}
         />
       </div>
       {data.propertyId && !isPermanentlyLocked ? (
