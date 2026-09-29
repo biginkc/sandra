@@ -473,6 +473,7 @@ language plpgsql security definer set search_path = '' as $$
 declare
   v_capture public.dialpad_recording_captures%rowtype;
   v_reason text;
+  v_call_ended boolean;
 begin
   if p_org_id is null or p_capture_id is null or (p_reason is not null and p_reason not in ('call_ended', 'service_closed'))
      or (p_rep_user_id is not null and p_reason is not null) then
@@ -484,7 +485,18 @@ begin
   if v_capture.status <> 'open' then
     return jsonb_build_object('status', 'replayed', 'capture', public.dialpad_recording_capture_json(v_capture.id));
   end if;
-  v_reason := case when p_rep_user_id is not null then 'rep_closed' else coalesce(p_reason, 'service_closed') end;
+  -- A session close after the provider's signed hangup is still a normal
+  -- call-ended close. If the signed end is not projected yet, preserve the
+  -- caller's early-stop reason permanently; a later hangup cannot upgrade it.
+  select exists (
+    select 1 from public.call_activities a
+     where a.id = v_capture.call_activity_id and a.ended_at is not null
+  ) into v_call_ended;
+  v_reason := case
+    when v_call_ended then 'call_ended'
+    when p_rep_user_id is not null then 'rep_closed'
+    else coalesce(p_reason, 'service_closed')
+  end;
   -- This deadline is an operational bound for an abandoned/incomplete
   -- MediaRecorder flush. It is not a timing tolerance and cannot establish
   -- stream completeness or provider-call duration.
@@ -783,8 +795,10 @@ $$;
 -- (only track, epoch and decodeOk are required when decodeOk is false). Ledger
 -- facts (chunk count, bytes, EOF at the last sequence, contiguity) are read from
 -- the database, never trusted from the caller, and completeness is derived from
--- them. Registered atomically under the claim's fencing token; an exact replay
--- is idempotent and a different result is a conflict.
+-- them. The consumed-grant inventory is also authoritative: any consumed later
+-- epoch or missing expected track keeps the capture partial. Registered
+-- atomically under the claim's fencing token; an exact replay is idempotent and
+-- a different result is a conflict.
 create or replace function public.fn_register_dialpad_recording_result(
   p_capture_id uuid, p_claim_token uuid, p_tracks jsonb, p_failure_code text default null
 ) returns jsonb
@@ -813,6 +827,9 @@ declare
   v_segments integer;
   v_reported integer := 0;
   v_complete_first integer;
+  v_complete_expected integer;
+  v_expected_segments integer;
+  v_later_consumed_epochs integer;
   v_usable integer;
   v_outcome text;
   v_fcode text;
@@ -965,6 +982,22 @@ begin
 
   select count(*) into v_complete_first from public.dialpad_recording_track_finals
     where capture_id = p_capture_id and epoch = 1 and completeness = 'complete';
+  -- The expected inventory is driven by consumed grants, not by whichever
+  -- segment rows happened to receive chunks. A consumed reconnect epoch is a
+  -- separate segment and conservatively prevents a complete seal, even when
+  -- epoch 1 is fully decodable.
+  select coalesce(sum(case when g.epoch > 1 then 1 else 0 end), 0)::integer,
+         (count(*) * 2)::integer
+    into v_later_consumed_epochs, v_expected_segments
+    from public.dialpad_recording_ingest_grants g
+   where g.capture_id = p_capture_id and g.consumed_at is not null;
+  select count(*)::integer into v_complete_expected
+    from public.dialpad_recording_ingest_grants g
+    cross join (values ('tab'::text), ('mic'::text)) expected(track)
+    join public.dialpad_recording_track_finals f
+      on f.capture_id = g.capture_id and f.epoch = g.epoch and f.track = expected.track
+     and f.completeness = 'complete'
+   where g.capture_id = p_capture_id and g.consumed_at is not null;
   select count(*) into v_usable from public.dialpad_recording_track_finals
     where capture_id = p_capture_id and decode_ok;
 
@@ -978,7 +1011,9 @@ begin
   -- is an explicit early stop, even if both streams have EOF. A signed call
   -- end must already be projected, and later hangup events cannot rewrite a
   -- terminal partial result.
-  if p_failure_code is null and v_segments = 2 and v_complete_first = 2
+  if p_failure_code is null and v_expected_segments = 2 and v_segments = v_expected_segments
+     and v_complete_expected = v_expected_segments and v_complete_first = 2
+     and v_later_consumed_epochs = 0
      and v_capture.close_reason = 'call_ended' and v_call_end_confirmed then
     v_outcome := 'sealed';
   elsif v_usable > 0 then
