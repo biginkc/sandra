@@ -57,7 +57,7 @@ export type Database = {
       }
 
       dialpad_recording_segments: {
-        Row: { capture_id: string; org_id: string; track: string; epoch: number; chunk_count: number; total_bytes: number; max_seq: number | null; eof_seq: number | null; created_at: string; updated_at: string }
+        Row: { capture_id: string; org_id: string; track: string; epoch: number; chunk_count: number; total_bytes: number; max_seq: number | null; eof_seq: number | null; eof_sha256: string | null; eof_marked_at: string | null; created_at: string; updated_at: string }
         Insert: Record<string, never>
         Update: Record<string, never>
         Relationships: []
@@ -79,6 +79,48 @@ export type Database = {
 
       dialpad_recording_ingest_grants: {
         Row: { id: string; org_id: string; capture_id: string; rep_user_id: string; epoch: number; token_hash: string; created_at: string; expires_at: string; revoked_at: string | null; consumed_at: string | null; consumed_by: string | null }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_vad_batches: {
+        Row: { batch_id: string; capture_id: string; org_id: string; track: string; epoch: number; range_count: number; ranges_sha256: string; recorded_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_vad_ranges: {
+        Row: { capture_id: string; org_id: string; track: string; epoch: number; batch_id: string; range_index: number; start_sample: number; end_sample: number; evidence_ref: string; recorded_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_vad_totals: {
+        Row: { capture_id: string; org_id: string; voiced_samples: number; high_water_epoch: number | null; high_water_end_sample: number | null; measurement_status: string; provider_window_evidence: Json | null; finalized_at: string | null; updated_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_vad_threshold_latches: {
+        Row: { capture_id: string; org_id: string; threshold_samples: number; crossing_total_samples: number; crossing_epoch: number; crossing_sample: number; crossing_start_sample: number; crossing_end_sample: number; evidence_ref: string; latched_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_pcm_batches: {
+        Row: { batch_id: string; capture_id: string; org_id: string; track: string; epoch: number; processed_through_sample: number; pcm_eof_sample: number | null; source_sample_rate_hz: number | null; source_channels: number | null; source_codec: string | null; degraded_reasons: Json; batch_sha256: string; recorded_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_pcm_progress: {
+        Row: { capture_id: string; org_id: string; track: string; epoch: number; processed_through_sample: number; pcm_eof_sample: number | null; source_sample_rate_hz: number | null; source_channels: number | null; source_codec: string | null; degraded_reasons: Json; updated_at: string }
         Insert: Record<string, never>
         Update: Record<string, never>
         Relationships: []
@@ -5761,6 +5803,12 @@ export type Database = {
       fn_mint_dialpad_recording_ingest_grant: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string; p_epoch: number; p_token_hash: string; p_ttl_seconds?: number }; Returns: Json }
       fn_consume_dialpad_recording_ingest_grant: { Args: { p_token_hash: string; p_worker_id: string }; Returns: Json }
       fn_record_dialpad_recording_chunk: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_seq: number; p_size_bytes: number; p_sha256: string; p_is_eof?: boolean }; Returns: Json }
+      fn_mark_dialpad_recording_eof: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_eof_seq: number; p_eof_sha256: string }; Returns: Json }
+      fn_get_dialpad_recording_lifecycle: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
+      fn_get_dialpad_recording_seal_inputs: { Args: { p_capture_id: string; p_claim_token: string }; Returns: Json }
+      fn_record_dialpad_recording_vad_ranges: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_batch_id: string; p_ranges: Json }; Returns: Json }
+      fn_record_dialpad_recording_pcm_progress: { Args: { p_org_id: string; p_capture_id: string; p_track: string; p_epoch: number; p_batch_id: string; p_processed_through_sample: number; p_pcm_eof_sample?: number | null; p_source_sample_rate_hz?: number | null; p_source_channels?: number | null; p_source_codec?: string | null; p_degraded_reasons?: Json }; Returns: Json }
+      fn_get_dialpad_recording_vad_snapshot: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
       fn_claim_dialpad_recording_seal_work: { Args: { p_worker_id: string; p_lease_seconds?: number }; Returns: Json }
       fn_register_dialpad_recording_result: { Args: { p_capture_id: string; p_claim_token: string; p_tracks: Json; p_failure_code?: string | null }; Returns: Json }
       fn_record_dialpad_event_process_failure: { Args: { p_event_id: string; p_sqlstate: string }; Returns: undefined }
