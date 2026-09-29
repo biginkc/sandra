@@ -30,9 +30,20 @@ const MUTATIONS = [
   ['M10', 'ALTER TABLE public.messages DISABLE ROW LEVEL SECURITY', 'ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY', ['PIN_BASE_GRANTS', 'C00', 'C01', 'C02', 'C03', 'D01', 'D02', 'D03'], ['pre', 'post']],
 ];
 
+export function fixtureChildEnv(baseEnv, fixture, scratch) {
+  const { MUTATION_FIXTURE_JSON: ignored, ...env } = baseEnv;
+  env.OUTBOX_CONTRACT_SCRATCH_DIR = scratch;
+  if (fixture) {
+    const file = path.join(scratch, 'mutation-fixture.json');
+    writeFileSync(file, JSON.stringify(fixture), { mode: 0o600 });
+    env.MUTATION_FIXTURE_PATH = file;
+  }
+  return env;
+}
+
 function runContract(phase, extra = [], fixture = null) {
   const scratch = mkdtempSync(path.join(os.tmpdir(), 'w4w-contract-step-'));
-  const env = { ...process.env, OUTBOX_CONTRACT_SCRATCH_DIR: scratch, ...(fixture ? { MUTATION_FIXTURE_JSON: JSON.stringify(fixture) } : {}) };
+  const env = fixtureChildEnv(process.env, fixture, scratch);
   try {
     const result = spawnSync(process.execPath, ['scripts/outbox-db-contract.mjs', '--target', 'disposable', '--phase', phase, ...extra], { encoding: 'utf8', env, maxBuffer: 20 * 1024 * 1024 });
     const line = result.stdout?.split('\n').find(value => value.startsWith('CONTRACT_RESULT '));
