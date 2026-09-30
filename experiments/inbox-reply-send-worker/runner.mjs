@@ -1,6 +1,8 @@
-// Single-connection durable dispatch contract (Astra #4). dispatchAttempt's
-// result is a discriminated {kind} exactly mirroring src/lib/inbox/
-// reply-dispatch.ts's ReplyAttemptResult:
+// Durable dispatch contract (Astra #4). dispatchAttempt is the provider-facing
+// journaled step; persistAttempt is the separately journaled ledger step.
+// dispatchAttempt's result is a discriminated {kind} exactly mirroring
+// src/lib/inbox/reply-dispatch.ts's ReplyAttemptResult plus the durable
+// provider receipt:
 //  - {kind:'settled', state} — a real ledger state was written or read back.
 //    Safe (and REQUIRED) to memoize durably: a replay must return this same
 //    value without re-calling the provider.
@@ -37,9 +39,9 @@ export function createRunner(pool, transport) {
      * inside worker_start_dispatch is held through the marker write, so a
      * concurrent revocation cannot land in the gap). The client is released
      * BEFORE the provider call — never held across an outbound HTTP request —
-     * and persist runs on a fresh pool connection, since persist is
-     * independently fenced by dispatch_token and safe to reconcile from any
-     * connection. NEVER calls transport() unless worker_start_dispatch
+     * The provider call happens after that connection is released. Persist
+     * runs on a fresh pool connection, since it is independently fenced by
+     * dispatch_token and safe to reconcile from any connection. NEVER calls transport() unless worker_start_dispatch
      * returned an unambiguous {kind:'dispatch',...} AND that call itself
      * returned successfully (i.e. is known-committed) — any thrown
      * worker_start_dispatch error (STALE_CLAIM/SENDER_BUSY/WINDOW_EXPIRED/
@@ -84,10 +86,20 @@ export function createRunner(pool, transport) {
         const providerResult = result.kind === 'accepted' ? { kind: 'accepted', externalId: result.externalId, status: result.providerStatus }
           : result.kind === 'not_attempted' ? { kind: 'not_attempted', reason: result.reason }
           : { kind: 'uncertain', reason: result.reason ?? 'unknown' };
-        const receipt = (await pool.query('SELECT inbox_reply_send.worker_persist($1,$2,$3,$4::jsonb) AS result', [o, a, token, JSON.stringify(providerResult)])).rows[0]?.result;
-        if (!receipt || typeof receipt.state !== 'string') throw Error('Invalid persist result');
-        return settled(receipt.state);
+        return { kind: 'dispatched', token, result: providerResult };
       } finally { release(); }
+    },
+    /** The second durable step. Restate retries this call after a rolled-back
+     * persist or a lost response; the SQL wrapper makes the replay safe. */
+    async persistAttempt(orgId, operationId, attemptId, dispatch) {
+      const o = id(orgId), a = id(attemptId);
+      if (typeof operationId !== 'string' || !UUID.test(operationId)) throw Error('Invalid reply worker identity');
+      if (!dispatch || dispatch.kind !== 'dispatched' || typeof dispatch.token !== 'string' || !UUID.test(dispatch.token) || !dispatch.result || typeof dispatch.result !== 'object') {
+        throw Error('Invalid dispatch receipt');
+      }
+      const receipt = (await pool.query('SELECT inbox_reply_send.worker_persist_result($1,$2,$3,$4::jsonb) AS result', [o, a, dispatch.token, JSON.stringify(dispatch.result)])).rows[0]?.result;
+      if (!receipt || typeof receipt.state !== 'string') throw Error('Invalid persist result');
+      return settled(receipt.state);
     },
   };
 }

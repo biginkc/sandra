@@ -1,10 +1,10 @@
 -- Lane 1 PR-F: durable reply-send worker SQL surface. Additive only — does NOT
 -- touch attempts.sql or accept.sql (PR-D/PR-E are frozen). Every function here
--- is SECURITY DEFINER and is one of the EIGHT things granted to the dedicated
+-- is SECURITY DEFINER and is one of the SEVEN things granted to the dedicated
 -- inbox_reply_send_worker role (worker-role.sql): claim_dispatch_batch,
 -- ack_dispatch, operation_dispatch_complete, operation_attempts, worker_claim,
 -- worker_start_dispatch (which folds the requester re-authorization check in —
--- see its own header below), worker_persist. The role never gets a direct
+-- see its own header below), worker_persist_result. The role never gets a direct
 -- table grant or EXECUTE on attempts.sql's plain (non-DEFINER)
 -- claim()/start_dispatch()/persist() themselves — those stay reachable only
 -- from inside a SECURITY DEFINER wrapper here, exactly like
@@ -169,12 +169,40 @@ BEGIN
  RETURN result;
 END $$;
 
-CREATE FUNCTION inbox_reply_send.worker_persist(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb
-LANGUAGE sql SECURITY DEFINER SET search_path='' AS $$ SELECT inbox_reply_send.persist(o,attempt_id,token,result) $$;
+-- The wrapper owns the durable persist replay cases. The additive projection
+-- migration re-issues this exact definition with CREATE OR REPLACE; keeping
+-- the fixture source in lockstep lets the worker proof exercise the same
+-- worker-facing API without granting the raw persist function.
+CREATE FUNCTION inbox_reply_send.worker_persist_result(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+DECLARE row inbox_reply_send.attempts;kind text;reason text;reference text;
+BEGIN
+ SELECT * INTO row FROM inbox_reply_send.attempts WHERE org_id=o AND id=attempt_id FOR UPDATE;
+ IF NOT FOUND OR token IS NULL OR row.dispatch_token IS DISTINCT FROM token THEN RAISE EXCEPTION 'INBOX_REPLY_STALE_TOKEN';END IF;
+ IF jsonb_typeof(result) IS DISTINCT FROM 'object' THEN RAISE EXCEPTION 'Invalid dispatch result';END IF;
+ kind:=result->>'kind';
+ IF kind IS NULL OR kind NOT IN ('accepted','not_attempted','uncertain') THEN RAISE EXCEPTION 'Invalid dispatch result';END IF;
+ IF kind='accepted' THEN
+  reference:=result->>'externalId';
+  IF reference IS NULL OR btrim(reference)='' OR octet_length(reference)>512 THEN RAISE EXCEPTION 'Invalid provider reference';END IF;
+ ELSIF kind='not_attempted' THEN
+  reason:=result->>'reason';
+  IF reason IS NULL OR reason NOT IN ('invalid_input','cancelled_before_dispatch') THEN RAISE EXCEPTION 'Invalid not_attempted reason';END IF;
+ END IF;
+ IF row.state='confirmed_not_submitted' THEN
+  IF kind='not_attempted' AND row.evidence IS NOT DISTINCT FROM 'local_not_attempted:'||reason THEN
+   RETURN jsonb_build_object('state',row.state,'receipt_version',row.receipt_version::text);
+  END IF;
+  RAISE EXCEPTION 'INBOX_REPLY_CONTRADICTORY_RECEIPT';
+ ELSIF row.state='uncertain' AND kind='not_attempted' THEN
+  RETURN jsonb_build_object('state',row.state,'receipt_version',row.receipt_version::text);
+ END IF;
+ RETURN inbox_reply_send.persist(o,attempt_id,token,result);
+END $$;
 
 -- [Astra B3] operation_dispatch_complete is called directly by the Restate
 -- handler (server.mjs) to decide whether to ack — it is NOT merely an
 -- internal helper for ack_dispatch, and must be granted. The worker's
--- reachable surface is EIGHT functions, not seven.
-REVOKE ALL ON FUNCTION inbox_reply_send.claim_dispatch_batch(integer),inbox_reply_send.ack_dispatch(uuid,uuid,bigint),inbox_reply_send.operation_dispatch_complete(uuid,uuid),inbox_reply_send.operation_attempts(uuid,uuid),inbox_reply_send.worker_claim(uuid,uuid,integer),inbox_reply_send.worker_start_dispatch(uuid,uuid,bigint),inbox_reply_send.worker_persist(uuid,uuid,uuid,jsonb) FROM PUBLIC,anon,authenticated,service_role;
+-- reachable surface is SEVEN functions.
+REVOKE ALL ON FUNCTION inbox_reply_send.claim_dispatch_batch(integer),inbox_reply_send.ack_dispatch(uuid,uuid,bigint),inbox_reply_send.operation_dispatch_complete(uuid,uuid),inbox_reply_send.operation_attempts(uuid,uuid),inbox_reply_send.worker_claim(uuid,uuid,integer),inbox_reply_send.worker_start_dispatch(uuid,uuid,bigint),inbox_reply_send.worker_persist(uuid,uuid,uuid,jsonb),inbox_reply_send.worker_persist_result(uuid,uuid,uuid,jsonb) FROM PUBLIC,anon,authenticated,service_role;
 COMMIT;

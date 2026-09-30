@@ -36,19 +36,24 @@ function fakePool(handlers) {
   };
 }
 
-test('happy path: claim -> start_dispatch -> transport -> persist, connection released before transport', async () => {
+test('T4 durable dispatch and persist steps keep one provider call across a persist retry', async () => {
   let releasedBeforeTransport = false;
+  let persistCalls = 0;
   const pool = fakePool({
     worker_claim: () => ({ kind: 'claimed', generation: '1' }),
     worker_start_dispatch: () => ({ kind: 'dispatch', token, from: '+18165550001', to: '+18165550002', body: 'hi' }),
-    worker_persist: () => ({ state: 'provider_accepted' }),
+    worker_persist_result: () => { persistCalls += 1; if (persistCalls === 1) return Error('injected persist rollback'); return { state: 'provider_accepted' }; },
   });
   const transport = async () => { releasedBeforeTransport = pool.calls.includes('release'); return { kind: 'accepted', externalId: 'ext-1', providerStatus: 'sent' }; };
   const runner = createRunner(pool, transport);
-  const result = await runner.dispatchAttempt(orgId, opId, attemptId);
+  const dispatch = await runner.dispatchAttempt(orgId, opId, attemptId);
+  assert.deepEqual(dispatch, { kind: 'dispatched', token, result: { kind: 'accepted', externalId: 'ext-1', status: 'sent' } });
+  await assert.rejects(() => runner.persistAttempt(orgId, opId, attemptId, dispatch), /injected persist rollback/);
+  const result = await runner.persistAttempt(orgId, opId, attemptId, dispatch);
   assert.deepEqual(result, { kind: 'settled', state: 'provider_accepted' });
   assert.equal(releasedBeforeTransport, true, 'connection must be released before the provider call');
-  assert.deepEqual(pool.calls.filter(c => c !== 'release'), ['worker_claim', 'worker_start_dispatch', 'worker_persist']);
+  assert.deepEqual(pool.calls.filter(c => c !== 'release'), ['worker_claim', 'worker_start_dispatch', 'worker_persist_result', 'worker_persist_result']);
+  assert.equal(persistCalls, 2);
 });
 
 test('a busy claim defers without ever calling start_dispatch', async () => {
@@ -105,25 +110,47 @@ test('skipped_ineligible from start_dispatch is settled and never calls the prov
   assert.equal(transportCalled, false);
 });
 
-test('a thrown transport is persisted as uncertain, never retried within the same call', async () => {
+test('T2 a thrown transport is journaled as uncertain and never retried in dispatch', async () => {
   const pool = fakePool({
     worker_claim: () => ({ kind: 'claimed', generation: '1' }),
     worker_start_dispatch: () => ({ kind: 'dispatch', token, from: '+18165550001', to: '+18165550002', body: 'hi' }),
-    worker_persist: (params) => { assert.equal(JSON.parse(params[3]).kind, 'uncertain'); return { state: 'uncertain' }; },
+    worker_persist_result: (params) => { assert.equal(JSON.parse(params[3]).kind, 'uncertain'); return { state: 'uncertain' }; },
   });
   const runner = createRunner(pool, async () => { throw Error('transport lost'); });
-  const result = await runner.dispatchAttempt(orgId, opId, attemptId);
+  const dispatch = await runner.dispatchAttempt(orgId, opId, attemptId);
+  assert.equal(dispatch.kind, 'dispatched');
+  const result = await runner.persistAttempt(orgId, opId, attemptId, dispatch);
   assert.deepEqual(result, { kind: 'settled', state: 'uncertain' });
 });
 
-test('an unmapped persisted state throws rather than silently passing through', async () => {
+test('T3 a persist-step retry uses worker_persist_result rather than worker_persist directly', async () => {
+  let calls = 0;
   const pool = fakePool({
-    worker_claim: () => ({ kind: 'claimed', generation: '1' }),
-    worker_start_dispatch: () => ({ kind: 'dispatch', token, from: '+18165550001', to: '+18165550002', body: 'hi' }),
-    worker_persist: () => ({ state: 'made_up_state' }),
+    worker_persist_result: () => { calls += 1; if (calls === 1) return Error('serialization failure'); return { state: 'confirmed_not_submitted' }; },
+  });
+  const runner = createRunner(pool, async () => { throw Error('not used'); });
+  const dispatch = { kind: 'dispatched', token, result: { kind: 'not_attempted', reason: 'invalid_input' } };
+  await assert.rejects(() => runner.persistAttempt(orgId, opId, attemptId, dispatch), /serialization failure/);
+  await assert.doesNotReject(async () => {
+    assert.deepEqual(await runner.persistAttempt(orgId, opId, attemptId, dispatch), { kind: 'settled', state: 'confirmed_not_submitted' });
+  });
+  assert.equal(calls, 2);
+});
+
+test('T5 an uncertain re-entry can persist a not_attempted result without raising', async () => {
+  const pool = fakePool({ worker_persist_result: (params) => { assert.equal(JSON.parse(params[3]).kind, 'not_attempted'); return { state: 'uncertain' }; } });
+  const runner = createRunner(pool, async () => { throw Error('not used'); });
+  await assert.doesNotReject(async () => {
+    assert.deepEqual(await runner.persistAttempt(orgId, opId, attemptId, { kind: 'dispatched', token, result: { kind: 'not_attempted', reason: 'cancelled_before_dispatch' } }), { kind: 'settled', state: 'uncertain' });
+  });
+});
+
+test('unmapped persisted state throws rather than silently passing through', async () => {
+  const pool = fakePool({
+    worker_persist_result: () => ({ state: 'made_up_state' }),
   });
   const runner = createRunner(pool, async () => ({ kind: 'accepted', externalId: 'x', providerStatus: 'sent' }));
-  await assert.rejects(() => runner.dispatchAttempt(orgId, opId, attemptId), /Unmapped reply attempt state/);
+  await assert.rejects(() => runner.persistAttempt(orgId, opId, attemptId, { kind: 'dispatched', token, result: { kind: 'accepted', externalId: 'x', status: 'sent' } }), /Unmapped reply attempt state/);
 });
 
 test('operationAttempts maps the SETOF uuid rows to a plain array', async () => {

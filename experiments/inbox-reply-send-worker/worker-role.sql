@@ -1,11 +1,11 @@
 -- Dedicated role candidate for the reply-send worker. Mirrors
 -- experiments/inbox-operation-preparation/worker-role.sql's inbox_action_worker
 -- exactly, distinct role name and distinct (narrower) function allow-list —
--- EIGHT functions: claim_dispatch_batch, ack_dispatch,
+-- SEVEN functions: claim_dispatch_batch, ack_dispatch,
 -- operation_dispatch_complete [Astra B3 — the Restate handler calls this
 -- directly to decide whether to ack, not merely internally from ack_dispatch],
 -- operation_attempts, worker_claim, worker_start_dispatch (folds the
--- requester re-authorization check in, see worker.sql), worker_persist.
+-- requester re-authorization check in, see worker.sql), worker_persist_result.
 -- Nothing else. No password or LOGIN role is created here; credential/login
 -- provisioning is a separate approved hosting operation.
 BEGIN;
@@ -29,11 +29,11 @@ GRANT EXECUTE ON FUNCTION
  inbox_reply_send.operation_attempts(uuid,uuid),
  inbox_reply_send.worker_claim(uuid,uuid,integer),
  inbox_reply_send.worker_start_dispatch(uuid,uuid,bigint),
- inbox_reply_send.worker_persist(uuid,uuid,uuid,jsonb)
+ inbox_reply_send.worker_persist_result(uuid,uuid,uuid,jsonb)
  TO inbox_reply_send_worker;
 -- Explicit REVOKE cannot subtract an inherited PUBLIC privilege. Refuse the
 -- installation if canonical schema ACLs grant this principal broader authority
--- than the eight functions above.
+-- than the seven functions above.
 DO $$ BEGIN
  IF EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
   WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname<>'information_schema'
@@ -53,7 +53,7 @@ DO $$ BEGIN
     'inbox_reply_send.operation_attempts(uuid,uuid)'::regprocedure,
     'inbox_reply_send.worker_claim(uuid,uuid,integer)'::regprocedure,
     'inbox_reply_send.worker_start_dispatch(uuid,uuid,bigint)'::regprocedure,
-    'inbox_reply_send.worker_persist(uuid,uuid,uuid,jsonb)'::regprocedure]::oid[])) THEN
+    'inbox_reply_send.worker_persist_result(uuid,uuid,uuid,jsonb)'::regprocedure]::oid[])) THEN
   RAISE EXCEPTION 'Reply-send worker unexpectedly reaches another privileged function';
  END IF;
 END $$;
