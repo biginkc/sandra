@@ -235,6 +235,24 @@ describe("MediaRecorderCollector", () => {
 });
 
 describe("Dialpad capture preparation", () => {
+  it("includes the current Sandra tab in Chrome's chooser before checking its identity", async () => {
+    const display = mediaStream(new FakeTrack(), new FakeTrack());
+    const ports = runtime(display, new FakeStream([], [new FakeTrack()]) as unknown as MediaStream, () => new FakeRecorder());
+    // Chrome excludes the requesting tab by default. Model that picker behavior,
+    // rather than always returning the right tab regardless of the request.
+    const getDisplayMedia = vi.fn(async (constraints: DisplayMediaStreamOptions) => {
+      const hints = constraints as DisplayMediaStreamOptions & { selfBrowserSurface?: string; preferCurrentTab?: boolean };
+      if (hints.selfBrowserSurface !== "include") throw new Error("Current tab is absent from chooser");
+      expect(hints.preferCurrentTab).toBe(true);
+      expect(hints.audio).toBe(true);
+      return display;
+    });
+    const prepared = await prepareDialpadBrowserCapture({
+      proof: { handle: "tab-handle", origin: "https://sandra.example" }, runtime: { ...ports, getDisplayMedia },
+    });
+    await prepared.dispose();
+  });
+
   it("prepares permissions without creating recorders, then captures tab and mic separately", async () => {
     const video = new FakeTrack();
     const tabAudio = new FakeTrack();
