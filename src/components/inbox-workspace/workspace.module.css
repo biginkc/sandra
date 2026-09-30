@@ -11,3 +11,22 @@
 @media(prefers-reduced-motion:reduce){.workspace *{scroll-behavior:auto}}
 
 .dragStatus{height:34px;min-height:34px;font-size:11px;color:#687080;overflow:hidden}
+
+/* The reply layout is admitted only when replyUiEnabled is true. The legacy
+   selectors above intentionally remain the main-branch workspace contract. */
+.replyLayout,.replyLayout.withDetail{grid-template-columns:minmax(340px,380px) minmax(0,1fr)}
+.replyLayout .row,.replyLayout.withDetail .row{height:88px;min-height:88px;grid-template-columns:20px minmax(0,1fr) 57px;grid-template-rows:minmax(0,1fr);gap:6px 9px;padding:8px 12px}
+.replyLayout .row input{grid-column:1;grid-row:1;align-self:center}
+.replyLayout .compactContent{grid-column:2;grid-row:1;display:flex;min-width:0;min-height:0;flex-direction:column;gap:5px;overflow:hidden}
+.replyLayout .compactTop{display:flex;min-width:0;align-items:center;gap:8px;line-height:1.2}
+.replyLayout .compactName{display:flex;min-width:0;align-items:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.replyLayout .compactName strong{overflow:hidden;text-overflow:ellipsis}
+.replyLayout .compactTime{margin-left:auto;flex:0 0 auto;color:#777e89;font-size:11px;white-space:nowrap}
+.replyLayout .compactBottom{display:flex;min-width:0;min-height:0;flex-wrap:wrap;align-items:center;gap:4px 6px;overflow:hidden;font-size:11px;line-height:1.3}
+.replyLayout .compactProperty{max-width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#46536a;font-weight:600}.replyLayout .compactPreview{min-width:80px;flex:1 1 90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#687283}.replyLayout .compactPreview small{display:block;overflow:hidden;text-overflow:ellipsis}.replyLayout .compactBottom .outcome,.replyLayout .compactBottom .assignee{flex:0 0 auto;max-width:100%;font-size:10px;padding:2px 6px}
+.replyLayout .row>button{grid-column:3;grid-row:1;align-self:center;justify-self:stretch;white-space:nowrap}
+.contextual{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 14px;background:#fff9ec;border-bottom:1px solid #eed7a5}.contextualHeading{display:flex;min-width:0;flex-direction:column}.contextualHeading strong{font-size:12px;color:#684516}.contextualHeading span{font-size:11px;color:#856c48}.contextualActions{display:flex;min-width:0;flex:1;flex-wrap:wrap;justify-content:flex-end;gap:8px}.contextualActions>div{min-width:130px}.contextualActions .action{min-height:36px}.contextualActions small{display:block;padding:3px}.contextualActions button{background:#172a50;color:#fff;border-color:#172a50;font-size:12px}.contextualActions .action:not(.prominent){background:#fff;color:inherit;border-color:var(--line)}
+.detailHeaderActions{display:flex;align-items:flex-start;justify-content:flex-end;gap:8px;flex-wrap:wrap}.mobileBack{display:none}
+@media(max-width:760px){.replyLayout,.replyLayout.withDetail{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto}.replyLayout .row,.replyLayout.withDetail .row{grid-template-columns:20px minmax(0,1fr) 57px;grid-template-rows:minmax(0,1fr);height:88px;min-height:88px}.replyLayout .compactProperty{max-width:38%}.replyLayout .compactPreview{flex-basis:70px}.contextual{align-items:stretch;flex-direction:column;gap:7px;padding:7px 10px}.contextualActions{justify-content:flex-start}.contextualActions>div{min-width:0;flex:1 1 130px}.contextualActions>.action{flex:1 1 130px}.desktopClose{display:none}.mobileBack{display:inline}}
+@media(min-width:761px) and (max-width:1100px){.replyLayout .detail{position:static;inset:auto;width:auto;z-index:auto;box-shadow:none}}
+@media(max-width:760px){.replyLayout .detail{position:absolute;inset:0;width:100%;z-index:10;box-shadow:-8px 0 30px #17203222}}
+.replyActivity{padding:8px 14px;border-bottom:1px solid var(--line)}

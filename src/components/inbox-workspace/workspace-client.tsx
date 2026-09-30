@@ -9,19 +9,34 @@ import { createInboxQueryCache, type InboxQueryIdentity } from "@/lib/inbox/work
 import { inboxViews, type InboxFilter, type InboxCounts } from "@/lib/inbox/filter-contract";
 import { ConversationHistory, type InboxDetailSnapshot } from "./conversation-history";
 import { useInboxMetadataActions } from "./use-metadata-actions";
+import { InboxReplyComposer } from "./reply-composer";
+import type { InboxReplyTarget } from "@/lib/inbox/reply-api-contract";
 
 const labels: Record<InboxFilter["view"], string> = { active: "All", all: "All", mine: "Assigned to me", unassigned: "Unassigned", unread: "Unread", escalated: "Needs review", dispo: "Has outcome", needs_outcome: "Needs outcome", unknown: "Unknown senders", dismissed: "Dismissed" };
 type Scope = WorkspaceScope & { nextCursor: string | null; refreshed: boolean };
 type Open = { id: WorkspaceId; generation: number; row?: WorkspaceRow; data?: InboxDetailSnapshot; error?: string };
-export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled = false }: { identity: InboxQueryIdentity & { expiresAt: number }; initialFilter: InboxFilter; actionsEnabled?: boolean }) {
+function replyTargetFromWorkspaceId(value: WorkspaceId, orgId: string): InboxReplyTarget {
+  const parsed: unknown = JSON.parse(value);
+  if (!Array.isArray(parsed) || parsed.length !== 3 || parsed[0] !== orgId || !["conversation", "unknown_sender_group"].includes(String(parsed[1])) || typeof parsed[2] !== "string") throw Error("The selected conversation is not eligible for reply review.");
+  return { kind: parsed[1] as InboxReplyTarget["kind"], id: parsed[2] };
+}
+function replyTargetName(target: InboxReplyTarget): string { return `${target.kind}:${target.id}`; }
+function replyTargetCount(ids: readonly WorkspaceId[], orgId: string): number {
+  return ids.reduce((count, id) => {
+    try { replyTargetFromWorkspaceId(id, orgId); return count + 1; } catch { return count; }
+  }, 0);
+}
+export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled = false, repliesEnabled = false }: { identity: InboxQueryIdentity & { expiresAt: number }; initialFilter: InboxFilter; actionsEnabled?: boolean; repliesEnabled?: boolean }) {
   const [cache] = useState(() => createInboxQueryCache(identity));
   const [snapshot, setSnapshot] = useState<SyncSnapshot>({ state: "loading", rows: [] });
   const [filter, setFilter] = useState(initialFilter);
   const [search, setSearch] = useState(initialFilter.search ?? "");
   const [selected, setSelected] = useState<readonly WorkspaceId[]>([]);
+  const selectedRef = useRef<readonly WorkspaceId[]>([]);
   const [invalidatedIds, setInvalidatedIds] = useState<readonly WorkspaceId[]>([]);
   const activeOpen = useRef<WorkspaceId | null>(null);
   const [review, setReview] = useState(false);
+  const [bulkReplyOpen, setBulkReplyOpen] = useState(false);
   const [opened, setOpened] = useState<Open | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string>();
@@ -37,13 +52,18 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const [selectionNames, setSelectionNames] = useState(new Map<WorkspaceId, string>());
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const clearActions = useRef<() => void>(() => {});
+  const replaceSelected = useCallback((ids: readonly WorkspaceId[]) => {
+    selectedRef.current = ids;
+    setSelected(ids);
+    if (ids.length < 2 || (repliesEnabled && replyTargetCount(ids, identity.orgId) < 2)) setBulkReplyOpen(false);
+  }, [identity.orgId, repliesEnabled]);
   const accessLost = useCallback(() => {
     if (denied.current) return;
     denied.current = true; sequence.current++;
     request.current?.abort(); clearActions.current(); cache.close();
-    setSelectionNames(new Map()); setSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setReview(false);
+    setSelectionNames(new Map()); replaceSelected([]); activeOpen.current = null; setOpened(null); setCounts(undefined); setReview(false);
     sync.current?.revoke(); setSnapshot({ state: "permission_lost", rows: [] }); setBusy(false);
-  }, [cache]);
+  }, [cache, replaceSelected]);
   /** A single item-scoped denial (404): only this target is affected. Invalidate its
    * cached detail, prune it from selection the same way the sync adapter's authoritative
    * onInvalidated does below (selected IDs must never silently become replacement rows,
@@ -55,10 +75,10 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     const id = workspaceId(target);
     cache.invalidate("detail", id);
     setInvalidatedIds(previous => (previous.includes(id) ? previous : [...previous, id]));
-    setSelected(previous => previous.filter(value => value !== id));
+    replaceSelected(selectedRef.current.filter(value => value !== id));
     setSelectionNames(previous => { if (!previous.has(id)) return previous; const next = new Map(previous); next.delete(id); return next; });
     if (activeOpen.current === id) { sequence.current++; activeOpen.current = null; setOpened(null); }
-  }, [cache]);
+  }, [cache, replaceSelected]);
   const unavailable = useCallback((conversationId: string) =>
     invalidateTarget({ kind: "conversation", orgId: identity.orgId, conversationId }), [invalidateTarget, identity.orgId]);
   const unavailableSenderGroup = useCallback((senderGroupId: string) =>
@@ -112,7 +132,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     const adapter = createWorkspaceSync({ origin: window.location.origin, onChange: setSnapshot, onAccessBoundary: accessLost,
       onInvalidated: ids => {
         setInvalidatedIds(previous => [...new Set([...previous, ...ids])]);
-        setSelected(previous => previous.filter(id => !ids.includes(id)));
+        replaceSelected(selectedRef.current.filter(id => !ids.includes(id)));
         setSelectionNames(previous => new Map([...previous].filter(([id]) => !ids.includes(id))));
         for (const id of ids) cache.invalidate("detail", id);
         if (activeOpen.current && ids.includes(activeOpen.current)) { sequence.current++; activeOpen.current = null; setOpened(null); }
@@ -135,7 +155,7 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
     if (ids.length > 500) { setError("Select up to 500 conversations at a time."); return; }
     const names = new Map<WorkspaceId, string>();
     for (const id of ids) names.set(id, snapshot.rows.find(row => workspaceId(row.target) === id)?.name ?? selectionNames.get(id) ?? "Conversation outside this view");
-    setSelectionNames(names); setSelected(ids);
+    setSelectionNames(names); replaceSelected(ids);
   }
   async function open(id: WorkspaceId, fresh = false) {
     const generation = ++sequence.current; activeOpen.current = id;
@@ -155,10 +175,19 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
       if (sequence.current === generation && !denied.current) setOpened({ id, generation, row, data: value });
     } catch (failure) { if (sequence.current === generation && !denied.current) setOpened({ id, generation, row, error: failure instanceof Error ? failure.message : "Conversation unavailable." }); }
   }
+  const selectedReplyTargets = repliesEnabled ? selected.flatMap(id => {
+    try { return [replyTargetFromWorkspaceId(id, identity.orgId)]; } catch { return []; }
+  }) : [];
+  const replyNames = new Map(selectedReplyTargets.map(target => [replyTargetName(target), selectionNames.get(workspaceIdForReplyTarget(target)) ?? "Selected conversation"]));
+  const openReplyNames = opened?.data ? new Map([[`conversation:${opened.data.conversationId}`, opened.row?.name ?? "Conversation"]]) : undefined;
+  function workspaceIdForReplyTarget(target: InboxReplyTarget): WorkspaceId {
+    return JSON.stringify([identity.orgId, target.kind, target.id]) as WorkspaceId;
+  }
   return <QueryClientProvider client={cache.client}>
     <InboxWorkspace scopeLabel={labels[filter.view]} rows={snapshot.rows} invalidatedIds={invalidatedIds} selectedIds={selected} openId={opened?.id ?? null}
       onSelectionChange={select} onOpen={id => void open(id)} onCloseDetail={() => { sequence.current++; activeOpen.current = null; setOpened(null); }}
       onBack={() => { window.location.href = "/inbox/overview"; }} onReviewSelection={() => setReview(true)}
+      replyUiEnabled={repliesEnabled} onBulkReply={() => setBulkReplyOpen(true)}
       actions={metadata.actions} onAction={metadata.prepare} connection={{ state: snapshot.state === "permission_lost" ? "permission_lost" : snapshot.state === "live" ? "live" : snapshot.state === "resync_required" ? "offline" : "updating", label: snapshot.state === "permission_lost" ? "Your access has changed. Reload to continue." : snapshot.state === "live" ? "Current workspace is synchronized" : snapshot.state === "resync_required" ? "Refresh this view to reconnect" : "Loading workspace…" }}
       listState={busy || snapshot.state === "loading" ? "loading" : "ready"} listError={error} onRetryList={() => void load(filter)}
       toolbar={<><form onSubmit={event => { event.preventDefault(); void load({ ...filter, search }); }}><label>Search <input aria-label="Search conversations" maxLength={100} value={search} onChange={event => setSearch(event.target.value)} disabled={busy} /></label><button disabled={busy}>Search</button></form>
@@ -166,9 +195,10 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
         <label><input type="checkbox" checked={filter.hide_noise ?? true} disabled={busy} onChange={event => void load({ ...filter, hide_noise: event.target.checked })} /> Hide DNC and test conversations</label>
         <span role="status">{counts ? `${counts.counts[filter.view === "active" ? "all" : filter.view]} matching · counted ${new Date(counts.asOf).toLocaleTimeString()}` : countsError ? "Counts unavailable" : "Loading counts…"}</span>{countsError && <button type="button" onClick={() => void loadCounts(filter, true)}>Retry counts</button>}</>}
       pageControl={<><span>{snapshot.rows.length} loaded</span><button disabled={busy} onClick={() => void load(filter)}>Refresh view</button><button disabled={busy || !nextCursor} onClick={() => void load(filter, nextCursor)}>Next 500</button></>}
-      detail={opened ? { targetId: opened.id, title: opened.row?.name ?? "Conversation", context: opened.row?.context, state: opened.error ? "error" : opened.data ? "ready" : "loading", error: opened.error, onRetry: () => void open(opened.id, true), content: opened.data ? <ConversationHistory orgId={identity.orgId} conversationId={opened.data.conversationId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.data }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={unavailable} /> : undefined } : undefined}
-      activity={metadata.activity ?? <p>{actionsEnabled ? "Select an action to review eligible records. Replies and remaining individual tools are being connected." : "Bulk actions and remaining individual tools are being connected."}</p>} />
+      detail={opened ? { targetId: opened.id, title: opened.row?.name ?? "Conversation", context: opened.row?.context, state: opened.error ? "error" : opened.data ? "ready" : "loading", error: opened.error, onRetry: () => void open(opened.id, true), content: opened.data ? <><ConversationHistory orgId={identity.orgId} conversationId={opened.data.conversationId} requestGeneration={opened.generation} snapshot={{ requestGeneration: opened.generation, data: opened.data }} visible onRefresh={() => void open(opened.id, true)} onAccessLost={accessLost} onUnavailable={unavailable} />{repliesEnabled && <InboxReplyComposer key={opened.data.conversationId} targets={[{ kind: "conversation", id: opened.data.conversationId }]} names={openReplyNames} routeKey={opened.data.captureGeneration} enabled />}</> : undefined } : undefined}
+      activity={metadata.activity ?? (repliesEnabled ? undefined : <p>{actionsEnabled ? "Select an action to review eligible records. Replies and remaining individual tools are being connected." : "Bulk actions and remaining individual tools are being connected."}</p>)} />
     {metadata.review}
     <Dialog open={review} onOpenChange={setReview}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>{selected.length} selected conversations</DialogTitle><DialogDescription>Remove any conversations that do not belong in this group, including those outside the current view.</DialogDescription><ul>{selected.map(id => <li className="flex items-center justify-between gap-4 py-2" key={id}>{selectionNames.get(id)}<button onClick={() => select(selected.filter(value => value !== id))}>Remove</button></li>)}</ul></DialogContent></Dialog>
+    <Dialog open={repliesEnabled && bulkReplyOpen && selectedReplyTargets.length >= 2} onOpenChange={setBulkReplyOpen}><DialogContent className="max-h-[85dvh] overflow-auto"><DialogTitle>Bulk reply review</DialogTitle><DialogDescription>Review every eligible destination before anything is sent. Excluded conversations stay visible with the server&apos;s reason.</DialogDescription>{selectedReplyTargets.length >= 2 && <InboxReplyComposer targets={selectedReplyTargets} names={replyNames} routeKey={selectedReplyTargets.map(replyTargetName).sort().join("|")} enabled onClose={() => setBulkReplyOpen(false)} />}</DialogContent></Dialog>
   </QueryClientProvider>;
 }

@@ -86,6 +86,14 @@ export type InboxReplyReceiptState =
    * (PRs B–H). Kept in the vocabulary now so a future terminal-rejection
    * receipt state doesn't require a wire-contract/consumer migration later. */
   | "rejected_unsent" | "confirmed_not_submitted";
+/**
+ * The terminal set enforced by reply-api.ts:375-388. The client must keep
+ * polling every other receipt state, including blocked, until the server
+ * reports one of these states or the operational no-change bound expires.
+ */
+export const INBOX_REPLY_TERMINAL_RECEIPT_STATES = [
+  "provider_accepted", "delivered", "delivery_failed", "rejected_unsent", "confirmed_not_submitted",
+] as const satisfies readonly InboxReplyReceiptState[];
 export interface InboxReplyReceipt {
   itemId: string;
   attemptId: string | null;
