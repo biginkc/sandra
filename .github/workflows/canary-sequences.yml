@@ -1,6 +1,8 @@
 name: Sequences V1 Prod Canary
+run-name: Sequences V1 Prod Canary ${{ github.event_name == 'schedule' && 'full' || inputs.mode }}
 
 permissions:
+  actions: read
   contents: read
   packages: read
 
@@ -19,13 +21,23 @@ permissions:
 # Cost: one Sendillo outbound SMS per enabled run.
 # Dispatch guard requires SEQUENCE_CANARY_USER_ID, SEQUENCE_CANARY_PROPERTY_ID,
 # and SEQUENCE_CANARY_CONTACT_ID in BOTH GitHub secrets and Vercel production env.
+# Every non-successful full run since the last clean success, including earlier
+# attempts, needs acknowledgement. Find IDs with:
+# gh run list --workflow canary-sequences.yml
+# Set the comma-separated repository variable with:
+# gh variable set SEQUENCE_CANARY_FAILURE_ACK_RUN_ID --body "<id>[,<id>]" -R biginkc/sandra
+# UI: Settings > Secrets and variables > Actions > Variables.
+# CANARY_GITHUB_READ_TOKEN: fine-grained PAT for this repository only,
+# Actions: read and Variables: read. This workflow and app only READ the variable.
+# A skipped or cancelled wrong-block needs acknowledgement until live samples
+# confirm the run conclusion and job started_at field values.
 
 on:
   schedule:
-    # Weekdays at 14:00 UTC = 09:00 America/Chicago (Central). Early
+    # Weekdays at 14:17 UTC = 08:17 or 09:17 America/Chicago. Early
     # enough that any failure surfaces before the workday really kicks
     # off, late enough that we're not alerting anyone at 5am.
-    - cron: "0 14 * * 1-5"
+    - cron: "17 14 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
@@ -48,6 +60,7 @@ jobs:
     timeout-minutes: 35
     concurrency:
       group: sequence-canary-prod
+      queue: max
       cancel-in-progress: false
 
     env:
@@ -61,19 +74,78 @@ jobs:
       SEQUENCE_CANARY_USER_ID: ${{ secrets.SEQUENCE_CANARY_USER_ID }}
       SEQUENCE_CANARY_PROPERTY_ID: ${{ secrets.SEQUENCE_CANARY_PROPERTY_ID }}
       SEQUENCE_CANARY_CONTACT_ID: ${{ secrets.SEQUENCE_CANARY_CONTACT_ID }}
+      CANARY_APPROVED_SENDILLO_API_KEY: ${{ secrets.CANARY_APPROVED_SENDILLO_API_KEY }}
+      CANARY_ADMIN_ACCESS_TOKEN: ${{ secrets.CANARY_ADMIN_ACCESS_TOKEN }}
+      CANARY_PRODUCTION_DEPLOYMENT_URL: ${{ vars.CANARY_PRODUCTION_DEPLOYMENT_URL }}
+      CANARY_PRODUCTION_ALIAS_HOST: ${{ vars.CANARY_PRODUCTION_ALIAS_HOST }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      CANARY_GITHUB_READ_TOKEN: ${{ secrets.CANARY_GITHUB_READ_TOKEN }}
+      GH_TOKEN: ${{ secrets.CANARY_GITHUB_READ_TOKEN }}
       SENDILLO_FROM_NUMBER: "+18164876899"
+      CANARY_SUMMARY_DIR: canary-run-summary
       CI: "1"
 
     steps:
-      - uses: actions/checkout@v5
+      - name: Check required inputs and send window
+        env:
+          RUN_MODE: ${{ github.event_name == 'schedule' && 'full' || inputs.mode }}
+          SCHEDULE_ENABLED: ${{ vars.SEQUENCE_CANARY_SCHEDULE_ENABLED }}
+        run: |
+          required=(PROD_SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY)
+          if [[ "$RUN_MODE" == "full" ]]; then
+            required+=(SEQUENCE_CANARY_USER_ID SEQUENCE_CANARY_PROPERTY_ID SEQUENCE_CANARY_CONTACT_ID CANARY_APPROVED_SENDILLO_API_KEY CANARY_ADMIN_ACCESS_TOKEN CANARY_PRODUCTION_DEPLOYMENT_URL CANARY_PRODUCTION_ALIAS_HOST CANARY_GITHUB_READ_TOKEN VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID)
+          fi
+          missing=()
+          for name in "${required[@]}"; do
+            if [[ -z "${!name}" ]]; then missing+=("$name"); fi
+          done
+          if (( ${#missing[@]} )); then
+            printf 'Missing required inputs: %s\n' "${missing[*]}"
+            exit 1
+          fi
+          if [[ "$RUN_MODE" == "full" && "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            [[ "$SCHEDULE_ENABLED" == "true" ]] || { echo "Schedule disabled"; exit 1; }
+            # Do not turn delayed or queued schedules into catch-up sends.
+            now=$(date -u +%s)
+            today=$(date -u +%Y-%m-%d)
+            due=$(date -u -d "$today 14:17:00 UTC" +%s)
+            (( now >= due && now <= due + 600 )) || { echo "Scheduled send window elapsed"; exit 1; }
+          fi
+          if [[ "$RUN_MODE" == "full" && "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
+            echo "A full canary run cannot be rerun"
+            exit 1
+          fi
 
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "24"
           cache: "npm"
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Install Vercel CLI
+        if: github.event_name == 'schedule' || inputs.mode == 'full'
+        run: npm install --global vercel@62.0.0
+
+      - name: Recheck current canary authorization
+        if: github.event_name == 'schedule' || inputs.mode == 'full'
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            enabled=$(gh api "repos/$GITHUB_REPOSITORY/actions/variables/SEQUENCE_CANARY_SCHEDULE_ENABLED" --jq .value)
+            [[ "$enabled" == "true" ]] || { echo "Current schedule stop state is disabled"; exit 1; }
+          else
+            allowed=$(gh api "repos/$GITHUB_REPOSITORY/actions/variables/SEQUENCE_CANARY_MANUAL_RUN_ID" --jq .value)
+            [[ "$allowed" == "$GITHUB_RUN_ID" ]] || { echo "Manual run is not the authorized attempt"; exit 1; }
+          fi
+
+      - name: Check prior full-run failure latch before enrollment
+        if: github.event_name == 'schedule' || inputs.mode == 'full'
+        run: npx tsx scripts/check-sequence-canary-failure-latch.ts
 
       - name: Run Sequences V1 prod canary
         if: github.event_name == 'schedule' || inputs.mode == 'full'
@@ -92,3 +164,28 @@ jobs:
         if: always() && (github.event_name == 'schedule' || inputs.mode == 'full')
         timeout-minutes: 5
         run: npx tsx scripts/smoke-sequences-prod.ts --cleanup-only
+
+      - name: Save redacted run summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          RUN_MODE: ${{ github.event_name == 'schedule' && 'full' || inputs.mode }}
+        run: |
+          mkdir -p canary-run-summary
+          {
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "commit=$GITHUB_SHA"
+            echo "mode=$RUN_MODE"
+            echo "status=$JOB_STATUS"
+            echo "observed_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > canary-run-summary/summary.txt
+          cat canary-run-summary/summary.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain redacted summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sequence-canary-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: canary-run-summary/
+          retention-days: 90

@@ -1,5 +1,6 @@
 import { assertNotTrainingTarget } from "@/lib/leads/training";
 import { assertCanaryDispatchEligibility } from "../../../scripts/sequence-canary-fixture";
+import { assertCanarySendBinding } from "@/lib/sequences/canary-runtime-proof";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -976,6 +977,10 @@ export async function sendSmsToContact(
       propertyId: input.propertyId, contactId: input.contactId,
       to: normalizedToPhone, from: fromAddress, provider: provider.providerId, body: input.body,
     });
+    await assertCanarySendBinding(supabase, {
+      propertyId: input.propertyId, body: input.body,
+      enrollmentId: input.sequenceContext?.enrollmentId,
+    });
     providerCallStarted = true;
     const result = await provider.sendSms({
       to: destination.phone,
@@ -1885,6 +1890,9 @@ export async function releaseQueuedMessage(
     await assertCanaryDispatchEligibility(supabase, {
       propertyId: msg.property_id, contactId: msg.contact_id,
       to: msg.to_address, from: msg.from_address, provider: provider.providerId, body: claimed.body,
+    });
+    await assertCanarySendBinding(supabase, {
+      propertyId: msg.property_id, body: claimed.body,
     });
     const result = await provider.sendSms({
       to: msg.to_address,

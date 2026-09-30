@@ -12,6 +12,9 @@ vi.mock("../../../scripts/sequence-canary-cleanup", () => ({
   cleanupAllCanaries: vi.fn(async () => 0),
   cleanupCanary: vi.fn(async () => undefined),
 }));
+vi.mock("../../../scripts/sequence-canary-runtime", () => ({
+  inspectRuntime: vi.fn(() => ({ description: "test-runtime-proof" })),
+}));
 
 const ids = { userId: "11111111-1111-4111-8111-111111111111", propertyId: "22222222-2222-4222-8222-222222222222", contactId: "33333333-3333-4333-8333-333333333333" };
 const org = "44444444-4444-4444-8444-444444444444";
@@ -175,6 +178,11 @@ describe("run-specific Sendillo proof", () => {
       .toBeLessThan(source.indexOf("const result = await provider.sendSms(", source.indexOf("export async function sendSmsToContact")));
     expect(source.indexOf("await assertCanaryDispatchEligibility(", source.indexOf("export async function releaseQueuedMessage")))
       .toBeLessThan(source.indexOf("const result = await provider.sendSms(", source.indexOf("export async function releaseQueuedMessage")));
+    expect(source.match(/await assertCanarySendBinding\(/g)).toHaveLength(2);
+    expect(source.indexOf("await assertCanarySendBinding(", source.indexOf("export async function sendSmsToContact")))
+      .toBeLessThan(source.indexOf("const result = await provider.sendSms(", source.indexOf("export async function sendSmsToContact")));
+    expect(source.indexOf("await assertCanarySendBinding(", source.indexOf("export async function releaseQueuedMessage")))
+      .toBeLessThan(source.indexOf("const result = await provider.sendSms(", source.indexOf("export async function releaseQueuedMessage")));
   });
   it("dispatch guard fails closed on sender, identity, or fixture changes", async () => {
     vi.stubEnv("SEQUENCE_CANARY_USER_ID", ids.userId);
@@ -225,7 +233,11 @@ describe("run-specific Sendillo proof", () => {
     const logs: string[] = [];
     const spy = vi.spyOn(console, "log").mockImplementation((...args) => { logs.push(args.map(String).join(" ")); });
     try {
-      await expect(runSequenceSmoke(fake, ids, false, SENDILLO_SENDER)).rejects.toThrow();
+      await expect(runSequenceSmoke(fake, ids, false, SENDILLO_SENDER, {
+        approvedKey: "test", adminAccessToken: "test", deploymentUrl: "https://test.example",
+        aliasHost: "test.example", expectedCommitSha: "a".repeat(40),
+        runId: "12345", runMode: "manual",
+      })).rejects.toThrow();
       const finalEvidence = logs.find((line) => line.startsWith("[smoke] evidence before cleanup"));
       expect(finalEvidence).toBeDefined();
       const evidence = JSON.parse(finalEvidence!.slice("[smoke] evidence before cleanup ".length));
@@ -257,8 +269,18 @@ it("preflight-only selects reference rows without any insert or enrollment", asy
 it("workflow gates schedule and gives cleanup its own timeout", () => {
   const workflow = fs.readFileSync(".github/workflows/canary-sequences.yml", "utf8");
   expect(workflow).toMatch(/if:\s*\$\{\{\s*github\.event_name != 'schedule' \|\| vars\.SEQUENCE_CANARY_SCHEDULE_ENABLED == 'true'\s*\}\}/);
+  expect(workflow).toContain("npx tsx scripts/check-sequence-canary-failure-latch.ts");
   expect(workflow).toContain("preflight-only");
   expect(workflow).toContain("cancel-in-progress: false");
+  expect(workflow).toContain("queue: max");
+  expect(workflow).toContain('cron: "17 14 * * 1-5"');
+  expect(workflow).toMatch(/actions\/checkout@[0-9a-f]{40}/);
+  expect(workflow).toMatch(/actions\/setup-node@[0-9a-f]{40}/);
+  expect(workflow).toMatch(/actions\/upload-artifact@[0-9a-f]{40}/);
+  expect(workflow).toContain("Missing required inputs:");
+  expect(workflow).toContain("Recheck current canary authorization");
+  expect(workflow).toContain("Scheduled send window elapsed");
+  expect(workflow).toContain("retention-days: 90");
   expect(workflow).toContain("timeout-minutes: 35");
   expect(workflow).toMatch(/Clean up tagged canary data[\s\S]*if: always\(\)[\s\S]*timeout-minutes: 5/);
   expect(workflow).not.toContain("Twilio");
