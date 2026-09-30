@@ -4,7 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import fs from "node:fs";
 import path from "node:path";
 import type { Database } from "../src/lib/supabase/types";
-import { assertFreshCanaryFixture, TWILIO_NUMBER } from "./sequence-canary-fixture";
+import { assertFreshCanaryFixture, RECEIVER_NUMBER, FIXTURE_ADDRESS, VERIFICATION_CONTACT_PREFIX } from "./sequence-canary-fixture";
 
 const localPath = path.resolve(process.cwd(), ".env.local");
 const local: Record<string, string> = {};
@@ -24,7 +24,7 @@ if (env.NEXT_PUBLIC_SUPABASE_URL.includes("ncsngxlcyxylaeskiteu")) throw new Err
 const client = createClient<Database>(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
-const address = "E2E PROD SMOKE — permanent sequence canary";
+const address = FIXTURE_ADDRESS;
 
 async function main() {
   const { data: auth, error: authError } = await client.auth.admin.getUserById(userId);
@@ -32,35 +32,72 @@ async function main() {
   const { data: organization, error: orgError } = await client.from("organizations").select("id").eq("id", orgId).maybeSingle();
   if (orgError || !organization) throw new Error(`Organization missing: ${orgError?.message ?? orgId}`);
   const { data: contacts, error: contactError } = await client.from("contacts")
-    .select("id").or(`phone_1.eq.${TWILIO_NUMBER},phone_2.eq.${TWILIO_NUMBER},phone_3.eq.${TWILIO_NUMBER}`);
+    .select("id,first_name,last_name").ilike("phone_digits", "%3107540662%");
   if (contactError) throw contactError;
   const { data: namedContacts, error: namedError } = await client.from("contacts")
     .select("id").eq("first_name", "Sequence").eq("last_name", "Canary");
   if (namedError) throw namedError;
-  const matchingContacts = [...new Map([...(contacts ?? []), ...(namedContacts ?? [])].map((row) => [row.id, row])).values()];
+  const matchingContacts = contacts ?? [];
   const { data: properties, error: propertyError } = await client.from("properties")
     .select("id").eq("address", address);
   if (propertyError) throw propertyError;
+  // A receiver contact tied to the marker address is always residue, including partial provisioning.
+  // The sole allowed pre-existing receiver contact is the 09-26 verification contact.
+  const unexpectedContacts = matchingContacts.filter((row) => !row.id.startsWith(VERIFICATION_CONTACT_PREFIX));
+  const { data: markerLinks, error: markerLinkError } = await client.from("properties")
+    .select("id,homeowner_contact_id").eq("address", address);
+  if (markerLinkError) throw markerLinkError;
+  if (markerLinks?.some((row) => matchingContacts.some((contact) => contact.id === row.homeowner_contact_id))) {
+    throw new Error("Receiver contact already linked to fixture property; residue detected");
+  }
   console.log(JSON.stringify({ dryRun: !apply, orgId, contactId: matchingContacts[0]?.id ?? null,
-    propertyId: properties?.[0]?.id ?? null, wouldCreate: {
-      contact: !matchingContacts.length, property: !properties?.length, consent: !matchingContacts.length,
+    propertyId: properties?.[0]?.id ?? null, unexpectedContactIds: unexpectedContacts.map((row) => row.id), wouldCreate: {
+      contact: true, property: true, consent: true,
     } }, null, 2));
   if (!apply) return;
-  assertFreshCanaryFixture(matchingContacts, properties ?? []);
+  assertFreshCanaryFixture(matchingContacts, properties ?? [], namedContacts ?? [], env.SEQUENCE_CANARY_VERIFICATION_CONTACT_ID);
+  if (env.SEQUENCE_CANARY_CONSENT_APPROVED !== "true") {
+    throw new Error("Owner-approved consent required before provisioning");
+  }
+  let contactId: string | null = null;
+  let propertyId: string | null = null;
+  try {
   const { data: contact, error: contactInsertError } = await client.from("contacts").insert({ org_id: orgId,
-    first_name: "Sequence", last_name: "Canary", phone_1: TWILIO_NUMBER, phone_1_type: "mobile" })
+    first_name: "Sequence", last_name: "Canary", phone_1: RECEIVER_NUMBER, phone_1_type: "mobile",
+    phone_2: null, phone_3: null })
     .select("id").single();
   if (contactInsertError || !contact) throw contactInsertError ?? new Error("Contact insert failed");
-  const contactId = contact.id;
+  contactId = contact.id;
   const { data: property, error: propertyInsertError } = await client.from("properties").insert({ org_id: orgId, address,
-    state: "MO", status: "new_lead", homeowner_contact_id: contactId, is_training: false })
+    state: "MO", status: "new_lead", homeowner_contact_id: contactId, is_training: false,
+    ai_responder_disabled: true, skip_trace_disabled: true })
     .select("id").single();
   if (propertyInsertError || !property) throw propertyInsertError ?? new Error("Property insert failed");
-  const propertyId = property.id;
+  propertyId = property.id;
   const { error: consentInsertError } = await client.from("consent_events").insert({ org_id: orgId, contact_id: contactId,
     channel: "sms", event_type: "opt_in_marketing_written", source: "sequence-canary-provision" });
   if (consentInsertError) throw consentInsertError;
   console.log(`SEQUENCE_CANARY_PROPERTY_ID=${propertyId}`);
   console.log(`SEQUENCE_CANARY_CONTACT_ID=${contactId}`);
+  } catch (error) {
+    // PostgREST inserts are separate transactions. Re-read by marker in case a write
+    // committed but its response was lost. Never auto-delete or retry into residue.
+    const [contactsAfter, propertiesAfter] = await Promise.all([
+      client.from("contacts").select("id").eq("first_name", "Sequence").eq("last_name", "Canary").eq("phone_1", RECEIVER_NUMBER),
+      client.from("properties").select("id").eq("address", address),
+    ]);
+    const residueContactIds = contactsAfter.data?.map((row) => row.id) ?? (contactId ? [contactId] : []);
+    const consentAfter = residueContactIds.length
+      ? await client.from("consent_events").select("id,contact_id").eq("source", "sequence-canary-provision").in("contact_id", residueContactIds)
+      : null;
+    console.error("Provisioning stopped; partial canary residue:", {
+      contactId, propertyId,
+      contactIds: contactsAfter.data?.map((row) => row.id) ?? null,
+      propertyIds: propertiesAfter.data?.map((row) => row.id) ?? null,
+      consentEventIds: consentAfter?.data?.map((row) => row.id) ?? null,
+      residueLookupErrors: [contactsAfter.error?.message, propertiesAfter.error?.message, consentAfter?.error?.message].filter(Boolean),
+    });
+    throw error;
+  }
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

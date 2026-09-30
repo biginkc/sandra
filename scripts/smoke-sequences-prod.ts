@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 
 import type { Database } from "../src/lib/supabase/types";
 import { cleanupAllCanaries, cleanupCanary } from "./sequence-canary-cleanup";
-import { assertCanaryReceipt, fixtureIds, preflightFixture, type FixtureIds } from "./sequence-canary-fixture";
+import { assertCanaryReceipt, assertDeliveryWebhook, fixtureIds, preflightFixture, SENDILLO_SENDER, type FixtureIds } from "./sequence-canary-fixture";
 
 // ---------- env bootstrap ---------------------------------------------------
 
@@ -35,19 +35,21 @@ function loadLocalEnv(file: string): Record<string, string> {
 
 // ---------- run ------------------------------------------------------------
 
-export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<Database>>, ids: FixtureIds, cleanupOnly = false, expectedSender = process.env.SEQUENCE_CANARY_EXPECTED_SENDER) {
-  const orgId = await preflightFixture(supabase, ids);
+export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<Database>>, ids: FixtureIds, cleanupOnly = false, expectedSender = process.env.SENDILLO_FROM_NUMBER) {
   if (cleanupOnly) {
     console.log(`[smoke] cleaned ${await cleanupAllCanaries(supabase, ids.userId, ids.propertyId)} canary sequences`);
     return;
   }
-  if (!expectedSender || !/^\+1\d{10}$/.test(expectedSender)) {
-    throw new Error("SEQUENCE_CANARY_EXPECTED_SENDER must be an E.164 US number");
+  const orgId = await preflightFixture(supabase, ids);
+  if (expectedSender !== SENDILLO_SENDER) {
+    throw new Error("SENDILLO_FROM_NUMBER must be the approved Sendillo sender");
   }
   const TS = new Date().toISOString().replace(/[:.]/g, "-");
   const UNIQUE_BODY = `PROD-SMOKE ${TS} ${randomUUID()}`;
   const sentBody = `Mel with BMH. ${UNIQUE_BODY} - Reply STOP.`;
   let sequenceId: string | null = null;
+  const evidence: Record<string, string | null> = { sequenceId: null, enrollmentId: null, stepId: null,
+    claimId: null, messageId: null, externalId: null, webhookEventId: null };
   try {
     console.log(`[smoke] start   ${TS}`);
 
@@ -67,6 +69,7 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
       .single();
     if (seqErr || !seq) throw seqErr ?? new Error("seq insert failed");
     sequenceId = seq.id;
+    evidence.sequenceId = seq.id;
     console.log(`[smoke] seq     ${seq.id}`);
 
     const { data: step, error: stepErr } = await supabase
@@ -81,8 +84,11 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
       .select("id")
       .single();
     if (stepErr || !step) throw stepErr ?? new Error("step insert failed");
+    evidence.stepId = step.id;
+    console.log(`[smoke] step    ${step.id}`);
 
     // Enroll (next_run_at = now so the next cron tick picks it up)
+    await preflightFixture(supabase, ids);
     const { data: enrollment, error: enrErr } = await supabase
       .from("sequence_enrollments")
       .insert({
@@ -97,50 +103,70 @@ export async function runSequenceSmoke(supabase: ReturnType<typeof createClient<
       .select("id")
       .single();
     if (enrErr || !enrollment) throw enrErr ?? new Error("enrollment insert failed");
+    evidence.enrollmentId = enrollment.id;
     console.log(`[smoke] enrol   ${enrollment.id}`);
     console.log(`[smoke] sent body = ${sentBody}`);
-    console.log(
-      `[smoke] waiting up to 6 min for the Vercel cron to fire and deliver to Twilio...`,
-    );
-
-    // Poll test_sms_log for the specific body.
-    const deadline = Date.now() + 6 * 60_000;
-    let matched: Database["public"]["Tables"]["test_sms_log"]["Row"] | null = null;
-    while (Date.now() < deadline) {
-      const { data: rows, error: pollError } = await supabase
-        .from("test_sms_log")
-        .select("id, received_at, body, to_number, from_number, provider, external_id, signature_verified, raw_payload")
-        .ilike("body", `%${UNIQUE_BODY}%`)
-        .order("received_at", { ascending: false })
-        .limit(1);
-      if (pollError) throw pollError;
-      if (rows && rows.length > 0) {
-        matched = rows[0];
-        break;
+    async function waitFor<T>(label: string, deadline: number, read: () => Promise<T | null>): Promise<T> {
+      while (Date.now() < deadline) {
+        const result = await read();
+        if (result) return result;
+        await new Promise((resolve) => setTimeout(resolve, 15_000));
       }
-      await new Promise((r) => setTimeout(r, 15_000));
-      process.stdout.write(".");
+      throw new Error(`Canary ${label} timed out`);
     }
-    process.stdout.write("\n");
-
-    if (!matched) {
-      console.error("[smoke] FAILED — no test_sms_log row with matching body");
-      throw new Error("No matching test_sms_log row");
+    const claim = await waitFor("accepted claim", Date.now() + 12 * 60_000, async () => {
+      const { data, error } = await supabase.from("sequence_step_runs")
+        .select("id,step_id,enrollment_id,attempt_outcome,message_id").eq("enrollment_id", enrollment.id).eq("step_id", step.id).limit(2);
+      if (error) throw error;
+      if ((data?.length ?? 0) > 1) throw new Error("Multiple canary claims");
+      const row = data?.[0];
+      if (row && !["not_attempted", "accepted"].includes(row.attempt_outcome)) throw new Error(`Canary claim failed: ${row.attempt_outcome}`);
+      return row?.attempt_outcome === "accepted" && row.message_id ? row : null;
+    });
+    console.log(`[smoke] claim   ${claim.id} message ${claim.message_id}`);
+    const messageId = claim.message_id!;
+    evidence.claimId = claim.id;
+    evidence.messageId = messageId;
+    const sent = await waitFor("sent_at", Date.now() + 2 * 60_000, async () => {
+      const { data, error } = await supabase.from("messages")
+        .select("id,body,to_address,from_address,provider,external_id,status,sent_at,delivered_at").eq("id", messageId).single();
+      if (error || !data) throw error ?? new Error("Canary message missing");
+      if (["failed", "undelivered", "canceled"].includes(data.status)) throw new Error(`Canary message failed: ${data.status}`);
+      return data.sent_at ? data : null;
+    });
+    const deliveryDeadline = new Date(sent.sent_at!).getTime() + 3 * 60_000;
+    const delivered = await waitFor("delivery", deliveryDeadline, async () => {
+      const { data, error } = await supabase.from("messages")
+        .select("id,body,to_address,from_address,provider,external_id,status,sent_at,delivered_at").eq("id", messageId).single();
+      if (error || !data) throw error ?? new Error("Canary message missing");
+      if (["failed", "undelivered", "canceled"].includes(data.status)) throw new Error(`Canary message failed: ${data.status}`);
+      return data.status === "delivered" ? data : null;
+    });
+    evidence.externalId = delivered.external_id;
+    assertCanaryReceipt(delivered, sentBody);
+    const webhook = await waitFor("webhook", deliveryDeadline, async () => {
+      const { data, error } = await supabase.from("webhook_events")
+        .select("id,provider,external_id,event_type,signature_verified,processing_status")
+        .eq("org_id", orgId).eq("provider", "sendillo").eq("external_id", delivered.external_id!)
+        .eq("event_type", "sms_status_delivered").limit(2);
+      if (error) throw error;
+      if ((data?.length ?? 0) > 1) throw new Error("Multiple matching canary webhooks");
+      const row = data?.[0];
+      if (row && (row.signature_verified !== true || row.processing_status === "failed")) throw new Error("Canary webhook authentication or processing failed");
+      return row?.processing_status === "processed" ? row : null;
+    });
+    evidence.webhookEventId = webhook.id;
+    assertDeliveryWebhook(webhook, delivered.external_id!);
+    const { data: after, error: afterError } = await supabase.from("sequence_enrollments")
+      .select("status,completed_at").eq("id", enrollment.id).single();
+    if (afterError || !after || after.status !== "completed" || !after.completed_at) {
+      throw afterError ?? new Error(`Enrollment did not complete: ${after?.status}`);
     }
-
-    const matchedRowId = assertCanaryReceipt(matched, sentBody, expectedSender);
-    console.log(`[smoke] PASS    test_sms_log row ${matchedRowId}`);
-    console.log(`[smoke]         received_at = ${matched.received_at}`);
-
-    // Verify enrollment advanced
-    const { data: after, error: afterError } = await supabase
-      .from("sequence_enrollments")
-      .select("status, completed_at")
-      .eq("id", enrollment.id)
-      .single();
-    if (afterError || !after || after.status !== "completed") throw afterError ?? new Error(`Enrollment did not complete: ${after?.status}`);
-    console.log(`[smoke]         enrollment.status = ${after.status}`);
+    console.log("[smoke] PASS", JSON.stringify({ enrollmentId: enrollment.id, stepId: step.id, claimId: claim.id,
+      messageId, externalId: delivered.external_id, webhookEventId: webhook.id, sentAt: delivered.sent_at,
+      deliveredAt: delivered.delivered_at, completedAt: after.completed_at }));
   } finally {
+    console.log("[smoke] evidence before cleanup", JSON.stringify(evidence));
     if (sequenceId) {
       await cleanupCanary(supabase, sequenceId, ids.userId, ids.propertyId);
       console.log("[smoke] cleaned");
@@ -164,7 +190,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const supabase = createClient<Database>(URL, KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  runSequenceSmoke(supabase, ids, process.argv.includes("--cleanup-only"), env.SEQUENCE_CANARY_EXPECTED_SENDER).catch((err) => {
+  runSequenceSmoke(supabase, ids, process.argv.includes("--cleanup-only"), env.SENDILLO_FROM_NUMBER).catch((err) => {
     console.error("[smoke] ERROR", err);
     process.exitCode = 1;
   });

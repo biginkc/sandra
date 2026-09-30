@@ -1,120 +1,185 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "../supabase/types";
-import { assertFreshCanaryFixture, assertCanaryReceipt, preflightFixture, TWILIO_NUMBER } from "../../../scripts/sequence-canary-fixture";
+import {
+  assertCanaryDispatchEligibility, assertCanaryReceipt, assertCentralSendWindow, assertDeliveryWebhook, assertFreshCanaryFixture,
+  FIXTURE_ADDRESS, preflightFixture, RECEIVER_NUMBER, SENDILLO_SENDER,
+} from "../../../scripts/sequence-canary-fixture";
 import { runSequenceSmoke } from "../../../scripts/smoke-sequences-prod";
 import fs from "node:fs";
 
 const ids = { userId: "11111111-1111-4111-8111-111111111111", propertyId: "22222222-2222-4222-8222-222222222222", contactId: "33333333-3333-4333-8333-333333333333" };
 const org = "44444444-4444-4444-8444-444444444444";
-function fixtureClient(overrides: Record<string, unknown> = {}) {
-  const rows: Record<string, unknown[]> = {
-    properties: [{ id: ids.propertyId, org_id: org, homeowner_contact_id: ids.contactId, is_dnc_locked: false, is_training: false, status: "new_lead", deleted_at: null }],
-    contacts: [{ id: ids.contactId, org_id: org, phone_1: TWILIO_NUMBER, phone_1_type: "mobile", phone_2: null, phone_3: null, do_not_contact: false, sms_opted_out: false }],
+const daytime = new Date("2026-09-29T15:00:00Z");
+
+function fixtureClient(overrides: Record<string, unknown[]> = {}, errors: string[] = []) {
+  const rows: Record<string, Record<string, unknown>[]> = {
+    organizations: [{ id: org }],
+    properties: [{ id: ids.propertyId, org_id: org, homeowner_contact_id: ids.contactId, address: FIXTURE_ADDRESS, state: "MO", ai_responder_disabled: true, skip_trace_disabled: true, outreach_dispo: null, is_dnc_locked: false, is_training: false, status: "new_lead", deleted_at: null }],
+    contacts: [{ id: ids.contactId, org_id: org, first_name: "Sequence", last_name: "Canary", phone_1: RECEIVER_NUMBER, phone_1_type: "mobile", phone_2: null, phone_3: null, do_not_contact: false, sms_opted_out: false }],
     consent_events: [{ id: "consent", org_id: org, contact_id: ids.contactId, channel: "sms", event_type: "opt_in_marketing_written" }],
     property_contacts: [],
+    sms_phone_suppressions: [],
   };
-  for (const [key, value] of Object.entries(overrides)) rows[key] = value as unknown[];
+  for (const [key, value] of Object.entries(overrides)) rows[key] = value as Record<string, unknown>[];
+  const queried: { table: string; filters: Record<string, unknown> }[] = [];
   const client = {
     auth: { admin: { getUserById: async () => ({ data: { user: { id: ids.userId } }, error: null }) } },
     from(table: string) {
-      const filters: Record<string, string> = {};
+      const filters: Record<string, unknown> = {};
+      queried.push({ table, filters });
+      const matching = () => rows[table]?.filter((row) => Object.entries(filters).every(([k, v]) => row[k] === v)) ?? [];
+      const result = (single: boolean) => ({ data: single ? matching()[0] ?? null : matching(), error: errors.includes(table) ? { message: "query failed" } : null });
       const query = {
         select: () => query,
-        eq: (column: string, value: string) => { filters[column] = value; return query; },
+        eq: (column: string, value: unknown) => { filters[column] = value; return query; },
         order: () => query,
         limit: () => query,
-        maybeSingle: async () => ({ data: rows[table]?.find((row) => Object.entries(filters).every(([k, v]) => (row as Record<string, unknown>)[k] === v)) ?? null, error: null }),
-        then(resolve: (value: unknown) => unknown) {
-          return Promise.resolve(resolve({ data: rows[table]?.filter((row) => Object.entries(filters).every(([k, v]) => (row as Record<string, unknown>)[k] === v)) ?? [], error: null }));
-        },
+        maybeSingle: async () => result(true),
+        then(resolve: (value: unknown) => unknown) { return Promise.resolve(resolve(result(false))); },
       };
       return query;
     },
   } as unknown as SupabaseClient<Database>;
-  return client;
+  return { client, queried, rows };
 }
 
-describe("fresh canary provisioning", () => {
-  it.each([
-    [[{ id: ids.contactId }], [], "contact"],
-    [[], [{ id: ids.propertyId }], "property"],
-  ])("refuses existing %s before writes", (contacts, properties, label) => {
-    expect(() => assertFreshCanaryFixture(contacts, properties)).toThrow(label);
+describe("fresh provisioning", () => {
+  it("refuses marker property, canary-created contact, and unexpected receiver contact", () => {
+    expect(() => assertFreshCanaryFixture([], [{ id: ids.propertyId }])).toThrow("property");
+    expect(() => assertFreshCanaryFixture([], [], [{ id: ids.contactId }])).toThrow("canary-created");
+    expect(() => assertFreshCanaryFixture([{ id: ids.contactId }], [], [], "d158a56c-0000-4000-8000-000000000000")).toThrow("Unexpected contact");
+    expect(() => assertFreshCanaryFixture([{ id: "d158a56c-0000-4000-8000-000000000000" }], [], [], "d158a56c-0000-4000-8000-000000000000")).not.toThrow();
+    expect(() => assertFreshCanaryFixture([{ id: "d158a56c-0000-4000-8000-000000000001" }], [], [], "d158a56c-0000-4000-8000-000000000000")).toThrow("Unexpected contact");
   });
-  it("checks all matching identifiers and invokes the guard before the first insert", () => {
+  it("provisioning sets the dedicated fixture fields and detects partial residue", () => {
     const source = fs.readFileSync("scripts/provision-sequence-canary.ts", "utf8");
-    expect(source).toContain("phone_1.eq.${TWILIO_NUMBER},phone_2.eq.${TWILIO_NUMBER},phone_3.eq.${TWILIO_NUMBER}");
-    expect(source).toContain('.eq("first_name", "Sequence").eq("last_name", "Canary")');
-    expect(source.indexOf("assertFreshCanaryFixture(matchingContacts, properties ?? [])"))
-      .toBeLessThan(source.indexOf('.from("contacts").insert('));
+    expect(source).toContain("RECEIVER_NUMBER");
+    expect(source).toContain("ai_responder_disabled: true");
+    expect(source).toContain("skip_trace_disabled: true");
+    expect(source).toContain("assertFreshCanaryFixture(matchingContacts, properties ?? [], namedContacts ?? [], env.SEQUENCE_CANARY_VERIFICATION_CONTACT_ID)");
+    expect(source).toContain("partial canary residue");
+    expect(source).toContain('env.SEQUENCE_CANARY_CONSENT_APPROVED !== "true"');
+    expect(source).not.toContain("TWILIO_NUMBER");
   });
 });
 
-describe("canary fixture preflight", () => {
-  it("accepts an isolated eligible fixture", async () => {
-    await expect(preflightFixture(fixtureClient(), ids)).resolves.toBe(org);
+describe("send eligibility", () => {
+  it("accepts an isolated fixture and scopes suppression by org, channel, and number", async () => {
+    const { client, queried } = fixtureClient();
+    await expect(preflightFixture(client, ids, daytime)).resolves.toBe(org);
+    expect(queried.find((query) => query.table === "sms_phone_suppressions")?.filters)
+      .toEqual({ org_id: org, channel: "sms", phone_e164: RECEIVER_NUMBER });
   });
   it.each([
-    ["wrong primary phone", { phone_1: "+18165550123" }],
-    ["non-mobile primary phone", { phone_1_type: "landline" }],
-    ["second phone", { phone_2: "+18165550124" }],
-    ["third phone", { phone_3: "+18165550125" }],
-    ["DNC", { do_not_contact: true }],
-    ["opted out", { sms_opted_out: true }],
-  ])("rejects %s", async (_label, patch) => {
-    const base = (await fixtureClient().from("contacts").select("*").eq("id", ids.contactId).maybeSingle()).data!;
-    await expect(preflightFixture(fixtureClient({ contacts: [{ ...base, ...patch }] }), ids)).rejects.toThrow();
+    ["wrong org", "properties", { org_id: "other" }],
+    ["wrong address", "properties", { address: "other" }],
+    ["wrong state", "properties", { state: "KS" }],
+    ["AI enabled", "properties", { ai_responder_disabled: false }],
+    ["skip trace enabled", "properties", { skip_trace_disabled: false }],
+    ["nurture", "properties", { outreach_dispo: "nurture" }],
+    ["terminal disposition", "properties", { outreach_dispo: "dnc" }],
+    ["not new lead", "properties", { status: "won" }],
+    ["training", "properties", { is_training: true }],
+    ["deleted", "properties", { deleted_at: "2026-09-01" }],
+    ["DNC lock", "properties", { is_dnc_locked: true }],
+    ["wrong phone", "contacts", { phone_1: "+18165550123" }],
+    ["non-mobile", "contacts", { phone_1_type: "landline" }],
+    ["second phone", "contacts", { phone_2: "+18165550124" }],
+    ["third phone", "contacts", { phone_3: "+18165550125" }],
+    ["DNC", "contacts", { do_not_contact: true }],
+    ["opted out", "contacts", { sms_opted_out: true }],
+  ])("rejects %s", async (_label, table, patch) => {
+    const { rows } = fixtureClient();
+    const { client } = fixtureClient({ [table]: [{ ...rows[table][0], ...patch }] });
+    await expect(preflightFixture(client, ids, daytime)).rejects.toThrow();
   });
-  it("rejects latest revoked consent", async () => {
-    await expect(preflightFixture(fixtureClient({ consent_events: [{ id: "latest", org_id: org, contact_id: ids.contactId, channel: "sms", event_type: "opt_out" }] }), ids)).rejects.toThrow();
+  it("rejects suppression and suppression lookup error", async () => {
+    await expect(preflightFixture(fixtureClient({ sms_phone_suppressions: [{ org_id: org, channel: "sms", phone_e164: RECEIVER_NUMBER }] }).client, ids, daytime)).rejects.toThrow("suppression");
+    await expect(preflightFixture(fixtureClient({}, ["sms_phone_suppressions"]).client, ids, daytime)).rejects.toThrow("suppression");
   });
-  it("rejects another homeowner property", async () => {
-    const base = (await fixtureClient().from("properties").select("*").eq("id", ids.propertyId).maybeSingle()).data!;
-    await expect(preflightFixture(fixtureClient({ properties: [base, { ...base, id: "other" }] }), ids)).rejects.toThrow();
+  it("rejects revoked consent and another property relationship", async () => {
+    await expect(preflightFixture(fixtureClient({ consent_events: [{ id: "latest", org_id: org, contact_id: ids.contactId, channel: "sms", event_type: "opt_out" }] }).client, ids, daytime)).rejects.toThrow("consent");
+    await expect(preflightFixture(fixtureClient({ property_contacts: [{ contact_id: ids.contactId, property_id: "other" }] }).client, ids, daytime)).rejects.toThrow("relationship");
   });
-  it("rejects another agent property", async () => {
-    const base = (await fixtureClient().from("properties").select("*").eq("id", ids.propertyId).maybeSingle()).data!;
-    await expect(preflightFixture(fixtureClient({ properties: [base, { ...base, id: "other", homeowner_contact_id: null, agent_contact_id: ids.contactId }] }), ids)).rejects.toThrow();
+  it("enforces Central weekdays and hours", () => {
+    expect(() => assertCentralSendWindow(daytime)).not.toThrow();
+    for (const time of ["2026-09-26T15:00:00Z", "2026-09-29T12:59:00Z", "2026-09-30T01:00:00Z"]) {
+      expect(() => assertCentralSendWindow(new Date(time))).toThrow("send window");
+    }
   });
-  it("rejects another property_contacts relationship", async () => {
-    await expect(preflightFixture(fixtureClient({ property_contacts: [{ contact_id: ids.contactId, property_id: "other", org_id: org }] }), ids)).rejects.toThrow();
-  });
-});
-
-describe("run-specific receipt", () => {
-  const body = "Mel with BMH. PROD-SMOKE unique - Reply STOP.";
-  const good = { id: "receipt", body, to_number: TWILIO_NUMBER, from_number: "+18162804181", provider: "twilio", external_id: "SM123", signature_verified: true, received_at: "2026-09-29T12:00:00Z" };
-  it("accepts exact row and records its id", () => expect(assertCanaryReceipt(good, body, "+18162804181")).toBe("receipt"));
-  it.each([
-    ["body", { body: "another run" }], ["receiver", { to_number: "+18165550123" }],
-    ["sender", { from_number: "+18165550123" }], ["SID", { external_id: null }],
-    ["provider", { provider: "other" }], ["signature", { signature_verified: false }],
-  ])("rejects mismatched %s on the matched row", (_label, patch) => {
-    expect(() => assertCanaryReceipt({ ...good, ...patch }, body, "+18162804181")).toThrow();
-  });
-  it("requires an expected sender before creating a sequence", async () => {
-    const writes: string[] = [];
-    const client = fixtureClient();
-    const originalFrom = client.from.bind(client);
-    client.from = ((table: "sequences") => {
-      if (table === "sequences") writes.push(table);
-      return originalFrom(table);
-    }) as typeof client.from;
-    await expect(runSequenceSmoke(client, ids, false, "")).rejects.toThrow("SEQUENCE_CANARY_EXPECTED_SENDER");
-    expect(writes).toEqual([]);
-  });
-  it("checks the row selected by the run token and prints its exact body and row id", () => {
+  it("cleanup-only uses ownership, not send eligibility", () => {
     const source = fs.readFileSync("scripts/smoke-sequences-prod.ts", "utf8");
-    expect(source).toContain("assertCanaryReceipt(matched, sentBody, expectedSender)");
-    expect(source).toContain("sent body = ${sentBody}");
-    expect(source).toContain("test_sms_log row ${matchedRowId}");
+    expect(source.indexOf("await cleanupAllCanaries(supabase, ids.userId, ids.propertyId)")).toBeLessThan(source.indexOf("const orgId = await preflightFixture"));
+    expect(source).not.toContain("cleanupOwnership");
   });
 });
 
-it("schedule is disabled by default while manual dispatch remains available", () => {
+describe("run-specific Sendillo proof", () => {
+  const body = "Mel with BMH. PROD-SMOKE unique - Reply STOP.";
+  const good = { id: "m", body, to_address: RECEIVER_NUMBER, from_address: SENDILLO_SENDER, provider: "sendillo", external_id: "snd123", status: "delivered", sent_at: "2026-09-29T15:00:00Z", delivered_at: "2026-09-29T15:00:01Z" };
+  it("requires exact delivered message fields", () => {
+    expect(assertCanaryReceipt(good, body)).toBe("m");
+    for (const patch of [{ body: "other" }, { to_address: "other" }, { from_address: "other" }, { provider: "twilio" }, { external_id: null }, { status: "sent" }, { sent_at: null }, { delivered_at: null }]) {
+      expect(() => assertCanaryReceipt({ ...good, ...patch }, body)).toThrow();
+    }
+  });
+  it("requires the exact authenticated processed delivery webhook", () => {
+    const event = { id: "w", provider: "sendillo", external_id: "snd123", event_type: "sms_status_delivered", signature_verified: true, processing_status: "processed" };
+    expect(assertDeliveryWebhook(event, "snd123")).toBe("w");
+    for (const patch of [{ provider: "twilio" }, { external_id: "other" }, { event_type: "other" }, { signature_verified: false }, { processing_status: "pending" }]) {
+      expect(() => assertDeliveryWebhook({ ...event, ...patch }, "snd123")).toThrow();
+    }
+  });
+  it("rejects wrong sender before a sequence write", async () => {
+    const { client } = fixtureClient();
+    await expect(runSequenceSmoke(client, ids, false, "")).rejects.toThrow();
+  });
+  it("has bounded waits and records all proof before cleanup", () => {
+    const source = fs.readFileSync("scripts/smoke-sequences-prod.ts", "utf8");
+    expect(source).toContain("12 * 60_000");
+    expect(source).toContain("2 * 60_000");
+    expect(source).toContain("3 * 60_000");
+    expect(source).toContain("enrollmentId: enrollment.id, stepId: step.id, claimId: claim.id");
+    expect(source).toContain("webhookEventId: webhook.id");
+    expect(source.indexOf("webhookEventId: webhook.id")).toBeLessThan(source.indexOf("await cleanupCanary"));
+    expect(source).not.toContain("test_sms_log");
+  });
+  it("rechecks canary eligibility at both provider dispatch sites", () => {
+    const source = fs.readFileSync("src/lib/messaging/send.ts", "utf8");
+    expect(source.match(/await assertCanaryDispatchEligibility\(/g)).toHaveLength(2);
+    expect(source.indexOf("await assertCanaryDispatchEligibility(", source.indexOf("export async function sendSmsToContact")))
+      .toBeLessThan(source.indexOf("const result = await provider.sendSms(", source.indexOf("export async function sendSmsToContact")));
+    expect(source.indexOf("await assertCanaryDispatchEligibility(", source.indexOf("export async function releaseQueuedMessage")))
+      .toBeLessThan(source.indexOf("const result = await provider.sendSms(", source.indexOf("export async function releaseQueuedMessage")));
+  });
+  it("dispatch guard fails closed on sender, identity, or fixture changes", async () => {
+    vi.stubEnv("SEQUENCE_CANARY_USER_ID", ids.userId);
+    vi.stubEnv("SEQUENCE_CANARY_PROPERTY_ID", ids.propertyId);
+    vi.stubEnv("SEQUENCE_CANARY_CONTACT_ID", ids.contactId);
+    try {
+      const input = { propertyId: ids.propertyId, contactId: ids.contactId, to: RECEIVER_NUMBER,
+        from: SENDILLO_SENDER, provider: "sendillo", body: "PROD-SMOKE run" };
+      await expect(assertCanaryDispatchEligibility(fixtureClient().client, { ...input, from: "other" }))
+        .rejects.toThrow("sender mismatch");
+      await expect(assertCanaryDispatchEligibility(fixtureClient().client, { ...input, contactId: "other" }))
+        .rejects.toThrow("identity");
+      const { rows } = fixtureClient();
+      await expect(assertCanaryDispatchEligibility(fixtureClient({ properties: [{ ...rows.properties[0], state: "KS" }] }).client, input))
+        .rejects.toThrow("eligibility");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+it("workflow gates schedule and gives cleanup its own timeout", () => {
   const workflow = fs.readFileSync(".github/workflows/canary-sequences.yml", "utf8");
   expect(workflow).toMatch(/if:\s*\$\{\{\s*github\.event_name != 'schedule' \|\| vars\.SEQUENCE_CANARY_SCHEDULE_ENABLED == 'true'\s*\}\}/);
-  expect(workflow).toMatch(/concurrency:\s*\n\s*group:.*\n\s*cancel-in-progress: false/);
   expect(workflow).toContain("workflow_dispatch: {}");
+  expect(workflow).toContain("cancel-in-progress: false");
+  expect(workflow).toContain("timeout-minutes: 35");
+  expect(workflow).toMatch(/Clean up tagged canary data[\s\S]*if: always\(\)[\s\S]*timeout-minutes: 5/);
+  expect(workflow).not.toContain("Twilio");
+  expect(workflow).not.toContain("test_sms_log");
 });

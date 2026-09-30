@@ -12,12 +12,11 @@ permissions:
 # giving us the worst possible signal.
 #
 # Failure mode: exit code non-zero → red run + email to repo watchers.
-# Success leaves a `PROD-SMOKE` row in `test_sms_log` for audit; the
-# script cleans up only its sequence, step, enrollment, and linked messages.
+# Success proves the exact Sendillo message and authenticated delivery webhook.
+# The script cleans up only its sequence, step, enrollment, and linked messages.
 # The owner-provisioned property, contact, and consent remain permanent.
 #
-# Cost: one Dialpad outbound SMS + one Twilio inbound per run
-# (~$0.005). ~22 weekday runs/month → ~$0.11/month.
+# Cost: one Sendillo outbound SMS per enabled run.
 
 on:
   schedule:
@@ -32,7 +31,7 @@ jobs:
     name: Sequences V1 Prod Canary
     if: ${{ github.event_name != 'schedule' || vars.SEQUENCE_CANARY_SCHEDULE_ENABLED == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     concurrency:
       group: sequence-canary-prod
       cancel-in-progress: false
@@ -47,7 +46,7 @@ jobs:
       SEQUENCE_CANARY_USER_ID: ${{ secrets.SEQUENCE_CANARY_USER_ID }}
       SEQUENCE_CANARY_PROPERTY_ID: ${{ secrets.SEQUENCE_CANARY_PROPERTY_ID }}
       SEQUENCE_CANARY_CONTACT_ID: ${{ secrets.SEQUENCE_CANARY_CONTACT_ID }}
-      SEQUENCE_CANARY_EXPECTED_SENDER: ${{ secrets.SEQUENCE_CANARY_EXPECTED_SENDER }}
+      SENDILLO_FROM_NUMBER: "+18164876899"
       CI: "1"
 
     steps:
@@ -62,13 +61,11 @@ jobs:
         run: npm ci
 
       - name: Run Sequences V1 prod canary
-        # Script uses the provisioned fixture, waits up to 6
-        # min for the Vercel `sequence-tick` cron to fire, polls
-        # `test_sms_log` for the Dialpad-delivered SMS, asserts
-        # enrollment advanced to `completed`, then cleans up. Exits 0
-        # on success, non-zero on any failure.
+        # Waits for the accepted claim, sent message, authenticated Sendillo
+        # delivery webhook, and completed enrollment.
         run: npx tsx scripts/smoke-sequences-prod.ts
 
       - name: Clean up tagged canary data
         if: always()
+        timeout-minutes: 5
         run: npx tsx scripts/smoke-sequences-prod.ts --cleanup-only
