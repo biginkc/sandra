@@ -46,7 +46,9 @@ export async function dispatchBatchWithStalls(pool, fetcher, ingress, { stallLog
   // Bounded sequential dispatch; no unbounded fan-out or browser dependency.
   for (const entry of entries) {
     const orgId = id(entry.org_id), operationId = id(entry.operation_id), eventId = id(entry.event_id);
-    if (typeof entry.generation !== 'string' || !/^[1-9][0-9]{0,18}$/.test(entry.generation) || BigInt(entry.generation) > 9223372036854775807n) throw Error('Invalid dispatch fence');
+    if (typeof entry.generation !== 'string' || !/^[1-9][0-9]{0,18}$/.test(entry.generation)) throw Error('Invalid dispatch fence');
+    const generation = BigInt(entry.generation);
+    if (generation > 9223372036854775807n) throw Error('Invalid dispatch fence');
     // [Astra B4] /run alone is Restate's SYNCHRONOUS ingress path — it blocks
     // for the full handler result and its 200 response IS the result, not an
     // {status:'Accepted'|'PreviouslyAccepted', invocationId} envelope. /run/send
@@ -65,8 +67,9 @@ export async function dispatchBatchWithStalls(pool, fetcher, ingress, { stallLog
     // its lease (still unacknowledged); it naturally expires and is retried
     // on a later pass, deferred, never journaled complete.
     if (acknowledgment.rows[0]?.result === true) accepted++;
-    else if (body.status === 'PreviouslyAccepted' && BigInt(entry.generation) >= 150n) {
-      stallLogger({ operation_id: operationId, event_id: eventId, invocation_id: body.invocationId, generation: entry.generation });
+    else if (body.status === 'PreviouslyAccepted' && generation >= 150n) {
+      const loggedGeneration = generation;
+      stallLogger({ operation_id: operationId, event_id: eventId, invocation_id: body.invocationId, generation: loggedGeneration });
     }
   }
   return accepted;

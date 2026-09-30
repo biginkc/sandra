@@ -210,8 +210,8 @@ def run_worker_locals(handle) -> None:
     record(handle, "T-R1/T-R5c/T-R6/T-R7/T-R8 local baseline", execute(baseline, env))
     mutations = [
         ("T-R1 mutation", WORKER_SERVICE, b"    options: inboxReplySendServiceOptions,\n", b"    // mutation: omit service options\n", "T-R1"),
-        ("T-R6 Number mutation", WORKER_CORE, b"body.status === 'PreviouslyAccepted' && BigInt(entry.generation) >= 150n", b"body.status === 'PreviouslyAccepted' && Number(entry.generation) >= 150n", "T-R6"),
-        ("T-R6 modulo-boundary mutation", WORKER_CORE, b"body.status === 'PreviouslyAccepted' && BigInt(entry.generation) >= 150n", b"body.status === 'PreviouslyAccepted' && BigInt(entry.generation) % 150n === 0n", "T-R6"),
+        ("T-R6 Number mutation", WORKER_CORE, b"const loggedGeneration = generation;", b"const loggedGeneration = Number(generation);", "T-R6"),
+        ("T-R6 modulo-boundary mutation", WORKER_CORE, b"body.status === 'PreviouslyAccepted' && generation >= 150n", b"body.status === 'PreviouslyAccepted' && generation % 150n === 0n", "T-R6"),
         ("T-R7 mutation", WORKER_DOCKERFILE, b"core.mjs runner.mjs server.mjs handler.mjs service.mjs", b"core.mjs runner.mjs server.mjs service.mjs", "T-R7"),
         ("T-R8 RunOptions mutation", WORKER_HANDLER, b"const dispatch = await ctx.run(`dispatch:${attemptId}`, async () => {", b"const dispatch = await ctx.run(`dispatch:${attemptId}`, { maxRetryAttempts: 3 }, async () => {", "T-R8"),
     ]
