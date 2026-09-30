@@ -1,0 +1,69 @@
+{
+  "verdict": "PASS",
+  "target": "disposable-readonly",
+  "phase": "post",
+  "plan_digests": {
+    "privileged": {
+      "first": {
+        "sha256": "61356f84d493418ed800322f27ca23ffded79ae97828bf1147374a1acbe583cc",
+        "messages_scan": "Seq Scan",
+        "total_cost": 481.3
+      },
+      "keyset": {
+        "sha256": "61356f84d493418ed800322f27ca23ffded79ae97828bf1147374a1acbe583cc",
+        "messages_scan": "Seq Scan",
+        "total_cost": 508.87
+      },
+      "null_tail": {
+        "sha256": "61356f84d493418ed800322f27ca23ffded79ae97828bf1147374a1acbe583cc",
+        "messages_scan": "Seq Scan",
+        "total_cost": 275.14
+      }
+    },
+    "member": {
+      "first": {
+        "sha256": "6efcbd7259645539e2482b724d5830c716fa19790781576898b471ec821aabc4",
+        "messages_scan": "Seq Scan",
+        "total_cost": 398.55
+      },
+      "keyset": {
+        "sha256": "6efcbd7259645539e2482b724d5830c716fa19790781576898b471ec821aabc4",
+        "messages_scan": "Seq Scan",
+        "total_cost": 430.96
+      },
+      "null_tail": {
+        "sha256": "6efcbd7259645539e2482b724d5830c716fa19790781576898b471ec821aabc4",
+        "messages_scan": "Seq Scan",
+        "total_cost": 301.22
+      }
+    }
+  },
+  "catalog_section_sha256": {
+    "created_objects_present": "b6037a028870fdea64dfe1978cbaa24cc0189e4e97bc52216edbad7cd1ba600f",
+    "extensions": "83d437bcb9373fde6172a87835bf23a9814fa252fb8ea0ffa30834125303c774",
+    "functions": "af7f746f5df0f6a307612d966cd6ae4355ae4267ce4f5eb56691cecbaab5bea3",
+    "index_names": "488cf545751b0e92b4543465d6c86c16b5428440bb00bd90373d4e4de1972cef",
+    "relations": "da13d12071cabe943dd4bc6e54537b588cb685750ab462cb1fc0fb96c7c43010",
+    "schema_migrations": "a1e1743f52e2eba300765533a43aeeef442d9edd0f327af5d885c6a49e3b2692",
+    "schemas": "c6c22cf46d2271acd88d26386e0a20934d2740d786485ac0f59b5dfbbb5cc0e1",
+    "trigger_names": "ba8253c1c614f6fcd11e761bfbe1762bf9feab7fd95ef9746de50e03599cc61e",
+    "types": "c59eafc9d497149bc8b126326595d2e363aa3ed9dbb8580318f6b453087f2c6f"
+  },
+  "platform_sha256": "720460ac84de66a1ae38f3f22ec17bb1d3947cfe3fb41fa2e2137e9e630c40dd",
+  "plan_cost_ratios": {
+    "privileged": {
+      "first": 16.989057536180727,
+      "keyset": 17.361651313544865,
+      "null_tail": 9.600139567341241
+    },
+    "member": {
+      "first": 6.050554121754971,
+      "keyset": 6.446671652954375,
+      "null_tail": 4.550151057401813
+    }
+  },
+  "indexes": {
+    "verdict": "PASS",
+    "count": 31
+  }
+}
