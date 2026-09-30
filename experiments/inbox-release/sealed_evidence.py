@@ -350,8 +350,18 @@ def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
                     or not math.isfinite(plan["total_cost"])):
                 raise EvidenceError(f"invalid shared-readonly plan: {directory}")
     tls = output["tls"]
-    if (not isinstance(tls, dict) or set(tls) != {"ssl", "version", "cipher"} or tls["ssl"] is not True
-            or not isinstance(tls["version"], str) or not isinstance(tls["cipher"], str)):
+    pin = "80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA"
+    fp = re.compile(r"(?:[0-9A-F]{2}:){31}[0-9A-F]{2}\Z")
+    if (not isinstance(tls, dict) or set(tls) != {"protocol", "cipher", "leaf_fingerprint", "pinned_ca_fingerprint", "root_in_peer_chain", "upstream_hop_ssl"}
+            or tls["protocol"] not in {"TLSv1.2", "TLSv1.3"}
+            or not isinstance(tls["cipher"], str) or not tls["cipher"]
+            or not isinstance(tls["leaf_fingerprint"], str) or not fp.fullmatch(tls["leaf_fingerprint"])
+            or tls["pinned_ca_fingerprint"] != pin or not isinstance(tls["root_in_peer_chain"], bool)
+            or (tls["upstream_hop_ssl"] is not None and (not isinstance(tls["upstream_hop_ssl"], dict)
+                or set(tls["upstream_hop_ssl"]) != {"ssl", "version", "cipher"}
+                or not isinstance(tls["upstream_hop_ssl"]["ssl"], bool)
+                or any(tls["upstream_hop_ssl"][key] is not None and not isinstance(tls["upstream_hop_ssl"][key], str)
+                       for key in ("version", "cipher"))))):
         raise EvidenceError(f"invalid shared-readonly TLS: {directory}")
     items = output["items"]
     if not isinstance(items, dict) or set(items) - {"queued_invariants"}:
