@@ -128,6 +128,13 @@ describe("POST /api/webhooks/sendillo/reply-status", () => {
     expect(reportErrorMock).toHaveBeenCalled();
   });
 
+  it("returns a non-2xx response when reconciliation is busy", async () => {
+    rpcMock.mockResolvedValue({ data: { kind: "busy" }, error: null });
+    const response = await POST(req(JSON.stringify(buildSyntheticReplyCallback("ext-busy-1", "delivered"))));
+    expect(response.status).toBe(500);
+    expect(reportErrorMock).toHaveBeenCalled();
+  });
+
   it("the [secret] variant forwards to the same handler", async () => {
     const payload = buildSyntheticReplyCallback("ext-secret-1", "delivered");
     const response = await pathSecretRoute.POST(

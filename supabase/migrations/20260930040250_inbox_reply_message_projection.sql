@@ -81,8 +81,8 @@ BEGIN
  SET status=projected_status,
      external_id=projected_external_id,
      sent_at=CASE WHEN projected_sent_at IS NULL THEN NULL ELSE coalesce(m.sent_at,projected_sent_at) END,
-     delivered_at=coalesce(m.delivered_at,projected_delivered_at),
-     failed_at=coalesce(m.failed_at,projected_failed_at),
+     delivered_at=CASE WHEN projected_delivered_at IS NULL THEN NULL ELSE coalesce(m.delivered_at,projected_delivered_at) END,
+     failed_at=CASE WHEN projected_failed_at IS NULL THEN NULL ELSE coalesce(m.failed_at,projected_failed_at) END,
      error_message=projected_error,
      metadata=projected_metadata
  WHERE m.org_id=o
@@ -176,6 +176,8 @@ BEGIN
   DELETE FROM inbox_reply_send.message_projection_backlog b
    WHERE b.org_id=key_row.org_id AND b.attempt_id=key_row.attempt_id;
   RETURN jsonb_build_object('drained',true,'projected',true,'attempt_id',key_row.attempt_id);
+ -- Deliberately omit query_canceled: cancellation aborts this transaction and
+ -- rolls back any tries bump; a cancelled drain must not count as a retry.
  EXCEPTION WHEN others THEN
   GET STACKED DIAGNOSTICS failure_code=RETURNED_SQLSTATE;
   next_tries:=backlog_row.tries+1;
@@ -201,7 +203,7 @@ GRANT EXECUTE ON FUNCTION public.inbox_reply_drain_message_projection_one() TO s
 -- delegating to the frozen persist() body; the two replay cases below never
 -- create a new ledger edge and never call the provider again.
 CREATE FUNCTION inbox_reply_send.worker_persist_result(o uuid,attempt_id uuid,token uuid,result jsonb) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path='' AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path='' SET lock_timeout='3s' AS $$
 DECLARE
  row inbox_reply_send.attempts;
  kind text;

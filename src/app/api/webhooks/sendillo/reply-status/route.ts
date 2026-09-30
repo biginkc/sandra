@@ -158,6 +158,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "reconcile failed" }, { status: 500 });
     }
 
+    if (data && typeof data === "object" && !Array.isArray(data) && (data as { kind?: unknown }).kind === "busy") {
+      reportError(new Error("reply reconciliation busy"), {
+        tags: { surface: "sendillo_reply_status_webhook_reconcile" },
+        extra: { externalId: event.externalId, terminal: event.terminal },
+      });
+      return NextResponse.json({ error: "reconcile busy" }, { status: 500 });
+    }
+
     return NextResponse.json({ ok: true, result: data });
   } catch (error) {
     reportError(error, { tags: { surface: "sendillo_reply_status_webhook_unexpected" } });

@@ -240,6 +240,7 @@ const postgrest = spawn("postgrest", [], {
     PGRST_DB_SCHEMAS: "public",
     PGRST_DB_EXTRA_SEARCH_PATH: "public,extensions",
     PGRST_JWT_SECRET: jwtSecret,
+    PGRST_SERVER_HOST: "127.0.0.1",
     PGRST_SERVER_PORT: String(postgrestPort),
   },
 });

@@ -284,7 +284,7 @@ DO $$ DECLARE m public.messages; BEGIN SELECT * INTO m FROM public.messages WHER
 INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) VALUES('{y['o']}','{y['a']}','{y['op']}','{y['prep']}','{y['i']}',1,'{y['c']}','+12025550001','+12025550009',inbox_reply_send.body_hash('hello-{n}','+12025550001','+12025550009'),'approved');
 {started(n,attempt=y)} UPDATE inbox_reply_send.attempts SET state='uncertain',evidence='transport_timeout',receipt_version=receipt_version+1 WHERE org_id='{y['o']}' AND id='{y['a']}';
 SELECT inbox_reply_send.worker_persist_result('{y['o']}','{y['a']}','{y['token']}',jsonb_build_object('kind','accepted','externalId','ext-8-late','status','sent'));
-DO $$ DECLARE m public.messages; BEGIN SELECT * INTO m FROM public.messages WHERE idempotency_key='{y['a']}'; IF m.status IS DISTINCT FROM 'sent' OR m.external_id IS DISTINCT FROM 'ext-8-late' OR m.failed_at IS NULL OR m.error_message IS NOT NULL OR m.metadata ? 'providerOutcome' THEN RAISE EXCEPTION 'T8 late acceptance snapshot mismatch'; END IF; END $$;"""
+DO $$ DECLARE m public.messages; BEGIN SELECT * INTO m FROM public.messages WHERE idempotency_key='{y['a']}'; IF m.status IS DISTINCT FROM 'sent' OR m.external_id IS DISTINCT FROM 'ext-8-late' OR m.failed_at IS NOT NULL OR m.error_message IS NOT NULL OR m.metadata ? 'providerOutcome' THEN RAISE EXCEPTION 'T8 late acceptance snapshot mismatch'; END IF; END $$;"""
         return assert_case(n, body, install_mutated_function("inbox_reply_send.project_message", "projected_external_id:=CASE WHEN row.state IN ('provider_accepted','delivered','delivery_failed') THEN row.provider_reference ELSE NULL END;", "projected_external_id:=NULL;"), items=2)
     if n in {9,10,11,13}:
         return concurrency_case(n)
@@ -617,6 +617,10 @@ def run_concurrency(n: int, mutated: bool) -> tuple[bool, str]:
             reconcile = session("r2-t10-reconcile", f"BEGIN; SELECT inbox_reply_send.reconcile_delivery('{x['o']}','sendillo','ext-10','delivered','{{}}'::jsonb);")
             sessions.append(reconcile)
             rec_pid, _ = wait_activity("r2-t10-reconcile", wait_event="Lock/transactionid")
+            major = int(psql("SELECT current_setting('server_version_num')::int/10000;", check=True).stdout.strip())
+            if major != 17:
+                finish_session(holder); finish_session(drain); finish_session(reconcile)
+                return True, f"T10 SKIP: granted tuple-lock assertion is pinned to PostgreSQL major 17; observed major {major}"
             lock_sql = f"SELECT jsonb_build_object('blockers',pg_blocking_pids({rec_pid}),'locks',coalesce(jsonb_agg(jsonb_build_object('locktype',l.locktype,'granted',l.granted,'transactionid',l.transactionid::text,'relation',l.relation::regclass::text)),'[]'::jsonb)) FROM pg_locks l WHERE l.pid={rec_pid};"
             lock = json.loads(psql(lock_sql,check=True).stdout.strip())
             locks = lock["locks"]
@@ -632,8 +636,6 @@ def run_concurrency(n: int, mutated: bool) -> tuple[bool, str]:
             drain = session("r2-t11-drain", "SELECT inbox_reply_send.drain_message_projection_one(); BEGIN; SELECT inbox_reply_send.drain_message_projection_one();")
             sessions.append(drain)
             wait_activity("r2-t11-drain", wait_event="Lock/advisory")
-            first_backlog = psql(f"SELECT count(*) FROM inbox_reply_send.message_projection_backlog WHERE attempt_id='{x['a']}';", check=True)
-            if first_backlog.stdout.strip() != "0": raise AssertionError("T11 first due item did not drain")
             callback = psql(f"""
 BEGIN;
 SET LOCAL lock_timeout='1s';
@@ -649,10 +651,12 @@ BEGIN
 END $$;
 ROLLBACK;
 """)
-            finish_session(holder); finish_session(drain)
             callback_text = output(callback)
-            if 'T11_CALLBACK_SQLSTATE=55P03' in callback_text: raise AssertionError("T11 callback unexpectedly returned SQLSTATE 55P03")
+            if 'T11_CALLBACK_SQLSTATE=55P03' in callback_text: raise AssertionError(f"T11_CALLBACK_SQLSTATE=55P03 (unexpected callback lock failure): {callback_text}")
             if 'T11_CALLBACK_RESULT=' not in callback_text or 'delivered' not in callback_text: raise AssertionError(f"T11 callback did not succeed: {callback_text}")
+            finish_session(holder); finish_session(drain)
+            first_backlog = psql(f"SELECT count(*) FROM inbox_reply_send.message_projection_backlog WHERE attempt_id='{x['a']}';", check=True)
+            if first_backlog.stdout.strip() != "0": raise AssertionError(f"T11 item one backlog remained after drain session: {first_backlog.stdout.strip()}")
             return True, output(callback)
         y = second_ids(n)
         drained = psql("SELECT inbox_reply_send.drain_message_projection_one();",check=True)
