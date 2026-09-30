@@ -62,3 +62,5 @@ next-env.d.ts
 /playwright/.cache/
 .env*.local
 supabase/.temp/
+__pycache__/
+*.pyc
