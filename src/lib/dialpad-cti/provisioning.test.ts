@@ -40,8 +40,9 @@ interface WorldSub {
   id: string;
   enabled: boolean;
   call_states: string[];
-  target_type: string;
-  target_id: string;
+  target_type: string | null;
+  target_id: string | null;
+  group_calls_only?: boolean;
   webhook_id: string | null;
 }
 
@@ -117,6 +118,7 @@ function subJson(sub: WorldSub): unknown {
     id: sub.id,
     enabled: sub.enabled,
     call_states: sub.call_states,
+    group_calls_only: sub.group_calls_only ?? false,
     target_type: sub.target_type,
     target_id: sub.target_id,
     ...(sub.webhook_id ? { webhook: { id: sub.webhook_id, hook_url: 'x' } } : { websocket: { id: '6000000000000001' } }),
@@ -241,6 +243,11 @@ function makePorts(w: World): ProvisioningPorts {
           if (!Array.isArray(body.call_states) || body.call_states.length === 0) {
             return { status: 400, text: JSON.stringify({ error: { message: 'Call states must be provided.' } }) };
           }
+          // Live PATCH replaces omitted target fields instead of preserving them.
+          sub.target_type = body.target_type ?? null;
+          sub.target_id = /"target_id":(\d+)/.exec(bodyText!)?.[1] ?? null;
+          sub.webhook_id = /"endpoint_id":(\d+)/.exec(bodyText!)?.[1] ?? sub.webhook_id;
+          sub.group_calls_only = body.group_calls_only ?? false;
           sub.call_states = body.call_states;
           sub.enabled = body.enabled === true;
           w.log.push(`PATCH ${sub.target_id}`);
@@ -798,6 +805,30 @@ describe('activate mode', () => {
     const rerun = await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID });
     expect(rerun.exitCode).toBe(0);
     expect(w.log).toEqual([`PATCH ${U1}`, `PATCH ${U2}`, 'db.activate']);
+  });
+
+  it('binds the preserved group filter into the preview digest', async () => {
+    const w = await prepared();
+    const before = await dryRun(w, activateInputs);
+    w.subs.find((s) => s.webhook_id === '7000000000000001')!.group_calls_only = true;
+    const after = await dryRun(w, activateInputs);
+    expect(after.plan!.digest).not.toBe(before.plan!.digest);
+  });
+
+  it('preserves target, group filter, and exact 64-bit endpoint on replacement-style PATCH', async () => {
+    const w = makeWorld();
+    w.nextHookId = BIG_WEBHOOK_ID;
+    expect((await execute(w)).exitCode).toBe(0);
+    w.connection!.recordingIngestEndpoint = RECORDING_ENDPOINT;
+    const owned = w.subs.filter((s) => s.webhook_id === BIG_WEBHOOK_ID);
+    owned[0]!.group_calls_only = true;
+    const scopeBefore = owned.map((s) => ({ target: s.target_id, type: s.target_type, endpoint: s.webhook_id, group: s.group_calls_only ?? false }));
+    expect((await execute(w, activateInputs, { confirmLiveReadiness: CONNECTION_ID })).exitCode).toBe(0);
+    expect(owned.map((s) => ({ target: s.target_id, type: s.target_type, endpoint: s.webhook_id, group: s.group_calls_only ?? false }))).toEqual(scopeBefore);
+    const body = w.requests.find((r) => r.method === 'PATCH')!.body!;
+    expect(body).toContain(`"endpoint_id":${BIG_WEBHOOK_ID},`);
+    expect(body).toContain(`"target_id":${U1},`);
+    expect(JSON.parse(body).group_calls_only).toBe(true);
   });
 
   it('leaves the connection disabled when the first subscription enable fails', async () => {

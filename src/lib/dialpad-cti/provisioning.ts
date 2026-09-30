@@ -317,6 +317,7 @@ export interface SubscriptionRecord {
   id: string;
   enabled: boolean | null;
   callStates: readonly string[];
+  groupCallsOnly: boolean;
   targetType: string | null;
   targetId: string | null;
   webhookId: string | null;
@@ -341,10 +342,12 @@ export function parseSubscription(value: unknown): SubscriptionRecord | null {
   if (!item) return null;
   const id = idOrNull(item.id);
   if (!id) return null;
+  if (item.group_calls_only != null && typeof item.group_calls_only !== 'boolean') return null;
   const webhook = record(item.webhook);
   return {
     id,
     enabled: typeof item.enabled === 'boolean' ? item.enabled : null,
+    groupCallsOnly: item.group_calls_only === true,
     callStates: Array.isArray(item.call_states) ? item.call_states.filter((s): s is string => typeof s === 'string') : [],
     targetType: typeof item.target_type === 'string' ? item.target_type : null,
     targetId: idOrNull(item.target_id),
@@ -632,7 +635,7 @@ export function buildPlan(inputs: ProvisioningInputs, o: Observed): Plan {
       action: sub.kind === 'owned' ? 'reuse' : 'create',
       detail:
         sub.kind === 'owned'
-          ? `subscription ${sub.record.id} enabled=${String(sub.record.enabled)}`
+          ? `subscription ${sub.record.id} enabled=${String(sub.record.enabled)} group_calls_only=${sub.record.groupCallsOnly}`
           : `create call subscription for user ${canary.userId} states=${CALL_STATES.join(',')} enabled=false`,
     });
   }
@@ -867,7 +870,7 @@ async function applyActivate(ctx: ApplyContext): Promise<void> {
     const subId = sub.record.id;
     const verifyEnabled = async (): Promise<boolean> => {
       const matches = (await listAll(ports.dialpad, '/api/v2/subscriptions/call', parseSubscription)).filter((entry) => entry.id === subId);
-      return matches.length === 1 && matches[0]!.enabled === true && matches[0]!.targetType === 'user' && matches[0]!.targetId === canary.userId && matches[0]!.webhookId === sub.record.webhookId && sameStates(matches[0]!.callStates);
+      return matches.length === 1 && matches[0]!.enabled === true && matches[0]!.targetType === 'user' && matches[0]!.targetId === canary.userId && matches[0]!.webhookId === sub.record.webhookId && sameStates(matches[0]!.callStates) && matches[0]!.groupCallsOnly === sub.record.groupCallsOnly;
     };
     if (sub.record.enabled === true) {
       if (!(await verifyEnabled())) throw new ProvisioningError('subscription_unverified', `subscription ${subId} no longer matches the expected enabled canary`);
@@ -879,8 +882,9 @@ async function applyActivate(ctx: ApplyContext): Promise<void> {
       ctx,
       id,
       async () => {
-        // Dialpad requires call_states on PATCH even when only enabling.
-        const body = JSON.stringify({ enabled: true, call_states: sub.record.callStates });
+        // PATCH requires states and clears omitted target fields. Preserve the full
+        // observed scope; validated IDs stay exact JSON integers beyond 2^53.
+        const body = `{"enabled":true,"target_type":"user","target_id":${canary.userId},"endpoint_id":${sub.record.webhookId},"group_calls_only":${sub.record.groupCallsOnly},"call_states":${JSON.stringify(sub.record.callStates)}}`;
         const response = await ports.dialpad.request('PATCH', `/api/v2/subscriptions/call/${subId}`, body);
         if (response.status !== 200) throw new ProvisioningError('subscription_enable_failed', `enable subscription returned HTTP ${response.status}`);
       },
