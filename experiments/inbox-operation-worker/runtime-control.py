@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Start only a new signed Restate/worker pair in the fixed full-schema fixture."""
 if not __debug__:raise SystemExit('Optimized Python refused')
-import hashlib,json,os,secrets,subprocess,sys,time,uuid
+import hashlib,json,os,re,secrets,subprocess,sys,time,uuid
 from pathlib import Path
 P=Path(__file__).resolve().parent;sys.path.insert(0,str(P.parent/'inbox-projection/fixture'))
 from guards import validate_container,validate_cron
@@ -25,6 +25,8 @@ local=P/'.runtime-local';local.mkdir(mode=0o700,exist_ok=True);os.chmod(local,0o
 need(not(local/'state.json').exists(),'Owned runtime state exists; inspect/recover instead of creating again')
 image=json.loads(docker('image','inspect','sandra-inbox-action-worker:20260913'))[0]
 need(image['Config']['User']=='node' and image['Config']['Labels'].get('com.bmh.inbox-fixture')==LABEL,'Worker image identity')
+image_id=image.get('Id','')
+need(re.fullmatch(r'sha256:[a-f0-9]{64}',image_id),'Worker image must expose a full immutable sha256 ID')
 ports=set()
 for proc in ['/proc/net/tcp','/proc/net/tcp6']:
  for line in docker('exec',DBCON,'cat',proc).splitlines()[1:]:
@@ -39,7 +41,8 @@ while number:number,remainder=divmod(number,58);encoded=alphabet[remainder]+enco
 encoded='1'*(len(raw)-len(raw.lstrip(b'\0')))+encoded;public='publickeyv1_'+encoded
 hosts=local/'hosts';hosts.write_text('127.0.0.1 localhost sandra-inbox-actions-db-owned sandra-inbox-restate-owned\n::1 localhost\n');os.chmod(hosts,0o644)
 password=secrets.token_urlsafe(40)
-config={'NODE_ENV':'test','INBOX_ACTION_WORKER_ENABLED':'1','INBOX_ACTION_LOCAL_FIXTURE':'1','INBOX_ACTION_DATABASE_URL':f'postgres://inbox_action_worker:{password}@sandra-inbox-actions-db-owned:5432/{DB}','INBOX_RESTATE_INGRESS_URL':'http://sandra-inbox-restate-owned:8080/','INBOX_RESTATE_IDENTITY_KEYS':json.dumps([public]),'INBOX_ACTION_CONNECTIONS':'2'}
+registration_path='/runtime/'+image_id.removeprefix('sha256:')
+config={'NODE_ENV':'test','INBOX_ACTION_WORKER_ENABLED':'1','INBOX_ACTION_LOCAL_FIXTURE':'1','INBOX_ACTION_DATABASE_URL':f'postgres://inbox_action_worker:{password}@sandra-inbox-actions-db-owned:5432/{DB}','INBOX_RESTATE_INGRESS_URL':'http://sandra-inbox-restate-owned:8080/','INBOX_RESTATE_REGISTRATION_PATH':registration_path,'INBOX_RESTATE_IDENTITY_KEYS':json.dumps([public]),'INBOX_ACTION_CONNECTIONS':'2'}
 env=local/'worker.env';env.write_text(''.join(k+'='+v+'\n' for k,v in config.items()));os.chmod(env,0o600)
 runtime={'database':DB,'marker':MARKER,'worker_name':worker,'engine_name':engine,'volume':volume,'public_key':public,'worker_image':image['Id'],'restate_image':RESTATE,'label':LABEL,'db_container_id':state['Id'],'phase':'prepared'}
 def save():
@@ -61,7 +64,7 @@ for _ in range(40):
  except RuntimeError:pass
  time.sleep(.25)
 else:raise RuntimeError('Owned Restate admin did not become ready; preserve evidence and inspect')
-registration=docker('exec',runtime['worker_id'],'node','--input-type=module','-e',"const r=await fetch('http://127.0.0.1:9070/deployments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({uri:'http://127.0.0.1:9080',use_http_11:true}),signal:AbortSignal.timeout(10000)});console.log(JSON.stringify({status:r.status,body:await r.json()}));")
+registration=docker('exec',runtime['worker_id'],'node','--input-type=module','-e',"const r=await fetch('http://127.0.0.1:9070/deployments',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({uri:'http://127.0.0.1:9080"+registration_path+"',use_http_11:true}),signal:AbortSignal.timeout(10000)});console.log(JSON.stringify({status:r.status,body:await r.json()}));")
 runtime['registration']=json.loads(registration);need(runtime['registration']['status'] in (200,201),'Signed service registration failed')
 runtime['phase']='registered';save()
 print('Owned signed worker/Restate pair registered; canonical effect/restart proof still required')

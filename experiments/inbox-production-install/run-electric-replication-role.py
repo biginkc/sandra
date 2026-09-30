@@ -11,6 +11,7 @@ channels; this helper never accepts a password or a DSN argument.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -25,6 +26,8 @@ SCRAM_VERIFIER = re.compile(
     r"^SCRAM-SHA-256\$([1-9][0-9]{0,9}):([A-Za-z0-9+/]{22})\$"
     r"([A-Za-z0-9+/]{43}):([A-Za-z0-9+/]{43})$"
 )
+PINNED_CA_FILE = HERE / "supabase-prod-ca-2021.crt"
+PINNED_CA_SHA256 = "700723581420dd1ac98fd7e9ac529f0ef210eadcaf87fc868a3ad7d114c2f3b7"
 
 
 class PacketError(RuntimeError):
@@ -37,6 +40,25 @@ def connected_project_ref() -> str:
     if not match or match.group(1) not in PROJECT_REFS:
         raise PacketError("PGHOST must be the approved direct Supabase host")
     return match.group(1)
+
+
+def validate_hosted_connection_environment() -> None:
+    for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+        if name in os.environ:
+            raise PacketError(f"{name} overrides the approved direct host")
+    if os.environ.get("PGSSLMODE") != "verify-full":
+        raise PacketError("PGSSLMODE must be verify-full for hosted refs")
+    rootcert = os.environ.get("PGSSLROOTCERT", "")
+    if not rootcert:
+        raise PacketError("PGSSLROOTCERT must point to the pinned Supabase CA")
+    try:
+        rootcert_path = Path(rootcert).resolve(strict=True)
+        pinned_path = PINNED_CA_FILE.resolve(strict=True)
+        digest = hashlib.sha256(rootcert_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise PacketError("PGSSLROOTCERT must point to the pinned Supabase CA") from exc
+    if rootcert_path != pinned_path or digest != PINNED_CA_SHA256:
+        raise PacketError("PGSSLROOTCERT is not the pinned Supabase CA")
 
 
 def validate_verifier(value: str) -> None:
@@ -83,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     connected_ref = connected_project_ref()
     if args.project_ref != connected_ref:
         raise PacketError("operator project ref does not match PGHOST")
+    validate_hosted_connection_environment()
     if args.packet == "teardown" and args.prior_replica_identity not in {"d", "n", "f", "i"}:
         raise PacketError("teardown requires a recorded replica identity")
 

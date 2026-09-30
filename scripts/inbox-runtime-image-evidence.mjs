@@ -5,12 +5,14 @@ import { pathToFileURL } from 'node:url';
 
 const serviceFiles = {
   'operation-worker': [
+    'experiments/inbox-operation-worker/Dockerfile',
     'experiments/inbox-operation-worker/package.json',
     'experiments/inbox-operation-worker/package-lock.json',
     'experiments/inbox-operation-worker/core.mjs',
     'experiments/inbox-operation-worker/server.mjs',
   ],
   'reply-send-worker': [
+    'experiments/inbox-reply-send-worker/Dockerfile',
     'experiments/inbox-reply-send-worker/package.json',
     'experiments/inbox-reply-send-worker/package-lock.json',
     'experiments/inbox-reply-send-worker/core.mjs',
@@ -19,6 +21,7 @@ const serviceFiles = {
     'experiments/inbox-reply-send-worker/vendor/reply-provider.mjs',
   ],
   'projection-worker': [
+    'services/inbox-projection-worker/Dockerfile',
     'services/inbox-projection-worker/package.json',
     'services/inbox-projection-worker/package-lock.json',
     'services/inbox-projection-worker/core.mjs',
@@ -26,6 +29,7 @@ const serviceFiles = {
     'services/inbox-projection-worker/server.mjs',
   ],
   'sync-relay': [
+    'services/inbox-sync-relay/Dockerfile',
     'services/inbox-sync-relay/server.mjs',
   ],
 };

@@ -27,17 +27,17 @@ test('image evidence binds exact source sha, immutable images, and manifest file
       for (const hash of Object.values(service.files)) assert.match(hash, /^[a-f0-9]{64}$/);
     }
     assert.deepEqual(Object.keys(evidence.services['operation-worker'].files).sort(), [
-      'core.mjs', 'package-lock.json', 'package.json', 'server.mjs',
+      'Dockerfile', 'core.mjs', 'package-lock.json', 'package.json', 'server.mjs',
     ]);
     assert.deepEqual(Object.keys(evidence.services['reply-send-worker'].files).sort(), [
-      'core.mjs', 'package-lock.json', 'package.json', 'runner.mjs', 'server.mjs',
+      'Dockerfile', 'core.mjs', 'package-lock.json', 'package.json', 'runner.mjs', 'server.mjs',
       'vendor/reply-provider.mjs',
     ]);
     assert.deepEqual(Object.keys(evidence.services['projection-worker'].files).sort(), [
-      'config.mjs', 'core.mjs', 'package-lock.json', 'package.json', 'server.mjs',
+      'Dockerfile', 'config.mjs', 'core.mjs', 'package-lock.json', 'package.json', 'server.mjs',
     ]);
     assert.deepEqual(Object.keys(evidence.services['sync-relay'].files).sort(), [
-      'server.mjs',
+      'Dockerfile', 'server.mjs',
     ]);
     assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), evidence);
   } finally {

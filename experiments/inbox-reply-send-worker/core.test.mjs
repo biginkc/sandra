@@ -56,6 +56,13 @@ test('workerConfiguration accepts the approved production ingress host and valid
   assert.throws(() => workerConfiguration({ INBOX_RESTATE_INGRESS_URL: 'http://sandra-inbox-restate-owned:8080/', INBOX_RESTATE_REGISTRATION_PATH: '/', INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]' }), /Version-specific Restate registration path required/);
 });
 
+test('workerConfiguration rejects a missing versioned registration path', () => {
+  assert.throws(() => workerConfiguration({
+    INBOX_RESTATE_INGRESS_URL: 'http://sandra-inbox-restate-owned:8080/',
+    INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]',
+  }), /Version-specific Restate registration path required/);
+});
+
 test('workerConfiguration rejects a connection budget over two', () => {
   assert.throws(() => workerConfiguration({ INBOX_RESTATE_INGRESS_URL: 'http://sandra-inbox-restate-owned:8080/', INBOX_RESTATE_REGISTRATION_PATH:'/runtime/'+'a'.repeat(64), INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]', INBOX_REPLY_SEND_CONNECTIONS: '3' }), /connection budget exceeds two/);
 });

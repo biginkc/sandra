@@ -46,11 +46,13 @@ WORKERS = {
 RAILWAY_ADMIN = "http://inbox-restate.railway.internal:9070"
 RAILWAY_WORKERS = {
     "operation": {
-        "endpoint": "http://inbox-operation-worker.railway.internal:9080",
+        "hostname_prefix": "inbox-operation-worker",
+        "port": 9080,
         "service": "InboxMetadataOperation",
     },
     "reply": {
-        "endpoint": "http://inbox-reply-send-worker.railway.internal:9081",
+        "hostname_prefix": "inbox-reply-send-worker",
+        "port": 9081,
         "service": "InboxReplySend",
     },
 }
@@ -276,8 +278,9 @@ def configured_railway_workers() -> dict:
     return {
         key: {
             **worker,
-            "liveness_endpoint": worker["endpoint"],
-            "endpoint": f"{worker['endpoint']}/runtime/{generation}",
+            "hostname": f"{worker['hostname_prefix']}-{generation}.railway.internal",
+            "liveness_endpoint": f"http://{worker['hostname_prefix']}-{generation}.railway.internal:{worker['port']}",
+            "endpoint": f"http://{worker['hostname_prefix']}-{generation}.railway.internal:{worker['port']}/runtime/{generation}",
         }
         for key, worker in RAILWAY_WORKERS.items()
     }

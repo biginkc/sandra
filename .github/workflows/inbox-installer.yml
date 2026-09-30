@@ -4,11 +4,19 @@ on:
   pull_request:
     paths:
       - 'experiments/inbox-production-install/**'
+      - 'experiments/inbox-release/execution-stack-compose.yml'
+      - 'experiments/inbox-release/test_execution_stack_compose.py'
+      - 'experiments/inbox-operation-worker/server.mjs'
+      - 'experiments/inbox-reply-send-worker/server.mjs'
       - '.github/workflows/inbox-installer.yml'
   push:
     branches: [main]
     paths:
       - 'experiments/inbox-production-install/**'
+      - 'experiments/inbox-release/execution-stack-compose.yml'
+      - 'experiments/inbox-release/test_execution_stack_compose.py'
+      - 'experiments/inbox-operation-worker/server.mjs'
+      - 'experiments/inbox-reply-send-worker/server.mjs'
       - '.github/workflows/inbox-installer.yml'
 permissions:
   contents: read
@@ -21,6 +29,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Install PostgreSQL 17 binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-17 postgresql-client-17
+          test -x /usr/lib/postgresql/17/bin/postgres
+          test -x /usr/lib/postgresql/17/bin/initdb
+          test -x /usr/lib/postgresql/17/bin/pg_ctl
+          test -x /usr/lib/postgresql/17/bin/psql
+          echo "PG17_BIN=/usr/lib/postgresql/17/bin" >> "$GITHUB_ENV"
       # DB-less determinism gate. This calls the same verifier entry point as
       # the native installed proof; --source-only stops after its hash-pinned
       # source/AST/compiler/receipt checks and never opens a database. Keeping one
@@ -30,6 +52,17 @@ jobs:
         working-directory: experiments/inbox-production-install
         run: |
           python3 verify.py --source-only
+      - name: Execute Electric packet against PostgreSQL 17
+        env:
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          test -x "$PG17_BIN/postgres"
+          python3 experiments/inbox-production-install/test_electric_replication_role_production.py
+      - name: Resolve compose env and start both workers
+        env:
+          LC_ALL: C
+        run: python3 experiments/inbox-release/test_execution_stack_compose.py
       # --- verify.py --installed, verify.py --selftest, and
       # verify-mutation-harness.py --owned-fixture (41 mutation cases plus a
       # clean baseline) are all NOT

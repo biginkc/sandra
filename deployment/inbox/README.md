@@ -76,6 +76,11 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   ```sh
   printf '%s\n' "$SCRAM_VERIFIER" | python3 experiments/inbox-production-install/run-electric-replication-role.py --packet install --project-ref "$PROJECT_REF"
   ```
+  Also export `PGSSLMODE=verify-full` and
+  `PGSSLROOTCERT=$PWD/experiments/inbox-production-install/supabase-prod-ca-2021.crt`.
+  The runner rejects `PGHOSTADDR`, `PGSERVICE`, and `PGSERVICEFILE`, and checks
+  the CA file's exact SHA-256 pin before invoking psql. The committed CA is the
+  public Supabase Root 2021 certificate; it is not a credential.
   The runner emits `\set` directives followed by `\i`, so the verifier is
   never a process argument and plaintext passwords are refused. Do not use
   `psql -v electric_password=...` or put a password in a DSN. Keep the
@@ -109,6 +114,25 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   while workers finish/recover accepted operations. Preserve old worker versions,
   receipts and Restate data. Never delete a replication slot while a consumer is
   still using it, or delete accepted-job state as part of a UI rollback.
+
+### Generation rollout and drain procedure
+
+Each Railway operation/reply worker service is generation-specific. For an image
+digest `G`, create the new private services with hostnames
+`inbox-operation-worker-G.railway.internal` and
+`inbox-reply-send-worker-G.railway.internal`, set each worker's
+`INBOX_RESTATE_REGISTRATION_PATH=/runtime/G`, and set the registration helper's
+`INBOX_RUNTIME_GENERATION=G`. Register the new endpoints only after `/livez` and
+the Restate registry readback pass. The helper keeps at most two generations per
+Restate service, so the old endpoint remains registered and routable while its
+outbox is drained.
+
+During rollback or replacement, stop new admission, observe the old generation's
+outbox/attempts and readiness until it is drained, then deregister and retire the
+old Railway services. Never repoint the old hostname, delete its service, or
+remove its Restate registration before that drain proof. A second generation may
+be registered and served concurrently; the generation path and hostname are both
+part of the deployment identity.
 
 References: [Electric deployment](https://electric.ax/docs/sync/guides/deployment),
 [Restate memory](https://docs.restate.dev/server/memory),

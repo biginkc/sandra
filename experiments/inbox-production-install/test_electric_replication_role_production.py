@@ -13,6 +13,7 @@ HERE = Path(__file__).resolve().parent
 INSTALL = HERE / "electric-replication-role.production.sql"
 TEARDOWN = HERE / "electric-replication-role.production-teardown.sql"
 RUNNER = HERE / "run-electric-replication-role.py"
+PINNED_CA = HERE / "supabase-prod-ca-2021.crt"
 PROJECT_REF = "ncsngxlcyxylaeskiteu"
 
 
@@ -81,10 +82,12 @@ class ProductionElectricPacketTests(unittest.TestCase):
         self.assertNotIn("DROP ROLE inbox_electric_replication", source)
         self.assertNotIn("install_fixture", source)
 
-    @unittest.skipUnless(postgres_bin(), "PostgreSQL 17 local binaries are required")
     def test_both_packets_execute_on_postgres17_and_restore_recorded_identity(self):
         bindir = postgres_bin()
-        assert bindir is not None
+        if bindir is None:
+            if os.environ.get("CI", "").lower() == "true":
+                self.fail("PostgreSQL 17 local binaries are required in CI; refusing a silent skip")
+            self.skipTest("PostgreSQL 17 local binaries are required")
         with tempfile.TemporaryDirectory(prefix="sandra-electric-pg17-") as temp:
             root = Path(temp)
             data = root / "data"
@@ -126,7 +129,7 @@ class ProductionElectricPacketTests(unittest.TestCase):
             fake_psql = root / "fake-psql.py"
             fake_psql.write_text("#!/usr/bin/env python3\nimport os, sys\nPath = __import__('pathlib').Path\nPath(os.environ['ARGS_FILE']).write_text(' '.join(sys.argv[1:]))\nsys.stdin.buffer.read()\nprint('fake psql ok')\n")
             fake_psql.chmod(0o700)
-            env = {**os.environ, "PGHOST": f"db.{PROJECT_REF}.supabase.co", "INBOX_ELECTRIC_PSQL_BIN": str(fake_psql), "ARGS_FILE": str(args_file)}
+            env = {**os.environ, "PGHOST": f"db.{PROJECT_REF}.supabase.co", "PGSSLMODE": "verify-full", "PGSSLROOTCERT": str(PINNED_CA), "INBOX_ELECTRIC_PSQL_BIN": str(fake_psql), "ARGS_FILE": str(args_file)}
             rejected = subprocess.run(["python3", str(RUNNER), "--packet", "install", "--project-ref", PROJECT_REF], input="plain-text-password\n", text=True, capture_output=True, env=env, check=False)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertNotIn("plain-text-password", rejected.stdout + rejected.stderr)
@@ -139,6 +142,19 @@ class ProductionElectricPacketTests(unittest.TestCase):
             self.assertNotEqual(mismatch.returncode, 0)
             self.assertIn("does not match PGHOST", mismatch.stderr)
             self.assertNotIn(scram, mismatch.stdout + mismatch.stderr)
+
+    def test_host_routing_and_tls_overrides_are_refused(self):
+        base = {**os.environ, "PGHOST": f"db.{PROJECT_REF}.supabase.co", "PGSSLMODE": "verify-full", "PGSSLROOTCERT": str(PINNED_CA), "INBOX_ELECTRIC_PSQL_BIN": "/definitely/missing/psql"}
+        for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE"):
+            env = {**base, name: "attacker-controlled"}
+            rejected = subprocess.run(["python3", str(RUNNER), "--packet", "teardown", "--project-ref", PROJECT_REF, "--prior-replica-identity", "d"], text=True, capture_output=True, env=env, check=False)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(name, rejected.stderr)
+        for key, value in (("PGSSLMODE", "require"), ("PGSSLROOTCERT", str(HERE / "electric-replication-role.production.sql"))):
+            env = {**base, key: value}
+            rejected = subprocess.run(["python3", str(RUNNER), "--packet", "teardown", "--project-ref", PROJECT_REF, "--prior-replica-identity", "d"], text=True, capture_output=True, env=env, check=False)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("pinned Supabase CA" if key == "PGSSLROOTCERT" else "verify-full", rejected.stderr)
 
     @staticmethod
     def _packet_input(packet: Path, values: dict[str, str]) -> str:
