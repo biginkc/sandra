@@ -14,6 +14,7 @@ import {
   parseDialpadRecordingLifecycle,
   parseDialpadRecordingSealInputs,
   parseDialpadRecordingVadResult,
+  parseDialpadRecordingBrowserStatus,
 } from './contracts';
 
 const capture = (over: Record<string, unknown> = {}) => ({
@@ -81,6 +82,12 @@ describe('recording contracts', () => {
       ],
     });
     expect(result.inputs[0]).toMatchObject({ epoch: 1, seq: 0, isEof: false });
+  });
+
+  it('parses durable threshold and final-result summaries without raw evidence', () => {
+    const status = parseDialpadRecordingBrowserStatus({ captureId: 'c', captureStatus: 'sealed', closedAt: '2026-09-29T00:00:00Z', drainDeadlineAt: null, latestConsumedEpoch: 1, ingestEndpoint: null, controlVersion: 2, tracks: ['tab', 'mic'], totalSamples: '4800001', measurementStatus: 'provisional', crossing: { status: 'latched', thresholdSamples: '4800000', crossingTotalSamples: '4800001', crossingEpoch: 1, crossingSample: 4800000, crossingStartSample: 4799999, crossingEndSample: 4800001 }, finalResult: { status: 'eligible', observedSamples: 4800001, eligibleSamples: 4800001, reasons: ['eligible'], evaluatedAt: '2026-09-29T00:00:00Z' } });
+    expect(status.crossing?.crossingTotalSamples).toBe(4800001);
+    expect(status.finalResult?.eligibleSamples).toBe(4800001);
   });
 
   it('requires authoritative lifecycle flags and preserves provisional VAD threshold state', () => {

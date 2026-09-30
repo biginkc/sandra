@@ -299,6 +299,7 @@ export function MyLeadsClient({viewer,roster,initialMemberId,initialSnapshot,ini
     {refreshError&&<div role="alert" className="mb-4 rounded border border-destructive p-3 text-destructive">{refreshError} Displayed counts may be out of date. Retrying automatically. <Button variant="outline" onClick={()=>void refresh()}>Retry now</Button> <Button variant="outline" onClick={()=>window.location.reload()}>Reload and reconnect</Button></div>}
     {dialpad&&roster.settings.enabled&&<DialpadPanel bootstrap={dialpad} callRequest={dialpadRequest}
       onCallRequestHandled={nonce=>setDialpadRequest(current=>current?.nonce===nonce?null:current)}
+      onRecordingFinalResult={()=>{void refresh(true);}}
       onLogOutcome={(propertyId,callActivityId)=>{if(!rawRow(propertyId)){setError('This lead is no longer in your queue.');return;}action('log-attempt',propertyId,callActivityId);}}/>}
     {!roster.settings.enabled?<p>My Leads is not enabled yet.</p>:!pages||!kpis||!tiles?<p role="status">Loading My Leads…</p>:<>
       <MyLeadsQueue canSelectRep={viewer.isOwner} stages={pages} drips={drips} kpis={tiles} search={search} selectedRepId={member}

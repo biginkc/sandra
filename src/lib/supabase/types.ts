@@ -147,6 +147,20 @@ export type Database = {
         Relationships: []
       }
 
+      dialpad_recording_provider_window_policies: {
+        Row: { org_id: string; policy_version: string; algorithm_version: string; policy_hash: string; mapping_method: string; time_unit: string; sample_rate_hz: number; domain_start_sample: number; domain_end_sample: number; lower_slope_us_per_sample: number; lower_intercept_us: number; upper_slope_us_per_sample: number; upper_intercept_us: number; classification_overcount_samples: number; supported_duration_max_seconds: number; supported_anchor_cadence_ms: number; supported_stall_max_ms: number; supported_drift_ppm: number; supported_capture_margin_us: number; supported_provider_start_margin_us: number; supported_provider_end_margin_us: number; evidence_digest: string; evidence_refs: Json; acceptance_note: string; accepted_at: string | null; accepted_by: string | null; revoked_at: string | null; created_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
+      dialpad_recording_provider_window_results: {
+        Row: { capture_id: string; org_id: string; call_activity_id: string; intent_id: string; epoch: number; provider_call_id: string; policy_version: string; policy_hash: string; algorithm_version: string; input_digest: string; observed_samples: number; eligible_samples: number | null; status: string; reasons: Json; sample_window: Json; selected_summary: Json; evaluated_at: string }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+
       dialpad_recording_shadow_measurements: {
         Row: { capture_id: string; org_id: string; call_activity_id: string; intent_id: string; algorithm_version: string; input_digest: string; evidence_manifest: Json; observed_samples: number; observed_samples_by_epoch: Json; eligible_samples: null; timing_status: string; evidence_status: string; reasons: Json; evaluated_at: string }
         Insert: Record<string, never>
@@ -5867,6 +5881,10 @@ export type Database = {
       fn_get_dialpad_recording_shadow_input: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
       fn_finalize_dialpad_recording_shadow: { Args: { p_org_id: string; p_capture_id: string; p_expected_input_digest: string }; Returns: Json }
       fn_get_dialpad_recording_shadow_measurement: { Args: { p_org_id: string; p_capture_id: string }; Returns: Json }
+      fn_list_dialpad_recording_provider_window_candidates: { Args: { p_limit?: number; p_after_result_at?: string | null; p_after_capture_id?: string | null }; Returns: Json }
+      fn_get_dialpad_recording_final_input: { Args: { p_org_id: string; p_capture_id: string; p_policy_version: string }; Returns: Json }
+      fn_finalize_dialpad_recording_provider_window: { Args: { p_org_id: string; p_capture_id: string; p_policy_version: string; p_expected_input_digest: string }; Returns: Json }
+      fn_get_dialpad_recording_provider_window_result: { Args: { p_org_id: string; p_rep_user_id: string; p_capture_id: string }; Returns: Json }
       fn_record_dialpad_event_process_failure: { Args: { p_event_id: string; p_sqlstate: string }; Returns: undefined }
       fn_get_rep_sms_context: { Args: { p_property_id: string }; Returns: Json }
       fn_set_rep_sms_enrollment: { Args: { p_org_id: string; p_user_id: string; p_enabled: boolean }; Returns: boolean }

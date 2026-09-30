@@ -291,6 +291,8 @@ export interface DialpadCallStatus {
   endedAt: string | null;
   durationSeconds: number | null;
   talkDurationSeconds: number | null;
+  /** Latest owned recording capture for this intent, when one exists. */
+  recordingCaptureId: string | null;
 }
 
 function nullableNumber(value: Json | undefined, label: string): number | null {
@@ -314,5 +316,6 @@ export function parseDialpadCallStatus(value: Json | null | undefined): DialpadC
     endedAt: nullableStr(data.endedAt, 'endedAt'),
     durationSeconds: nullableNumber(data.durationSeconds, 'durationSeconds'),
     talkDurationSeconds: nullableNumber(data.talkDurationSeconds, 'talkDurationSeconds'),
+    recordingCaptureId: nullableStr(data.recordingCaptureId, 'recordingCaptureId'),
   };
 }

@@ -219,7 +219,7 @@ export interface DialpadPanelBootstrap {
   allowedOrigins: string[];
   binding: { status: 'none' } | { status: 'pending' | 'verified'; dialpadUserId: string };
   grants: { id: string; callerNumberE164: string; identityType: DialpadIdentityType | null }[];
-  recording?: { ingestEndpoint: string };
+  recording?: { ingestEndpoint: string; timingEnabled?: boolean };
 }
 
 const DENIAL_MESSAGES: Record<DialpadDenialDetail, string> = {
@@ -305,7 +305,12 @@ export async function loadDialpadPanelBootstrap(db: DialpadDispatchDb, actor: Di
     binding: binding ? { status: binding.status, dialpadUserId: binding.dialpadUserId } : { status: 'none' },
     grants,
   } satisfies DialpadPanelBootstrap;
-  if (isTrustedRecordingIngestEndpoint(connection.recordingIngestEndpoint)) bootstrap.recording = { ingestEndpoint: connection.recordingIngestEndpoint };
+  if (isTrustedRecordingIngestEndpoint(connection.recordingIngestEndpoint)) {
+    bootstrap.recording = {
+      ingestEndpoint: connection.recordingIngestEndpoint,
+      ...(process.env.DIALPAD_RECORDING_TIMING_ENABLED === 'true' ? { timingEnabled: true } : {}),
+    };
+  }
   return bootstrap;
 }
 
