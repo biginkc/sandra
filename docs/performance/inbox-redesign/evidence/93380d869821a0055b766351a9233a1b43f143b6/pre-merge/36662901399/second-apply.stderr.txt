@@ -1,0 +1,3 @@
+ERROR:  P0001: Existing candidate: use validated forward upgrade, never reset
+CONTEXT:  PL/pgSQL function inline_code_block line 5 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3911
