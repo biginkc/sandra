@@ -35,6 +35,8 @@ const dispatchSql = readSql("20260929180000_dialpad_cti_dispatch.sql");
 const recordingSql = readSql("20260929210000_dialpad_recording_foundation.sql");
 const transportSql = readSql("20260929220000_dialpad_recording_transport_contract.sql");
 const playbackSql = readSql("20260929221000_dialpad_recording_playback.sql");
+const trainingProjectionSql = readSql("20260930036000_dialpad_training_projection.sql");
+const trainingPlaybackSql = readSql("20260930037000_dialpad_training_playback.sql");
 const browserSessionSql = readSql("20260930001000_dialpad_recording_browser_session.sql");
 const shadowSql = readSql("20260930001100_dialpad_recording_shadow_measurements.sql");
 
@@ -172,7 +174,7 @@ async function seedFixture(): Promise<void> {
   await verifiedBinding(orgId, repA, dialpadRepId);
 }
 
-async function seedSandraLibraryFixture(): Promise<void> {
+async function seedSandraLibraryFixture(training = false): Promise<void> {
   orgId = SANDRA_ORG_ID;
   contactId = uuid();
   propertyId = uuid();
@@ -182,6 +184,7 @@ async function seedSandraLibraryFixture(): Promise<void> {
     await pg.query("insert into public.organizations(id,name) values ($1,'Sandra playback test org') on conflict (id) do nothing", [orgId]);
     await pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'owner') on conflict (user_id,org_id) do update set role='owner', access_status='active', deletion_prepared_at=null, access_expires_at=null", [ownerId, orgId]);
     await pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member') on conflict (user_id,org_id) do update set access_status='active', deletion_prepared_at=null, access_expires_at=null", [repA, orgId]);
+    await pg.query("insert into public.memberships(user_id,org_id,role) values ($1,$2,'member') on conflict (user_id,org_id) do update set access_status='active', deletion_prepared_at=null, access_expires_at=null", [repB, orgId]);
   });
   // The projection test seeds its member directly inside the surrounding
   // transaction; the owner designation RPC is covered by the acquisition
@@ -193,15 +196,19 @@ async function seedSandraLibraryFixture(): Promise<void> {
   } finally {
     await pg.query("alter table public.memberships enable trigger trg_my_leads_designation_guard");
   }
+  await setDesignation(repB, orgId, true);
   await pg.query("insert into public.acquisition_org_settings(org_id,my_leads_enabled) values ($1,true) on conflict (org_id) do update set my_leads_enabled=true", [orgId]);
   await pg.query(
     "insert into public.contacts(id,org_id,first_name,phone_1,phone_1_type) values ($1,$2,'Sandra playback seller',$3,'mobile')",
     [contactId, orgId, dialpadExternalNumber],
   );
-  await pg.query(
-    "insert into public.properties(id,org_id,address,state,homeowner_contact_id,assigned_user_id) values ($1,$2,concat('Sandra Playback Way ',right($1::uuid::text,8)),'MO',$3,$4)",
-    [propertyId, orgId, contactId, repA],
-  );
+  const insertProperty = () =>
+    pg.query(
+      "insert into public.properties(id,org_id,address,state,homeowner_contact_id,assigned_user_id,is_training) values ($1,$2,concat('Sandra Playback Way ',right($1::uuid::text,8)),'MO',$3,$4,$5)",
+      [propertyId, orgId, contactId, repA, training],
+    );
+  if (training) await service(insertProperty);
+  else await insertProperty();
   const connection = await service(() =>
     pg.query<{ id: string }>(
       "insert into public.dialpad_org_connections(org_id,status,cti_client_id,webhook_secret_ref,dialpad_company_id,directory_api_key_ref,recording_ingest_endpoint) values ($1,'active',$2,'env:DIALPAD_CTI_WEBHOOK_SECRET_SEARCH','4040404040404041','env:DIALPAD_CTI_DIRECTORY_KEY_SEARCH','wss://recording.example.test/dialpad-browser-ingest') on conflict (org_id) do update set status='active',cti_client_id=excluded.cti_client_id,webhook_secret_ref=excluded.webhook_secret_ref,dialpad_company_id=excluded.dialpad_company_id,directory_api_key_ref=excluded.directory_api_key_ref,recording_ingest_endpoint=excluded.recording_ingest_endpoint returning id",
@@ -418,6 +425,9 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
     await pg.query(transportSql);
     await pg.query(playbackSql);
     await pg.query(playbackSql);
+    await pg.query(trainingProjectionSql);
+    await pg.query(trainingPlaybackSql);
+    await pg.query(trainingPlaybackSql);
     await pg.query(browserSessionSql);
     await pg.query(browserSessionSql);
     await pg.query(shadowSql);
@@ -475,6 +485,11 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
           "fn_finalize_dialpad_recording_shadow",
           "fn_finish_dialpad_recording_timing",
           "fn_get_dialpad_recording_shadow_measurement",
+          "fn_get_dialpad_recording_final_input",
+          "fn_finalize_dialpad_recording_provider_window",
+          "fn_list_dialpad_recording_provider_window_candidates",
+          "fn_get_dialpad_recording_provider_window_result",
+          "dialpad_recording_provider_window_is_eligible",
         ].sort(),
       );
       const { captureId } = await openedCapture();
@@ -526,6 +541,7 @@ describe("20260929210000 Dialpad recording foundation migration", () => {
       await pg.query(recordingSql);
       await pg.query(transportSql);
       await pg.query(playbackSql);
+      await pg.query(trainingPlaybackSql);
       const bucket = await pg.query("select public, file_size_limit from storage.buckets where id='dialpad-recordings'");
       expect(bucket.rowCount).toBe(1);
       expect(bucket.rows[0]).toMatchObject({ public: false, file_size_limit: "536870912" });
@@ -1891,6 +1907,127 @@ describe("20260929210000 Dialpad recording foundation concurrency", () => {
       expect(((exact.rows as Array<Json>)[0]!.files as Array<Json>).every((file) => file.duration === 4.25)).toBe(true);
       const outside = await rpc("fn_recording_library_search", [ownerId, "owner", JSON.stringify({ status: "all", min: "4.251", max: "4.251" }), audio]);
       expect(outside.rows).toEqual([]);
+    });
+
+    it("lists and plays permanent training files without creating an acquisition attempt", async () => {
+      await seedSandraLibraryFixture(true);
+      const { captureId, token } = await sealedReady(String(Date.now()));
+      await register(captureId, token, [decoded("tab"), decoded("mic")]);
+      const capture = await captureRow(captureId);
+      const activity = (await pg.query<Json>(
+        "select * from public.call_activities where id=$1",
+        [capture.call_activity_id],
+      )).rows[0]!;
+      expect(activity).toMatchObject({
+        call_purpose: "internal_training",
+        property_id: null,
+        contact_id: null,
+        provider: "dialpad",
+        provider_call_id: capture.provider_call_id,
+        operator_user_id: repA,
+        jitter_attempt_id: `dialpad-cti:${capture.intent_id}`,
+      });
+      expect((await pg.query(
+        "select count(*)::int as n from public.acquisition_attempts where org_id=$1 and call_activity_id=$2",
+        [orgId, capture.call_activity_id],
+      )).rows[0]!.n).toBe(0);
+      await service(() => pg.query(
+        "update public.properties set assigned_user_id=null where id=$1 and org_id=$2",
+        [propertyId, orgId],
+      ));
+
+      const ownerSources = (await rpc("fn_dialpad_recording_library_sources", [ownerId, "owner"])) as unknown as Array<Json>;
+      const ownerSource = ownerSources.find((item) => item.id === String(capture.call_activity_id));
+      expect(ownerSource).toMatchObject({ source: "dialpad", actorId: repA, recordingStatus: "sealed" });
+      const ownerFiles = (ownerSource?.files ?? []) as Array<Json>;
+      expect(ownerFiles).toHaveLength(2);
+      expect(ownerFiles.every((file) => file.completeness === "complete" && file.recordingStatus === "sealed")).toBe(true);
+      const library = await rpc("fn_recording_library_search", [
+        ownerId,
+        "owner",
+        JSON.stringify({ status: "all" }),
+        JSON.stringify(ownerSources),
+      ]);
+      expect((library.rows as Array<Json>).find((row) => row.id === `call:${capture.call_activity_id}`)).toMatchObject({
+        purpose: "internal_training",
+        files: expect.arrayContaining([expect.objectContaining({ source: "dialpad", completeness: "complete" })]),
+      });
+
+      const mineSources = (await rpc("fn_dialpad_recording_library_sources", [repA, "mine"])) as unknown as Array<Json>;
+      expect(mineSources).toHaveLength(1);
+      expect(mineSources[0]).toMatchObject({ id: String(capture.call_activity_id), actorId: repA, source: "dialpad" });
+
+      const sameOrgOtherRepSources = await rpc("fn_dialpad_recording_library_sources", [repB, "mine"]);
+      expect(sameOrgOtherRepSources).toEqual([]);
+
+      const playback = await rpc("fn_dialpad_recording_playback_file", [repA, "mine", ownerFiles[0]!.id]);
+      expect(playback).toMatchObject({
+        source: "dialpad",
+        file: {
+          id: ownerFiles[0]!.id,
+          source: "dialpad",
+          completeness: "complete",
+          recordingStatus: "sealed",
+          bucket: "dialpad-recordings",
+          captureId,
+          orgId,
+        },
+      });
+      expect(String((playback.file as Json).storagePath)).toBe(`${orgId}/${captureId}/final/1/${ownerFiles[0]!.track}`);
+      expect(await rpc("fn_dialpad_recording_playback_file", [repB, "mine", ownerFiles[0]!.id])).toBeNull();
+    });
+
+    it("freezes an established Dialpad training provider call id without changing unrelated providers or replay", async () => {
+      await seedSandraLibraryFixture(true);
+      const { captureId } = await sealedReady(String(Date.now()));
+      const capture = await captureRow(captureId);
+      const activityId = String(capture.call_activity_id);
+      const changed = await failure(() => service(() => pg.query(
+        "update public.call_activities set provider_call_id=$2 where id=$1",
+        [activityId, "9999999999999999999"],
+      )));
+      expect(changed.code).toBe("23514");
+      expect((await pg.query("select provider_call_id from public.call_activities where id=$1", [activityId])).rows[0]!.provider_call_id).toBe(capture.provider_call_id);
+
+      const replay = await rpc("dialpad_cti_project_intent", [capture.intent_id]);
+      expect(replay).toMatchObject({ projected: true, intentId: capture.intent_id, callActivityId: activityId });
+
+      const softphoneActivityId = uuid();
+      await service(() => pg.query(
+        "insert into public.call_activities(id,org_id,property_id,contact_id,jitter_attempt_id,jitter_session_id,provider,operator_user_id,provider_call_id,call_purpose) values ($1,$2,null,null,$3,'softphone-session','sandra_softphone',$4,'softphone-old','internal_training')",
+        [softphoneActivityId, orgId, `sandra-${softphoneActivityId}`, repA],
+      ));
+      const softphoneUpdate = await service(() => pg.query(
+        "update public.call_activities set provider_call_id='softphone-new' where id=$1",
+        [softphoneActivityId],
+      ));
+      expect(softphoneUpdate.rowCount).toBe(1);
+    });
+
+    it("fails closed for revoked or foreign members and forged training links", async () => {
+      await seedSandraLibraryFixture(true);
+      const { captureId, token } = await sealedReady(String(Date.now()));
+      await register(captureId, token, [decoded("tab"), decoded("mic")]);
+      const capture = await captureRow(captureId);
+      const sources = (await rpc("fn_dialpad_recording_library_sources", [ownerId, "owner"])) as unknown as Array<Json>;
+      const source = sources.find((item) => item.id === String(capture.call_activity_id))!;
+      const fileId = ((source.files ?? []) as Array<Json>)[0]!.id;
+
+      expect(await rpc("fn_dialpad_recording_playback_file", [repB, "mine", fileId])).toBeNull();
+      expect(await rpc("fn_dialpad_recording_playback_file", [otherRep, "mine", fileId])).toBeNull();
+      await service(() => pg.query(
+        "update public.memberships set access_status='revoked' where org_id=$1 and user_id=$2",
+        [orgId, repA],
+      ));
+      expect(await rpc("fn_dialpad_recording_library_sources", [repA, "mine"])).toEqual([]);
+      expect(await rpc("fn_dialpad_recording_playback_file", [repA, "mine", fileId])).toBeNull();
+
+      await withoutTriggers(
+        "update public.call_activities set jitter_attempt_id=$2 where id=$1",
+        [capture.call_activity_id, `dialpad-cti:${uuid()}`],
+      );
+      expect(await rpc("fn_dialpad_recording_library_sources", [ownerId, "owner"])).toEqual([]);
+      expect(await rpc("fn_dialpad_recording_playback_file", [ownerId, "owner", fileId])).toBeNull();
     });
 
     it("keeps a usable partial final playable while marking the capture partial", async () => {

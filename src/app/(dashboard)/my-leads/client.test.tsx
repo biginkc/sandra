@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   submitMyLeadHandoffDrip: vi.fn(),
   loadMyLeads: vi.fn(),
   loadMyLeadCallReferences: vi.fn(),
+  dialpadHandlers: [] as Array<((nonce: number) => void) | undefined>,
   listDripChoices: vi.fn(async () => ({ ok: true, data: [{ id: 'drip-1', name: 'Seller follow-up', textCount: 4, days: 90, firstSend: 'Today' }] })),
 }))
 
@@ -39,6 +40,13 @@ vi.mock("./actions", () => ({
 vi.mock("@/app/(dashboard)/sequences/actions", () => ({
   listDripChoices: mocks.listDripChoices,
   startDripForLeads: vi.fn(),
+}))
+
+vi.mock("./_components/dialpad-panel", () => ({
+  DialpadPanel: (props: { onCallRequestHandled?: (nonce: number) => void }) => {
+    mocks.dialpadHandlers.push(props.onCallRequestHandled)
+    return React.createElement("button", { type: "button", "data-testid": "dialpad-panel-stub", onClick: () => props.onCallRequestHandled?.(1) }, "Dialpad panel")
+  },
 }))
 
 vi.mock("./_components/queue", () => ({
@@ -181,7 +189,7 @@ function snapshot(address: string): QueueSnapshot {
   }
 }
 
-function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initialDrips:MyLeadDripSnapshot|null=null) {
+function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initialDrips:MyLeadDripSnapshot|null=null, dialpad?: React.ComponentProps<typeof MyLeadsClient>["dialpad"]) {
   return render(
     <MyLeadsClient
       viewer={viewer}
@@ -190,6 +198,7 @@ function renderClient(initialSnapshot: QueueSnapshot, initialKpis = kpis, initia
       initialSnapshot={initialSnapshot}
       initialKpis={initialKpis}
       initialDrips={initialDrips}
+      dialpad={dialpad}
     />,
   )
 }
@@ -199,6 +208,7 @@ describe("MyLeadsClient", () => {
     mocks.loadMyLeads.mockReset()
     mocks.submitMyLeadCommand.mockReset()
     mocks.loadMyLeadCallReferences.mockReset()
+    mocks.dialpadHandlers.length = 0
   })
 
   it("opens Log attempt for a pinned reply outside the first 20 rows", async()=>{
@@ -235,6 +245,33 @@ describe("MyLeadsClient", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
       expect(view.container.querySelector("time")).toHaveTextContent("9:01:00 AM CDT")
       expect(mocks.loadMyLeads).toHaveBeenCalledTimes(2)
+    } finally {
+      view.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it("keeps the Dialpad request handler stable across focus and 30-second queue refreshes", async () => {
+    vi.useFakeTimers()
+    const initial = snapshot("106 Fixture Lane")
+    mocks.loadMyLeads.mockResolvedValue({ ok: true, snapshot: { ...initial, snapshotAt: "2026-09-11T14:01:00.000Z" }, kpis })
+    const dialpad = {
+      connectionId: "connection-1",
+      allowedOrigins: ["https://dialpad.com"],
+      binding: { status: "verified", dialpadUserId: "5551234" },
+      grants: [],
+    } as React.ComponentProps<typeof MyLeadsClient>["dialpad"]
+    const view = renderClient(initial, kpis, null, dialpad)
+    try {
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Start call" })) })
+      expect(screen.getByTestId("dialpad-panel-stub")).toBeInTheDocument()
+      const firstHandler = mocks.dialpadHandlers.at(-1)
+      expect(firstHandler).toBeDefined()
+      await act(async () => { window.dispatchEvent(new Event("focus")) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+      expect(mocks.loadMyLeads).toHaveBeenCalledTimes(2)
+      expect(mocks.dialpadHandlers.length).toBeGreaterThan(1)
+      expect(mocks.dialpadHandlers.every((handler) => handler === firstHandler)).toBe(true)
     } finally {
       view.unmount()
       vi.useRealTimers()
