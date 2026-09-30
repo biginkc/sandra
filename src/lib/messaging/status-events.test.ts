@@ -102,6 +102,64 @@ describe("applyMessageStatusEvent", () => {
     vi.mocked(createAdminClient).mockReset();
   });
 
+  it("T16 forwards terminal events for a marked reply row without updating public.messages", async () => {
+    const row = message({
+      status: "pending",
+      metadata: { inboxReply: { attemptId: "attempt-1", operationId: "operation-1" } } as Json,
+    });
+    const rpc = vi.fn(async () => ({ data: { kind: "reconciled", result: { state: "delivered" } }, error: null }));
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
+    const { supabase, updates } = makeSupabase({ messages: [row], updatedRows: [{ id: row.id }] });
+
+    await expect(applyMessageStatusEvent(supabase, "sendillo", {
+      kind: "delivered", externalId: "reply-ext-1", timestamp: new Date("2026-06-24T15:01:00.000Z"),
+    })).resolves.toBe("updated");
+    expect(rpc).toHaveBeenCalledWith("inbox_reply_reconcile_callback", {
+      in_provider: "sendillo",
+      in_external_id: "reply-ext-1",
+      in_terminal: "delivered",
+      in_payload: { kind: "delivered", timestamp: "2026-06-24T15:01:00.000Z" },
+    });
+    expect(updates).toEqual([]);
+  });
+
+  it("T16 holds either terminal arrival order behind the reply callback RPC", async () => {
+    const row = message({
+      status: "pending",
+      metadata: { inboxReply: { attemptId: "attempt-order", operationId: "operation-order" } } as Json,
+    });
+    const rpc = vi.fn()
+      .mockResolvedValueOnce({ data: { kind: "reconciled" }, error: null })
+      .mockResolvedValueOnce({ data: { kind: "rejected" }, error: null });
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
+    const { supabase, updates } = makeSupabase({ messages: [row], updatedRows: [{ id: row.id }] });
+
+    await expect(applyMessageStatusEvent(supabase, "sendillo", {
+      kind: "failed", externalId: "reply-order", timestamp: new Date("2026-06-24T15:02:00.000Z"), errorMessage: "carrier failure",
+    })).resolves.toBe("updated");
+    await expect(applyMessageStatusEvent(supabase, "sendillo", {
+      kind: "delivered", externalId: "reply-order", timestamp: new Date("2026-06-24T15:03:00.000Z"),
+    })).resolves.toBe("skipped");
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(updates).toEqual([]);
+  });
+
+  it("T17 forwards an unmatched terminal event and preserves message-not-found handling", async () => {
+    const rpc = vi.fn(async () => ({ data: { kind: "stored_unmatched" }, error: null }));
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
+    const { supabase } = makeSupabase({ messages: [], updatedRows: [] });
+
+    await expect(applyMessageStatusEvent(supabase, "sendillo", {
+      kind: "failed", externalId: "legacy-ext-1", timestamp: new Date("2026-06-24T15:01:00.000Z"), errorMessage: "carrier failure",
+    })).resolves.toBe("unknown");
+    expect(rpc).toHaveBeenCalledWith("inbox_reply_reconcile_callback", {
+      in_provider: "sendillo",
+      in_external_id: "legacy-ext-1",
+      in_terminal: "delivery_failed",
+      in_payload: { kind: "failed", timestamp: "2026-06-24T15:01:00.000Z", errorMessage: "carrier failure" },
+    });
+  });
+
   it("does not roll Sandra delivery state forward when guarded update matches zero rows", async () => {
     const { supabase } = makeSupabase({
       messages: [message()],

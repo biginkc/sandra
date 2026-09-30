@@ -302,7 +302,7 @@ describe("runSequenceTick — queue drain (integration)", () => {
     );
   });
 
-  it("terminal-fails stale pending provider attempts without re-sending", async () => {
+  it("T18 terminal-fails stale pending provider attempts without re-sending", async () => {
     const { propertyId, contactId } = await seedLead({
       phone: "+18165550116",
     });

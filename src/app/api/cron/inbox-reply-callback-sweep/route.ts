@@ -19,6 +19,10 @@ type SweepDatabase = Omit<Database, "public"> & {
         Args: { batch_limit: number };
         Returns: Json;
       };
+      inbox_reply_drain_message_projection_one: {
+        Args: Record<string, never>;
+        Returns: Json;
+      };
     };
   };
 };
@@ -55,7 +59,17 @@ async function handle(request: Request) {
       reportError(new Error(error.message), { tags: { surface: "cron_inbox_reply_callback_sweep" } });
       return NextResponse.json({ error: "sweep failed" }, { status: 500 });
     }
-    return NextResponse.json({ ok: true, result: data });
+    const projections: Json[] = [];
+    for (let i = 0; i < BATCH_LIMIT; i += 1) {
+      const projection = await supabase.rpc("inbox_reply_drain_message_projection_one", {});
+      if (projection.error) {
+        reportError(new Error(projection.error.message), { tags: { surface: "cron_inbox_reply_message_projection" } });
+        return NextResponse.json({ error: "message projection failed" }, { status: 500 });
+      }
+      projections.push(projection.data);
+      if (!projection.data || typeof projection.data !== "object" || Array.isArray(projection.data) || (projection.data as Record<string, unknown>).drained !== true) break;
+    }
+    return NextResponse.json({ ok: true, result: data, projections });
   } catch (error) {
     reportError(error, { tags: { surface: "cron_inbox_reply_callback_sweep" } });
     return NextResponse.json({ error: error instanceof Error ? error.message : "unknown" }, { status: 500 });

@@ -10,7 +10,7 @@ let frameId = 0;
 function props(overrides: Partial<ConversationHistoryProps> = {}): ConversationHistoryProps {
   return { orgId, conversationId, requestGeneration: 1, visible: true, onRefresh: vi.fn(), onAccessLost: vi.fn(), onUnavailable: vi.fn(), snapshot: { requestGeneration: 1, data: {
     requesterId: orgId, orgId, conversationId, headRevision: "1", readBoundary, boundaryExpiresAt: "2030-01-01T00:00:00Z", nextCursor: null, captureGeneration: orgId,
-    history: [{ id: orgId, createdAtRaw: "2026-09-13 12:00:00.123456+00", body: "Visible conversation", direction: "inbound", readAtRaw: null, inboundRevision: "1" }],
+    history: [{ id: orgId, createdAtRaw: "2026-09-13 12:00:00.123456+00", body: "Visible conversation", direction: "inbound", readAtRaw: null, inboundRevision: "1", status: "received", delivery: "delivered" }],
   } }, ...overrides };
 }
 function receipt(batch = 0, complete = true) { return Response.json({ boundaryId: readBoundary, batch, changed: complete ? 1 : 200, completed: complete }); }

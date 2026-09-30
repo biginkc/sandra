@@ -18,11 +18,13 @@ const receipt = { boundary_id: boundary, batch: 0, changed: 200, completed: fals
 const snapshot = {
   requester_id: boundary, org_id: org, conversation_id: conversation, head_revision: "9007199254740993",
   read_boundary: boundary, boundary_expires_at: "2030-01-01T00:00:00Z", capture_generation: boundary, next_cursor: null,
-  history: [{ id: boundary, created_at_raw: "2026-09-13 12:00:00.123456+00", body: "Owned test", direction: "inbound", read_at_raw: null, inbound_revision: "9007199254740993" }],
+  history: [{ id: boundary, created_at_raw: "2026-09-13 12:00:00.123456+00", body: "Owned test", direction: "inbound", read_at_raw: null, inbound_revision: "9007199254740993", status: "received", delivery: "delivered" }],
 };
 describe("canonical Inbox read RPC repository", () => {
   it("decodes retained real canonical mixed-history and receipt scalars (mock HTTP transport)", async () => {
-    const raw = wrapperEvidence.scalar_detail;
+    const raw = { ...wrapperEvidence.scalar_detail, history: wrapperEvidence.scalar_detail.history.map((row, index) => ({
+      ...row, status: index === 0 ? "received" : "sent", delivery: index === 0 ? "delivered" : "sent",
+    })) };
     const { repository } = client([{ data: { ...raw, next_cursor: null }, error: null }, { data: wrapperEvidence.scalar_acknowledgment, error: null }]);
     const detail = await repository.detail(raw.org_id, raw.conversation_id, signal());
     expect(detail.history.map(row => [row.direction, row.inboundRevision])).toEqual([["inbound", "1"], ["outbound", "0"]]);

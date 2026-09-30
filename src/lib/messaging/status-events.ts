@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { reportError } from "@/lib/errors/report";
 import { recordAiResponderDeliveryForThread } from "@/lib/messages/ai-responder-thread-state";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { Database } from "@/lib/supabase/types";
+import type { Database, Json } from "@/lib/supabase/types";
 import type { SmsStatusEvent } from "./types";
 
 type MessageStatusRow = Pick<
@@ -21,6 +21,19 @@ type MessageStatusRow = Pick<
 >;
 
 type MessageStatusUpdate = Database["public"]["Tables"]["messages"]["Update"];
+
+type ReplyCallbackDatabase = Omit<Database, "public"> & {
+  public: Omit<Database["public"], "Functions"> & {
+    Functions: Database["public"]["Functions"] & {
+      inbox_reply_reconcile_callback: {
+        Args: { in_provider: string; in_external_id: string; in_terminal: string; in_payload: Json };
+        Returns: Json;
+      };
+    };
+  };
+};
+
+type ReplyCallbackClient = Pick<SupabaseClient<ReplyCallbackDatabase>, "rpc">;
 
 type WebhookEventRow = Pick<
   Database["public"]["Tables"]["webhook_events"]["Row"],
@@ -69,7 +82,23 @@ export async function applyMessageStatusEvent(
     );
   }
   const message = messages?.[0] as MessageStatusRow | undefined;
-  if (!message) return "unknown";
+  if (!message) {
+    if (event.kind === "delivered" || event.kind === "failed") {
+      return forwardInboxReplyCallback(providerId, event);
+    }
+    return "unknown";
+  }
+
+  // The reply ledger is the only status authority for its marked rows. The
+  // public.messages projection is deliberately not updated by either webhook
+  // route; the callback RPC reconciles the attempt and lets the projection
+  // trigger/backlog catch up independently.
+  if (isInboxReplyMessage(message.metadata)) {
+    if (event.kind === "delivered" || event.kind === "failed") {
+      return forwardInboxReplyCallback(providerId, event);
+    }
+    return "skipped";
+  }
 
   const update = buildStatusUpdate(message, event);
   if (!update) {
@@ -111,6 +140,35 @@ export async function applyMessageStatusEvent(
     event,
   });
   return "updated";
+}
+
+async function forwardInboxReplyCallback(
+  providerId: string,
+  event: SmsStatusEvent,
+): Promise<"updated" | "skipped" | "unknown"> {
+  const admin = createAdminClient() as unknown as ReplyCallbackClient;
+  const payload: Json = {
+    kind: event.kind,
+    timestamp: event.timestamp.toISOString(),
+    ...(event.errorMessage ? { errorMessage: event.errorMessage } : {}),
+  };
+  const { data, error } = await admin.rpc("inbox_reply_reconcile_callback", {
+    in_provider: providerId,
+    in_external_id: event.externalId,
+    in_terminal: event.kind === "delivered" ? "delivered" : "delivery_failed",
+    in_payload: payload,
+  });
+  if (error) throw new Error(`reply callback reconciliation failed: ${error.message}`);
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("reply callback reconciliation returned an invalid result");
+  }
+  const kind = (data as Record<string, unknown>).kind;
+  if (kind === "stored_unmatched") return "unknown";
+  if (kind === "busy") throw new Error("reply callback reconciliation is busy");
+  if (kind === "reconciled" || kind === "already_processed" || kind === "rejected") {
+    return kind === "rejected" || kind === "already_processed" ? "skipped" : "updated";
+  }
+  throw new Error("reply callback reconciliation returned an unknown result");
 }
 
 /**
@@ -284,6 +342,13 @@ function isProviderUnknownMessage(message: Pick<MessageStatusRow, "metadata" | "
     return false;
   }
   return message.metadata.providerOutcome === "provider_unknown";
+}
+
+function isInboxReplyMessage(metadata: MessageStatusRow["metadata"]): boolean {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+  const marker = metadata.inboxReply;
+  return !!marker && typeof marker === "object" && !Array.isArray(marker) &&
+    typeof marker.attemptId === "string" && typeof marker.operationId === "string";
 }
 
 function reportRepSmsDeliveryBridgeError(message: string): void {

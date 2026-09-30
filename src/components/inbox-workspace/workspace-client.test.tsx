@@ -27,7 +27,7 @@ beforeEach(() => {
     if (url.includes("/detail")) {
       if (state.detailUnavailable) return Response.json({}, { status: 404 });
       const openedConversationId = url.match(/conversations\/([^/]+)\/detail/)?.[1] ?? conversationId;
-      return Response.json({ orgId, requesterId: userId, conversationId: openedConversationId, history: [{ id: "message", direction: "inbound", body: "Hello from history", createdAtRaw: new Date().toISOString(), readAtRaw: null, inboundRevision: "1" }], readBoundary: "boundary", boundaryExpiresAt: new Date(Date.now() + 60000).toISOString(), captureGeneration: "capture", headRevision: "1" });
+      return Response.json({ orgId, requesterId: userId, conversationId: openedConversationId, history: [{ id: "message", direction: "inbound", body: "Hello from history", createdAtRaw: new Date().toISOString(), readAtRaw: null, inboundRevision: "1", status: "received", delivery: "delivered" }], readBoundary: "boundary", boundaryExpiresAt: new Date(Date.now() + 60000).toISOString(), captureGeneration: "capture", headRevision: "1" });
     }
     if (url.endsWith("/replies/prepare")) {
       const body = JSON.parse(String(init?.body)) as { idempotencyKey: string; targets: Array<{ kind: "conversation"; id: string }> };

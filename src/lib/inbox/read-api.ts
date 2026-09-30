@@ -27,6 +27,11 @@ function revision(value: unknown): string {
 }
 function timestamp(value: unknown): string { requireValue(typeof value === "string" && Number.isFinite(Date.parse(value))); return value; }
 function nullableTimestamp(value: unknown): string | null { return value === null ? null : timestamp(value); }
+function historyStatus(value: unknown): string { requireValue(typeof value === "string" && value.length > 0); return value; }
+function delivery(value: unknown): "sending" | "sent" | "delivered" | "failed" | "not_confirmed" {
+  requireValue(typeof value === "string" && ["sending", "sent", "delivered", "failed", "not_confirmed"].includes(value));
+  return value as "sending" | "sent" | "delivered" | "failed" | "not_confirmed";
+}
 function fail(error: { code?: string; message?: string } | null): void {
   if (!error) return;
   if (error.code === "PGRST301" || error.code === "PGRST303") throw new InboxReadError(401);
@@ -80,7 +85,8 @@ export function createInboxReadRepository(client: InboxReadClient) {
         requireValue(message.body === null || typeof message.body === "string");
         requireValue(message.direction === "inbound" || message.direction === "outbound");
         return { id: messageId, createdAtRaw: timestamp(message.created_at_raw), body: message.body,
-          direction: message.direction, readAtRaw: nullableTimestamp(message.read_at_raw), inboundRevision: revision(message.inbound_revision) };
+          direction: message.direction, readAtRaw: nullableTimestamp(message.read_at_raw), inboundRevision: revision(message.inbound_revision),
+          status: historyStatus(message.status), delivery: delivery(message.delivery) };
       });
       return { requesterId: id(row.requester_id), orgId, conversationId, headRevision: revision(row.head_revision),
         readBoundary: id(row.read_boundary), boundaryExpiresAt: timestamp(row.boundary_expires_at), captureGeneration: id(row.capture_generation), history, nextCursor: row.next_cursor === null ? null : id(row.next_cursor) };
