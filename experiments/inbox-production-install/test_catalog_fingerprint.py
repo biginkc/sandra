@@ -1,6 +1,10 @@
 import importlib.util
+import copy
+import hashlib
+import json
 from pathlib import Path
 import re
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -54,5 +58,28 @@ class CatalogScope(unittest.TestCase):
             with self.subTest(section=section), patch.object(f, 'read_catalog', return_value=sections), patch('sys.argv', ['catalog_fingerprint.py', '--preflight']):
                 with self.assertRaisesRegex(SystemExit, 'Migration-created objects already exist'):
                     f.main()
+
+    def test_tool_generated_fixture_and_sha_bound_record(self):
+        sections = {name: [] for name in f.CATALOG_SECTIONS}
+        sections['relations'] = [{'identity': 'public.message_threads', 'owner': 'postgres', 'columns': [], 'indexes': [], 'constraints': [], 'triggers': [], 'policies': []}]
+        baseline = f.fingerprint(sections)
+        observed_sections = copy.deepcopy(sections)
+        observed_sections['relations'][0]['columns'].append({'name': 'new_column', 'type': 'uuid', 'not_null': False, 'default': None, 'acl': None, 'attgenerated': '', 'attidentity': ''})
+        observed = f.fingerprint(observed_sections)
+        fixture = f.generate_drift_items_fixture(baseline, observed, 'ncsngxlcyxylaeskiteu')
+        self.assertEqual(set(fixture), {'fixture_version', 'items'})
+        self.assertEqual(fixture['items'][0]['definition_sha256'], hashlib.sha256(b'uuid').hexdigest())
+        record = f.generate_drift_record_from_fixture(baseline, observed, fixture, 'ncsngxlcyxylaeskiteu', 'a' * 40)
+        self.assertEqual(f.record_bindings(record), f.fixture_bindings(fixture))
+        self.assertNotIn('baseline_digest', fixture)
+        self.assertNotIn('candidate_sha', fixture)
+
+    def test_no_drift_is_an_explicit_empty_fixture_and_sql_is_safe(self):
+        sections = {name: [] for name in f.CATALOG_SECTIONS}
+        sections['relations'] = [{'identity': 'public.message_threads', 'owner': 'postgres', 'columns': [], 'indexes': [], 'constraints': [], 'triggers': [], 'policies': []}]
+        baseline = f.fingerprint(sections)
+        fixture = f.generate_drift_items_fixture(baseline, baseline, 'copflsklaefwzipsrjqz')
+        self.assertEqual(fixture, {'fixture_version': f.DRIFT_FIXTURE_VERSION, 'items': []})
+        self.assertEqual(f.drift_fixture_sql(fixture), '')
 
 if __name__ == '__main__': unittest.main()

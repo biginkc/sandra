@@ -47,6 +47,9 @@ PLATFORM_MAJOR_FIELDS = ("postgres_major", "postgrest_major", "gotrue_major")
 PLATFORM_FIELDS = PLATFORM_MAJOR_FIELDS + ("postgrest_reason", "postgrest_observed_major")
 POSTGREST_REASONS = {"NAME_UNVERSIONED", "MIXED_NAMES", "NO_CONNECTION"}
 CATALOG_FORMAT_VERSION = 2
+DRIFT_FIXTURE_VERSION = 1
+KNOWN_TARGET_REFS = frozenset(PROJECT_REFS.values())
+DRIFT_FIXTURE_ROOT = "experiments/inbox-production-install/drift"
 DRIFT_APPROVALS = {
     "idx_message_threads_ai_responder_status": "e419f623f1922466db14dba7aa091cdd4720924e2b97901088af2dc5719b108a",
     "idx_users_name": "4dbc01feffae5acf04236e5aa3611151cc43e1467f84588e05b025dd9fbc7402",
@@ -56,20 +59,35 @@ OPERATOR_INDEX_NAMES = {
     "inbox_backfill_messages", "inbox_backfill_reviews", "inbox_backfill_threads",
     "inbox_backfill_thread_identity", "inbox_unknown_history_page",
 }
-ROWTYPE_TABLES = {
-    "inbox_backfill.jobs", "inbox_control.baseline_progress", "inbox_maintained.queue",
-    "inbox_maintained.rows", "inbox_parent.work", "inbox_safety.routes",
-}
-EXPECTED_DRIFT_ITEMS = {
-    ("public.message_threads", "columns", "ai_responder_debounce_token"),
-    ("public.message_threads", "columns", "ai_responder_debounce_until"),
-    ("public.message_threads", "indexes", "idx_message_threads_ai_responder_status"),
-    ("public.webhook_events", "columns", "processing_lease_token"),
-    ("auth.users", "indexes", "idx_users_email"),
-    ("auth.users", "indexes", "idx_users_created_at_desc"),
-    ("auth.users", "indexes", "idx_users_last_sign_in_at_desc"),
-    ("auth.users", "indexes", "idx_users_name"),
-}
+def derive_rowtype_tables(sources: list[str]) -> frozenset[str]:
+    tables: set[str] = set()
+    aliases: dict[str, set[str]] = {}
+    qualified = r"((?:public|auth|storage|inbox_[a-z_]+|supabase_migrations)\.[a-z_][a-z_0-9]*)"
+    for source in sources:
+        tables.update(f"{schema.lower()}.{table.lower()}" for schema, table in re.findall(
+            r"\b([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)%rowtype\b", source, re.I))
+        for match in re.finditer(rf"\b(?:FROM|JOIN)\s+{qualified}(?:\s+(?:AS\s+)?([a-z_][a-z0-9_]*))?", source, re.I):
+            table = match.group(1).lower()
+            alias = (match.group(2) or table.rsplit('.', 1)[-1]).lower()
+            aliases.setdefault(alias, set()).add(table)
+        for match in re.finditer(rf"\b(?:FROM|JOIN)\s+{qualified}\b", source, re.I):
+            table = match.group(1).lower()
+            if re.search(rf"\b{re.escape(table.rsplit('.', 1)[-1])}\s*\.\s*\*", source, re.I):
+                tables.add(table)
+            if re.search(rf"\bSELECT\s+(?:DISTINCT\s+)?\*\s+FROM\s+{re.escape(table)}\b", source, re.I):
+                tables.add(table)
+        for alias, candidates in aliases.items():
+            if re.search(rf"\b{re.escape(alias)}\s*\.\s*\*", source, re.I):
+                tables.update(candidates)
+            if re.search(rf"\bSELECT\s+(?:DISTINCT\s+)?\*\s+FROM\s+{re.escape(alias)}\b", source, re.I):
+                tables.update(candidates)
+            if re.search(rf"\b(?:SELECT\s+\(?\s*{re.escape(alias)}\s*\)?\s*(?:,|FROM|$)|ROW\s*\(\s*{re.escape(alias)}\s*\))", source, re.I | re.M):
+                tables.update(candidates)
+    return frozenset(tables)
+
+
+_migration_dir = Path(__file__).resolve().parents[2] / "supabase/migrations"
+ROWTYPE_TABLES = derive_rowtype_tables([p.read_text() for p in _migration_dir.glob("2026093004*.sql")])
 J5A_CATALOG_DRIFT_SUMMARY = "TEST matched the disposable baseline except eight pre-existing items not in any migration, listed here. They are recorded and replayed, not explained; owners unknown. Production's drift is not yet observed."
 
 
@@ -152,9 +170,11 @@ def reconstruct_drift_catalog(baseline: dict, record: dict, *, bound_baseline_di
     relations = {row["identity"]: row for row in sections["relations"]}
     seen = set()
     for item in record["items"]:
-        if (not isinstance(item, dict) or set(item) != {"object", "attribute", "name", "canonical_definition", "classification", "origin", "approval_sha256"}
+        if (not isinstance(item, dict) or set(item) != {"object", "attribute", "name", "canonical_definition", "definition_sha256", "classification", "origin", "approval_sha256"}
                 or item["attribute"] not in {"columns", "indexes"} or not all(isinstance(item.get(key), str) and item[key] for key in ("object", "name"))
                 or not isinstance(item["canonical_definition"], str) or not item["canonical_definition"] or item["canonical_definition"].endswith("\n")
+                or not isinstance(item["definition_sha256"], str) or not HASH.fullmatch(item["definition_sha256"])
+                or hashlib.sha256(item["canonical_definition"].encode("utf-8")).hexdigest() != item["definition_sha256"]
                 or item["object"] not in relations):
             raise EvidenceError("DRIFT_RECORD_STALE item")
         identity = (item["object"], item["attribute"], item["name"])
@@ -196,15 +216,49 @@ def reconstruct_drift_catalog(baseline: dict, record: dict, *, bound_baseline_di
     return catalog_digest(sections)
 
 
-def validate_replacement_drift_record(original: dict, replacement: dict) -> None:
-    original_items = {(item.get("object"), item.get("attribute"), item.get("name")) for item in original.get("items", []) if isinstance(item, dict)}
-    replacement_items = {(item.get("object"), item.get("attribute"), item.get("name")) for item in replacement.get("items", []) if isinstance(item, dict)}
+def _drift_bindings(record: dict) -> set[tuple[str, str, str, str]]:
+    return {(item.get("object"), item.get("attribute"), item.get("name"), item.get("definition_sha256"))
+            for item in record.get("items", []) if isinstance(item, dict)}
+
+
+def validate_replacement_drift_record(original: dict, replacement: dict, replay: dict | None = None) -> None:
+    original_items = _drift_bindings(original)
+    replacement_items = _drift_bindings(replacement)
     if not replacement_items <= original_items:
-        raise EvidenceError("replacement drift record contains item absent from sealed PRE")
+        raise EvidenceError("replacement drift record item absent from sealed PRE or definition changed")
+    if replay is None or replay.get("sha256") != replacement.get("sha256"):
+        raise EvidenceError("replacement drift record is not linked to a passing sealed replay")
+
+
+def drift_fixture_path(target_ref: str) -> str:
+    if target_ref not in KNOWN_TARGET_REFS:
+        raise EvidenceError(f"unknown drift target ref: {target_ref}")
+    return f"{DRIFT_FIXTURE_ROOT}/{target_ref}.items.json"
+
+
+def read_drift_fixture(repo: Path, commit: str, target_ref: str) -> dict:
+    try:
+        fixture = json.loads(blob(repo, commit, drift_fixture_path(target_ref)), object_pairs_hook=unique_object_pairs)
+    except (EvidenceError, ValueError, UnicodeDecodeError) as exc:
+        raise EvidenceError(f"missing or malformed drift fixture for {target_ref}") from exc
+    if (not isinstance(fixture, dict) or set(fixture) != {"fixture_version", "items"}
+            or fixture["fixture_version"] != DRIFT_FIXTURE_VERSION or not isinstance(fixture["items"], list)):
+        raise EvidenceError(f"malformed drift fixture for {target_ref}")
+    for item in fixture["items"]:
+        if (not isinstance(item, dict)
+                or set(item) != {"object", "attribute", "name", "canonical_definition", "definition_sha256", "classification", "origin", "approval_sha256"}
+                or not isinstance(item["canonical_definition"], str) or not item["canonical_definition"] or item["canonical_definition"].endswith("\n")
+                or not isinstance(item["definition_sha256"], str) or not HASH.fullmatch(item["definition_sha256"])
+                or hashlib.sha256(item["canonical_definition"].encode("utf-8")).hexdigest() != item["definition_sha256"]):
+            raise EvidenceError(f"malformed drift fixture item for {target_ref}")
+    return fixture
 
 
 def validate_drift_lane(kind: str, artifacts: object) -> None:
-    if kind != "drift-replay" and isinstance(artifacts, dict) and any(name in artifacts for name in ("drift-record.json", "catalog-drift.json")):
+    if kind != "drift-replay" and isinstance(artifacts, dict) and any(
+            name in {"drift-record.json", "catalog-drift.json"}
+            or (isinstance(name, str) and name.startswith("drift-record-") and name.endswith(".json"))
+            for name in artifacts):
         raise EvidenceError("drift record is only permitted in replay lane")
 
 
@@ -561,7 +615,7 @@ def _check_shared_readonly(repo: Path, run: dict, selected: dict) -> None:
         raise EvidenceError(f"comparison linkage missing: {directory}")
     for label, key, artifact in (("catalog_record", ("pre-merge", "catalog-fingerprint", "n/a", "disposable"), "catalog-pre.json"),
                                  ("platform_record", ("pre-merge", "db-contract", "pre", "disposable"), "platform-config.json"),
-                                 ("drift_record", ("pre-merge", "drift-replay", "n/a", "disposable"), "drift-record.json")):
+                                 ("drift_record", ("pre-merge", "drift-replay", "n/a", "disposable"), "drift-record-ncsngxlcyxylaeskiteu.json")):
         source = selected.get(key)
         inputs = manifest.get("inputs")
         if not isinstance(inputs, dict) or set(inputs) != {"catalog_record", "platform_record", "drift_record"}:
@@ -628,12 +682,19 @@ def _check_drift_replay(repo: Path, run: dict, selected: dict) -> None:
     manifest = run["manifest"]
     if not isinstance(manifest.get("summary"), dict) or manifest["summary"].get("j5a") != J5A_CATALOG_DRIFT_SUMMARY:
         raise EvidenceError(f"drift replay J5a wording mismatch: {directory}")
-    if set(manifest.get("artifacts", {})) != {"drift-record.json", "catalog-pre.json", "catalog-post.json", "pre-readonly.json", "post-readonly.json", "contract-suite.txt"}:
+    refs = tuple(sorted(KNOWN_TARGET_REFS))
+    expected_artifacts = {"catalog-pre.json", "catalog-post.json"}
+    for target_ref in refs:
+        expected_artifacts.update({
+            f"drift-record-{target_ref}.json", f"catalog-pre-{target_ref}.json", f"catalog-post-{target_ref}.json",
+            f"pre-readonly-{target_ref}.json", f"post-readonly-{target_ref}.json",
+            f"contract-pre-{target_ref}.txt", f"contract-post-{target_ref}.txt",
+        })
+    if set(manifest.get("artifacts", {})) != expected_artifacts:
         raise EvidenceError(f"drift replay artifact inventory mismatch: {directory}")
     try:
-        record = json.loads(blob(repo, run["commit"], directory + "/drift-record.json"), object_pairs_hook=unique_object_pairs)
-        pre = json.loads(blob(repo, run["commit"], directory + "/catalog-pre.json"), object_pairs_hook=unique_object_pairs)
-        post = json.loads(blob(repo, run["commit"], directory + "/catalog-post.json"), object_pairs_hook=unique_object_pairs)
+        pre_baseline = json.loads(blob(repo, run["commit"], directory + "/catalog-pre.json"), object_pairs_hook=unique_object_pairs)
+        post_baseline = json.loads(blob(repo, run["commit"], directory + "/catalog-post.json"), object_pairs_hook=unique_object_pairs)
     except (ValueError, UnicodeDecodeError) as exc:
         raise EvidenceError(f"invalid drift replay artifact: {directory}") from exc
     def reject_raw_drift(value: object) -> None:
@@ -649,26 +710,32 @@ def _check_drift_replay(repo: Path, run: dict, selected: dict) -> None:
         elif isinstance(value, list):
             for child in value:
                 reject_raw_drift(child)
-    reject_raw_drift(record)
-    if not isinstance(record.get("items"), list) or not record["items"]:
-        raise EvidenceError(f"drift replay record is empty: {directory}")
-    identities = {(item.get("object"), item.get("attribute"), item.get("name")) for item in record.get("items", []) if isinstance(item, dict)}
-    if identities != EXPECTED_DRIFT_ITEMS or record.get("target_ref") != PROJECT_REFS["shared-test"] or record.get("candidate_sha") != manifest.get("tested_sha"):
-        raise EvidenceError(f"drift replay item or binding mismatch: {directory}")
-    source = selected.get(("pre-merge", "catalog-fingerprint", "n/a", "disposable"))
-    if source is None:
-        raise EvidenceError(f"drift replay lacks sealed disposable baseline: {directory}")
-    baseline = json.loads(blob(repo, source["commit"], source["directory"] + "/catalog-pre.json"), object_pairs_hook=unique_object_pairs)
-    reconstructed = reconstruct_drift_catalog(baseline, record, target_ref=PROJECT_REFS["shared-test"], candidate_sha=manifest["tested_sha"])
-    validate_catalog_baseline(pre, "replay PRE")
-    validate_catalog_baseline(post, "replay POST")
-    if reconstructed["sha256"] != pre.get("sha256"):
-        raise EvidenceError(f"drift replay PRE mismatch: {directory}")
-    post_artifact = source["manifest"].get("catalog_fingerprint_post_artifact", "catalog-post.json")
-    post_baseline = json.loads(blob(repo, source["commit"], source["directory"] + "/" + post_artifact), object_pairs_hook=unique_object_pairs)
-    reconstructed_post = reconstruct_drift_catalog(post_baseline, record, bound_baseline_digest=baseline["sha256"], target_ref=PROJECT_REFS["shared-test"], candidate_sha=manifest["tested_sha"])
-    if reconstructed_post["sha256"] != post.get("sha256"):
-        raise EvidenceError(f"drift replay POST mismatch: {directory}")
+    validate_catalog_baseline(pre_baseline, "replay PRE baseline")
+    validate_catalog_baseline(post_baseline, "replay POST baseline")
+    if not SHA.fullmatch(str(manifest.get("tested_sha", ""))):
+        raise EvidenceError(f"drift replay candidate binding mismatch: {directory}")
+    for target_ref in refs:
+        record = json.loads(blob(repo, run["commit"], f"{directory}/drift-record-{target_ref}.json"), object_pairs_hook=unique_object_pairs)
+        fixture = read_drift_fixture(repo, run["commit"], target_ref)
+        reject_raw_drift(record)
+        if record.get("target_ref") != target_ref or record.get("candidate_sha") != manifest.get("tested_sha"):
+            raise EvidenceError(f"drift replay item or binding mismatch: {directory} {target_ref}")
+        if _drift_bindings(record) != {(item["object"], item["attribute"], item["name"], item["definition_sha256"]) for item in fixture["items"]}:
+            raise EvidenceError(f"drift fixture/replay definition mismatch: {directory} {target_ref}")
+        reconstructed = reconstruct_drift_catalog(pre_baseline, record, target_ref=target_ref, candidate_sha=manifest["tested_sha"])
+        observed_pre = json.loads(blob(repo, run["commit"], f"{directory}/catalog-pre-{target_ref}.json"), object_pairs_hook=unique_object_pairs)
+        observed_post = json.loads(blob(repo, run["commit"], f"{directory}/catalog-post-{target_ref}.json"), object_pairs_hook=unique_object_pairs)
+        validate_catalog_baseline(observed_pre, f"replay PRE {target_ref}")
+        validate_catalog_baseline(observed_post, f"replay POST {target_ref}")
+        if reconstructed["sha256"] != observed_pre.get("sha256"):
+            raise EvidenceError(f"drift replay PRE mismatch: {directory} {target_ref}")
+        reconstructed_post = reconstruct_drift_catalog(post_baseline, record, bound_baseline_digest=pre_baseline["sha256"], target_ref=target_ref, candidate_sha=manifest["tested_sha"])
+        if reconstructed_post["sha256"] != observed_post.get("sha256"):
+            raise EvidenceError(f"drift replay POST mismatch: {directory} {target_ref}")
+        for phase in ("pre", "post"):
+            contract = blob(repo, run["commit"], f"{directory}/contract-{phase}-{target_ref}.txt")
+            if not contract.strip():
+                raise EvidenceError(f"empty real contract evidence: {directory} {target_ref} {phase}")
 
 
 def _find_migration_chain(repo: Path, x_mig: str) -> dict:
@@ -764,32 +831,37 @@ def evaluate_migration(repo: Path, m: str, target: str, head: str = "HEAD", x_mi
         raise EvidenceError("migration head binding mismatch")
     x_mig = bound_x
     if x_mig:
-        pre = _find_migration_chain(Path(repo), x_mig)["selected"].get(("pre-merge", "catalog-fingerprint", "n/a", "disposable"))
+        evidence_chain = _find_migration_chain(Path(repo), x_mig)
+        catalog_key = ("pre-merge", "catalog-fingerprint", "n/a", "disposable" if target == "shared-test" else "production")
+        replay_key = ("pre-merge", "drift-replay", "n/a", "disposable")
+        _require(evidence_chain["selected"], (catalog_key, replay_key), Path(repo))
+        pre = evidence_chain["selected"].get(catalog_key)
         if pre is None:
-            raise EvidenceError("missing committed catalog fingerprint")
+            raise EvidenceError("missing committed target-specific catalog PRE")
         fingerprint_path = pre["manifest"].get("catalog_fingerprint_post_artifact", "catalog-fingerprint-post.json")
         if fingerprint_path not in pre["manifest"]["artifacts"]:
             raise EvidenceError("missing committed catalog fingerprint artifact")
+        expected_pre = json.loads(blob(Path(repo), pre["commit"], pre["directory"] + "/catalog-pre.json"))
         expected_base = json.loads(blob(Path(repo), pre["commit"], pre["directory"] + "/" + fingerprint_path))
         observed = manifest.get("catalog_fingerprint_after")
         if not isinstance(observed, dict):
             raise EvidenceError("catalog fingerprint section mismatch")
-        pre_chain = _find_migration_chain(Path(repo), x_mig)["selected"]
-        replay = pre_chain.get(("pre-merge", "drift-replay", "n/a", "disposable"))
+        pre_chain = evidence_chain["selected"]
+        replay = pre_chain.get(replay_key)
         if replay is None:
             raise EvidenceError("missing sealed drift replay for catalog fingerprint")
-        drift = json.loads(blob(Path(repo), replay["commit"], replay["directory"] + "/drift-record.json"))
-        replacement = manifest.get("catalog_drift_record")
-        if replacement is not None:
-            if not isinstance(replacement, dict):
-                raise EvidenceError("replacement drift record malformed")
-            validate_replacement_drift_record(drift, replacement)
-            drift = replacement
-        pre_source = pre_chain.get(("pre-merge", "catalog-fingerprint", "n/a", "disposable"))
-        if pre_source is None:
-            raise EvidenceError("missing sealed disposable catalog PRE")
-        expected_pre = json.loads(blob(Path(repo), pre_source["commit"], pre_source["directory"] + "/catalog-pre.json"))
-        expected = reconstruct_drift_catalog(expected_base, drift, bound_baseline_digest=expected_pre["sha256"], target_ref=PROJECT_REFS["shared-test"] if target == "shared-test" else PROJECT_REFS["production"], candidate_sha=x_mig)
+        if "catalog_drift_record" in manifest:
+            raise EvidenceError("migration manifest cannot supply a replacement drift record")
+        target_ref = PROJECT_REFS[target]
+        drift = json.loads(blob(Path(repo), replay["commit"], f"{replay['directory']}/drift-record-{target_ref}.json"))
+        replay_runs = [candidate for candidate in evidence_chain["runs"] if candidate["key"] == replay_key]
+        if len(replay_runs) > 1:
+            original = json.loads(blob(Path(repo), replay_runs[0]["commit"], f"{replay_runs[0]['directory']}/drift-record-{target_ref}.json"))
+            validate_replacement_drift_record(original, drift, replay=drift)
+        fixture = read_drift_fixture(Path(repo), replay["commit"], target_ref)
+        if _drift_bindings(drift) != {(item["object"], item["attribute"], item["name"], item["definition_sha256"]) for item in fixture["items"]}:
+            raise EvidenceError("sealed fixture, replay record, and drift record differ")
+        expected = reconstruct_drift_catalog(expected_base, drift, bound_baseline_digest=expected_pre["sha256"], target_ref=target_ref, candidate_sha=x_mig)
         if expected.keys() != observed.keys() or any(expected[k] != observed[k] for k in expected):
             raise EvidenceError("catalog fingerprint section mismatch")
     return {"status": "PASS", "selected": selected}

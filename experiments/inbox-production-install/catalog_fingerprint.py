@@ -12,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = ROOT / 'supabase/migrations'
 MANIFEST = Path(__file__).with_name('catalog-scope.json')
 CATALOG_FORMAT_VERSION = 2
+DRIFT_FIXTURE_VERSION = 1
+KNOWN_TARGET_REFS = frozenset({'ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz'})
 CATALOG_SECTIONS = ('created_objects_present', 'extensions', 'functions', 'index_names', 'relations', 'schema_migrations', 'schemas', 'trigger_names', 'types')
 IDENT = re.compile(r'\b(?:public|auth|storage|inbox_[a-z_]+|supabase_migrations)\.[a-z_][a-z_0-9]*\b', re.I)
 CREATED = re.compile(r'\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|FUNCTION|TYPE|VIEW|MATERIALIZED\s+VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:public|inbox_[a-z_]+)\.[a-z_][a-z_0-9]*)', re.I)
@@ -65,7 +67,7 @@ def normalize(value, key=''):
 
 
 DRIFT_RECORD_VERSION = 1
-DRIFT_ITEM_KEYS = {'object', 'attribute', 'name', 'canonical_definition', 'classification', 'origin', 'approval_sha256'}
+DRIFT_ITEM_KEYS = {'object', 'attribute', 'name', 'canonical_definition', 'definition_sha256', 'classification', 'origin', 'approval_sha256'}
 DRIFT_APPROVALS = {
     'idx_message_threads_ai_responder_status': 'e419f623f1922466db14dba7aa091cdd4720924e2b97901088af2dc5719b108a',
     'idx_users_name': '4dbc01feffae5acf04236e5aa3611151cc43e1467f84588e05b025dd9fbc7402',
@@ -75,17 +77,52 @@ OPERATOR_INDEX_NAMES = {
     'inbox_backfill_messages', 'inbox_backfill_reviews', 'inbox_backfill_threads',
     'inbox_backfill_thread_identity', 'inbox_unknown_history_page',
 }
-ROWTYPE_TABLES = frozenset(
-    f'{schema.lower()}.{table.lower()}'
-    for path in MIGRATIONS.glob('2026093004*.sql')
-    for schema, table in re.findall(r'\b([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)%rowtype\b', path.read_text(), re.I)
-)
+def derive_rowtype_tables(sources):
+    """Conservatively derive relations read as whole rows by Inbox SQL.
+
+    PostgreSQL's %ROWTYPE is only one whole-row form.  A star projection,
+    qualified star, or selecting an alias/ROW(alias) also makes the relation's
+    complete row type observable.  The parser is deliberately conservative:
+    false positives reject otherwise recordable drift, while false negatives
+    would allow a migration-read table to be recorded as unexplained drift.
+    """
+    tables = set()
+    aliases = {}
+    qualified = r'((?:public|auth|storage|inbox_[a-z_]+|supabase_migrations)\.[a-z_][a-z_0-9]*)'
+    for source in sources:
+        tables.update(f'{schema.lower()}.{table.lower()}' for schema, table in re.findall(
+            r'\b([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)%rowtype\b', source, re.I))
+        for match in re.finditer(rf'\b(?:FROM|JOIN)\s+{qualified}(?:\s+(?:AS\s+)?([a-z_][a-z0-9_]*))?', source, re.I):
+            table = match.group(1).lower()
+            alias = (match.group(2) or table.rsplit('.', 1)[-1]).lower()
+            aliases.setdefault(alias, set()).add(table)
+        for match in re.finditer(rf'\b(?:FROM|JOIN)\s+{qualified}\b', source, re.I):
+            table = match.group(1).lower()
+            if re.search(rf'\b{re.escape(table.rsplit(".", 1)[-1])}\s*\.\s*\*', source, re.I):
+                tables.add(table)
+            if re.search(rf'\bSELECT\s+(?:DISTINCT\s+)?\*\s+FROM\s+{re.escape(table)}\b', source, re.I):
+                tables.add(table)
+        for alias, candidates in aliases.items():
+            if re.search(rf'\b{re.escape(alias)}\s*\.\s*\*', source, re.I):
+                tables.update(candidates)
+            if re.search(rf'\bSELECT\s+(?:DISTINCT\s+)?\*\s+FROM\s+{re.escape(alias)}\b', source, re.I):
+                tables.update(candidates)
+            if re.search(rf'\b(?:SELECT\s+\(?\s*{re.escape(alias)}\s*\)?\s*(?:,|FROM|$)|ROW\s*\(\s*{re.escape(alias)}\s*\))', source, re.I | re.M):
+                tables.update(candidates)
+    return frozenset(tables)
+
+
+ROWTYPE_TABLES = derive_rowtype_tables([path.read_text() for path in MIGRATIONS.glob('2026093004*.sql')])
 
 
 def _sha_text(value):
     if not isinstance(value, str) or not value or value.endswith('\n'):
         raise ValueError('canonical definition must be schema text without a trailing newline')
     return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def _definition_digest(value):
+    return _sha_text(value)
 
 
 def _drift_digest(record):
@@ -136,7 +173,8 @@ def _validate_drift_record(record, baseline=None, target_ref=None, candidate_sha
             raise ValueError('rowtype-table drift item is forbidden')
         if item['attribute'] not in {'columns', 'indexes'} or not isinstance(item['canonical_definition'], str):
             raise ValueError('unknown drift item class')
-        _sha_text(item['canonical_definition'])
+        if item['definition_sha256'] != _definition_digest(item['canonical_definition']):
+            raise ValueError('drift definition digest mismatch')
         classification = item['classification']
         if not isinstance(classification, dict) or classification.get('class') != item['attribute'][:-1]:
             raise ValueError('drift classification mismatch')
@@ -155,7 +193,8 @@ def _validate_drift_record(record, baseline=None, target_ref=None, candidate_sha
             expected = {'class', 'nullable', 'default', 'attidentity', 'attgenerated', 'column_acl', 'owner'}
             if (set(classification) != expected or classification['nullable'] is not True or classification['default'] is not None
                     or classification['attidentity'] != '' or classification['attgenerated'] != '' or classification['column_acl'] is not None
-                    or classification['owner'] != relation.get('owner')):
+                    or not isinstance(classification['owner'], str) or not classification['owner']
+                    or (relation is not None and classification['owner'] != relation.get('owner'))):
                 raise ValueError('ineligible drift column')
             if item['approval_sha256'] is not None:
                 raise ValueError('column approval is forbidden')
@@ -241,13 +280,13 @@ def generate_drift_record(baseline, observed, target_ref, candidate_sha):
                     continue
                 if class_name == 'column':
                     classification = {'class': 'column', 'nullable': not entry['not_null'], 'default': entry['default'], 'attidentity': entry['attidentity'], 'attgenerated': entry['attgenerated'], 'column_acl': entry['acl'], 'owner': current['owner']}
-                    item = {'object': identity, 'attribute': attribute, 'name': name, 'canonical_definition': entry['type'], 'classification': classification, 'origin': 'unknown', 'approval_sha256': None}
+                    item = {'object': identity, 'attribute': attribute, 'name': name, 'canonical_definition': entry['type'], 'definition_sha256': _definition_digest(entry['type']), 'classification': classification, 'origin': 'unknown', 'approval_sha256': None}
                 else:
                     classification = {'class': 'index', 'unique': entry['unique'], 'primary': entry['primary'], 'constraint': entry['constraint'], 'valid': entry['valid'], 'ready': entry['ready'], 'live': entry['live'], 'predicate': entry['predicate'], 'expression': entry['expression'], 'owner': entry['owner']}
                     approval = DRIFT_APPROVALS.get(name) if classification['predicate'] is not None or classification['expression'] else None
                     if approval is not None and _sha_text(entry['definition']) != approval:
                         raise ValueError(f'approval digest mismatch: {identity}.{name}')
-                    item = {'object': identity, 'attribute': attribute, 'name': name, 'canonical_definition': entry['definition'], 'classification': classification, 'origin': 'platform' if identity == 'auth.users' else 'unknown', 'approval_sha256': approval}
+                    item = {'object': identity, 'attribute': attribute, 'name': name, 'canonical_definition': entry['definition'], 'definition_sha256': _definition_digest(entry['definition']), 'classification': classification, 'origin': 'platform' if identity == 'auth.users' else 'unknown', 'approval_sha256': approval}
                 items.append(item)
     record = {'record_version': DRIFT_RECORD_VERSION, 'target_ref': target_ref, 'candidate_sha': candidate_sha, 'baseline_digest': baseline['sha256'], 'catalog_format_version': CATALOG_FORMAT_VERSION, 'items': sorted(items, key=lambda item: (item['object'], item['attribute'], item['name']))}
     record['sha256'] = _drift_digest(record)
@@ -255,6 +294,76 @@ def generate_drift_record(baseline, observed, target_ref, candidate_sha):
     if reconstruct_drift_fingerprint(baseline, record)['section_sha256'] != observed['section_sha256']:
         raise ValueError('drift record does not reconstruct observed catalog')
     return record
+
+
+def validate_drift_items_fixture(fixture, baseline=None):
+    if not isinstance(fixture, dict) or set(fixture) != {'fixture_version', 'items'} or fixture['fixture_version'] != DRIFT_FIXTURE_VERSION or not isinstance(fixture['items'], list):
+        raise ValueError('malformed drift items fixture')
+    payload = {
+        'record_version': DRIFT_RECORD_VERSION,
+        'target_ref': 'fixture',
+        'candidate_sha': '0' * 40,
+        'baseline_digest': baseline['sha256'] if baseline is not None else '0' * 64,
+        'catalog_format_version': CATALOG_FORMAT_VERSION,
+        'items': fixture['items'],
+    }
+    payload['sha256'] = _drift_digest(payload)
+    _validate_drift_record(payload, baseline, require_baseline_digest=baseline is not None)
+    return fixture
+
+
+def fixture_bindings(fixture):
+    return sorted((item['object'], item['attribute'], item['name'], item['definition_sha256']) for item in fixture['items'])
+
+
+def record_bindings(record):
+    return sorted((item['object'], item['attribute'], item['name'], item['definition_sha256']) for item in record['items'])
+
+
+def generate_drift_items_fixture(baseline, observed, target_ref):
+    if target_ref not in KNOWN_TARGET_REFS:
+        raise ValueError('unknown target ref')
+    record = generate_drift_record(baseline, observed, target_ref, '0' * 40)
+    fixture = {'fixture_version': DRIFT_FIXTURE_VERSION, 'items': record['items']}
+    validate_drift_items_fixture(fixture, baseline)
+    return fixture
+
+
+def generate_drift_record_from_fixture(baseline, observed, fixture, target_ref, candidate_sha):
+    if target_ref not in KNOWN_TARGET_REFS:
+        raise ValueError('unknown target ref')
+    validate_drift_items_fixture(fixture, baseline)
+    record = {
+        'record_version': DRIFT_RECORD_VERSION,
+        'target_ref': target_ref,
+        'candidate_sha': candidate_sha,
+        'baseline_digest': baseline['sha256'],
+        'catalog_format_version': CATALOG_FORMAT_VERSION,
+        'items': fixture['items'],
+    }
+    record['sha256'] = _drift_digest(record)
+    _validate_drift_record(record, baseline, target_ref, candidate_sha)
+    expected = reconstruct_drift_fingerprint(baseline, record)
+    if expected['section_sha256'] != observed.get('section_sha256') or expected['sha256'] != observed.get('sha256'):
+        raise ValueError('drift fixture does not reconstruct observed catalog')
+    return record
+
+
+def drift_fixture_sql(fixture):
+    validate_drift_items_fixture(fixture)
+    statements = []
+    for item in fixture['items']:
+        if ';' in item['canonical_definition'] or '\x00' in item['canonical_definition']:
+            raise ValueError('drift definition contains SQL terminator')
+        schema, table = item['object'].split('.', 1)
+        quote = lambda value: '"' + value.replace('"', '""') + '"'
+        if item['attribute'] == 'columns':
+            statements.append(f'ALTER TABLE {quote(schema)}.{quote(table)} ADD COLUMN {quote(item["name"])} {item["canonical_definition"]};')
+        else:
+            if not re.match(r'^CREATE INDEX\s+', item['canonical_definition'], re.I):
+                raise ValueError('drift index definition is not a CREATE INDEX statement')
+            statements.append(item['canonical_definition'] + ';')
+    return '\n'.join(statements) + ('\n' if statements else '')
 
 
 def read_catalog(identifiers, scope):
@@ -309,18 +418,40 @@ def main():
     parser.add_argument('--preflight', action='store_true', help='refuse if a migration-created object already exists')
     parser.add_argument('--compare', type=Path, help='compare against a saved TEST fingerprint; any section mismatch fails')
     parser.add_argument('--write-drift-record', action='store_true', help='build a content-addressed record from two read-only catalog observations')
+    parser.add_argument('--write-drift-items-fixture', action='store_true', help='build an unbound tool-output fixture from two read-only catalog observations')
+    parser.add_argument('--write-drift-fixture-sql', action='store_true', help='emit SQL that materializes a committed drift items fixture')
     parser.add_argument('--verify-drift-record', action='store_true', help='verify a drift record reconstructs a read-only catalog observation')
     parser.add_argument('--catalog-observation', type=Path)
     parser.add_argument('--baseline', type=Path)
     parser.add_argument('--drift-record', type=Path)
+    parser.add_argument('--fixture', type=Path)
     parser.add_argument('--target-ref')
     parser.add_argument('--candidate-sha')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
+    if args.write_drift_items_fixture:
+        if not all((args.catalog_observation, args.baseline, args.target_ref, args.output)):
+            raise SystemExit('--write-drift-items-fixture requires --catalog-observation --baseline --target-ref --output')
+        fixture = generate_drift_items_fixture(json.loads(args.baseline.read_text()), json.loads(args.catalog_observation.read_text()), args.target_ref)
+        args.output.write_text(json.dumps(fixture, indent=2, sort_keys=True) + '\n')
+        print(json.dumps({'fixture_version': DRIFT_FIXTURE_VERSION, 'items': len(fixture['items']), 'output': str(args.output)}, sort_keys=True))
+        return
+    if args.write_drift_fixture_sql:
+        if not args.fixture:
+            raise SystemExit('--write-drift-fixture-sql requires --fixture')
+        sql = drift_fixture_sql(json.loads(args.fixture.read_text()))
+        if args.output:
+            args.output.write_text(sql)
+        else:
+            print(sql, end='')
+        return
     if args.write_drift_record:
         if not all((args.catalog_observation, args.baseline, args.target_ref, args.candidate_sha, args.output)):
             raise SystemExit('--write-drift-record requires --catalog-observation --baseline --target-ref --candidate-sha --output')
-        record = generate_drift_record(json.loads(args.baseline.read_text()), json.loads(args.catalog_observation.read_text()), args.target_ref, args.candidate_sha)
+        baseline = json.loads(args.baseline.read_text())
+        observed = json.loads(args.catalog_observation.read_text())
+        record = (generate_drift_record_from_fixture(baseline, observed, json.loads(args.fixture.read_text()), args.target_ref, args.candidate_sha)
+                  if args.fixture else generate_drift_record(baseline, observed, args.target_ref, args.candidate_sha))
         args.output.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
         print(json.dumps({'drift_record_sha256': record['sha256'], 'items': len(record['items']), 'output': str(args.output)}, sort_keys=True))
         return

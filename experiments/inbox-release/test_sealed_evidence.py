@@ -68,7 +68,7 @@ class SealedEvidenceTests(unittest.TestCase):
         drift_dir = self.record("drift", kind="drift-replay", phase="n/a", target="disposable", extra={"github_run_id": "333", "github_run_attempt": "1", "lane": "drift-replay", "artifact_name": f"heavy-drift-replay-{self.sha}-333-1", "workflow_path": ".github/workflows/inbox-heavy-verification.yml", "workflow_input_sha": self.sha, "event": "workflow_dispatch", "head_branch": "main"})
         drift_commit = self.git("rev-parse", "HEAD")
         catalog = self.catalog_config()
-        drift = json.loads((drift_dir / "drift-record.json").read_text())
+        drift = json.loads((drift_dir / "drift-record-ncsngxlcyxylaeskiteu.json").read_text())
         observed_catalog = evidence.reconstruct_drift_catalog(catalog, drift)
         platform = self.platform_config()
         catalog_bytes = (catalog_dir / "catalog-pre.json").read_bytes()
@@ -206,6 +206,11 @@ class SealedEvidenceTests(unittest.TestCase):
             target = self.repo / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((source / name).read_bytes())
+        fixture_dir = self.repo / evidence.DRIFT_FIXTURE_ROOT
+        fixture_dir.mkdir(parents=True, exist_ok=True)
+        fixture_items = self.drift_config()["items"]
+        for target_ref in sorted(evidence.KNOWN_TARGET_REFS):
+            (fixture_dir / f"{target_ref}.items.json").write_text(json.dumps({"fixture_version": evidence.DRIFT_FIXTURE_VERSION, "items": fixture_items}))
         self.commit("base")
         self.sha = self.git("rev-parse", "HEAD")
         self.base_branch = self.git("branch", "--show-current")
@@ -241,7 +246,7 @@ class SealedEvidenceTests(unittest.TestCase):
             ("public.message_threads", "ai_responder_debounce_until", "timestamptz", "unknown", "postgres"),
             ("public.webhook_events", "processing_lease_token", "uuid", "unknown", "postgres"),
         ):
-            items.append({"object": object_name, "attribute": "columns", "name": name, "canonical_definition": definition,
+            items.append({"object": object_name, "attribute": "columns", "name": name, "canonical_definition": definition, "definition_sha256": hashlib.sha256(definition.encode()).hexdigest(),
                           "classification": {"class": "column", "nullable": True, "default": None, "attidentity": "", "attgenerated": "", "column_acl": None, "owner": owner},
                           "origin": origin, "approval_sha256": None})
         for name, definition, origin, owner, predicate, expression, approval in (
@@ -252,7 +257,7 @@ class SealedEvidenceTests(unittest.TestCase):
             ("idx_users_name", "CREATE INDEX idx_users_name ON auth.users USING btree (((raw_user_meta_data ->> 'name'::text))) WHERE ((raw_user_meta_data ->> 'name'::text) IS NOT NULL)", "platform", "supabase_auth_admin", "((raw_user_meta_data ->> 'name'::text) IS NOT NULL)", True, evidence.DRIFT_APPROVALS["idx_users_name"]),
         ):
             items.append({"object": "auth.users" if origin == "platform" else "public.message_threads", "attribute": "indexes", "name": name,
-                          "canonical_definition": definition,
+                          "canonical_definition": definition, "definition_sha256": hashlib.sha256(definition.encode()).hexdigest(),
                           "classification": {"class": "index", "unique": False, "primary": False, "constraint": False, "valid": True, "ready": True, "live": True, "predicate": predicate, "expression": expression, "owner": owner},
                           "origin": origin, "approval_sha256": approval})
         payload = {"record_version": 1, "target_ref": "ncsngxlcyxylaeskiteu", "candidate_sha": "0" * 40,
@@ -293,30 +298,42 @@ class SealedEvidenceTests(unittest.TestCase):
             manifest["artifacts"][artifact2.name] = hashlib.sha256(artifact2.read_bytes()).hexdigest()
         if kind == "drift-replay":
             artifact.unlink()
-            baseline = self.catalog_config()
+            # Keep replay setup valid when a caller deliberately mutates the
+            # catalog fixture to exercise a later gate assertion.
+            baseline = SealedEvidenceTests.catalog_config()
             drift = self.drift_config()
             drift["candidate_sha"] = self.sha
             drift["baseline_digest"] = baseline["sha256"]
             digest_payload = {key: drift[key] for key in ("record_version", "target_ref", "candidate_sha", "baseline_digest", "catalog_format_version", "items")}
             drift["sha256"] = hashlib.sha256(json.dumps(digest_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-            try:
-                replay = evidence.reconstruct_drift_catalog(baseline, drift)
-            except EvidenceError:
-                replay = baseline
+            records = {}
+            for target_ref in sorted(evidence.KNOWN_TARGET_REFS):
+                record = json.loads(json.dumps(drift))
+                record["target_ref"] = target_ref
+                payload = {key: record[key] for key in ("record_version", "target_ref", "candidate_sha", "baseline_digest", "catalog_format_version", "items")}
+                record["sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+                records[target_ref] = record
             files = {
-                "drift-record.json": drift,
-                "catalog-pre.json": replay,
-                "catalog-post.json": replay,
-                "pre-readonly.json": {"verdict": "PASS", "phase": "pre"},
-                "post-readonly.json": {"verdict": "PASS", "phase": "post"},
-                "contract-suite.txt": "PASS\n",
+                "catalog-pre.json": baseline,
+                "catalog-post.json": baseline,
             }
+            for target_ref, record in records.items():
+                replay = evidence.reconstruct_drift_catalog(baseline, record)
+                files.update({
+                    f"drift-record-{target_ref}.json": record,
+                    f"catalog-pre-{target_ref}.json": replay,
+                    f"catalog-post-{target_ref}.json": replay,
+                    f"pre-readonly-{target_ref}.json": {"verdict": "PASS", "phase": "pre"},
+                    f"post-readonly-{target_ref}.json": {"verdict": "PASS", "phase": "post"},
+                    f"contract-pre-{target_ref}.txt": "PASS\n",
+                    f"contract-post-{target_ref}.txt": "PASS\n",
+                })
             manifest["artifacts"] = {}
             for filename, value in files.items():
                 target = directory / filename
                 target.write_text(json.dumps(value) if not isinstance(value, str) else value)
                 manifest["artifacts"][filename] = hashlib.sha256(target.read_bytes()).hexdigest()
-            manifest["summary"] = {"replayed_items": len(drift["items"]), "drift_record_sha256": drift["sha256"], "j5a": evidence.J5A_CATALOG_DRIFT_SUMMARY}
+            manifest["summary"] = {"replayed_items": {ref: len(record["items"]) for ref, record in records.items()}, "drift_record_sha256": {ref: record["sha256"] for ref, record in records.items()}, "definition_sha256": {ref: [item["definition_sha256"] for item in record["items"]] for ref, record in records.items()}, "j5a": evidence.J5A_CATALOG_DRIFT_SUMMARY}
         if kind == "shared-readonly":
             manifest.pop("runner_script_sha256")
             manifest.pop("fault_proxy_script_sha256")
@@ -326,7 +343,7 @@ class SealedEvidenceTests(unittest.TestCase):
             manifest["run_id"] = "shared-readonly-" + phase + "-" + sealed_time.replace("-", "").replace(":", "").replace(".", "")
             scripts = json.loads((self.repo / evidence.OPERATOR_LIST).read_text())["operator_scripts"]
             inputs = {}
-            for label, source_kind, source_phase, filename in (("catalog_record", "catalog-fingerprint", "n/a", "catalog-pre.json"), ("platform_record", "db-contract", "pre", "platform-config.json"), ("drift_record", "drift-replay", "n/a", "drift-record.json")):
+            for label, source_kind, source_phase, filename in (("catalog_record", "catalog-fingerprint", "n/a", "catalog-pre.json"), ("platform_record", "db-contract", "pre", "platform-config.json"), ("drift_record", "drift-replay", "n/a", "drift-record-ncsngxlcyxylaeskiteu.json")):
                 candidates = list((self.repo / ROOT / self.sha / "pre-merge").glob("*/manifest.json"))
                 found = next((p for p in candidates if (v := json.loads(p.read_text())).get("kind") == source_kind and v.get("phase") == source_phase), None)
                 if found:
@@ -336,7 +353,7 @@ class SealedEvidenceTests(unittest.TestCase):
             if len(inputs) == 3:
                 platform_data = self.platform_config()
                 catalog_data = json.loads(inputs["catalog_record"]["directory"] and (self.repo / inputs["catalog_record"]["directory"] / "catalog-pre.json").read_text())
-                drift_data = json.loads((self.repo / inputs["drift_record"]["directory"] / "drift-record.json").read_text())
+                drift_data = json.loads((self.repo / inputs["drift_record"]["directory"] / "drift-record-ncsngxlcyxylaeskiteu.json").read_text())
                 try:
                     observed_catalog = evidence.reconstruct_drift_catalog(catalog_data, drift_data)
                 except EvidenceError:
@@ -837,8 +854,9 @@ class SealedEvidenceTests(unittest.TestCase):
                            "catalog_fingerprint_after": fingerprint or {"tables": "ok"}})
 
     def complete_migration_record(self, *, target="shared-test", apply_conclusion="success", apply_attempt=2,
-                                  include_apply=True, bind_conclusion="success", bind_attempt=2):
-        catalog = self.record("catalog", kind="catalog-fingerprint", phase="n/a", target="disposable",
+                                  include_apply=True, bind_conclusion="success", bind_attempt=2,
+                                  include_replay=True, replay_target_ref=None):
+        catalog = self.record("catalog", kind="catalog-fingerprint", phase="n/a", target="production" if target == "production" else "disposable",
                               commit=False, extra=self.perf_provenance())
         artifact = catalog / "catalog-fingerprint-post.json"
         artifact.write_text(json.dumps(self.catalog_config()))
@@ -846,22 +864,26 @@ class SealedEvidenceTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text())
         manifest["artifacts"][artifact.name] = hashlib.sha256(artifact.read_bytes()).hexdigest()
         manifest_path.write_text(json.dumps(manifest))
-        drift = self.record("drift", kind="drift-replay", phase="n/a", target="disposable", commit=False,
-                            extra={"github_run_id": "1002", "github_run_attempt": "1", "lane": "drift-replay",
-                                   "artifact_name": f"heavy-drift-replay-{self.sha}-1002-1",
-                                   "workflow_path": ".github/workflows/inbox-heavy-verification.yml", "workflow_input_sha": self.sha,
-                                   "event": "workflow_dispatch", "head_branch": "main"})
-        drift_data = json.loads((drift / "drift-record.json").read_text())
-        if target == "production":
-            drift_data["target_ref"] = "copflsklaefwzipsrjqz"
-            digest_payload = {key: drift_data[key] for key in ("record_version", "target_ref", "candidate_sha", "baseline_digest", "catalog_format_version", "items")}
-            drift_data["sha256"] = hashlib.sha256(json.dumps(digest_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-            (drift / "drift-record.json").write_text(json.dumps(drift_data))
-            manifest_path = drift / "manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            manifest["artifacts"]["drift-record.json"] = hashlib.sha256((drift / "drift-record.json").read_bytes()).hexdigest()
-            manifest_path.write_text(json.dumps(manifest))
-        expected_after = evidence.reconstruct_drift_catalog(self.catalog_config(), drift_data)
+        drift_data = None
+        if include_replay:
+            drift = self.record("drift", kind="drift-replay", phase="n/a", target="disposable", commit=False,
+                                extra={"github_run_id": "1002", "github_run_attempt": "1", "lane": "drift-replay",
+                                       "artifact_name": f"heavy-drift-replay-{self.sha}-1002-1",
+                                       "workflow_path": ".github/workflows/inbox-heavy-verification.yml", "workflow_input_sha": self.sha,
+                                       "event": "workflow_dispatch", "head_branch": "main"})
+            drift_artifact = f"drift-record-{'copflsklaefwzipsrjqz' if target == 'production' else 'ncsngxlcyxylaeskiteu'}.json"
+            drift_data = json.loads((drift / drift_artifact).read_text())
+            if replay_target_ref is not None:
+                replacement = json.loads((drift / f"drift-record-{replay_target_ref}.json").read_text())
+                (drift / drift_artifact).write_text(json.dumps(replacement))
+                drift_data = replacement
+                manifest_path = drift / "manifest.json"
+                manifest = json.loads(manifest_path.read_text())
+                manifest["artifacts"][drift_artifact] = hashlib.sha256((drift / drift_artifact).read_bytes()).hexdigest()
+                manifest_path.write_text(json.dumps(manifest))
+            expected_after = evidence.reconstruct_drift_catalog(self.catalog_config(), drift_data)
+        else:
+            expected_after = self.catalog_config()
         self.commit("catalog")
         production = target == "production"
         workflow = {"workflow_path": f".github/workflows/db-migrate-{'prod' if production else 'test'}.yml",
@@ -910,6 +932,54 @@ class SealedEvidenceTests(unittest.TestCase):
         # GitHub retains the successful binding job when only the gated job is rerun.
         self.assertEqual(evaluate_migration(self.repo, self.sha, "production")["status"], "PASS")
 
+    def test_migration_rejects_changed_definition_presented_as_sealed_pre(self):
+        self.complete_migration_record()
+        drift = self.record("drift-replacement", kind="drift-replay", phase="n/a", target="disposable", commit=False,
+                            extra={"github_run_id": "1003", "github_run_attempt": "1", "lane": "drift-replay",
+                                   "artifact_name": f"heavy-drift-replay-{self.sha}-1003-1",
+                                   "workflow_path": ".github/workflows/inbox-heavy-verification.yml", "workflow_input_sha": self.sha,
+                                   "event": "workflow_dispatch", "head_branch": "main"})
+        record_path = drift / "drift-record-ncsngxlcyxylaeskiteu.json"
+        record = json.loads(record_path.read_text())
+        record["items"][0]["canonical_definition"] = "text"
+        record["items"][0]["definition_sha256"] = hashlib.sha256(b"text").hexdigest()
+        digest_payload = {key: record[key] for key in ("record_version", "target_ref", "candidate_sha", "baseline_digest", "catalog_format_version", "items")}
+        record["sha256"] = hashlib.sha256(json.dumps(digest_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        record_path.write_text(json.dumps(record))
+        manifest_path = drift / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["artifacts"][record_path.name] = hashlib.sha256(record_path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        self.commit("changed drift definition")
+        with self.assertRaisesRegex(EvidenceError, "fixture/replay definition mismatch"):
+            evaluate_migration(self.repo, self.sha, "shared-test")
+
+    def test_migration_rejects_replacement_record_in_manifest(self):
+        self.complete_migration_record()
+        replacement = self.record("migration-replacement", tier="test-env", kind="migration-apply", phase="post", target="shared-test", commit=False,
+                                  extra={"target_binding": {"project_ref": "ncsngxlcyxylaeskiteu"},
+                                         "workflow_run": {"workflow_path": ".github/workflows/db-migrate-test.yml", "run_id": "124", "run_attempt": 1, "head_sha": self.sha, "conclusion": "success",
+                                                          "apply_job": {"name": "Apply migrations to test", "id": "457", "run_id": "124", "run_attempt": 1, "conclusion": "success"}},
+                                         "migration_head_sha": self.sha, "schema_migrations_before": ["old"], "schema_migrations_after": ["old", *sorted(MIGRATION_VERSIONS)],
+                                         "catalog_fingerprint_after": {"tables": "ok"}})
+        manifest_path = replacement / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["catalog_drift_record"] = {"items": "replacement-from-manifest"}
+        manifest_path.write_text(json.dumps(manifest))
+        self.commit("manifest drift replacement")
+        with self.assertRaisesRegex(EvidenceError, "migration manifest cannot supply a replacement drift record"):
+            evaluate_migration(self.repo, self.sha, "shared-test")
+
+    def test_migration_requires_a_linked_replay(self):
+        self.complete_migration_record(include_replay=False)
+        with self.assertRaisesRegex(EvidenceError, "missing required check"):
+            evaluate_migration(self.repo, self.sha, "shared-test")
+
+    def test_production_migration_cannot_use_test_replay_record(self):
+        self.complete_migration_record(target="production", replay_target_ref="ncsngxlcyxylaeskiteu")
+        with self.assertRaisesRegex(EvidenceError, "drift replay item or binding mismatch"):
+            evaluate_migration(self.repo, self.sha, "production")
+
     def test_migration_wrong_head_negative(self):
         self.migration_record(head_sha="0" * 40)
         with self.assertRaisesRegex(EvidenceError, "workflow identity"):
@@ -927,7 +997,8 @@ class SealedEvidenceTests(unittest.TestCase):
 
     def test_migration_fingerprint_section_mismatch_negative(self):
         self.git("checkout", "-qb", "evidence", self.sha)
-        directory = self.record("catalog", kind="catalog-fingerprint", phase="n/a", target="disposable", commit=False)
+        directory = self.record("catalog", kind="catalog-fingerprint", phase="n/a", target="disposable", commit=False,
+                                extra=self.perf_provenance())
         fingerprint = directory / "catalog-fingerprint-post.json"
         fingerprint.write_text(json.dumps(self.catalog_config()))
         manifest_path = directory / "manifest.json"

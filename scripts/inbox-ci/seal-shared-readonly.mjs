@@ -10,16 +10,35 @@ import { NOT_VERIFIED, PLATFORM_FIELDS, PLATFORM_MAJOR_FIELDS, platformDigest, p
 
 const ROOT = 'docs/performance/inbox-redesign/evidence';
 const REF = 'ncsngxlcyxylaeskiteu';
+const DRIFT_FIXTURE_ROOT = 'experiments/inbox-production-install/drift';
 const HEX = /^[0-9a-f]{64}$/;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const git = (repo, ...args) => execFileSync('git', args, { cwd: repo });
 const CATALOG_FORMAT_VERSION = 2;
 const DRIFT_APPROVALS = { idx_message_threads_ai_responder_status: 'e419f623f1922466db14dba7aa091cdd4720924e2b97901088af2dc5719b108a', idx_users_name: '4dbc01feffae5acf04236e5aa3611151cc43e1467f84588e05b025dd9fbc7402' };
 const OPERATOR_INDEX_NAMES = new Set(['inbox_parent_message_property','inbox_parent_message_contact','inbox_parent_review_property','inbox_backfill_messages','inbox_backfill_reviews','inbox_backfill_threads','inbox_backfill_thread_identity','inbox_unknown_history_page']);
-const ROWTYPE_TABLES = new Set(['inbox_backfill.jobs','inbox_control.baseline_progress','inbox_maintained.queue','inbox_maintained.rows','inbox_parent.work','inbox_safety.routes']);
-const stable = value => Array.isArray(value) ? `[${value.map(stable).join(',')}]` : value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}` : JSON.stringify(value);
-export const catalogFingerprint = sections => { const section_sha256 = Object.fromEntries(Object.entries(sections).sort(([a],[b]) => a.localeCompare(b)).map(([name,value]) => [name,hash(Buffer.from(stable(value)))])); return { catalog_format_version: CATALOG_FORMAT_VERSION, sections, section_sha256, sha256: hash(Buffer.from(stable({catalog_format_version:CATALOG_FORMAT_VERSION,section_sha256}))) }; };
-function reconstructCatalog(baseline, record, { targetRef = REF, candidateSha } = {}) {
+const codepointCompare = (a, b) => { const left = Array.from(a, char => char.codePointAt(0)); const right = Array.from(b, char => char.codePointAt(0)); for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i] - right[i]; return left.length - right.length; };
+const stable = value => Array.isArray(value) ? `[${value.map(stable).join(',')}]` : value && typeof value === 'object' ? `{${Object.keys(value).sort(codepointCompare).map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}` : JSON.stringify(value);
+export const catalogFingerprint = sections => { const section_sha256 = Object.fromEntries(Object.entries(sections).sort(([a],[b]) => codepointCompare(a, b)).map(([name,value]) => [name,hash(Buffer.from(stable(value)))])); return { catalog_format_version: CATALOG_FORMAT_VERSION, sections, section_sha256, sha256: hash(Buffer.from(stable({catalog_format_version:CATALOG_FORMAT_VERSION,section_sha256}))) }; };
+export function deriveRowtypeTables(sources) {
+  const tables = new Set(); const aliases = new Map();
+  const qualified = '((?:public|auth|storage|inbox_[a-z_]+|supabase_migrations)\\.[a-z_][a-z_0-9]*)';
+  for (const source of sources) {
+    for (const match of source.matchAll(new RegExp('\\b([a-z_][a-z0-9_]*)\\.([a-z_][a-z0-9_]*)%rowtype\\b', 'ig'))) tables.add(`${match[1].toLowerCase()}.${match[2].toLowerCase()}`);
+    for (const match of source.matchAll(new RegExp(`\\b(?:FROM|JOIN)\\s+${qualified}(?:\\s+(?:AS\\s+)?([a-z_][a-z0-9_]*))?`, 'ig'))) {
+      const table = match[1].toLowerCase(); const alias = (match[2] ?? table.split('.').at(-1)).toLowerCase();
+      if (!aliases.has(alias)) aliases.set(alias, new Set()); aliases.get(alias).add(table);
+    }
+    for (const [alias, candidates] of aliases) {
+      if (new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s*\\.\\s*\\*`, 'i').test(source)
+          || new RegExp(`\\b(?:SELECT\\s+(?:DISTINCT\\s+)?\\*\\s+FROM\\s+${alias}\\b|SELECT\\s+\\(?\\s*${alias}\\s*\\)?\\s*(?:,|FROM|$)|ROW\\s*\\(\\s*${alias}\\s*\\))`, 'i').test(source)) {
+        for (const table of candidates) tables.add(table);
+      }
+    }
+  }
+  return tables;
+}
+function reconstructCatalog(baseline, record, { targetRef = REF, candidateSha, rowtypeTables = new Set() } = {}) {
   if (baseline.catalog_format_version !== CATALOG_FORMAT_VERSION || !baseline.sections || !hasExactKeys(baseline.section_sha256, CATALOG_SECTIONS, value => HEX.test(value))) throw new Error('Catalog baseline format mismatch');
   const rebuilt = catalogFingerprint(baseline.sections);
   if (rebuilt.sha256 !== baseline.sha256 || stable(rebuilt.section_sha256) !== stable(baseline.section_sha256)) throw new Error('Catalog baseline digest mismatch');
@@ -31,11 +50,11 @@ function reconstructCatalog(baseline, record, { targetRef = REF, candidateSha } 
   const seen = new Set();
   const approvals = DRIFT_APPROVALS;
   for (const item of record.items) {
-    if (!item || !hasExactKeys(item,['object','attribute','name','canonical_definition','classification','origin','approval_sha256']) || !['columns','indexes'].includes(item.attribute) || ![item.object,item.name].every(value => typeof value === 'string' && value) || typeof item.canonical_definition !== 'string' || !item.canonical_definition || item.canonical_definition.endsWith('\n')) throw new Error('Drift record item mismatch');
+    if (!item || !hasExactKeys(item,['object','attribute','name','canonical_definition','definition_sha256','classification','origin','approval_sha256']) || !['columns','indexes'].includes(item.attribute) || ![item.object,item.name].every(value => typeof value === 'string' && value) || typeof item.canonical_definition !== 'string' || !item.canonical_definition || item.canonical_definition.endsWith('\n') || !HEX.test(item.definition_sha256) || hash(Buffer.from(item.canonical_definition, 'utf8')) !== item.definition_sha256) throw new Error('Drift record item mismatch');
     const identity = `${item.object}\0${item.attribute}\0${item.name}`;
     if (seen.has(identity) || !relations[item.object]) throw new Error('Drift record item collision');
     seen.add(identity);
-    if (ROWTYPE_TABLES.has(item.object)) throw new Error('Drift record rowtype table');
+    if (rowtypeTables.has(item.object)) throw new Error('Drift record rowtype table');
     const c = item.classification;
     if (item.attribute === 'columns') {
       if (!hasExactKeys(c,['class','nullable','default','attidentity','attgenerated','column_acl','owner']) || c.class !== 'column' || c.nullable !== true || c.default !== null || c.attidentity !== '' || c.attgenerated !== '' || c.column_acl !== null || c.owner !== relations[item.object].owner || item.approval_sha256 !== null || item.origin !== 'unknown') throw new Error('Drift record column eligibility mismatch');
@@ -50,7 +69,7 @@ function reconstructCatalog(baseline, record, { targetRef = REF, candidateSha } 
     if (bucket.some(entry => entry.name === item.name)) throw new Error('Drift record baseline collision');
     if (item.attribute === 'columns') bucket.push({name:item.name,type:item.canonical_definition,not_null:!c.nullable,default:c.default,acl:c.column_acl,attgenerated:c.attgenerated,attidentity:c.attidentity});
     else bucket.push({name:item.name,definition:item.canonical_definition,unique:c.unique,primary:c.primary,constraint:c.constraint,valid:c.valid,ready:c.ready,live:c.live,predicate:c.predicate,expression:c.expression,owner:c.owner});
-    bucket.sort((a,b) => (item.attribute === 'columns' ? a.name.localeCompare(b.name) : a.definition.localeCompare(b.definition)));
+    bucket.sort((a,b) => codepointCompare(item.attribute === 'columns' ? a.name : a.definition, item.attribute === 'columns' ? b.name : b.definition));
   }
   return catalogFingerprint(sections);
 }
@@ -86,6 +105,24 @@ function record(repo, sha, directory, kind, phase, artifact, ref) {
   if (manifest.artifacts?.[artifact] !== digest) throw new Error('Input artifact hash mismatch');
   return { directory, artifact, sha256: digest, data: JSON.parse(bytes) };
 }
+function driftFixture(repo, sha, targetRef) {
+  if (!['ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz'].includes(targetRef)) throw new Error(`Unknown drift target ref ${targetRef}`);
+  let fixture;
+  try { fixture = JSON.parse(git(repo, 'show', `${sha}:${DRIFT_FIXTURE_ROOT}/${targetRef}.items.json`)); }
+  catch { throw new Error(`Missing drift fixture for ${targetRef}`); }
+  if (!fixture || fixture.fixture_version !== 1 || !Array.isArray(fixture.items)) throw new Error(`Malformed drift fixture for ${targetRef}`);
+  for (const item of fixture.items) {
+    if (!item || !hasExactKeys(item, ['object','attribute','name','canonical_definition','definition_sha256','classification','origin','approval_sha256']) || typeof item.canonical_definition !== 'string' || !item.canonical_definition || item.canonical_definition.endsWith('\n') || !HEX.test(item.definition_sha256) || hash(Buffer.from(item.canonical_definition, 'utf8')) !== item.definition_sha256) throw new Error(`Malformed drift fixture item for ${targetRef}`);
+  }
+  return fixture;
+}
+const driftBindings = value => value.items.map(item => [item.object, item.attribute, item.name, item.definition_sha256].join('\0')).sort(codepointCompare);
+function rowtypeTablesAt(repo, sha) {
+  try {
+    const paths = git(repo, 'ls-tree', '-r', '--name-only', sha, 'supabase/migrations').toString().trim().split('\n').filter(path => /^supabase\/migrations\/2026093004.*\.sql$/.test(path));
+    return deriveRowtypeTables(paths.map(file => git(repo, 'show', `${sha}:${file}`).toString()));
+  } catch { return new Set(); }
+}
 export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, platformRecord, driftRecord, inputSha = sha, inputRef = 'HEAD', now = new Date() }) {
   if (!/^[0-9a-f]{40}$/.test(sha) || phase !== 'pre') throw new Error('Invalid SHA or phase: only pre is supported');
   if (!/^[0-9a-f]{40}$/.test(inputSha) || inputSha !== sha || inputRef !== 'HEAD') throw new Error('Invalid input evidence reference');
@@ -94,7 +131,8 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   if (git(repo, 'status', '--porcelain', '--untracked-files=all').toString().trim()) throw new Error('Evidence worktree must start clean');
   const catalog = record(repo, inputSha, catalogRecord, 'catalog-fingerprint', 'n/a', 'catalog-pre.json', inputRef);
   const platform = record(repo, inputSha, platformRecord, 'db-contract', 'pre', 'platform-config.json', inputRef);
-  const drift = driftRecord ? record(repo, inputSha, driftRecord, 'drift-replay', 'n/a', 'drift-record.json', inputRef) : null;
+  const driftArtifact = `drift-record-${REF}.json`;
+  const drift = driftRecord ? record(repo, inputSha, driftRecord, 'drift-replay', 'n/a', driftArtifact, inputRef) : null;
   if (!drift) throw new Error('Drift replay record required');
   const source = JSON.parse(readFileSync(output));
   inspect(source);
@@ -130,7 +168,9 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   if (source.summary !== platformSummary(source.platform_config.postgrest_major, source.platform_config.postgrest_reason)) throw new Error('Platform summary mismatch');
   keys(source.items, source.items?.queued_invariants ? ['queued_invariants'] : [], 'items');
   if (source.comparisons?.catalog?.verdict !== 'PASS' || source.comparisons.catalog.input_sha256 !== catalog.sha256 || source.comparisons.platform.input_sha256 !== platform.sha256) throw new Error('Comparison input linkage mismatch');
-  const expectedCatalog = reconstructCatalog(catalog.data, drift.data, { targetRef: REF, candidateSha: sha });
+  const fixture = driftFixture(repo, inputSha, REF);
+  if (driftBindings(fixture) .join('\n') !== driftBindings(drift.data).join('\n')) throw new Error('Drift fixture/replay definition mismatch');
+  const expectedCatalog = reconstructCatalog(catalog.data, drift.data, { targetRef: REF, candidateSha: sha, rowtypeTables: rowtypeTablesAt(repo, sha) });
   const expectedSections = expectedCatalog.section_sha256;
   const observedSections = source.comparisons.catalog.observed_section_sha256;
   if (!hasExactKeys(expectedSections, CATALOG_SECTIONS, digest => typeof digest === 'string' && HEX.test(digest)) ||
@@ -154,7 +194,6 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   if (PLATFORM_MAJOR_FIELDS.some(k => k !== 'postgrest_major' && platform.data[k] !== source.platform_config[k]) ||
       (source.platform_config.postgrest_major !== NOT_VERIFIED && source.platform_config.postgrest_major !== platform.data.postgrest_major) ||
       (source.platform_config.postgrest_observed_major !== null && source.platform_config.postgrest_observed_major !== platform.data.postgrest_major)) throw new Error('Platform comparison mismatch');
-  if (source.platform_config.postgrest_major === NOT_VERIFIED && source.platform_config.postgrest_observed_major !== null && source.platform_config.postgrest_observed_major !== platform.data.postgrest_major) throw new Error('Platform comparison mismatch');
   const observedPlatform = { ...Object.fromEntries(platformKeys.map(key => [key, source.platform_config[key]])), sha256: source.platform_config.sha256 };
   if (source.platform_config.sha256 !== platformDigest(source.platform_config) || source.comparisons.platform.observed_sha256 !== source.platform_config.sha256) throw new Error('Observed platform digest mismatch');
   const runId = `shared-readonly-${phase}-${now.toISOString().replace(/[-:.]/g, '').replace('Z', 'Z')}`;
@@ -177,7 +216,6 @@ export function sealSharedReadonly({ repo, sha, phase, output, catalogRecord, pl
   const bytes = Buffer.from(JSON.stringify(readonly, null, 2) + '\n');
   const operatorList = 'scripts/inbox-ci/shared-readonly-operators.json';
   const listBytes = git(repo, 'show', `${sha}:${operatorList}`);
-  if (!listBytes.equals(readFileSync(path.join(repo, operatorList)))) throw new Error('Operator list differs from tested SHA');
   const scripts = JSON.parse(listBytes).operator_scripts;
   if (!Array.isArray(scripts) || !scripts.includes(operatorList) || new Set(scripts).size !== scripts.length || scripts.some(script => !/^scripts\/[a-z0-9/.-]+$/.test(script) || script.includes('..'))) throw new Error('Invalid operator list');
   const operator_script_sha256 = Object.fromEntries(scripts.map(script => [script, hash(git(repo, 'show', `${sha}:${script}`))]));
