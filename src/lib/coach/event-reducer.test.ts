@@ -31,6 +31,22 @@ describe("coachReducer — objection prompt", () => {
     state = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
     expect(state.objectionPrompt).toBeNull();
   });
+
+  it("does not duplicate an exact prompt or let an older prompt replace a newer one", () => {
+    const newer = { ...prompt, label: "Timing concern", sellerTurn: 2, ts: "2026-09-29T12:00:10Z" };
+    let state = coachReducer(initialCoachState(), newer);
+    const afterDuplicate = coachReducer(state, newer);
+
+    expect(afterDuplicate).toBe(state);
+
+    state = coachReducer(state, {
+      ...prompt,
+      label: "Price concern",
+      sellerTurn: 1,
+      ts: "2026-09-29T12:00:09Z",
+    });
+    expect(state.objectionPrompt).toMatchObject({ label: "Timing concern", sellerTurn: 2, ts: newer.ts });
+  });
 });
 
 describe("coachReducer — transcript", () => {

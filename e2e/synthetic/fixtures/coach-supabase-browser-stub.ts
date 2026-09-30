@@ -1,7 +1,7 @@
 type BroadcastCallback = (message: { payload: unknown }) => void;
 type StatusCallback = (status: string) => void;
 
-const broadcastCallbacks = new Set<BroadcastCallback>();
+const broadcastCallbacks = new Map<BroadcastCallback, string>();
 const statusCallbacks = new Set<StatusCallback>();
 
 export function hasSyntheticCoachSubscriber(): boolean {
@@ -12,21 +12,23 @@ export function emitSyntheticCoachStatus(status: string): void {
   for (const callback of statusCallbacks) callback(status);
 }
 
-export function emitSyntheticCoachBroadcast(payload: unknown): void {
-  for (const callback of broadcastCallbacks) callback({ payload });
+export function emitSyntheticCoachBroadcast(payload: unknown, topic?: string): void {
+  for (const [callback, subscribedTopic] of broadcastCallbacks) {
+    if (topic === undefined || topic === subscribedTopic) callback({ payload });
+  }
 }
 
 export function createClient() {
   return {
     auth: { getSession: async () => ({ data: { session: null } }) },
     realtime: { setAuth: () => undefined },
-    channel: () => {
+    channel: (topic: string) => {
       let broadcastCallback: BroadcastCallback | null = null;
       let statusCallback: StatusCallback | null = null;
       const channel = {
         on: (_kind: string, _filter: unknown, callback: BroadcastCallback) => {
           broadcastCallback = callback;
-          broadcastCallbacks.add(callback);
+          broadcastCallbacks.set(callback, topic);
           return channel;
         },
         subscribe: (callback: StatusCallback) => {

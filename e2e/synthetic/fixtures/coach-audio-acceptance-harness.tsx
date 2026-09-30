@@ -1,6 +1,7 @@
 /* eslint-disable react-hooks/refs -- this non-shipping fixture deliberately models the SDK's imperative mutable handles */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { closrOutbound123Ref } from "@biginkc/coach/fixtures";
 import { SoftphoneProvider } from "@/components/softphone/softphone-provider";
 import type { CoachCallContext } from "@/lib/coach/types";
 import type { JitterAudioHealthSample } from "@/lib/dialer/jitter-contract";
@@ -21,11 +22,22 @@ class FakeRtcClient {
   handlers = new Map<string, Array<(...args: unknown[]) => void>>();
   calls: FakeCall[] = [];
   socketDisconnectCount = 0; serverDisconnectCount = 0; disconnectCount = 0; onFirstConnect: (() => void) | null = null;
+  allowDeferredAttach: boolean;
+  constructor(deferInitialAttach = false) { this.allowDeferredAttach = !deferInitialAttach; }
   on(name: string, handler: (...args: unknown[]) => void): this { this.handlers.set(name, [...(this.handlers.get(name) ?? []), handler]); return this; }
   emit(name: string, value?: unknown): void { for (const handler of this.handlers.get(name) ?? []) handler(value); }
-  async connect(): Promise<void> { this.emit("telnyx.ready"); const attach = this.onFirstConnect; this.onFirstConnect = null; attach?.(); }
+  private attachIfAllowed(): void {
+    if (!this.allowDeferredAttach) return;
+    const attach = this.onFirstConnect;
+    this.onFirstConnect = null;
+    attach?.();
+  }
+  async connect(): Promise<void> {
+    this.emit("telnyx.ready");
+    this.attachIfAllowed();
+  }
   async disconnect(): Promise<void> { this.disconnectCount += 1; }
-  socketDisconnect(): void { this.socketDisconnectCount += 1; this.emit("telnyx.socket.close"); this.emit("telnyx.ready"); }
+  socketDisconnect(): void { this.socketDisconnectCount += 1; this.emit("telnyx.socket.close"); this.emit("telnyx.ready"); this.attachIfAllowed(); }
   serverDisconnect(): void {
     this.serverDisconnectCount += 1;
     for (const call of this.calls) void call.hangup({ initiator: "sdk:server-disconnect" }, false);
@@ -66,7 +78,8 @@ function attachPeer(call: FakeCall, advancing: boolean): void {
 }
 declare global { interface Window { coachAudioAcceptanceHarness: Record<AudioStimulus, () => Promise<void>> & { transcriptReady: () => boolean }; } }
 function AudioAcceptanceHarness() {
-  const rtc = useRef(new FakeRtcClient());
+  const deferInitialRecovery = document.getElementById("root")?.getAttribute("data-defer-recovery") === "true";
+  const rtc = useRef(new FakeRtcClient(deferInitialRecovery));
   const call = useRef(new FakeCall("browser-leg-1"));
   const legs = useRef<FakeCall[]>([call.current]);
   const scheduledHealth = useRef<(() => void) | null>(null);
@@ -89,6 +102,9 @@ function AudioAcceptanceHarness() {
   const [unmuteCalls, setUnmuteCalls] = useState(0);
   const [healthScheduled, setHealthScheduled] = useState(false);
   const [terminalSource, setTerminalSource] = useState<"provider" | "manual" | null>(null);
+  const [remoteAudioAttached, setRemoteAudioAttached] = useState(false);
+  const [remoteAudioPlaying, setRemoteAudioPlaying] = useState(false);
+  const [recoverAudioCount, setRecoverAudioCount] = useState(0);
   call.current.onMuteCount = setMuteCalls;
   call.current.onUnmuteCount = setUnmuteCalls;
   if (!rtc.current.calls.includes(call.current)) rtc.current.calls.push(call.current);
@@ -106,15 +122,51 @@ function AudioAcceptanceHarness() {
           setTerminalResponses(terminalResponsesRef.current);
           return { ok: true as const, data: { state: "terminal" as const, outcome: "ended" as const } };
         }
+        const errorCode = document.getElementById("root")?.getAttribute("data-provider-status-error-code");
+        if (errorCode) return { ok: false as const, status: 503, error: "synthetic provider status unavailable", errorCode };
         return { ok: true as const, data: { state: "active" as const } };
       },
-      recoverAudio: async () => ({ ok: true, data: { recovering: true } }),
-      connect: async () => ({ ok: true, data: { dialing: true } }),
+      recoverAudio: async () => {
+        setRecoverAudioCount((count) => count + 1);
+        rtc.current.allowDeferredAttach = true;
+        return { ok: true as const, data: { recovering: true as const } };
+      },
+      connect: async () => ({
+        ok: true,
+        data: {
+          dialing: true,
+          operator_attach_identity: {
+            provider_id: "telnyx" as const,
+            operator_provider_call_control_id: "synthetic-operator-browser-leg",
+            operator_call_operation_id: "synthetic-operation",
+            run_id: "synthetic-run",
+            request_generation: "synthetic-generation",
+          },
+        },
+      }),
       cancel: async () => { setCancelRequests((n) => n + 1); return { ok: true as const, data: { call_id: "synthetic-call", session_id: "synthetic-session", status: "ended" as const, teardown: { released_batch_claims: 0, revoked_bindings: 0, revoked_device_leases: 0, ended_shifts: 0, released_worker_leases: 0 } } }; },
       reportAudioHealth: async (_id, sample) => { setReports((all) => [...all, sample]); return { ok: true, data: { accepted: reportAccepted.current, status: reportMode.current } }; },
       sendDigit: async () => ({ ok: true, data: { sent: true } }),
-      createRtcClient: async () => rtc.current,
-      createRemoteAudio: () => { const audio = document.createElement("audio"); audio.play = async () => { setPlayCount((n) => n + 1); }; remoteAudio.current = audio; return audio; },
+      createRtcClient: async (_token, audio) => {
+        if (audio) {
+          audio.srcObject = new MediaStream();
+          setRemoteAudioAttached(true);
+        }
+        return rtc.current;
+      },
+      createRemoteAudio: () => {
+        const audio = document.createElement("audio");
+        let playing = false;
+        Object.defineProperty(audio, "paused", { configurable: true, get: () => !playing });
+        audio.play = async () => {
+          playing = true;
+          setRemoteAudioPlaying(true);
+          setPlayCount((n) => n + 1);
+        };
+        remoteAudio.current = audio;
+        setRemoteAudioAttached(false);
+        return audio;
+      },
       subscribePageHide: () => () => undefined, sendCancelBeacon: () => false, sleep: async () => undefined,
       scheduleAudioHealth: (handler) => { scheduledHealth.current = handler; setHealthScheduled(true); return () => { scheduledHealth.current = null; setHealthScheduled(false); }; },
       now: () => Date.parse("2026-08-29T20:00:00.000Z"), registrationTimeoutMs: 100,
@@ -148,7 +200,7 @@ function AudioAcceptanceHarness() {
           type: "transcript", speaker: "seller",
           text: "This synthetic conversation contains no personal information.",
           isFinal: true, ts: "synthetic-audio-transcript",
-          scriptVersion: "1.2.0", matcherVersion: "synthetic",
+          scriptVersion: "1.2.3", scriptDigest: closrOutbound123Ref.digest, matcherVersion: "synthetic",
         });
       },
       readyNoAttach: async () => {
@@ -205,6 +257,9 @@ function AudioAcceptanceHarness() {
 
   const evidence = <div hidden data-testid="transport-evidence">
     <output data-testid="transport-state-history">{history.join("|")}</output><output data-testid="remote-audio-play-count">{playCount}</output>
+    <output data-testid="remote-audio-attached">{remoteAudioAttached ? "attached" : "detached"}</output>
+    <output data-testid="remote-audio-playing">{remoteAudioPlaying ? "playing" : "paused"}</output>
+    <output data-testid="recover-audio-count">{recoverAudioCount}</output>
     <output data-testid="health-report-count">{reports.length}</output><output data-testid="last-health-packets">{reports.at(-1)?.packets_received ?? "none"}</output>
     <output data-testid="last-two-health-samples">{JSON.stringify(reports.slice(-2).map((sample) => ({ generation: sample.peer_connection_generation, packets: sample.packets_received, bytes: sample.bytes_received })))}</output>
     <output data-testid="provider-status-request-count">{providerChecks}</output><output data-testid="cancel-request-count">{cancelRequests}</output>
@@ -219,7 +274,8 @@ function AudioAcceptanceHarness() {
     <output data-testid="server-disconnect-count">{rtc.current.serverDisconnectCount}</output>
     <output data-testid="transport-ready">{history.includes("live") && healthScheduled ? "ready" : "not-ready"}</output>
   </div>;
-  return <SoftphoneProvider transportFactory={() => transport.current!}>{evidence}<output hidden data-testid="terminal-source">{terminalSource ?? "none"}</output></SoftphoneProvider>;
+  const transportFactory = useCallback(() => transport.current!, []);
+  return <SoftphoneProvider transportFactory={transportFactory}>{evidence}<output hidden data-testid="terminal-source">{terminalSource ?? "none"}</output></SoftphoneProvider>;
 }
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Missing #root for coach audio acceptance harness");

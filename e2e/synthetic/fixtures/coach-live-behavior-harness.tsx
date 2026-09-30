@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixtures";
 
 import { KeyedCoachLiveView } from "@/components/coach/keyed-coach-live-view";
+import { ObjectionPromptProvider } from "@/components/coach/objection-prompt-context";
 import type {
   CoachRecommendationRequest,
   CoachRecommendationResult,
@@ -45,9 +47,89 @@ type DelayedRequest = {
 
 declare global {
   interface Window {
-    coachBehaviorHarness: Record<string, () => void>;
+    coachBehaviorHarness: Record<string, () => void | Promise<unknown>>;
     coachContextStartupMode?: SyntheticContextMode;
   }
+}
+
+const ACCEPTANCE_WIRE_VERSIONS = {
+  scriptVersion: closrOutbound123Bundle.script.version,
+  scriptDigest: closrOutbound123Ref.digest,
+  matcherVersion: "synthetic",
+} as const;
+
+type SyntheticTranscriptEvent = {
+  type: "transcript";
+  speaker: "rep" | "seller";
+  text: string;
+  isFinal: boolean;
+  ts: string;
+};
+
+function acceptanceTranscriptEvents(): SyntheticTranscriptEvent[] {
+  const turns: Array<{ speaker: "rep" | "seller"; interim: string; final: string }> = [
+    { speaker: "seller", interim: "Hi, thanks for calling", final: "Hi, thanks for calling back." },
+    { speaker: "rep", interim: "Absolutely, I wanted to", final: "Absolutely, I wanted to learn what has you considering a move." },
+    { speaker: "seller", interim: "We have been thinking", final: "We have been thinking about selling since the job change." },
+    { speaker: "rep", interim: "That makes sense, can", final: "That makes sense, can you tell me more about the timing?" },
+    { speaker: "seller", interim: "My commute is getting", final: "My commute is getting harder and I want to be closer to family." },
+    { speaker: "rep", interim: "Being closer to family", final: "Being closer to family sounds important to you." },
+    { speaker: "seller", interim: "Yes, and the repairs", final: "Yes, and the repairs are starting to feel overwhelming." },
+    { speaker: "rep", interim: "If the process were", final: "If the process were straightforward, what would a good outcome look like?" },
+    { speaker: "seller", interim: "I would like a", final: "I would like a clean sale without putting more money into the house." },
+    { speaker: "rep", interim: "We can look at", final: "We can look at an as-is option and walk through the numbers." },
+    { speaker: "seller", interim: "The timing matters", final: "The timing matters because my next lease starts in October." },
+    { speaker: "rep", interim: "If we can make", final: "If we can make the timing work, would you be open to reviewing an offer?" },
+    { speaker: "seller", interim: "I need to think", final: "I need to think about it because I do not want to leave money on the table." },
+    { speaker: "rep", interim: "That is fair, the", final: "That is fair, the offer should make sense for your situation." },
+    { speaker: "seller", interim: "I would need to", final: "I would need to understand the closing date before deciding." },
+    { speaker: "rep", interim: "Let us review the", final: "Let us review the timing and the net proceeds together." },
+  ];
+  const base = Date.parse("2026-09-29T12:00:00.000Z");
+  return turns.flatMap((turn, index) => [
+    { type: "transcript" as const, speaker: turn.speaker, text: turn.interim, isFinal: false, ts: new Date(base + index * 1_000).toISOString() },
+    { type: "transcript" as const, speaker: turn.speaker, text: turn.final, isFinal: true, ts: new Date(base + index * 1_000 + 500).toISOString() },
+  ]).map((event) => ({ ...event, ...ACCEPTANCE_WIRE_VERSIONS }));
+}
+
+function objectionPromptEvent(
+  label: string,
+  sellerTurn: number,
+  ts: string,
+  scriptDigest = ACCEPTANCE_WIRE_VERSIONS.scriptDigest,
+) {
+  return {
+    type: "objection_prompt" as const,
+    objectionId: label === "Timing concern" ? "timing" : "price",
+    label,
+    sellerTurn,
+    classifierModel: "jev-synthetic",
+    questionsSha256: "a".repeat(64),
+    ts,
+    ...ACCEPTANCE_WIRE_VERSIONS,
+    scriptDigest,
+  };
+}
+
+function waitForVisibleText(text: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const started = performance.now();
+    const deadline = started + 2_000;
+    const check = () => {
+      const visible = [...document.querySelectorAll<HTMLElement>("[data-testid='transcript-line'], [data-testid='coach-objection-prompt-label']")]
+        .some((element) => element.textContent?.includes(text));
+      if (visible) {
+        resolve(performance.now());
+        return;
+      }
+      if (performance.now() >= deadline) {
+        reject(new Error(`Synthetic acceptance text did not become visible: ${text}`));
+        return;
+      }
+      window.requestAnimationFrame(check);
+    };
+    check();
+  });
 }
 
 function recommendationSuccess(input: CoachRecommendationRequest): CoachRecommendationResult {
@@ -140,6 +222,52 @@ function BehaviorHarness() {
     session.dispatch({ type: "transcript", speaker, text, isFinal, ts: `synthetic-${Date.now()}-${Math.random()}`, ...eventVersion() });
   }, [session]);
 
+  const replayAcceptanceConversation = useCallback(async () => {
+    const events = acceptanceTranscriptEvents();
+    const gaps = [180, 220, 260, 320];
+    const latencies: number[] = [];
+    const receipts: number[] = [];
+    const started = performance.now();
+    for (const [index, event] of events.entries()) {
+      const receipt = performance.now();
+      receipts.push(receipt);
+      emitSyntheticCoachBroadcast(event, `coach:${callId}`);
+      const visible = await waitForVisibleText(event.text);
+      latencies.push(visible - receipt);
+      if (index < events.length - 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, gaps[index % gaps.length]));
+      }
+    }
+    return {
+      eventCount: events.length,
+      latencies,
+      receiptGaps: receipts.slice(1).map((value, index) => value - receipts[index]),
+      elapsedMs: performance.now() - started,
+    };
+  }, [callId]);
+
+  const emitAcceptancePrompt = useCallback((label: string, sellerTurn: number, ts: string, digest?: string) => {
+    emitSyntheticCoachBroadcast(
+      objectionPromptEvent(label, sellerTurn, ts, digest),
+      `coach:${callId}`,
+    );
+  }, [callId]);
+
+  const measureAcceptancePrompt = useCallback(async () => {
+    const receipt = performance.now();
+    emitAcceptancePrompt("Price concern", 3, "2026-09-29T12:10:00.000Z");
+    const visible = await waitForVisibleText("Price concern");
+    return visible - receipt;
+  }, [emitAcceptancePrompt]);
+
+  const emitPreviousCallPrompt = useCallback(() => {
+    const previousCallId = `synthetic-call-${Math.max(1, callNumber - 1)}`;
+    emitSyntheticCoachBroadcast(
+      objectionPromptEvent("Previous call", 99, "2026-09-29T12:09:00.000Z"),
+      `coach:${previousCallId}`,
+    );
+  }, [callNumber]);
+
   const startNewCall = useCallback(() => {
     const nextCall = callNumber + 1;
     setCallNumber(nextCall);
@@ -193,6 +321,12 @@ function BehaviorHarness() {
       sellerSecondMeaningful: () => emitTranscript("seller", "My job is moving and I cannot afford two homes after next month.", true),
       sellerThirdMeaningful: () => emitTranscript("seller", "The vacant property is draining our savings and we need a clean closing.", true),
       repFinal: () => emitTranscript("rep", "Tell me more about the timing.", true),
+      replayAcceptanceConversation,
+      measureAcceptancePrompt,
+      newerObjectionPrompt: () => emitAcceptancePrompt("Timing concern", 4, "2026-09-29T12:10:10.000Z"),
+      olderObjectionPrompt: () => emitAcceptancePrompt("Price concern", 3, "2026-09-29T12:10:09.000Z"),
+      mismatchedDigestObjectionPrompt: () => emitAcceptancePrompt("Wrong digest", 5, "2026-09-29T12:10:11.000Z", "f".repeat(64)),
+      previousCallObjectionPrompt: emitPreviousCallPrompt,
       providerImmediate: () => chooseProviderMode("immediate"),
       providerFast: () => chooseProviderMode("fast"),
       providerDeferred: () => chooseProviderMode("deferred"),
@@ -215,7 +349,7 @@ function BehaviorHarness() {
       rejectContext: rejectSyntheticCoachContextLoads,
       newCall: startNewCall,
     };
-  }, [chooseProviderMode, emitLegacyBatch, emitTranscript, resolveDelayed, resolveNewestDelayed, session, startNewCall]);
+  }, [chooseProviderMode, emitAcceptancePrompt, emitLegacyBatch, emitPreviousCallPrompt, emitTranscript, measureAcceptancePrompt, replayAcceptanceConversation, resolveDelayed, resolveNewestDelayed, session, startNewCall]);
 
   return (
     <>
@@ -259,5 +393,12 @@ function BehaviorHarness() {
 
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Missing #root for coach behavior harness");
-configureSyntheticCoachContext(window.coachContextStartupMode ?? "immediate", BASE_CONTEXT);
-createRoot(rootElement).render(<BehaviorHarness />);
+configureSyntheticCoachContext(
+  window.coachContextStartupMode ?? "immediate",
+  rootElement.dataset.acceptanceTyping === "true"
+    ? { ...BASE_CONTEXT, coldCallerName: null }
+    : BASE_CONTEXT,
+);
+createRoot(rootElement).render(
+  <ObjectionPromptProvider enabled><BehaviorHarness /></ObjectionPromptProvider>,
+);

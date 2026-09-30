@@ -78,6 +78,30 @@ let transcriptSeq = 0;
 let objectionCardSeq = 0;
 let nudgeSeq = 0;
 
+function isSameObjectionPrompt(
+  current: NonNullable<CoachState["objectionPrompt"]>,
+  incoming: Extract<CoachEvent, { type: "objection_prompt" }>,
+): boolean {
+  return current.objectionId === incoming.objectionId
+    && current.label === incoming.label
+    && current.sellerTurn === incoming.sellerTurn
+    && current.classifierModel === incoming.classifierModel
+    && current.questionsSha256 === incoming.questionsSha256
+    && current.ts === incoming.ts;
+}
+
+function isOlderObjectionPrompt(
+  current: NonNullable<CoachState["objectionPrompt"]>,
+  incoming: Extract<CoachEvent, { type: "objection_prompt" }>,
+): boolean {
+  const currentMs = Date.parse(current.ts);
+  const incomingMs = Date.parse(incoming.ts);
+  if (Number.isFinite(currentMs) && Number.isFinite(incomingMs) && currentMs !== incomingMs) {
+    return incomingMs < currentMs;
+  }
+  return incoming.sellerTurn <= current.sellerTurn;
+}
+
 /** A live interim result replaces THAT SPEAKER's still-open interim line in
  * place; a final either commits that line or, if the speaker's most recent
  * line was already final (or they have no line yet), appends fresh. Each
@@ -210,7 +234,14 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
           : nextObjectionCards,
       };
     }
-    case "objection_prompt":
+    case "objection_prompt": {
+      if (
+        state.objectionPrompt &&
+        (isSameObjectionPrompt(state.objectionPrompt, action) ||
+          isOlderObjectionPrompt(state.objectionPrompt, action))
+      ) {
+        return state;
+      }
       return {
         ...state,
         connected: true,
@@ -221,6 +252,7 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
           ts: action.ts, expiresAt: Date.now() + OBJECTION_PROMPT_TTL_MS,
         },
       };
+    }
     case "counter":
       return {
         ...state,
