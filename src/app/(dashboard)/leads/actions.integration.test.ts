@@ -186,7 +186,8 @@ describe("updatePropertyStatus (integration)", () => {
         null,
       );
       expect(sendResult.ok).toBe(true);
-      if (!sendResult.ok || sendResult.data.outcome.status !== "sent") return;
+      if (!sendResult.ok) throw new Error("legacy parity send failed");
+      expect(sendResult.data.outcome.status).toBe("sent");
       expect(getMockMessageLog()).toHaveLength(1);
       const legacyCaptures = await db.query<{ message_id: string; metadata: Record<string, unknown>; status: string; snapshot: Record<string, unknown> }>(
         `select message_id, metadata, status, snapshot

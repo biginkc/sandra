@@ -164,15 +164,19 @@ async function queryPsql(sql) {
   return output.trim();
 }
 
-function projectionFunction(mutated) {
+function migrationFunction(name) {
   const migration = readFileSync(
     `${root}/supabase/migrations/20260930040250_inbox_reply_message_projection.sql`,
     "utf8",
   );
-  const start = migration.indexOf("CREATE FUNCTION inbox_reply_send.project_message(");
+  const start = migration.indexOf(`CREATE FUNCTION ${name}(`);
   const end = migration.indexOf("END $$;", start) + "END $$;".length;
-  if (start < 0 || end < start) throw new Error("project_message function not found");
-  let body = migration.slice(start, end).replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION");
+  if (start < 0 || end < start) throw new Error(`${name} function not found`);
+  return migration.slice(start, end).replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION");
+}
+
+function projectionFunction(mutated) {
+  let body = migrationFunction("inbox_reply_send.project_message");
   if (mutated) {
     const needle = " projected_metadata:=jsonb_build_object('inboxReply',marker);";
     const replacement = " projected_metadata:=jsonb_build_object('inboxReply',marker,'generated_by','reply');";
@@ -220,7 +224,7 @@ const mutationIndex = process.argv.indexOf("--mutated");
 const mutation = mutationIndex >= 0 ? process.argv[mutationIndex + 1] : null;
 await seedLocalOrganizations();
 if (mutation === "T23") {
-  await runPsql(projectionFunction(true));
+  await runPsql(`${projectionFunction(true)}\n${migrationFunction("inbox_reply_send.project_message_trigger")}`);
   const installed = await queryPsql(
     "select pg_get_functiondef('inbox_reply_send.project_message(uuid,uuid)'::regprocedure) like '%generated_by%';",
   );
