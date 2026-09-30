@@ -26,6 +26,10 @@ export const DRIP_REPLY_CLEAR_WORKFLOW_OPERATIONS = [
   "log_acquisition_attempt",
 ] as const;
 
+export function outboundStatusClearsDripReply(status: string): boolean {
+  return status !== "failed";
+}
+
 export type InboxDetail = {
   /** The conversation UUID — same value as `conversationId`; kept as the
    *  field name the cockpit keys selection on. */
@@ -389,7 +393,7 @@ async function loadMessageDripContext(
   if (actionSinceReply?.[1].error) throw new Error(`fetchInboxDetail drip workflow: ${actionSinceReply[1].error.message}`);
   if (attemptAfterReply?.error) throw new Error(`fetchInboxDetail acquisition attempts: ${attemptAfterReply.error.message}`);
   const humanOutboundAfterReply = reply && messages.some((message) =>
-    message.direction === "outbound" && message.created_at > reply.created_at &&
+    message.direction === "outbound" && outboundStatusClearsDripReply(message.status) && message.created_at > reply.created_at &&
     message.campaign_id == null &&
     (message.metadata as { generated_by?: string } | null)?.generated_by == null &&
     !stepRunMessageIds.has(message.id));
