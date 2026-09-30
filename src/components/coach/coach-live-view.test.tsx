@@ -229,7 +229,7 @@ describe("<CoachLiveView /> manual navigation", () => {
 
   it("shows the owner's approved replies on the objection card, line for line, and nothing for a type without one", async () => {
     const raw = readFileSync("src/lib/coach/live-coach-objection-replies.json");
-    expect(createHash("sha256").update(raw).digest("hex")).toBe("21332bc237ee5361e5841ba2338136284671d8df14bf78a8718ee1700f25f6b9");
+    expect(createHash("sha256").update(raw).digest("hex")).toBe("efeeb6da09f75f4e4a544e9999d8883351ea7d6fce56080d9286ecb85afd0ab1");
     const file = JSON.parse(raw.toString("utf8")) as { source: { sha256: string }; sets: Record<string, { replies: { catalogId: string; text: string }[] }> };
     expect(file.source.sha256).toBe("fe25b222796afd33e8171527789791307a58ae1f85b814320b0f1ed9dc6ecd77");
     const invisible = /[\s\u200b\u200c\u200d\ufeff]/g;
@@ -244,7 +244,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(blocks()).toEqual(file.sets.price_pushback.replies.map((reply) => visibleLines(reply.text)));
     expect(blocks().flat().join("\n")).toBe(file.sets.price_pushback.replies.flatMap((reply) => visibleLines(reply.text)).join("\n"));
     // Owner-approved cleaning (2026-09-30): no playbook header, source tag or recorded seller name on any card.
-    for (const set of Object.values(file.sets)) for (const reply of set.replies) expect(reply.text).not.toMatch(/CLOSR|Boiler Room|Kyle|Julia|Ivan|Stone/);
+    for (const set of Object.values(file.sets)) for (const reply of set.replies) expect(reply.text).not.toMatch(/CLOSR|Boiler|Kyle|Julia|Ivan|Stone|Jayline/);
     // Owner-approved relocation reply (2026-09-30), exactly as approved.
     broadcast({ ...base, objectionId: "relocation", label: "Housing delay", sellerTurn: 3, ts: "2026-09-29T12:00:10Z" });
     expect(screen.getByTestId("coach-objection-prompt-label")).toHaveTextContent("Housing delay");

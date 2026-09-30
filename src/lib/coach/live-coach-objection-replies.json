@@ -5,7 +5,7 @@
     "version": "objection-rules-2026-09-07",
     "sha256": "fe25b222796afd33e8171527789791307a58ae1f85b814320b0f1ed9dc6ecd77",
     "exportSha256": "41993b4ad0362cc6ec57490499697e497479c7295eeb50643ec63ca704abdf9d",
-    "cleaning": "rule 2A (Jarrad, 2026-09-30): header line and (Boiler Room, date) tags removed; Kyle/Julia/Ivan/Stone -> Mr. Seller; relocation reply 1C added"
+    "cleaning": "rule 2A (Jarrad, 2026-09-30): header line and (Boiler Room, date) tags removed; Kyle/Julia/Ivan/Stone/Jayline -> Mr. Seller; relocation reply 1C added"
   },
   "sets": {
     "consult": {
@@ -36,7 +36,7 @@
         {
           "catalogId": "not_rushed",
           "variantId": "readiness",
-          "text": "Ask if they are in a position to move forward once you find a solution that makes sense. If they are not,\nJT’s correction is direct: cut the call. Do not run a full offer call with someone who cannot move. (Boiler\nRoom, Jun 23)\n"
+          "text": "Ask if they are in a position to move forward once you find a solution that makes sense. If they are not,\nJT’s correction is direct: cut the call. Do not run a full offer call with someone who cannot move.\n"
         }
       ]
     },
@@ -82,7 +82,7 @@
         {
           "catalogId": "counteroffer",
           "variantId": "core",
-          "text": "When price is too low\n“Yeah, man. Unfortunately, it did come in lower than you and I were hoping for. What were you hoping they\nwere at least going to say?”\n“I’m not sure I can get you that. I’m going to fight for you to get as high as possible… What is the lowest\nyou’d actually be willing to go in order to be able to achieve dream outcome?”\nGive-and-take after rejection\n“Look, Mr. Seller, at the end of the day, I don’t really think it would work for you either, right? However, that’s\nwith us paying moving costs, that’s with a 14-day close, that’s with all cash, no walkthroughs, nothing like\nthat, right? Would it really matter if it took like an extra 30 days and we got a couple of walkthroughs just to\nmake sure it’s in the condition you promised me, if I’m able to get you X amount in your pocket?” (Boiler\nRoom, Jun 23)\n“Perfect. I’m going to go see if I can get you approved for that program because that one sounds like it’s a\nbetter fit for you in the first place.”\n"
+          "text": "When price is too low\n“Yeah, man. Unfortunately, it did come in lower than you and I were hoping for. What were you hoping they\nwere at least going to say?”\n“I’m not sure I can get you that. I’m going to fight for you to get as high as possible… What is the lowest\nyou’d actually be willing to go in order to be able to achieve dream outcome?”\nGive-and-take after rejection\n“Look, Mr. Seller, at the end of the day, I don’t really think it would work for you either, right? However, that’s\nwith us paying moving costs, that’s with a 14-day close, that’s with all cash, no walkthroughs, nothing like\nthat, right? Would it really matter if it took like an extra 30 days and we got a couple of walkthroughs just to\nmake sure it’s in the condition you promised me, if I’m able to get you X amount in your pocket?”\n“Perfect. I’m going to go see if I can get you approved for that program because that one sounds like it’s a\nbetter fit for you in the first place.”\n"
         }
       ]
     },
@@ -96,7 +96,7 @@
         {
           "catalogId": "listing_realtor",
           "variantId": "outcome-tradeoffs",
-          "text": "Listing comparison\n“Jayline, honestly, that may be the best option for you… if you’ve got the money for that, you have the next\nsix months to take a risk and list it on the market, and you can honestly afford the mortgage payment and\ntaxes over the next six months, that’s probably the best fit for you to do.”\n“But if you’re looking for something with certainty that doesn’t require you to come out of pocket $30,000\nin repairs and cleaning and marketing and waiting six months, and you just want certainty and to alleviate\nthe pain of this company, then that’s what we’re here to do. So which one of those makes more sense for\nyou?”\n"
+          "text": "Listing comparison\n“Mr. Seller, honestly, that may be the best option for you… if you’ve got the money for that, you have the next\nsix months to take a risk and list it on the market, and you can honestly afford the mortgage payment and\ntaxes over the next six months, that’s probably the best fit for you to do.”\n“But if you’re looking for something with certainty that doesn’t require you to come out of pocket $30,000\nin repairs and cleaning and marketing and waiting six months, and you just want certainty and to alleviate\nthe pain of this company, then that’s what we’re here to do. So which one of those makes more sense for\nyou?”\n"
         }
       ]
     },
