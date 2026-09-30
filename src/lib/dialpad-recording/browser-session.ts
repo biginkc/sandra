@@ -266,6 +266,9 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   };
 
   const settleTiming = (error: DialpadBrowserSessionError) => {
+    timingIncomplete = true;
+    pendingTimingRecords.length = 0;
+    pendingTimingBytes = 0;
     if (timingProbeTimer) {
       clearInterval(timingProbeTimer);
       timingProbeTimer = null;
@@ -285,6 +288,9 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       timingEndInFlight.reject(error);
       timingEndInFlight = null;
     }
+    // Timing flushes are intentionally detached from capture callbacks. Keep
+    // a rejection from an already queued chain owned after abort/finalization.
+    void timingSendQueue.catch(() => undefined);
   };
 
   type FinalizationDeadline = number | (() => number | undefined);
@@ -501,7 +507,11 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     }
     pendingTimingRecords.push(record);
     pendingTimingBytes += recordBytes;
-    void flushTimingBatches();
+    void flushTimingBatches().catch(() => {
+      timingIncomplete = true;
+      pendingTimingRecords.length = 0;
+      pendingTimingBytes = 0;
+    });
   }
 
   async function flushTimingBatches(deadlineAt?: FinalizationDeadline): Promise<void> {

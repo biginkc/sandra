@@ -317,6 +317,87 @@ describe('Dialpad browser session', () => {
     expect(session.state()).toBe('stopped');
   });
 
+  it('owns a detached timing flush when finalization settles an in-flight batch', async () => {
+    const socket = new FakeSocket();
+    const failures: string[] = [];
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    let timingBatchCount = 0;
+    let resolveFirstBatch!: () => void;
+    let resolveSecondRecord!: () => void;
+    const firstBatchSent = new Promise<void>((resolve) => { resolveFirstBatch = resolve; });
+    const secondRecordQueued = new Promise<void>((resolve) => { resolveSecondRecord = resolve; });
+    const timingAnchor = (seq: number) => ({
+      kind: 'anchor' as const, track: 'tab' as const, seq, contextId: '00000000-0000-4000-8000-000000000001', anchor: 'periodic' as const,
+      contextFrame: seq * 128, sourceCursor: seq * 128, blockLength: 128, sourceRateHz: 48_000, outputCursor: seq * 40,
+      outputFrameIndex: 0, phaseNumerator: 0, continuity: 'continuous' as const, previousContextEndFrame: seq === 0 ? null : seq * 128, discardedTailSamples: null,
+    });
+    socket.send = (data) => {
+      socket.sent.push(data);
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; seq?: number; batchId?: string };
+      if (message.type === 'timing_probe') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_probe_reply', epoch: 1, seq: message.seq, nonce: 'e'.repeat(64), serverClockId: '00000000-0000-4000-8000-000000000003', serverReceiveMonoMs: 1, serverSendMonoMs: 2, serverReceiveWallMs: 100, serverSendWallMs: 90 })));
+      } else if (message.type === 'timing_confirm') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_exchange_ack', epoch: 1, seq: message.seq, status: 'recorded' })));
+      } else if (message.type === 'timing_batch') {
+        timingBatchCount += 1;
+        if (timingBatchCount === 1) resolveFirstBatch();
+      } else if (message.type === 'timing_end') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_end_ack', epoch: 1, status: 'incomplete', reasons: ['persistence_failed'] })));
+      }
+    };
+    const tail = (track: 'tab' | 'mic'): PcmTailReport => ({
+      track, epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0,
+    });
+    const capture: PreparedDialpadCapture = {
+      proof: { handle: 'h', origin: 'https://app.example.test' },
+      start: async (sinks) => {
+        if (!sinks) throw new Error('timing test requires network sinks');
+        void (async () => {
+          for (let seq = 0; seq < 16; seq += 1) await sinks.onTiming?.(timingAnchor(seq));
+          await firstBatchSent;
+          await sinks.onTiming?.(timingAnchor(16));
+          resolveSecondRecord();
+        })();
+        return {
+          state: () => 'recording' as const,
+          stop: async () => {
+            await sinks.onPcmTail?.(tail('tab'));
+            await sinks.onPcmTail?.(tail('mic'));
+          },
+          dispose: async () => undefined,
+        };
+      },
+      dispose: async () => undefined,
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const session = createDialpadBrowserSession({
+        endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket,
+        enableTiming: true, ackTimeoutMs: 500, onFailure: (error) => failures.push(error.code), capture,
+      });
+      const started = session.start();
+      socket.open();
+      socket.message(JSON.stringify({ type: 'ready', epoch: 1, controlVersion: 2, capabilities: ['capture_timing_v1'] }));
+      socket.message(JSON.stringify({ type: 'measurement_snapshot', epoch: 1, revision: 0, totalSamples: 0, measurementStatus: 'provisional', threshold: { crossed: false, crossingEpoch: null, crossingSample: null }, degradedReasons: [] }));
+      socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'open', drainDeadlineAt: null }));
+      await started;
+      await firstBatchSent;
+      await secondRecordQueued;
+      socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(Date.now() + 40).toISOString() }));
+      await session.stop();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(session.state()).toBe('failed');
+      expect(failures).toContain('timeout');
+      expect(timingBatchCount).toBe(1);
+      expect(unhandled).toEqual([]);
+      expect(socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry).type)).not.toContain('timing_end');
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('holds a recording chunk until its matching ACK and finishes both tracks only after drain responses', async () => {
     const socket = new FakeSocket();
     let chunk: EncodedMediaChunk | null = null;
