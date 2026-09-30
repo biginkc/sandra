@@ -1,4 +1,5 @@
 import { assertNotTrainingTarget } from "@/lib/leads/training";
+import { assertCanaryDispatchEligibility } from "../../../scripts/sequence-canary-fixture";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -971,6 +972,10 @@ export async function sendSmsToContact(
   let providerCallStarted = false;
   try {
     await manualDispatch?.authorize(pending.id);
+    await assertCanaryDispatchEligibility(supabase, {
+      propertyId: input.propertyId, contactId: input.contactId,
+      to: normalizedToPhone, from: fromAddress, provider: provider.providerId, body: input.body,
+    });
     providerCallStarted = true;
     const result = await provider.sendSms({
       to: destination.phone,
@@ -1877,6 +1882,10 @@ export async function releaseQueuedMessage(
     // Accepted race: an operator-triggered catalog sync can deactivate this
     // sender in the milliseconds after validation and before the provider call.
     // The queued row keeps the exact sender snapshot for audit/retry review.
+    await assertCanaryDispatchEligibility(supabase, {
+      propertyId: msg.property_id, contactId: msg.contact_id,
+      to: msg.to_address, from: msg.from_address, provider: provider.providerId, body: claimed.body,
+    });
     const result = await provider.sendSms({
       to: msg.to_address,
       body: claimed.body,

@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "../supabase/types";
 import { cleanupAllCanaries, cleanupCanary } from "../../../scripts/sequence-canary-cleanup";
@@ -94,6 +94,8 @@ it("refuses a sequence without the canary owner", async () => {
 });
 
 it("smoke entry point fails preflight before any write", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-09-29T15:00:00Z"));
   const writes: string[] = [];
   const client = {
     auth: { admin: { getUserById: async () => ({ data: { user: { id: owner } }, error: null }) } },
@@ -108,7 +110,11 @@ it("smoke entry point fails preflight before any write", async () => {
       return query;
     },
   } as unknown as SupabaseClient<Database>;
-  await expect(runSequenceSmoke(client, { userId: owner, propertyId: property, contactId: contact }))
-    .rejects.toThrow("Canary property missing");
-  expect(writes).toEqual([]);
+  try {
+    await expect(runSequenceSmoke(client, { userId: owner, propertyId: property, contactId: contact }))
+      .rejects.toThrow("Canary property missing");
+    expect(writes).toEqual([]);
+  } finally {
+    vi.useRealTimers();
+  }
 });
