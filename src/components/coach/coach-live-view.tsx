@@ -60,7 +60,7 @@ import type {
 import { isNearTranscriptBottom } from "@/lib/coach/transcript-scroll";
 import { isCoachScriptV2Enabled } from "@/lib/coach/flags";
 import { useObjectionPromptEnabled } from "./objection-prompt-context";
-import type { CoachObjectionPrompt } from "@/lib/coach/types";
+import type { CoachMotivationPrompt, CoachObjectionPrompt } from "@/lib/coach/types";
 import { cn } from "@/lib/utils";
 import { HoldTimer } from "./hold-timer";
 
@@ -597,6 +597,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
           <RecommendationsPanel
             {...recommendations}
             objectionPrompt={objectionPromptEnabled ? state.objectionPrompt : null}
+            motivationPrompt={objectionPromptEnabled ? state.motivationPrompt : null}
             hasFinalSellerTranscript={state.transcript.some(
               (line) => line.isFinal && line.speaker === "seller",
             )}
@@ -1214,6 +1215,7 @@ function ScriptLoading() {
 
 function RecommendationsPanel({
   objectionPrompt,
+  motivationPrompt,
   recommendations,
   followUpQuestions,
   loadingMode,
@@ -1224,6 +1226,7 @@ function RecommendationsPanel({
   requestFollowUp,
 }: ReturnType<typeof useCoachRecommendations> & {
   objectionPrompt: CoachObjectionPrompt | null;
+  motivationPrompt: CoachMotivationPrompt | null;
   hasFinalSellerTranscript: boolean;
 }) {
   const followUpBusy = loadingMode === "follow_up";
@@ -1245,6 +1248,7 @@ function RecommendationsPanel({
         Coach
       </h2>
       {objectionPrompt ? <ObjectionPromptCard key={`${objectionPrompt.sellerTurn}-${objectionPrompt.ts}-${objectionPrompt.expiresAt}`} prompt={objectionPrompt} /> : null}
+      {motivationPrompt ? <MotivationPromptCard key={`${motivationPrompt.sellerTurn}-${motivationPrompt.ts}-${motivationPrompt.expiresAt}`} prompt={motivationPrompt} /> : null}
       {recommendations.length === 0 && followUpQuestions.length === 0 ? (
         <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
           Sandra is listening for a meaningful homeowner response. Suggestions
@@ -1324,6 +1328,23 @@ function RecommendationsPanel({
         </p>
       ) : null}
     </aside>
+  );
+}
+
+function MotivationPromptCard({ prompt }: { prompt: CoachMotivationPrompt }) {
+  const [visible, setVisible] = useState(() => prompt.expiresAt > Date.now());
+  useEffect(() => {
+    const remaining = prompt.expiresAt - Date.now();
+    if (remaining <= 0) return;
+    const timer = window.setTimeout(() => setVisible(false), remaining);
+    return () => window.clearTimeout(timer);
+  }, [prompt]);
+  if (!visible || prompt.expiresAt <= Date.now()) return null;
+  return (
+    <div data-testid="coach-motivation-prompt" className="mt-3 rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed">
+      <div className="mb-1 text-[10px] font-extrabold tracking-[0.1em] text-muted-foreground uppercase">Motivation</div>
+      <div data-testid="coach-motivation-prompt-label">{prompt.label}</div>
+    </div>
   );
 }
 

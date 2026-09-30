@@ -8,6 +8,7 @@ const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
   "phase",
   "objection",
   "objection_prompt",
+  "motivation_prompt",
   "counter",
   "gate",
   "timer",
@@ -146,6 +147,22 @@ export function parseCoachEvent(payload: unknown, bundle: ScriptBundle | null = 
       ) {
         return { ok: true, event: {
           type: "objection_prompt", objectionId: payload.objectionId, label: payload.label,
+          sellerTurn: payload.sellerTurn, classifierModel: payload.classifierModel,
+          questionsSha256: payload.questionsSha256, ts: payload.ts, ...versions,
+        } };
+      }
+      break;
+    }
+    case "motivation_prompt": {
+      if (
+        isNonEmptyString(payload.label) && payload.label.length <= 80 &&
+        isPositiveInteger(payload.sellerTurn) &&
+        isNonEmptyString(payload.classifierModel) &&
+        typeof payload.questionsSha256 === "string" && /^[a-f0-9]{64}$/i.test(payload.questionsSha256) &&
+        isParseableTimestamp(payload.ts)
+      ) {
+        return { ok: true, event: {
+          type: "motivation_prompt", label: payload.label,
           sellerTurn: payload.sellerTurn, classifierModel: payload.classifierModel,
           questionsSha256: payload.questionsSha256, ts: payload.ts, ...versions,
         } };

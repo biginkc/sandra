@@ -57,6 +57,7 @@ export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"
     transcriptFragments: [],
     objectionCards: [],
     objectionPrompt: null,
+    motivationPrompt: null,
     nudges: [],
     probeCount: 0,
     gates: {},
@@ -250,6 +251,32 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
         lastEventAt: action.ts,
         objectionPrompt: {
           objectionId: action.objectionId, label: action.label, sellerTurn: action.sellerTurn,
+          classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
+          ts: action.ts, expiresAt: Date.now() + OBJECTION_PROMPT_TTL_MS,
+        },
+      };
+    }
+    case "motivation_prompt": {
+      // Owner-approved separate motivation card (2026-09-29). Latest wins; a duplicate
+      // or an older event (earlier ts, or same ts on an earlier seller turn) is ignored.
+      const current = state.motivationPrompt;
+      if (current) {
+        const currentMs = Date.parse(current.ts);
+        const incomingMs = Date.parse(action.ts);
+        const duplicate = current.ts === action.ts && current.sellerTurn === action.sellerTurn
+          && current.label === action.label && current.classifierModel === action.classifierModel
+          && current.questionsSha256 === action.questionsSha256;
+        const older = Number.isFinite(currentMs) && Number.isFinite(incomingMs) && currentMs !== incomingMs
+          ? incomingMs < currentMs
+          : action.sellerTurn < current.sellerTurn;
+        if (duplicate || older) return state;
+      }
+      return {
+        ...state,
+        connected: true,
+        lastEventAt: action.ts,
+        motivationPrompt: {
+          label: action.label, sellerTurn: action.sellerTurn,
           classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
           ts: action.ts, expiresAt: Date.now() + OBJECTION_PROMPT_TTL_MS,
         },

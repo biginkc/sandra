@@ -59,6 +59,33 @@ describe("coachReducer — objection prompt", () => {
   });
 });
 
+describe("coachReducer — motivation prompt", () => {
+  const motivation = { type: "motivation_prompt" as const, label: "Motivation", sellerTurn: 2, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  const objection = { type: "objection_prompt" as const, objectionId: "price", label: "Price concern", sellerTurn: 2, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_000_000); });
+  afterEach(() => vi.useRealTimers());
+
+  it("keeps motivation separate from the objection card and resets it", () => {
+    expect(initialCoachState().motivationPrompt).toBeNull();
+    let state = coachReducer(initialCoachState(), objection);
+    state = coachReducer(state, motivation);
+    expect(state.objectionPrompt).toMatchObject({ label: "Price concern" });
+    expect(state.motivationPrompt).toMatchObject({ label: "Motivation", sellerTurn: 2, expiresAt: 1_030_000 });
+    state = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
+    expect(state.motivationPrompt).toBeNull();
+  });
+
+  it("ignores an exact duplicate and an older motivation event, accepts a newer one", () => {
+    let state = coachReducer(initialCoachState(), motivation);
+    vi.setSystemTime(1_005_000);
+    expect(coachReducer(state, motivation)).toBe(state);
+    expect(coachReducer(state, { ...motivation, ts: "2026-09-29T11:59:59Z", sellerTurn: 3 })).toBe(state);
+    expect(coachReducer(state, { ...motivation, sellerTurn: 1 })).toBe(state);
+    state = coachReducer(state, { ...motivation, ts: "2026-09-29T12:00:05Z", sellerTurn: 4 });
+    expect(state.motivationPrompt).toMatchObject({ sellerTurn: 4, expiresAt: 1_035_000 });
+  });
+});
+
 describe("coachReducer — transcript", () => {
   it("appends a final line for a fresh speaker turn", () => {
     const state = coachReducer(initialCoachState(), {

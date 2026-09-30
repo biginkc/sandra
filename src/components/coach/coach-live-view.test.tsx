@@ -240,6 +240,22 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getAllByTestId("coach-objection-prompt")).toHaveLength(1);
   });
 
+  it("shows a separate motivation card beside the objection card, only when enabled", async () => {
+    const motivationPayload = { type: "motivation_prompt", label: "Motivation", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z" };
+    const { unmount } = render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    broadcast(motivationPayload);
+    expect(screen.queryByTestId("coach-motivation-prompt")).toBeNull();
+    unmount();
+    render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    broadcast(promptPayload);
+    broadcast(motivationPayload);
+    expect(screen.getByTestId("coach-objection-prompt-label")).toHaveTextContent("Price concern");
+    expect(screen.getByTestId("coach-motivation-prompt")).toHaveTextContent(/^Motivation\s*Motivation$/);
+    expect(screen.getByTestId("coach-motivation-prompt-label")).toHaveTextContent("Motivation");
+  });
+
   it("removes the prompt after thirty seconds", async () => {
     render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
     await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());

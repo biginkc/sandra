@@ -25,6 +25,21 @@ describe("parseCoachEvent — objection prompt", () => {
   });
 });
 
+describe("parseCoachEvent — motivation prompt", () => {
+  const MOTIVATION = { type: "motivation_prompt", label: "Motivation", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  it("accepts the bounded shape and ignores unknown fields", () => {
+    expect(parseCoachEvent({ ...MOTIVATION, objectionId: "ignored" })).toEqual({ ok: true, event: MOTIVATION });
+  });
+  it.each([
+    { label: "" }, { label: "x".repeat(81) },
+    { sellerTurn: 0 }, { sellerTurn: 1.5 },
+    { classifierModel: "" }, { questionsSha256: "bad" },
+    { ts: "invalid" }, { scriptVersion: null, scriptDigest: null }, { matcherVersion: null },
+  ])("rejects a malformed field: %j", (change) => {
+    expect(parseCoachEvent({ ...MOTIVATION, ...change })).toEqual({ ok: false, reason: "malformed", rawType: "motivation_prompt" });
+  });
+});
+
 describe("parseCoachEvent — valid events", () => {
   it("parses a transcript event", () => {
     const result = parseCoachEvent({ type: "transcript", speaker: "rep", text: "hey", isFinal: true, ts: "t1", ...V });
