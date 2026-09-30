@@ -1,0 +1,77 @@
+{
+  "tested_sha": "bae5514f0553094cde6884cf2c28b0f2a7f42cc5",
+  "tier": "pre-merge",
+  "phase": "n/a",
+  "target": "disposable",
+  "started_at": "2026-09-30T00:27:31.081Z",
+  "completed_at": "2026-09-30T00:31:35.181Z",
+  "runner_script_sha256": "5165334ed5a0c672fedf7898399f3c5a6a3809c508e50980d54b60121a3ea961",
+  "fault_proxy_script_sha256": "e15d6410d84bf96af4c487e8f7354c820b4ea39adc8c84fc26c3a3d74d5f0143",
+  "github_run_id": "36650362778",
+  "github_run_attempt": "1",
+  "artifact_name": "heavy-catalog-fingerprint-bae5514f0553094cde6884cf2c28b0f2a7f42cc5-36650362778-1",
+  "workflow_input_sha": "bae5514f0553094cde6884cf2c28b0f2a7f42cc5",
+  "event": "workflow_dispatch",
+  "head_branch": "main",
+  "workflow_path": ".github/workflows/inbox-heavy-verification.yml",
+  "workflow_sha": "6af1a7c310b663c25deca9ccbd15f0bc6e709cc1",
+  "runner_image": {
+    "os": "ubuntu24",
+    "version": "20260920.314.1"
+  },
+  "supabase_cli_version": "2.116.0",
+  "docker_version": "Docker version 28.0.4, build b8034c0",
+  "lane": "catalog-fingerprint",
+  "exit_status": 0,
+  "verdict": "PASS",
+  "kind": "catalog-fingerprint",
+  "run_id": "36650362778",
+  "clean_tree": {
+    "start": true,
+    "end_excluding_run_dir": true,
+    "excluded_path": "docs/performance/inbox-redesign/evidence/bae5514f0553094cde6884cf2c28b0f2a7f42cc5/pre-merge/36650362778",
+    "end_status": [
+      "?? docs/performance/inbox-redesign/evidence/bae5514f0553094cde6884cf2c28b0f2a7f42cc5/pre-merge/36650362778/catalog-live.txt",
+      "?? docs/performance/inbox-redesign/evidence/bae5514f0553094cde6884cf2c28b0f2a7f42cc5/pre-merge/36650362778/catalog-manifest-check.txt",
+      "?? docs/performance/inbox-redesign/evidence/bae5514f0553094cde6884cf2c28b0f2a7f42cc5/pre-merge/36650362778/catalog-post.json",
+      "?? docs/performance/inbox-redesign/evidence/bae5514f0553094cde6884cf2c28b0f2a7f42cc5/pre-merge/36650362778/catalog-pre.json",
+      "?? docs/performance/inbox-redesign/evidence/bae5514f0553094cde6884cf2c28b0f2a7f42cc5/pre-merge/36650362778/summary.json"
+    ]
+  },
+  "summary": {
+    "pre_sha256": "fa6b9a7afd45d1b65acb33ed2a674b974ffd4a022710a7d2a6e62da3342abc99",
+    "post_sha256": "f17a99b407af8f4a187bd86cfd2ce038a195b290cc6ed6f158ffc3a9d7c94ed0",
+    "pre_section_sha256": {
+      "created_objects_present": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "extensions": "83d437bcb9373fde6172a87835bf23a9814fa252fb8ea0ffa30834125303c774",
+      "functions": "6fa19699ef872d0511986b202a1125647306787cfed91878fbf05b97aa3b183d",
+      "index_names": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "relations": "c64cdc7c3ac333d86349d2bf642006a75de2a149347ff02a32173e32567eea4b",
+      "schema_migrations": "5f588fcfe3ad547470a5f8f1f9e3bd5b76312da0035460a83c9b45025cacfe60",
+      "schemas": "4260fb03ab4da3e156dcb9dc3b22b0876860caa15bf986badb45b310364a451f",
+      "trigger_names": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "types": "17d87eedb080944063624980b8d3a26b0286e292452f05c92e6b4633159a3def"
+    },
+    "post_section_sha256": {
+      "created_objects_present": "b6037a028870fdea64dfe1978cbaa24cc0189e4e97bc52216edbad7cd1ba600f",
+      "extensions": "83d437bcb9373fde6172a87835bf23a9814fa252fb8ea0ffa30834125303c774",
+      "functions": "af7f746f5df0f6a307612d966cd6ae4355ae4267ce4f5eb56691cecbaab5bea3",
+      "index_names": "488cf545751b0e92b4543465d6c86c16b5428440bb00bd90373d4e4de1972cef",
+      "relations": "da13d12071cabe943dd4bc6e54537b588cb685750ab462cb1fc0fb96c7c43010",
+      "schema_migrations": "a1e1743f52e2eba300765533a43aeeef442d9edd0f327af5d885c6a49e3b2692",
+      "schemas": "c6c22cf46d2271acd88d26386e0a20934d2740d786485ac0f59b5dfbbb5cc0e1",
+      "trigger_names": "ba8253c1c614f6fcd11e761bfbe1762bf9feab7fd95ef9746de50e03599cc61e",
+      "types": "c59eafc9d497149bc8b126326595d2e363aa3ed9dbb8580318f6b453087f2c6f"
+    },
+    "live_mutation_tests": 5
+  },
+  "catalog_fingerprint_post_artifact": "catalog-post.json",
+  "raw_inflated_sha256": {},
+  "artifacts": {
+    "catalog-live.txt": "609c8da9fe21093f61ff5e97b89f896fe8e4581afd3eff07845c0f06570d3380",
+    "catalog-manifest-check.txt": "c3e9ebb1425392cc5cc64fdbdac0a4c7ef9b8c2f9e961a563dd7f614bb9d0c71",
+    "catalog-post.json": "9b911f8d41726c90f7fed2ebbced73393aa444adec5e641c8106bc4cfa215c3a",
+    "catalog-pre.json": "ce739f10f875379a21c261407e0c39ea5f09c4fcd97c3ea109afdc4b7803fa83",
+    "summary.json": "e7ac3e8047abc57bbc5e0fc0d1e116293926916b46cb299064a2cccac19ebe6d"
+  }
+}
