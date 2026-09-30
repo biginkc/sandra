@@ -1,0 +1,620 @@
+[
+  {
+    "id": "PIN_TRIGGERS",
+    "verdict": "PASS",
+    "detail": [
+      {
+        "tgname": "guard_training_messages",
+        "tgenabled": "O"
+      },
+      {
+        "tgname": "messages_reject_dnc_locked_read",
+        "tgenabled": "O"
+      },
+      {
+        "tgname": "trg_messages_fill_sms_conversation_id",
+        "tgenabled": "O"
+      }
+    ]
+  },
+  {
+    "id": "PIN_BASE_GRANTS",
+    "verdict": "PASS",
+    "detail": {
+      "tables": [
+        {
+          "n": "contacts",
+          "role": "anon",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "anon",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "anon",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "anon",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "authenticated",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "authenticated",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "authenticated",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "authenticated",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "service_role",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "service_role",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "service_role",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "contacts",
+          "role": "service_role",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "lead_events",
+          "role": "anon",
+          "op": "DELETE",
+          "allowed": false
+        },
+        {
+          "n": "lead_events",
+          "role": "anon",
+          "op": "INSERT",
+          "allowed": false
+        },
+        {
+          "n": "lead_events",
+          "role": "anon",
+          "op": "SELECT",
+          "allowed": false
+        },
+        {
+          "n": "lead_events",
+          "role": "anon",
+          "op": "UPDATE",
+          "allowed": false
+        },
+        {
+          "n": "lead_events",
+          "role": "authenticated",
+          "op": "DELETE",
+          "allowed": false
+        },
+        {
+          "n": "lead_events",
+          "role": "authenticated",
+          "op": "INSERT",
+          "allowed": false
+        },
+        {
+          "n": "lead_events",
+          "role": "authenticated",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "lead_events",
+          "role": "authenticated",
+          "op": "UPDATE",
+          "allowed": false
+        },
+        {
+          "n": "lead_events",
+          "role": "service_role",
+          "op": "DELETE",
+          "allowed": false
+        },
+        {
+          "n": "lead_events",
+          "role": "service_role",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "lead_events",
+          "role": "service_role",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "lead_events",
+          "role": "service_role",
+          "op": "UPDATE",
+          "allowed": false
+        },
+        {
+          "n": "memberships",
+          "role": "anon",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "anon",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "anon",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "anon",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "authenticated",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "authenticated",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "authenticated",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "authenticated",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "service_role",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "service_role",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "service_role",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "memberships",
+          "role": "service_role",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "anon",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "anon",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "anon",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "anon",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "authenticated",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "authenticated",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "authenticated",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "authenticated",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "service_role",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "service_role",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "service_role",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "messages",
+          "role": "service_role",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "anon",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "anon",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "anon",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "anon",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "authenticated",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "authenticated",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "authenticated",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "authenticated",
+          "op": "UPDATE",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "service_role",
+          "op": "DELETE",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "service_role",
+          "op": "INSERT",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "service_role",
+          "op": "SELECT",
+          "allowed": true
+        },
+        {
+          "n": "properties",
+          "role": "service_role",
+          "op": "UPDATE",
+          "allowed": true
+        }
+      ],
+      "acl": [
+        {
+          "name": "contacts",
+          "acl": [
+            "postgres=arwdDxtm/postgres",
+            "anon=arwdDxtm/postgres",
+            "authenticated=arwdDxtm/postgres",
+            "service_role=arwdDxtm/postgres"
+          ],
+          "rls": true
+        },
+        {
+          "name": "lead_events",
+          "acl": [
+            "postgres=arwdDxtm/postgres",
+            "authenticated=r/postgres",
+            "service_role=ar/postgres"
+          ],
+          "rls": true
+        },
+        {
+          "name": "memberships",
+          "acl": [
+            "postgres=arwdDxtm/postgres",
+            "anon=arwdDxtm/postgres",
+            "authenticated=arwdDxtm/postgres",
+            "service_role=arwdDxtm/postgres"
+          ],
+          "rls": true
+        },
+        {
+          "name": "messages",
+          "acl": [
+            "postgres=arwdDxtm/postgres",
+            "anon=arwdDxtm/postgres",
+            "authenticated=arwdDxtm/postgres",
+            "service_role=arwdDxtm/postgres"
+          ],
+          "rls": true
+        },
+        {
+          "name": "properties",
+          "acl": [
+            "postgres=arwdDxtm/postgres",
+            "anon=arwdDxtm/postgres",
+            "authenticated=arwdDxtm/postgres",
+            "service_role=arwdDxtm/postgres"
+          ],
+          "rls": true
+        }
+      ],
+      "anonPolicies": [],
+      "metrics": [
+        {
+          "role": "anon",
+          "allowed": false
+        },
+        {
+          "role": "authenticated",
+          "allowed": true
+        },
+        {
+          "role": "service_role",
+          "allowed": false
+        }
+      ]
+    }
+  },
+  {
+    "id": "PIN_PRE_ABSENCE",
+    "verdict": "PASS",
+    "detail": {
+      "head": null,
+      "rollout": null
+    }
+  },
+  {
+    "id": "C00",
+    "verdict": "PASS",
+    "detail": {
+      "inserted": 118,
+      "crossTenantStatus": 403
+    }
+  },
+  {
+    "id": "C01",
+    "verdict": "PASS",
+    "detail": {
+      "count": 101,
+      "first": "0035567d-b896-4b98-9701-57bba4cbc938",
+      "last": "0fa6a793-aee3-4e8b-9489-bc0d3ccb3297"
+    }
+  },
+  {
+    "id": "C02",
+    "verdict": "PASS",
+    "detail": {
+      "remainder": 13,
+      "fullCount": 114
+    }
+  },
+  {
+    "id": "C03",
+    "verdict": "PASS",
+    "detail": {
+      "id": "0ef2301b-16ec-4059-9050-8abbd01de93c"
+    }
+  },
+  {
+    "id": "C04",
+    "verdict": "PASS",
+    "detail": {
+      "metrics": [
+        {
+          "outbound_rows": 116,
+          "queued": 114,
+          "paused": 1,
+          "due_queued": 0,
+          "pending": 0,
+          "sent": 1,
+          "delivered": 0,
+          "failed": 0,
+          "failed_after_handoff": 0,
+          "handed_off_via_sent_at_today": 0,
+          "delivered_without_sent_at_today": 0,
+          "failed_today": 0,
+          "next_scheduled_for": "2026-09-30T09:24:47.193+00:00",
+          "last_scheduled_for": "2026-09-30T13:04:47.193+00:00"
+        }
+      ],
+      "serviceRoleStatus": 403
+    }
+  },
+  {
+    "id": "C05",
+    "verdict": "PASS",
+    "detail": {
+      "id": "0035567d-b896-4b98-9701-57bba4cbc938"
+    }
+  },
+  {
+    "id": "C06",
+    "verdict": "PASS",
+    "detail": {
+      "id": "0440b6c3-f200-48b2-a4c8-0c54f7b9bd2e"
+    }
+  },
+  {
+    "id": "C07",
+    "verdict": "PASS",
+    "detail": [
+      {
+        "id": "0a7f7b04-6225-4b0c-8116-ecae16e605dc",
+        "winners": 1
+      },
+      {
+        "id": "00516e67-497c-4b4a-bbf8-a63713531e49",
+        "winners": 1
+      },
+      {
+        "id": "098da744-b086-4368-9b59-81198f93516a",
+        "winners": 1
+      },
+      {
+        "id": "0fa50157-1987-4528-8ab0-350199906d7a",
+        "winners": 1
+      },
+      {
+        "id": "09063908-c2bc-488d-a5bc-e2a1a066415d",
+        "winners": 1
+      }
+    ]
+  },
+  {
+    "id": "C08",
+    "verdict": "PASS",
+    "detail": {
+      "first": 200,
+      "repeat": 200
+    }
+  },
+  {
+    "id": "C08b",
+    "verdict": "PASS",
+    "detail": {
+      "failed": "00516e67-497c-4b4a-bbf8-a63713531e49",
+      "deferred": "098da744-b086-4368-9b59-81198f93516a"
+    }
+  },
+  {
+    "id": "C09",
+    "verdict": "PASS",
+    "detail": {
+      "untouched": 7,
+      "leadEvents": 0
+    }
+  },
+  {
+    "id": "D01",
+    "verdict": "PASS",
+    "detail": {
+      "page": 0
+    }
+  },
+  {
+    "id": "D02",
+    "verdict": "PASS",
+    "detail": {
+      "only": "ffffffff-ffff-4fff-8fff-9d7317707841",
+      "insertStatus": 403
+    }
+  },
+  {
+    "id": "D03",
+    "verdict": "PASS",
+    "detail": {
+      "before": 101,
+      "after": 0
+    }
+  },
+  {
+    "id": "D04",
+    "verdict": "PASS",
+    "detail": {
+      "phase": "pre"
+    }
+  },
+  {
+    "id": "D05",
+    "verdict": "PASS",
+    "detail": {
+      "phase": "pre"
+    }
+  }
+]
