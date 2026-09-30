@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { createRunner } from './runner.mjs';
+import { createRunHandler } from './handler.mjs';
 import { dispatchBatch, workerConfiguration, createReadinessProbe, createRestateReadinessProbe, databaseConfiguration } from './core.mjs';
 
 /**
@@ -56,36 +57,12 @@ async function start() {
   }
   const transport = await loadTransport();
   const runner = createRunner(pool, transport);
-  const service = restate.service({ name: 'InboxReplySend', handlers: { run: async (ctx, input) => {
-    if (!input || typeof input !== 'object' || Object.keys(input).length !== 2) throw Error('Invalid reply dispatch request');
-    const orgId = String(input.orgId), operationId = String(input.operationId);
-    const attemptIds = await ctx.run('list-attempts', () => runner.operationAttempts(orgId, operationId));
-    const results = [];
-    for (const attemptId of attemptIds) {
-      // [Astra B2] A deferred/not_sent outcome is NEVER a value this
-      // durable step may return normally. A thrown, non-terminal error is
-      // retried by Restate; only the dispatch receipt or a ledger-backed
-      // settled state is memoized.
-      const dispatch = await ctx.run(`dispatch:${attemptId}`, async () => {
-        const result = await runner.dispatchAttempt(orgId, operationId, attemptId);
-        if (result.kind !== 'settled' && result.kind !== 'dispatched') throw Error(`reply attempt ${attemptId} not yet settled: ${result.kind}${result.reason ? `(${result.reason})` : ''}`);
-        return result;
-      });
-      const outcome = dispatch.kind === 'settled'
-        ? dispatch
-        : await ctx.run(`persist:${attemptId}`, async () => runner.persistAttempt(orgId, operationId, attemptId, dispatch));
-      results.push(outcome);
-    }
-    const acknowledged = await ctx.run('ack-if-complete', async () => {
-      // Every attempt above is 'settled' by the time we reach here (the
-      // loop above cannot exit early with a deferred/not_sent outcome
-      // still pending — it would have thrown and Restate would have
-      // retried that step before ever reaching this line), so this is
-      // read-only confirmation, never a reason by itself to defer.
-      return (await pool.query('SELECT inbox_reply_send.operation_dispatch_complete($1,$2) AS ready', [orgId, operationId])).rows[0]?.ready === true;
-    });
-    return { operationId, attempts: results, complete: acknowledged };
-  } } });
+  const service = restate.service({
+    name: 'InboxReplySend',
+    handlers: {
+      run: createRunHandler({ runner, pool }),
+    },
+  });
   const endpoint = createEndpointHandler({ services: [service], identityKeys });
   let stopping = false, lastDispatchOk = 0, inflight;
   const engineReadiness = createRestateReadinessProbe(fetch, ingress);
