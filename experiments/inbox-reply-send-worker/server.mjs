@@ -2,6 +2,7 @@ import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { createRunner } from './runner.mjs';
 import { createRunHandler } from './handler.mjs';
+import { createInboxReplySendService } from './service.mjs';
 import { dispatchBatch, workerConfiguration, createReadinessProbe, createRestateReadinessProbe, databaseConfiguration } from './core.mjs';
 
 /**
@@ -57,12 +58,7 @@ async function start() {
   }
   const transport = await loadTransport();
   const runner = createRunner(pool, transport);
-  const service = restate.service({
-    name: 'InboxReplySend',
-    handlers: {
-      run: createRunHandler({ runner, pool }),
-    },
-  });
+  const service = createInboxReplySendService(restate, createRunHandler({ runner, pool }));
   const endpoint = createEndpointHandler({ services: [service], identityKeys });
   let stopping = false, lastDispatchOk = 0, inflight;
   const engineReadiness = createRestateReadinessProbe(fetch, ingress);

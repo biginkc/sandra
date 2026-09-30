@@ -19,6 +19,27 @@ async function transaction(pool, statement, args) {
   }
 }
 export async function dispatchBatch(pool, fetcher, ingress) {
+  return dispatchBatchWithStalls(pool, fetcher, ingress);
+}
+
+export function createStallLogger(clock = Date.now, write = (line) => process.stderr.write(line)) {
+  const lastLoggedByOperation = new Map();
+  return (entry) => {
+    const now = clock();
+    const last = lastLoggedByOperation.get(entry.operation_id);
+    if (last !== undefined && now - last < 60 * 60_000) return false;
+    lastLoggedByOperation.set(entry.operation_id, now);
+    write(`inbox_reply_send_stalled ${JSON.stringify({
+      operation_id: entry.operation_id,
+      event_id: entry.event_id,
+      invocation_id: entry.invocation_id,
+      generation: String(entry.generation),
+    })}\n`);
+    return true;
+  };
+}
+
+export async function dispatchBatchWithStalls(pool, fetcher, ingress, { stallLogger = createStallLogger() } = {}) {
   const entries = (await transaction(pool, 'SELECT inbox_reply_send.claim_dispatch_batch(20) AS result', [])).rows[0]?.result;
   if (!Array.isArray(entries) || entries.length > 20) throw Error('Invalid dispatch batch');
   let accepted = 0;
@@ -44,6 +65,9 @@ export async function dispatchBatch(pool, fetcher, ingress) {
     // its lease (still unacknowledged); it naturally expires and is retried
     // on a later pass, deferred, never journaled complete.
     if (acknowledgment.rows[0]?.result === true) accepted++;
+    else if (BigInt(entry.generation) >= 150n) {
+      stallLogger({ operation_id: operationId, event_id: eventId, invocation_id: body.invocationId, generation: entry.generation });
+    }
   }
   return accepted;
 }

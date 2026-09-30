@@ -19,6 +19,11 @@ result) -> the worker is restarted -> Restate redelivers the SAME durable
 invocation -> the worker MUST NOT call the transport a second time (claim()
 re-enters as existing/uncertain) -> the attempt settles to 'uncertain', the
 transport call count stays at exactly 1, and no double dispatch occurred.
+
+RULING v4.1 REAL rows reserved for this proof lane and intentionally NOT RUN
+in the no-Docker Round 4 harness: T-R2, T-R3, T-R4, T-R5a, T-R5b, T-R8
+real half, T-R9, T-R10, T-R13 real half, and T-R11 Railway. Their evidence
+must never be inferred from this older crash-window scenario.
 """
 if not __debug__: raise SystemExit('Optimized Python refused')
 import hashlib, json, os, re, secrets, subprocess, sys, time, uuid
