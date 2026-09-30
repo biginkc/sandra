@@ -12,11 +12,11 @@ import {
 import { initialReplyState, replyStateReducer, type ReplyReview, type ReplyState } from "./reply-state-machine";
 import {
   classifyReceipt,
-  isTerminalReceiptStatus,
   MAX_POLL_DURATION_MS,
+  receiptItemViews,
   receiptPollDelay,
-  receiptProgress,
-  receiptProgressCopy,
+  receiptRollup,
+  receiptRollupCopy,
   type ReceiptPollTracker,
 } from "./reply-receipt-policy";
 import styles from "./reply-composer.module.css";
@@ -146,17 +146,11 @@ function targetKey(targetValue: InboxReplyTarget): string {
 }
 
 function receiptLabel(status: InboxReplyStatus): string {
-  if (status.receipts.some(receipt => receipt.state === "delivered")) return "Delivered";
-  if (status.receipts.some(receipt => receipt.state === "provider_accepted")) return "Accepted by provider";
-  if (status.receipts.some(receipt => receipt.state === "delivery_failed")) return "Delivery failed";
-  if (status.receipts.some(receipt => receipt.state === "confirmed_not_submitted" || receipt.state === "rejected_unsent")) return "Not submitted";
-  return "Checking receipt";
+  return receiptRollup(status).headline;
 }
 
 function statusMessage(status: InboxReplyStatus): string {
-  if (!isTerminalReceiptStatus(status)) return "The durable receipt is still being checked.";
-  const failure = status.receipts.find(receipt => receipt.reason)?.reason;
-  return failure ?? (receiptLabel(status) === "Accepted by provider" ? "The provider accepted the reply; delivery can update separately." : "The server recorded the reply result.");
+  return receiptRollupCopy(receiptRollup(status));
 }
 
 function PreparedReview({ prepared, names, onEdit, onSend, sending, bulk }: { prepared: PreparedInboxReply; names?: ReadonlyMap<string, string>; onEdit: () => void; onSend: () => void; sending: boolean; bulk: boolean }) {
@@ -179,16 +173,19 @@ function PreparedReview({ prepared, names, onEdit, onSend, sending, bulk }: { pr
 
 function ReceiptSummary({ status, operationId, bulk, sending = false, uncertainResult = false, message }: { status?: InboxReplyStatus; operationId?: string; bulk: boolean; sending?: boolean; uncertainResult?: boolean; message?: string }) {
   if (!status && !operationId) return null;
-  const uncertain = uncertainResult;
-  const progress = status ? receiptProgress(status) : null;
-  const stillSending = sending && !!status && !uncertain && !isTerminalReceiptStatus(status);
-  return <section className={`${styles.receipt} ${stillSending ? styles.receiptPending : ""} ${uncertain ? styles.uncertain : ""}`} role={uncertain ? "alert" : "status"}>
-    <strong>{uncertain ? "Send result not confirmed" : stillSending ? "Still sending…" : status ? receiptLabel(status) : "Checking receipt"}</strong>
-    <p>{uncertain && message ? message : stillSending && progress ? receiptProgressCopy(progress) : status ? statusMessage(status) : uncertain ? "The send result was not confirmed. Do not resend this reply." : "The durable receipt is still being checked."}{uncertain ? " Check the receipt or conversation manually; this screen will not resend it." : ""}</p>
-    {status && <ul className={styles.receiptList}>{status.items.map(item => {
-      const receipt = status.receipts.find(value => value.itemId === item.id);
-      const name = item.recipient?.contactName ?? "Excluded recipient";
-      return <li className={styles.receiptRow} key={item.id}><span>{name}</span><strong>{receipt?.state ?? (item.exclusion ? "excluded" : "pending")}</strong></li>;
+  const timedOut = uncertainResult && !!status;
+  const rollup = status ? receiptRollup(status, timedOut) : null;
+  const hasNotConfirmed = uncertainResult || !!rollup?.hasServerNotConfirmed || !!rollup?.hasTimeoutNotConfirmed;
+  const hasNotSent = !!rollup && rollup.counts.blocked + rollup.counts.failed > 0;
+  const stillSending = sending && !!rollup?.keepPolling;
+  const headline = rollup?.keepPolling && !hasNotConfirmed ? "Still sending…" : rollup?.headline;
+  return <section className={`${styles.receipt} ${stillSending ? styles.receiptPending : ""} ${hasNotConfirmed || hasNotSent ? styles.uncertain : ""}`} role={hasNotConfirmed || hasNotSent ? "alert" : "status"}>
+    <strong>{headline ?? (uncertainResult ? "Send result not confirmed" : "Checking receipt")}</strong>
+    <p>{rollup ? receiptRollupCopy(rollup) : message ?? "The durable receipt is still being checked."}</p>
+    {status && <ul className={styles.receiptList}>{receiptItemViews(status, timedOut).map(row => {
+      const item = status.items.find(value => value.id === row.itemId);
+      const name = item?.recipient?.contactName ?? "Excluded recipient";
+      return <li className={styles.receiptRow} key={row.itemId}><span>{name}</span><strong>{row.label}</strong>{row.statusLabel && <small>{row.statusLabel}</small>}{row.reason && <small>Reason: {row.reason}</small>}{row.keepPolling && <small>Wait for reconciliation; this receipt does not offer a resend.</small>}</li>;
     })}</ul>}
     {operationId && <a href={`/inbox/replies/${encodeURIComponent(operationId)}`} className={styles.secondary}>{bulk ? "Open bulk receipt" : "Open reply receipt"}</a>}
   </section>;

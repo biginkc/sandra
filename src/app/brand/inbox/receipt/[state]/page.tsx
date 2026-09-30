@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { InboxReplyReceiptPreview, type InboxReplyReceiptPreviewState } from "../../_receipt-preview-shell";
 
-const states: InboxReplyReceiptPreviewState[] = ["sending", "delivered", "not-confirmed"];
+const states: InboxReplyReceiptPreviewState[] = ["sending", "delivered", "not-confirmed", "provider-accepted", "blocked", "uncertain", "mixed-bulk"];
 
 export function generateStaticParams() {
   return states.map(state => ({ state }));

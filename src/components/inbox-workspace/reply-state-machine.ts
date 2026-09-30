@@ -2,6 +2,7 @@ import type {
   InboxReplyStatus,
   PreparedInboxReply,
 } from "@/lib/inbox/reply-api-contract";
+import { isTerminalReceiptStatus } from "./reply-receipt-policy";
 
 export type ReplyPhase =
   | "ready"
@@ -47,11 +48,6 @@ export const initialReplyState = (draft = ""): ReplyState => ({
   draft,
 });
 
-function receiptIsUncertain(status: InboxReplyStatus): boolean {
-  return status.receipts.some((receipt) =>
-    ["pending", "dispatch_started", "uncertain"].includes(receipt.state),
-  );
-}
 function reviewIsBlocked(review: ReplyReview): boolean {
   return (
     review.prepared.blockers.length > 0 ||
@@ -124,7 +120,10 @@ export function replyStateReducer(
     case "receipt":
       return {
         ...state,
-        phase: receiptIsUncertain(event.status) ? "uncertain" : "sent",
+        // The shared policy is the only receipt-state classifier. A receipt
+        // event is expected to be terminal; fail closed if a caller violates
+        // that contract (report §(e)).
+        phase: isTerminalReceiptStatus(event.status) ? "sent" : "uncertain",
         status: event.status,
         message: undefined,
       };

@@ -44,7 +44,7 @@ describe("InboxReplyComposer", () => {
 
   it("hydrates a seeded terminal state without preparing or exposing a resend control", () => {
     render(<PreviewInboxReplyComposer targets={[target]} routeKey="route-a" enabled initialDraft="Draft" initialState={{ phase: "sent", draft: "Draft", operationId, status: status("delivered") }} />);
-    expect(screen.getByText("Delivered")).toBeVisible();
+    expect(screen.getAllByText("Delivered").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Review reply" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
@@ -78,7 +78,7 @@ describe("InboxReplyComposer", () => {
     await act(async () => { await Promise.resolve(); });
     expect(screen.queryByRole("button", { name: "Review reply" })).toBeNull();
     await act(async () => { resolveAccept(Response.json({ operationId })); });
-    await screen.findByText("Delivered");
+    await screen.findAllByText("Delivered");
   });
 
   it("delegates a selection over 50 targets to the server review", async () => {
@@ -113,7 +113,7 @@ describe("InboxReplyComposer", () => {
     expect(screen.getByText("+18165550100")).toBeVisible();
     expect(screen.getByText("+18165550142")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
-    await screen.findByText("Delivered");
+    await screen.findAllByText("Delivered");
     const calls = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
     expect(calls.filter(url => url.endsWith("/replies/accept"))).toHaveLength(1);
   });
@@ -152,7 +152,7 @@ describe("InboxReplyComposer", () => {
     expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith("/replies/accept"))).toBe(false);
   });
 
-  it("keeps an uncertain receipt in-flight until the no-change bound", async () => {
+  it("shows an explicit uncertain receipt immediately and stops automatic polling", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => Promise.resolve(responseFor(url, init, "uncertain"))));
     mount();
     fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
@@ -161,11 +161,13 @@ describe("InboxReplyComposer", () => {
     vi.useFakeTimers();
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(screen.getByText("Still sending…")).toBeVisible();
-    expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
+    expect(screen.getByText("Send result not confirmed")).toBeVisible();
+    expect(screen.queryByText("Still sending…")).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Not confirmed, may or may not have sent/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /resend|retry/i })).not.toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/replies/") && !String(url).endsWith("/replies/prepare") && !String(url).endsWith("/replies/accept"))).toHaveLength(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(MAX_POLL_DURATION_MS); });
     expect(screen.getByText("Send result not confirmed")).toBeVisible();
-    expect(screen.getByRole("alert")).toHaveTextContent(/not resend/i);
     expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
   });
 
@@ -183,7 +185,7 @@ describe("InboxReplyComposer", () => {
     await screen.findByText("Review before sending");
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
     await screen.findByText("Still sending…");
-    expect(screen.getAllByText("dispatch_started", { exact: true }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Sending", { exact: true }).length).toBeGreaterThan(0);
     expect(screen.queryByText("Send result not confirmed")).toBeNull();
     expect(screen.getAllByText("Ada Lovelace").length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "Open reply receipt" })).toBeVisible();
@@ -191,13 +193,13 @@ describe("InboxReplyComposer", () => {
     expect(receiptAttempts).toBe(1);
   });
 
-  it("keeps a blocked receipt in still-sending progress until a terminal receipt arrives", async () => {
+  it("treats a blocked receipt as final and does not poll it", async () => {
     let receiptAttempts = 0;
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith("/replies/prepare")) return Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey));
       if (url.endsWith("/replies/accept")) return Response.json({ operationId });
       receiptAttempts += 1;
-      return Response.json(status(receiptAttempts === 1 ? "blocked" : "delivered"));
+      return Response.json(status("blocked"));
     }));
     mount();
     fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
@@ -206,11 +208,11 @@ describe("InboxReplyComposer", () => {
     vi.useFakeTimers();
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(screen.getByText("Still sending…")).toBeVisible();
-    expect(screen.getByText(/0 of 1 recipient has a terminal receipt/)).toBeVisible();
+    expect(screen.getByText("Some not sent")).toBeVisible();
+    expect(screen.getByText("Not sent")).toBeVisible();
     await act(async () => { vi.advanceTimersByTime(500); await Promise.resolve(); await Promise.resolve(); });
-    expect(screen.getByText("Delivered")).toBeVisible();
-    expect(receiptAttempts).toBe(2);
+    expect(screen.queryByText("Still sending…")).not.toBeInTheDocument();
+    expect(receiptAttempts).toBe(1);
   });
 
   it("retries receipt polling with backoff and keeps the durable receipt link visible", async () => {

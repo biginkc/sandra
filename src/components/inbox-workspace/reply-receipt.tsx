@@ -5,10 +5,10 @@ import type { InboxReplyStatus } from "@/lib/inbox/reply-api-contract";
 import styles from "./reply-composer.module.css";
 import {
   classifyReceipt,
-  isTerminalReceiptState,
-  isTerminalReceiptStatus,
+  receiptItemViews,
   receiptPollDelay,
-  receiptProgressCopy,
+  receiptRollup,
+  receiptRollupCopy,
   type ReceiptClassification,
   type ReceiptPollTracker,
 } from "./reply-receipt-policy";
@@ -18,21 +18,6 @@ function parseStatus(value: unknown, operationId: string): InboxReplyStatus {
   const row = value as Record<string, unknown>;
   if (row.operationId !== operationId || typeof row.preparationId !== "string" || typeof row.dispatchComplete !== "boolean" || !Array.isArray(row.items) || !Array.isArray(row.receipts)) throw Error("The reply receipt could not be verified.");
   return value as InboxReplyStatus;
-}
-
-function receiptText(state: string): string {
-  switch (state) {
-    case "delivered": return "Delivered";
-    case "provider_accepted": return "Accepted by provider";
-    case "delivery_failed": return "Delivery failed";
-    case "confirmed_not_submitted":
-    case "rejected_unsent": return "Not submitted";
-    case "blocked":
-    case "dispatch_started":
-    case "uncertain":
-    case "pending": return "Still sending";
-    default: return "Pending";
-  }
 }
 
 type ReplyReceiptViewProps = {
@@ -103,21 +88,25 @@ function ReplyReceiptView({ operationId, fetcher = fetch, initialTracker, initia
     return () => { controller.abort(); if (timer) clearTimeout(timer); };
   }, [fetcher, initialFingerprint, initialTracker, initialTrackerAgeMs, operationId, retry]);
 
-  const terminal = classification === "terminal" || (!!status && isTerminalReceiptStatus(status));
+  const timedOut = classification === "not_confirmed";
+  const rollup = status ? receiptRollup(status, timedOut) : null;
+  const terminal = classification === "terminal";
   const notConfirmed = classification === "not_confirmed";
-  const stillSending = !error && !terminal && !notConfirmed && !!status;
-  const progress = status ? { completed: status.receipts.filter(receipt => isTerminalReceiptState(receipt.state)).length, total: status.receipts.length } : null;
-  const receiptClass = `${styles.receipt} ${stillSending ? styles.receiptPending : ""} ${notConfirmed ? styles.uncertain : ""}`;
+  const stillSending = !error && !!rollup?.keepPolling;
+  const hasNotSent = !!rollup && rollup.counts.blocked + rollup.counts.failed > 0;
+  const alert = !!error || !!rollup?.hasServerNotConfirmed || !!rollup?.hasTimeoutNotConfirmed || hasNotSent || notConfirmed;
+  const headline = rollup?.keepPolling && !rollup.hasServerNotConfirmed && !rollup.hasTimeoutNotConfirmed ? "Still sending…" : rollup?.headline;
+  const receiptClass = `${styles.receipt} ${stillSending ? styles.receiptPending : ""} ${notConfirmed || hasNotSent ? styles.uncertain : ""}`;
 
   return <main className="mx-auto max-w-4xl space-y-6 p-6" data-testid="inbox-reply-receipt">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm text-muted-foreground">Sandra Inbox</p><h1 className="text-2xl font-semibold">Reply receipt</h1><p className="break-all text-xs text-muted-foreground">Operation {operationId}</p></div><a className="rounded border px-3 py-2 text-sm" href="/inbox">← Inbox</a></div>
-    <section className={receiptClass} role={error || notConfirmed ? "alert" : "status"}>
-      <strong>{error ? "Receipt unavailable" : notConfirmed ? "Send result not confirmed" : terminal ? "Reply operation complete" : stillSending ? "Still sending…" : "Checking reply operation"}</strong>
-      <p>{error ?? (notConfirmed ? "The receipt did not change within the polling window. Do not resend this reply. Check the receipt before taking any further action." : terminal ? "The server recorded a terminal result for each recipient." : stillSending && progress ? receiptProgressCopy(progress) : "Checking the durable server receipt…")}</p>
+    <section className={receiptClass} role={alert ? "alert" : "status"}>
+      <strong>{error ? "Receipt unavailable" : headline ?? (terminal ? "Reply operation complete" : "Checking reply operation")}</strong>
+      <p>{error ?? (rollup ? receiptRollupCopy(rollup) : "Checking the durable server receipt…")}</p>
       {notConfirmed && <button type="button" className={styles.secondary} onClick={() => setRetry(value => value + 1)}>Refresh</button>}
       {error && !notConfirmed && <button type="button" className={styles.secondary} onClick={() => setRetry(value => value + 1)}>Check again</button>}
     </section>
-    {status && <section aria-label="Per-recipient results"><h2 className="text-lg font-semibold">Per-recipient results</h2><ul className="mt-3 grid gap-3">{status.items.map(item => { const receipt = status.receipts.find(value => value.itemId === item.id); return <li key={item.id} className="rounded-xl border bg-white p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-medium">{item.recipient?.contactName ?? "Excluded recipient"}</p><p className="text-sm text-muted-foreground">{item.recipient?.propertyAddress ?? "Not eligible for this reply"}</p></div><strong className="text-sm">{receiptText(receipt?.state ?? "pending")}</strong></div>{item.recipient && <><div className="mt-3 grid gap-2 text-xs sm:grid-cols-2"><p><span className="block uppercase tracking-wider text-muted-foreground">From</span>{item.recipient.from}</p><p><span className="block uppercase tracking-wider text-muted-foreground">To</span>{item.recipient.to}</p></div><p className="mt-3 whitespace-pre-wrap border-l-2 border-slate-300 pl-3 text-sm">{item.recipient.renderedBody}</p></>}{receipt?.reason && <p className="mt-2 text-sm text-muted-foreground">{receipt.reason}</p>}{receipt && !isTerminalReceiptState(receipt.state) && <p className="mt-2 text-sm font-medium text-amber-800">Wait for reconciliation. This receipt does not offer a resend.</p>}</li>; })}</ul></section>}
+    {status && <section aria-label="Per-recipient results"><h2 className="text-lg font-semibold">Per-recipient results</h2><ul className="mt-3 grid gap-3">{receiptItemViews(status, timedOut).map(row => { const item = status.items.find(value => value.id === row.itemId); return <li key={row.itemId} className="rounded-xl border bg-white p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-medium">{item?.recipient?.contactName ?? "Excluded recipient"}</p><p className="text-sm text-muted-foreground">{item?.recipient?.propertyAddress ?? "Not eligible for this reply"}</p></div><div className="text-right"><small className="block text-xs font-semibold text-slate-500">{row.statusLabel}</small><strong className="text-sm">{row.label}</strong></div></div>{item?.recipient && <><div className="mt-3 grid gap-2 text-xs sm:grid-cols-2"><p><span className="block uppercase tracking-wider text-muted-foreground">From</span>{item.recipient.from}</p><p><span className="block uppercase tracking-wider text-muted-foreground">To</span>{item.recipient.to}</p></div><p className="mt-3 whitespace-pre-wrap border-l-2 border-slate-300 pl-3 text-sm">{item.recipient.renderedBody}</p></>}{row.reason && <p className="mt-2 text-sm text-muted-foreground">Reason: {row.reason}</p>}{row.keepPolling && <p className="mt-2 text-sm font-medium text-amber-800">Wait for reconciliation. This receipt does not offer a resend.</p>}</li>; })}</ul></section>}
   </main>;
 }
 

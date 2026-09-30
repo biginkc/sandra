@@ -60,22 +60,20 @@ describe("InboxReplyReceipt", () => {
     await screen.findByText("Still sending…");
     expect(fetcher).toHaveBeenCalled();
     expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
-    expect(screen.getByText(/0 of 1 recipient has a terminal receipt/)).toBeVisible();
+    expect(screen.getByText(/1 sending/)).toBeVisible();
     expect(screen.getByText("Still sending…").closest("section")).toHaveClass(/receiptPending/);
   });
 
-  it("keeps claim-time blocked in-flight using the same policy as the composer", async () => {
+  it("treats blocked as final even when dispatchComplete is false", async () => {
     vi.useFakeTimers();
-    const fetcher = vi.mocked(fetch)
-      .mockResolvedValueOnce(Response.json(status("blocked")))
-      .mockResolvedValueOnce(Response.json(status("delivered")));
+    const fetcher = vi.mocked(fetch).mockResolvedValue(Response.json(status("blocked")));
     mountReceipt();
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(screen.getByText("Still sending…")).toBeVisible();
-    expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
-    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
-    expect(screen.getByText("Reply operation complete")).toBeVisible();
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Some not sent")).toBeVisible();
+    expect(screen.getByText("Not sent")).toBeVisible();
+    expect(screen.queryByText("Still sending…")).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it("resets the no-change clock when receipt progress changes", async () => {
@@ -113,22 +111,25 @@ describe("InboxReplyReceipt", () => {
     const fetcher = vi.mocked(fetch).mockResolvedValue(Response.json(status("delivered")));
     mountReceipt();
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(screen.getByText("Reply operation complete")).toBeVisible();
+    expect(screen.getAllByText("Delivered").length).toBeGreaterThan(0);
     const attempts = fetcher.mock.calls.length;
     await act(async () => { await vi.advanceTimersByTimeAsync(MAX_POLL_DURATION_MS); });
     expect(fetcher).toHaveBeenCalledTimes(attempts);
   });
 
-  it.each(["dispatch_started", "blocked", "delivered"] as const)("classifies %s the same in composer and receipt page", async (receiptState) => {
+  it.each(["pending", "dispatch_started", "provider_accepted", "uncertain", "blocked", "delivered", "delivery_failed", "confirmed_not_submitted", "rejected_unsent"] as const)("classifies %s the same in composer and receipt page", async (receiptState) => {
     const receipt = status(receiptState);
     const composer = render(<PreviewInboxReplyComposer targets={[{ kind: "conversation", id: conversationId }]} enabled initialState={{ phase: "sending", draft: "Draft", operationId, status: receipt }} />);
-    const composerInFlight = !!screen.queryByText("Still sending…");
+    const composerReceipt = screen.queryByRole("alert") ?? screen.getByRole("status");
+    const composerHeadline = composerReceipt.querySelector("strong")?.textContent ?? "";
     composer.unmount();
     vi.mocked(fetch).mockResolvedValue(Response.json(receipt));
     render(<InboxReplyReceipt operationId={operationId} />);
-    if (receiptState === "delivered") await screen.findByText("Reply operation complete");
-    else await screen.findByText("Still sending…");
-    expect(!!screen.queryByText("Still sending…")).toBe(composerInFlight);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const receiptSection = screen.queryByRole("alert") ?? screen.getByRole("status");
+    const receiptHeadline = receiptSection.querySelector("strong")?.textContent ?? "";
+    expect(receiptHeadline).toBe(composerHeadline);
+    expect(screen.queryByRole("button", { name: /resend|retry/i })).not.toBeInTheDocument();
   });
 
   it("does not allow production callers to hydrate the composer", () => {
