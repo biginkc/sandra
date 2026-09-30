@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { Client } from 'pg';
 import { readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import os from 'node:os';
 import { collect, reconcile, stabilityProbe } from './outbox-db-contract/readonly.mjs';
 import { platformFingerprint, comparePlatform } from './outbox-db-contract/platform.mjs';
 import { CATALOG_SECTIONS, hasExactKeys } from './outbox-db-contract/catalog-sections.mjs';
@@ -51,6 +52,7 @@ function assertTarget(target, dsn, { apiUrl, ack = process.env.INBOX_PROD_READON
   }
 }
 export { assertTarget };
+const catalogCaTempDir = '__INBOX_CATALOG_CA_TEMP_DIR';
 export function catalogChildEnv(dsn, parentEnv, target, expectedFingerprint) {
   const url = new URL(dsn);
   if ([...url.searchParams.keys()].some(key => /^ssl/i.test(key))) throw new Error('TARGET_REFUSED');
@@ -66,15 +68,37 @@ export function catalogChildEnv(dsn, parentEnv, target, expectedFingerprint) {
     PGPASSWORD: decodeURIComponent(url.password), LC_ALL: 'C' });
   if (hosted) {
     const ca = pinnedCa(parentEnv, expectedFingerprint);
-    Object.assign(env, { PGSSLMODE: 'verify-full', PGSSLROOTCERT: ca.path,
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'sandra-catalog-ca-'), { mode: 0o700 });
+    const tempPath = path.join(tempDir, 'root.pem');
+    try {
+      writeFileSync(tempPath, ca.pem, { mode: 0o600 });
+      chmodSync(tempPath, 0o600);
+    } catch (error) {
+      rmSync(tempDir, { recursive: true, force: true });
+      throw error;
+    }
+    Object.defineProperty(env, catalogCaTempDir, { value: tempDir, enumerable: false, configurable: true });
+    Object.assign(env, { PGSSLMODE: 'verify-full', PGSSLROOTCERT: tempPath,
       PGSSLMINPROTOCOLVERSION: 'TLSv1.2', PGGSSENCMODE: 'disable', INBOX_CATALOG_HOSTED_TLS: '1' });
   } else env.PGSSLMODE = 'disable';
   return env;
 }
+export function disposeCatalogChildEnv(env) {
+  if (env?.[catalogCaTempDir]) {
+    rmSync(env[catalogCaTempDir], { recursive: true, force: true });
+    delete env[catalogCaTempDir];
+  }
+}
 async function catalog(dsn, target) {
   const path = 'experiments/inbox-production-install/catalog_fingerprint.py';
   if (!existsSync(path)) throw new Error('CATALOG_TOOL_UNAVAILABLE: rebase migrations branch');
-  const run = spawnSync('python3', ['scripts/outbox-db-contract/catalog-readonly.py'], { env: catalogChildEnv(dsn, process.env, target), encoding: 'utf8' });
+  const env = catalogChildEnv(dsn, process.env, target);
+  let run;
+  try {
+    run = spawnSync('python3', ['scripts/outbox-db-contract/catalog-readonly.py'], { env, encoding: 'utf8' });
+  } finally {
+    disposeCatalogChildEnv(env);
+  }
   if (run.status !== 0) throw new Error(`CATALOG_FAILED ${run.stderr.trim()}`);
   return JSON.parse(run.stdout);
 }
