@@ -541,7 +541,7 @@ def wait_activity(app: str, *, wait_event: str | None = None) -> tuple[int, str]
         if value:
             parts = value.split("|", 3)
             observed = f"{parts[2]}/{parts[3]}"
-            if wait_event is None or observed == wait_event or parts[2] == wait_event:
+            if wait_event is None or observed == wait_event or parts[2] == wait_event or parts[3] == wait_event:
                 return int(parts[0]), parts[1]
         time.sleep(.05)
     raise AssertionError(f"session {app} did not reach activity state {wait_event!r}")
@@ -558,14 +558,17 @@ def wait_advisory(app: str, key: int) -> None:
 
 def cleanup(n: int) -> None:
     x = ids(n)
+    extra_owner = f" DELETE FROM auth.users WHERE id='{ids(n + 1)['c']}';" if n == 13 else ""
     psql(f"""
 DROP SCHEMA IF EXISTS inbox_reply_test CASCADE;
 SET session_replication_role='replica';
 DELETE FROM inbox_reply_send.message_projection_backlog WHERE org_id='{x['o']}';
+DELETE FROM inbox_reply_send.dispatch_outbox WHERE org_id='{x['o']}';
 DELETE FROM inbox_reply_send.callback_receipts WHERE org_id='{x['o']}';
 DELETE FROM inbox_reply_send.unmatched_callbacks WHERE provider='sendillo' AND (provider_reference LIKE 'ext-{n}-%' OR provider_reference='ext-{n}');
 DELETE FROM inbox_reply_send.attempts WHERE org_id='{x['o']}'; DELETE FROM inbox_reply_send.operations WHERE org_id='{x['o']}'; DELETE FROM inbox_reply_review.preparations WHERE org_id='{x['o']}';
-DELETE FROM public.messages WHERE org_id='{x['o']}'; DELETE FROM public.memberships WHERE org_id='{x['o']}'; DELETE FROM provider_sender_numbers WHERE org_id='{x['o']}'; DELETE FROM sequence_enrollments WHERE org_id='{x['o']}'; DELETE FROM sequences WHERE org_id='{x['o']}'; DELETE FROM public.properties WHERE org_id='{x['o']}'; DELETE FROM consent_events WHERE contact_id='{x['c']}'; DELETE FROM public.contacts WHERE org_id='{x['o']}'; DELETE FROM organizations WHERE id='{x['o']}'; DELETE FROM auth.users WHERE id='{x['c']}';""")
+DELETE FROM inbox_inbound_heads WHERE org_id='{x['o']}';
+DELETE FROM public.messages WHERE org_id='{x['o']}'; DELETE FROM public.memberships WHERE org_id='{x['o']}'; DELETE FROM provider_sender_numbers WHERE org_id='{x['o']}'; DELETE FROM sequence_enrollments WHERE org_id='{x['o']}'; DELETE FROM sequences WHERE org_id='{x['o']}'; DELETE FROM public.properties WHERE org_id='{x['o']}'; DELETE FROM consent_events WHERE contact_id='{x['c']}'; DELETE FROM public.contacts WHERE org_id='{x['o']}'; DELETE FROM organizations WHERE id='{x['o']}'; DELETE FROM auth.users WHERE id='{x['c']}';{extra_owner}""")
 
 
 def concurrency_case(n: int) -> tuple[str, str]:

@@ -40,12 +40,24 @@ def prerequisite() -> bool:
     return True
 
 
-def common_seed(n: int, *, items: int = 1, body: str = "") -> str:
+def common_seed(n: int, *, items: int = 1, body: str = "", second_owner: bool = False) -> str:
     x = projection.ids(n)
+    extra_owner = ""
+    if second_owner:
+        y = projection.ids(n + 1)
+        extra_owner = f"""
+INSERT INTO auth.users(id,email) VALUES('{y['c']}','restate-local-db-{n}-second-owner@example.invalid');
+INSERT INTO memberships(user_id,org_id,role,access_status) VALUES('{y['c']}','{x['o']}','owner','active');
+"""
     return projection.fixture(n, f"""
 INSERT INTO auth.users(id,email) VALUES('{x['c']}','restate-local-db-{n}@example.invalid');
 INSERT INTO memberships(user_id,org_id,role,access_status) VALUES('{x['c']}','{x['o']}','owner','active');
+{extra_owner}
 INSERT INTO inbox_reply_send.operations(org_id,id,requester_id,preparation_id,idempotency_key) VALUES('{x['o']}','{x['op']}','{x['c']}','{x['prep']}',gen_random_uuid());
+INSERT INTO provider_sender_numbers(id,org_id,provider,phone_e164,provider_number_id,status,messaging_status)
+VALUES('{x['token']}','{x['o']}','sendillo','+12025550001','restate-local-db-{n}','active','active');
+INSERT INTO inbox_inbound_heads(org_id,conversation_id,revision)
+VALUES('{x['o']}','{x['conv']}',1);
 CREATE SCHEMA IF NOT EXISTS inbox_reply_test;
 UPDATE inbox_reply_review.admission SET enabled=true;
 {body}
@@ -175,8 +187,8 @@ ALTER TABLE inbox_reply_review.preparations ENABLE TRIGGER immutable_reply_prepa
 def t_r13(mutated: bool) -> tuple[bool, str]:
     n = 13
     x = projection.ids(n)
-    body = f"{add_attempt(n)}{add_attempt(n, second=True)}{insert_outbox(n)}UPDATE memberships SET access_status='inactive' WHERE user_id='{x['c']}' AND org_id='{x['o']}';"
-    q(common_seed(n, items=2, body=body), check=True)
+    body = f"{add_attempt(n)}{add_attempt(n, second=True)}{insert_outbox(n)}UPDATE memberships SET access_status='revoked' WHERE user_id='{x['c']}' AND org_id='{x['o']}';"
+    q(common_seed(n, items=2, body=body, second_owner=True), check=True)
     try:
         scalar(f"SELECT inbox_reply_send.worker_claim('{x['o']}','{x['a']}')->>'generation';")
         denied = q(f"SELECT inbox_reply_send.worker_start_dispatch('{x['o']}','{x['a']}',1);", check=False)

@@ -33,10 +33,11 @@ def main() -> int:
     x = projection.ids(28)
     sessions = []
     original = projection.fn_body("inbox_reply_send.worker_persist_result")
+    fixture_probe = projection.psql("SELECT to_regprocedure('inbox_reply_send.worker_persist_result(uuid,uuid,uuid,jsonb)') IS NOT NULL;", check=False)
+    if fixture_probe.returncode != 0 or fixture_probe.stdout.strip() != "t":
+        print("B2 NOT RUN: disposable fixture with inbox_reply_send.worker_persist_result is unavailable")
+        return 2
     try:
-        if projection.psql("SELECT to_regprocedure('inbox_reply_send.worker_persist_result(uuid,uuid,uuid,jsonb)') IS NOT NULL;").stdout.strip() != "t":
-            print("B2 NOT RUN: disposable fixture does not contain inbox_reply_send.worker_persist_result")
-            return 2
         if mutated:
             body = original.replace(" SET lock_timeout='3s'", "", 1)
             if body == original:

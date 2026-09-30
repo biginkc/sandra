@@ -21,6 +21,8 @@ STATUS_EVENTS = ROOT / "src/lib/messaging/status-events.ts"
 HANDLER = ROOT / "experiments/inbox-reply-send-worker/handler.mjs"
 T18_INTEGRATION = ROOT / "src/app/api/cron/sequence-tick/route.queue.integration.test.ts"
 LOCAL_INTEGRATION = ROOT / "experiments/inbox-reply-send/run-local-integration.mjs"
+REPLY_STATUS_ROUTE = ROOT / "src/app/api/webhooks/sendillo/reply-status/route.ts"
+PROJECTION_MIGRATION = ROOT / "supabase/migrations/20260930040250_inbox_reply_message_projection.sql"
 WORKER_TEST = ROOT / "experiments/inbox-reply-send-worker/restate-retry.test.mjs"
 WORKER_CORE = ROOT / "experiments/inbox-reply-send-worker/core.mjs"
 WORKER_SERVICE = ROOT / "experiments/inbox-reply-send-worker/service.mjs"
@@ -28,6 +30,7 @@ WORKER_DOCKERFILE = ROOT / "experiments/inbox-reply-send-worker/Dockerfile"
 WORKER_HANDLER = ROOT / "experiments/inbox-reply-send-worker/handler.mjs"
 LOCAL_DB_RETRY = ROOT / "experiments/inbox-reply-send-worker/restate-retry-local-db.py"
 PROVIDER_FIX = ROOT / "experiments/inbox-reply-send/provider-fix-proof.py"
+PROVIDER_FIX_MINIMAL = ROOT / "experiments/inbox-reply-send/provider-fix-minimal.py"
 LOG = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-run-r4.log")
 EVIDENCE = Path("/Users/jarradhenry/Sites/BMH apps/Sandra-inbox-tmp/notes/replypersist-mutation-evidence.md")
 
@@ -137,7 +140,7 @@ def run_t4_application(handle) -> None:
 
 def run_t16_application(handle) -> None:
     command = [
-        "npx", "vitest", "run", "--config", "vitest.config.ts",
+        str(ROOT / "node_modules/.bin/vitest"), "run", "--config", "vitest.config.ts",
         "src/lib/messaging/status-events.test.ts",
         "-t", "T16 forwards an unmatched delivered event before the reply row exists",
         "--maxWorkers=1", "--no-file-parallelism",
@@ -173,7 +176,7 @@ def run_t17_application(handle) -> None:
         raise RuntimeError("T17 mutation target is not unique")
     mutated = original.replace(needle, b"    // mutation: skip the legacy external-id lookup\n", 1)
     command = [
-        "npx", "vitest", "run", "--config", "vitest.config.ts",
+        str(ROOT / "node_modules/.bin/vitest"), "run", "--config", "vitest.config.ts",
         "src/lib/messaging/status-events.test.ts",
         "-t", "T17 updates a matched non-Inbox legacy row",
         "--maxWorkers=1", "--no-file-parallelism",
@@ -211,15 +214,44 @@ def run_worker_locals(handle) -> None:
 def run_provider_fixes(handle) -> None:
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     route = [
-        "npx", "vitest", "run", "--config", "vitest.config.ts",
+        str(ROOT / "node_modules/.bin/vitest"), "run", "--config", "vitest.config.ts",
         "src/app/api/webhooks/sendillo/reply-status/route.test.ts",
         "-t", "returns a non-2xx response when reconciliation is busy",
         "--maxWorkers=1", "--no-file-parallelism",
     ]
     record(handle, "B1 route baseline", execute(route, env))
+    route_original = REPLY_STATUS_ROUTE.read_bytes()
+    busy_branch = b'''    if (data && typeof data === "object" && !Array.isArray(data) && (data as { kind?: unknown }).kind === "busy") {
+      reportError(new Error("reply reconciliation busy"), {
+        tags: { surface: "sendillo_reply_status_webhook_reconcile" },
+        extra: { externalId: event.externalId, terminal: event.terminal },
+      });
+      return NextResponse.json({ error: "reconcile busy" }, { status: 500 });
+    }
+'''
+    if route_original.count(busy_branch) != 1:
+        raise RuntimeError("B1 busy-route mutation target is not unique")
+    REPLY_STATUS_ROUTE.write_bytes(route_original.replace(busy_branch, b"    // mutation: busy reconcile falls through to 200\n", 1))
+    try:
+        record(handle, "B1 route mutation", execute(route, env))
+    finally:
+        REPLY_STATUS_ROUTE.write_bytes(route_original)
     record(handle, "B2 lock-timeout baseline", execute([sys.executable, str(PROVIDER_FIX)], env))
     record(handle, "B2 lock-timeout mutation", execute([sys.executable, str(PROVIDER_FIX), "--mutated"], env))
+    record(handle, "B2 minimal disposable PostgreSQL baseline", execute([sys.executable, str(PROVIDER_FIX_MINIMAL)], env))
+    record(handle, "B2 minimal disposable PostgreSQL mutation", execute([sys.executable, str(PROVIDER_FIX_MINIMAL), "--mutated"], env))
     record(handle, "B4 source-record baseline", execute([sys.executable, str(PROVIDER_FIX), "--b4"], env))
+    migration_original = PROJECTION_MIGRATION.read_bytes()
+    comment_block = b''' -- Deliberately omit query_canceled: cancellation aborts this transaction and
+ -- rolls back any tries bump; a cancelled drain must not count as a retry.
+'''
+    if migration_original.count(comment_block) != 1:
+        raise RuntimeError("B4 source-record mutation target is not unique")
+    PROJECTION_MIGRATION.write_bytes(migration_original.replace(comment_block, b"", 1))
+    try:
+        record(handle, "B4 source-record mutation", execute([sys.executable, str(PROVIDER_FIX), "--b4"], env))
+    finally:
+        PROJECTION_MIGRATION.write_bytes(migration_original)
 
 
 def run_restate_local_db(handle) -> None:
@@ -238,7 +270,8 @@ REAL_NOT_RUN = {
     "T-R9": "Restate engine requires Docker; Docker is forbidden by Round 4",
     "T-R10": "Restate engine requires Docker; Docker is forbidden by Round 4",
     "T-R11": "Railway/provider execution is forbidden by Round 4",
-    "T-R13": "Restate engine requires Docker for REAL half; Docker is forbidden by Round 4",
+    "T-R8 REAL": "Restate engine requires Docker for REAL half; Docker is forbidden by Round 4",
+    "T-R13 REAL": "Restate engine requires Docker for REAL half; Docker is forbidden by Round 4",
 }
 
 
@@ -264,7 +297,7 @@ def derive_evidence(raw: str) -> str:
         seen.add(test)
         label = header.replace("|", "\\|")
         value = "<br>".join(line.replace("|", "\\|") for line in selected)
-        executed = "NOT RUN" if "NOT RUN" in header or "NOT RUN" in body or "could not connect" in body or "fixture.*unavailable" in body else "EXECUTED"
+        executed = "NOT RUN" if "NOT RUN" in header or "NOT RUN" in body or "could not connect" in body or "No such file or directory" in body or "PROJECTION_PGHOST is required" in body else "EXECUTED"
         rows.append(f"| {test} | {executed} | {label} | `{value}` |")
     for n in range(1, 28):
         test = f"T{n}"
