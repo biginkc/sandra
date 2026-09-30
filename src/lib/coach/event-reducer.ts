@@ -99,7 +99,9 @@ function isOlderObjectionPrompt(
   if (Number.isFinite(currentMs) && Number.isFinite(incomingMs) && currentMs !== incomingMs) {
     return incomingMs < currentMs;
   }
-  return incoming.sellerTurn <= current.sellerTurn;
+  // Timestamp tie: only a strictly earlier seller turn is older. A different
+  // prompt on the same turn (e.g. interim → final of another type) replaces it.
+  return incoming.sellerTurn < current.sellerTurn;
 }
 
 /** A live interim result replaces THAT SPEAKER's still-open interim line in

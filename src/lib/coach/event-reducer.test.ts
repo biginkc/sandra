@@ -47,6 +47,16 @@ describe("coachReducer — objection prompt", () => {
     });
     expect(state.objectionPrompt).toMatchObject({ label: "Timing concern", sellerTurn: 2, ts: newer.ts });
   });
+
+  it("replaces a same-turn prompt of a different type even when timestamps tie", () => {
+    const ts = "2026-09-29T12:00:00.000Z";
+    let state = coachReducer(initialCoachState(), { ...prompt, objectionId: "price", label: "Price concern", sellerTurn: 200, ts });
+    state = coachReducer(state, { ...prompt, objectionId: "timing", label: "Timing concern", sellerTurn: 200, ts });
+    expect(state.objectionPrompt).toMatchObject({ objectionId: "timing", label: "Timing concern" });
+
+    state = coachReducer(state, { ...prompt, objectionId: "consult", label: "Consult", sellerTurn: 199, ts });
+    expect(state.objectionPrompt).toMatchObject({ objectionId: "timing" });
+  });
 });
 
 describe("coachReducer — transcript", () => {
