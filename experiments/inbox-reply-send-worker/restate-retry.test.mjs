@@ -45,7 +45,9 @@ test('T-R1 LOCAL SDK discovery exposes the approved retry policy and timeouts', 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
     const address = server.address();
-    const response = await fetch(`http://127.0.0.1:${address.port}/discover`);
+    const response = await fetch(`http://127.0.0.1:${address.port}/discover`, {
+      headers: { Accept: 'application/vnd.restate.endpointmanifest.v4+json' },
+    });
     assert.equal(response.status, 200);
     const manifest = await response.json();
     const discovered = manifest.services?.find((candidate) => candidate.name === 'InboxReplySend');
