@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { prepareDialpadBrowserCapture, type ActiveDialpadCapture, type BrowserCaptureRuntime, type BrowserCaptureSinks, type EncodedMediaChunk, type MediaRecorderLike, type PreparedDialpadCapture } from './browser-capture';
 import { decodeDialpadBrowserBinary } from './browser-protocol';
@@ -349,6 +349,158 @@ describe('Dialpad browser session', () => {
     socket.message(JSON.stringify({ type: 'pcm_eof_drained', track: 'mic', epoch: 1, endSample: 0 }));
   });
 
+  it('serializes WebM receipt ACKs across tracks while allowing PCM to interleave before EOF', async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSocket();
+      const binaryKinds: string[] = [];
+      let recordingInFlight = 0;
+      let maxRecordingInFlight = 0;
+      const events: string[] = [];
+      socket.send = (data) => {
+        socket.sent.push(data);
+        if (data instanceof Uint8Array) {
+          const binary = decodeDialpadBrowserBinary(data);
+          if (binary.kind === 'recording') {
+            binaryKinds.push(`webm:${binary.track}:${binary.sequence}`);
+            recordingInFlight += 1;
+            maxRecordingInFlight = Math.max(maxRecordingInFlight, recordingInFlight);
+            setTimeout(() => {
+              recordingInFlight -= 1;
+              socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' }));
+            }, 824);
+          } else {
+            binaryKinds.push(`pcm:${binary.sequence}`);
+            queueMicrotask(() => socket.message(JSON.stringify({ type: 'pcm_frame_ack', track: binary.track, epoch: 1, seq: binary.sequence })));
+          }
+          return;
+        }
+        if (typeof data !== 'string') return;
+        const message = JSON.parse(data) as { type?: string; track?: 'tab' | 'mic'; lastSeq?: number; endSample?: number };
+        events.push(message.type ?? 'unknown');
+        if (message.type === 'recording_eof') queueMicrotask(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })));
+        if (message.type === 'pcm_eof') queueMicrotask(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })));
+      };
+      let sinksRef: BrowserCaptureSinks | null = null;
+      const capture: PreparedDialpadCapture = {
+        proof: { handle: 'h', origin: 'https://app.example.test' },
+        start: async (sinks) => {
+          sinksRef = sinks!;
+          await sinks!.onTrackFormat?.(format('tab'));
+          await sinks!.onTrackFormat?.(format('mic'));
+          for (const [track, seq] of [['tab', 0], ['mic', 0], ['tab', 1], ['mic', 1]] as const) {
+            void sinks!.onWebmChunk({ track, epoch: 1, seq, blob: new Blob([`${track}-${seq}`]), byteLength: `${track}-${seq}`.length });
+          }
+          return {
+            state: () => 'recording' as const,
+            stop: async () => {
+              await sinks!.onPcmTail?.({ track: 'tab', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 });
+              await sinks!.onPcmTail?.({ track: 'mic', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 });
+            },
+            dispose: async () => undefined,
+          };
+        },
+        dispose: async () => undefined,
+      };
+      const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 5_000, capture });
+      const started = session.start();
+      socket.open();
+      serverHydrate(socket);
+      await vi.advanceTimersByTimeAsync(5);
+      await started;
+      await vi.advanceTimersByTimeAsync(0);
+      await sinksRef!.onPcmFrame(pcmFrame('tab', 0));
+      const closingAt = Date.now();
+      socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(closingAt + 10_000).toISOString() }));
+      await vi.advanceTimersByTimeAsync(4 * 824 + 100);
+      expect(session.state()).toBe('stopped');
+      expect(Date.now() - closingAt).toBeLessThan(10_000);
+      expect(maxRecordingInFlight).toBe(1);
+      expect(binaryKinds.filter((kind) => kind.startsWith('webm:'))).toHaveLength(4);
+      const pcmIndex = binaryKinds.findIndex((kind) => kind.startsWith('pcm:'));
+      expect(pcmIndex).toBe(1);
+      expect(pcmIndex).toBeLessThan(binaryKinds.length - 1);
+      expect(events.filter((event) => event === 'recording_eof')).toEqual(['recording_eof', 'recording_eof']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts each queued WebM ACK timer only after it acquires the global receipt permit', async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSocket();
+      const failures: string[] = [];
+      const sentSequences: number[] = [];
+      socket.send = (data) => {
+        socket.sent.push(data);
+        if (!(data instanceof Uint8Array)) return;
+        const binary = decodeDialpadBrowserBinary(data);
+        if (binary.kind !== 'recording') return;
+        sentSequences.push(binary.sequence);
+        setTimeout(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })), 40);
+      };
+      let deliveries: Promise<void> | undefined;
+      const session = createDialpadBrowserSession({
+        endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 50,
+        onFailure: (error) => failures.push(error.code),
+        capture: fakeCapture((sinks) => {
+          void sinks.onTrackFormat?.(format('tab'));
+          void sinks.onTrackFormat?.(format('mic'));
+          deliveries = Promise.all([
+            sinks.onWebmChunk({ track: 'tab', epoch: 1, seq: 0, blob: new Blob(['first']), byteLength: 5 }),
+            sinks.onWebmChunk({ track: 'mic', epoch: 1, seq: 0, blob: new Blob(['second']), byteLength: 6 }),
+          ]).then(() => undefined);
+        }),
+      });
+      const started = session.start();
+      socket.open();
+      serverHydrate(socket);
+      await vi.advanceTimersByTimeAsync(5);
+      await started;
+      await vi.advanceTimersByTimeAsync(40);
+      expect(sentSequences).toEqual([0, 0]);
+      await vi.advanceTimersByTimeAsync(40);
+      await deliveries;
+      expect(failures).toEqual([]);
+      await session.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps WebM receipt permits independent across concurrent sessions', async () => {
+    vi.useFakeTimers();
+    try {
+      const sockets = [new FakeSocket(), new FakeSocket()];
+      const sessions = sockets.map((socket, index) => createDialpadBrowserSession({
+        endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 100,
+        capture: fakeCapture((sinks) => {
+          void sinks.onTrackFormat?.(format('tab'));
+          void sinks.onTrackFormat?.(format('mic'));
+          void sinks.onWebmChunk({ track: 'tab', epoch: 1, seq: index, blob: new Blob([`session-${index}`]), byteLength: `session-${index}`.length });
+        }),
+      }));
+      const starts = sessions.map((session, index) => {
+        const started = session.start();
+        sockets[index]!.open();
+        serverHydrate(sockets[index]!);
+        return started;
+      });
+      await vi.advanceTimersByTimeAsync(5);
+      await Promise.all(starts);
+      expect(sockets.map((socket) => binarySent(socket).length)).toEqual([1, 1]);
+      for (const socket of sockets) {
+        const binary = decodeDialpadBrowserBinary(binarySent(socket)[0]!);
+        socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' }));
+      }
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.all(sessions.map((session) => session.dispose()));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each(['timedOut', 'deliveryTimedOut'] as const)('suppresses recording EOF for durable WebM when the %s PCM tail is incomplete', async (timeoutField) => {
     const socket = new FakeSocket();
     const originalSend = socket.send.bind(socket);
@@ -475,6 +627,197 @@ describe('Dialpad browser session', () => {
     expect(session.state()).toBe('stopped');
   });
 
+  it('fails closed when an EOF acknowledgement crosses the one finalization deadline', async () => {
+    const socket = new FakeSocket();
+    const failures: string[] = [];
+    let stoppedNotifications = 0;
+    let finalizationDeadlineAt = Number.POSITIVE_INFINITY;
+    const originalSend = socket.send.bind(socket);
+    socket.send = (data) => {
+      originalSend(data);
+      if (data instanceof Uint8Array) {
+        const binary = decodeDialpadBrowserBinary(data);
+        if (binary.kind === 'recording') queueMicrotask(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })));
+        return;
+      }
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; track?: 'tab' | 'mic'; lastSeq?: number; endSample?: number };
+      if (message.type === 'recording_eof') {
+        setTimeout(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })), Math.max(5, finalizationDeadlineAt - Date.now() + 10));
+      } else if (message.type === 'pcm_eof') {
+        setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })), Math.max(5, finalizationDeadlineAt - Date.now() + 10));
+      }
+    };
+    const tail = (track: 'tab' | 'mic'): PcmTailReport => ({
+      track, epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0,
+    });
+    const capture: PreparedDialpadCapture = {
+      proof: { handle: 'h', origin: 'https://app.example.test' },
+      start: async (sinks) => {
+        if (!sinks) throw new Error('finalization test requires network sinks');
+        await sinks.onTrackFormat?.(format('tab'));
+        await sinks.onTrackFormat?.(format('mic'));
+        await sinks.onWebmChunk?.({ track: 'tab', epoch: 1, seq: 0, blob: new Blob(['tab-webm']), byteLength: 8 });
+        await sinks.onWebmChunk?.({ track: 'mic', epoch: 1, seq: 0, blob: new Blob(['mic-webm']), byteLength: 8 });
+        await sinks.onPcmTail?.(tail('tab'));
+        await sinks.onPcmTail?.(tail('mic'));
+        return { state: () => 'recording' as const, stop: async () => undefined, dispose: async () => undefined };
+      },
+      dispose: async () => undefined,
+    };
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket,
+      ackTimeoutMs: 500, onFailure: (error) => failures.push(error.code), onStopped: () => { stoppedNotifications += 1; }, capture,
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    finalizationDeadlineAt = Date.now() + 40;
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(finalizationDeadlineAt).toISOString() }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await session.stop();
+    expect(session.state()).toBe('failed');
+    expect(failures).toContain('timeout');
+    expect(stoppedNotifications).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 170));
+    expect(session.state()).toBe('failed');
+  });
+
+  it('fails an in-flight EOF wait when closing tightens the fallback deadline', async () => {
+    const socket = new FakeSocket();
+    const failures: string[] = [];
+    let stoppedNotifications = 0;
+    const originalSend = socket.send.bind(socket);
+    socket.send = (data) => {
+      originalSend(data);
+      if (data instanceof Uint8Array) {
+        const binary = decodeDialpadBrowserBinary(data);
+        if (binary.kind === 'recording') queueMicrotask(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })));
+        return;
+      }
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; track?: 'tab' | 'mic'; lastSeq?: number; endSample?: number };
+      if (message.type === 'recording_eof') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(Date.now() + 40).toISOString() })));
+        setTimeout(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })), 80);
+      } else if (message.type === 'pcm_eof') {
+        setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })), 80);
+      }
+    };
+    const tail = (track: 'tab' | 'mic'): PcmTailReport => ({
+      track, epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0,
+    });
+    const capture: PreparedDialpadCapture = {
+      proof: { handle: 'h', origin: 'https://app.example.test' },
+      start: async (sinks) => {
+        if (!sinks) throw new Error('finalization test requires network sinks');
+        await sinks.onTrackFormat?.(format('tab'));
+        await sinks.onTrackFormat?.(format('mic'));
+        await sinks.onWebmChunk?.({ track: 'tab', epoch: 1, seq: 0, blob: new Blob(['tab-webm']), byteLength: 8 });
+        await sinks.onPcmTail?.(tail('tab'));
+        await sinks.onPcmTail?.(tail('mic'));
+        return { state: () => 'recording' as const, stop: async () => undefined, dispose: async () => undefined };
+      },
+      dispose: async () => undefined,
+    };
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket,
+      ackTimeoutMs: 500, onFailure: (error) => failures.push(error.code), onStopped: () => { stoppedNotifications += 1; }, capture,
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    await session.stop();
+    expect(session.state()).toBe('failed');
+    expect(failures).toContain('timeout');
+    expect(stoppedNotifications).toBe(0);
+  });
+
+  it('does not grant finish timing a fresh ACK budget after the finalization deadline', async () => {
+    const socket = new FakeSocket();
+    const failures: string[] = [];
+    const originalSend = socket.send.bind(socket);
+    socket.send = (data) => {
+      originalSend(data);
+      if (data instanceof Uint8Array) {
+        const binary = decodeDialpadBrowserBinary(data);
+        if (binary.kind === 'recording') queueMicrotask(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })));
+        return;
+      }
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; seq?: number };
+      if (message.type === 'timing_probe') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_probe_reply', epoch: 1, seq: message.seq, nonce: 'd'.repeat(64), serverClockId: '00000000-0000-4000-8000-000000000003', serverReceiveMonoMs: 1, serverSendMonoMs: 2, serverReceiveWallMs: 100, serverSendWallMs: 90 })));
+      } else if (message.type === 'timing_confirm') {
+        queueMicrotask(() => socket.message(JSON.stringify({ type: 'timing_exchange_ack', epoch: 1, seq: message.seq, status: 'recorded' })));
+      } else if (message.type === 'timing_end') {
+        setTimeout(() => socket.message(JSON.stringify({ type: 'timing_end_ack', epoch: 1, status: 'collected', reasons: [] })), 150);
+      }
+    };
+    const capture = fakeCapture((sinks) => {
+      void sinks.onTrackFormat?.(format('tab'));
+      void sinks.onTrackFormat?.(format('mic'));
+      void sinks.onWebmChunk?.({ track: 'tab', epoch: 1, seq: 0, blob: new Blob(['tab-webm']), byteLength: 8 });
+      void sinks.onPcmTail?.({ track: 'tab', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 });
+      void sinks.onPcmTail?.({ track: 'mic', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 });
+    });
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, enableTiming: true, ackTimeoutMs: 500,
+      onFailure: (error) => failures.push(error.code), capture,
+    });
+    const started = session.start();
+    socket.open();
+    socket.message(JSON.stringify({ type: 'ready', epoch: 1, controlVersion: 2, capabilities: ['capture_timing_v1'] }));
+    socket.message(JSON.stringify({ type: 'measurement_snapshot', epoch: 1, revision: 0, totalSamples: 0, measurementStatus: 'provisional', threshold: { crossed: false, crossingEpoch: null, crossingSample: null }, degradedReasons: [] }));
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'open', drainDeadlineAt: null }));
+    await started;
+    await waitUntil(() => socket.sent.some((entry) => typeof entry === 'string' && JSON.parse(entry).type === 'timing_confirm'));
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(Date.now() + 40).toISOString() }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await session.stop();
+    expect(session.state()).toBe('failed');
+    expect(failures).toContain('timeout');
+    expect(socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry).type)).not.toContain('recording_eof');
+  });
+
+  it('completes all final controls when they fit inside the shared deadline', async () => {
+    const socket = new FakeSocket();
+    let stoppedNotifications = 0;
+    const originalSend = socket.send.bind(socket);
+    socket.send = (data) => {
+      originalSend(data);
+      if (data instanceof Uint8Array) {
+        const binary = decodeDialpadBrowserBinary(data);
+        if (binary.kind === 'recording') queueMicrotask(() => socket.message(JSON.stringify({ type: 'recording_chunk_ack', track: binary.track, epoch: 1, seq: binary.sequence, status: 'recorded' })));
+        return;
+      }
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data) as { type?: string; track?: 'tab' | 'mic'; lastSeq?: number; endSample?: number };
+      if (message.type === 'recording_eof') queueMicrotask(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })));
+      if (message.type === 'pcm_eof') queueMicrotask(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })));
+    };
+    const capture = fakeCapture((sinks) => {
+      void sinks.onTrackFormat?.(format('tab'));
+      void sinks.onTrackFormat?.(format('mic'));
+      void sinks.onWebmChunk?.({ track: 'tab', epoch: 1, seq: 0, blob: new Blob(['tab-webm']), byteLength: 8 });
+      void sinks.onWebmChunk?.({ track: 'mic', epoch: 1, seq: 0, blob: new Blob(['mic-webm']), byteLength: 8 });
+      void sinks.onPcmTail?.({ track: 'tab', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 });
+      void sinks.onPcmTail?.({ track: 'mic', epoch: 1, sourceSampleRateHz: 48_000, totalInputSamples: 0, creditedSamples: 0, uncreditedTailSamples: 0 });
+    });
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 100, onStopped: () => { stoppedNotifications += 1; }, capture });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(Date.now() + 500).toISOString() }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await session.stop();
+    expect(session.state()).toBe('stopped');
+    expect(stoppedNotifications).toBe(1);
+  });
+
   it('fails closed when a chunk ACK does not arrive before the bounded deadline', async () => {
     const failures: string[] = [];
     const socket = new FakeSocket();
@@ -494,6 +837,169 @@ describe('Dialpad browser session', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(session.state()).toBe('failed');
     expect(failures).toContain('timeout');
+  });
+
+  it('releases queued WebM permit waiters on abortive disposal', async () => {
+    const socket = new FakeSocket();
+    let deliveries!: Promise<unknown>;
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 500,
+      capture: fakeCapture((sinks) => {
+        void sinks.onTrackFormat?.(format('tab'));
+        void sinks.onTrackFormat?.(format('mic'));
+        const first = Promise.resolve(sinks.onWebmChunk({ track: 'tab', epoch: 1, seq: 0, blob: new Blob(['first']), byteLength: 5 })).catch(() => undefined);
+        const second = Promise.resolve(sinks.onWebmChunk({ track: 'mic', epoch: 1, seq: 0, blob: new Blob(['second']), byteLength: 6 })).catch(() => undefined);
+        deliveries = Promise.allSettled([first, second]);
+      }),
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    await session.dispose();
+    await deliveries;
+    expect(session.state()).toBe('stopped');
+  });
+
+  it('fails closed and releases the active permit when the recording queue overflows', async () => {
+    const socket = new FakeSocket();
+    const failures: string[] = [];
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, maxBufferedBytes: 1,
+      onFailure: (error) => failures.push(error.code),
+      capture: fakeCapture((sinks) => {
+        void sinks.onTrackFormat?.(format('tab'));
+        void sinks.onTrackFormat?.(format('mic'));
+        void Promise.resolve(sinks.onWebmChunk({ track: 'tab', epoch: 1, seq: 0, blob: new Blob(['first']), byteLength: 5 })).catch(() => undefined);
+      }),
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await expect(started).rejects.toMatchObject({ code: 'queue_overflow' });
+    expect(failures).toContain('queue_overflow');
+    expect(session.state()).toBe('failed');
+  });
+
+  it('fails conservatively when the browser clock is ahead of the server drain deadline', async () => {
+    const socket = new FakeSocket();
+    const failures: string[] = [];
+    const session = createDialpadBrowserSession({
+      endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket,
+      onFailure: (error) => failures.push(error.code), capture: fakeCapture(() => {}),
+    });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    const serverDeadlineAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(serverDeadlineAt + 10_000);
+    try {
+      socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(serverDeadlineAt).toISOString() }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(session.state()).toBe('failed');
+      expect(failures).toContain('timeout');
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('does not extend the first server drain deadline when closing is repeated', async () => {
+    const socket = new FakeSocket();
+    let releaseStop!: () => void;
+    const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+    const stopOptions: Array<number | undefined> = [];
+    const capture: PreparedDialpadCapture = {
+      proof: { handle: 'h', origin: 'https://app.example.test' },
+      start: async () => ({
+        state: () => 'recording' as const,
+        stop: async (options) => { stopOptions.push(options?.drainDeadlineAt); await stopGate; },
+        dispose: async () => undefined,
+      }),
+      dispose: async () => undefined,
+    };
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, capture });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    const firstDeadline = Date.now() + 1_000;
+    const laterDeadline = Date.now() + 20_000;
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(firstDeadline).toISOString() }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(laterDeadline).toISOString() }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stopOptions).toHaveLength(1);
+    expect(stopOptions[0]).toBeLessThanOrEqual(firstDeadline);
+    expect(stopOptions[0]).toBeGreaterThan(firstDeadline - 100);
+    releaseStop();
+    await session.stop();
+  });
+
+  it('tightens the shared deadline when an earlier closing arrives during local capture stop', async () => {
+    const socket = new FakeSocket();
+    const failures: string[] = [];
+    let stopStarted = false;
+    let releaseStop!: () => void;
+    const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+    const capture: PreparedDialpadCapture = {
+      proof: { handle: 'h', origin: 'https://app.example.test' },
+      start: async () => ({
+        state: () => 'recording' as const,
+        stop: async () => { stopStarted = true; await stopGate; },
+        dispose: async () => undefined,
+      }),
+      dispose: async () => undefined,
+    };
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, capture, onFailure: (error) => failures.push(error.code) });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    const firstDeadlineAt = Date.now() + 500;
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(firstDeadlineAt).toISOString() }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitUntil(() => stopStarted);
+    const earlierDeadlineAt = Date.now() + 40;
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(earlierDeadlineAt).toISOString() }));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    releaseStop();
+    const stopping = session.stop();
+    await stopping;
+    expect(session.state()).toBe('failed');
+    expect(failures).toContain('timeout');
+  });
+
+  it('caps a far-future server timestamp to the local drain bound', async () => {
+    const socket = new FakeSocket();
+    let releaseStop!: () => void;
+    const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+    let observedDeadline: number | undefined;
+    const capture: PreparedDialpadCapture = {
+      proof: { handle: 'h', origin: 'https://app.example.test' },
+      start: async () => ({
+        state: () => 'recording' as const,
+        stop: async (options) => { observedDeadline = options?.drainDeadlineAt; await stopGate; },
+        dispose: async () => undefined,
+      }),
+      dispose: async () => undefined,
+    };
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, capture });
+    const started = session.start();
+    socket.open();
+    serverHydrate(socket);
+    await started;
+    const localNow = Date.now();
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closing', drainDeadlineAt: new Date(localNow + 300_000).toISOString() }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(observedDeadline).toBeLessThanOrEqual(localNow + 30_001);
+    expect(observedDeadline).toBeGreaterThan(localNow);
+    socket.message(JSON.stringify({ type: 'capture_state', epoch: 1, latestConsumedEpoch: 1, state: 'closed', drainDeadlineAt: null }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.state()).toBe('failed');
+    expect(socket.sent.filter((entry): entry is string => typeof entry === 'string').map((entry) => JSON.parse(entry).type)).not.toContain('recording_eof');
+    releaseStop();
+    await session.stop();
   });
 
   it('pipelines a dual-track prefix beyond 64 frames behind a global 32-frame PCM receipt window', async () => {

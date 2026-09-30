@@ -246,6 +246,70 @@ describe("Dialpad browser capture proof", () => {
 });
 
 describe("MediaRecorderCollector", () => {
+  it("uses a five second default cadence while retaining an explicit override", async () => {
+    const recorder = new FakeRecorder();
+    const collector = new MediaRecorderCollector({
+      track: "tab",
+      stream: {} as MediaStream,
+      createRecorder: () => recorder,
+      onChunk: () => undefined,
+      finalizationWaitMs: 0,
+    });
+    collector.start(1);
+    await collector.stop();
+    expect(recorder.timeslices).toEqual([5_000]);
+  });
+
+  it("keeps the local recorder stop bound separate from a supplied chunk drain deadline", async () => {
+    const recorder = new FakeRecorder();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const collector = new MediaRecorderCollector({
+      track: "tab",
+      stream: {} as MediaStream,
+      createRecorder: () => recorder,
+      onChunk: async () => { await held; },
+      stopTimeoutMs: 10,
+      finalizationWaitMs: 0,
+    });
+    collector.start(1);
+    recorder.emit(new Blob(["accepted-before-stop"]));
+    await Promise.resolve();
+    const stopping = collector.stop({ drainDeadlineAt: Date.now() + 150 });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(collector.state).toBe("stopping");
+    release();
+    await stopping;
+    expect(collector.state).toBe("stopped");
+  });
+
+  it("keeps a delayed recorder stop bounded independently of the delivery deadline", async () => {
+    class DelayedStopRecorder extends EventTarget implements MediaRecorderLike {
+      state = "inactive";
+      start() { this.state = "recording"; }
+      stop() {
+        this.state = "inactive";
+        setTimeout(() => this.dispatchEvent(new Event("stop")), 30);
+      }
+    }
+    const recorder = new DelayedStopRecorder();
+    const failures: BrowserCaptureError[] = [];
+    const collector = new MediaRecorderCollector({
+      track: "tab",
+      stream: {} as MediaStream,
+      createRecorder: () => recorder,
+      onChunk: () => undefined,
+      onFailure: (error) => failures.push(error),
+      stopTimeoutMs: 10,
+      finalizationWaitMs: 0,
+    });
+    collector.start(1);
+    await collector.stop({ drainDeadlineAt: Date.now() + 150 });
+    expect(failures[0]?.code).toBe("timeout");
+    expect(collector.state).toBe("interrupted");
+    await new Promise((resolve) => setTimeout(resolve, 35));
+  });
+
   it("preserves delayed final data and splits oversized blobs without changing bytes", async () => {
     const first = new Uint8Array(MAX_MEDIA_CHUNK_BYTES + 3).map((_, index) => index % 251);
     const final = new Uint8Array(MAX_MEDIA_CHUNK_BYTES + 17).map((_, index) => (index + 17) % 251);
