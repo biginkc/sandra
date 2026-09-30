@@ -34,6 +34,22 @@ function status(state: InboxReplyStatus["receipts"][number]["state"], version = 
   };
 }
 
+function bulkStatus(states: readonly InboxReplyStatus["receipts"][number]["state"][]): InboxReplyStatus {
+  const base = status(states[0]);
+  const items = states.map((_, index) => ({
+    ...base.items[0],
+    id: `${itemId.slice(0, -1)}${index + 3}`,
+    target: { kind: "conversation" as const, id: `${conversationId.slice(0, -1)}${index + 1}` },
+    recipient: { ...base.items[0].recipient!, contactName: `Recipient ${index + 1}` },
+  }));
+  return {
+    ...base,
+    dispatchComplete: states.every(receiptState => ["provider_accepted", "delivered", "delivery_failed", "rejected_unsent", "confirmed_not_submitted"].includes(receiptState)),
+    items,
+    receipts: states.map((receiptState, index) => ({ itemId: items[index].id, attemptId: null, version: "1", state: receiptState, reason: receiptState === "uncertain" ? "reentered_without_result" : null })),
+  };
+}
+
 function mountReceipt() {
   return render(<InboxReplyReceipt operationId={operationId} />);
 }
@@ -69,10 +85,20 @@ describe("InboxReplyReceipt", () => {
     const fetcher = vi.mocked(fetch).mockResolvedValue(Response.json(status("blocked")));
     mountReceipt();
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(screen.getByText("Some not sent")).toBeVisible();
-    expect(screen.getByText("Not sent")).toBeVisible();
+    expect(screen.getAllByText("Not sent").length).toBeGreaterThan(0);
     expect(screen.queryByText("Still sending…")).not.toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the mixed not-confirmed bulk banner amber instead of pending blue", async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.mocked(fetch).mockResolvedValue(Response.json(bulkStatus(["delivered", "uncertain", "pending"])));
+    mountReceipt();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const banner = screen.getByText("Some not confirmed, do not resend").closest("section");
+    expect(banner).toHaveClass(/uncertain/);
+    expect(banner).not.toHaveClass(/receiptPending/);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
@@ -134,9 +160,9 @@ describe("InboxReplyReceipt", () => {
 
   it("does not allow production callers to hydrate the composer", () => {
     // @ts-expect-error initialState is intentionally preview-only.
-    const rejectedProductionProps: Parameters<typeof InboxReplyComposer>[0] = { targets: [{ kind: "conversation", id: conversationId }], enabled: true, initialState: { phase: "sent", draft: "Draft", operationId, status: status("delivered") } };
+    const rejectedProductionProps: Parameters<typeof InboxReplyComposer>[0] = { targets: [{ kind: "conversation", id: conversationId }], enabled: true, initialState: { phase: "sending", draft: "Draft", operationId, status: status("delivered") } };
     expect(rejectedProductionProps).toHaveProperty("initialState");
-    const productionProps = { targets: [{ kind: "conversation" as const, id: conversationId }], enabled: true, initialState: { phase: "sent" as const, draft: "Draft", operationId, status: status("delivered") } } as unknown as Parameters<typeof InboxReplyComposer>[0];
+    const productionProps = { targets: [{ kind: "conversation" as const, id: conversationId }], enabled: true, initialState: { phase: "sending" as const, draft: "Draft", operationId, status: status("delivered") } } as unknown as Parameters<typeof InboxReplyComposer>[0];
     render(<InboxReplyComposer {...productionProps} />);
     expect(screen.getByRole("button", { name: "Review reply" })).toBeVisible();
     expect(screen.queryByText("Delivered")).not.toBeInTheDocument();

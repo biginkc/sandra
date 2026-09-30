@@ -96,7 +96,8 @@ function ReplyReceiptView({ operationId, fetcher = fetch, initialTracker, initia
   const hasNotSent = !!rollup && rollup.counts.blocked + rollup.counts.failed > 0;
   const alert = !!error || !!rollup?.hasServerNotConfirmed || !!rollup?.hasTimeoutNotConfirmed || hasNotSent || notConfirmed;
   const headline = rollup?.keepPolling && !rollup.hasServerNotConfirmed && !rollup.hasTimeoutNotConfirmed ? "Still sending…" : rollup?.headline;
-  const receiptClass = `${styles.receipt} ${stillSending ? styles.receiptPending : ""} ${notConfirmed || hasNotSent ? styles.uncertain : ""}`;
+  const rollupWarning = !!rollup && (rollup.hasServerNotConfirmed || rollup.hasTimeoutNotConfirmed || hasNotSent);
+  const receiptClass = `${styles.receipt} ${stillSending && !rollupWarning ? styles.receiptPending : ""} ${notConfirmed || rollupWarning ? styles.uncertain : ""}`;
 
   return <main className="mx-auto max-w-4xl space-y-6 p-6" data-testid="inbox-reply-receipt">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm text-muted-foreground">Sandra Inbox</p><h1 className="text-2xl font-semibold">Reply receipt</h1><p className="break-all text-xs text-muted-foreground">Operation {operationId}</p></div><a className="rounded border px-3 py-2 text-sm" href="/inbox">← Inbox</a></div>

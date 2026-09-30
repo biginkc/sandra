@@ -64,21 +64,10 @@ describe("review-before-send state machine", () => {
     expect(state.status).toBe(statusValue);
   });
 
-  it("enters sent only from a terminal receipt", () => {
-    const state = replyStateReducer(
-      { ...initialReplyState("Hello"), phase: "sending", operationId: "operation-1", review: review() },
-      { type: "receipt", status: status({
-        operationId: "operation-1", preparationId: "00000000-0000-4000-8000-000000000001", dispatchComplete: true,
-        items: prepared().items, receipts: [{ itemId: prepared().items[0].id, attemptId: null, version: "1", state: "delivered", reason: null }],
-      }) },
-    );
-    expect(state.phase).toBe("sent");
-  });
-
-  it.each(["pending", "dispatch_started", "uncertain"] as const)(
-    "classifies a %s receipt as uncertain and never as sent",
+  it.each(["pending", "dispatch_started", "provider_accepted", "delivered", "delivery_failed", "uncertain", "blocked", "confirmed_not_submitted", "rejected_unsent"] as const)(
+    "stores a %s receipt without classifying the composer phase",
     (receiptState) => {
-      // MUTATION M3 GUARD: forcing receipt handling to "sent" must fail every case here.
+      // MUTATION GUARD: restoring all-final => sent must fail this test.
       const state = replyStateReducer(
         { ...initialReplyState("Hello"), phase: "sending", operationId: "operation-1", review: review() },
         { type: "receipt", status: status({
@@ -86,7 +75,7 @@ describe("review-before-send state machine", () => {
           items: prepared().items, receipts: [{ itemId: prepared().items[0].id, attemptId: null, version: "1", state: receiptState, reason: null }],
         }) },
       );
-      expect(state.phase).toBe("uncertain");
+      expect(state.phase).toBe("sending");
       expect(state.phase).not.toBe("sent");
     },
   );

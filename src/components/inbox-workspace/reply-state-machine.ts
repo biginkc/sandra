@@ -2,13 +2,11 @@ import type {
   InboxReplyStatus,
   PreparedInboxReply,
 } from "@/lib/inbox/reply-api-contract";
-import { isTerminalReceiptStatus } from "./reply-receipt-policy";
 
 export type ReplyPhase =
   | "ready"
   | "reviewing"
   | "sending"
-  | "sent"
   | "blocked"
   | "route_changed"
   | "uncertain"
@@ -120,10 +118,9 @@ export function replyStateReducer(
     case "receipt":
       return {
         ...state,
-        // The shared policy is the only receipt-state classifier. A receipt
-        // event is expected to be terminal; fail closed if a caller violates
-        // that contract (report §(e)).
-        phase: isTerminalReceiptStatus(event.status) ? "sent" : "uncertain",
+        // Receipt classification belongs to reply-receipt-policy. Keep the
+        // transport phase unchanged and let the composer derive its badge and
+        // controls from the shared rollup.
         status: event.status,
         message: undefined,
       };

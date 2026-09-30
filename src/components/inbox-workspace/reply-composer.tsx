@@ -9,14 +9,17 @@ import {
   type PreparedInboxReply,
   type PreparedInboxReplyItem,
 } from "@/lib/inbox/reply-api-contract";
-import { initialReplyState, replyStateReducer, type ReplyReview, type ReplyState } from "./reply-state-machine";
+import { initialReplyState, replyStateReducer, type ReplyPhase, type ReplyReview, type ReplyState } from "./reply-state-machine";
 import {
   classifyReceipt,
   MAX_POLL_DURATION_MS,
   receiptItemViews,
   receiptPollDelay,
+  receiptRollupBadge,
   receiptRollup,
   receiptRollupCopy,
+  type ReceiptBadge,
+  type ReceiptBadgeTone,
   type ReceiptPollTracker,
 } from "./reply-receipt-policy";
 import styles from "./reply-composer.module.css";
@@ -153,6 +156,28 @@ function statusMessage(status: InboxReplyStatus): string {
   return receiptRollupCopy(receiptRollup(status));
 }
 
+function phaseBadge(phase: ReplyPhase): ReceiptBadge {
+  switch (phase) {
+    case "reviewing": return { label: "Reviewing", tone: "pending" };
+    case "sending": return { label: "Sending", tone: "pending" };
+    case "blocked": return { label: "Blocked", tone: "blocked" };
+    case "uncertain": return { label: "Not confirmed", tone: "uncertain" };
+    case "route_changed": return { label: "Review discarded", tone: "mixed" };
+    case "network_error": return { label: "Review unavailable", tone: "failed" };
+    case "ready": return { label: "Ready", tone: "neutral" };
+  }
+}
+
+const badgeStyles: Record<ReceiptBadgeTone, string> = {
+  success: styles.success,
+  pending: styles.pending,
+  blocked: styles.blocked,
+  failed: styles.failed,
+  uncertain: styles.uncertainBadge,
+  mixed: styles.mixed,
+  neutral: "",
+};
+
 function PreparedReview({ prepared, names, onEdit, onSend, sending, bulk }: { prepared: PreparedInboxReply; names?: ReadonlyMap<string, string>; onEdit: () => void; onSend: () => void; sending: boolean; bulk: boolean }) {
   const eligible = prepared.items.filter(item => item.exclusion === null && item.recipient !== null);
   return <section className={styles.review} aria-label="Review reply">
@@ -177,7 +202,8 @@ function ReceiptSummary({ status, operationId, bulk, sending = false, uncertainR
   const rollup = status ? receiptRollup(status, timedOut) : null;
   const hasNotConfirmed = uncertainResult || !!rollup?.hasServerNotConfirmed || !!rollup?.hasTimeoutNotConfirmed;
   const hasNotSent = !!rollup && rollup.counts.blocked + rollup.counts.failed > 0;
-  const stillSending = sending && !!rollup?.keepPolling;
+  const warning = hasNotConfirmed || hasNotSent;
+  const stillSending = sending && !!rollup?.keepPolling && !warning;
   const headline = rollup?.keepPolling && !hasNotConfirmed ? "Still sending…" : rollup?.headline;
   return <section className={`${styles.receipt} ${stillSending ? styles.receiptPending : ""} ${hasNotConfirmed || hasNotSent ? styles.uncertain : ""}`} role={hasNotConfirmed || hasNotSent ? "alert" : "status"}>
     <strong>{headline ?? (uncertainResult ? "Send result not confirmed" : "Checking receipt")}</strong>
@@ -309,16 +335,19 @@ function ReplyComposer({ targets, names, enabled = false, routeKey = "route-unkn
   if (!enabled) return null;
   const review = state.review?.prepared;
   const reviewBusy = state.phase === "reviewing" && !review;
-  const sent = state.phase === "sent" || state.phase === "uncertain";
+  const rollup = state.status ? receiptRollup(state.status, state.phase === "uncertain") : null;
+  const badge = rollup ? receiptRollupBadge(rollup) : phaseBadge(state.phase);
+  const receiptSettled = !!rollup && !rollup.keepPolling;
+  const composerFinished = receiptSettled || state.phase === "uncertain";
   return <section className={styles.composer} aria-label={bulk ? "Reply to selected conversations" : "Reply to conversation"}>
-    <div className={styles.heading}><div><span className={styles.eyebrow}>{bulk ? "BULK REPLY" : "SINGLE REPLY"}</span><h3>{bulk ? `Reply to ${targets.length} selected conversations` : `Reply to ${names?.get(targetKey(targets[0])) ?? "this conversation"}`}</h3></div><span className={`${styles.state} ${["blocked", "route_changed", "network_error", "uncertain"].includes(state.phase) ? styles.warning : state.phase === "sent" ? styles.success : ""}`}>{state.phase === "route_changed" ? "Review discarded" : state.phase.replaceAll("_", " ")}</span></div>
+    <div className={styles.heading}><div><span className={styles.eyebrow}>{bulk ? "BULK REPLY" : "SINGLE REPLY"}</span><h3>{bulk ? `Reply to ${targets.length} selected conversations` : `Reply to ${names?.get(targetKey(targets[0])) ?? "this conversation"}`}</h3></div><span data-testid="reply-composer-status-badge" data-badge-tone={badge.tone} className={`${styles.state} ${badgeStyles[badge.tone]}`}>{badge.label}</span></div>
     {state.phase === "route_changed" && <div className={styles.notice} role="alert"><strong>Review discarded</strong><p>{state.message}</p><p>Nothing was sent. Review the current route and message again.</p></div>}
     {state.phase === "network_error" && <div className={styles.error} role="alert"><strong>Review unavailable</strong><p>{state.message}</p><p>No send was started from this screen. Reconnect and review again.</p></div>}
     {state.phase === "uncertain" && !state.status && <div className={styles.notice} role="alert"><strong>Send result not confirmed</strong><p>{state.message}</p><p>Do not resend. Check the conversation or receipt manually.</p></div>}
-    {!sent && <><label className={styles.label} htmlFor={bulk ? "bulk-reply-message" : "single-reply-message"}>Message</label><textarea id={bulk ? "bulk-reply-message" : "single-reply-message"} className={styles.textarea} aria-label="Reply message" rows={3} maxLength={MAX_BODY} value={state.draft} disabled={reviewBusy || state.phase === "sending" || state.phase === "blocked"} onChange={event => dispatch({ type: "edit", draft: event.target.value })} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void reviewReply(); } }} placeholder="Write a reply…" />
+    {!composerFinished && <><label className={styles.label} htmlFor={bulk ? "bulk-reply-message" : "single-reply-message"}>Message</label><textarea id={bulk ? "bulk-reply-message" : "single-reply-message"} className={styles.textarea} aria-label="Reply message" rows={3} maxLength={MAX_BODY} value={state.draft} disabled={reviewBusy || state.phase === "sending" || state.phase === "blocked"} onChange={event => dispatch({ type: "edit", draft: event.target.value })} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void reviewReply(); } }} placeholder="Write a reply…" />
       <div className={styles.footer}><span className={styles.counter}>{state.draft.length} / {MAX_BODY} characters{bulk ? ` · ${targets.length} selected` : ""}</span>{state.phase !== "reviewing" && state.phase !== "blocked" && state.phase !== "sending" && <button type="button" className={styles.primary} onClick={() => void reviewReply()} disabled={!state.draft.trim() || reviewBusy}>{reviewBusy ? "Checking…" : "Review reply"}</button>}</div></>}
     {reviewBusy && <p className={styles.notice} role="status">Checking current eligibility and recipient routes…</p>}
-    {review && !sent && <PreparedReview prepared={review} names={names} onEdit={() => dispatch({ type: "edit", draft: state.draft })} onSend={() => void sendReply()} sending={state.phase === "sending"} bulk={bulk} />}
+    {review && !composerFinished && <PreparedReview prepared={review} names={names} onEdit={() => dispatch({ type: "edit", draft: state.draft })} onSend={() => void sendReply()} sending={state.phase === "sending"} bulk={bulk} />}
     {!review && state.message && state.phase === "blocked" && <p className={styles.error} role="alert">{state.message}</p>}
     {(state.status || state.operationId) && <ReceiptSummary status={state.status} operationId={state.operationId} bulk={bulk} sending={state.phase === "sending"} uncertainResult={state.phase === "uncertain"} message={state.message} />}
     {onClose && <button className={styles.secondary} type="button" onClick={onClose}>Close</button>}

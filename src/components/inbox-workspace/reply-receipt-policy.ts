@@ -86,11 +86,18 @@ export type ReceiptRollupCounts = {
 
 export type ReceiptRollup = {
   counts: ReceiptRollupCounts;
-  headline: "Sending" | "Delivered" | "Some not sent" | "Some not confirmed, do not resend" | "Send result not confirmed" | "No eligible recipients";
+  headline: "Sending" | "Delivered" | "Not sent" | "Some not sent" | "Some not confirmed, do not resend" | "Send result not confirmed" | "No eligible recipients";
   keepPolling: boolean;
   hasServerNotConfirmed: boolean;
   hasTimeoutNotConfirmed: boolean;
   rows: readonly ReceiptItemView[];
+};
+
+export type ReceiptBadgeTone = "success" | "pending" | "blocked" | "failed" | "uncertain" | "mixed" | "neutral";
+
+export type ReceiptBadge = {
+  label: string;
+  tone: ReceiptBadgeTone;
 };
 
 export type ReceiptClassificationResult = {
@@ -245,11 +252,30 @@ export function receiptRollup(status: InboxReplyStatus, timedOut = false): Recei
       : hasTimeoutNotConfirmed
         ? "Send result not confirmed"
         : counts.blocked + counts.failed > 0
-          ? "Some not sent"
-          : counts.delivered > 0
-            ? "Delivered"
-            : "No eligible recipients";
+          ? receiptCount === 1 ? "Not sent" : "Some not sent"
+            : counts.delivered > 0
+              ? "Delivered"
+              : "No eligible recipients";
   return { counts, headline, keepPolling, hasServerNotConfirmed, hasTimeoutNotConfirmed, rows };
+}
+
+/**
+ * The composer badge is a policy presentation of the operation rollup, not a
+ * second receipt-state classifier. Keep these outcomes explicit so a terminal
+ * unsent receipt can never inherit a green `sent` phase label.
+ */
+export function receiptRollupBadge(rollup: ReceiptRollup): ReceiptBadge {
+  const { counts } = rollup;
+  const notConfirmed = counts.notConfirmedServer + counts.notConfirmedTimeout;
+  const receiptCount = counts.delivered + counts.sending + counts.failed + counts.blocked + notConfirmed;
+
+  if (receiptCount === 0) return { label: "No recipients", tone: "neutral" };
+  if (counts.delivered === receiptCount) return { label: "Delivered", tone: "success" };
+  if (counts.sending === receiptCount) return { label: "Sending", tone: "pending" };
+  if (counts.blocked === receiptCount) return { label: "Blocked", tone: "blocked" };
+  if (counts.failed === receiptCount) return { label: "Failed", tone: "failed" };
+  if (notConfirmed === receiptCount) return { label: "Not confirmed", tone: "uncertain" };
+  return { label: "Mixed", tone: "mixed" };
 }
 
 export function isTerminalReceiptStatus(status: InboxReplyStatus): boolean {

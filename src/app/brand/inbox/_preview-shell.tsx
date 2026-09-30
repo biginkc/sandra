@@ -90,7 +90,9 @@ function previewInitialState(state: InboxReplyPreviewState, targets: readonly In
   if (state === "checking") return { phase: "reviewing", draft };
   if (state === "reviewing" || state === "bulk-review") return { phase: "reviewing", draft, review };
   if (state === "sending") return { phase: "sending", draft, review, operationId, status: statusFor(prepared, "pending") };
-  if (state === "sent" || state === "bulk-receipt") return { phase: "sent", draft, operationId, status: statusFor(prepared, "delivered") };
+  if (state === "sent" || state === "bulk-receipt") return { phase: "sending", draft, operationId, status: statusFor(prepared, "delivered") };
+  if (state === "receipt-blocked") return { phase: "sending", draft, operationId, status: statusFor(prepared, "blocked") };
+  if (state === "receipt-confirmed-not-submitted") return { phase: "sending", draft, operationId, status: statusFor(prepared, "confirmed_not_submitted") };
   if (state === "uncertain") return { phase: "uncertain", draft, operationId, status: statusFor(prepared, "uncertain"), message: "The provider result is not yet confirmed. Do not resend this reply." };
   if (state === "route-changed") return { phase: "route_changed", draft, message: "The sending route changed. Review the current route before sending." };
   if (state === "network-error") return { phase: "network_error", draft, message: "Fixture network unavailable" };
@@ -136,7 +138,14 @@ export function InboxReplyPreview({ state }: { state: InboxReplyPreviewState }) 
     }
     if (url.includes("/replies/")) {
       const prepared = preparedFor(state, replyTargets, "fixture-idempotency-key");
-      return Response.json(statusFor(prepared, state === "uncertain" ? "uncertain" : "delivered"));
+      const receiptState = state === "uncertain"
+        ? "uncertain"
+        : state === "receipt-blocked"
+          ? "blocked"
+          : state === "receipt-confirmed-not-submitted"
+            ? "confirmed_not_submitted"
+            : "delivered";
+      return Response.json(statusFor(prepared, receiptState));
     }
     return Response.json({ boundaryId: fixture.boundaryId, batch: 0, changed: 0, completed: true });
   };

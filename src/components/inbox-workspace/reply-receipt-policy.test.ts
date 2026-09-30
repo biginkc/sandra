@@ -6,6 +6,7 @@ import {
   isTerminalReceiptStatus,
   receiptItemViews,
   receiptProgressFingerprint,
+  receiptRollupBadge,
   receiptRollup,
   type ReceiptClassification,
   type ReceiptRowClass,
@@ -119,6 +120,19 @@ describe("authoritative receipt policy truth table", () => {
     expect(rollup.headline).toBe("Some not sent");
     expect(rollup.keepPolling).toBe(false);
     expect(isTerminalReceiptStatus(value)).toBe(true);
+    expect(receiptRollup(status(["blocked"], { dispatchComplete: false, reasons: ["outside_window"] })).headline).toBe("Not sent");
+  });
+
+  it.each([
+    { name: "all delivered", states: ["delivered"] as const, label: "Delivered", tone: "success" },
+    { name: "provider accepted pending", states: ["provider_accepted"] as const, label: "Sending", tone: "pending" },
+    { name: "blocked only", states: ["blocked"] as const, label: "Blocked", tone: "blocked" },
+    { name: "failed only", states: ["delivery_failed"] as const, label: "Failed", tone: "failed" },
+    { name: "uncertain", states: ["uncertain"] as const, label: "Not confirmed", tone: "uncertain" },
+    { name: "mixed", states: ["delivered", "blocked"] as const, label: "Mixed", tone: "mixed" },
+  ])("maps the $name rollup to its own composer badge", ({ states, label, tone }) => {
+    const rollup = receiptRollup(status(states, { reasons: states.map(state => state === "blocked" ? "outside_window" : null) }));
+    expect(receiptRollupBadge(rollup)).toEqual({ label, tone });
   });
 
   it("15 resets only when a fingerprint field changes, not when receipts reorder", () => {

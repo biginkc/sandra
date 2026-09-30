@@ -20,6 +20,20 @@ function status(receiptState: InboxReplyStatus["receipts"][number]["state"]): In
   return { operationId, preparationId: "00000000-0000-4000-8000-000000000004", dispatchComplete: INBOX_REPLY_TERMINAL_RECEIPT_STATES.includes(receiptState as typeof INBOX_REPLY_TERMINAL_RECEIPT_STATES[number]), items: [prepared("00000000-0000-4000-8000-000000000007").items[0]], receipts: [{ itemId, attemptId: null, version: "1", state: receiptState, reason: receiptState === "uncertain" ? "provider timeout" : null }] };
 }
 
+function statusForStates(states: readonly InboxReplyStatus["receipts"][number]["state"][]): InboxReplyStatus {
+  const items = states.map((_, index) => {
+    const item = prepared(`00000000-0000-4000-8000-${String(index + 7).padStart(12, "0")}`).items[0];
+    return { ...item, id: `${item.id.slice(0, -1)}${index + 3}`, target: index === 0 ? target : targetFor(index + 1) };
+  });
+  return {
+    operationId,
+    preparationId: "00000000-0000-4000-8000-000000000004",
+    dispatchComplete: states.every(receiptState => INBOX_REPLY_TERMINAL_RECEIPT_STATES.includes(receiptState as typeof INBOX_REPLY_TERMINAL_RECEIPT_STATES[number])),
+    items,
+    receipts: states.map((receiptState, index) => ({ itemId: items[index].id, attemptId: null, version: "1", state: receiptState, reason: receiptState === "uncertain" ? "provider timeout" : null })),
+  };
+}
+
 function responseFor(url: string, init?: RequestInit, receiptState: InboxReplyStatus["receipts"][number]["state"] = "delivered"): Response {
   if (url.endsWith("/replies/prepare")) return Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey));
   if (url.endsWith("/replies/accept")) return Response.json({ operationId });
@@ -36,6 +50,31 @@ function mount(routeKey = "route-a") {
 }
 
 describe("InboxReplyComposer", () => {
+  it.each([
+    { name: "all delivered", states: ["delivered"] as const, label: "Delivered", tone: "success" },
+    { name: "provider accepted pending", states: ["provider_accepted"] as const, label: "Sending", tone: "pending" },
+    { name: "blocked only", states: ["blocked"] as const, label: "Blocked", tone: "blocked" },
+    { name: "failed only", states: ["delivery_failed"] as const, label: "Failed", tone: "failed" },
+    { name: "uncertain", states: ["uncertain"] as const, label: "Not confirmed", tone: "uncertain" },
+    { name: "mixed", states: ["delivered", "blocked"] as const, label: "Mixed", tone: "mixed" },
+  ])("derives the $name badge from the shared rollup", ({ states, label, tone }) => {
+    render(<PreviewInboxReplyComposer targets={states.length === 1 ? [target] : [target, targetFor(2)]} routeKey="route-a" enabled initialDraft="Draft" initialState={{ phase: "sending", draft: "Draft", operationId, status: statusForStates(states) }} />);
+    const badge = screen.getByTestId("reply-composer-status-badge");
+    expect(badge).toHaveTextContent(label);
+    expect(badge).toHaveAttribute("data-badge-tone", tone);
+    if (states[0] === "blocked" || states[0] === "delivery_failed") {
+      expect(badge).not.toHaveTextContent("Sent");
+    }
+  });
+
+  it("does not show Sent for a confirmed_not_submitted receipt", () => {
+    render(<PreviewInboxReplyComposer targets={[target]} routeKey="route-a" enabled initialDraft="Draft" initialState={{ phase: "sending", draft: "Draft", operationId, status: statusForStates(["confirmed_not_submitted"]) }} />);
+    const badge = screen.getByTestId("reply-composer-status-badge");
+    expect(badge).toHaveTextContent("Failed");
+    expect(badge).not.toHaveTextContent("Sent");
+    expect(badge).toHaveAttribute("data-badge-tone", "failed");
+  });
+
   it("starts ready with one review control and no send control", () => {
     mount();
     expect(screen.getByRole("button", { name: "Review reply" })).toBeVisible();
@@ -43,7 +82,7 @@ describe("InboxReplyComposer", () => {
   });
 
   it("hydrates a seeded terminal state without preparing or exposing a resend control", () => {
-    render(<PreviewInboxReplyComposer targets={[target]} routeKey="route-a" enabled initialDraft="Draft" initialState={{ phase: "sent", draft: "Draft", operationId, status: status("delivered") }} />);
+    render(<PreviewInboxReplyComposer targets={[target]} routeKey="route-a" enabled initialDraft="Draft" initialState={{ phase: "sending", draft: "Draft", operationId, status: status("delivered") }} />);
     expect(screen.getAllByText("Delivered").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Review reply" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
@@ -208,8 +247,7 @@ describe("InboxReplyComposer", () => {
     vi.useFakeTimers();
     fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(screen.getByText("Some not sent")).toBeVisible();
-    expect(screen.getByText("Not sent")).toBeVisible();
+    expect(screen.getAllByText("Not sent").length).toBeGreaterThan(0);
     await act(async () => { vi.advanceTimersByTime(500); await Promise.resolve(); await Promise.resolve(); });
     expect(screen.queryByText("Still sending…")).not.toBeInTheDocument();
     expect(receiptAttempts).toBe(1);
