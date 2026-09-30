@@ -1,0 +1,450 @@
+{
+  "config": {
+    "configFile": "./playwright.outbox-regression.config.ts",
+    "rootDir": "./e2e/inbox-acceptance",
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": "./e2e/inbox-acceptance/outbox-global-setup.ts",
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "ci": {
+        "commitHref": "https://github.com/biginkc/sandra/commit/3476f6dd4809cf223caa520b31aae1748607ffab",
+        "commitHash": "3476f6dd4809cf223caa520b31aae1748607ffab",
+        "buildHref": "https://github.com/biginkc/sandra/actions/runs/36664735497"
+      },
+      "gitCommit": {
+        "shortHash": "93380d8",
+        "hash": "93380d869821a0055b766351a9233a1b43f143b6",
+        "subject": "Untrack pyc artifact; cover psql18 Host Address fixture",
+        "body": "Untrack pyc artifact; cover psql18 Host Address fixture\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n",
+        "author": {
+          "name": "biginkc",
+          "email": "jarrad@bmhgroupkc.com",
+          "time": 1790737223000
+        },
+        "committer": {
+          "name": "biginkc",
+          "email": "jarrad@bmhgroupkc.com",
+          "time": 1790737548000
+        },
+        "branch": "HEAD"
+      },
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "projects": [
+      {
+        "outputDir": "./docs/performance/inbox-redesign/evidence/93380d869821a0055b766351a9233a1b43f143b6/pre-merge/36664735497/playwright",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "ci": {
+            "commitHref": "https://github.com/biginkc/sandra/commit/3476f6dd4809cf223caa520b31aae1748607ffab",
+            "commitHash": "3476f6dd4809cf223caa520b31aae1748607ffab",
+            "buildHref": "https://github.com/biginkc/sandra/actions/runs/36664735497"
+          },
+          "gitCommit": {
+            "shortHash": "93380d8",
+            "hash": "93380d869821a0055b766351a9233a1b43f143b6",
+            "subject": "Untrack pyc artifact; cover psql18 Host Address fixture",
+            "body": "Untrack pyc artifact; cover psql18 Host Address fixture\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n",
+            "author": {
+              "name": "biginkc",
+              "email": "jarrad@bmhgroupkc.com",
+              "time": 1790737223000
+            },
+            "committer": {
+              "name": "biginkc",
+              "email": "jarrad@bmhgroupkc.com",
+              "time": 1790737548000
+            },
+            "branch": "HEAD"
+          },
+          "actualWorkers": 1
+        },
+        "id": "setup",
+        "name": "setup",
+        "testDir": "./e2e",
+        "testIgnore": [
+          "**/prod-canary/**",
+          "**/properties-filter-characterization.*.ts"
+        ],
+        "testMatch": [
+          "/auth\\.setup\\.ts$/"
+        ],
+        "timeout": 30000
+      },
+      {
+        "outputDir": "./docs/performance/inbox-redesign/evidence/93380d869821a0055b766351a9233a1b43f143b6/pre-merge/36664735497/playwright",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {
+          "ci": {
+            "commitHref": "https://github.com/biginkc/sandra/commit/3476f6dd4809cf223caa520b31aae1748607ffab",
+            "commitHash": "3476f6dd4809cf223caa520b31aae1748607ffab",
+            "buildHref": "https://github.com/biginkc/sandra/actions/runs/36664735497"
+          },
+          "gitCommit": {
+            "shortHash": "93380d8",
+            "hash": "93380d869821a0055b766351a9233a1b43f143b6",
+            "subject": "Untrack pyc artifact; cover psql18 Host Address fixture",
+            "body": "Untrack pyc artifact; cover psql18 Host Address fixture\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n",
+            "author": {
+              "name": "biginkc",
+              "email": "jarrad@bmhgroupkc.com",
+              "time": 1790737223000
+            },
+            "committer": {
+              "name": "biginkc",
+              "email": "jarrad@bmhgroupkc.com",
+              "time": 1790737548000
+            },
+            "branch": "HEAD"
+          },
+          "actualWorkers": 1
+        },
+        "id": "chromium",
+        "name": "chromium",
+        "testDir": "./e2e/inbox-acceptance",
+        "testIgnore": [],
+        "testMatch": [
+          "/outbox\\.spec\\.ts$/"
+        ],
+        "timeout": 30000
+      }
+    ],
+    "quiet": false,
+    "reporter": [
+      [
+        "json"
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.59.1",
+    "workers": 1
+  },
+  "suites": [
+    {
+      "title": "../auth.setup.ts",
+      "file": "../auth.setup.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "authenticate",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "setup",
+              "projectName": "setup",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 23758,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "steps": [
+                    {
+                      "title": "Provision exact-run test identity",
+                      "duration": 116
+                    },
+                    {
+                      "title": "Load authenticated dashboard",
+                      "duration": 19282
+                    },
+                    {
+                      "title": "Verify authenticated shell",
+                      "duration": 85
+                    }
+                  ],
+                  "startTime": "2026-09-30T03:33:55.455Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "17e3fe6f4d9d8bd79c6b-1aef690144aaba1a394d",
+          "file": "../auth.setup.ts",
+          "line": 20,
+          "column": 6
+        }
+      ]
+    },
+    {
+      "title": "outbox.spec.ts",
+      "file": "outbox.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "O01 — queued cards render with totals",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 11846,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-30T03:34:26.014Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-0b502c22757538d609a1",
+          "file": "outbox.spec.ts",
+          "line": 102,
+          "column": 5
+        },
+        {
+          "title": "O03/O07 — send one and delete a queued message",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 5902,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-30T03:34:38.292Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-b3de7270569016a60c5f",
+          "file": "outbox.spec.ts",
+          "line": 122,
+          "column": 5
+        },
+        {
+          "title": "O06 — edit queued text, save, then cancel leaves original",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 3272,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-30T03:34:44.244Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-272d394dd1a76966af93",
+          "file": "outbox.spec.ts",
+          "line": 160,
+          "column": 5
+        },
+        {
+          "title": "O04/O05 — auto-send start/pause, cadence input",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 7866,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-30T03:34:47.556Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-d55ac1190301c1aecefa",
+          "file": "outbox.spec.ts",
+          "line": 185,
+          "column": 5
+        },
+        {
+          "title": "O02 — Send next releases the head-of-queue message via that click alone",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 5313,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-30T03:34:55.450Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-624c477895d0cbfc6e92",
+          "file": "outbox.spec.ts",
+          "line": 222,
+          "column": 5
+        },
+        {
+          "title": "O08/O09 — load more queue rows advances the page, loaded total updates",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 150000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 5748,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-30T03:35:00.802Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-77246467607e24a2682b",
+          "file": "outbox.spec.ts",
+          "line": 275,
+          "column": 5
+        },
+        {
+          "title": "O10 — a failed initial queue read recovers via Retry",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 9279,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-09-30T03:35:06.593Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ],
+              "status": "expected"
+            }
+          ],
+          "id": "50118ef5791fb11706f2-097dcc5f6a719e2909bc",
+          "file": "outbox.spec.ts",
+          "line": 323,
+          "column": 5
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2026-09-30T03:33:24.009Z",
+    "duration": 114338.484,
+    "expected": 8,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}
