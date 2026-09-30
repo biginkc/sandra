@@ -4,13 +4,14 @@ import {
   type PcmFrame,
   type PcmTailReport,
   type PcmTrack,
+  type PcmWorkletStartOptions,
   startPcmWorkletSession,
   type PcmWorkletSession,
 } from "./pcm-audio-worklet";
 import type { PcmTimingRecord } from "./pcm-audio-worklet";
 
 export const MAX_MEDIA_CHUNK_BYTES = 1_048_576;
-export const DEFAULT_MEDIA_TIMESLICE_MS = 1_000;
+export const DEFAULT_MEDIA_TIMESLICE_MS = 5_000;
 export const MAX_PENDING_PCM_FRAMES = 64;
 export const MEDIA_RECORDER_MIME_TYPE = "audio/webm;codecs=opus";
 
@@ -179,6 +180,11 @@ export type MediaRecorderCollectorOptions = {
 
 export type MediaRecorderCollectorState = "idle" | "recording" | "stopping" | "stopped" | "interrupted";
 
+export type MediaRecorderCollectorStopOptions = {
+  /** Absolute local deadline for already-produced chunks, if a session supplied one. */
+  readonly drainDeadlineAt?: number;
+};
+
 export function splitMediaBlob(blob: Blob, maxBytes = MAX_MEDIA_CHUNK_BYTES): readonly Blob[] {
   if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new Error("Invalid media chunk limit.");
   const parts: Blob[] = [];
@@ -300,7 +306,7 @@ export class MediaRecorderCollector {
     }
   }
 
-  async stop(): Promise<void> {
+  async stop(stopOptions: MediaRecorderCollectorStopOptions = {}): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
     if (this.stateValue === "idle" || this.stateValue === "stopped") {
       this.stateValue = "stopped";
@@ -324,7 +330,10 @@ export class MediaRecorderCollector {
         if (!recorderStopped) this.fail(new BrowserCaptureError("timeout", "MediaRecorder did not finish within the stop deadline."), generation);
         await waitMs(this.options.finalizationWaitMs);
       }
-      const queueDrained = await Promise.race([generation.queue.then(() => true), waitMs(this.options.stopTimeoutMs).then(() => false)]);
+      const drainRemainingMs = stopOptions.drainDeadlineAt === undefined
+        ? this.options.stopTimeoutMs
+        : Math.max(0, stopOptions.drainDeadlineAt - Date.now());
+      const queueDrained = await Promise.race([generation.queue.then(() => true), waitMs(drainRemainingMs).then(() => false)]);
       if (!queueDrained) this.fail(new BrowserCaptureError("timeout", "Media chunk sink did not drain within the stop deadline."), generation);
       if (this.failure) this.stateValue = "interrupted";
       else this.stateValue = "stopped";
@@ -342,7 +351,7 @@ export type BrowserCaptureRuntime = {
   readonly createMediaStream: (tracks: readonly MediaStreamTrack[]) => MediaStream;
   readonly supportsMediaRecorder?: (mimeType: string) => boolean;
   readonly createRecorder: (stream: MediaStream, mimeType?: string) => MediaRecorderLike;
-  readonly createPcmSession?: (stream: MediaStream, track: PcmTrack, epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>, onTail: (tail: PcmTailReport) => void | Promise<void>, options?: { readonly signal?: AbortSignal; readonly onFailure?: (error: Error) => void; readonly onTiming?: (record: PcmTimingRecord) => void | Promise<void> }) => Promise<PcmWorkletSession>;
+  readonly createPcmSession?: (stream: MediaStream, track: PcmTrack, epoch: number, onFrame: (frame: PcmFrame) => void | Promise<void>, onTail: (tail: PcmTailReport) => void | Promise<void>, options?: Pick<PcmWorkletStartOptions, "signal" | "onFailure" | "onTiming" | "deliveryTimeoutMs">) => Promise<PcmWorkletSession>;
 };
 
 function browserRuntime(): BrowserCaptureRuntime {
@@ -394,12 +403,19 @@ export type ActiveDialpadCapture = {
   readonly state: () => "starting" | "recording" | "stopping" | "stopped" | "interrupted";
   /** Attaches an authenticated network sink without resetting local clocks or sequence origins. */
   readonly attach?: (sinks: BrowserCaptureSinks, epoch?: number) => Promise<void>;
-  readonly stop: () => Promise<void>;
+  readonly stop: (options?: ActiveDialpadCaptureStopOptions) => Promise<void>;
   readonly dispose: () => Promise<void>;
+};
+
+export type ActiveDialpadCaptureStopOptions = {
+  /** Absolute local deadline for already-produced authenticated chunks. */
+  readonly drainDeadlineAt?: number;
 };
 
 export const DEFAULT_LOCAL_SPOOL_MAX_BYTES = 16 * MAX_MEDIA_CHUNK_BYTES;
 export const DEFAULT_LOCAL_SPOOL_MAX_MS = 120_000;
+export const DEFAULT_LOCAL_CAPTURE_DRAIN_MS = 30_000;
+const AUTHENTICATED_PCM_DELIVERY_TIMEOUT_MS = 2_000;
 
 // Chrome otherwise excludes the requesting tab from its chooser. These hints
 // offer the tab; Capture Handle verification below still proves its identity.
@@ -597,6 +613,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
       let pcmPrefixDraining = false;
       const startupPcmFrames: PcmFrame[] = [];
       let pcmDeliveryQueue = Promise.resolve();
+      let webmDeliveryQueue = Promise.resolve();
       let queuedPcmFrames = 0;
       const startupAbort = new AbortController();
       const fail = (error: BrowserCaptureError) => {
@@ -614,12 +631,48 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         return false;
       };
       const deliverFormat = async (format: BrowserCaptureTrackFormat): Promise<void> => {
-        if (spoolMode !== "live" || !attachedSinks) {
+        if (spoolMode === "buffering" || !attachedSinks) {
           if (!spool || !appendSpool(128)) return;
           spool.formats[format.track] = format;
           return;
         }
         await attachedSinks.onTrackFormat?.(format);
+      };
+      const drainWorkletPrefix = async (): Promise<void> => {
+        await Promise.all([
+          tabPcm?.drainAcceptedFrames?.(),
+          micPcm?.drainAcceptedFrames?.(),
+        ]);
+        if (failed) throw failed;
+        if (disposed) throw new BrowserCaptureError("interrupted", "Capture has been disposed.");
+      };
+      const drainPcmDeliveryPrefix = async (): Promise<void> => {
+        const accepted = pcmDeliveryQueue;
+        await accepted;
+        if (failed) throw failed;
+        if (disposed) throw new BrowserCaptureError("interrupted", "Capture has been disposed.");
+      };
+      const flushSpoolPcmPrefix = async (nextSinks: BrowserCaptureSinks): Promise<void> => {
+        if (!spool) return;
+        const pcm = spool.pcm.splice(0);
+        const latePcm = startupPcmFrames.splice(0);
+        for (const frame of [...pcm, ...latePcm]) {
+          if (failed) throw failed;
+          if (disposed) throw new BrowserCaptureError("interrupted", "Capture has been disposed.");
+          await nextSinks.onPcmFrame({ ...frame, epoch: captureEpoch });
+        }
+      };
+      const deliverWebmTurn = async (normalized: EncodedMediaChunk): Promise<void> => {
+        const turn = webmDeliveryQueue.then(async () => {
+          await drainWorkletPrefix();
+          if (spoolMode === "draining") await flushSpoolPcmPrefix(attachedSinks!);
+          await drainPcmDeliveryPrefix();
+          if (failed) throw failed;
+          if (disposed) throw new BrowserCaptureError("interrupted", "Capture has been disposed.");
+          await attachedSinks!.onWebmChunk(normalized);
+        });
+        webmDeliveryQueue = turn;
+        await turn;
       };
       const deliverWebm = async (chunk: EncodedMediaChunk): Promise<void> => {
         const normalized = { ...chunk, epoch: captureEpoch };
@@ -628,7 +681,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
           spool.webm.push(normalized);
           return;
         }
-        await attachedSinks.onWebmChunk(normalized);
+        await deliverWebmTurn(normalized);
       };
       const deliverTiming = async (record: PcmTimingRecord): Promise<void> => {
         if (timingFailed) return;
@@ -659,12 +712,20 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         }
       };
       const sourceInterrupted = () => fail(new BrowserCaptureError("interrupted", "Audio sharing was stopped."));
-      const cleanup = async () => {
+      const cleanup = async (drainDeadlineAt?: number) => {
         options.sources?.signal.removeEventListener("abort", sourceInterrupted);
         handleMonitor?.stop();
         for (const monitor of trackMonitors) monitor.stop();
         startupAbort.abort();
-        const results = await Promise.allSettled([tabPcm?.stop(), micPcm?.stop(), tabCollector?.stop(), micCollector?.stop()]);
+        const collectorDrainDeadlineAt = failed
+          ? Date.now()
+          : drainDeadlineAt ?? Date.now() + DEFAULT_LOCAL_CAPTURE_DRAIN_MS;
+        const results = await Promise.allSettled([
+          tabPcm?.stop(),
+          micPcm?.stop(),
+          tabCollector?.stop({ drainDeadlineAt: collectorDrainDeadlineAt }),
+          micCollector?.stop({ drainDeadlineAt: collectorDrainDeadlineAt }),
+        ]);
         for (const result of results.slice(0, 2)) {
           if (result.status === "rejected") {
             fail(new BrowserCaptureError("interrupted", result.reason instanceof Error ? result.reason.message : "PCM capture cleanup failed."));
@@ -691,7 +752,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
           options.sources.release();
         } else { stopTracks(display); stopTracks(microphone); }
       };
-      const stop = async () => {
+      const stop = async (stopOptions: ActiveDialpadCaptureStopOptions = {}) => {
         if (stopPromise) return stopPromise;
         stopRequested = true;
         stopPromise = (async () => {
@@ -701,7 +762,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
             return;
           }
           state = "stopping";
-          await cleanup();
+          await cleanup(stopOptions.drainDeadlineAt);
           if (!failed) state = "stopped";
         })();
         return stopPromise;
@@ -758,21 +819,22 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
             const format = spool.formats[track];
             if (format) await nextSinks.onTrackFormat?.(format);
           }
-          let flushed = false;
           while (spool.webm.length > 0 || spool.pcm.length > 0 || spool.tails.length > 0 || spool.timing.length > 0 || startupPcmFrames.length > 0) {
             const webm = spool.webm.splice(0);
-            const pcm = spool.pcm.splice(0);
             const tails = spool.tails.splice(0);
             const timing = spool.timing.splice(0);
-            const latePcm = startupPcmFrames.splice(0);
             for (const record of timing) await nextSinks.onTiming?.(record);
-            for (const chunk of webm) await nextSinks.onWebmChunk({ ...chunk, epoch: captureEpoch });
-            for (const frame of [...pcm, ...latePcm]) {
-              const normalized = { ...frame, epoch: captureEpoch };
-              pcmDeliveryQueue = pcmDeliveryQueue.then(() => nextSinks.onPcmFrame(normalized));
-              flushed = true;
-            }
-            if (flushed) await pcmDeliveryQueue;
+            // Worklet callbacks accepted before this turn may still be hidden
+            // behind each worklet's serial delivery queue. Drain that finite
+            // prefix first; those callbacks append to the spool while attach
+            // is draining, so splice the spool only after the snapshot settles.
+            await drainWorkletPrefix();
+            await flushSpoolPcmPrefix(nextSinks);
+            await drainPcmDeliveryPrefix();
+            // Use the same global WebM turn policy as live capture. The first
+            // turn may have just flushed the spool prefix; later turns snapshot
+            // only PCM accepted before their own turn.
+            for (const chunk of webm) await deliverWebmTurn({ ...chunk, epoch: captureEpoch });
             for (const tail of tails) await nextSinks.onPcmTail?.({ ...tail, epoch: captureEpoch });
           }
           spoolMode = "live";
@@ -841,7 +903,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
           fail(new BrowserCaptureError(error.name === "TimeoutError" ? "timeout" : "sink_failure", error.message));
         };
         const startPcm = async (stream: MediaStream, pcmTrack: PcmTrack): Promise<PcmWorkletSession | null> => {
-          const session = await runtime.createPcmSession!(stream, pcmTrack, epoch, emitPcmFrame, emitPcmTail, { signal: startupAbort.signal, onFailure: pcmFailure, onTiming: deliverTiming });
+          const session = await runtime.createPcmSession!(stream, pcmTrack, epoch, emitPcmFrame, emitPcmTail, { signal: startupAbort.signal, onFailure: pcmFailure, onTiming: deliverTiming, deliveryTimeoutMs: AUTHENTICATED_PCM_DELIVERY_TIMEOUT_MS });
           if (stopRequested || failed || disposed) {
             await session.stop();
             return null;

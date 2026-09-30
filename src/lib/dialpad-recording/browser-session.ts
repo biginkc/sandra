@@ -8,12 +8,13 @@ import {
   type DialpadBrowserTrack,
 } from './browser-protocol';
 import { encodeDialpadTimingBatch, type DialpadTimingReason, type DialpadTimingRecord } from './timing-evidence';
-import type {
-  ActiveDialpadCapture,
-  BrowserCaptureError,
-  BrowserCaptureSinks,
-  EncodedMediaChunk,
-  PreparedDialpadCapture,
+import {
+  DEFAULT_LOCAL_CAPTURE_DRAIN_MS,
+  type ActiveDialpadCapture,
+  type BrowserCaptureError,
+  type BrowserCaptureSinks,
+  type EncodedMediaChunk,
+  type PreparedDialpadCapture,
 } from './browser-capture';
 import type { PcmFrame, PcmTailReport } from './pcm-audio-worklet';
 
@@ -148,6 +149,12 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   let ready = false;
   let snapshot = false;
   let captureState = false;
+  let captureClosingObserved = false;
+  let captureDrainDeadlineAt: number | undefined;
+  // Set once graceful stop begins. A later provider closing message may
+  // tighten this deadline, but must never grant a fresh local drain budget.
+  let finalizationDeadlineAt: number | undefined;
+  let finalizationWatchdog: ReturnType<typeof setTimeout> | null = null;
   let timingNegotiated = false;
   let timingIncomplete = false;
   let timingBarrierSent = false;
@@ -170,8 +177,12 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   let lifecycleGeneration = 0;
   let mediaAdmissionOpen = true;
   let snapshotRevision = -1;
-  let pendingChunkConversions = 0;
   const pendingChunkAcks = new Map<string, { readonly track: Track; readonly seq: number; readonly resolve: () => void; readonly reject: (error: Error) => void; readonly timer: ReturnType<typeof setTimeout> }>();
+  type RecordingPermitWaiter = { readonly bytes: number; readonly resolve: (release: (() => void) | null) => void };
+  let recordingAckInFlight = false;
+  let recordingQueueCount = 0;
+  let recordingQueueBytes = 0;
+  const recordingPermitWaiters: RecordingPermitWaiter[] = [];
   const acknowledgedChunks = new Set<string>();
   const pendingPcmAcks = new Map<string, { readonly track: Track; readonly seq: number; readonly resolve: () => void; readonly reject: (error: Error) => void; readonly timer: ReturnType<typeof setTimeout> }>();
   const pcmAckHistory = new Map<Track, { contiguous: number; readonly outOfOrder: Set<number> }>(TRACKS.map((track) => [track, { contiguous: -1, outOfOrder: new Set<number>() }]));
@@ -206,6 +217,15 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       pending.reject(error);
     }
     pendingChunkAcks.clear();
+  };
+
+  const settleRecordingPermitWaiters = () => {
+    while (recordingPermitWaiters.length > 0) {
+      const waiter = recordingPermitWaiters.shift()!;
+      recordingQueueCount = Math.max(0, recordingQueueCount - 1);
+      recordingQueueBytes = Math.max(0, recordingQueueBytes - waiter.bytes);
+      waiter.resolve(null);
+    }
   };
 
   const drainPcmCreditWaiters = () => {
@@ -246,6 +266,9 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
   };
 
   const settleTiming = (error: DialpadBrowserSessionError) => {
+    timingIncomplete = true;
+    pendingTimingRecords.length = 0;
+    pendingTimingBytes = 0;
     if (timingProbeTimer) {
       clearInterval(timingProbeTimer);
       timingProbeTimer = null;
@@ -265,7 +288,90 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       timingEndInFlight.reject(error);
       timingEndInFlight = null;
     }
+    // Timing flushes are intentionally detached from capture callbacks. Keep
+    // a rejection from an already queued chain owned after abort/finalization.
+    void timingSendQueue.catch(() => undefined);
   };
+
+  type FinalizationDeadline = number | (() => number | undefined);
+
+  function currentFinalizationDeadline(deadlineAt: FinalizationDeadline | undefined): number | undefined {
+    const passed = typeof deadlineAt === 'function' ? deadlineAt() : deadlineAt;
+    if (passed === undefined) return finalizationDeadlineAt;
+    return finalizationDeadlineAt === undefined ? passed : Math.min(passed, finalizationDeadlineAt);
+  }
+
+  function finalizationTimeout(label: string): DialpadBrowserSessionError {
+    return new DialpadBrowserSessionError('timeout', `${label} exceeded the recording finalization deadline.`);
+  }
+
+  function assertFinalizationDeadline(deadlineAt: FinalizationDeadline | undefined, label: string): void {
+    const current = currentFinalizationDeadline(deadlineAt);
+    if (current !== undefined && Date.now() >= current) throw finalizationTimeout(label);
+  }
+
+  async function waitForFinalizationDeadline<T>(promise: Promise<T>, deadlineAt: FinalizationDeadline | undefined, label: string): Promise<T> {
+    if (deadlineAt === undefined) return promise;
+    const current = currentFinalizationDeadline(deadlineAt);
+    if (current === undefined) return promise;
+    const remaining = current - Date.now();
+    if (remaining <= 0) {
+      const error = finalizationTimeout(label);
+      fail(error);
+      throw error;
+    }
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const error = finalizationTimeout(label);
+        fail(error);
+        reject(error);
+      }, remaining);
+      promise.then(
+        (value) => {
+          clearTimeout(timer);
+          if (failed) {
+            reject(failed);
+            return;
+          }
+          if ((() => {
+            const currentDeadline = currentFinalizationDeadline(deadlineAt);
+            return currentDeadline !== undefined && Date.now() >= currentDeadline;
+          })()) {
+            const error = finalizationTimeout(label);
+            fail(error);
+            reject(error);
+            return;
+          }
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  function clearFinalizationWatchdog(): void {
+    if (finalizationWatchdog) clearTimeout(finalizationWatchdog);
+    finalizationWatchdog = null;
+  }
+
+  function armFinalizationWatchdog(): void {
+    clearFinalizationWatchdog();
+    const deadlineAt = finalizationDeadlineAt;
+    if (deadlineAt === undefined || failed || disposed) return;
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) {
+      fail(finalizationTimeout('Recording finalization'));
+      return;
+    }
+    finalizationWatchdog = setTimeout(() => {
+      finalizationWatchdog = null;
+      if (finalizationDeadlineAt !== undefined && Date.now() >= finalizationDeadlineAt) fail(finalizationTimeout('Recording finalization'));
+      else armFinalizationWatchdog();
+    }, remaining);
+  }
 
   function disposeCapture(): Promise<void> {
     if (!cleanupPromise) {
@@ -274,13 +380,51 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     return cleanupPromise;
   }
 
+  function releaseRecordingAckPermit(bytes: number): void {
+    recordingQueueCount = Math.max(0, recordingQueueCount - 1);
+    recordingQueueBytes = Math.max(0, recordingQueueBytes - bytes);
+    const waiter = recordingPermitWaiters.shift();
+    if (!waiter || failed || disposed) {
+      recordingAckInFlight = false;
+      if (waiter) {
+        recordingQueueCount = Math.max(0, recordingQueueCount - 1);
+        recordingQueueBytes = Math.max(0, recordingQueueBytes - waiter.bytes);
+        waiter.resolve(null);
+      }
+      return;
+    }
+    recordingAckInFlight = true;
+    waiter.resolve(() => releaseRecordingAckPermit(waiter.bytes));
+  }
+
+  function acquireRecordingAckPermit(bytes: number): Promise<(() => void) | null> {
+    if (failed || disposed) return Promise.resolve(null);
+    if (recordingQueueCount >= maxPendingChunks || recordingQueueBytes + bytes > maxBufferedBytes) {
+      const error = new DialpadBrowserSessionError('queue_overflow', 'Recording chunk receipt queue capacity was exceeded.');
+      fail(error);
+      return Promise.resolve(null);
+    }
+    recordingQueueCount += 1;
+    recordingQueueBytes += bytes;
+    return new Promise<(() => void) | null>((resolve) => {
+      if (!recordingAckInFlight) {
+        recordingAckInFlight = true;
+        resolve(() => releaseRecordingAckPermit(bytes));
+      } else {
+        recordingPermitWaiters.push({ bytes, resolve });
+      }
+    });
+  }
+
   function fail(error: DialpadBrowserSessionError): void {
     if (failed || disposed) return;
+    clearFinalizationWatchdog();
     failed = error;
     state = 'failed';
     mediaAdmissionOpen = false;
     lifecycleGeneration += 1;
     settlePendingChunkAcks(error);
+    settleRecordingPermitWaiters();
     settlePendingPcmAcks(error);
     settleTiming(error);
     try { options.onFailure?.(error); } catch { /* failure remains sticky */ }
@@ -291,8 +435,9 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     void disposeCapture();
   }
 
-  function enqueueSend(data: string | ArrayBuffer | Uint8Array, countsAsChunk = false, timingOnly = false): Promise<void> {
+  function enqueueSend(data: string | ArrayBuffer | Uint8Array, countsAsChunk = false, timingOnly = false, deadlineAt?: FinalizationDeadline): Promise<void> {
     if (failed || disposed || !socket || socket.readyState !== OPEN) return Promise.reject(failed ?? new DialpadBrowserSessionError('socket', 'Recording transport is not open.'));
+    assertFinalizationDeadline(deadlineAt, 'Recording finalization');
     if ((!countsAsChunk && typeof data !== 'string' && queueDepth >= maxPendingPackets) || (countsAsChunk && pendingChunkAcks.size > maxPendingChunks)) {
       const error = new DialpadBrowserSessionError('queue_overflow', 'Recording transport queue capacity was exceeded.');
       if (timingOnly) timingIncomplete = true; else fail(error);
@@ -309,6 +454,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     queuedBytes += bytes;
     const operation = sendQueue.then(() => {
       if (failed || !socket || socket.readyState !== OPEN) throw failed ?? new DialpadBrowserSessionError('socket', 'Recording transport is not open.');
+      assertFinalizationDeadline(deadlineAt, 'Recording finalization');
       if ((socket.bufferedAmount ?? 0) + bytes > maxBufferedBytes) throw new DialpadBrowserSessionError('queue_overflow', 'Native recording transport buffer was full.');
       socket.send(asBinaryData(data));
       if ((socket.bufferedAmount ?? 0) > maxBufferedBytes) throw new DialpadBrowserSessionError('queue_overflow', 'Native recording transport buffer exceeded its limit.');
@@ -326,8 +472,8 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     return timingOnly ? operation : sendQueue;
   }
 
-  function sendControl(message: Record<string, unknown>, timingOnly = false): Promise<void> {
-    return enqueueSend(JSON.stringify(message), false, timingOnly);
+  function sendControl(message: Record<string, unknown>, timingOnly = false, deadlineAt?: FinalizationDeadline): Promise<void> {
+    return enqueueSend(JSON.stringify(message), false, timingOnly, deadlineAt);
   }
 
   function timingNow(): number {
@@ -361,13 +507,18 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     }
     pendingTimingRecords.push(record);
     pendingTimingBytes += recordBytes;
-    void flushTimingBatches();
+    void flushTimingBatches().catch(() => {
+      timingIncomplete = true;
+      pendingTimingRecords.length = 0;
+      pendingTimingBytes = 0;
+    });
   }
 
-  async function flushTimingBatches(): Promise<void> {
+  async function flushTimingBatches(deadlineAt?: FinalizationDeadline): Promise<void> {
     if (!timingNegotiated || timingIncomplete) return;
     timingSendQueue = timingSendQueue.then(async () => {
       while (pendingTimingRecords.length > 0 && !timingIncomplete) {
+        assertFinalizationDeadline(deadlineAt, 'Timing finalization');
         const batch: DialpadTimingRecord[] = [];
         while (pendingTimingRecords.length > 0 && batch.length < 16) {
           const candidate = pendingTimingRecords[0]!;
@@ -380,14 +531,27 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         const encoded = encodeDialpadTimingBatch(options.epoch, batchId, batch);
         const batchBytes = batch.reduce((total, record) => total + timingRecordBytes(record), 0);
         await new Promise<void>((resolve, reject) => {
+          const currentDeadline = currentFinalizationDeadline(deadlineAt);
+          const remaining = currentDeadline === undefined ? Number.POSITIVE_INFINITY : Math.max(0, currentDeadline - Date.now());
+          if (remaining <= 0) {
+            const error = finalizationTimeout('Timing finalization');
+            fail(error);
+            reject(error);
+            return;
+          }
+          const deadlineBound = remaining <= ackTimeoutMs;
           const timer = setTimeout(() => {
             if (timingBatchInFlight?.batchId !== batchId) return;
             timingBatchInFlight = null;
-            timingIncomplete = true;
-            reject(new DialpadBrowserSessionError('timeout', 'Timing batch acknowledgement timed out.'));
-          }, ackTimeoutMs);
+            const error = deadlineBound
+              ? finalizationTimeout('Timing finalization')
+              : new DialpadBrowserSessionError('timeout', 'Timing batch acknowledgement timed out.');
+            if (deadlineBound) fail(error);
+            else timingIncomplete = true;
+            reject(error);
+          }, Math.min(ackTimeoutMs, remaining));
           timingBatchInFlight = { batchId, records: batch, bytes: batchBytes, resolve, reject, timer };
-          void enqueueSend(encoded, false, true).catch((error) => {
+          void enqueueSend(encoded, false, true, deadlineAt).catch((error) => {
             if (timingBatchInFlight?.batchId === batchId) timingBatchInFlight = null;
             timingIncomplete = true;
             clearTimeout(timer);
@@ -396,27 +560,44 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         }).catch(() => undefined);
       }
     });
-    await timingSendQueue;
+    await waitForFinalizationDeadline(timingSendQueue, deadlineAt, 'Timing finalization');
   }
 
-  async function sendTimingProbe(final = false): Promise<void> {
+  async function sendTimingProbe(final = false, deadlineAt?: FinalizationDeadline): Promise<void> {
     if (!timingNegotiated || timingIncomplete) return;
     if (timingProbePromise) {
-      await timingProbePromise.catch(() => undefined);
+      try {
+        await waitForFinalizationDeadline(timingProbePromise, deadlineAt, 'Timing finalization');
+      } catch (error) {
+        if (failed) throw error;
+      }
       if (!final || timingIncomplete) return;
     }
     if (timingIncomplete) return;
     const seq = timingExchangeSeq++;
     const browserSendMs = timingNow();
     const exchange = new Promise<void>((resolve, reject) => {
+      const currentDeadline = currentFinalizationDeadline(deadlineAt);
+      const remaining = currentDeadline === undefined ? Number.POSITIVE_INFINITY : Math.max(0, currentDeadline - Date.now());
+      if (remaining <= 0) {
+        const error = finalizationTimeout('Timing finalization');
+        fail(error);
+        reject(error);
+        return;
+      }
+      const deadlineBound = remaining <= ackTimeoutMs;
       const timer = setTimeout(() => {
         if (timingProbeInFlight?.seq !== seq) return;
         timingProbeInFlight = null;
-        timingIncomplete = true;
-        reject(new DialpadBrowserSessionError('timeout', 'Timing exchange timed out.'));
-      }, ackTimeoutMs);
+        const error = deadlineBound
+          ? finalizationTimeout('Timing finalization')
+          : new DialpadBrowserSessionError('timeout', 'Timing exchange timed out.');
+        if (deadlineBound) fail(error);
+        else timingIncomplete = true;
+        reject(error);
+      }, Math.min(ackTimeoutMs, remaining));
       timingProbeInFlight = { seq, nonce: null, browserSendMs, browserReceiveMs: null, replyFingerprint: null, resolve, reject, timer };
-      void sendControl({ type: 'timing_probe', epoch: options.epoch, seq, browserSendMs }, true).catch((error) => {
+      void sendControl({ type: 'timing_probe', epoch: options.epoch, seq, browserSendMs }, true, deadlineAt).catch((error) => {
         if (timingProbeInFlight?.seq === seq) timingProbeInFlight = null;
         clearTimeout(timer);
         timingIncomplete = true;
@@ -427,25 +608,50 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     try { await exchange; } catch { timingIncomplete = true; } finally { if (timingProbePromise === exchange) timingProbePromise = null; }
   }
 
-  async function finishTiming(): Promise<void> {
+  async function finishTiming(deadlineAt?: FinalizationDeadline): Promise<void> {
     if (!timingNegotiated || timingBarrierSent) return;
     if (timingProbeTimer) {
       clearInterval(timingProbeTimer);
       timingProbeTimer = null;
     }
-    await flushTimingBatches();
-    await sendTimingProbe(true);
-    await flushTimingBatches();
+    await flushTimingBatches(deadlineAt);
+    await sendTimingProbe(true, deadlineAt);
+    await flushTimingBatches(deadlineAt);
     timingBarrierSent = true;
     const outcome = timingIncomplete ? 'incomplete' : 'collected';
     const reasons: DialpadTimingReason[] = timingIncomplete ? ['persistence_failed'] : [];
     try {
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => { timingEndInFlight = null; reject(new DialpadBrowserSessionError('timeout', 'Timing end acknowledgement timed out.')); }, ackTimeoutMs);
+        const currentDeadline = currentFinalizationDeadline(deadlineAt);
+        const remaining = currentDeadline === undefined ? Number.POSITIVE_INFINITY : Math.max(0, currentDeadline - Date.now());
+        if (remaining <= 0) {
+          const error = finalizationTimeout('Timing finalization');
+          fail(error);
+          reject(error);
+          return;
+        }
+        const deadlineBound = remaining <= ackTimeoutMs;
+        const timer = setTimeout(() => {
+          timingEndInFlight = null;
+          const error = deadlineBound
+            ? finalizationTimeout('Timing finalization')
+            : new DialpadBrowserSessionError('timeout', 'Timing end acknowledgement timed out.');
+          if (deadlineBound) fail(error);
+          reject(error);
+        }, Math.min(ackTimeoutMs, remaining));
         timingEndInFlight = { resolve, reject, timer };
-        void sendControl({ type: 'timing_end', epoch: options.epoch, lastSeq: timingDurableLastSeq, outcome, reasons }, true).catch(reject);
+        void sendControl({ type: 'timing_end', epoch: options.epoch, lastSeq: timingDurableLastSeq, outcome, reasons }, true, deadlineAt).catch(reject);
       });
-    } catch { timingIncomplete = true; }
+    } catch (error) {
+      if (failed) throw failed;
+      const currentDeadline = currentFinalizationDeadline(deadlineAt);
+      if (currentDeadline !== undefined && Date.now() >= currentDeadline) {
+        const timeout = finalizationTimeout('Timing finalization');
+        fail(timeout);
+        throw timeout;
+      }
+      timingIncomplete = true;
+    }
   }
 
   async function onOpen(): Promise<void> {
@@ -499,6 +705,22 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         if (message.state === 'closed') {
           fail(new DialpadBrowserSessionError('interrupted', 'The recording capture is already closed.'));
           return;
+        }
+        if (message.state === 'closing') {
+          const serverDeadlineAt = Date.parse(message.drainDeadlineAt ?? '');
+          const now = Date.now();
+          if (!Number.isFinite(serverDeadlineAt) || serverDeadlineAt <= now) {
+            fail(new DialpadBrowserSessionError('timeout', 'The server recording drain deadline has expired.'));
+            return;
+          }
+          // The server timestamp is an absolute wall-clock deadline. Bound the
+          // local wait independently so clock skew or a far-future value cannot
+          // turn provider closure into an unbounded client drain.
+          const boundedDeadlineAt = Math.min(serverDeadlineAt, now + DEFAULT_LOCAL_CAPTURE_DRAIN_MS);
+          captureDrainDeadlineAt = captureDrainDeadlineAt === undefined ? boundedDeadlineAt : Math.min(captureDrainDeadlineAt, boundedDeadlineAt);
+          captureClosingObserved = true;
+          if (finalizationDeadlineAt !== undefined) finalizationDeadlineAt = Math.min(finalizationDeadlineAt, captureDrainDeadlineAt);
+          if (finalizationDeadlineAt !== undefined) armFinalizationWatchdog();
         }
         if (message.state === 'closing' && state !== 'stopping' && state !== 'stopped' && state !== 'failed') void stop();
       } else if (message.type === 'recording_chunk_ack') {
@@ -722,92 +944,98 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       fail(new DialpadBrowserSessionError('protocol', 'Recording chunk did not match the session contract.'));
       return;
     }
-    if (pendingChunkConversions >= maxPendingChunks) {
-      const error = new DialpadBrowserSessionError('queue_overflow', 'Recording chunk conversion capacity was exceeded.');
-      fail(error);
-      throw error;
-    }
-    pendingChunkConversions += 1;
-    let bytes: Uint8Array;
-    try {
-      bytes = new Uint8Array(await chunk.blob.arrayBuffer());
-    } finally {
-      pendingChunkConversions -= 1;
-    }
-    if (bytes.byteLength !== chunk.byteLength || bytes.byteLength < 1 || bytes.byteLength > DIALPAD_BROWSER_PROTOCOL.maxRecordingPayloadBytes) {
-      fail(new DialpadBrowserSessionError('protocol', 'Recording chunk byte length changed before delivery.'));
-      return;
-    }
     const ackKey = key(chunk.track, chunk.seq);
     if (pendingChunkAcks.has(ackKey) || acknowledgedChunks.has(ackKey)) return;
-    let resolveAck!: () => void;
-    let rejectAck!: (error: Error) => void;
-    const ackPromise = new Promise<void>((resolve, reject) => { resolveAck = resolve; rejectAck = reject; });
-    // The send path can fail before its caller reaches the ACK await. Own the
-    // rejection immediately so socket/buffer failures never become unhandled.
-    void ackPromise.catch(() => undefined);
-    const timer = setTimeout(() => {
-      pendingChunkAcks.delete(ackKey);
-      const timeout = new DialpadBrowserSessionError('timeout', 'Recording chunk acknowledgement timed out.');
-      rejectAck(timeout);
-      fail(timeout);
-    }, ackTimeoutMs);
-    pendingChunkAcks.set(ackKey, { track: chunk.track, seq: chunk.seq, resolve: resolveAck, reject: rejectAck, timer });
-    recordingLastSeq.set(chunk.track, chunk.seq);
+    const releaseRecordingPermit = await acquireRecordingAckPermit(chunk.byteLength);
+    if (!releaseRecordingPermit) return;
     try {
-      await enqueueSend(encodeDialpadBrowserBinary({ kind: 'recording', track: chunk.track, epoch: options.epoch, sequence: chunk.seq, payloadLength: bytes.byteLength, payload: bytes }), true);
-    } catch (error) {
-      clearTimeout(timer);
-      pendingChunkAcks.delete(ackKey);
-      rejectAck(error instanceof Error ? error : new DialpadBrowserSessionError('socket', 'Recording chunk could not be sent.'));
-      throw error;
+      if (failed || disposed || !mediaAdmissionOpen) return;
+      let bytes: Uint8Array;
+      bytes = new Uint8Array(await chunk.blob.arrayBuffer());
+      if (bytes.byteLength !== chunk.byteLength || bytes.byteLength < 1 || bytes.byteLength > DIALPAD_BROWSER_PROTOCOL.maxRecordingPayloadBytes) {
+        fail(new DialpadBrowserSessionError('protocol', 'Recording chunk byte length changed before delivery.'));
+        return;
+      }
+      if (pendingChunkAcks.has(ackKey) || acknowledgedChunks.has(ackKey)) return;
+      let resolveAck!: () => void;
+      let rejectAck!: (error: Error) => void;
+      const ackPromise = new Promise<void>((resolve, reject) => { resolveAck = resolve; rejectAck = reject; });
+      // The send path can fail before its caller reaches the ACK await. Own the
+      // rejection immediately so socket/buffer failures never become unhandled.
+      void ackPromise.catch(() => undefined);
+      const timer = setTimeout(() => {
+        pendingChunkAcks.delete(ackKey);
+        const timeout = new DialpadBrowserSessionError('timeout', 'Recording chunk acknowledgement timed out.');
+        rejectAck(timeout);
+        fail(timeout);
+      }, ackTimeoutMs);
+      pendingChunkAcks.set(ackKey, { track: chunk.track, seq: chunk.seq, resolve: resolveAck, reject: rejectAck, timer });
+      recordingLastSeq.set(chunk.track, chunk.seq);
+      try {
+        await enqueueSend(encodeDialpadBrowserBinary({ kind: 'recording', track: chunk.track, epoch: options.epoch, sequence: chunk.seq, payloadLength: bytes.byteLength, payload: bytes }), true);
+      } catch (error) {
+        clearTimeout(timer);
+        pendingChunkAcks.delete(ackKey);
+        rejectAck(error instanceof Error ? error : new DialpadBrowserSessionError('socket', 'Recording chunk could not be sent.'));
+        throw error;
+      }
+      if (acknowledgedChunks.has(ackKey)) {
+        clearTimeout(timer);
+        pendingChunkAcks.delete(ackKey);
+        resolveAck();
+      }
+      await ackPromise;
+    } finally {
+      releaseRecordingPermit();
     }
-    if (acknowledgedChunks.has(ackKey)) {
-      clearTimeout(timer);
-      pendingChunkAcks.delete(ackKey);
-      resolveAck();
-    }
-    await ackPromise;
   }
 
-  async function waitForAcks(predicate: () => boolean, label: string): Promise<void> {
+  async function waitForAcks(predicate: () => boolean, label: string, deadlineAt?: FinalizationDeadline): Promise<void> {
     const started = Date.now();
-    while (!predicate()) {
+    while (true) {
       if (failed) throw failed;
-      if (Date.now() - started >= ackTimeoutMs) throw new DialpadBrowserSessionError('timeout', `${label} acknowledgement timed out.`);
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      assertFinalizationDeadline(deadlineAt, label);
+      if (predicate()) return;
+      const elapsed = Date.now() - started;
+      if (elapsed >= ackTimeoutMs) throw new DialpadBrowserSessionError('timeout', `${label} acknowledgement timed out.`);
+      const currentDeadline = currentFinalizationDeadline(deadlineAt);
+      const remaining = currentDeadline === undefined ? 5 : Math.min(5, currentDeadline - Date.now());
+      if (remaining <= 0) throw finalizationTimeout(label);
+      await new Promise((resolve) => setTimeout(resolve, remaining));
     }
   }
 
-  async function finishControls(): Promise<void> {
-    await waitForAcks(() => pendingPcmAcks.size === 0 && pcmCreditWaiters.length === 0 && pcmCreditWakeups === 0, 'PCM frame');
-    await finishTiming();
+  async function finishControls(deadlineAt: FinalizationDeadline): Promise<void> {
+    assertFinalizationDeadline(deadlineAt, 'Recording finalization');
+    await waitForAcks(() => pendingPcmAcks.size === 0 && pcmCreditWaiters.length === 0 && pcmCreditWakeups === 0, 'PCM frame', deadlineAt);
+    await finishTiming(deadlineAt);
     for (const track of TRACKS) {
       const tail = pcmTails.get(track);
       const discardedTailSamples = tail ? boundedTail(tail) : null;
       const interrupted = interruptedTracks.has(track) || !tail || Boolean(tail.timedOut || tail.deliveryTimedOut) || discardedTailSamples === null;
       if (interrupted) {
         interruptedTracks.add(track);
-        await sendControl({ type: 'capture_interrupted', epoch: options.epoch, track, reason: tail?.timedOut || tail?.deliveryTimedOut ? 'capture_sink_failed' : 'capture_interrupted' });
+        await sendControl({ type: 'capture_interrupted', epoch: options.epoch, track, reason: tail?.timedOut || tail?.deliveryTimedOut ? 'capture_sink_failed' : 'capture_interrupted' }, false, deadlineAt);
       }
       const lastSeq = recordingLastSeq.get(track);
       if (lastSeq === undefined) {
         interruptedTracks.add(track);
-        if (!interrupted) await sendControl({ type: 'capture_interrupted', epoch: options.epoch, track, reason: 'capture_interrupted' });
+        if (!interrupted) await sendControl({ type: 'capture_interrupted', epoch: options.epoch, track, reason: 'capture_interrupted' }, false, deadlineAt);
       } else if (!interrupted) {
-        await waitForAcks(() => pendingChunkAcks.size === 0, 'recording chunk');
+        await waitForAcks(() => pendingChunkAcks.size === 0, 'recording chunk', deadlineAt);
         recordingEofRequests.set(track, lastSeq);
-        await sendControl({ type: 'recording_eof', epoch: options.epoch, track, lastSeq });
+        await sendControl({ type: 'recording_eof', epoch: options.epoch, track, lastSeq }, false, deadlineAt);
       }
       if (!interrupted) {
         const endSample = pcmEndSamples.get(track) ?? 0;
         pcmDrainRequests.set(track, endSample);
-        await sendControl({ type: 'pcm_eof', epoch: options.epoch, track, endSample, discardedTailSamples: discardedTailSamples!, degradedReasons: [] });
+        await sendControl({ type: 'pcm_eof', epoch: options.epoch, track, endSample, discardedTailSamples: discardedTailSamples!, degradedReasons: [] }, false, deadlineAt);
       }
     }
     const expectedRecordingAcks = TRACKS.filter((track) => !interruptedTracks.has(track) && recordingLastSeq.has(track));
     const expectedPcmAcks = TRACKS.filter((track) => !interruptedTracks.has(track));
-    await waitForAcks(() => expectedRecordingAcks.every((track) => recordingEofAcks.get(track) === recordingEofRequests.get(track)) && expectedPcmAcks.every((track) => pcmDrainAcks.get(track) === pcmDrainRequests.get(track)), 'recording drain');
+    await waitForAcks(() => expectedRecordingAcks.every((track) => recordingEofAcks.get(track) === recordingEofRequests.get(track)) && expectedPcmAcks.every((track) => pcmDrainAcks.get(track) === pcmDrainRequests.get(track)), 'recording drain', deadlineAt);
+    assertFinalizationDeadline(deadlineAt, 'Recording finalization');
   }
 
   async function stop(): Promise<void> {
@@ -827,6 +1055,8 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
       }
       state = 'stopping';
       let abortedCaptureStartup = false;
+      finalizationDeadlineAt = captureDrainDeadlineAt ?? Date.now() + DEFAULT_LOCAL_CAPTURE_DRAIN_MS;
+      armFinalizationWatchdog();
       try {
         const pendingCaptureStart = captureStartPromise;
         // Provider closure is graceful: stop acquisition first, then let an
@@ -841,11 +1071,13 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
           lifecycleGeneration += 1;
           await disposeCapture();
         } else {
-          await activeCapture?.stop();
+          await activeCapture?.stop({ drainDeadlineAt: finalizationDeadlineAt });
           if (pendingCaptureStart) await pendingCaptureStart;
         }
-        await sendQueue;
-        if (!failed && !disposed && !abortedCaptureStartup) await finishControls();
+        assertFinalizationDeadline(() => finalizationDeadlineAt, 'Recording finalization');
+        await waitForFinalizationDeadline(sendQueue, () => finalizationDeadlineAt, 'Recording finalization');
+        assertFinalizationDeadline(() => finalizationDeadlineAt, 'Recording finalization');
+        if (!failed && !disposed && !abortedCaptureStartup) await finishControls(() => finalizationDeadlineAt);
         mediaAdmissionOpen = false;
         await disposeCapture();
         state = failed ? 'failed' : 'stopped';
@@ -853,6 +1085,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         fail(error instanceof DialpadBrowserSessionError ? error : new DialpadBrowserSessionError('interrupted', 'Recording could not finish cleanly.'));
         await disposeCapture();
       } finally {
+        clearFinalizationWatchdog();
         mediaAdmissionOpen = false;
         if (socket) {
           detach();
@@ -901,6 +1134,7 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
     mediaAdmissionOpen = false;
     lifecycleGeneration += 1;
     settlePendingChunkAcks(new DialpadBrowserSessionError('interrupted', 'Recording session was disposed.'));
+    settleRecordingPermitWaiters();
     settlePendingPcmAcks(new DialpadBrowserSessionError('interrupted', 'Recording session was disposed.'));
     settleTiming(new DialpadBrowserSessionError('interrupted', 'Recording session was disposed.'));
     if (socket) {

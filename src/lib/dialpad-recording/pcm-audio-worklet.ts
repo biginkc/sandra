@@ -314,6 +314,8 @@ export type PcmWorkletSession = {
   /** Actual input layout observed by the AudioContext source before collection starts. */
   readonly inputChannels: number;
   readonly contextId?: string;
+  /** Drain only callbacks accepted before this call; future frames do not extend the snapshot. */
+  readonly drainAcceptedFrames?: () => Promise<void>;
   stop(): Promise<PcmTailReport>;
 };
 
@@ -327,6 +329,8 @@ export type PcmWorkletRuntime = {
 
 export type PcmWorkletStartOptions = {
   readonly timeoutMs?: number;
+  /** Optional separate deadline for accepted frame/tail callbacks after the worklet reports its tail. */
+  readonly deliveryTimeoutMs?: number;
   readonly startupTimeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly onFailure?: (error: Error) => void;
@@ -420,9 +424,11 @@ export async function startPcmWorkletSession(
   const onContextStateChange = () => emitContextClock('state_change', context.state === 'closed' ? 'closed' : context.state === 'suspended' ? 'suspended' : 'running');
   let pendingDeliveries = 0;
   let failureNotified = false;
+  let deliveryFailure: Error | null = null;
   const notifyFailure = (error: Error) => {
     if (failureNotified) return;
     failureNotified = true;
+    deliveryFailure = error;
     deliveryActive = false;
     try { options.onFailure?.(error); } catch { /* the original PCM failure remains authoritative */ }
   };
@@ -541,6 +547,11 @@ export async function startPcmWorkletSession(
     sourceSampleRateHz: context.sampleRate,
     inputChannels,
     contextId,
+    drainAcceptedFrames: async () => {
+      const accepted = deliveryQueue;
+      await accepted;
+      if (deliveryFailure) throw deliveryFailure;
+    },
     stop: async () => {
       if (stopPromise) return stopPromise;
       stopPromise = (async () => {
@@ -556,7 +567,12 @@ export async function startPcmWorkletSession(
           tailReceived = tail;
           try { await Promise.race([Promise.resolve(onTail(tail)), wait(remaining())]); } catch (error) { notifyFailure(error instanceof Error ? error : new Error("PCM tail sink failed.")); }
         } else if (tail) {
-          const drained = await Promise.race([deliveryQueue.then(() => true), wait(remaining()).then(() => false)]);
+          // A prompt worklet tail proves acquisition completed. Give already
+          // accepted callbacks their own bounded drain window measured from
+          // that proof instead of consuming the acquisition deadline.
+          const deliveryDeadline = options.deliveryTimeoutMs === undefined ? deadline : Date.now() + options.deliveryTimeoutMs;
+          const deliveryRemaining = () => Math.max(0, deliveryDeadline - Date.now());
+          const drained = await Promise.race([deliveryQueue.then(() => true), wait(deliveryRemaining()).then(() => false)]);
           if (!drained) {
             deliveryActive = false;
             tail = { ...tail, deliveryTimedOut: true };
