@@ -2,6 +2,12 @@ import { createHash } from 'node:crypto';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const NOT_VERIFIED = 'NOT_VERIFIED';
+export const PLATFORM_FIELDS = Object.freeze(['postgres_major', 'postgrest_major', 'gotrue_major']);
+export function platformVerdict(waivedFields = []) {
+  return waivedFields.length
+    ? Object.fromEntries(PLATFORM_FIELDS.map(field => [field, waivedFields.includes(field) ? NOT_VERIFIED : 'PASS']))
+    : 'PASS';
+}
 export async function readonlyGet(url, options = {}, transport = globalThis.fetch) {
   const parsed = new URL(url);
   if (options.method && options.method !== 'GET' || !['/rest/v1/', '/auth/v1/health'].includes(parsed.pathname) || parsed.search) {

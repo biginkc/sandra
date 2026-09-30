@@ -39,7 +39,7 @@ async function fixture() {
   const platformRecord = input('platform', 'db-contract', 'pre', 'platform-config.json', platform);
   const output = path.join(os.tmpdir(), `shared-output-${sha}.json`);
   const plans = Object.fromEntries(['privileged','member'].map(role => [role, Object.fromEntries(['first','keyset','null_tail'].map(shape => [shape,{sha256:'a'.repeat(64),messages_scan:'Seq Scan',total_cost:10}]))]));
-  const source = { verdict: 'PASS', target: 'shared-readonly', phase: 'pre', plans, tls:{protocol:'TLSv1.3',cipher:'test',leaf_fingerprint:'AA:'.repeat(31)+'AA',pinned_ca_fingerprint:'80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA',root_in_peer_chain:false,upstream_hop_ssl:{ssl:false,version:null,cipher:null}}, catalog_indexes:{}, items: {}, platform_config: platform, comparisons: { catalog: { verdict: 'PASS', input_sha256: digest(JSON.stringify(catalog)), observed_section_sha256: sections }, platform: { verdict: 'PASS', input_sha256: digest(JSON.stringify(platform)), observed_sha256: platform.sha256 } } };
+  const source = { verdict: 'PASS', target: 'shared-readonly', phase: 'pre', plans, tls:{protocol:'TLSv1.3',cipher:'test',leaf_fingerprint:'AA:'.repeat(31)+'AA',pinned_ca_fingerprint:'80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA',root_in_peer_chain:false,upstream_hop_ssl:{ssl:false,version:null,cipher:null}}, catalog_indexes:{}, items: {}, platform_config: platform, comparisons: { catalog: { verdict: 'PASS', input_sha256: digest(JSON.stringify(catalog)), observed_section_sha256: sections }, platform: { verdict: 'PASS', waived_fields: [], input_sha256: digest(JSON.stringify(platform)), observed_sha256: platform.sha256 } } };
   const args = { repo, sha, phase: 'pre', output, catalogRecord, platformRecord };
   const save = () => writeFileSync(output, JSON.stringify(source)); save();
   return { args, source, save, repo, root };
@@ -55,11 +55,45 @@ test('sealer records a PostgREST NOT_VERIFIED waiver and covers it in the digest
   f.source.platform_config.postgrest_major = NOT_VERIFIED;
   const majors = Object.fromEntries(['postgres_major', 'postgrest_major', 'gotrue_major'].map(key => [key, f.source.platform_config[key]]));
   f.source.platform_config.sha256 = digest(JSON.stringify(majors));
+  f.source.comparisons.platform.verdict = { postgres_major: 'PASS', postgrest_major: NOT_VERIFIED, gotrue_major: 'PASS' };
+  f.source.comparisons.platform.waived_fields = ['postgrest_major'];
   f.source.comparisons.platform.observed_sha256 = f.source.platform_config.sha256;
   f.save();
   const dir = sealSharedReadonly(f.args);
   const manifest = JSON.parse(readFileSync(path.join(f.repo, dir, 'manifest.json')));
   assert.deepEqual(manifest.waived_fields, ['postgrest_major']);
+});
+test('sealer rejects a NOT_VERIFIED disposable baseline', async () => {
+  const f = await fixture();
+  const file = path.join(f.repo, f.args.platformRecord, 'platform-config.json');
+  const baseline = JSON.parse(readFileSync(file));
+  baseline.postgrest_major = NOT_VERIFIED;
+  baseline.sha256 = digest(JSON.stringify({ postgres_major: baseline.postgres_major, postgrest_major: baseline.postgrest_major, gotrue_major: baseline.gotrue_major }));
+  const bytes = Buffer.from(JSON.stringify(baseline));
+  writeFileSync(file, bytes);
+  const manifestFile = path.join(f.repo, f.args.platformRecord, 'manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestFile));
+  manifest.artifacts['platform-config.json'] = digest(bytes);
+  writeFileSync(manifestFile, JSON.stringify(manifest));
+  f.source.platform_config.postgrest_major = NOT_VERIFIED;
+  f.source.platform_config.sha256 = digest(JSON.stringify({ postgres_major: f.source.platform_config.postgres_major, postgrest_major: NOT_VERIFIED, gotrue_major: f.source.platform_config.gotrue_major }));
+  f.source.comparisons.platform.verdict = { postgres_major: 'PASS', postgrest_major: NOT_VERIFIED, gotrue_major: 'PASS' };
+  f.source.comparisons.platform.waived_fields = ['postgrest_major'];
+  f.source.comparisons.platform.observed_sha256 = f.source.platform_config.sha256;
+  f.source.comparisons.platform.input_sha256 = digest(bytes);
+  f.save();
+  git(f.repo, 'add', '.'); git(f.repo, 'commit', '-qm', 'mutate baseline');
+  assert.throws(() => sealSharedReadonly(f.args), /Platform comparison mismatch/);
+});
+test('sealer rejects a waived field with a bare PASS verdict', async () => {
+  const f = await fixture();
+  f.source.platform_config.postgrest_major = NOT_VERIFIED;
+  const majors = Object.fromEntries(['postgres_major', 'postgrest_major', 'gotrue_major'].map(key => [key, f.source.platform_config[key]]));
+  f.source.platform_config.sha256 = digest(JSON.stringify(majors));
+  f.source.comparisons.platform.waived_fields = ['postgrest_major'];
+  f.source.comparisons.platform.observed_sha256 = f.source.platform_config.sha256;
+  f.save();
+  assert.throws(() => sealSharedReadonly(f.args), /Platform comparison mismatch/);
 });
 test('sealer rejects a waiver-shaped but non-exact PostgREST value', async () => {
   const f = await fixture();

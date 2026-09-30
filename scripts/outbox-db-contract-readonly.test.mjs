@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, readPostgrestMajor, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
+import { collect, compareSets, reconcile, snapshot, openReadTxn, stabilityProbe, readPostgrestMajor, ACTIVE, planSkeleton } from './outbox-db-contract/readonly.mjs';
 import { readonlyGet, compareObservedPlatform, comparePlatform, platformFingerprint, NOT_VERIFIED } from './outbox-db-contract/platform.mjs';
-import { assertTarget, parseArgs, compareCatalog, assertSealedPre, catalogChildEnv } from './outbox-db-contract-readonly.mjs';
+import { assertTarget, main, parseArgs, compareCatalog, assertSealedPre, catalogChildEnv, platformSummary } from './outbox-db-contract-readonly.mjs';
 import { connectionConfig, pinnedCa } from './outbox-db-contract/connection.mjs';
 import { describePlan, comparePlans, catalogIndexes, compareIndexes, OPERATOR_INDEXES, OPERATOR_RELATIONS } from './outbox-db-contract/plan-contract.mjs';
 
@@ -199,11 +199,36 @@ test('RULING pg_stat_activity outcomes are scoped, strict, and duplicate-toleran
   assert.match(sql, /datname=current_database\(\)/);
   await assert.rejects(readPostgrestMajor({query: async () => { throw new Error('database unavailable'); }}), /PLATFORM_READ_FAILED/);
 });
-test('RULING collect reads PostgREST before its read-only transaction commits', () => {
-  const source = readFileSync(new URL('./outbox-db-contract/readonly.mjs', import.meta.url), 'utf8');
-  const collectSource = source.slice(source.indexOf('export async function collect'));
-  assert.ok(collectSource.indexOf('readPostgrestMajor(client)') < collectSource.indexOf("client.query('COMMIT')"));
-  assert.match(collectSource, /postgrest_major/);
+test('RULING collect reads PostgREST before its read-only transaction commits', async () => {
+  const trace = [];
+  const message = { id: '1', body: 'a', status: 'queued', from_address: 'x', to_address: 'y', created_at: '2026-01-01', scheduled_for: null, property_id: null, contact_id: null, property: null, contact: null };
+  const plan = { 'Node Type': 'Index Scan', 'Relation Name': 'messages', Schema: 'public', 'Index Name': 'messages_queue_idx', 'Total Cost': 10 };
+  const client = { query: async (sql) => {
+    trace.push(sql);
+    if (sql === 'SHOW transaction_isolation') return { rows: [{ transaction_isolation: 'repeatable read' }] };
+    if (sql === 'SHOW transaction_read_only') return { rows: [{ transaction_read_only: 'on' }] };
+    if (sql.startsWith('SELECT has_table_privilege')) {
+      return { rows: [Object.fromEntries([...sql.matchAll(/\sAS\s+([a-z_][\w]*)/gi)].map(([, key]) => [key, true]))] };
+    }
+    if (sql.includes('FROM pg_stat_activity')) return { rows: [{ application_name: 'PostgREST 12.2.0' }] };
+    if (sql === 'SELECT now() AS at') return { rows: [{ at: '2026-01-01T00:00:00Z' }] };
+    if (sql.includes('SELECT mb.user_id FROM public.memberships mb')) return { rows: [{ user_id: 'member' }] };
+    if (sql.includes('SELECT msg.id,msg.org_id')) return { rows: [{ id: '1', org_id: 'org' }] };
+    if (sql.includes('SELECT mb.org_id FROM public.memberships mb')) return { rows: [{ org_id: 'org' }] };
+    if (sql.includes('SELECT m.id,') && sql.includes("m.org_id=$1")) return { rows: [message] };
+    if (sql.startsWith('EXPLAIN')) return { rows: [{ 'QUERY PLAN': [{ Plan: plan }] }] };
+    if (sql.includes('auth.uid() AS uid')) return { rows: [{ uid: 'member', role: 'authenticated' }] };
+    if (sql.includes('scheduled_for > $1') || sql.includes('scheduled_for IS NULL AND m.id > $1')) return { rows: [] };
+    if (sql.includes('FROM public.messages m LEFT JOIN') && sql.includes("WHERE m.status='queued'") && !sql.includes('m.org_id=$1')) return { rows: [message] };
+    return { rows: [] };
+  } };
+  const result = await collect(client, 'org');
+  const statIndex = trace.findIndex(sql => sql.includes('FROM pg_stat_activity'));
+  const commitIndex = trace.lastIndexOf('COMMIT');
+  assert.equal(result.postgrest_major, '12');
+  assert.ok(statIndex >= 0 && statIndex < commitIndex, 'PostGREST observation must precede COMMIT');
+  assert.match(trace[statIndex], /usename='authenticator'/);
+  assert.match(trace[statIndex], /datname=current_database\(\)/);
 });
 const catalogSections = ['relations', 'functions', 'types', 'extensions', 'schemas', 'index_names', 'trigger_names', 'schema_migrations', 'created_objects_present'];
 const catalogMap = () => Object.fromEntries(catalogSections.map((name, index) => [name, String(index).padStart(64, 'a')]));
@@ -367,11 +392,94 @@ test('RULING hosted sends publishable apikey, makes no REST call, and allows onl
   await assert.rejects(platformFingerprint('https://example.invalid', undefined, '17', transport, { mode: 'hosted', postgrestMajor: '12' }), /PLATFORM_READ_FAILED/);
   await assert.rejects(platformFingerprint('https://example.invalid', 'publishable', '17', transport, { mode: 'hosted', postgrestMajor: 'not-a-major' }), /PLATFORM_READ_FAILED/);
 });
-test('RULING checker summary uses the exact observed or NOT_VERIFIED wording', () => {
-  const source = readFileSync(new URL('./outbox-db-contract-readonly.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /PostgREST major was \[pending\]/);
-  assert.match(source, /PostgREST major was \$\{postgrestMajor === NOT_VERIFIED \? 'NOT_VERIFIED: no PostgREST connection was visible, which does not prove none existed' : 'observed from its connection name and matched'\}/);
-  assert.match(source, /Hosted app\/SSR\/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality\./);
+test('RULING checker summary uses target-appropriate observed or NOT_VERIFIED wording', () => {
+  const disposableObserved = platformSummary('12', 'disposable-readonly');
+  assert.match(disposableObserved, /PostgREST request returned 200/);
+  assert.doesNotMatch(disposableObserved, /request was rejected/);
+  assert.match(disposableObserved, /observed from its HTTP response and SQL connection name and matched/);
+  const hostedMissing = platformSummary(NOT_VERIFIED, 'shared-readonly');
+  assert.match(hostedMissing, /request was rejected/);
+  assert.match(hostedMissing, /NOT_VERIFIED: no PostgREST connection was visible, which does not prove none existed/);
+  assert.match(hostedMissing, /Hosted app\/SSR\/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality\./);
+});
+const mainData = postgrest_major => ({ queued: { count: 1, per_row: {} }, current_status: {}, member_orgs: [], postgrest_major, rls: { verdict: 'PASS' }, plans: {} });
+const fakeMainClient = () => ({ connect: async () => {}, end: async () => {}, query: async sql => sql === 'SHOW server_version_num' ? { rows: [{ server_version_num: '170000' }] } : { rows: [] } });
+async function withMainEnv(values, fn) {
+  const previous = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  try { return await fn(); }
+  finally {
+    for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
+  }
+}
+test('RULING main wires disposable mode and enforces SQL equals HTTP', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'readonly-main-disposable-'));
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    const pathname = new URL(url).pathname;
+    calls.push({ pathname, headers: options.headers });
+    return pathname === '/rest/v1/'
+      ? { ok: true, status: 200, headers: { get: name => name === 'x-postgrest-version' ? 'PostgREST/12.2.0' : null }, json: async () => ({}) }
+      : { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ version: '2.151.0' }) };
+  };
+  try {
+    await withMainEnv({ DATABASE_URL: 'postgres://postgres@127.0.0.1:55422/postgres', E2E_DISPOSABLE_DATABASE: '1', SUPABASE_ANON_KEY: 'publishable' }, async () => {
+      const output = path.join(dir, 'result.json');
+      await main({ argv: { target: 'disposable-readonly', phase: 'pre', org: '00000000-0000-0000-0000-000000000001', 'api-url': 'http://127.0.0.1:55421', output }, createClient: fakeMainClient, collectData: async () => mainData('12') });
+      assert.deepEqual(calls.map(call => call.pathname), ['/rest/v1/', '/auth/v1/health']);
+      assert.deepEqual(JSON.parse(readFileSync(output, 'utf8')).platform_config.postgrest_major, '12');
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('RULING main hosted mode makes no REST call and carries field-scoped NOT_VERIFIED', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'readonly-main-hosted-'));
+  const previousFetch = globalThis.fetch;
+  const calls = [];
+  const sections = Object.fromEntries(['relations', 'functions', 'types', 'extensions', 'schemas', 'index_names', 'trigger_names', 'schema_migrations', 'created_objects_present'].map(name => [name, 'a'.repeat(64)]));
+  const platform = { postgres_major: '17', postgrest_major: '12', gotrue_major: '2' };
+  const catalogPath = path.join(dir, 'catalog.json');
+  const platformPath = path.join(dir, 'platform.json');
+  writeFileSync(catalogPath, JSON.stringify({ section_sha256: sections }));
+  writeFileSync(platformPath, JSON.stringify(platform));
+  globalThis.fetch = async (url, options) => {
+    calls.push({ pathname: new URL(url).pathname, headers: options.headers });
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ version: '2.151.0' }) };
+  };
+  try {
+    await withMainEnv({ DATABASE_URL: `postgres://postgres.${TEST_REF}:unused@aws-0-us-east-1.pooler.supabase.com:5432/postgres`, SUPABASE_ANON_KEY: 'publishable' }, async () => {
+      const output = path.join(dir, 'result.json');
+      await main({ argv: { target: 'shared-readonly', phase: 'pre', org: '00000000-0000-0000-0000-000000000001', 'api-url': api(TEST_REF), 'catalog-compare': catalogPath, 'platform-compare': platformPath, output }, createClient: fakeMainClient, makeClientConfig: () => ({}), collectData: async () => mainData(NOT_VERIFIED), readCatalog: async () => ({ sections: { relations: [] }, section_sha256: sections }), readConnectionEvidence: async () => ({ protocol: 'TLSv1.3' }), getPinnedCa: () => ({}) });
+      const result = JSON.parse(readFileSync(output, 'utf8'));
+      assert.deepEqual(calls, [{ pathname: '/auth/v1/health', headers: { apikey: 'publishable' } }]);
+      assert.deepEqual(result.comparisons.platform.waived_fields, ['postgrest_major']);
+      assert.deepEqual(result.comparisons.platform.verdict, { postgres_major: 'PASS', postgrest_major: NOT_VERIFIED, gotrue_major: 'PASS' });
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('RULING main POST rejects a hosted major that differs from PRE observation', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'readonly-main-post-'));
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => new URL(url).pathname === '/rest/v1/'
+    ? { ok: true, status: 200, headers: { get: name => name === 'x-postgrest-version' ? 'PostgREST/13.0.0' : null }, json: async () => ({}) }
+    : { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ version: '2.151.0' }) };
+  try {
+    await withMainEnv({ DATABASE_URL: 'postgres://postgres@127.0.0.1:55422/postgres', E2E_DISPOSABLE_DATABASE: '1', SUPABASE_ANON_KEY: 'publishable' }, async () => {
+      const pre = { target: 'disposable-readonly', phase: 'pre', queued: { per_row: {} }, platform_config: { postgres_major: '17', postgrest_major: '12', gotrue_major: '2', sha256: readableDigest(Buffer.from(JSON.stringify({ postgres_major: '17', postgrest_major: '12', gotrue_major: '2' }))) } };
+      const prePath = path.join(dir, 'pre.json');
+      writeFileSync(prePath, JSON.stringify(pre));
+      await assert.rejects(main({ argv: { target: 'disposable-readonly', phase: 'post', org: '00000000-0000-0000-0000-000000000001', 'api-url': 'http://127.0.0.1:55421', 'pre-file': prePath }, createClient: fakeMainClient, collectData: async () => mainData('13') }), /PLATFORM_MISMATCH postgrest_major/);
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 test('RULING Postgres and GoTrue remain blocking while PostgREST waiver is field-scoped', () => {
   fails('postgres', () => comparePlatform({postgres_major:'17',postgrest_major:'12',gotrue_major:'2'}, {postgres_major:'16',postgrest_major:NOT_VERIFIED,gotrue_major:'2'}), /PLATFORM_MISMATCH postgres_major/);

@@ -84,7 +84,7 @@ class SealedEvidenceTests(unittest.TestCase):
             "platform_config": platform, "items": {},
             "comparisons": {
                 "catalog": {"verdict": "PASS", "input_sha256": hashlib.sha256(catalog_bytes).hexdigest(), "observed_section_sha256": catalog["section_sha256"]},
-                "platform": {"verdict": "PASS", "input_sha256": hashlib.sha256(platform_bytes).hexdigest(), "observed_sha256": platform["sha256"]},
+                "platform": {"verdict": "PASS", "waived_fields": [], "input_sha256": hashlib.sha256(platform_bytes).hexdigest(), "observed_sha256": platform["sha256"]},
             },
         }
         raw_path = Path(self.temp.name).parent / f"shared-raw-{self.sha}.json"
@@ -120,6 +120,8 @@ class SealedEvidenceTests(unittest.TestCase):
         self.assertEqual(original_manifest["waived_fields"], [])
         waived_output = json.loads(json.dumps(original_output))
         waived_majors = {"postgres_major": "17", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "2"}
+        waived_output["comparisons"]["platform"]["verdict"] = {"postgres_major": "PASS", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "PASS"}
+        waived_output["comparisons"]["platform"]["waived_fields"] = ["postgrest_major"]
         waived_output["comparisons"]["platform"]["observed_sha256"] = hashlib.sha256(json.dumps(waived_majors, separators=(",", ":")).encode()).hexdigest()
         output_path.write_text(json.dumps(waived_output))
         waived_manifest = json.loads(json.dumps(original_manifest))
@@ -268,7 +270,7 @@ class SealedEvidenceTests(unittest.TestCase):
                 output = {"verdict": "PASS", "target": "shared-test", "phase": phase, "source_output_sha256": "a" * 64,
                           "plans": {role: {shape: plan for shape in evidence.PLAN_SHAPES} for role in evidence.PLAN_ROLES},
                           "tls": {"protocol": "TLSv1.3", "cipher": "fixture", "leaf_fingerprint": "AA:" * 31 + "AA", "pinned_ca_fingerprint": "80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA", "root_in_peer_chain": False, "upstream_hop_ssl": None}, "catalog_indexes_sha256": "a" * 64,
-                          "comparisons": {"catalog": {"verdict": "PASS", "input_sha256": inputs["catalog_record"]["sha256"], "observed_section_sha256": self.catalog_config()["section_sha256"]}, "platform": {"verdict": "PASS", "input_sha256": inputs["platform_record"]["sha256"], "observed_sha256": platform_data["sha256"]}}, "items": {}}
+                          "comparisons": {"catalog": {"verdict": "PASS", "input_sha256": inputs["catalog_record"]["sha256"], "observed_section_sha256": self.catalog_config()["section_sha256"]}, "platform": {"verdict": "PASS", "waived_fields": [], "input_sha256": inputs["platform_record"]["sha256"], "observed_sha256": platform_data["sha256"]}}, "items": {}}
                 artifact.unlink()
                 manifest["artifacts"] = {"readonly.json": hashlib.sha256(json.dumps(output).encode()).hexdigest()}
                 (directory / "readonly.json").write_text(json.dumps(output))
@@ -553,6 +555,62 @@ class SealedEvidenceTests(unittest.TestCase):
                 finally:
                     case.doCleanups()
 
+    def test_shared_readonly_rejects_unwaived_not_verified_digest(self):
+        def mutate(manifest, directory):
+            output_path = directory / "readonly.json"
+            output = json.loads(output_path.read_text())
+            majors = {"postgres_major": "17", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "2"}
+            output["comparisons"]["platform"]["observed_sha256"] = hashlib.sha256(json.dumps(majors, separators=(",", ":")).encode()).hexdigest()
+            output_path.write_text(json.dumps(output))
+            manifest["artifacts"]["readonly.json"] = hashlib.sha256(output_path.read_bytes()).hexdigest()
+
+        self.shared_mutation = mutate
+        self.j5a_records()
+        with self.assertRaisesRegex(EvidenceError, "platform mismatch"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def test_shared_readonly_rejects_waiver_for_matching_observed_digest(self):
+        def mutate(manifest, directory):
+            output_path = directory / "readonly.json"
+            output = json.loads(output_path.read_text())
+            output["comparisons"]["platform"]["waived_fields"] = ["postgrest_major"]
+            output["comparisons"]["platform"]["verdict"] = {"postgres_major": "PASS", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "PASS"}
+            manifest["waived_fields"] = ["postgrest_major"]
+            output_path.write_text(json.dumps(output))
+            manifest["artifacts"]["readonly.json"] = hashlib.sha256(output_path.read_bytes()).hexdigest()
+
+        self.shared_mutation = mutate
+        self.j5a_records()
+        with self.assertRaisesRegex(EvidenceError, "platform mismatch"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def test_shared_readonly_rejects_waiver_for_observed_major_different_from_baseline(self):
+        def mutate(manifest, directory):
+            output_path = directory / "readonly.json"
+            output = json.loads(output_path.read_text())
+            majors = {"postgres_major": "17", "postgrest_major": "13", "gotrue_major": "2"}
+            output["comparisons"]["platform"]["waived_fields"] = ["postgrest_major"]
+            output["comparisons"]["platform"]["verdict"] = {"postgres_major": "PASS", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "PASS"}
+            output["comparisons"]["platform"]["observed_sha256"] = hashlib.sha256(json.dumps(majors, separators=(",", ":")).encode()).hexdigest()
+            manifest["waived_fields"] = ["postgrest_major"]
+            output_path.write_text(json.dumps(output))
+            manifest["artifacts"]["readonly.json"] = hashlib.sha256(output_path.read_bytes()).hexdigest()
+
+        self.shared_mutation = mutate
+        self.j5a_records()
+        with self.assertRaisesRegex(EvidenceError, "platform mismatch"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def test_shared_readonly_rejects_not_verified_disposable_baseline(self):
+        self.platform_config_override = {
+            "postgres_major": "17", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "2",
+            "sha256": hashlib.sha256(json.dumps({"postgres_major": "17", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "2"}, separators=(",", ":")).encode()).hexdigest(),
+        }
+        self.platform_config = lambda: self.platform_config_override
+        self.j5a_records()
+        with self.assertRaisesRegex(EvidenceError, "invalid consumed platform data"):
+            evaluate(self.repo, "j5a", self.sha)
+
     def test_j5a_missing_browser_post_names_key_six(self):
         self.j5a_records(omit=J5A[5])
         with self.assertRaisesRegex(EvidenceError, "browser.*post.*disposable"):
@@ -602,6 +660,7 @@ class SealedEvidenceTests(unittest.TestCase):
             ("catalog comparison", mutate_output(lambda o, m: o["comparisons"]["catalog"].update(verdict="FAIL"))),
             ("catalog observed", mutate_output(lambda o, m: o["comparisons"]["catalog"]["observed_section_sha256"].update(relations="0" * 64))),
             ("input hash", mutate_output(lambda o, m: o["comparisons"]["platform"].update(input_sha256="0" * 64))),
+            ("platform per-field verdict", mutate_output(lambda o, m: o["comparisons"]["platform"].update(verdict={"postgres_major": "PASS", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "PASS"}))),
             ("stability probe", mutate_output(lambda o, m: (o["items"].update(queued_invariants={"verdict": "INCONCLUSIVE", "stability_probe": {"message_body": "private"}}), m["items"].update(o["items"])))),
             ("queued diff omitted", mutate_output(lambda o, m: (o["items"].update(queued_invariants={"verdict": "PASS"}), m["items"].update(o["items"])))),
             ("empty INCONCLUSIVE diff", mutate_output(lambda o, m: (o["items"].update(queued_invariants={"verdict": "INCONCLUSIVE", "diff": hashlib.sha256(b"[]").hexdigest()}), m["items"].update(o["items"])))),
