@@ -71,6 +71,8 @@ async function seed(client) {
     org: randomUUID(),
     contact: randomUUID(),
     property: randomUUID(),
+    duplicateContact: randomUUID(),
+    duplicateProperty: randomUUID(),
     conversation: randomUUID(),
     message: randomUUID(),
   };
@@ -79,6 +81,8 @@ async function seed(client) {
   await client.query("INSERT INTO public.organizations(id,name) VALUES($1,$2)", [ids.org, `Inbox RT ${ids.org}`]);
   await client.query("INSERT INTO public.contacts(id,org_id,first_name,last_name) VALUES($1,$2,'Runtime','Fixture')", [ids.contact, ids.org]);
   await client.query("INSERT INTO public.properties(id,org_id,address,state,status,homeowner_contact_id) VALUES($1,$2,'100 Runtime Way','MO','contacted',$3)", [ids.property, ids.org, ids.contact]);
+  await client.query("INSERT INTO public.contacts(id,org_id,first_name,last_name) VALUES($1,$2,'Duplicate','Fixture')", [ids.duplicateContact, ids.org]);
+  await client.query("INSERT INTO public.properties(id,org_id,address,state,status,homeowner_contact_id) VALUES($1,$2,'101 Runtime Way','MO','contacted',$3)", [ids.duplicateProperty, ids.org, ids.duplicateContact]);
   await client.query("INSERT INTO public.message_threads(org_id,channel,contact_id,property_id,conversation_id) VALUES($1,'sms',$2,$3,$4)", [ids.org, ids.contact, ids.property, ids.conversation]);
   await client.query(`
     INSERT INTO public.messages(id,org_id,channel,direction,status,property_id,contact_id,conversation_id,from_address,to_address,body,created_at)
@@ -202,10 +206,10 @@ test("R6a runs against the real J5a schema and proves source, projection, filter
     const duplicateThreadIds = [randomUUID(), randomUUID()];
     await client.query("ALTER TABLE public.message_threads DISABLE TRIGGER zzzzz_inbox_backfill_collision");
     try {
-      for (const threadId of duplicateThreadIds) {
+      for (const [index, threadId] of duplicateThreadIds.entries()) {
         await client.query(
           "INSERT INTO public.message_threads(id,org_id,channel,contact_id,property_id,conversation_id) VALUES($1,$2,'sms',$3,$4,$5)",
-          [threadId, ids.org, null, null, duplicateConversation],
+          [threadId, ids.org, index === 0 ? ids.contact : ids.duplicateContact, index === 0 ? ids.property : ids.duplicateProperty, duplicateConversation],
         );
       }
     } finally {
