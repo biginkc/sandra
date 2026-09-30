@@ -401,6 +401,13 @@ export type ActiveDialpadCapture = {
 export const DEFAULT_LOCAL_SPOOL_MAX_BYTES = 16 * MAX_MEDIA_CHUNK_BYTES;
 export const DEFAULT_LOCAL_SPOOL_MAX_MS = 120_000;
 
+// Chrome otherwise excludes the requesting tab from its chooser. These hints
+// offer the tab; Capture Handle verification below still proves its identity.
+const DEFAULT_DISPLAY_CONSTRAINTS: DisplayMediaStreamOptions & {
+  selfBrowserSurface: "include";
+  preferCurrentTab: true;
+} = { video: true, audio: true, selfBrowserSurface: "include", preferCurrentTab: true };
+
 type ActiveDialpadCaptureState = ReturnType<ActiveDialpadCapture["state"]>;
 
 export type PrepareDialpadCaptureOptions = {
@@ -451,7 +458,7 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
   let display: MediaStream | null = null;
   let microphone: MediaStream | null = null;
   try {
-    display = await runtime.getDisplayMedia(options.displayConstraints ?? { video: true, audio: true });
+    display = await runtime.getDisplayMedia(options.displayConstraints ?? DEFAULT_DISPLAY_CONSTRAINTS);
     const videoTrack = display.getVideoTracks()[0];
     if (!videoTrack) throw new BrowserCaptureError("unsupported", "Display capture did not provide a video identity track.");
     assertSandraCaptureHandle(videoTrack, options.proof);
