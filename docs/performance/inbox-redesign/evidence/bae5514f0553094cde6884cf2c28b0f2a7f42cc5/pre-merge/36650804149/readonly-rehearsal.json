@@ -1,0 +1,53 @@
+{
+  "verdict": "PASS",
+  "target": "disposable-readonly",
+  "phase": "pre",
+  "plan_digests": {
+    "privileged": {
+      "first": {
+        "sha256": "968b8bd6f453a0f6feb43d5e222d0cb6776f21b74e3def31c3e7971d9f638077",
+        "messages_scan": "Seq Scan",
+        "total_cost": 36.47
+      },
+      "keyset": {
+        "sha256": "968b8bd6f453a0f6feb43d5e222d0cb6776f21b74e3def31c3e7971d9f638077",
+        "messages_scan": "Seq Scan",
+        "total_cost": 38.13
+      },
+      "null_tail": {
+        "sha256": "968b8bd6f453a0f6feb43d5e222d0cb6776f21b74e3def31c3e7971d9f638077",
+        "messages_scan": "Seq Scan",
+        "total_cost": 37.02
+      }
+    },
+    "member": {
+      "first": {
+        "sha256": "67746c5e464aba1d871c820882700eab560c2ea06bbcc64489b71bdf0ac013ee",
+        "messages_scan": "Seq Scan",
+        "total_cost": 74.24
+      },
+      "keyset": {
+        "sha256": "67746c5e464aba1d871c820882700eab560c2ea06bbcc64489b71bdf0ac013ee",
+        "messages_scan": "Seq Scan",
+        "total_cost": 75.89
+      },
+      "null_tail": {
+        "sha256": "67746c5e464aba1d871c820882700eab560c2ea06bbcc64489b71bdf0ac013ee",
+        "messages_scan": "Seq Scan",
+        "total_cost": 74.79
+      }
+    }
+  },
+  "catalog_section_sha256": {
+    "created_objects_present": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "extensions": "83d437bcb9373fde6172a87835bf23a9814fa252fb8ea0ffa30834125303c774",
+    "functions": "6fa19699ef872d0511986b202a1125647306787cfed91878fbf05b97aa3b183d",
+    "index_names": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "relations": "c64cdc7c3ac333d86349d2bf642006a75de2a149347ff02a32173e32567eea4b",
+    "schema_migrations": "5f588fcfe3ad547470a5f8f1f9e3bd5b76312da0035460a83c9b45025cacfe60",
+    "schemas": "4260fb03ab4da3e156dcb9dc3b22b0876860caa15bf986badb45b310364a451f",
+    "trigger_names": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "types": "17d87eedb080944063624980b8d3a26b0286e292452f05c92e6b4633159a3def"
+  },
+  "platform_sha256": "720460ac84de66a1ae38f3f22ec17bb1d3947cfe3fb41fa2e2137e9e630c40dd"
+}
