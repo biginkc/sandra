@@ -26,12 +26,6 @@ export function createWorkerRequestHandler({ endpoint, registrationPath, isStopp
 }
 
 async function start() {
-  if (process.env.INBOX_WORKER_ROUTING_TEST === '1') {
-    const registrationPath = process.env.INBOX_RESTATE_REGISTRATION_PATH ?? '';
-    const endpoint = async (_req, res) => { res.writeHead(200); res.end('handled'); };
-    http.createServer(createWorkerRequestHandler({ endpoint, registrationPath })).listen(Number(process.env.PORT ?? 9080), '127.0.0.1');
-    return;
-  }
   if (process.env.INBOX_ACTION_WORKER_ENABLED !== '1') throw Error('Inbox action worker is disabled');
   if (!process.env.INBOX_ACTION_DATABASE_URL || !process.env.INBOX_RESTATE_INGRESS_URL) throw Error('Private worker configuration missing');
   const { default: pg } = await import('pg');

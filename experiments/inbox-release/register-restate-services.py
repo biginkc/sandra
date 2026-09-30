@@ -57,6 +57,7 @@ RAILWAY_WORKERS = {
     },
 }
 RAILWAY_EXPECTED_SERVICES = {"InboxMetadataOperation", "InboxReplySend"}
+RAILWAY_GENERATION_ID_LENGTH = 12
 RESTATE_IMAGE = (
     "docker.restate.dev/restatedev/restate@sha256:"
     "675b85e7bf674f9dfda04a391fa33e850650d57e464b694ca8df5866acad95cc"
@@ -275,15 +276,70 @@ def configured_railway_workers() -> dict:
     generation = os.environ.get("INBOX_RUNTIME_GENERATION", "")
     if not re.fullmatch(r"[a-f0-9]{64}", generation):
         raise GuardError("INBOX_RUNTIME_GENERATION must be a full image digest")
+    generation_id = generation[:RAILWAY_GENERATION_ID_LENGTH]
     return {
         key: {
             **worker,
-            "hostname": f"{worker['hostname_prefix']}-{generation}.railway.internal",
-            "liveness_endpoint": f"http://{worker['hostname_prefix']}-{generation}.railway.internal:{worker['port']}",
-            "endpoint": f"http://{worker['hostname_prefix']}-{generation}.railway.internal:{worker['port']}/runtime/{generation}",
+            "generation": generation,
+            "generation_id": generation_id,
+            "hostname": f"{worker['hostname_prefix']}-{generation_id}.railway.internal",
+            "liveness_endpoint": f"http://{worker['hostname_prefix']}-{generation_id}.railway.internal:{worker['port']}",
+            "endpoint": f"http://{worker['hostname_prefix']}-{generation_id}.railway.internal:{worker['port']}/runtime/{generation}",
         }
         for key, worker in RAILWAY_WORKERS.items()
     }
+
+
+def _registered_generation_host(uri: object, hostname_prefix: str) -> tuple[str, str] | None:
+    if not isinstance(uri, str):
+        return None
+    try:
+        parsed = urlsplit(uri)
+        hostname = parsed.hostname
+    except ValueError:
+        return None
+    if hostname is None:
+        return None
+    host_match = re.fullmatch(
+        rf"{re.escape(hostname_prefix)}-([a-f0-9]+)\.railway\.internal",
+        hostname.lower(),
+    )
+    if host_match is None:
+        return None
+    path_match = re.fullmatch(r"/runtime/([a-f0-9]{64})/?", parsed.path)
+    if path_match is None:
+        raise GuardError(f"registered Railway hostname {hostname} has no full generation path")
+    generation_id, generation = host_match.group(1), path_match.group(1)
+    if len(generation_id) != RAILWAY_GENERATION_ID_LENGTH or generation_id != generation[:RAILWAY_GENERATION_ID_LENGTH]:
+        raise GuardError(f"registered Railway hostname {hostname} does not identify its full generation")
+    return hostname.lower(), generation
+
+
+def assert_generation_hostname_unique(registry: dict, worker: dict) -> None:
+    deployments = registry.get("deployments")
+    if not isinstance(deployments, list):
+        raise GuardError("Restate deployment registry has no deployments list")
+    seen: dict[str, str] = {}
+    for deployment in deployments:
+        if not isinstance(deployment, dict):
+            continue
+        services = deployment.get("services")
+        if not isinstance(services, list) or not any(
+            isinstance(item, dict) and item.get("name") == worker["service"]
+            for item in services
+        ):
+            continue
+        registered = _registered_generation_host(deployment.get("uri"), worker["hostname_prefix"])
+        if registered is None:
+            continue
+        hostname, generation = registered
+        previous = seen.setdefault(hostname, generation)
+        if previous != generation:
+            raise GuardError(f"Railway hostname {hostname} is reused by multiple registered generations")
+    hostname = worker["hostname"].lower()
+    previous = seen.get(hostname)
+    if previous is not None and previous != worker["generation"]:
+        raise GuardError(f"Railway hostname {hostname} is already registered for another generation")
 
 
 def railway_liveness(worker: dict) -> dict:
@@ -304,6 +360,7 @@ def run_railway(register: bool) -> dict:
         raise GuardError(f"Railway Restate deployment registry is unavailable: HTTP {registry_status}")
     registrations = []
     for worker in workers.values():
+        assert_generation_hostname_unique(registry, worker)
         current = deployment_matches(registry, worker["endpoint"], worker["service"])
         if current is not None:
             registrations.append({"endpoint": worker["endpoint"], "service": worker["service"], "state": "already_registered", **current})
@@ -322,6 +379,7 @@ def run_railway(register: bool) -> dict:
         registry_status, registry = http_json(f"{RAILWAY_ADMIN}/deployments")
         if registry_status != 200:
             raise GuardError("Railway Restate deployment registry could not be read after registration")
+        assert_generation_hostname_unique(registry, worker)
         verified = deployment_matches(registry, worker["endpoint"], worker["service"])
         if verified is None:
             raise GuardError(f"Railway registration did not expose {worker['service']} at {worker['endpoint']}")

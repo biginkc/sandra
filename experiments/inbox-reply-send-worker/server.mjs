@@ -27,12 +27,6 @@ export function createWorkerRequestHandler({ endpoint, registrationPath, isStopp
 }
 
 async function start() {
-  if (process.env.INBOX_WORKER_ROUTING_TEST === '1') {
-    const registrationPath = process.env.INBOX_RESTATE_REGISTRATION_PATH ?? '';
-    const endpoint = async (_req, res) => { res.writeHead(200); res.end('handled'); };
-    http.createServer(createWorkerRequestHandler({ endpoint, registrationPath })).listen(Number(process.env.PORT ?? 9081), '127.0.0.1');
-    return;
-  }
   if (process.env.INBOX_REPLY_SEND_WORKER_ENABLED !== '1') throw Error('Inbox reply-send worker is disabled');
   if (!process.env.INBOX_REPLY_SEND_DATABASE_URL || !process.env.INBOX_RESTATE_INGRESS_URL) throw Error('Private worker configuration missing');
   const { default: pg } = await import('pg');
@@ -68,6 +62,23 @@ async function start() {
     const attemptIds = await ctx.run('list-attempts', () => runner.operationAttempts(orgId, operationId));
     const results = [];
     for (const attemptId of attemptIds) {
+      // [Astra B2] A deferred/not_sent outcome is NEVER a value this step
+      // may return normally — a normal return is what Restate's ctx.run
+      // memoizes durably, and memoizing "deferred" would permanently strand
+      // this attempt: a later replay of THIS invocation would just replay
+      // the journaled "deferred" forever, never re-checking the ledger.
+      // Instead, the action throws a plain (non-Terminal) Error when the
+      // outcome isn't 'settled'. A thrown, non-terminal error inside
+      // ctx.run is NEVER journaled as a completed value — Restate retries
+      // the action itself (bounded, with backoff), calling
+      // dispatchAttempt() again for real each time. dispatchAttempt is
+      // always safe to re-enter: claim() is idempotent/fenced (busy again,
+      // or existing/settled — never a second token), so re-running it on
+      // retry can never double-send. Only once the outcome is genuinely
+      // 'settled' does the action return normally, and ctx.run then
+      // memoizes THAT (real, durable, ledger-backed) value — a later
+      // replay of this same invocation returns it instantly without ever
+      // touching the ledger or the provider again.
       const outcome = await ctx.run(`attempt:${attemptId}`, async () => {
         const result = await runner.dispatchAttempt(orgId, operationId, attemptId);
         if (result.kind !== 'settled') throw Error(`reply attempt ${attemptId} not yet settled: ${result.kind}${result.reason ? `(${result.reason})` : ''}`);

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Prove the release compose env resolves and both worker entrypoints start.
+"""Prove the release compose env resolves and both worker seams start.
 
-The child processes use the workers' explicit routing-test mode, so this test
-does not open a database, invoke Restate, contact a provider, or mutate a
-fixture. The compose CLI still performs the real env-file interpolation.
+The proof imports the real worker configuration functions and request-handler
+factories with injected endpoint dependencies. It does not open a database,
+invoke Restate, contact a provider, or mutate a fixture.
 """
 
 from __future__ import annotations
@@ -12,33 +12,13 @@ import json
 import os
 from pathlib import Path
 import shutil
-import socket
 import subprocess
 import tempfile
-import time
 import unittest
-from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
 
 
 HERE = Path(__file__).resolve().parent
 COMPOSE = HERE / "execution-stack-compose.yml"
-
-
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def status(url: str) -> int:
-    try:
-        with urlopen(url, timeout=0.5) as response:
-            return response.status
-    except HTTPError as exc:
-        return exc.code
-    except URLError:
-        return None
 
 
 def compose_command() -> list[str] | None:
@@ -62,7 +42,14 @@ class ExecutionStackComposeTests(unittest.TestCase):
             key = root / "restate-key.pem"
             key.write_text("fixture-key\n")
             runtime_env = root / "runtime.env"
-            runtime_env.write_text("INBOX_RESTATE_IDENTITY_KEYS=[]\n")
+            runtime_env.write_text(
+                "\n".join([
+                    'INBOX_RESTATE_IDENTITY_KEYS=["publickeyv1_' + "A" * 43 + '"]',
+                    "INBOX_ACTION_DATABASE_URL=postgres://inbox_action_worker:fixture@127.0.0.1:54322/postgres",
+                    "INBOX_REPLY_SEND_DATABASE_URL=postgres://inbox_reply_send_worker:fixture@127.0.0.1:54322/postgres",
+                    "",
+                ])
+            )
             projection_env = root / "projection.env"
             projection_env.write_text("INBOX_PROJECTION_DATABASE_URL=postgres://fixture:fixture@127.0.0.1:54322/postgres\n")
             generation_a = "a" * 64
@@ -89,6 +76,7 @@ class ExecutionStackComposeTests(unittest.TestCase):
             }
             self.assertEqual(supplied["INBOX_RELEASE_OPERATION_REGISTRATION_PATH"], f"/runtime/{generation_a}")
             self.assertEqual(supplied["INBOX_RELEASE_REPLY_REGISTRATION_PATH"], f"/runtime/{generation_b}")
+            resolved_services = None
             if compose is not None:
                 result = subprocess.run(
                     [*compose, "--env-file", str(compose_env), "-f", str(COMPOSE), "--profile", "full-runtime", "config", "--format", "json"],
@@ -100,51 +88,28 @@ class ExecutionStackComposeTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr[-2000:])
                 resolved = json.loads(result.stdout)
-                operation_env = resolved["services"]["operation-worker"]["environment"]
-                reply_env = resolved["services"]["reply-send-worker"]["environment"]
-            else:
-                # Some developer machines have Docker Engine without Compose.
-                # Check the same required interpolation explicitly, then use
-                # those resolved values for the process-level start proof.
-                source = COMPOSE.read_text()
-                operation_marker = "${INBOX_RELEASE_OPERATION_REGISTRATION_PATH:?"
-                reply_marker = "${INBOX_RELEASE_REPLY_REGISTRATION_PATH:?"
-                self.assertIn(operation_marker, source)
-                self.assertIn(reply_marker, source)
-                operation_env = {"INBOX_RESTATE_REGISTRATION_PATH": f"/runtime/{generation_a}"}
-                reply_env = {"INBOX_RESTATE_REGISTRATION_PATH": f"/runtime/{generation_b}"}
-            self.assertEqual(operation_env["INBOX_RESTATE_REGISTRATION_PATH"], f"/runtime/{generation_a}")
-            self.assertEqual(reply_env["INBOX_RESTATE_REGISTRATION_PATH"], f"/runtime/{generation_b}")
+                resolved_services = {
+                    "operation-worker": resolved["services"]["operation-worker"]["environment"],
+                    "reply-send-worker": resolved["services"]["reply-send-worker"]["environment"],
+                }
 
-            children = []
-            try:
-                for worker, worker_env, default_port in (
-                    ("operation", operation_env, 9080),
-                    ("reply", reply_env, 9081),
-                ):
-                    port = free_port() or default_port
-                    env = {**os.environ, **{str(k): str(v) for k, v in worker_env.items() if v is not None}}
-                    env.update({"INBOX_WORKER_ROUTING_TEST": "1", "PORT": str(port), "INBOX_WORKER_BIND": "127.0.0.1", "LC_ALL": "C"})
-                    process = subprocess.Popen([node, str(HERE.parent / ("inbox-operation-worker" if worker == "operation" else "inbox-reply-send-worker") / "server.mjs")], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    children.append((worker, process, port))
-                deadline = time.monotonic() + 5
-                for worker, process, port in children:
-                    while time.monotonic() < deadline and process.poll() is None:
-                        if status(f"http://127.0.0.1:{port}/livez") == 200:
-                            break
-                        time.sleep(0.05)
-                    self.assertIsNone(process.poll(), f"{worker} worker exited before startup")
-                    self.assertEqual(status(f"http://127.0.0.1:{port}/livez"), 200, worker)
-            finally:
-                for _worker, process, _port in children:
-                    if process.poll() is None:
-                        process.terminate()
-                for _worker, process, _port in children:
-                    try:
-                        process.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=3)
+            proof = subprocess.run(
+                [node, str(HERE / "worker-compose-proof.mjs")],
+                input=json.dumps({
+                    "compose_path": str(COMPOSE),
+                    "supplied_env": supplied,
+                    "resolved_services": resolved_services,
+                }),
+                capture_output=True,
+                text=True,
+                cwd=HERE.parent.parent,
+                env={**os.environ, "LC_ALL": "C"},
+                check=False,
+            )
+            self.assertEqual(proof.returncode, 0, proof.stderr[-4000:])
+            self.assertIn('"configurationAccepted":true', proof.stdout)
+            self.assertIn('"databaseAccepted":true', proof.stdout)
+            self.assertIn('"routingAccepted":true', proof.stdout)
 
 
 if __name__ == "__main__":

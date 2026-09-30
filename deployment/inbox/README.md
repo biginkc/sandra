@@ -91,8 +91,8 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   `INBOX_RESTATE_REGISTRATION_PATH=/runtime/<64-lowercase-hex-image-digest>`.
   The worker serves that versioned path and the registration helper uses it as
   the deployment identity. Railway registration also requires
-  `INBOX_RUNTIME_GENERATION=<64-lowercase-hex-image-digest>`; a missing or
-  reused generation is rejected before registration.
+  `INBOX_RUNTIME_GENERATION=<64-lowercase-hex-image-digest>`; a missing,
+  reused, or first-12-hex collision is rejected before registration.
 - `INBOX_ELECTRIC_RELAY_TOKEN` (Next, read by `src/lib/inbox/sync-upstream-config.ts`)
   and `INBOX_RELAY_TOKEN` (relay, read by `services/inbox-sync-relay/server.mjs`)
   are the SAME secret in two processes' own env vars — not a mismatch to
@@ -119,11 +119,13 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
 
 Each Railway operation/reply worker service is generation-specific. For an image
 digest `G`, create the new private services with hostnames
-`inbox-operation-worker-G.railway.internal` and
-`inbox-reply-send-worker-G.railway.internal`, set each worker's
+`inbox-operation-worker-G[:12].railway.internal` and
+`inbox-reply-send-worker-G[:12].railway.internal`, where `G[:12]` is the first
+12 lowercase hex characters of the full 64-character digest. Set each worker's
 `INBOX_RESTATE_REGISTRATION_PATH=/runtime/G`, and set the registration helper's
 `INBOX_RUNTIME_GENERATION=G`. Register the new endpoints only after `/livez` and
-the Restate registry readback pass. The helper keeps at most two generations per
+the Restate registry readback pass. The helper rejects any registered generation
+whose short hostname collides with a different full digest and keeps at most two generations per
 Restate service, so the old endpoint remains registered and routable while its
 outbox is drained.
 
