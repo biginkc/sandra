@@ -25,6 +25,8 @@ const localDbUrl = "postgresql://postgres:postgres@127.0.0.1:54329/postgres";
 const foundationSql = readFileSync(path.resolve(__dirname, "20260929034021_dialpad_cti_foundation.sql"), "utf8");
 const projectionSql = readFileSync(path.resolve(__dirname, "20260929120000_dialpad_cti_call_projection.sql"), "utf8");
 
+const trainingSql = readFileSync(path.resolve(__dirname, "20260930036000_dialpad_training_projection.sql"), "utf8");
+
 const uuid = () => crypto.randomUUID();
 const DIALPAD_REP_A = "5150000000000001";
 const DIALPAD_TRANSFEREE = "5150000000000009";
@@ -109,7 +111,7 @@ async function setDesignation(user: string, org: string, enabled: boolean): Prom
   });
 }
 
-async function seedFixture(): Promise<void> {
+async function seedFixture(training = false): Promise<void> {
   orgId = uuid();
   otherOrgId = uuid();
   ownerId = uuid();
@@ -132,10 +134,17 @@ async function seedFixture(): Promise<void> {
     "insert into public.contacts(id,org_id,first_name,phone_1,phone_1_type) values ($1,$2,'Seller','(816) 555-0142','mobile')",
     [contactId, orgId],
   );
-  await pg.query(
-    "insert into public.properties(id,org_id,address,state,homeowner_contact_id,assigned_user_id) values ($1,$2,'1 CTI Way','MO',$3,$4)",
-    [propertyId, orgId, contactId, repA],
-  );
+  if (training) {
+    await service(() => pg.query(
+      "insert into public.properties(id,org_id,address,state,homeowner_contact_id,assigned_user_id,is_training,status) values ($1,$2,'1 CTI Way','MO',$3,$4,true,'new_lead')",
+      [propertyId, orgId, contactId, repA],
+    ));
+  } else {
+    await pg.query(
+      "insert into public.properties(id,org_id,address,state,homeowner_contact_id,assigned_user_id) values ($1,$2,'1 CTI Way','MO',$3,$4)",
+      [propertyId, orgId, contactId, repA],
+    );
+  }
   await service(async () => {
     const a = await pg.query<{ id: string }>(
       "insert into public.dialpad_org_connections(org_id,status,cti_client_id,webhook_secret_ref) values ($1,'active','client_abc','env:DIALPAD_CTI_WEBHOOK_SECRET_A') returning id",
@@ -308,7 +317,9 @@ describe("20260929120000 Dialpad CTI call projection migration", () => {
     await pg.connect();
     await pg.query(foundationSql);
     await pg.query(projectionSql);
+    await pg.query(trainingSql);
     await pg.query(projectionSql);
+    await pg.query(trainingSql);
   });
 
   afterAll(async () => {
@@ -324,6 +335,57 @@ describe("20260929120000 Dialpad CTI call projection migration", () => {
   afterEach(async () => {
     await pg.query("rollback");
     await pg.query("reset role");
+  });
+
+  describe("permanent training isolation", () => {
+    it("commits training events, opens recording, and replays without customer ledger effects", async () => {
+      await pg.query("rollback");
+      await pg.query("begin");
+      await seedFixture(true);
+      const snapshot = async () => ({
+        property: (await pg.query("select to_jsonb(p) as v from public.properties p where id=$1", [propertyId])).rows,
+        queue: (await pg.query("select * from public.acquisition_queue_states where property_id=$1", [propertyId])).rows,
+        episodes: (await pg.query("select * from public.acquisition_assignment_episodes where property_id=$1", [propertyId])).rows,
+      });
+      const before = await snapshot();
+      const intent = await prepare();
+      const events = answeredCall(String(intent.customData));
+      // Reproduce the production rollback using the old function, then restore
+      // the patched function in the same isolated transaction.
+      await pg.query("savepoint legacy_projection");
+      const legacyStart = projectionSql.indexOf("create or replace function public.dialpad_cti_project_intent");
+      const legacyEnd = projectionSql.indexOf("\n$$;", legacyStart) + 4;
+      await pg.query(projectionSql.slice(legacyStart, legacyEnd));
+      expect((await failure(() => deliver(events[0]!))).message).toContain("TRAINING_PROTECTED");
+      await pg.query("rollback to savepoint legacy_projection");
+      for (const event of events.slice(0, 2)) {
+        expect(await deliver(event)).toMatchObject({ disposition: "matched", projected: true, attemptId: null });
+      }
+      const callStatus = () => service(() => pg.query("select public.fn_get_dialpad_call_status($1,$2,$3) as v", [orgId, repA, intent.intentId]));
+      expect((await callStatus()).rows[0].v).toMatchObject({ state: "connected", attemptId: null, propertyId });
+      const open = () => service(() => pg.query("select public.fn_open_dialpad_recording_capture($1,$2,$3) as v", [orgId, repA, intent.intentId]));
+      const opened = (await open()).rows[0].v;
+      expect(opened.status).toBe("opened");
+      expect((await open()).rows[0].v).toMatchObject({ status: "replayed", capture: { captureId: opened.capture.captureId } });
+      expect(await deliver(events[2]!)).toMatchObject({ disposition: "matched", projected: true, attemptId: null });
+      for (const event of events) await deliver(event);
+      const { activities, attempts } = await ledger();
+      expect(activities).toHaveLength(1);
+      expect(activities[0]).toMatchObject({ call_purpose: "internal_training", provider: "dialpad", property_id: null, contact_id: null, operator_user_id: repA, duration_seconds: 64 });
+      expect(activities[0]!.ended_at).not.toBeNull();
+      expect(attempts).toHaveLength(0);
+      expect(await snapshot()).toEqual(before);
+      expect((await callStatus()).rows[0].v).toMatchObject({ state: "ended", attemptId: null, callActivityId: activities[0]!.id });
+      expect(await count("dialpad_recording_captures", "org_id=$1", [orgId])).toBe(1);
+      expect(await count("dialpad_call_events", "org_id=$1 and disposition='matched' and projected_at is not null", [orgId])).toBe(3);
+
+      expect((await failure(() => service(() => pg.query("update public.properties set status='contacted' where id=$1", [propertyId])))).code).toBe("23514");
+      expect((await failure(() => service(() => pg.query("update public.properties set is_training=false where id=$1", [propertyId])))).code).toBe("23514");
+      expect((await failure(() => service(() => pg.query("update public.contacts set phone_1='8165559999' where id=$1", [contactId])))).code).toBe("23514");
+      expect((await failure(() => service(() => pg.query("update public.call_activities set property_id=$1 where id=$2", [propertyId, activities[0]!.id])))).code).toBe("23514");
+      expect((await failure(() => service(() => pg.query("update public.call_activities set call_purpose='customer' where id=$1", [activities[0]!.id])))).code).toBe("23514");
+      expect((await failure(() => authenticated(repA, () => pg.query("insert into public.call_activities(org_id,provider,call_purpose,operator_user_id) values ($1,'dialpad','internal_training',$2)", [orgId, repA])))).code).toBe("42501");
+    });
   });
 
   describe("attribution and lifecycle projection", () => {
@@ -1047,6 +1109,7 @@ describe("20260929120000 Dialpad CTI call projection concurrency", () => {
     await Promise.all([pg.connect(), c1.connect(), c2.connect()]);
     await pg.query(foundationSql);
     await pg.query(projectionSql);
+    await pg.query(trainingSql);
   });
 
   afterAll(async () => {
