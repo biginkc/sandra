@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { parseCoachEvent } from "./event-validation";
+
+it("pins the approved reply file bytes", () => {
+  const bytes = readFileSync(new URL("./live-coach-replies.approved.json", import.meta.url));
+  expect(createHash("sha256").update(bytes).digest("hex")).toBe("e3152385a4090367b9fd6e72c32181c55a4f134ce40b7fdab692916735c1ea18");
+});
 
 /** Every wire message carries both content versions, always — required per
  * the producer's verbatim wire contract. Spread into every payload/expected
@@ -22,6 +29,27 @@ describe("parseCoachEvent — objection prompt", () => {
     { matcherVersion: null },
   ])("rejects a malformed field: %j", (change) => {
     expect(parseCoachEvent({ ...PROMPT, ...change })).toEqual({ ok: false, reason: "malformed", rawType: "objection_prompt" });
+  });
+});
+
+describe("parseCoachEvent — motivation prompt", () => {
+  const MOTIVATION = { type: "motivation_prompt", label: "Motivation", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  it("accepts the bounded shape and ignores unknown fields", () => {
+    expect(parseCoachEvent({ ...MOTIVATION, objectionId: "ignored" })).toEqual({ ok: true, event: MOTIVATION });
+  });
+  it("accepts an optional sub-type id and rejects a malformed one", () => {
+    expect(parseCoachEvent({ ...MOTIVATION, subType: "tired_landlord" })).toEqual({ ok: true, event: { ...MOTIVATION, subType: "tired_landlord" } });
+    for (const subType of ["", "Has Space", "x".repeat(65), 7]) {
+      expect(parseCoachEvent({ ...MOTIVATION, subType })).toEqual({ ok: false, reason: "malformed", rawType: "motivation_prompt" });
+    }
+  });
+  it.each([
+    { label: "" }, { label: "x".repeat(81) },
+    { sellerTurn: 0 }, { sellerTurn: 1.5 },
+    { classifierModel: "" }, { questionsSha256: "bad" },
+    { ts: "invalid" }, { scriptVersion: null, scriptDigest: null }, { matcherVersion: null },
+  ])("rejects a malformed field: %j", (change) => {
+    expect(parseCoachEvent({ ...MOTIVATION, ...change })).toEqual({ ok: false, reason: "malformed", rawType: "motivation_prompt" });
   });
 });
 

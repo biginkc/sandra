@@ -19,15 +19,19 @@ describe("coachReducer — objection prompt", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_000_000); });
   afterEach(() => vi.useRealTimers());
 
-  it("sets, replaces, expires, and resets the single prompt", () => {
+  it("sets, replaces, persists, dismisses, and resets the single prompt", () => {
     expect(initialCoachState().objectionPrompt).toBeNull();
     let state = coachReducer(initialCoachState(), prompt);
-    expect(state.objectionPrompt).toMatchObject({ label: "Price concern", expiresAt: 1_030_000 });
+    expect(state.objectionPrompt).toMatchObject({ label: "Price concern" });
     vi.setSystemTime(1_010_000);
     state = coachReducer(state, { ...prompt, label: "Timing concern", sellerTurn: 2 });
-    expect(state.objectionPrompt).toMatchObject({ label: "Timing concern", expiresAt: 1_040_000 });
+    expect(state.objectionPrompt).toMatchObject({ label: "Timing concern" });
     vi.setSystemTime(1_040_000);
-    expect(state.objectionPrompt!.expiresAt <= Date.now()).toBe(true);
+    expect(state.objectionPrompt).not.toHaveProperty("expiresAt");
+    expect(state.objectionPrompt?.label).toBe("Timing concern");
+    state = coachReducer(state, { type: "dismiss_objection_prompt" });
+    expect(state.objectionPrompt).toBeNull();
+    state = coachReducer(state, prompt);
     state = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
     expect(state.objectionPrompt).toBeNull();
   });
@@ -56,6 +60,104 @@ describe("coachReducer — objection prompt", () => {
 
     state = coachReducer(state, { ...prompt, objectionId: "consult", label: "Consult", sellerTurn: 199, ts });
     expect(state.objectionPrompt).toMatchObject({ objectionId: "timing" });
+  });
+});
+
+describe("coachReducer — motivation prompt", () => {
+  const motivation = { type: "motivation_prompt" as const, label: "Motivation", sellerTurn: 2, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  const objection = { type: "objection_prompt" as const, objectionId: "price", label: "Price concern", sellerTurn: 2, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_000_000); });
+  afterEach(() => vi.useRealTimers());
+
+  it("keeps motivation separate from the objection card and resets it", () => {
+    expect(initialCoachState().motivationPrompt).toBeNull();
+    let state = coachReducer(initialCoachState(), objection);
+    state = coachReducer(state, motivation);
+    expect(state.objectionPrompt).toMatchObject({ label: "Price concern" });
+    expect(state.motivationPrompt).toMatchObject({ label: "Motivation", sellerTurn: 2 });
+    vi.setSystemTime(1_040_000);
+    expect(state.motivationPrompt).not.toHaveProperty("expiresAt");
+    state = coachReducer(state, { type: "dismiss_motivation_prompt" });
+    expect(state.motivationPrompt).toBeNull();
+    expect(state.objectionPrompt).not.toBeNull();
+    state = coachReducer(state, motivation);
+    state = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
+    expect(state.motivationPrompt).toBeNull();
+  });
+
+  it("stores the sub-type and lets a same-timestamp different sub-type replace the card", () => {
+    let state = coachReducer(initialCoachState(), motivation);
+    expect(state.motivationPrompt).not.toHaveProperty("subType");
+    state = coachReducer(state, { ...motivation, subType: "inherited" });
+    expect(state.motivationPrompt).toMatchObject({ subType: "inherited" });
+    expect(coachReducer(state, { ...motivation, subType: "inherited" })).toBe(state);
+  });
+
+  it("ignores an exact duplicate and an older motivation event, accepts a newer one", () => {
+    let state = coachReducer(initialCoachState(), motivation);
+    vi.setSystemTime(1_005_000);
+    expect(coachReducer(state, motivation)).toBe(state);
+    expect(coachReducer(state, { ...motivation, ts: "2026-09-29T11:59:59Z", sellerTurn: 3 })).toBe(state);
+    expect(coachReducer(state, { ...motivation, sellerTurn: 1 })).toBe(state);
+    state = coachReducer(state, { ...motivation, ts: "2026-09-29T12:00:05Z", sellerTurn: 4 });
+    expect(state.motivationPrompt).toMatchObject({ sellerTurn: 4 });
+  });
+});
+
+describe("coachReducer — a dismissed card stays dismissed", () => {
+  const objection = { type: "objection_prompt" as const, objectionId: "price", label: "Price concern", sellerTurn: 2, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  const motivation = { type: "motivation_prompt" as const, label: "Motivation", sellerTurn: 2, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+
+  it.each([
+    ["objection", objection, { type: "dismiss_objection_prompt" as const }, "objectionPrompt" as const],
+    ["motivation", motivation, { type: "dismiss_motivation_prompt" as const }, "motivationPrompt" as const],
+  ])("%s: a duplicate or older event cannot bring it back, a newer one shows, reset forgets", (_kind, event, dismiss, field) => {
+    let state = coachReducer(initialCoachState(), event);
+    state = coachReducer(state, dismiss);
+    expect(state[field]).toBeNull();
+    expect(coachReducer(state, event)[field]).toBeNull();
+    expect(coachReducer(state, { ...event, ts: "2026-09-29T11:59:00Z", sellerTurn: 9 })[field]).toBeNull();
+    // Jitter's re-send after a failed publish: same card, same statement, fresh ts.
+    const resent = coachReducer(state, { ...event, ts: "2026-09-29T12:00:01Z" });
+    expect(resent[field]).toBeNull();
+    // ...and a slower card stamped before that re-send is still older.
+    expect(coachReducer(resent, { ...event, ts: "2026-09-29T12:00:00.500Z", sellerTurn: 9 })[field]).toBeNull();
+    expect(coachReducer(state, { ...event, sellerTurn: 1 })[field]).toBeNull();
+    const newer = coachReducer(state, { ...event, ts: "2026-09-29T12:00:30Z", sellerTurn: 4 });
+    expect(newer[field]).toMatchObject({ sellerTurn: 4 });
+    const reset = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
+    expect(coachReducer(reset, event)[field]).toMatchObject({ sellerTurn: 2 });
+  });
+});
+
+describe("coachReducer — a re-sent card is the same card", () => {
+  const objection = { type: "objection_prompt" as const, objectionId: "price", label: "Price concern", sellerTurn: 2, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  const motivation = { type: "motivation_prompt" as const, label: "Motivation", subType: "inherited", sellerTurn: 2, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z", ...V };
+  const later = "2026-09-29T12:00:01Z";
+
+  it("keeps the visible card object when the same card is re-sent with a later ts", () => {
+    const shown = coachReducer(coachReducer(initialCoachState(), objection), motivation);
+    const resent = coachReducer(coachReducer(shown, { ...objection, ts: later }), { ...motivation, ts: later });
+    expect(resent.objectionPrompt).toBe(shown.objectionPrompt);
+    expect(resent.motivationPrompt).toBe(shown.motivationPrompt);
+  });
+
+  it("shows a different card on the same statement, and the first one again if it comes back after it", () => {
+    let state = coachReducer(coachReducer(initialCoachState(), objection), motivation);
+    state = coachReducer(state, { ...objection, objectionId: "timing", label: "Timing concern", ts: later });
+    state = coachReducer(state, { ...motivation, subType: "vacant", ts: later });
+    expect(state.objectionPrompt).toMatchObject({ objectionId: "timing" });
+    expect(state.motivationPrompt).toMatchObject({ subType: "vacant" });
+    state = coachReducer(state, { ...motivation, ts: "2026-09-29T12:00:02Z" });
+    expect(state.motivationPrompt).toMatchObject({ subType: "inherited" });
+  });
+
+  it("keeps a dismissed sub-type card hidden when the general card for that statement arrives, but shows a sub-type after a general", () => {
+    const { subType: _subType, ...general } = motivation;
+    let state = coachReducer(coachReducer(initialCoachState(), motivation), { type: "dismiss_motivation_prompt" });
+    expect(coachReducer(state, { ...general, ts: later }).motivationPrompt).toBeNull();
+    state = coachReducer(coachReducer(initialCoachState(), general), { ...motivation, ts: later });
+    expect(state.motivationPrompt).toMatchObject({ subType: "inherited" });
   });
 });
 

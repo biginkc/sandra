@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   act,
   fireEvent,
@@ -7,17 +8,13 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   closrOutbound123Bundle,
   closrOutbound123Ref,
 } from "@biginkc/coach/fixtures";
-import type {
-  CoachRecommendationRequest,
-  CoachRecommendationRequestFn,
-  CoachRecommendationResult,
-} from "@/lib/coach/recommendation-types";
 import type { CoachCallContext } from "@/lib/coach/types";
 import {
   useCoachSession,
@@ -157,29 +154,6 @@ function DialogLifecycleHarness() {
 }
 
 function baseProps(overrides: Partial<HarnessProps> = {}): HarnessProps {
-  const recommendationRequest: CoachRecommendationRequestFn = vi.fn(
-    async (
-      input: CoachRecommendationRequest,
-    ): Promise<CoachRecommendationResult> => ({
-      ok: true,
-      requestId: input.requestId,
-      callId: input.callId,
-      activeSectionId: input.activeSectionId,
-      mode: input.mode,
-      recommendations:
-        input.mode === "automatic"
-          ? ["Ask how the repair issue affects their timing."]
-          : [],
-      followUpQuestions:
-        input.mode === "follow_up"
-          ? [
-              "What repairs concern you most?",
-              "How long has that been a problem?",
-              "What happens if nothing changes?",
-            ]
-          : [],
-    }),
-  );
   return {
     callName: "Jane Homeowner",
     callStatus: "live",
@@ -192,7 +166,6 @@ function baseProps(overrides: Partial<HarnessProps> = {}): HarnessProps {
     onHold: vi.fn(),
     onHangup: vi.fn(),
     onCollapse: vi.fn(),
-    recommendationRequest,
     ...overrides,
   };
 }
@@ -238,21 +211,100 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByTestId("coach-objection-prompt")).not.toHaveTextContent("price");
     broadcast({ type: "objection", objectionId: "legacy", ts: "legacy" });
     expect(screen.getAllByTestId("coach-objection-prompt")).toHaveLength(1);
+    expect(screen.queryByTestId("coach-recommendations")).toBeNull();
+    expect(screen.queryByTestId("follow-up-questions")).toBeNull();
   });
 
-  it("removes the prompt after thirty seconds", async () => {
+  it("mounts the v2 tray inside the script panel above navigation", async () => {
+    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
+    render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
+    await screen.findByTestId("current-script-card");
+    broadcast(promptPayload);
+    const panel = screen.getByTestId("coach-script-panel");
+    const tray = await screen.findByTestId("coach-card-tray");
+    expect(tray.parentElement).toBe(panel);
+    expect(panel).toContainElement(screen.getByTestId("section-navigation"));
+    expect(screen.queryByTestId("coach-recommendations")).toBeNull();
+  });
+
+  it("shows the owner's playbook replies on the objection card, line for line, and nothing for a type without one", async () => {
+    const raw = readFileSync("src/lib/coach/live-coach-objection-replies.json");
+    expect(createHash("sha256").update(raw).digest("hex")).toBe("41993b4ad0362cc6ec57490499697e497479c7295eeb50643ec63ca704abdf9d");
+    const file = JSON.parse(raw.toString("utf8")) as { source: { sha256: string }; sets: Record<string, { replies: { catalogId: string; text: string }[] }> };
+    expect(file.source.sha256).toBe("fe25b222796afd33e8171527789791307a58ae1f85b814320b0f1ed9dc6ecd77");
+    const invisible = /[\s\u200b\u200c\u200d\ufeff]/g;
+    const visibleLines = (text: string) => text.split("\n").filter((line) => line.replace(invisible, "") !== "");
+    const base = { type: "objection_prompt", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64) };
+    render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    broadcast({ ...base, objectionId: "price_pushback", label: "Offered-price pushback", ts: "2026-09-29T12:00:00Z" });
+    const blocks = () => screen.getAllByTestId("coach-objection-reply").map((block) => [...block.querySelectorAll("p")].map((line) => line.textContent));
+    // Both merged catalog entries, in catalog order, every visible line exactly as written.
+    expect(file.sets.price_pushback.replies.map((reply) => reply.catalogId)).toEqual(["offer_too_low", "counteroffer"]);
+    expect(blocks()).toEqual(file.sets.price_pushback.replies.map((reply) => visibleLines(reply.text)));
+    expect(blocks().flat().join("\n")).toBe(file.sets.price_pushback.replies.flatMap((reply) => visibleLines(reply.text)).join("\n"));
+    broadcast({ ...base, objectionId: "relocation", label: "Housing delay", sellerTurn: 3, ts: "2026-09-29T12:00:10Z" });
+    expect(screen.getByTestId("coach-objection-prompt-label")).toHaveTextContent("Housing delay");
+    expect(screen.queryByTestId("coach-objection-replies")).toBeNull();
+    expect(file.sets.relocation).toBeUndefined();
+  });
+
+  it("shows the matching sub-type lines, all at once, and replaces them on a later statement", async () => {
+    const approved = JSON.parse(readFileSync("src/lib/coach/live-coach-replies.approved.json", "utf8")) as { sets: Record<string, { replies: { text: string }[] }> };
+    const lines = () => [...screen.getByTestId("coach-motivation-replies").querySelectorAll("li")].map((item) => item.textContent);
+    const base = { type: "motivation_prompt", label: "Motivation", classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64) };
+    render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    broadcast({ ...base, subType: "tired_landlord", sellerTurn: 1, ts: "2026-09-29T12:00:00Z" });
+    expect(lines()).toEqual(approved.sets["motivation.tired_landlord"].replies.map((reply) => reply.text));
+    expect(lines()).toHaveLength(6);
+    broadcast({ ...base, subType: "inherited", sellerTurn: 3, ts: "2026-09-29T12:00:10Z" });
+    expect(lines()).toEqual(approved.sets["motivation.inherited"].replies.map((reply) => reply.text));
+    broadcast({ ...base, subType: "not_an_approved_set", sellerTurn: 5, ts: "2026-09-29T12:00:20Z" });
+    expect(lines()).toEqual(approved.sets.motivation.replies.map((reply) => reply.text));
+    expect(screen.getAllByTestId("coach-motivation-prompt")).toHaveLength(1);
+  });
+
+  it("shows a separate motivation card beside the objection card, only when enabled", async () => {
+    const motivationPayload = { type: "motivation_prompt", label: "Motivation", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z" };
+    const { unmount } = render(<Harness {...baseProps()} />);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    broadcast(motivationPayload);
+    expect(screen.queryByTestId("coach-motivation-prompt")).toBeNull();
+    unmount();
+    render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
+    await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
+    broadcast(promptPayload);
+    broadcast(motivationPayload);
+    expect(screen.getByTestId("coach-objection-prompt-label")).toHaveTextContent("Price concern");
+    const approved = JSON.parse(readFileSync("src/lib/coach/live-coach-replies.approved.json", "utf8")) as { sets: { motivation: { replies: { text: string }[] } } };
+    expect([...screen.getByTestId("coach-motivation-replies").querySelectorAll("li")].map((item) => item.textContent)).toEqual(approved.sets.motivation.replies.map((reply) => reply.text));
+    expect(screen.getByTestId("coach-motivation-prompt-label")).toHaveTextContent("Motivation");
+    expect(screen.getByTestId("coach-objection-prompt").querySelector("ul")).toBeNull();
+    expect(screen.getByTestId("coach-card-tray")).toContainElement(screen.getByTestId("coach-objection-prompt"));
+    expect(screen.getByTestId("coach-card-tray")).toContainElement(screen.getByTestId("coach-motivation-prompt"));
+  });
+
+  it("keeps prompts past thirty seconds, replaces each kind, and dismisses independently", async () => {
     render(<ObjectionPromptProvider enabled><Harness {...baseProps()} /></ObjectionPromptProvider>);
     await waitFor(() => expect(screen.getByTestId("current-script-card")).toBeVisible());
     vi.useFakeTimers();
-    const timerSpy = vi.spyOn(window, "setTimeout");
     try {
       broadcast(promptPayload);
       expect(screen.getByTestId("coach-objection-prompt")).toBeVisible();
-      expect(timerSpy.mock.calls.some(([, delay]) => typeof delay === "number" && delay >= 29_900 && delay <= 30_000)).toBe(true);
-      act(() => vi.advanceTimersByTime(30_000));
+      broadcast({ type: "motivation_prompt", label: "Motivation", sellerTurn: 1, classifierModel: "jev-1.13.0", questionsSha256: "a".repeat(64), ts: "2026-09-29T12:00:00Z" });
+      act(() => vi.advanceTimersByTime(31_000));
+      expect(screen.getByTestId("coach-objection-prompt")).toBeVisible();
+      expect(screen.getByTestId("coach-motivation-prompt")).toBeVisible();
+      broadcast({ ...promptPayload, label: "Timing concern", sellerTurn: 2, ts: "2026-09-29T12:00:01Z" });
+      expect(screen.getByTestId("coach-objection-prompt-label")).toHaveTextContent("Timing concern");
+      expect(screen.getAllByTestId("coach-objection-prompt")).toHaveLength(1);
+      fireEvent.click(screen.getByTestId("coach-objection-prompt-dismiss"));
       expect(screen.queryByTestId("coach-objection-prompt")).toBeNull();
+      expect(screen.getByTestId("coach-motivation-prompt")).toBeVisible();
+      fireEvent.click(screen.getByTestId("coach-motivation-prompt-dismiss"));
+      expect(screen.queryByTestId("coach-motivation-prompt")).toBeNull();
     } finally {
-      timerSpy.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -296,7 +348,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.getByLabelText("Live transcript")).not.toHaveAttribute(
       "hidden",
     );
-    expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
+    expect(screen.queryByTestId("coach-recommendations")).toBeNull();
   });
 
   it("keeps the S4 panel when the V2 flag is unset", async () => {
@@ -333,7 +385,7 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(screen.queryByTestId("coach-reconnect-gap")).not.toBeInTheDocument();
   });
 
-  it("renders the package navigator in the three-column view and retains typed navigator state", async () => {
+  it("renders the package navigator in the two-column view and retains typed navigator state", async () => {
     vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
     loadCoachCallContext.mockResolvedValue({
       ...sampleContext,
@@ -372,135 +424,6 @@ describe("<CoachLiveView /> manual navigation", () => {
     const motivation = await screen.findByTestId("coach-token-motivation");
     fireEvent.change(motivation, { target: { value: "Downsize" } });
     expect(motivation).toHaveValue("Downsize");
-  });
-
-  it("grounds V2 recommendations in the navigator's active section after Next", async () => {
-    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
-    const recommendationRequest = vi.fn(
-      async (
-        input: CoachRecommendationRequest,
-      ): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        recommendations: [],
-        followUpQuestions: ["What is the timeline?"],
-      }),
-    );
-    const user = userEvent.setup();
-    render(<Harness {...baseProps({ recommendationRequest })} />);
-
-    await screen.findByTestId("coach-script-v2-panel");
-    await user.click(screen.getByTestId("coach-next"));
-    await screen.findByText("Set the qualification frame");
-    broadcast({
-      type: "transcript",
-      speaker: "seller",
-      text: "I need to move before winter.",
-      isFinal: true,
-      ts: "v2-grounding",
-    });
-    await user.click(screen.getByTestId("follow-up-questions"));
-
-    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
-    expect(recommendationRequest.mock.calls[0]?.[0]).toMatchObject({
-      activeSectionId: "introduction.qualification-frame",
-      mode: "follow_up",
-    });
-  });
-
-  it("sends V2 navigator branch and variant selections with a follow-up recommendation", async () => {
-    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
-    const recommendationRequest = vi.fn(
-      async (
-        input: CoachRecommendationRequest,
-      ): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        recommendations: [],
-        followUpQuestions: ["What would make that price work?"],
-      }),
-    );
-    const user = userEvent.setup();
-    render(<Harness {...baseProps({ recommendationRequest })} />);
-
-    await screen.findByTestId("coach-script-v2-panel");
-    await user.click(screen.getByTestId("variant-Opener-fsbo"));
-    await user.click(screen.getByRole("button", { name: "Offer" }));
-    await screen.findByText("Present the appropriate offer outcome");
-    await user.click(
-      screen.getByTestId("section-path-offer.outcome-tracks-Price too low"),
-    );
-
-    broadcast({
-      type: "transcript",
-      speaker: "seller",
-      text: "That price is too low for me.",
-      isFinal: true,
-      ts: "v2-branch-grounding",
-    });
-    await user.click(screen.getByTestId("follow-up-questions"));
-
-    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
-    expect(recommendationRequest.mock.calls[0]?.[0]).toMatchObject({
-      activeSectionId: "offer.outcome-tracks",
-      selectedSectionBranch: "Price too low",
-      mode: "follow_up",
-    });
-    expect(recommendationRequest.mock.calls[0]?.[0].branchOverrides).toEqual({
-      Opener: "fsbo",
-      "Price too low": "default",
-    });
-  });
-
-  it("sends the V2 navigator's auto-selected SMS opener variant with a follow-up recommendation", async () => {
-    vi.stubEnv("NEXT_PUBLIC_COACH_SCRIPT_V2", "1");
-    loadCoachCallContext.mockResolvedValue({
-      ...sampleContext,
-      leadSource: "sms",
-    });
-    const recommendationRequest = vi.fn(
-      async (
-        input: CoachRecommendationRequest,
-      ): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        recommendations: [],
-        followUpQuestions: ["What would make a conversation useful today?"],
-      }),
-    );
-    const user = userEvent.setup();
-    render(<Harness {...baseProps({ recommendationRequest })} />);
-
-    await screen.findByTestId("coach-script-v2-panel");
-    broadcast({
-      type: "transcript",
-      speaker: "seller",
-      text: "I saw your text message.",
-      isFinal: true,
-      ts: "v2-sms-grounding",
-    });
-    await user.click(screen.getByTestId("follow-up-questions"));
-
-    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
-    expect(recommendationRequest.mock.calls[0]?.[0]).toMatchObject({
-      activeSectionId: "introduction.opener",
-      selectedSectionBranch: null,
-      mode: "follow_up",
-    });
-    // This must be derived from the shared navigator resolver: removing the
-    // effective-variant mapping regresses it to {}, and the assertion fails.
-    expect(recommendationRequest.mock.calls[0]?.[0].branchOverrides).toEqual({
-      Opener: "sms",
-    });
   });
 
   it("keeps file-number identity placeholder-only while loading, then shows the authorized context value", async () => {
@@ -817,145 +740,6 @@ describe("<CoachLiveView /> manual navigation", () => {
     expect(lines[1]).toHaveTextContent("Rep");
     expect(lines[1]).toHaveTextContent("Tell me more about");
     expect(lines[1]).toHaveAttribute("data-final", "false");
-  });
-
-  it("keeps finalized seller speech eligible and AI-visible through a same-speaker interim", async () => {
-    const user = userEvent.setup();
-    const recommendationRequest = vi.fn(
-      async (
-        input: CoachRecommendationRequest,
-      ): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        recommendations: [],
-        followUpQuestions: ["What makes selling important now?"],
-      }),
-    );
-    render(<Harness {...baseProps({ recommendationRequest })} />);
-    await waitFor(() =>
-      expect(screen.getByTestId("current-section-title")).toBeVisible(),
-    );
-
-    broadcast({
-      type: "transcript",
-      speaker: "seller",
-      text: "I need",
-      isFinal: true,
-      ts: "seller-final-1",
-    });
-    broadcast({
-      type: "transcript",
-      speaker: "seller",
-      text: "to sell",
-      isFinal: false,
-      ts: "seller-interim-2",
-    });
-
-    expect(screen.getByTestId("follow-up-questions")).toBeEnabled();
-    let lines = screen.getAllByTestId("transcript-line");
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toHaveTextContent("I need");
-    expect(lines[0]).toHaveAttribute("data-final", "true");
-    expect(lines[1]).toHaveTextContent("to sell");
-    expect(lines[1]).toHaveAttribute("data-final", "false");
-
-    await user.click(screen.getByTestId("follow-up-questions"));
-    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
-    expect(recommendationRequest.mock.calls[0][0].transcript).toEqual([
-      expect.objectContaining({
-        speaker: "seller",
-        text: "I need",
-        isFinal: true,
-      }),
-    ]);
-
-    broadcast({
-      type: "transcript",
-      speaker: "seller",
-      text: "to sell",
-      isFinal: true,
-      ts: "seller-final-2",
-    });
-    lines = screen.getAllByTestId("transcript-line");
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toHaveTextContent("I need to sell");
-    expect(lines[0]).toHaveAttribute("data-final", "true");
-  });
-
-  it("enables follow-up questions only after a finalized homeowner turn and sends one grounded request per click", async () => {
-    const user = userEvent.setup();
-    const recommendationRequest = vi.fn(
-      async (
-        input: CoachRecommendationRequest,
-      ): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        recommendations: [],
-        followUpQuestions: [
-          "Which repair is weighing on you the most?",
-          "How has that affected your moving timeline?",
-          "What happens if the property stays as-is?",
-        ],
-      }),
-    );
-    render(<Harness {...baseProps({ recommendationRequest })} />);
-    await waitFor(() =>
-      expect(screen.getByTestId("current-section-title")).toHaveTextContent(
-        "Open the call",
-      ),
-    );
-
-    broadcast({
-      type: "transcript",
-      speaker: "rep",
-      text: "Tell me more about the condition.",
-      isFinal: true,
-      ts: "rep-final",
-    });
-    expect(screen.getByTestId("follow-up-questions")).toBeDisabled();
-
-    broadcast({
-      type: "transcript",
-      speaker: "seller",
-      text: "The roof and furnace repairs are becoming too expensive.",
-      isFinal: true,
-      ts: "seller-final",
-    });
-    expect(screen.getByTestId("follow-up-questions")).toBeEnabled();
-
-    await user.click(screen.getByTestId("follow-up-questions"));
-
-    await waitFor(() => expect(recommendationRequest).toHaveBeenCalledTimes(1));
-    expect(recommendationRequest.mock.calls[0][0]).toMatchObject({
-      callId: "call-1",
-      activeSectionId: "introduction.opener",
-      mode: "follow_up",
-      transcript: [
-        expect.objectContaining({ speaker: "rep", isFinal: true }),
-        expect.objectContaining({ speaker: "seller", isFinal: true }),
-      ],
-    });
-    expect(
-      screen.getByTestId("follow-up-question-options").children,
-    ).toHaveLength(3);
-    expect(
-      screen.getByText("Which repair is weighing on you the most?"),
-    ).toBeVisible();
-    expect(
-      screen.getByText("How has that affected your moving timeline?"),
-    ).toBeVisible();
-    expect(
-      screen.getByText("What happens if the property stays as-is?"),
-    ).toBeVisible();
-    expect(screen.getByTestId("current-section-title")).toHaveTextContent(
-      "Open the call",
-    );
   });
 
   it("parses legacy guidance events without rendering them or covering the script", async () => {

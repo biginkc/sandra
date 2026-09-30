@@ -57,6 +57,31 @@
   color-scheme: light dark;
 }
 
+[data-testid="coach-live-view"].coach-script-v2 [data-testid="coach-script-v2-panel"] {
+  overflow: hidden;
+}
+[data-testid="coach-live-view"].coach-script-v2 [data-testid="coach-script-v2-panel"] > .coach-script-panel {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+[data-testid="coach-live-view"].coach-script-v2 [data-testid="coach-script-v2-panel"] .coach-script-card {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+[data-testid="coach-live-view"].coach-script-v2 [data-testid="coach-script-v2-panel"] .coach-navigation-footer {
+  order: 3;
+  flex-shrink: 0;
+  margin-top: 0;
+}
+@media (max-width: 1279px) {
+  [data-testid="coach-live-view"].coach-script-v2 [data-testid="coach-script-v2-panel"] { height: min(70vh, 680px); flex: none; }
+}
+
 /* The navigator's disabled Back label is still instructional text. Preserve
    its semantic muted colour without lowering its rendered contrast via the
    package's generic disabled opacity. */
@@ -108,9 +133,6 @@
   [data-testid="coach-back"] { height: auto; padding: 12px 20px; border-radius: 12px; color: var(--coach-secondary); }
   [data-testid="coach-next"] { height: auto; padding: 14px 36px; border-radius: 12px; font-size: 16px; font-weight: 800; }
 
-  [data-testid="automatic-recommendations"], [data-testid="follow-up-question-options"] { margin-top: 12px; }
-  [data-testid="automatic-recommendations"] li, [data-testid="follow-up-question-options"] li { border-radius: 14px; padding: 12px 14px; font-size: 13px; line-height: 1.5; }
-  [data-testid="follow-up-questions"] { margin-top: 12px; height: auto; padding: 11px; border-radius: 10px; font-size: 13px; }
   [data-testid="coach-call-controls"] button { height: auto; padding: 10px 20px; border-radius: 10px; font-size: 13px; }
   [data-testid="coach-collapse"] { height: auto; padding: 9px 16px; border-radius: 10px; border-color: transparent; background: transparent; color: var(--coach-secondary); font-size: 13px; }
   /* Neutralize shared dark-mode outline/expanded overrides, which use alpha. */
@@ -123,8 +145,29 @@
   [data-testid="phone-keypad"] button > span:last-child { color: inherit; }
   [data-testid="phone-keypad"] button:disabled { background: var(--card); border-color: var(--border); color: var(--muted-foreground); }
   button:disabled { opacity: 1; }
-  [data-testid^="coach-"]:disabled, [data-testid="follow-up-questions"]:disabled { color: var(--muted-foreground); background: var(--card); }
+  [data-testid^="coach-"]:disabled { color: var(--muted-foreground); background: var(--card); }
 }
+
+[data-testid="coach-live-view"] {
+  .coach-card-tray { order: 2; display: grid; gap: 10px; flex: 0 1 auto; min-height: 0; max-height: min(40vh, 370px); overflow-y: auto; overscroll-behavior: contain; padding: 8px 12px; background: var(--background); }
+  /* Column order in the script panel: script box, Up next, card tray, Back/Next. The footer wrapper is display:contents so its children take part in this ordering. */
+  .coach-script-footer { display: contents; }
+  .coach-script-footer > [data-testid="next-section-preview"] { order: 1; flex-shrink: 0; margin-top: 12px; background: var(--background); }
+  .coach-script-footer > [data-testid="section-navigation"] { order: 3; flex-shrink: 0; background: var(--background); }
+  .coach-prompt-card { animation: coach-card-arrive 220ms ease-out both; border: 2px solid var(--coach-sky); border-left: 5px solid var(--coach-sky); border-radius: 12px; background: var(--card); padding: 14px 18px; color: var(--foreground); box-shadow: 0 4px 14px var(--border); }
+  .coach-prompt-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; font-size: 16px; line-height: 1.4; }
+  .coach-prompt-heading strong { display: block; color: var(--coach-sky); font-size: 18px; }
+  .coach-prompt-heading button { flex-shrink: 0; border-radius: 6px; padding: 5px; color: var(--foreground); }
+  .coach-prompt-heading button:hover, .coach-prompt-heading button:focus-visible { background: var(--muted); outline-color: var(--ring); }
+  .coach-prompt-replies { margin-top: 10px; padding-left: 24px; list-style: disc; font-size: 15px; line-height: 1.5; }
+  .coach-prompt-replies li + li { margin-top: 5px; }
+  .coach-prompt-reply-blocks { margin-top: 10px; font-size: 15px; line-height: 1.5; }
+  .coach-prompt-reply-block p + p { margin-top: 5px; }
+  .coach-prompt-reply-block + .coach-prompt-reply-block { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+}
+
+@keyframes coach-card-arrive { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { [data-testid="coach-live-view"] .coach-prompt-card { animation: none; } }
 
 /* V2 keeps the approved dark-navy Script Screen header in both application
  * themes. Its active/live controls and identity text must contrast against
@@ -166,7 +209,8 @@
     }
     [data-testid="coach-script-v2-panel"] .coach-next-section-preview { flex-shrink: 0; }
     [data-testid="coach-script-v2-panel"] .coach-navigation-footer {
-      margin-top: auto;
+      order: 3;
+      margin-top: 0;
       flex-shrink: 0;
     }
   }
@@ -181,20 +225,17 @@
   }
 }
 
-/* The keypad can leave too little vertical room for a pinned preview. Keep
-   navigation available without covering the script in short desktop panels. */
+/* Short script column (for example desktop with the keypad open): keep Up next,
+   the card tray and Back/Next all on screen by tightening their padding and
+   trimming the preview to one line. The script box keeps its own scroll. */
 @media (min-width: 1280px) {
-  [data-testid="coach-script-panel"] { container: coach-script / size; }
-  @container coach-script (max-height: 380px) {
-    [data-testid="coach-live-view"] .coach-script-footer { display: contents; }
-    [data-testid="coach-live-view"] [data-testid="next-section-preview"] { margin-top: 28px; }
-    [data-testid="coach-live-view"] [data-testid="section-navigation"] {
-      position: sticky;
-      bottom: 0;
-      z-index: 10;
-      margin-top: auto;
-      flex-shrink: 0;
-      background: var(--background);
-    }
+  [data-testid="coach-live-view"] [data-testid="coach-script-panel"] { container-type: size; }
+  @container (max-height: 420px) {
+    .coach-script-column { padding-top: 8px; }
+    [data-testid="coach-script-scroll"] { min-height: 3rem; }
+    .coach-script-footer > [data-testid="next-section-preview"] { margin-top: 6px; padding-top: 8px; padding-bottom: 8px; }
+    .coach-script-footer > [data-testid="next-section-preview"] p { margin-top: 2px; -webkit-line-clamp: 1; line-clamp: 1; font-size: 15px; }
+    .coach-script-footer > [data-testid="section-navigation"] { padding-top: 8px; padding-bottom: 8px; }
+    .coach-card-tray { min-height: 2rem; padding-top: 4px; padding-bottom: 4px; }
   }
 }

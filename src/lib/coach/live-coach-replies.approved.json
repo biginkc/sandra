@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "approvedBy": "Jarrad",
+  "sets": {
+    "motivation": {
+      "replies": [
+        { "text": "What's going on with the house right now?", "approvedAt": "2026-09-29" },
+        { "text": "How has that been affecting you?", "approvedAt": "2026-09-29" },
+        { "text": "How long has that been going on?", "approvedAt": "2026-09-29" },
+        { "text": "What happens if nothing changes?", "approvedAt": "2026-09-29" },
+        { "text": "Do you have a plan for how to handle this, or do you need help?", "approvedAt": "2026-09-29" }
+      ]
+    },
+    "motivation.behind_on_payments": {
+      "replies": [
+        { "text": "How many payments behind are you right now?", "approvedAt": "2026-09-30" },
+        { "text": "What has the lender been saying when they call or send letters?", "approvedAt": "2026-09-30" },
+        { "text": "How much would it take to get caught up, with the late fees on top?", "approvedAt": "2026-09-30" },
+        { "text": "Is the amount you're behind still growing each month?", "approvedAt": "2026-09-30" },
+        { "text": "If you can't get caught up, what has the lender told you happens next?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.facing_auction": {
+      "replies": [
+        { "text": "What date is the auction set for?", "approvedAt": "2026-09-30" },
+        { "text": "What did the notice say you'd have to pay to stop the sale?", "approvedAt": "2026-09-30" },
+        { "text": "Have you been able to reach anyone at the lender or the attorney's office about it?", "approvedAt": "2026-09-30" },
+        { "text": "How long would you have to be out of the house after the sale?", "approvedAt": "2026-09-30" },
+        { "text": "If the house sells at auction, what have you been told you walk away with?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.back_taxes": {
+      "replies": [
+        { "text": "How many years of taxes are owed on the property?", "approvedAt": "2026-09-30" },
+        { "text": "What's the total the county says you owe now, with penalties and interest?", "approvedAt": "2026-09-30" },
+        { "text": "What notices has the county sent you about it?", "approvedAt": "2026-09-30" },
+        { "text": "Has the county set a date for a tax sale?", "approvedAt": "2026-09-30" },
+        { "text": "If the taxes don't get paid, what has the county told you happens to the house?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.bankruptcy": {
+      "replies": [
+        { "text": "Which chapter did you file under, and how far along is the case?", "approvedAt": "2026-09-30" },
+        { "text": "What has your attorney said about keeping the house through it?", "approvedAt": "2026-09-30" },
+        { "text": "Are you keeping up with the payments the court set?", "approvedAt": "2026-09-30" },
+        { "text": "What does the trustee want to do with the house?", "approvedAt": "2026-09-30" },
+        { "text": "If the case doesn't go the way you need, what have you been told happens to the house?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.liens": {
+      "replies": [
+        { "text": "Who holds the lien, and what is it for?", "approvedAt": "2026-09-30" },
+        { "text": "What's the payoff on it now, with interest added?", "approvedAt": "2026-09-30" },
+        { "text": "Has the lien holder taken any steps to collect on it?", "approvedAt": "2026-09-30" },
+        { "text": "Has it stopped you from refinancing or borrowing against the house?", "approvedAt": "2026-09-30" },
+        { "text": "If it doesn't get paid off, what have you been told the lien holder can do?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.underwater": {
+      "replies": [
+        { "text": "What's the total owed on the house, counting any second loan or line of credit?", "approvedAt": "2026-09-30" },
+        { "text": "What do you think it would sell for as it sits today?", "approvedAt": "2026-09-30" },
+        { "text": "How far apart are those two numbers?", "approvedAt": "2026-09-30" },
+        { "text": "Is the balance going down each month, or barely moving?", "approvedAt": "2026-09-30" },
+        { "text": "If you had to sell tomorrow, how much would you have to bring to closing out of your own pocket?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.inherited": {
+      "replies": [
+        { "text": "How far do you live from the house, and how often can you get out to it?", "approvedAt": "2026-09-30" },
+        { "text": "What has it cost you out of your own pocket to hold onto it so far?", "approvedAt": "2026-09-30" },
+        { "text": "Has anyone been living in it or checking on it since it became yours?", "approvedAt": "2026-09-30" },
+        { "text": "Is the insurance still covering it now that it's sitting empty?", "approvedAt": "2026-09-30" },
+        { "text": "How much longer can you keep carrying it before it becomes a problem for you?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.divorce": {
+      "replies": [
+        { "text": "Is anyone living in the house right now, or is it sitting empty?", "approvedAt": "2026-09-30" },
+        { "text": "How long has the house been holding up the rest of the settlement?", "approvedAt": "2026-09-30" },
+        { "text": "What is it costing the two of you each month to keep it while this drags on?", "approvedAt": "2026-09-30" },
+        { "text": "Can either of you afford to buy the other one out?", "approvedAt": "2026-09-30" },
+        { "text": "If the house is still not sold six months from now, what does that do to everything else you're trying to finish?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.downsizing_health": {
+      "replies": [
+        { "text": "Are there parts of the house that have gotten too much to keep up with?", "approvedAt": "2026-09-30" },
+        { "text": "What repairs or upkeep have had to wait because of it?", "approvedAt": "2026-09-30" },
+        { "text": "Who do you rely on now when something at the house needs doing?", "approvedAt": "2026-09-30" },
+        { "text": "What does it cost you each month to keep a house this size running?", "approvedAt": "2026-09-30" },
+        { "text": "Say you don't sell this year. What's your plan for managing next year?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.tired_landlord": {
+      "replies": [
+        { "text": "How far behind is the current tenant on rent right now?", "approvedAt": "2026-09-30" },
+        { "text": "How many times has the tenant called you about a problem in the last month?", "approvedAt": "2026-09-30" },
+        { "text": "What kind of shape has the tenant left the place in?", "approvedAt": "2026-09-30" },
+        { "text": "Have you had to evict anyone, and what did that run you?", "approvedAt": "2026-09-30" },
+        { "text": "How long did the place sit empty the last time a tenant moved out?", "approvedAt": "2026-09-30" },
+        { "text": "When the tenant calls with an emergency, who has to deal with it?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.vacant": {
+      "replies": [
+        { "text": "How long has the house been sitting empty?", "approvedAt": "2026-09-30" },
+        { "text": "Has anyone broken in, or has anything been taken or damaged since it's been vacant?", "approvedAt": "2026-09-30" },
+        { "text": "Has the city sent you any notices or fines about the property?", "approvedAt": "2026-09-30" },
+        { "text": "What are you paying each month in taxes, insurance, and utilities on a house no one is using?", "approvedAt": "2026-09-30" },
+        { "text": "Say it sits empty through another winter. Are you guys going to winterize it?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.failed_listing": {
+      "replies": [
+        { "text": "How long was the house on the market before the listing ended?", "approvedAt": "2026-09-30" },
+        { "text": "Did you do any price drops to get more traction?", "approvedAt": "2026-09-30" },
+        { "text": "What were buyers and their agents saying about the house after showings?", "approvedAt": "2026-09-30" },
+        { "text": "Did any offers come in, and what made them fall apart?", "approvedAt": "2026-09-30" },
+        { "text": "Say you list it again and it sits another 6 months. What's the plan after that?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.moving_away": {
+      "replies": [
+        { "text": "What date do you have to be in the new place by?", "approvedAt": "2026-09-30" },
+        { "text": "Once you move, will you be paying for two places at the same time?", "approvedAt": "2026-09-30" },
+        { "text": "Who looks after this house once you're living somewhere else?", "approvedAt": "2026-09-30" },
+        { "text": "How would you handle a repair or a break-in here from that far away?", "approvedAt": "2026-09-30" },
+        { "text": "Say the house hasn't sold by the time you move. What's the plan after that?", "approvedAt": "2026-09-30" }
+      ]
+    },
+    "motivation.major_repairs": {
+      "replies": [
+        { "text": "What is the biggest repair the house needs right now?", "approvedAt": "2026-09-30" },
+        { "text": "What have contractors quoted you to fix it?", "approvedAt": "2026-09-30" },
+        { "text": "How long has it been that way, and is it getting worse?", "approvedAt": "2026-09-30" },
+        { "text": "Has it started causing damage to other parts of the house?", "approvedAt": "2026-09-30" },
+        { "text": "Say the repair doesn't get done this year. Will you fix it before selling next year?", "approvedAt": "2026-09-30" }
+      ]
+    }
+  }
+}

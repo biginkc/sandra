@@ -12,6 +12,8 @@ export type CoachLocalAction =
    * only: it cannot imply a healthy/coached script stream. */
   | { type: "append_unbound_transcript"; event: CoachTranscriptEvent }
   | { type: "dismiss_objection"; cardId: string }
+  | { type: "dismiss_objection_prompt" }
+  | { type: "dismiss_motivation_prompt" }
   | { type: "dismiss_nudge"; nudgeId: string }
   | { type: "override_phase"; phaseId: CoachPhaseId }
   | { type: "set_entry_field"; field: CoachEntryToken; value: string }
@@ -32,7 +34,6 @@ const MAX_TRANSCRIPT_LINES = 500;
  * is heavier (three-beat Acknowledge/Disarm/Overcome layout) and stays up
  * longer than a nudge (a one-line coaching prompt). */
 export const OBJECTION_CARD_TTL_MS = 45_000;
-export const OBJECTION_PROMPT_TTL_MS = 30_000;
 export const NUDGE_TTL_MS = 20_000;
 
 /** Bounds how many simultaneously-visible guidance cards/nudges the
@@ -57,6 +58,9 @@ export function initialCoachState(startingPhaseId: CoachPhaseId = "introduction"
     transcriptFragments: [],
     objectionCards: [],
     objectionPrompt: null,
+    motivationPrompt: null,
+    lastObjectionPrompt: null,
+    lastMotivationPrompt: null,
     nudges: [],
     probeCount: 0,
     gates: {},
@@ -78,16 +82,14 @@ let transcriptSeq = 0;
 let objectionCardSeq = 0;
 let nudgeSeq = 0;
 
+/** The same card for the same seller statement. Jitter re-sends a card whose
+ * publish failed or timed out with a FRESH ts, so ts is not part of identity:
+ * a re-send must not re-show a card the rep is looking at or has dismissed. */
 function isSameObjectionPrompt(
   current: NonNullable<CoachState["objectionPrompt"]>,
   incoming: Extract<CoachEvent, { type: "objection_prompt" }>,
 ): boolean {
-  return current.objectionId === incoming.objectionId
-    && current.label === incoming.label
-    && current.sellerTurn === incoming.sellerTurn
-    && current.classifierModel === incoming.classifierModel
-    && current.questionsSha256 === incoming.questionsSha256
-    && current.ts === incoming.ts;
+  return current.objectionId === incoming.objectionId && current.sellerTurn === incoming.sellerTurn;
 }
 
 function isOlderObjectionPrompt(
@@ -237,22 +239,59 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
       };
     }
     case "objection_prompt": {
-      if (
-        state.objectionPrompt &&
-        (isSameObjectionPrompt(state.objectionPrompt, action) ||
-          isOlderObjectionPrompt(state.objectionPrompt, action))
-      ) {
-        return state;
+      if (state.lastObjectionPrompt) {
+        if (isOlderObjectionPrompt(state.lastObjectionPrompt, action)) return state;
+        if (isSameObjectionPrompt(state.lastObjectionPrompt, action)) {
+          // Remember the re-send's ts so a slower, older card still counts as older.
+          return state.lastObjectionPrompt.ts === action.ts
+            ? state
+            : { ...state, lastObjectionPrompt: { ...state.lastObjectionPrompt, ts: action.ts } };
+        }
       }
+      const objectionPrompt = {
+        objectionId: action.objectionId, label: action.label, sellerTurn: action.sellerTurn,
+        classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
+        ts: action.ts,
+      };
       return {
         ...state,
         connected: true,
         lastEventAt: action.ts,
-        objectionPrompt: {
-          objectionId: action.objectionId, label: action.label, sellerTurn: action.sellerTurn,
-          classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
-          ts: action.ts, expiresAt: Date.now() + OBJECTION_PROMPT_TTL_MS,
-        },
+        objectionPrompt: objectionPrompt,
+        lastObjectionPrompt: objectionPrompt,
+      };
+    }
+    case "motivation_prompt": {
+      // Owner-approved separate motivation card (2026-09-29). Latest wins; a duplicate
+      // or an older event (earlier ts, or same ts on an earlier seller turn) is ignored.
+      const current = state.lastMotivationPrompt;
+      if (current) {
+        const currentMs = Date.parse(current.ts);
+        const incomingMs = Date.parse(action.ts);
+        const older = Number.isFinite(currentMs) && Number.isFinite(incomingMs) && currentMs !== incomingMs
+          ? incomingMs < currentMs
+          : action.sellerTurn < current.sellerTurn;
+        if (older) return state;
+        // Same card for the same seller statement (ts is not identity: Jitter re-sends with a
+        // fresh ts). A general card for a statement that already had a sub-type card is the
+        // same statement's weaker card and never replaces it.
+        const duplicate = current.sellerTurn === action.sellerTurn
+          && (current.subType === action.subType || action.subType === undefined);
+        if (duplicate) {
+          return current.ts === action.ts ? state : { ...state, lastMotivationPrompt: { ...current, ts: action.ts } };
+        }
+      }
+      const motivationPrompt = {
+        label: action.label, ...(action.subType === undefined ? {} : { subType: action.subType }), sellerTurn: action.sellerTurn,
+        classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
+        ts: action.ts,
+      };
+      return {
+        ...state,
+        connected: true,
+        lastEventAt: action.ts,
+        motivationPrompt: motivationPrompt,
+        lastMotivationPrompt: motivationPrompt,
       };
     }
     case "counter":
@@ -329,6 +368,12 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
         ...state,
         objectionCards: state.objectionCards.filter((card) => card.id !== action.cardId),
       };
+    // Dismiss hides the card only. The last accepted event stays as the dedupe reference, so a
+    // duplicate or older event cannot bring a dismissed card back; a newer one still shows.
+    case "dismiss_objection_prompt":
+      return { ...state, objectionPrompt: null };
+    case "dismiss_motivation_prompt":
+      return { ...state, motivationPrompt: null };
     case "dismiss_nudge":
       return {
         ...state,
