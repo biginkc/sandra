@@ -25,6 +25,71 @@ const args = parseArgs(process.argv.slice(2));
 const fail = (message, code = 1) => { console.error(message); process.exit(code); };
 const TEST_REF = 'ncsngxlcyxylaeskiteu';
 const PROD_REF = 'copflsklaefwzipsrjqz';
+const CATALOG_FORMAT_VERSION = 2;
+const HEX = /^[0-9a-f]{64}$/;
+const DRIFT_APPROVALS = Object.freeze({
+  idx_message_threads_ai_responder_status: 'e419f623f1922466db14dba7aa091cdd4720924e2b97901088af2dc5719b108a',
+  idx_users_name: '4dbc01feffae5acf04236e5aa3611151cc43e1467f84588e05b025dd9fbc7402',
+});
+const OPERATOR_INDEX_NAMES = new Set(['inbox_parent_message_property','inbox_parent_message_contact','inbox_parent_review_property','inbox_backfill_messages','inbox_backfill_reviews','inbox_backfill_threads','inbox_backfill_thread_identity','inbox_unknown_history_page']);
+const ROWTYPE_TABLES = new Set(['inbox_backfill.jobs','inbox_control.baseline_progress','inbox_maintained.queue','inbox_maintained.rows','inbox_parent.work','inbox_safety.routes']);
+const stable = value => {
+  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+};
+const sha256 = value => createHash('sha256').update(value).digest('hex');
+export const catalogFingerprint = sections => {
+  const section_sha256 = Object.fromEntries(Object.entries(sections).sort(([a],[b]) => a.localeCompare(b)).map(([name, value]) => [name, sha256(stable(value))]));
+  return { catalog_format_version: CATALOG_FORMAT_VERSION, sections, section_sha256, sha256: sha256(stable({ catalog_format_version: CATALOG_FORMAT_VERSION, section_sha256 })) };
+};
+function validateCatalogBaseline(value, label = 'catalog') {
+  if (!value || value.catalog_format_version !== CATALOG_FORMAT_VERSION || !value.sections || !hasExactKeys(value.sections, CATALOG_SECTIONS, () => true) || !hasExactKeys(value.section_sha256, CATALOG_SECTIONS, digest => HEX.test(digest))) throw new Error(`CATALOG_MISMATCH ${label} format`);
+  const rebuilt = catalogFingerprint(value.sections);
+  if (stable(rebuilt.section_sha256) !== stable(value.section_sha256) || rebuilt.sha256 !== value.sha256) throw new Error(`CATALOG_MISMATCH ${label} digest`);
+  return value;
+}
+function validateDriftRecord(record, baseline, { targetRef, candidateSha } = {}) {
+  if (!record || !hasExactKeys(record, ['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items','sha256'])) throw new Error('DRIFT_RECORD_STALE malformed');
+  if (record.record_version !== 1 || record.catalog_format_version !== CATALOG_FORMAT_VERSION || (targetRef && record.target_ref !== targetRef) || (candidateSha && record.candidate_sha !== candidateSha) || !/^[0-9a-f]{40}$/.test(record.candidate_sha) || !HEX.test(record.baseline_digest)) throw new Error('DRIFT_RECORD_STALE binding');
+  if (record.baseline_digest !== baseline.sha256 || record.sha256 !== sha256(stable(Object.fromEntries(['record_version','target_ref','candidate_sha','baseline_digest','catalog_format_version','items'].map(key => [key, record[key]]))))) throw new Error('DRIFT_RECORD_STALE digest');
+  const relations = Object.fromEntries(baseline.sections.relations.map(row => [row.identity, row]));
+  const seen = new Set();
+  for (const item of record.items) {
+    if (!item || !hasExactKeys(item, ['object','attribute','name','canonical_definition','classification','origin','approval_sha256']) || !['columns','indexes'].includes(item.attribute) || ![item.object,item.name].every(value => typeof value === 'string' && value) || typeof item.canonical_definition !== 'string' || !item.canonical_definition || item.canonical_definition.endsWith('\n')) throw new Error('DRIFT_RECORD_STALE item');
+    const identity = `${item.object}\0${item.attribute}\0${item.name}`;
+    if (seen.has(identity)) throw new Error('DRIFT_RECORD_STALE duplicate');
+    seen.add(identity);
+    if (!relations[item.object]) throw new Error('DRIFT_RECORD_STALE object');
+    if (ROWTYPE_TABLES.has(item.object)) throw new Error('DRIFT_RECORD_STALE rowtype table');
+    const c = item.classification;
+    if (item.attribute === 'columns') {
+      if (!hasExactKeys(c, ['class','nullable','default','attidentity','attgenerated','column_acl','owner']) || c.class !== 'column' || c.nullable !== true || c.default !== null || c.attidentity !== '' || c.attgenerated !== '' || c.column_acl !== null || c.owner !== relations[item.object].owner || item.approval_sha256 !== null || item.origin !== 'unknown') throw new Error('DRIFT_RECORD_STALE column');
+    } else {
+      if (!hasExactKeys(c, ['class','unique','primary','constraint','valid','ready','live','predicate','expression','owner']) || c.class !== 'index' || c.unique !== false || c.primary !== false || c.constraint !== false || c.valid !== true || c.ready !== true || c.live !== true || typeof c.owner !== 'string' || !c.owner || (item.object === 'auth.users' && c.owner !== 'supabase_auth_admin') || OPERATOR_INDEX_NAMES.has(item.name)) throw new Error('DRIFT_RECORD_STALE index');
+      const approval = c.predicate !== null || c.expression === true ? DRIFT_APPROVALS[item.name] : null;
+      if ((c.predicate !== null || c.expression === true) && !approval || item.approval_sha256 !== approval) throw new Error('DRIFT_RECORD_STALE approval');
+      if (approval && sha256(Buffer.from(item.canonical_definition, 'utf8')) !== approval) throw new Error('DRIFT_RECORD_STALE approval');
+      if (item.origin !== (item.object === 'auth.users' ? 'platform' : 'unknown') || (item.object === 'auth.users' && c.owner !== 'supabase_auth_admin')) throw new Error('DRIFT_RECORD_STALE origin');
+    }
+  }
+  return record;
+}
+function reconstructCatalog(baseline, record) {
+  validateCatalogBaseline(baseline, 'baseline');
+  validateDriftRecord(record, baseline);
+  const sections = JSON.parse(JSON.stringify(baseline.sections));
+  const relations = Object.fromEntries(sections.relations.map(row => [row.identity, row]));
+  for (const item of record.items) {
+    const bucket = relations[item.object][item.attribute];
+    if (bucket.some(entry => entry.name === item.name)) throw new Error('DRIFT_RECORD_STALE collision');
+    const c = item.classification;
+    if (item.attribute === 'columns') bucket.push({ name: item.name, type: item.canonical_definition, not_null: !c.nullable, default: c.default, acl: c.column_acl, attgenerated: c.attgenerated, attidentity: c.attidentity });
+    else bucket.push({ name: item.name, definition: item.canonical_definition, unique: c.unique, primary: c.primary, constraint: c.constraint, valid: c.valid, ready: c.ready, live: c.live, predicate: c.predicate, expression: c.expression, owner: c.owner });
+    bucket.sort((a,b) => (item.attribute === 'columns' ? a.name.localeCompare(b.name) : a.definition.localeCompare(b.definition)));
+  }
+  return catalogFingerprint(sections);
+}
 function assertTarget(target, dsn, { apiUrl, ack = process.env.INBOX_PROD_READONLY_ACK } = {}) {
   if (!['shared-readonly', 'production', 'disposable-readonly'].includes(target)) throw new Error('TARGET_REFUSED');
   const suppliedUrls = [dsn, apiUrl ?? '', process.env.SUPABASE_URL ?? ''];
@@ -103,14 +168,37 @@ async function catalog(dsn, target) {
   if (run.status !== 0) throw new Error(`CATALOG_FAILED ${run.stderr.trim()}`);
   return JSON.parse(run.stdout);
 }
-export function compareCatalog(pinned, observed) {
+export function compareCatalog(pinned, observed, { driftRecord = null, targetRef, candidateSha } = {}) {
+  validateCatalogBaseline(pinned, 'expected');
+  validateCatalogBaseline(observed, 'observed');
+  if (pinned.catalog_format_version !== observed.catalog_format_version) throw new Error('CATALOG_MISMATCH format');
+  if (driftRecord) {
+    const baselineRelations = Object.fromEntries(pinned.sections.relations.map(row => [row.identity, row]));
+    const observedRelations = Object.fromEntries(observed.sections.relations.map(row => [row.identity, row]));
+    for (const [object, relation] of Object.entries(observedRelations)) {
+      if (!baselineRelations[object]) throw new Error('CATALOG_DRIFT_UNRECORDED');
+      for (const attribute of ['columns','indexes']) {
+        const allowed = new Set((baselineRelations[object][attribute] ?? []).map(item => item.name));
+        const recorded = new Set(driftRecord.items.filter(item => item.object === object && item.attribute === attribute).map(item => item.name));
+        if ((relation[attribute] ?? []).some(item => !allowed.has(item.name) && !recorded.has(item.name))) throw new Error('CATALOG_DRIFT_UNRECORDED');
+      }
+    }
+    let expected;
+    try { validateDriftRecord(driftRecord, pinned, { targetRef, candidateSha }); expected = reconstructCatalog(pinned, driftRecord); }
+    catch (error) { if (error.message === 'CATALOG_MISMATCH baseline digest') throw error; throw new Error('DRIFT_RECORD_STALE'); }
+    for (const section of CATALOG_SECTIONS) if (expected.section_sha256[section] !== observed.section_sha256[section]) throw new Error(section === 'relations' ? 'DRIFT_RECORD_STALE' : `CATALOG_MISMATCH ${section}`);
+    return;
+  }
   for (const [side, value] of [['expected', pinned], ['observed', observed]]) {
     const sections = value?.section_sha256;
     if (!hasExactKeys(sections, CATALOG_SECTIONS, digest => typeof digest === 'string' && /^[0-9a-f]{64}$/.test(digest))) {
       throw new Error(`CATALOG_MISMATCH ${side} sections`);
     }
   }
-  for (const section of CATALOG_SECTIONS) if (pinned.section_sha256[section] !== observed.section_sha256[section]) throw new Error(`CATALOG_MISMATCH ${section}`);
+  for (const section of CATALOG_SECTIONS) if (pinned.section_sha256[section] !== observed.section_sha256[section]) {
+    if (section === 'relations') throw new Error('CATALOG_DRIFT_UNRECORDED');
+    throw new Error(`CATALOG_MISMATCH ${section}`);
+  }
 }
 export function assertSealedPre({ manifest, sealed, sealedBytes, rawBytes, target }) {
   const expectedTarget = target === 'shared-readonly' ? 'shared-test' : 'production';
@@ -121,12 +209,16 @@ export function assertSealedPre({ manifest, sealed, sealedBytes, rawBytes, targe
       sealed.source_output_sha256 !== sha(rawBytes)) throw new Error('PLAN_PRE_NOT_SEALED');
   return sealed;
 }
-export const platformSummary = (postgrestMajor, target) => {
+export const platformSummary = (postgrestMajor, target, reason = null) => {
   const observed = postgrestMajor === NOT_VERIFIED
-    ? 'NOT_VERIFIED: no PostgREST connection was visible, which does not prove none existed'
+    ? ({
+      NAME_UNVERSIONED: 'NOT_VERIFIED: the connection name carried no version',
+      MIXED_NAMES: 'NOT_VERIFIED: some connections carried a matching version and others none (MIXED_NAMES)',
+      NO_CONNECTION: 'NOT_VERIFIED: no PostgREST connection was visible, which does not prove none existed',
+    }[reason] ?? 'NOT_VERIFIED: invalid reason')
     : target === 'disposable-readonly' ? 'observed from its HTTP response and SQL connection name and matched' : 'observed from its connection name and matched';
   if (target === 'disposable-readonly') return `Auth health returned 200 with the publishable key; GoTrue major matched. Our publishable-key PostgREST request returned 200. PostgREST major was ${observed}. Disposable app/SSR/PostgREST behaviour was directly checked by the disposable HTTP/SQL contract.`;
-  return `Auth health returned 200 with the publishable key; GoTrue major matched. Our publishable-key PostgREST request was rejected. PostgREST major was ${observed}. Hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality.`;
+  return `Auth health returned 200 with the publishable key; GoTrue major matched. Our publishable-key PostgREST request was rejected. PostgREST major was ${observed}. On TEST the name carries no version, so this check is waived there in practice; Production is expected to be the same. Connection names are diagnostic labels, not attestations. Release may proceed with hosted PostgREST compatibility unverified. Hosted app/SSR/PostgREST behaviour is inferred from same-SHA disposable runs plus catalog and claim-plumbing equality, which cannot establish hosted runtime/configuration equality; a GoTrue major match does not prove identical hosted claim configuration.`;
 };
 export async function main({ argv = args, createClient = config => new Client(config), makeClientConfig = connectionConfig, collectData = collect, readCatalog = catalog, readConnectionEvidence = connectionEvidence, getPinnedCa = pinnedCa } = {}) {
   const args = argv;
@@ -169,7 +261,7 @@ export async function main({ argv = args, createClient = config => new Client(co
     const tls = hostedReadOnly ? await readConnectionEvidence(client, dsn, getPinnedCa()) : null;
     const data = await collectData(client, args.org, { previousIds: pre ? Object.keys(pre.queued.per_row) : [] });
     const major = String(Math.floor(Number((await client.query('SHOW server_version_num')).rows[0].server_version_num) / 10000));
-    const result = { verdict: 'PASS', items: {}, summary: platformSummary(data.postgrest_major, args.target), target: args.target, phase: args.phase, ...data, ...(tls ? { tls } : {}) };
+    const result = { verdict: 'PASS', items: {}, summary: platformSummary(data.postgrest_major, args.target, data.postgrest_reason), target: args.target, phase: args.phase, ...data, ...(tls ? { tls } : {}) };
     if (args.target === 'production') { result.member_org_count = data.member_orgs.length; delete result.member_orgs; }
     if (args['pre-file']) {
       result.items.queued_invariants = reconcile(pre.queued, data.queued, data.current_status);
@@ -180,14 +272,15 @@ export async function main({ argv = args, createClient = config => new Client(co
     if (args['api-url']) {
       result.platform_config = await platformFingerprint(args['api-url'], process.env.SUPABASE_ANON_KEY, major, undefined, {
         mode: hostedReadOnly ? 'hosted' : 'disposable', postgrestMajor: data.postgrest_major,
+        postgrestReason: data.postgrest_reason, postgrestObservedMajor: data.postgrest_observed_major,
       });
       if (pre?.platform_config) compareObservedPlatform(pre.platform_config, result.platform_config);
-      result.summary = platformSummary(result.platform_config.postgrest_major, args.target);
+      result.summary = platformSummary(result.platform_config.postgrest_major, args.target, result.platform_config.postgrest_reason);
     }
     if (args['platform-compare']) {
       const bytes = await readFile(args['platform-compare']);
       const platformComparison = comparePlatform(JSON.parse(bytes), result.platform_config);
-      result.comparisons = { ...result.comparisons, platform: { verdict: platformVerdict(platformComparison.waived_fields), waived_fields: platformComparison.waived_fields, input_sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'), observed_sha256: result.platform_config.sha256 } };
+      result.comparisons = { ...result.comparisons, platform: { verdict: platformVerdict(platformComparison.waived_fields), waived_fields: platformComparison.waived_fields, waiver_reasons: platformComparison.waiver_reasons, input_sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'), observed_sha256: result.platform_config.sha256 } };
     }
     if (args['catalog'] || args['catalog-compare']) {
       result.catalog_fingerprint = await readCatalog(dsn, args.target);
@@ -207,14 +300,15 @@ export async function main({ argv = args, createClient = config => new Client(co
     if (args['catalog-compare']) {
       const bytes = await readFile(args['catalog-compare']);
       const pinned = JSON.parse(bytes);
+      const driftRecord = args['catalog-drift-record'] ? JSON.parse(await readFile(args['catalog-drift-record'])) : null;
       let catalogVerdict = 'PASS', catalogReason;
-      try { compareCatalog(pinned, result.catalog_fingerprint); }
+      try { compareCatalog(pinned, result.catalog_fingerprint, { driftRecord, targetRef: args.target === 'production' ? PROD_REF : TEST_REF, candidateSha: args['candidate-sha'] ?? process.env.HEAVY_TESTED_SHA }); }
       catch (error) {
         catalogVerdict = result.items.indexes?.verdict === 'INCONCLUSIVE' ? 'INCONCLUSIVE' : 'FAIL';
         catalogReason = error.message;
         if (catalogVerdict === 'FAIL') { result.verdict = 'FAIL'; failures.push(error.message); }
       }
-      result.comparisons = { ...result.comparisons, catalog: { verdict: catalogVerdict, ...(catalogReason ? { reason: catalogReason } : {}), input_sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'), observed_section_sha256: result.catalog_fingerprint.section_sha256 } };
+      result.comparisons = { ...result.comparisons, catalog: { verdict: catalogVerdict, ...(catalogReason ? { reason: catalogReason } : {}), input_sha256: (await import('node:crypto')).createHash('sha256').update(bytes).digest('hex'), observed_section_sha256: result.catalog_fingerprint.section_sha256, observed_catalog_sha256: result.catalog_fingerprint.sha256, ...(driftRecord ? { drift_record_sha256: driftRecord.sha256 } : {}) } };
     }
     if (args['plan-compare']) {
       const sealedBytes = await readFile(args['plan-compare']);

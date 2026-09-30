@@ -29,15 +29,24 @@ export async function readPostgrestMajor(client) {
   } catch {
     throw new Error('PLATFORM_READ_FAILED');
   }
-  const majors = new Set();
-  for (const row of rows) {
-    const match = typeof row?.application_name === 'string' ? /^PostgREST (\d+)\./.exec(row.application_name) : null;
-    if (!match) throw new Error('PLATFORM_UNIDENTIFIED');
-    majors.add(match[1]);
-  }
-  if (!rows.length) return NOT_VERIFIED;
+  const classifications = rows.map(row => {
+    const name = row?.application_name;
+    const versioned = typeof name === 'string' ? /^PostgREST (\d+)\./.exec(name) : null;
+    if (versioned) return { kind: 'versioned', major: versioned[1] };
+    if (typeof name === 'string' && /^postgrest$/i.test(name)) return { kind: 'bare' };
+    return { kind: 'other' };
+  });
+  // Precedence is intentional: a malformed/other connection is never hidden
+  // by a valid row, while multiple versioned majors are ambiguous even when
+  // bare diagnostic labels are also present.
+  if (classifications.some(item => item.kind === 'other')) throw new Error('PLATFORM_UNIDENTIFIED');
+  const majors = new Set(classifications.filter(item => item.kind === 'versioned').map(item => item.major));
   if (majors.size > 1) throw new Error('PLATFORM_AMBIGUOUS');
-  return [...majors][0];
+  if (!rows.length) return { postgrest_major: NOT_VERIFIED, postgrest_reason: 'NO_CONNECTION', postgrest_observed_major: null };
+  if (majors.size === 0) return { postgrest_major: NOT_VERIFIED, postgrest_reason: 'NAME_UNVERSIONED', postgrest_observed_major: null };
+  const major = [...majors][0];
+  if (classifications.some(item => item.kind === 'bare')) return { postgrest_major: NOT_VERIFIED, postgrest_reason: 'MIXED_NAMES', postgrest_observed_major: major };
+  return { postgrest_major: major, postgrest_reason: null, postgrest_observed_major: major };
 }
 export async function preconditions(client) {
   const { rows } = await client.query(`SELECT has_table_privilege(current_user,'public.messages','SELECT') AS messages, has_table_privilege(current_user,'public.memberships','SELECT') AS memberships, has_table_privilege(current_user,'public.organizations','SELECT') AS organizations, has_table_privilege(current_user,'public.properties','SELECT') AS properties, has_table_privilege(current_user,'public.contacts','SELECT') AS contacts, ${['pg_class','pg_namespace','pg_proc','pg_type','pg_attribute','pg_attrdef','pg_constraint','pg_index','pg_trigger','pg_policy','pg_extension'].map(n => `has_table_privilege(current_user,'pg_catalog.${n}','SELECT') AS ${n}`).join(', ')}, has_table_privilege(current_user,'supabase_migrations.schema_migrations','SELECT') AS migration_ledger, has_function_privilege(current_user,'auth.uid()','EXECUTE') AS uid, has_function_privilege(current_user,'auth.role()','EXECUTE') AS role, pg_has_role(current_user,'authenticated','MEMBER') AS can_switch`);
@@ -99,7 +108,7 @@ export async function collect(client, org, options = {}) {
   await openReadTxn(client, options.begin);
   try {
     await preconditions(client);
-    const postgrest_major = await readPostgrestMajor(client);
+    const postgrest = await readPostgrestMajor(client);
     await client.query("SET LOCAL statement_timeout='60s'");
     const now = (await client.query('SELECT now() AS at')).rows[0].at;
     const member = (await client.query(`SELECT mb.user_id FROM public.memberships mb WHERE mb.org_id=$1 AND ${ACTIVE} ORDER BY mb.created_at,mb.user_id LIMIT 1`, [org])).rows[0]?.user_id;
@@ -129,7 +138,7 @@ export async function collect(client, org, options = {}) {
     const memberPlan = await explainShapes(client, cursor, tail);
     await client.query('RESET ROLE');
     await client.query('COMMIT');
-    return { member_sub: member, member_orgs: orgs, snapshot_at: now, postgrest_major, queued: snapshot(queued.rows), current_status: currentStatus, shapes, rls, plans: { privileged: privilegedPlan, member: memberPlan } };
+    return { member_sub: member, member_orgs: orgs, snapshot_at: now, ...postgrest, queued: snapshot(queued.rows), current_status: currentStatus, shapes, rls, plans: { privileged: privilegedPlan, member: memberPlan } };
   } catch (e) { await client.query('ROLLBACK'); throw e; }
 }
 export async function stabilityProbe(client, org, waitMs = 300000) {

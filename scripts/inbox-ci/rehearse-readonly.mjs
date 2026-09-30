@@ -38,18 +38,18 @@ writeFileSync(catalogPath, catalog.stdout);
 const client = new Client({ connectionString: process.env.E2E_CI_SUPABASE_DB_URL, ssl: false });
 await client.connect();
 let major;
-let postgrestMajor;
+let postgrest;
 try {
   major = String(Math.floor(Number((await client.query('SHOW server_version_num')).rows[0].server_version_num) / 10000));
   await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-  postgrestMajor = await readPostgrestMajor(client);
+  postgrest = await readPostgrestMajor(client);
   await client.query('COMMIT');
 } catch (error) {
   await client.query('ROLLBACK').catch(() => {});
   throw error;
 }
 finally { await client.end(); }
-const platform = await platformFingerprint(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, major, undefined, { postgrestMajor });
+const platform = await platformFingerprint(process.env.TEST_SUPABASE_URL, process.env.TEST_SUPABASE_ANON_KEY, major, undefined, { ...postgrest, postgrestMajor: postgrest.postgrest_major, postgrestReason: postgrest.postgrest_reason, postgrestObservedMajor: postgrest.postgrest_observed_major });
 const platformPath = path.join(scratch, 'platform.json');
 writeFileSync(platformPath, JSON.stringify(platform));
 const output = options['--output'] ?? path.join(scratch, 'readonly.json');
