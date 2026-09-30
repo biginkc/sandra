@@ -55,6 +55,24 @@ describe("InboxReplyComposer", () => {
     await screen.findByText("Review before sending");
   });
 
+  it("hides the review control while a send is in flight", async () => {
+    let resolveAccept!: (value: Response) => void;
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/replies/prepare")) return Promise.resolve(Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey)));
+      if (url.endsWith("/replies/accept")) return new Promise<Response>(resolve => { resolveAccept = resolve; });
+      return Promise.resolve(responseFor(url, init));
+    }));
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    await screen.findByText("Review before sending");
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole("button", { name: "Review reply" })).toBeNull();
+    await act(async () => { resolveAccept(Response.json({ operationId })); });
+    await screen.findByText("Delivered");
+  });
+
   it("delegates a selection over 50 targets to the server review", async () => {
     // MUTATION GUARD: restoring a client-side 50-target short-circuit must fail this test.
     const targets = Array.from({ length: 51 }, (_, index) => targetFor(index + 10));
@@ -177,6 +195,38 @@ describe("InboxReplyComposer", () => {
     await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); await Promise.resolve(); });
     expect(receiptAttempts).toBe(3);
     expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it("resets the failed-poll streak after a valid pending receipt", async () => {
+    let receiptAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/replies/prepare")) return Response.json(prepared(JSON.parse(String(init?.body)).idempotencyKey));
+      if (url.endsWith("/replies/accept")) return Response.json({ operationId });
+      receiptAttempts += 1;
+      if (receiptAttempts === 2) return Response.json({ ...status("pending"), dispatchComplete: false });
+      throw Error("Receipt temporarily unavailable");
+    }));
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "Reply message" }), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review reply" }));
+    await screen.findByText("Review before sending");
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(1);
+    await act(async () => { vi.advanceTimersByTime(500); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(2);
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(3);
+    await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(4);
+    await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(5);
+    expect(screen.queryByText("Send result not confirmed")).not.toBeInTheDocument();
+    await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); await Promise.resolve(); });
+    expect(receiptAttempts).toBe(6);
+    expect(screen.getAllByText("Send result not confirmed").length).toBeGreaterThan(0);
     vi.useRealTimers();
   });
 

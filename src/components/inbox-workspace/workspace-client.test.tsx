@@ -141,3 +141,17 @@ it("removes an authoritative tombstone from selection, detail and its revisit ca
   await screen.findByText("Hello from history");
   expect(calls.filter(url => url.includes("/detail"))).toHaveLength(2);
 });
+
+it("closes bulk reply review when fewer than two eligible targets remain", async () => {
+  render(<InboxWorkspaceClient identity={identity} initialFilter={{ view: "all", hide_noise: true }} repliesEnabled />);
+  await waitFor(() => expect(state.replacements).toHaveLength(1));
+  act(() => state.callbacks!.onChange({ state: "live", rows: [row, row2] }));
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select Ada" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "Select Bea" }));
+  fireEvent.click(screen.getByRole("button", { name: "Review reply to 2" }));
+  expect(screen.getByRole("dialog")).toHaveTextContent("Bulk reply review");
+
+  act(() => state.callbacks!.onInvalidated([workspaceId(row2.target)]));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+});

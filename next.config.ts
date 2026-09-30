@@ -3,9 +3,6 @@ import { withWorkflow } from "workflow/next";
 import { withSentryConfig } from "@sentry/nextjs/config";
 
 const nextConfig: NextConfig = {
-  // Keep compile/runtime errors visible while keeping the dev route marker out
-  // of visual fixture captures and the app's mobile footer content.
-  devIndicators: false,
   experimental: {
     serverActions: {
       allowedOrigins: ["sandra.bmhgroup.com", "localhost:3000"],

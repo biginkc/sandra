@@ -1,8 +1,8 @@
 import { INBOX_REPLY_EXCLUSIONS, INBOX_REPLY_RECIPIENT_LIMIT, type InboxReplyExclusion } from "@/lib/inbox/reply-api-contract";
 
-export type InboxReplyPreviewState = "ready" | "reviewing" | "sending" | "sent" | "route-changed" | "uncertain" | "network-error" | "bulk-review" | "bulk-receipt" | `blocked-${InboxReplyExclusion}`;
+export type InboxReplyPreviewState = "ready" | "checking" | "reviewing" | "sending" | "sent" | "route-changed" | "uncertain" | "network-error" | "bulk-review" | "bulk-receipt" | `blocked-${InboxReplyExclusion}`;
 export const blockedPreviewStates = [...INBOX_REPLY_EXCLUSIONS].map(value => `blocked-${value}` as const);
-export const previewStates: InboxReplyPreviewState[] = ["ready", "reviewing", "sending", "sent", "route-changed", "uncertain", "network-error", ...blockedPreviewStates, "bulk-review", "bulk-receipt"];
+export const previewStates: InboxReplyPreviewState[] = ["ready", "checking", "reviewing", "sending", "sent", "route-changed", "uncertain", "network-error", ...blockedPreviewStates, "bulk-review", "bulk-receipt"];
 export const recipientLimit = INBOX_REPLY_RECIPIENT_LIMIT;
 
 export const fixture = {

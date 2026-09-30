@@ -92,7 +92,7 @@ export function InboxReplyPreview({ state }: { state: InboxReplyPreviewState }) 
   const fixtureFetch: typeof fetch = async (input, init) => {
     const url = String(input);
     if (url.endsWith("/replies/prepare")) {
-      if (state === "reviewing" || state === "bulk-review") return new Promise<Response>(() => {});
+      if (state === "checking") return new Promise<Response>(() => {});
       if (state === "network-error") throw Error("Fixture network unavailable");
       const body = JSON.parse(String(init?.body)) as { idempotencyKey: string; targets: readonly InboxReplyTarget[] };
       return Response.json(preparedFor(state, body.targets, body.idempotencyKey));

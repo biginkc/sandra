@@ -21,6 +21,11 @@ function replyTargetFromWorkspaceId(value: WorkspaceId, orgId: string): InboxRep
   return { kind: parsed[1] as InboxReplyTarget["kind"], id: parsed[2] };
 }
 function replyTargetName(target: InboxReplyTarget): string { return `${target.kind}:${target.id}`; }
+function replyTargetCount(ids: readonly WorkspaceId[], orgId: string): number {
+  return ids.reduce((count, id) => {
+    try { replyTargetFromWorkspaceId(id, orgId); return count + 1; } catch { return count; }
+  }, 0);
+}
 export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled = false, repliesEnabled = false }: { identity: InboxQueryIdentity & { expiresAt: number }; initialFilter: InboxFilter; actionsEnabled?: boolean; repliesEnabled?: boolean }) {
   const [cache] = useState(() => createInboxQueryCache(identity));
   const [snapshot, setSnapshot] = useState<SyncSnapshot>({ state: "loading", rows: [] });
@@ -50,8 +55,8 @@ export function InboxWorkspaceClient({ identity, initialFilter, actionsEnabled =
   const replaceSelected = useCallback((ids: readonly WorkspaceId[]) => {
     selectedRef.current = ids;
     setSelected(ids);
-    if (ids.length < 2) setBulkReplyOpen(false);
-  }, []);
+    if (ids.length < 2 || (repliesEnabled && replyTargetCount(ids, identity.orgId) < 2)) setBulkReplyOpen(false);
+  }, [identity.orgId, repliesEnabled]);
   const accessLost = useCallback(() => {
     if (denied.current) return;
     denied.current = true; sequence.current++;

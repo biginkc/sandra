@@ -228,12 +228,12 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
     }
   }
 
-  function schedulePoll(operationId: string, attempt: number) {
+  function schedulePoll(operationId: string, attempt: number, consecutiveFailures: number) {
     if (pollTimer.current) clearTimeout(pollTimer.current);
-    pollTimer.current = setTimeout(() => { pollTimer.current = null; void poll(operationId, attempt + 1); }, POLL_BACKOFF_MS[Math.min(attempt, POLL_BACKOFF_MS.length - 1)]);
+    pollTimer.current = setTimeout(() => { pollTimer.current = null; void poll(operationId, attempt + 1, consecutiveFailures); }, POLL_BACKOFF_MS[Math.min(attempt, POLL_BACKOFF_MS.length - 1)]);
   }
 
-  async function poll(operationId: string, attempt = 0) {
+  async function poll(operationId: string, attempt = 0, consecutiveFailures = 0) {
     const controller = new AbortController(); request.current = controller;
     try {
       const response = await requestFetch(`/api/inbox/replies/${encodeURIComponent(operationId)}`, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) });
@@ -241,10 +241,11 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
       const status = await response.json() as InboxReplyStatus;
       if (controller.signal.aborted || status.operationId !== operationId || !Array.isArray(status.receipts)) throw Error("The reply receipt could not be verified.");
       if (status.dispatchComplete) dispatch({ type: "receipt", status });
-      else schedulePoll(operationId, attempt);
+      else schedulePoll(operationId, attempt, 0);
     } catch (error) {
       if (!controller.signal.aborted) {
-        if (attempt < POLL_BACKOFF_MS.length) schedulePoll(operationId, attempt);
+        const nextFailures = consecutiveFailures + 1;
+        if (nextFailures <= POLL_BACKOFF_MS.length) schedulePoll(operationId, attempt, nextFailures);
         else dispatch({ type: "uncertain", message: error instanceof Error ? error.message : "The reply result could not be checked." });
       }
     }
@@ -288,7 +289,7 @@ export function InboxReplyComposer({ targets, names, enabled = false, routeKey =
     {state.phase === "network_error" && <div className={styles.error} role="alert"><strong>Review unavailable</strong><p>{state.message}</p><p>No send was started from this screen. Reconnect and review again.</p></div>}
     {state.phase === "uncertain" && !state.status && <div className={styles.notice} role="alert"><strong>Send result not confirmed</strong><p>{state.message}</p><p>Do not resend. Check the conversation or receipt manually.</p></div>}
     {!sent && <><label className={styles.label} htmlFor={bulk ? "bulk-reply-message" : "single-reply-message"}>Message</label><textarea id={bulk ? "bulk-reply-message" : "single-reply-message"} className={styles.textarea} aria-label="Reply message" rows={3} maxLength={MAX_BODY} value={state.draft} disabled={reviewBusy || state.phase === "sending" || state.phase === "blocked"} onChange={event => dispatch({ type: "edit", draft: event.target.value })} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); void reviewReply(); } }} placeholder="Write a reply…" />
-      <div className={styles.footer}><span className={styles.counter}>{state.draft.length} / {MAX_BODY} characters · {targets.length} selected</span>{state.phase !== "reviewing" && state.phase !== "blocked" && <button type="button" className={styles.primary} onClick={() => void reviewReply()} disabled={!state.draft.trim() || reviewBusy || state.phase === "sending"}>{reviewBusy ? "Checking…" : "Review reply"}</button>}</div></>}
+      <div className={styles.footer}><span className={styles.counter}>{state.draft.length} / {MAX_BODY} characters · {targets.length} selected</span>{state.phase !== "reviewing" && state.phase !== "blocked" && state.phase !== "sending" && <button type="button" className={styles.primary} onClick={() => void reviewReply()} disabled={!state.draft.trim() || reviewBusy}>{reviewBusy ? "Checking…" : "Review reply"}</button>}</div></>}
     {reviewBusy && <p className={styles.notice} role="status">Checking current eligibility and recipient routes…</p>}
     {review && !sent && <PreparedReview prepared={review} names={names} onEdit={() => dispatch({ type: "edit", draft: state.draft })} onSend={() => void sendReply()} sending={state.phase === "sending"} bulk={bulk} />}
     {!review && state.message && state.phase === "blocked" && <p className={styles.error} role="alert">{state.message}</p>}

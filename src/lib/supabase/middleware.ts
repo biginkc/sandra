@@ -45,12 +45,6 @@ function loginDenialResponse(request: NextRequest, url: URL): NextResponse {
 }
 
 export async function updateSession(request: NextRequest) {
-  const path = request.nextUrl.pathname;
-  // Brand previews are deterministic, fixture-only pages. Keep them truly
-  // unauthenticated so local screenshot/dev runs do not need Supabase config;
-  // protected routes and browser OAuth paths still use the full session gate.
-  if (path.startsWith("/brand")) return NextResponse.next({ request });
-
   let supabaseResponse = NextResponse.next({ request });
   const writtenCookieNames = new Set<string>();
 
@@ -80,6 +74,7 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
+  const path = request.nextUrl.pathname;
   const isPublic = isPublicPath(path);
   const allowLocalE2ePasswordSession =
     process.env.NODE_ENV !== "production" &&
