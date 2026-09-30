@@ -550,6 +550,14 @@ export function DialpadPanel({ bootstrap, callRequest, onLogOutcome, onCallReque
             ? { epoch: snapshot.threshold.crossingEpoch, sample: snapshot.threshold.crossingSample }
             : null,
         } : latest),
+        onStopped: () => {
+          if (!isOwned()) return;
+          const latest = recordingRef.current;
+          if (!latest || latest.intentId !== call.intentId) return;
+          const stopped: RecordingPanelState = { ...latest, prepared: null, active: null, captureId, session: null, busy: false, hydrated: true, message: 'Recording finished. Verifying saved audio…' };
+          recordingRef.current = stopped;
+          setRecording(stopped);
+        },
         onFailure: (failure) => setRecording((latest) => isOwned() && latest?.intentId === call.intentId ? { ...latest, prepared: null, active: null, session: null, busy: false, message: failure.message } : latest),
       });
       ownedSession = session;

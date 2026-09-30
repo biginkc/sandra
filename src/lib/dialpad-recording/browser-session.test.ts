@@ -549,7 +549,8 @@ describe('Dialpad browser session', () => {
       if (message.type === 'recording_eof') setTimeout(() => socket.message(JSON.stringify({ type: 'recording_eof_ack', epoch: 1, track: message.track, lastSeq: message.lastSeq })), 50);
       if (message.type === 'pcm_eof') setTimeout(() => socket.message(JSON.stringify({ type: 'pcm_eof_drained', epoch: 1, track: message.track, endSample: message.endSample })), 50);
     };
-    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 2_000, attachmentTimeoutMs: 10_000, capture: active });
+    let stoppedNotifications = 0;
+    const session = createDialpadBrowserSession({ endpoint: ENDPOINT, token: 'token', epoch: 1, socketFactory: () => socket, ackTimeoutMs: 2_000, attachmentTimeoutMs: 10_000, capture: active, onStopped: () => { stoppedNotifications += 1; } });
     const started = session.start();
     socket.open();
     serverHydrate(socket);
@@ -561,6 +562,8 @@ describe('Dialpad browser session', () => {
     expect(events).toContain('send:recording_eof');
     expect(events).toContain('send:pcm_eof');
     expect(session.state()).toBe('stopped');
+    await session.stop();
+    expect(stoppedNotifications).toBe(1);
     await prepared.dispose();
   });
 

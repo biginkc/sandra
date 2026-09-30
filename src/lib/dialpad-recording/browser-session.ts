@@ -69,6 +69,8 @@ export type DialpadBrowserSessionOptions = {
   readonly onCaptureState?: (state: DialpadBrowserCaptureStateMessage) => void;
   readonly onServerMessage?: (message: DialpadBrowserServerMessage) => void;
   readonly onFailure?: (error: DialpadBrowserSessionError) => void;
+  /** Recording transport completed gracefully; this is not provider hangup proof. */
+  readonly onStopped?: () => void;
 };
 
 export type DialpadBrowserSession = {
@@ -855,6 +857,9 @@ export function createDialpadBrowserSession(options: DialpadBrowserSessionOption
         if (socket) {
           detach();
           try { socket.close(1000, 'recording session stopped'); } catch { /* closed */ }
+        }
+        if (state === 'stopped' && !disposed) {
+          try { options.onStopped?.(); } catch { /* observers cannot change transport completion */ }
         }
       }
     })();
