@@ -1,0 +1,20 @@
+[
+  {
+    "table": "auth.users",
+    "id": "1f752d32-fcbb-4dcb-9abb-b20dbf166c85",
+    "retained": "managed by e2e-identity-lifecycle"
+  },
+  {
+    "table": "memberships",
+    "id": "b36f3bd9-65b3-40b1-b254-4d45cb2269b4"
+  },
+  {
+    "table": "properties",
+    "id": "80668dc9-6819-4831-a53b-0bf96455f421"
+  },
+  {
+    "table": "lead_events",
+    "id": "3f67936f-aa90-42c9-842a-4d112b8e350f",
+    "property_id": "80668dc9-6819-4831-a53b-0bf96455f421"
+  }
+]
