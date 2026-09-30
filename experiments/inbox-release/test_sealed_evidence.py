@@ -46,6 +46,7 @@ class SealedEvidenceTests(unittest.TestCase):
         for key in selected:
             evidence._require(selected, (key,), Path("."))
         self.assertEqual(set(J5A) - set(selected), {
+            ("pre-merge", "drift-replay", "n/a", "disposable"),
             ("pre-merge", "browser", "post", "disposable"),
             ("pre-merge", "shared-readonly", "pre", "shared-test"),
         })
@@ -64,7 +65,11 @@ class SealedEvidenceTests(unittest.TestCase):
         catalog_commit = self.git("rev-parse", "HEAD")
         platform_dir = self.record("platform", kind="db-contract", phase="pre", target="disposable")
         platform_commit = self.git("rev-parse", "HEAD")
+        drift_dir = self.record("drift", kind="drift-replay", phase="n/a", target="disposable", extra={"github_run_id": "333", "github_run_attempt": "1", "lane": "drift-replay", "artifact_name": f"heavy-drift-replay-{self.sha}-333-1", "workflow_path": ".github/workflows/inbox-heavy-verification.yml", "workflow_input_sha": self.sha, "event": "workflow_dispatch", "head_branch": "main"})
+        drift_commit = self.git("rev-parse", "HEAD")
         catalog = self.catalog_config()
+        drift = json.loads((drift_dir / "drift-record.json").read_text())
+        observed_catalog = evidence.reconstruct_drift_catalog(catalog, drift)
         platform = self.platform_config()
         catalog_bytes = (catalog_dir / "catalog-pre.json").read_bytes()
         platform_bytes = (platform_dir / "platform-config.json").read_bytes()
@@ -81,10 +86,10 @@ class SealedEvidenceTests(unittest.TestCase):
             "plans": {role: {shape: plan for shape in plan_contract["shapes"]} for role in plan_contract["roles"]},
             "tls": {"protocol": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384", "leaf_fingerprint": "AA:" * 31 + "AA", "pinned_ca_fingerprint": "80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA", "root_in_peer_chain": False, "upstream_hop_ssl": {"ssl": False, "version": None, "cipher": None}},
             "catalog_indexes": {"messages_pkey": {"relation": "messages", "valid": True}},
-            "platform_config": platform, "items": {},
+            "summary": evidence.hosted_platform_summary(platform["postgrest_major"], platform["postgrest_reason"]), "platform_config": platform, "items": {},
             "comparisons": {
-                "catalog": {"verdict": "PASS", "input_sha256": hashlib.sha256(catalog_bytes).hexdigest(), "observed_section_sha256": catalog["section_sha256"]},
-                "platform": {"verdict": "PASS", "waived_fields": [], "input_sha256": hashlib.sha256(platform_bytes).hexdigest(), "observed_sha256": platform["sha256"]},
+                "catalog": {"verdict": "PASS", "input_sha256": hashlib.sha256(catalog_bytes).hexdigest(), "observed_section_sha256": observed_catalog["section_sha256"], "observed_catalog_sha256": observed_catalog["sha256"], "drift_record_sha256": drift["sha256"]},
+                "platform": {"verdict": "PASS", "waived_fields": [], "waiver_reasons": {}, "input_sha256": hashlib.sha256(platform_bytes).hexdigest(), "observed_sha256": platform["sha256"]},
             },
         }
         raw_path = Path(self.temp.name).parent / f"shared-raw-{self.sha}.json"
@@ -94,6 +99,7 @@ class SealedEvidenceTests(unittest.TestCase):
         args = {"repo": str(self.repo), "sha": self.sha, "phase": "pre", "output": str(raw_path),
                 "catalogRecord": catalog_dir.relative_to(self.repo).as_posix(),
                 "platformRecord": platform_dir.relative_to(self.repo).as_posix(),
+                "driftRecord": drift_dir.relative_to(self.repo).as_posix(),
                 "now": "2026-09-28T12:00:00.000Z"}
         node = f"import {{ sealSharedReadonly }} from {json.dumps(script)}; const a=JSON.parse(process.argv[1]); a.now=new Date(a.now); console.log(sealSharedReadonly(a));"
         directory = subprocess.check_output(["node", "--input-type=module", "-e", node, json.dumps(args)], cwd=source, text=True).strip()
@@ -104,7 +110,7 @@ class SealedEvidenceTests(unittest.TestCase):
             paths = {p.relative_to(self.repo).as_posix() for p in (self.repo / directory).iterdir()}
             run = evidence.validate_manifest(self.repo, commit, directory, paths, self.sha)
             selected = {}
-            for kind, phase, source_dir, source_commit in (("catalog-fingerprint", "n/a", catalog_dir, catalog_commit), ("db-contract", "pre", platform_dir, platform_commit)):
+            for kind, phase, source_dir, source_commit in (("catalog-fingerprint", "n/a", catalog_dir, catalog_commit), ("db-contract", "pre", platform_dir, platform_commit), ("drift-replay", "n/a", drift_dir, drift_commit)):
                 relative = source_dir.relative_to(self.repo).as_posix()
                 source_paths = {p.relative_to(self.repo).as_posix() for p in source_dir.rglob("*") if p.is_file()}
                 source_run = evidence.validate_manifest(self.repo, source_commit, relative, source_paths, self.sha)
@@ -119,13 +125,17 @@ class SealedEvidenceTests(unittest.TestCase):
         original_raw = raw_path.read_bytes()
         self.assertEqual(original_manifest["waived_fields"], [])
         waived_output = json.loads(json.dumps(original_output))
-        waived_majors = {"postgres_major": "17", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "2"}
+        waived_majors = {"postgres_major": "17", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "2", "postgrest_reason": "NO_CONNECTION", "postgrest_observed_major": None}
+        waived_output["platform_config"] = {**waived_majors, "sha256": evidence.platform_digest(waived_majors)}
+        waived_output["summary"] = evidence.hosted_platform_summary(evidence.NOT_VERIFIED, "NO_CONNECTION")
         waived_output["comparisons"]["platform"]["verdict"] = {"postgres_major": "PASS", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "PASS"}
         waived_output["comparisons"]["platform"]["waived_fields"] = ["postgrest_major"]
-        waived_output["comparisons"]["platform"]["observed_sha256"] = hashlib.sha256(json.dumps(waived_majors, separators=(",", ":")).encode()).hexdigest()
+        waived_output["comparisons"]["platform"]["waiver_reasons"] = {"postgrest_major": "NO_CONNECTION"}
+        waived_output["comparisons"]["platform"]["observed_sha256"] = waived_output["platform_config"]["sha256"]
         output_path.write_text(json.dumps(waived_output))
         waived_manifest = json.loads(json.dumps(original_manifest))
         waived_manifest["waived_fields"] = ["postgrest_major"]
+        waived_manifest["waiver_reasons"] = {"postgrest_major": "NO_CONNECTION"}
         waived_manifest["artifacts"]["readonly.json"] = hashlib.sha256(output_path.read_bytes()).hexdigest()
         manifest_path.write_text(json.dumps(waived_manifest))
         self.commit("accept PostgREST waiver")
@@ -209,18 +219,47 @@ class SealedEvidenceTests(unittest.TestCase):
 
     @staticmethod
     def platform_config() -> dict:
-        # This is platform.mjs's JSON.stringify serializer: majors in this insertion order, then sha256.
-        majors = {"postgres_major": "17", "postgrest_major": "12", "gotrue_major": "2"}
-        return {**majors, "sha256": hashlib.sha256(json.dumps(majors, separators=(",", ":")).encode()).hexdigest()}
+        value = {"postgres_major": "17", "postgrest_major": "12", "gotrue_major": "2", "postgrest_reason": None, "postgrest_observed_major": "12"}
+        return {**value, "sha256": evidence.platform_digest(value)}
 
     @staticmethod
     def catalog_config() -> dict:
         names = CATALOG_SECTIONS
         sections = {name: [] for name in names}
-        hashes = {name: "c" * 64 for name in names}
-        # catalog_fingerprint.py emits the raw sections plus both levels of digest.
-        return {"sections": sections, "section_sha256": hashes,
-                "sha256": hashlib.sha256(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+        sections["relations"] = [
+            {"identity": "auth.users", "owner": "supabase_auth_admin", "columns": [], "indexes": []},
+            {"identity": "public.message_threads", "owner": "postgres", "columns": [], "indexes": []},
+            {"identity": "public.webhook_events", "owner": "postgres", "columns": [], "indexes": []},
+        ]
+        return evidence.catalog_digest(sections)
+
+    @staticmethod
+    def drift_config() -> dict:
+        items = []
+        for object_name, name, definition, origin, owner in (
+            ("public.message_threads", "ai_responder_debounce_token", "uuid", "unknown", "postgres"),
+            ("public.message_threads", "ai_responder_debounce_until", "timestamptz", "unknown", "postgres"),
+            ("public.webhook_events", "processing_lease_token", "uuid", "unknown", "postgres"),
+        ):
+            items.append({"object": object_name, "attribute": "columns", "name": name, "canonical_definition": definition,
+                          "classification": {"class": "column", "nullable": True, "default": None, "attidentity": "", "attgenerated": "", "column_acl": None, "owner": owner},
+                          "origin": origin, "approval_sha256": None})
+        for name, definition, origin, owner, predicate, expression, approval in (
+            ("idx_message_threads_ai_responder_status", "CREATE INDEX idx_message_threads_ai_responder_status ON public.message_threads USING btree (ai_responder_status) WHERE (ai_responder_status IS NOT NULL)", "unknown", "postgres", "(ai_responder_status IS NOT NULL)", False, evidence.DRIFT_APPROVALS["idx_message_threads_ai_responder_status"]),
+            ("idx_users_email", "CREATE INDEX idx_users_email ON auth.users USING btree (email)", "platform", "supabase_auth_admin", None, False, None),
+            ("idx_users_created_at_desc", "CREATE INDEX idx_users_created_at_desc ON auth.users USING btree (created_at DESC)", "platform", "supabase_auth_admin", None, False, None),
+            ("idx_users_last_sign_in_at_desc", "CREATE INDEX idx_users_last_sign_in_at_desc ON auth.users USING btree (last_sign_in_at DESC)", "platform", "supabase_auth_admin", None, False, None),
+            ("idx_users_name", "CREATE INDEX idx_users_name ON auth.users USING btree (((raw_user_meta_data ->> 'name'::text))) WHERE ((raw_user_meta_data ->> 'name'::text) IS NOT NULL)", "platform", "supabase_auth_admin", "((raw_user_meta_data ->> 'name'::text) IS NOT NULL)", True, evidence.DRIFT_APPROVALS["idx_users_name"]),
+        ):
+            items.append({"object": "auth.users" if origin == "platform" else "public.message_threads", "attribute": "indexes", "name": name,
+                          "canonical_definition": definition,
+                          "classification": {"class": "index", "unique": False, "primary": False, "constraint": False, "valid": True, "ready": True, "live": True, "predicate": predicate, "expression": expression, "owner": owner},
+                          "origin": origin, "approval_sha256": approval})
+        payload = {"record_version": 1, "target_ref": "ncsngxlcyxylaeskiteu", "candidate_sha": "0" * 40,
+                   "baseline_digest": "", "catalog_format_version": evidence.CATALOG_FORMAT_VERSION, "items": sorted(items, key=lambda item: (item["object"], item["attribute"], item["name"]))}
+        payload["baseline_digest"] = evidence.catalog_digest(SealedEvidenceTests.catalog_config()["sections"])["sha256"]
+        digest_payload = {key: payload[key] for key in ("record_version", "target_ref", "candidate_sha", "baseline_digest", "catalog_format_version", "items")}
+        return {**payload, "sha256": hashlib.sha256(json.dumps(digest_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()}
 
     def record(self, name="one", *, sha=None, tier="pre-merge", exit_status=0, completed="2026-09-28T12:00:00Z", observed=None, commit=True, kind=None, phase="pre", target="n/a", verdict=None, extra=None) -> Path:
         sha = sha or self.sha
@@ -244,10 +283,40 @@ class SealedEvidenceTests(unittest.TestCase):
             artifact2 = directory / "catalog-pre.json"
             artifact2.write_text(json.dumps(self.catalog_config()))
             manifest["artifacts"][artifact2.name] = hashlib.sha256(artifact2.read_bytes()).hexdigest()
+            artifact3 = directory / "catalog-post.json"
+            artifact3.write_text(json.dumps(self.catalog_config()))
+            manifest["artifacts"][artifact3.name] = hashlib.sha256(artifact3.read_bytes()).hexdigest()
+            manifest["catalog_fingerprint_post_artifact"] = "catalog-post.json"
         if kind == "db-contract" and phase == "pre":
             artifact2 = directory / "platform-config.json"
             artifact2.write_text(json.dumps(getattr(self, "platform_config_override", self.platform_config())))
             manifest["artifacts"][artifact2.name] = hashlib.sha256(artifact2.read_bytes()).hexdigest()
+        if kind == "drift-replay":
+            artifact.unlink()
+            baseline = self.catalog_config()
+            drift = self.drift_config()
+            drift["candidate_sha"] = self.sha
+            drift["baseline_digest"] = baseline["sha256"]
+            digest_payload = {key: drift[key] for key in ("record_version", "target_ref", "candidate_sha", "baseline_digest", "catalog_format_version", "items")}
+            drift["sha256"] = hashlib.sha256(json.dumps(digest_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            try:
+                replay = evidence.reconstruct_drift_catalog(baseline, drift)
+            except EvidenceError:
+                replay = baseline
+            files = {
+                "drift-record.json": drift,
+                "catalog-pre.json": replay,
+                "catalog-post.json": replay,
+                "pre-readonly.json": {"verdict": "PASS", "phase": "pre"},
+                "post-readonly.json": {"verdict": "PASS", "phase": "post"},
+                "contract-suite.txt": "PASS\n",
+            }
+            manifest["artifacts"] = {}
+            for filename, value in files.items():
+                target = directory / filename
+                target.write_text(json.dumps(value) if not isinstance(value, str) else value)
+                manifest["artifacts"][filename] = hashlib.sha256(target.read_bytes()).hexdigest()
+            manifest["summary"] = {"replayed_items": len(drift["items"]), "drift_record_sha256": drift["sha256"], "j5a": evidence.J5A_CATALOG_DRIFT_SUMMARY}
         if kind == "shared-readonly":
             manifest.pop("runner_script_sha256")
             manifest.pop("fault_proxy_script_sha256")
@@ -257,20 +326,27 @@ class SealedEvidenceTests(unittest.TestCase):
             manifest["run_id"] = "shared-readonly-" + phase + "-" + sealed_time.replace("-", "").replace(":", "").replace(".", "")
             scripts = json.loads((self.repo / evidence.OPERATOR_LIST).read_text())["operator_scripts"]
             inputs = {}
-            for label, source_kind, source_phase, filename in (("catalog_record", "catalog-fingerprint", "n/a", "catalog-pre.json"), ("platform_record", "db-contract", "pre", "platform-config.json")):
+            for label, source_kind, source_phase, filename in (("catalog_record", "catalog-fingerprint", "n/a", "catalog-pre.json"), ("platform_record", "db-contract", "pre", "platform-config.json"), ("drift_record", "drift-replay", "n/a", "drift-record.json")):
                 candidates = list((self.repo / ROOT / self.sha / "pre-merge").glob("*/manifest.json"))
                 found = next((p for p in candidates if (v := json.loads(p.read_text())).get("kind") == source_kind and v.get("phase") == source_phase), None)
                 if found:
                     v = json.loads(found.read_text())
                     inputs[label] = {"directory": found.parent.relative_to(self.repo).as_posix(), "artifact": filename, "sha256": v["artifacts"][filename]}
-            manifest.update({"event": "operator", "workflow_path": "", "github_run_id": "", "github_run_attempt": "", "target_binding": {"project_ref": "ncsngxlcyxylaeskiteu", "pooler_user": "postgres.ncsngxlcyxylaeskiteu"}, "operator_script_sha256": {name: hashlib.sha256((self.repo / name).read_bytes()).hexdigest() for name in scripts}, "inputs": inputs, "waived_fields": [], "items": {}})
-            if len(inputs) == 2:
+            manifest.update({"event": "operator", "workflow_path": "", "github_run_id": "", "github_run_attempt": "", "target_binding": {"project_ref": "ncsngxlcyxylaeskiteu", "pooler_user": "postgres.ncsngxlcyxylaeskiteu"}, "operator_script_sha256": {name: hashlib.sha256((self.repo / name).read_bytes()).hexdigest() for name in scripts}, "inputs": inputs, "waived_fields": [], "waiver_reasons": {}, "items": {}})
+            if len(inputs) == 3:
                 platform_data = self.platform_config()
+                catalog_data = json.loads(inputs["catalog_record"]["directory"] and (self.repo / inputs["catalog_record"]["directory"] / "catalog-pre.json").read_text())
+                drift_data = json.loads((self.repo / inputs["drift_record"]["directory"] / "drift-record.json").read_text())
+                try:
+                    observed_catalog = evidence.reconstruct_drift_catalog(catalog_data, drift_data)
+                except EvidenceError:
+                    observed_catalog = catalog_data
                 plan = {"sha256": "a" * 64, "messages_scan": "Seq Scan", "total_cost": 10}
                 output = {"verdict": "PASS", "target": "shared-test", "phase": phase, "source_output_sha256": "a" * 64,
                           "plans": {role: {shape: plan for shape in evidence.PLAN_SHAPES} for role in evidence.PLAN_ROLES},
                           "tls": {"protocol": "TLSv1.3", "cipher": "fixture", "leaf_fingerprint": "AA:" * 31 + "AA", "pinned_ca_fingerprint": "80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA", "root_in_peer_chain": False, "upstream_hop_ssl": None}, "catalog_indexes_sha256": "a" * 64,
-                          "comparisons": {"catalog": {"verdict": "PASS", "input_sha256": inputs["catalog_record"]["sha256"], "observed_section_sha256": self.catalog_config()["section_sha256"]}, "platform": {"verdict": "PASS", "waived_fields": [], "input_sha256": inputs["platform_record"]["sha256"], "observed_sha256": platform_data["sha256"]}}, "items": {}}
+                          "summary": evidence.hosted_platform_summary(platform_data.get("postgrest_major"), platform_data.get("postgrest_reason")), "platform_config": platform_data,
+                          "comparisons": {"catalog": {"verdict": "PASS", "input_sha256": inputs["catalog_record"]["sha256"], "observed_section_sha256": observed_catalog["section_sha256"], "observed_catalog_sha256": observed_catalog["sha256"], "drift_record_sha256": drift_data["sha256"]}, "platform": {"verdict": "PASS", "waived_fields": [], "waiver_reasons": {}, "input_sha256": inputs["platform_record"]["sha256"], "observed_sha256": platform_data["sha256"]}}, "items": {}}
                 artifact.unlink()
                 manifest["artifacts"] = {"readonly.json": hashlib.sha256(json.dumps(output).encode()).hexdigest()}
                 (directory / "readonly.json").write_text(json.dumps(output))
@@ -462,8 +538,9 @@ class SealedEvidenceTests(unittest.TestCase):
                 continue
             tier, kind, phase, target = key
             failed = key == bad
-            provenance = ({"github_run_id": str(1000 + i), "github_run_attempt": "1", "lane": "outbox",
-                           "artifact_name": f"heavy-outbox-{self.sha}-{1000 + i}-1",
+            lane = "drift-replay" if kind == "drift-replay" else "outbox"
+            provenance = ({"github_run_id": str(1000 + i), "github_run_attempt": "1", "lane": lane,
+                           "artifact_name": f"heavy-{lane}-{self.sha}-{1000 + i}-1",
                            "workflow_path": ".github/workflows/inbox-heavy-verification.yml",
                            "workflow_input_sha": self.sha, "event": "workflow_dispatch", "head_branch": "main"}
                           if target == "disposable" else None)
@@ -542,7 +619,7 @@ class SealedEvidenceTests(unittest.TestCase):
         valid = self.platform_config()
         for label, platform, message in (
             ("three keys", {key: valid[key] for key in ("postgres_major", "postgrest_major", "gotrue_major")}, "invalid consumed platform data"),
-            ("wrong sha256", {**valid, "sha256": "0" * 64}, "platform mismatch"),
+            ("wrong sha256", {**valid, "sha256": "0" * 64}, "platform mismatch|consumed platform digest mismatch"),
         ):
             with self.subTest(label=label):
                 case = SealedEvidenceTests(methodName="test_valid_sealed_record")
@@ -566,7 +643,7 @@ class SealedEvidenceTests(unittest.TestCase):
 
         self.shared_mutation = mutate
         self.j5a_records()
-        with self.assertRaisesRegex(EvidenceError, "platform mismatch"):
+        with self.assertRaisesRegex(EvidenceError, "platform mismatch|waived fields mismatch"):
             evaluate(self.repo, "j5a", self.sha)
 
     def test_shared_readonly_rejects_waiver_for_matching_observed_digest(self):
@@ -581,7 +658,7 @@ class SealedEvidenceTests(unittest.TestCase):
 
         self.shared_mutation = mutate
         self.j5a_records()
-        with self.assertRaisesRegex(EvidenceError, "platform mismatch"):
+        with self.assertRaisesRegex(EvidenceError, "platform mismatch|waived fields mismatch"):
             evaluate(self.repo, "j5a", self.sha)
 
     def test_shared_readonly_rejects_waiver_for_observed_major_different_from_baseline(self):
@@ -593,6 +670,23 @@ class SealedEvidenceTests(unittest.TestCase):
             output["comparisons"]["platform"]["verdict"] = {"postgres_major": "PASS", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "PASS"}
             output["comparisons"]["platform"]["observed_sha256"] = hashlib.sha256(json.dumps(majors, separators=(",", ":")).encode()).hexdigest()
             manifest["waived_fields"] = ["postgrest_major"]
+            output_path.write_text(json.dumps(output))
+            manifest["artifacts"]["readonly.json"] = hashlib.sha256(output_path.read_bytes()).hexdigest()
+
+        self.shared_mutation = mutate
+        self.j5a_records()
+        with self.assertRaisesRegex(EvidenceError, "platform mismatch|waived fields mismatch"):
+            evaluate(self.repo, "j5a", self.sha)
+
+    def test_shared_readonly_rejects_mixed_names_observed_major_different_from_baseline(self):
+        def mutate(manifest, directory):
+            output_path = directory / "readonly.json"
+            output = json.loads(output_path.read_text())
+            platform = {"postgres_major": "17", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "2", "postgrest_reason": "MIXED_NAMES", "postgrest_observed_major": "13"}
+            output["platform_config"] = {**platform, "sha256": evidence.platform_digest(platform)}
+            output["summary"] = evidence.hosted_platform_summary(evidence.NOT_VERIFIED, "MIXED_NAMES")
+            output["comparisons"]["platform"].update(waived_fields=["postgrest_major"], waiver_reasons={"postgrest_major": "MIXED_NAMES"}, verdict={"postgres_major": "PASS", "postgrest_major": evidence.NOT_VERIFIED, "gotrue_major": "PASS"}, observed_sha256=output["platform_config"]["sha256"])
+            manifest.update(waived_fields=["postgrest_major"], waiver_reasons={"postgrest_major": "MIXED_NAMES"})
             output_path.write_text(json.dumps(output))
             manifest["artifacts"]["readonly.json"] = hashlib.sha256(output_path.read_bytes()).hexdigest()
 
@@ -612,7 +706,7 @@ class SealedEvidenceTests(unittest.TestCase):
             evaluate(self.repo, "j5a", self.sha)
 
     def test_j5a_missing_browser_post_names_key_six(self):
-        self.j5a_records(omit=J5A[5])
+        self.j5a_records(omit=J5A[6])
         with self.assertRaisesRegex(EvidenceError, "browser.*post.*disposable"):
             evaluate(self.repo, "j5a", self.sha)
 
@@ -694,7 +788,7 @@ class SealedEvidenceTests(unittest.TestCase):
                         config["section_sha256"]["unexpected"] = "c" * 64
                     case.catalog_config = lambda: config
                     case.j5a_records()
-                    with case.assertRaisesRegex(EvidenceError, "catalog mismatch"):
+                    with case.assertRaisesRegex(EvidenceError, "(?i)catalog[_ ]mismatch"):
                         evaluate(case.repo, "j5a", case.sha)
                 finally:
                     case.doCleanups()
@@ -747,11 +841,27 @@ class SealedEvidenceTests(unittest.TestCase):
         catalog = self.record("catalog", kind="catalog-fingerprint", phase="n/a", target="disposable",
                               commit=False, extra=self.perf_provenance())
         artifact = catalog / "catalog-fingerprint-post.json"
-        artifact.write_text(json.dumps({"tables": "ok"}))
+        artifact.write_text(json.dumps(self.catalog_config()))
         manifest_path = catalog / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
         manifest["artifacts"][artifact.name] = hashlib.sha256(artifact.read_bytes()).hexdigest()
         manifest_path.write_text(json.dumps(manifest))
+        drift = self.record("drift", kind="drift-replay", phase="n/a", target="disposable", commit=False,
+                            extra={"github_run_id": "1002", "github_run_attempt": "1", "lane": "drift-replay",
+                                   "artifact_name": f"heavy-drift-replay-{self.sha}-1002-1",
+                                   "workflow_path": ".github/workflows/inbox-heavy-verification.yml", "workflow_input_sha": self.sha,
+                                   "event": "workflow_dispatch", "head_branch": "main"})
+        drift_data = json.loads((drift / "drift-record.json").read_text())
+        if target == "production":
+            drift_data["target_ref"] = "copflsklaefwzipsrjqz"
+            digest_payload = {key: drift_data[key] for key in ("record_version", "target_ref", "candidate_sha", "baseline_digest", "catalog_format_version", "items")}
+            drift_data["sha256"] = hashlib.sha256(json.dumps(digest_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            (drift / "drift-record.json").write_text(json.dumps(drift_data))
+            manifest_path = drift / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["artifacts"]["drift-record.json"] = hashlib.sha256((drift / "drift-record.json").read_bytes()).hexdigest()
+            manifest_path.write_text(json.dumps(manifest))
+        expected_after = evidence.reconstruct_drift_catalog(self.catalog_config(), drift_data)
         self.commit("catalog")
         production = target == "production"
         workflow = {"workflow_path": f".github/workflows/db-migrate-{'prod' if production else 'test'}.yml",
@@ -769,7 +879,7 @@ class SealedEvidenceTests(unittest.TestCase):
                            "workflow_run": workflow, "migration_head_sha": self.sha,
                            "schema_migrations_before": ["old"],
                            "schema_migrations_after": ["old", *sorted(MIGRATION_VERSIONS)],
-                           "catalog_fingerprint_after": {"tables": "ok"}})
+                           "catalog_fingerprint_after": expected_after})
 
     def test_migration_skipped_apply_job_negative(self):
         self.complete_migration_record(apply_conclusion="skipped")
@@ -819,11 +929,16 @@ class SealedEvidenceTests(unittest.TestCase):
         self.git("checkout", "-qb", "evidence", self.sha)
         directory = self.record("catalog", kind="catalog-fingerprint", phase="n/a", target="disposable", commit=False)
         fingerprint = directory / "catalog-fingerprint-post.json"
-        fingerprint.write_text(json.dumps({"tables": "expected", "policies": "same"}))
+        fingerprint.write_text(json.dumps(self.catalog_config()))
         manifest_path = directory / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
         manifest["artifacts"][fingerprint.name] = hashlib.sha256(fingerprint.read_bytes()).hexdigest()
         manifest_path.write_text(json.dumps(manifest))
+        self.record("drift", kind="drift-replay", phase="n/a", target="disposable", commit=False,
+                    extra={"github_run_id": "1002", "github_run_attempt": "1", "lane": "drift-replay",
+                           "artifact_name": f"heavy-drift-replay-{self.sha}-1002-1",
+                           "workflow_path": ".github/workflows/inbox-heavy-verification.yml", "workflow_input_sha": self.sha,
+                           "event": "workflow_dispatch", "head_branch": "main"})
         self.commit("catalog")
         self.git("checkout", "-q", self.base_branch)
         (self.repo / "main.txt").write_text("main")
