@@ -106,7 +106,7 @@ describe("canary runtime proof", () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes("FAILURE_ACK_RUN_ID")) return new Response(JSON.stringify({ value: "" }));
       if (url.includes("/workflows/")) return new Response(JSON.stringify({
-        workflow_runs: [{ id: 99, event: "schedule", status: "completed", conclusion: "failure" }], total_count: 1,
+        workflow_runs: [{ id: 99, run_number: 99, run_attempt: 1, event: "schedule", status: "completed", conclusion: "failure" }], total_count: 1,
       }));
       if (url.includes("/runs/")) return new Response(JSON.stringify({ status: "in_progress", run_attempt: 1, event: "schedule" }));
       return new Response(JSON.stringify({ value: "true" }));
