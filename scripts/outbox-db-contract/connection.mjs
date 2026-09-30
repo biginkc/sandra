@@ -4,16 +4,33 @@ import tls from 'node:tls';
 
 export const PINNED_CA_FINGERPRINT = '80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA';
 const fingerprint = raw => createHash('sha256').update(raw).digest('hex').toUpperCase().match(/../g).join(':');
+const pemBlock = /-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/g;
+const certificate = /-----BEGIN CERTIFICATE-----\r?\n([\s\S]*?)\r?\n-----END CERTIFICATE-----/;
+function canonicalPem(raw) {
+  const text = raw.toString('utf8');
+  const blocks = [...text.matchAll(pemBlock)];
+  if (blocks.length !== 1) throw new Error('single CA required');
+  const match = certificate.exec(text);
+  if (!match) throw new Error('single CA required');
+  if (blocks.length === 1 && (text.slice(0, match.index).trim() || text.slice(match.index + match[0].length).trim())) throw new Error('single CA required');
+  const encoded = match[1].replace(/\r?\n/g, '');
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('invalid certificate encoding');
+  const der = Buffer.from(encoded, 'base64');
+  if (!der.length || der.toString('base64') !== encoded) throw new Error('invalid certificate encoding');
+  const cert = new X509Certificate(der);
+  const base64 = der.toString('base64').replace(/.{64}/g, '$&\n');
+  const pem = `-----BEGIN CERTIFICATE-----\n${base64}\n-----END CERTIFICATE-----\n`;
+  if (!Buffer.from(match[0], 'utf8').equals(Buffer.from(pem.trimEnd(), 'utf8'))) throw new Error('non-canonical certificate');
+  return { cert, der, pem };
+}
 export function pinnedCa(env = process.env, expected = PINNED_CA_FINGERPRINT) {
   if (!env.NODE_EXTRA_CA_CERTS) throw new Error('TLS_CA_REQUIRED');
-  let pem, cert;
+  let parsed;
   try {
-    pem = readFileSync(env.NODE_EXTRA_CA_CERTS, 'utf8');
-    if ((pem.match(/-----BEGIN CERTIFICATE-----/g) ?? []).length !== 1) throw new Error('single CA required');
-    cert = new X509Certificate(pem);
+    parsed = canonicalPem(readFileSync(env.NODE_EXTRA_CA_CERTS));
   } catch { throw new Error('TLS_CA_INVALID'); }
-  if (fingerprint(cert.raw) !== expected) throw new Error('TLS_CA_PIN_MISMATCH');
-  return { path: env.NODE_EXTRA_CA_CERTS, pem, cert };
+  if (fingerprint(parsed.der) !== expected) throw new Error('TLS_CA_PIN_MISMATCH');
+  return { path: env.NODE_EXTRA_CA_CERTS, ...parsed };
 }
 export function connectionConfig(target, dsn, env = process.env, expected = PINNED_CA_FINGERPRINT) {
   const hosted = target === 'shared-readonly' || target === 'production';

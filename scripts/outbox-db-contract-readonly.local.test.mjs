@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Client } from 'pg';
 import { spawnSync } from 'node:child_process';
 const localReady = spawnSync('pg_isready', ['-h','127.0.0.1','-p','55472'], {stdio:'ignore'}).status === 0;
-const localTest = (name, fn) => test(name, {skip: !localReady && 'local Postgres unavailable'}, fn);
+const localTest = (name, fn) => test(name, {skip: !localReady && process.env.INBOX_ALLOW_LOCAL_DB_SKIP === '1' && 'local Postgres unavailable (INBOX_ALLOW_LOCAL_DB_SKIP=1)'}, fn);
 import { collect, observe, openReadTxn, stabilityProbe } from './outbox-db-contract/readonly.mjs';
 const base='postgres://postgres:w4r@127.0.0.1:55472/w4r';
 const reader='postgres://w4r_reader:reader@127.0.0.1:55472/w4r';
