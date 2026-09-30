@@ -12,7 +12,7 @@ const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'u
 const runId = env.GITHUB_RUN_ID;
 const attempt = env.GITHUB_RUN_ATTEMPT ?? '1';
 if (!Number.isInteger(status) || status < 1 || status > 255) throw new Error('Invalid failure status');
-if (!['catalog-fingerprint', 'db-contract-pre', 'db-contract-post', 'burst', 'perf-120k', 'outbox-pre', 'outbox-post'].includes(lane)) throw new Error('Invalid failure lane');
+if (!['catalog-fingerprint', 'db-contract-pre', 'db-contract-post', 'drift-replay', 'burst', 'perf-120k', 'outbox-pre', 'outbox-post'].includes(lane)) throw new Error('Invalid failure lane');
 if (env.PERF_LOCAL_EXECUTION === '1') throw new Error('Local perf diagnostic cannot seal an approval record');
 if (env.HEAVY_TESTED_SHA !== sha || !/^[a-f0-9]{40}$/.test(sha) || !/^[0-9]+$/.test(runId ?? '') || !/^[0-9]+$/.test(attempt)) throw new Error('Invalid heavy run identity');
 if (env.GITHUB_ACTIONS !== 'true' || env.GITHUB_EVENT_NAME !== 'workflow_dispatch' || env.GITHUB_REF_NAME !== 'main') throw new Error('Untrusted dispatch provenance');

@@ -12,7 +12,7 @@ const WORKFLOW = '.github/workflows/inbox-heavy-verification.yml';
 const LANES = Object.freeze({
   'outbox-pre': ['browser', 'pre'], 'outbox-post': ['browser', 'post'],
   'db-contract-pre': ['db-contract', 'pre'], 'db-contract-post': ['db-contract', 'post'],
-  'migration-dry-run': ['migration-dry-run', 'n/a'], 'catalog-fingerprint': ['catalog-fingerprint', 'n/a'],
+  'migration-dry-run': ['migration-dry-run', 'n/a'], 'catalog-fingerprint': ['catalog-fingerprint', 'n/a'], 'drift-replay': ['drift-replay', 'n/a'],
   burst: ['burst', 'n/a'], 'perf-120k': ['perf-120k', 'n/a'],
 });
 const MAX_RUN = 40 * 1024 * 1024;

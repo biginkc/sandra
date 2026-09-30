@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { verifyDownload } from '../ci/pull-heavy-record.mjs';
 
 const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const lanes = ['catalog-fingerprint', 'db-contract-pre', 'db-contract-post', 'burst', 'perf-120k', 'outbox-pre', 'outbox-post'];
+const lanes = ['catalog-fingerprint', 'drift-replay', 'db-contract-pre', 'db-contract-post', 'burst', 'perf-120k', 'outbox-pre', 'outbox-post'];
 
 test('early failure writer seals stageable FAIL manifests for each non-migration lane', () => {
   const temporary = mkdtempSync(path.join(os.tmpdir(), 'heavy-failure-record-'));
