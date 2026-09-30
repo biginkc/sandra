@@ -410,8 +410,89 @@ const DEFAULT_DISPLAY_CONSTRAINTS: DisplayMediaStreamOptions & {
 
 type ActiveDialpadCaptureState = ReturnType<ActiveDialpadCapture["state"]>;
 
+export type DialpadCaptureSourceLease = {
+  readonly display: MediaStream;
+  readonly microphone: MediaStream;
+  readonly signal: AbortSignal;
+  assertValid(): void;
+  release(): void;
+  invalidate(): void;
+};
+
+/** Owns permission sources only. No recorder, worklet or spool exists while idle. */
+export function createDialpadCaptureSourceSession(options: {
+  proof: CaptureHandleProof;
+  runtime?: BrowserCaptureRuntime;
+  onStopped?: () => void;
+}) {
+  const runtime = options.runtime ?? browserRuntime();
+  let display: MediaStream | null = null;
+  let microphone: MediaStream | null = null;
+  let disposed = false;
+  let leased = false;
+  const monitors: CaptureHandleMonitor[] = [];
+  const invalidation = new AbortController();
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    invalidation.abort();
+    for (const monitor of monitors) monitor.stop();
+    stopTracks(display);
+    stopTracks(microphone);
+    options.onStopped?.();
+  };
+  const validate = () => {
+    if (disposed || !display || !microphone) throw new BrowserCaptureError("interrupted", "Audio sharing has stopped. Allow sharing again before calling.");
+    const video = display.getVideoTracks()[0];
+    if (!video || [...display.getTracks(), ...microphone.getTracks()].some((track) => track.readyState === "ended")) {
+      throw new BrowserCaptureError("interrupted", "An audio sharing source ended.");
+    }
+    assertSandraCaptureHandle(video, options.proof);
+  };
+  return {
+    proof: options.proof,
+    dispose,
+    async acquire(): Promise<DialpadCaptureSourceLease> {
+      if (disposed || leased) throw new BrowserCaptureError("interrupted", "Audio sharing is unavailable or already in use.");
+      leased = true;
+      try {
+        if (!display) {
+          display = await runtime.getDisplayMedia(DEFAULT_DISPLAY_CONSTRAINTS);
+          if (disposed) { stopTracks(display); throw new BrowserCaptureError("interrupted", "Audio sharing was cancelled."); }
+          const video = display.getVideoTracks()[0];
+          if (!video) throw new BrowserCaptureError("unsupported", "Display capture has no identity track.");
+          assertSandraCaptureHandle(video, options.proof);
+          if (display.getAudioTracks().length === 0) throw new BrowserCaptureError("missing_audio", "Share the Sandra tab audio before calling.");
+          monitors.push(monitorSandraCaptureHandle(video, options.proof, dispose));
+          for (const track of display.getTracks()) monitors.push(monitorDialpadTrackEnded(track, dispose));
+          if (disposed) throw new BrowserCaptureError("interrupted", "Audio sharing was cancelled.");
+          microphone = await runtime.getUserMedia({ audio: true });
+          if (disposed) { stopTracks(microphone); throw new BrowserCaptureError("interrupted", "Audio sharing was cancelled."); }
+          if (microphone.getAudioTracks().length === 0) throw new BrowserCaptureError("missing_audio", "Microphone capture has no audio track.");
+          for (const track of microphone.getAudioTracks()) monitors.push(monitorDialpadTrackEnded(track, dispose));
+        }
+        validate();
+        let released = false;
+        return {
+          display: display!, microphone: microphone!, signal: invalidation.signal,
+          assertValid() { if (released) throw new BrowserCaptureError("interrupted", "Audio lease has ended."); validate(); },
+          release() { if (!released) { released = true; leased = false; } },
+          invalidate: dispose,
+        };
+      } catch (error) {
+        leased = false;
+        dispose();
+        // dispose may have run while a permission promise was pending.
+        stopTracks(display); stopTracks(microphone);
+        throw error;
+      }
+    },
+  };
+}
+
 export type PrepareDialpadCaptureOptions = {
   readonly proof: CaptureHandleProof;
+  readonly sources?: DialpadCaptureSourceLease;
   readonly runtime?: BrowserCaptureRuntime;
   readonly displayConstraints?: DisplayMediaStreamOptions;
   readonly microphoneConstraints?: MediaStreamConstraints;
@@ -458,18 +539,20 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
   let display: MediaStream | null = null;
   let microphone: MediaStream | null = null;
   try {
-    display = await runtime.getDisplayMedia(options.displayConstraints ?? DEFAULT_DISPLAY_CONSTRAINTS);
+    options.sources?.assertValid();
+    display = options.sources?.display ?? await runtime.getDisplayMedia(options.displayConstraints ?? DEFAULT_DISPLAY_CONSTRAINTS);
     const videoTrack = display.getVideoTracks()[0];
     if (!videoTrack) throw new BrowserCaptureError("unsupported", "Display capture did not provide a video identity track.");
     assertSandraCaptureHandle(videoTrack, options.proof);
     if (display.getAudioTracks().length === 0) throw new BrowserCaptureError("missing_audio", "The selected Sandra tab has no audio track.");
     try {
-      microphone = await runtime.getUserMedia(options.microphoneConstraints ?? { audio: true });
+      microphone = options.sources?.microphone ?? await runtime.getUserMedia(options.microphoneConstraints ?? { audio: true });
     } catch (error) {
       throw new BrowserCaptureError("permission_denied", error instanceof Error ? error.message : "Microphone permission was denied.");
     }
     if (microphone.getAudioTracks().length === 0) throw new BrowserCaptureError("missing_audio", "Microphone capture has no audio track.");
   } catch (error) {
+    options.sources?.invalidate();
     stopTracks(microphone);
     stopTracks(display);
     throw error instanceof BrowserCaptureError ? error : new BrowserCaptureError("permission_denied", error instanceof Error ? error.message : "Media capture permission failed.");
@@ -481,8 +564,8 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
     if (disposed) return;
     disposed = true;
     await active?.dispose();
-    stopTracks(microphone);
-    stopTracks(display);
+    if (options.sources) options.sources.release();
+    else { stopTracks(microphone); stopTracks(display); }
   };
 
   const prepared: PreparedDialpadCapture = {
@@ -575,7 +658,9 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
           notifyTimingFailure(new BrowserCaptureError("sink_failure", "Timing evidence could not be retained."));
         }
       };
+      const sourceInterrupted = () => fail(new BrowserCaptureError("interrupted", "Audio sharing was stopped."));
       const cleanup = async () => {
+        options.sources?.signal.removeEventListener("abort", sourceInterrupted);
         handleMonitor?.stop();
         for (const monitor of trackMonitors) monitor.stop();
         startupAbort.abort();
@@ -601,8 +686,10 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
         startupPcmFrames.length = 0;
         stopTracks(tabStream);
         stopTracks(micStream);
-        stopTracks(display);
-        stopTracks(microphone);
+        if (options.sources) {
+          if (failed) options.sources.invalidate();
+          options.sources.release();
+        } else { stopTracks(display); stopTracks(microphone); }
       };
       const stop = async () => {
         if (stopPromise) return stopPromise;
@@ -735,10 +822,14 @@ export async function prepareDialpadBrowserCapture(options: PrepareDialpadCaptur
       };
       active = { state: () => state, attach: spool ? attach : undefined, stop, dispose: stop };
       try {
-        tabStream = runtime.createMediaStream(display!.getAudioTracks());
-        micStream = runtime.createMediaStream(microphone!.getAudioTracks());
+        options.sources?.signal.addEventListener("abort", sourceInterrupted);
+        options.sources?.assertValid();
+        // Keep the original video track as the authoritative capture identity;
+        // only per-call audio clones are stopped when this call finishes.
+        tabStream = runtime.createMediaStream(display!.getAudioTracks().map((track) => options.sources ? track.clone() : track));
+        micStream = runtime.createMediaStream(microphone!.getAudioTracks().map((track) => options.sources ? track.clone() : track));
         handleMonitor = monitorSandraCaptureHandle(display!.getVideoTracks()[0]!, options.proof, fail);
-        for (const track of [...tabStream.getAudioTracks(), ...micStream.getAudioTracks()]) {
+        for (const track of [...tabStream.getAudioTracks(), ...micStream.getAudioTracks(), ...(options.sources ? [...display!.getAudioTracks(), ...microphone!.getAudioTracks()] : [])]) {
           trackMonitors.push(monitorDialpadTrackEnded(track, fail));
         }
         if (failed) throw failed;

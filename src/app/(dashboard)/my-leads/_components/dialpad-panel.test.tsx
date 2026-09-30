@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   cancel: vi.fn(),
   recent: vi.fn(),
   createProof: vi.fn(),
+  createMediaOwner: vi.fn(),
+  releaseMediaOwner: vi.fn(),
   prepareCapture: vi.fn(),
   createSession: vi.fn(),
   openCapture: vi.fn(),
@@ -31,6 +33,7 @@ vi.mock('../dialpad-actions', () => ({
 
 vi.mock('@/lib/dialpad-recording/browser-capture', () => ({
   createSandraCaptureHandleProof: mocks.createProof,
+  createDialpadCaptureSourceSession: mocks.createMediaOwner,
   prepareDialpadBrowserCapture: mocks.prepareCapture,
 }));
 
@@ -83,6 +86,7 @@ beforeEach(() => {
   mocks.captures.length = 0;
   mocks.lastSessionOptions = null;
   mocks.createProof.mockReturnValue({ handle: 'handle', origin: 'https://sandra.example' });
+  mocks.createMediaOwner.mockImplementation(({ proof }) => ({ proof, acquire: async () => ({ invalidate: vi.fn(), release: vi.fn() }), dispose: mocks.releaseMediaOwner }));
   mocks.recent.mockResolvedValue({ ok: true, calls: [] });
   mocks.targets.mockResolvedValue({ ok: true, contactId: 'contact-1', phones: [{ slot: 1, masked: '••• ••• 0196' }, { slot: 2, masked: '••• ••• 0142' }], grants: [] });
   mocks.status.mockResolvedValue(status('awaiting_provider'));
@@ -266,6 +270,19 @@ describe('DialpadPanel dialing', () => {
 });
 
 describe('DialpadPanel recording capture', () => {
+  it('releases shared audio without claiming that the provider call ended', async () => {
+    mocks.start.mockResolvedValue(released);
+    const { call, view } = await chooseAndCall({ bootstrap: recordingBootstrap });
+    await userEvent.click(call);
+    await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    expect(screen.getByText(/nothing is recorded between calls/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Stop sharing audio' }));
+    expect(mocks.releaseMediaOwner).toHaveBeenCalledTimes(1);
+    expect(mocks.cancel).not.toHaveBeenCalled();
+    expect(screen.getByText('Calling. Waiting for Dialpad to confirm.')).toBeInTheDocument();
+    view.unmount();
+  });
+
   it('requires capture permission before dispatch and keeps the chooser retryable after denial', async () => {
     mocks.prepareCapture.mockRejectedValueOnce(new Error('Microphone permission was denied.'));
     const { call } = await chooseAndCall({ bootstrap: recordingBootstrap });
@@ -292,6 +309,8 @@ describe('DialpadPanel recording capture', () => {
     const { call } = await chooseAndCall({ bootstrap: recordingBootstrap, pollMs: 15 });
     await userEvent.click(call);
     await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('button', { name: 'Start recording' })).not.toBeInTheDocument();
+    expect(screen.getByText('Recording starts automatically when Dialpad confirms the connection.')).toBeInTheDocument();
     mocks.status.mockResolvedValue(status('connected'));
     await waitFor(() => expect(mocks.createSession).toHaveBeenCalledTimes(1));
     expect(mocks.lastSessionOptions?.capture).toBe(mocks.captures[0]?.active);
