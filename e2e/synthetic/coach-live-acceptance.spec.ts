@@ -253,6 +253,18 @@ test("proves the synthetic live-coach machine acceptance path", async ({ page },
     metrics.objectionPrompt.olderEventPreservedNewer = true;
     metrics.objectionPrompt.duplicateCardCount = await page.getByTestId("coach-objection-prompt").count();
     expect(metrics.objectionPrompt.duplicateCardCount).toBe(1);
+    await expect(page.getByTestId("coach-recommendations")).toHaveCount(0);
+    await page.evaluate(() => window.coachBehaviorHarness.motivationPrompt());
+    const approvedReplies = JSON.parse(await readFile(path.resolve(process.cwd(), "src/lib/coach/live-coach-replies.approved.json"), "utf8")) as { sets: { motivation: { replies: { text: string }[] } } };
+    await expect(page.getByTestId("coach-motivation-replies").getByRole("listitem")).toHaveText(approvedReplies.sets.motivation.replies.map((reply) => reply.text));
+    await expect(page.getByTestId("coach-card-tray")).toContainText("Timing concern");
+    await expect(page.getByTestId("coach-objection-prompt").getByRole("listitem")).toHaveCount(0);
+    await page.getByTestId("coach-objection-prompt-dismiss").click();
+    await expect(page.getByTestId("coach-objection-prompt")).toHaveCount(0);
+    await expect(page.getByTestId("coach-motivation-prompt")).toBeVisible();
+    await page.getByTestId("coach-motivation-prompt-dismiss").click();
+    await expect(page.getByTestId("coach-motivation-prompt")).toHaveCount(0);
+    await page.evaluate(() => window.coachBehaviorHarness.newerObjectionPrompt());
 
     await page.evaluate(() => window.coachBehaviorHarness.mismatchedDigestObjectionPrompt());
     await page.waitForTimeout(50);

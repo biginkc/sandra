@@ -28,8 +28,8 @@ export type CoachEvent = CoachTranscriptEvent | CoachPhaseEvent | CoachObjection
 
 export type CoachTranscriptLine = { id: string; speaker: CoachSpeaker; text: string; isFinal: boolean; ts: string };
 export type CoachObjectionCard = { id: string; objectionId: string; ts: string; expiresAt: number };
-export type CoachObjectionPrompt = { objectionId: string; label: string; sellerTurn: number; classifierModel: string; questionsSha256: string; ts: string; expiresAt: number };
-export type CoachMotivationPrompt = { label: string; sellerTurn: number; classifierModel: string; questionsSha256: string; ts: string; expiresAt: number };
+export type CoachObjectionPrompt = { objectionId: string; label: string; sellerTurn: number; classifierModel: string; questionsSha256: string; ts: string };
+export type CoachMotivationPrompt = { label: string; sellerTurn: number; classifierModel: string; questionsSha256: string; ts: string };
 export type CoachHoldTimer = { timerId: string; startedAt: string; durationS: number };
 export type CoachCursor = { phaseId: CoachPhaseId; branchTag: string; variantKey: string; lineIndex: number; lineText: string; scriptVersion: string; ts: string };
 export type CoachNudge = { id: string; text: string; phaseId: CoachPhaseId; ts: string; expiresAt: number };

@@ -53,7 +53,7 @@ async function mount(page: Page, mode: "off" | "on", data = ""): Promise<void> {
   await page.waitForTimeout(350);
 }
 
-test("flag off preserves the S4 card while flag on renders three columns and the bound ref", async ({ page }) => {
+test("flag off preserves the S4 card while flag on renders two columns and the bound ref", async ({ page }) => {
   await mount(page, "off");
   await expect(page.getByTestId("coach-script-v2-panel")).toHaveCount(0);
   await expect(page.getByTestId("current-script-card")).toBeVisible();
@@ -66,9 +66,9 @@ test("flag off preserves the S4 card while flag on renders three columns and the
   await expect(page.getByAltText("Closer Lab")).toHaveAttribute("src", "/brand/closer-lab-logo.svg");
   const transcript = await page.getByLabel("Live transcript").boundingBox();
   const script = await page.getByTestId("coach-script-v2-panel").boundingBox();
-  const recommendations = await page.getByTestId("coach-recommendations").boundingBox();
+  await expect(page.getByTestId("coach-recommendations")).toHaveCount(0);
   expect(transcript!.x + transcript!.width).toBeLessThanOrEqual(script!.x + 1);
-  expect(script!.x + script!.width).toBeLessThanOrEqual(recommendations!.x + 1);
+  expect(script!.x + script!.width).toBeLessThanOrEqual(page.viewportSize()!.width + 1);
   await page.screenshot({ path: path.resolve(process.cwd(), ".planning/claude-convergence/pr-s5-screens/main.png"), fullPage: true });
 });
 

@@ -19,15 +19,19 @@ describe("coachReducer — objection prompt", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_000_000); });
   afterEach(() => vi.useRealTimers());
 
-  it("sets, replaces, expires, and resets the single prompt", () => {
+  it("sets, replaces, persists, dismisses, and resets the single prompt", () => {
     expect(initialCoachState().objectionPrompt).toBeNull();
     let state = coachReducer(initialCoachState(), prompt);
-    expect(state.objectionPrompt).toMatchObject({ label: "Price concern", expiresAt: 1_030_000 });
+    expect(state.objectionPrompt).toMatchObject({ label: "Price concern" });
     vi.setSystemTime(1_010_000);
     state = coachReducer(state, { ...prompt, label: "Timing concern", sellerTurn: 2 });
-    expect(state.objectionPrompt).toMatchObject({ label: "Timing concern", expiresAt: 1_040_000 });
+    expect(state.objectionPrompt).toMatchObject({ label: "Timing concern" });
     vi.setSystemTime(1_040_000);
-    expect(state.objectionPrompt!.expiresAt <= Date.now()).toBe(true);
+    expect(state.objectionPrompt).not.toHaveProperty("expiresAt");
+    expect(state.objectionPrompt?.label).toBe("Timing concern");
+    state = coachReducer(state, { type: "dismiss_objection_prompt" });
+    expect(state.objectionPrompt).toBeNull();
+    state = coachReducer(state, prompt);
     state = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
     expect(state.objectionPrompt).toBeNull();
   });
@@ -70,7 +74,13 @@ describe("coachReducer — motivation prompt", () => {
     let state = coachReducer(initialCoachState(), objection);
     state = coachReducer(state, motivation);
     expect(state.objectionPrompt).toMatchObject({ label: "Price concern" });
-    expect(state.motivationPrompt).toMatchObject({ label: "Motivation", sellerTurn: 2, expiresAt: 1_030_000 });
+    expect(state.motivationPrompt).toMatchObject({ label: "Motivation", sellerTurn: 2 });
+    vi.setSystemTime(1_040_000);
+    expect(state.motivationPrompt).not.toHaveProperty("expiresAt");
+    state = coachReducer(state, { type: "dismiss_motivation_prompt" });
+    expect(state.motivationPrompt).toBeNull();
+    expect(state.objectionPrompt).not.toBeNull();
+    state = coachReducer(state, motivation);
     state = coachReducer(state, { type: "reset", startingPhaseId: "introduction" });
     expect(state.motivationPrompt).toBeNull();
   });
@@ -82,7 +92,7 @@ describe("coachReducer — motivation prompt", () => {
     expect(coachReducer(state, { ...motivation, ts: "2026-09-29T11:59:59Z", sellerTurn: 3 })).toBe(state);
     expect(coachReducer(state, { ...motivation, sellerTurn: 1 })).toBe(state);
     state = coachReducer(state, { ...motivation, ts: "2026-09-29T12:00:05Z", sellerTurn: 4 });
-    expect(state.motivationPrompt).toMatchObject({ sellerTurn: 4, expiresAt: 1_035_000 });
+    expect(state.motivationPrompt).toMatchObject({ sellerTurn: 4 });
   });
 });
 

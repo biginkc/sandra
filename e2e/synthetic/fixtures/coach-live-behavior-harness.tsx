@@ -324,6 +324,11 @@ function BehaviorHarness() {
       replayAcceptanceConversation,
       measureAcceptancePrompt,
       newerObjectionPrompt: () => emitAcceptancePrompt("Timing concern", 4, "2026-09-29T12:10:10.000Z"),
+      motivationPrompt: () => emitSyntheticCoachBroadcast({
+        type: "motivation_prompt", label: "Motivation", sellerTurn: 4,
+        classifierModel: "jev-synthetic", questionsSha256: "a".repeat(64),
+        ts: "2026-09-29T12:10:10.000Z", ...ACCEPTANCE_WIRE_VERSIONS,
+      }, `coach:${callId}`),
       olderObjectionPrompt: () => emitAcceptancePrompt("Price concern", 3, "2026-09-29T12:10:09.000Z"),
       mismatchedDigestObjectionPrompt: () => emitAcceptancePrompt("Wrong digest", 5, "2026-09-29T12:10:11.000Z", "f".repeat(64)),
       previousCallObjectionPrompt: emitPreviousCallPrompt,
@@ -349,7 +354,7 @@ function BehaviorHarness() {
       rejectContext: rejectSyntheticCoachContextLoads,
       newCall: startNewCall,
     };
-  }, [chooseProviderMode, emitAcceptancePrompt, emitLegacyBatch, emitPreviousCallPrompt, emitTranscript, measureAcceptancePrompt, replayAcceptanceConversation, resolveDelayed, resolveNewestDelayed, session, startNewCall]);
+  }, [callId, chooseProviderMode, emitAcceptancePrompt, emitLegacyBatch, emitPreviousCallPrompt, emitTranscript, measureAcceptancePrompt, replayAcceptanceConversation, resolveDelayed, resolveNewestDelayed, session, startNewCall]);
 
   return (
     <>
@@ -383,7 +388,6 @@ function BehaviorHarness() {
             onHold={() => setHeld((value) => !value)}
             onHangup={() => setCallStatus("ended")}
             onCollapse={() => setOpen(false)}
-            recommendationRequest={recommendationRequest}
           />
         </>
       ) : null}

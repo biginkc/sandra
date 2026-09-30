@@ -12,6 +12,8 @@ export type CoachLocalAction =
    * only: it cannot imply a healthy/coached script stream. */
   | { type: "append_unbound_transcript"; event: CoachTranscriptEvent }
   | { type: "dismiss_objection"; cardId: string }
+  | { type: "dismiss_objection_prompt" }
+  | { type: "dismiss_motivation_prompt" }
   | { type: "dismiss_nudge"; nudgeId: string }
   | { type: "override_phase"; phaseId: CoachPhaseId }
   | { type: "set_entry_field"; field: CoachEntryToken; value: string }
@@ -32,7 +34,6 @@ const MAX_TRANSCRIPT_LINES = 500;
  * is heavier (three-beat Acknowledge/Disarm/Overcome layout) and stays up
  * longer than a nudge (a one-line coaching prompt). */
 export const OBJECTION_CARD_TTL_MS = 45_000;
-export const OBJECTION_PROMPT_TTL_MS = 30_000;
 export const NUDGE_TTL_MS = 20_000;
 
 /** Bounds how many simultaneously-visible guidance cards/nudges the
@@ -252,7 +253,7 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
         objectionPrompt: {
           objectionId: action.objectionId, label: action.label, sellerTurn: action.sellerTurn,
           classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
-          ts: action.ts, expiresAt: Date.now() + OBJECTION_PROMPT_TTL_MS,
+          ts: action.ts,
         },
       };
     }
@@ -278,7 +279,7 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
         motivationPrompt: {
           label: action.label, sellerTurn: action.sellerTurn,
           classifierModel: action.classifierModel, questionsSha256: action.questionsSha256,
-          ts: action.ts, expiresAt: Date.now() + OBJECTION_PROMPT_TTL_MS,
+          ts: action.ts,
         },
       };
     }
@@ -356,6 +357,10 @@ export function createCoachReducer(bundle: ScriptBundle | null) {
         ...state,
         objectionCards: state.objectionCards.filter((card) => card.id !== action.cardId),
       };
+    case "dismiss_objection_prompt":
+      return { ...state, objectionPrompt: null };
+    case "dismiss_motivation_prompt":
+      return { ...state, motivationPrompt: null };
     case "dismiss_nudge":
       return {
         ...state,

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { parseCoachEvent } from "./event-validation";
+
+it("pins the approved reply file bytes", () => {
+  const bytes = readFileSync(new URL("./live-coach-replies.approved.json", import.meta.url));
+  expect(createHash("sha256").update(bytes).digest("hex")).toBe("e3152385a4090367b9fd6e72c32181c55a4f134ce40b7fdab692916735c1ea18");
+});
 
 /** Every wire message carries both content versions, always — required per
  * the producer's verbatim wire contract. Spread into every payload/expected

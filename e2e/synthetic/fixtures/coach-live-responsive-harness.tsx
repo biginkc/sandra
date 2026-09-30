@@ -14,7 +14,6 @@ import { closrOutbound123Bundle, closrOutbound123Ref } from "@biginkc/coach/fixt
 import type { DtmfDigit } from "@/lib/dialer/transport";
 import type { CoachSession } from "@/lib/coach/use-coach-session";
 import type { CoachCallContext, CoachPhaseId, CoachState } from "@/lib/coach/types";
-import type { CoachRecommendationRequest, CoachRecommendationResult } from "@/lib/coach/recommendation-types";
 import { createCoachRecommendationContinuity } from "@/lib/coach/recommendation-client";
 
 const sampleContext: CoachCallContext = {
@@ -147,17 +146,7 @@ function Harness({ held: initialHeld = false, interrupted = false, unavailable =
       onHangup={() => { document.getElementById("root")?.setAttribute("data-hungup", "true"); }}
       onReconnectAudio={() => {}}
       onCollapse={() => {}}
-      recommendationRequest={async (input: CoachRecommendationRequest): Promise<CoachRecommendationResult> => ({
-        ok: true,
-        requestId: input.requestId,
-        callId: input.callId,
-        activeSectionId: input.activeSectionId,
-        mode: input.mode,
-        recommendations: input.mode === "automatic" ? ["Ask how being closer to family would change their timeline."] : [],
-        followUpQuestions: input.mode === "follow_up"
-          ? ["What would moving closer to family make easier?", "How soon would you like that move to happen?", "What is making the timing important now?"]
-          : [],
-      })}
+
     />
   );
 }

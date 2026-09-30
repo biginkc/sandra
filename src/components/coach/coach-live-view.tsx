@@ -11,6 +11,8 @@ import {
   PlayIcon,
   XIcon,
 } from "lucide-react";
+import { createPortal } from "react-dom";
+import approvedReplies from "@/lib/coach/live-coach-replies.approved.json";
 import {
   lazy,
   Suspense,
@@ -29,9 +31,6 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { DtmfDigit } from "@/lib/dialer/transport";
 import { splitDisplaySentences } from "@/lib/coach/display-sentences";
-import { requestCoachRecommendations } from "@/lib/coach/recommendation-action";
-import { useCoachRecommendations } from "@/lib/coach/recommendation-client";
-import type { CoachRecommendationRequestFn } from "@/lib/coach/recommendation-types";
 import {
   buildCoachSectionScriptBlock,
   type BranchSelectContext,
@@ -107,9 +106,6 @@ export type CoachLiveViewProps = {
    * coach session itself (transcript, phase, gates, cards, entered
    * values) lives in the provider and is unaffected by this. */
   onCollapse: () => void;
-  /** Test/synthetic injection only. Production uses the authenticated
-   * Sandra server action above. */
-  recommendationRequest?: CoachRecommendationRequestFn;
 };
 
 const ENTRY_TOKEN_SET: ReadonlySet<string> = new Set(COACH_ENTRY_TOKENS);
@@ -194,7 +190,6 @@ export function CoachLiveView(props: CoachLiveViewProps) {
     onHangup,
     onReconnectAudio,
     onCollapse,
-    recommendationRequest = requestCoachRecommendations,
   } = props;
   const {
     state,
@@ -294,93 +289,16 @@ export function CoachLiveView(props: CoachLiveViewProps) {
       tokens,
     ],
   );
-  // V2 owns its own navigator state. Use the exact initial state supplied to
-  // that navigator until it reports its first update, so recommendation
-  // grounding never briefly falls back to the legacy panel's selection.
-  const effectiveNavigatorState = useMemo<NavigatorState>(
-    () =>
-      session.navigatorState ?? {
-        activeSectionId,
-        sectionBranchSelections,
-        branchOverrides,
-        entryFields: state.entryFields,
-      },
-    [
-      activeSectionId,
-      branchOverrides,
-      sectionBranchSelections,
-      session.navigatorState,
-      state.entryFields,
-    ],
-  );
-  const recommendationSectionId = scriptV2Enabled
-    ? effectiveNavigatorState.activeSectionId
-    : activeSectionId;
-  // Keep recommendation grounding in lockstep with ScriptNavigator: both
-  // resolve tokens from the live context and navigator-owned entry fields,
-  // then let the shared section resolver choose auto and manual variants.
-  const navigatorTokens = useMemo(
-    () =>
-      bundle
-        ? resolveCoachTokens(
-            bundle.script.tokens,
-            activeContext,
-            effectiveNavigatorState.entryFields,
-          )
-        : {},
-    [activeContext, bundle, effectiveNavigatorState.entryFields],
-  );
-  const recommendationNavigatorBlock = useMemo(
-    () =>
-      scriptV2Enabled && bundle
-        ? buildCoachSectionScriptBlock(
-            bundle,
-            effectiveNavigatorState.activeSectionId,
-            navigatorTokens,
-            selectCtx,
-            effectiveNavigatorState.branchOverrides,
-            effectiveNavigatorState.sectionBranchSelections[
-              effectiveNavigatorState.activeSectionId
-            ] ?? null,
-          )
-        : null,
-    [
-      bundle,
-      effectiveNavigatorState,
-      navigatorTokens,
-      scriptV2Enabled,
-      selectCtx,
-    ],
-  );
-  const effectiveNavigatorVariants = useMemo(
-    () => ({
-      ...effectiveNavigatorState.branchOverrides,
-      ...Object.fromEntries(
-        (recommendationNavigatorBlock?.branches ?? []).map((branch) => [
-          branch.tag,
-          branch.selected.key,
-        ]),
-      ),
-    }),
-    [effectiveNavigatorState.branchOverrides, recommendationNavigatorBlock],
-  );
   const activePhaseId =
     scriptBlock?.phaseId ?? bundle?.script.phases[0]?.id ?? "unavailable";
-  const recommendations = useCoachRecommendations({
-    callId: session.callId,
-    activeSectionId: recommendationSectionId,
-    selectedSectionBranch: scriptV2Enabled
-      ? (effectiveNavigatorState.sectionBranchSelections[
-          recommendationSectionId
-        ] ?? null)
-      : (scriptBlock?.selectedBranchTag ?? null),
-    branchOverrides: scriptV2Enabled
-      ? effectiveNavigatorVariants
-      : selectedVariants,
-    transcript: state.transcript,
-    request: recommendationRequest,
-    continuity: session.recommendationContinuity,
-  });
+  const cardTray = objectionPromptEnabled ? (
+    <CoachCardTray
+      objectionPrompt={state.objectionPrompt}
+      motivationPrompt={state.motivationPrompt}
+      onDismissObjection={() => session.dispatch({ type: "dismiss_objection_prompt" })}
+      onDismissMotivation={() => session.dispatch({ type: "dismiss_motivation_prompt" })}
+    />
+  ) : null;
 
   const onEditEntry = useCallback(
     (field: CoachEntryToken, value: string) => setEntryField(field, value),
@@ -548,7 +466,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
             </button>
           </div>
         ) : null}
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto xl:grid xl:grid-cols-[380px_minmax(0,1fr)_320px] xl:overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto xl:grid xl:grid-cols-[380px_minmax(0,1fr)] xl:overflow-hidden">
           <TranscriptFeed lines={state.transcript} degraded={degraded} />
           {scriptV2Enabled && bundle && session.scriptBinding ? (
             <ScriptNavigatorPanel
@@ -564,6 +482,7 @@ export function CoachLiveView(props: CoachLiveViewProps) {
                 }
               }
               onStateChange={session.rememberNavigatorState}
+              cardTray={cardTray}
             />
           ) : bundle ? (
             <ScriptPanel
@@ -588,20 +507,13 @@ export function CoachLiveView(props: CoachLiveViewProps) {
                 ) + 1,
               )}
               sectionCount={bundle.sections.sections.length}
+              cardTray={cardTray}
             />
           ) : session.scriptBindingStatus === "loading" ? (
             <ScriptLoading />
           ) : (
             <ScriptUnavailable />
           )}
-          <RecommendationsPanel
-            {...recommendations}
-            objectionPrompt={objectionPromptEnabled ? state.objectionPrompt : null}
-            motivationPrompt={objectionPromptEnabled ? state.motivationPrompt : null}
-            hasFinalSellerTranscript={state.transcript.some(
-              (line) => line.isFinal && line.speaker === "seller",
-            )}
-          />
         </div>
         <CallControlDock
           callStatus={callStatus}
@@ -813,17 +725,31 @@ function ScriptNavigatorPanel({
   context,
   initialState,
   onStateChange,
+  cardTray,
 }: {
   bundle: import("@biginkc/coach").ScriptBundle;
   ref: import("@biginkc/coach").ScriptRef;
   context: import("@biginkc/coach").CoachCallContext;
   initialState: NavigatorState;
   onStateChange: (state: NavigatorState) => void;
+  cardTray: React.ReactNode;
 }) {
+  const panelRef = useRef<HTMLElement>(null);
+  const [scriptPanel, setScriptPanel] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    const root = panelRef.current;
+    if (!root) return;
+    const update = () => setScriptPanel(root.querySelector<HTMLElement>('[data-testid="coach-script-panel"]'));
+    update();
+    const observer = new MutationObserver(update);
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
   return (
     <main
       className="flex min-h-[28rem] min-w-0 flex-1 flex-col overflow-y-auto border-b border-border xl:min-h-0 xl:overflow-hidden xl:border-b-0"
       data-testid="coach-script-v2-panel"
+      ref={panelRef}
     >
       <Suspense
         fallback={
@@ -840,6 +766,7 @@ function ScriptNavigatorPanel({
           onStateChange={onStateChange}
         />
       </Suspense>
+      {scriptPanel && cardTray ? createPortal(cardTray, scriptPanel) : null}
     </main>
   );
 }
@@ -951,6 +878,7 @@ function ScriptPanel({
   onSelectSectionBranch,
   sectionIndex,
   sectionCount,
+  cardTray,
 }: {
   block: CoachSectionScriptBlock | null;
   nextBlock: CoachSectionScriptBlock | null;
@@ -971,8 +899,9 @@ function ScriptPanel({
   ) => void;
   sectionIndex: number;
   sectionCount: number;
+  cardTray: React.ReactNode;
 }) {
-  const panelRef = useRef<HTMLElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (panelRef.current) panelRef.current.scrollTop = 0;
@@ -1025,101 +954,103 @@ function ScriptPanel({
     : null;
   return (
     <main
-      className="min-h-[28rem] min-w-0 flex-1 overflow-y-auto border-b border-border px-4 pt-7 md:px-8 xl:min-h-0 xl:border-b-0 xl:px-12"
-      ref={panelRef}
+      className="flex min-h-[28rem] min-w-0 flex-1 flex-col overflow-hidden border-b border-border px-4 pt-7 md:px-8 xl:min-h-0 xl:border-b-0 xl:px-12"
       data-testid="coach-script-panel"
     >
-      <div className="mx-auto flex min-h-full max-w-[820px] flex-col">
-        {contextLoad.status === "error" ? (
-          <div
-            role="alert"
-            data-testid="coach-context-error"
-            className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-[var(--coach-amber)] bg-card px-3 py-2 text-xs text-[var(--coach-amber-text)]"
-          >
-            <span>
-              Couldn&apos;t load lead details — showing the script with
-              placeholders.
-            </span>
-            <Button
-              type="button"
-              variant="outline"
-              size="xs"
-              data-testid="coach-context-retry"
-              onClick={onRetryContext}
-            >
-              Retry
-            </Button>
-          </div>
-        ) : null}
-        {degraded ? (
-          <p
-            className="mb-4 rounded-lg border border-[var(--coach-amber)] bg-card px-3 py-2 text-xs text-[var(--coach-amber-text)]"
-            data-testid="coach-degraded-note"
-          >
-            Live transcript is reconnecting. Keep following the current script —
-            your place is saved.
-          </p>
-        ) : null}
-        <section
-          aria-label={`Current script — ${block.title}`}
-          data-testid="current-script-card"
-          className="min-w-0"
-        >
-          <h2 className="text-[11px] font-black tracking-[0.16em] text-muted-foreground uppercase">
-            {block.phaseName} ·{" "}
-            <span data-testid="current-section-title">{block.title}</span>
-          </h2>
-          <p className="sr-only" data-testid="current-phase-purpose">
-            <span className="font-semibold text-foreground">Purpose:</span>{" "}
-            {block.purpose}
-          </p>
-          {block.branchOptions.length > 1 ? (
+      <div className="mx-auto flex min-h-0 w-full max-w-[820px] flex-1 flex-col">
+        <div ref={panelRef} className="min-h-0 flex-1 overflow-y-auto" data-testid="coach-script-scroll">
+          {contextLoad.status === "error" ? (
             <div
-              className="mt-3.5 grid grid-cols-4 gap-2"
-              role="tablist"
-              aria-label={`${block.title} spoken paths`}
-              data-testid="section-path-options"
+              role="alert"
+              data-testid="coach-context-error"
+              className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-[var(--coach-amber)] bg-card px-3 py-2 text-xs text-[var(--coach-amber-text)]"
             >
-              {block.branchOptions.map((tag) => (
-                <button
-                  key={tag}
-                  type="button"
-                  role="tab"
-                  aria-selected={tag === block.selectedBranchTag}
-                  aria-label={`Use ${tag} spoken path for ${block.title}`}
-                  data-testid={`section-path-${block.sectionId}-${tag}`}
-                  onClick={() => onSelectSectionBranch(block.sectionId, tag)}
-                  className={cn(
-                    "rounded-full border px-2 py-0.5 text-[10px] font-bold",
-                    tag === block.selectedBranchTag
-                      ? "border-primary bg-primary text-primary-foreground"
-                      : "border-border text-muted-foreground hover:bg-muted",
-                  )}
-                >
-                  {tag}
-                </button>
-              ))}
+              <span>
+                Couldn&apos;t load lead details — showing the script with
+                placeholders.
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                data-testid="coach-context-retry"
+                onClick={onRetryContext}
+              >
+                Retry
+              </Button>
             </div>
           ) : null}
-          <div
-            className="mt-[26px] space-y-5"
-            data-testid="current-section-script"
+          {degraded ? (
+            <p
+              className="mb-4 rounded-lg border border-[var(--coach-amber)] bg-card px-3 py-2 text-xs text-[var(--coach-amber-text)]"
+              data-testid="coach-degraded-note"
+            >
+              Live transcript is reconnecting. Keep following the current script —
+              your place is saved.
+            </p>
+          ) : null}
+          <section
+            aria-label={`Current script — ${block.title}`}
+            data-testid="current-script-card"
+            className="min-w-0"
           >
-            {block.branches.map((branch) => (
-              <BranchCard
-                key={branch.tag}
-                branch={branch}
-                onEditEntry={onEditEntry}
-                isEntryTokenEditable={isEntryTokenEditable}
-                onBeginEntryEdit={onBeginEntryEdit}
-                onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
-              />
-            ))}
-          </div>
-        </section>
+            <h2 className="text-[11px] font-black tracking-[0.16em] text-muted-foreground uppercase">
+              {block.phaseName} ·{" "}
+              <span data-testid="current-section-title">{block.title}</span>
+            </h2>
+            <p className="sr-only" data-testid="current-phase-purpose">
+              <span className="font-semibold text-foreground">Purpose:</span>{" "}
+              {block.purpose}
+            </p>
+            {block.branchOptions.length > 1 ? (
+              <div
+                className="mt-3.5 grid grid-cols-4 gap-2"
+                role="tablist"
+                aria-label={`${block.title} spoken paths`}
+                data-testid="section-path-options"
+              >
+                {block.branchOptions.map((tag) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    role="tab"
+                    aria-selected={tag === block.selectedBranchTag}
+                    aria-label={`Use ${tag} spoken path for ${block.title}`}
+                    data-testid={`section-path-${block.sectionId}-${tag}`}
+                    onClick={() => onSelectSectionBranch(block.sectionId, tag)}
+                    className={cn(
+                      "rounded-full border px-2 py-0.5 text-[10px] font-bold",
+                      tag === block.selectedBranchTag
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border text-muted-foreground hover:bg-muted",
+                    )}
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <div
+              className="mt-[26px] space-y-5"
+              data-testid="current-section-script"
+            >
+              {block.branches.map((branch) => (
+                <BranchCard
+                  key={branch.tag}
+                  branch={branch}
+                  onEditEntry={onEditEntry}
+                  isEntryTokenEditable={isEntryTokenEditable}
+                  onBeginEntryEdit={onBeginEntryEdit}
+                  onSelectVariant={(key) => onSelectVariant(branch.tag, key)}
+                />
+              ))}
+            </div>
+          </section>
+        </div>
+        {cardTray}
         <div
           ref={footerRef}
-          className="coach-script-footer sticky bottom-0 z-10 mt-auto shrink-0 bg-background pt-7"
+          className="coach-script-footer z-10 mt-auto shrink-0 bg-background pt-7"
         >
           {nextBlock ? (
             <section
@@ -1213,155 +1144,57 @@ function ScriptLoading() {
   );
 }
 
-function RecommendationsPanel({
-  objectionPrompt,
-  motivationPrompt,
-  recommendations,
-  followUpQuestions,
-  loadingMode,
-  error,
-  automaticLimitReached,
-  followUpLimitReached,
-  hasFinalSellerTranscript,
-  requestFollowUp,
-}: ReturnType<typeof useCoachRecommendations> & {
+function CoachCardTray({
+  objectionPrompt, motivationPrompt, onDismissObjection, onDismissMotivation,
+}: {
   objectionPrompt: CoachObjectionPrompt | null;
   motivationPrompt: CoachMotivationPrompt | null;
-  hasFinalSellerTranscript: boolean;
+  onDismissObjection: () => void;
+  onDismissMotivation: () => void;
 }) {
-  const followUpBusy = loadingMode === "follow_up";
-  const failureMessage =
-    error === "rate_limited"
-      ? "The recommendation limit for this call has been reached."
-      : error === "busy"
-        ? "Sandra is already preparing a recommendation."
-        : error
-          ? "Recommendations are temporarily unavailable. Your script and transcript are unaffected."
-          : null;
   return (
-    <aside
-      aria-label="Live recommendations"
-      data-testid="coach-recommendations"
-      className="min-h-64 shrink-0 border-l border-border bg-[var(--coach-rail)] p-4 xl:min-h-0 xl:overflow-y-auto"
-    >
-      <h2 className="text-[11px] font-extrabold tracking-[0.12em] text-muted-foreground uppercase">
-        Coach
-      </h2>
-      {objectionPrompt ? <ObjectionPromptCard key={`${objectionPrompt.sellerTurn}-${objectionPrompt.ts}-${objectionPrompt.expiresAt}`} prompt={objectionPrompt} /> : null}
-      {motivationPrompt ? <MotivationPromptCard key={`${motivationPrompt.sellerTurn}-${motivationPrompt.ts}-${motivationPrompt.expiresAt}`} prompt={motivationPrompt} /> : null}
-      {recommendations.length === 0 && followUpQuestions.length === 0 ? (
-        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-          Sandra is listening for a meaningful homeowner response. Suggestions
-          will appear here without changing your place in the script.
-        </p>
+    <div data-testid="coach-card-tray" className="coach-card-tray">
+      {objectionPrompt ? (
+        <ObjectionPromptCard
+          key={JSON.stringify(objectionPrompt)}
+          prompt={objectionPrompt}
+          onDismiss={onDismissObjection}
+        />
       ) : null}
-      {recommendations.length > 0 ? (
-        <div className="mt-5" data-testid="automatic-recommendations">
-          <ul className="mt-2 space-y-2">
-            {recommendations.map((recommendation) => (
-              <li
-                key={recommendation}
-                className="rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed"
-              >
-                <div className="mb-1 text-[10px] font-extrabold tracking-[0.1em] text-muted-foreground uppercase">
-                  Consider saying
-                </div>
-                {recommendation}
-              </li>
-            ))}
-          </ul>
-        </div>
+      {motivationPrompt ? (
+        <MotivationPromptCard
+          key={JSON.stringify(motivationPrompt)}
+          prompt={motivationPrompt}
+          onDismiss={onDismissMotivation}
+        />
       ) : null}
-      <Button
-        type="button"
-        variant="outline"
-        className="mt-5 w-full"
-        disabled={
-          followUpBusy || !hasFinalSellerTranscript || followUpLimitReached
-        }
-        data-testid="follow-up-questions"
-        onClick={() => void requestFollowUp()}
-      >
-        {loadingMode === "follow_up" ? (
-          <Loader2Icon className="size-4 animate-spin" aria-hidden />
-        ) : null}
-        Follow-up Questions
-      </Button>
-      {!hasFinalSellerTranscript ? (
-        <p className="mt-2 text-xs text-muted-foreground">
-          Available after the homeowner has spoken.
-        </p>
-      ) : null}
-      {followUpQuestions.length > 0 ? (
-        <ol className="mt-4 space-y-2" data-testid="follow-up-question-options">
-          {followUpQuestions.map((question) => (
-            <li
-              key={question}
-              className="rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed"
-            >
-              {question}
-            </li>
-          ))}
-        </ol>
-      ) : null}
-      {loadingMode === "automatic" ? (
-        <p
-          className="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
-          data-testid="automatic-recommendations-loading"
-        >
-          <Loader2Icon className="size-3.5 animate-spin" aria-hidden />
-          Preparing suggestions…
-        </p>
-      ) : null}
-      {automaticLimitReached ? (
-        <p className="mt-3 text-xs text-muted-foreground">
-          Automatic suggestions have reached their limit for this call.
-        </p>
-      ) : null}
-      {failureMessage ? (
-        <p
-          role="status"
-          className="mt-3 text-xs text-muted-foreground"
-          data-testid="recommendation-error"
-        >
-          {failureMessage}
-        </p>
-      ) : null}
-    </aside>
-  );
-}
-
-function MotivationPromptCard({ prompt }: { prompt: CoachMotivationPrompt }) {
-  const [visible, setVisible] = useState(() => prompt.expiresAt > Date.now());
-  useEffect(() => {
-    const remaining = prompt.expiresAt - Date.now();
-    if (remaining <= 0) return;
-    const timer = window.setTimeout(() => setVisible(false), remaining);
-    return () => window.clearTimeout(timer);
-  }, [prompt]);
-  if (!visible || prompt.expiresAt <= Date.now()) return null;
-  return (
-    <div data-testid="coach-motivation-prompt" className="mt-3 rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed">
-      <div className="mb-1 text-[10px] font-extrabold tracking-[0.1em] text-muted-foreground uppercase">Motivation</div>
-      <div data-testid="coach-motivation-prompt-label">{prompt.label}</div>
     </div>
   );
 }
 
-function ObjectionPromptCard({ prompt }: { prompt: CoachObjectionPrompt }) {
-  const [visible, setVisible] = useState(() => prompt.expiresAt > Date.now());
-  useEffect(() => {
-    const remaining = prompt.expiresAt - Date.now();
-    if (remaining <= 0) return;
-    const timer = window.setTimeout(() => setVisible(false), remaining);
-    return () => window.clearTimeout(timer);
-  }, [prompt]);
-  if (!visible || prompt.expiresAt <= Date.now()) return null;
+function MotivationPromptCard({ prompt, onDismiss }: { prompt: CoachMotivationPrompt; onDismiss: () => void }) {
   return (
-    <div data-testid="coach-objection-prompt" className="mt-3 rounded-lg border border-border bg-card px-3 py-2 text-sm leading-relaxed">
-      <div className="mb-1 text-[10px] font-extrabold tracking-[0.1em] text-muted-foreground uppercase">Objection type</div>
-      <div data-testid="coach-objection-prompt-label">{prompt.label}</div>
-    </div>
+    <section data-testid="coach-motivation-prompt" className="coach-prompt-card">
+      <div className="coach-prompt-heading">
+        <div><strong>Motivation</strong><div data-testid="coach-motivation-prompt-label">{prompt.label}</div></div>
+        <button type="button" aria-label="Dismiss motivation" data-testid="coach-motivation-prompt-dismiss" onClick={onDismiss}><XIcon aria-hidden className="size-5" /></button>
+      </div>
+      <ul data-testid="coach-motivation-replies" className="coach-prompt-replies">
+        {approvedReplies.sets.motivation.replies.map((reply, index) => <li key={index}>{reply.text}</li>)}
+      </ul>
+    </section>
+  );
+}
+
+function ObjectionPromptCard({ prompt, onDismiss, replies }: { prompt: CoachObjectionPrompt; onDismiss: () => void; replies?: readonly string[] }) {
+  return (
+    <section data-testid="coach-objection-prompt" className="coach-prompt-card">
+      <div className="coach-prompt-heading">
+        <div><strong>Objection</strong><div data-testid="coach-objection-prompt-label">{prompt.label}</div></div>
+        <button type="button" aria-label="Dismiss objection" data-testid="coach-objection-prompt-dismiss" onClick={onDismiss}><XIcon aria-hidden className="size-5" /></button>
+      </div>
+      {replies?.length ? <ul className="coach-prompt-replies">{replies.map((reply, index) => <li key={index}>{reply}</li>)}</ul> : null}
+    </section>
   );
 }
 

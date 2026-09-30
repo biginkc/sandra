@@ -296,6 +296,8 @@ for (const mode of [
     await mountFullCoach(page, { darkMode: mode.darkMode, withGuidance: false });
 
     await expect(page.getByTestId("coach-objection-prompt-label")).toHaveText("Price concern");
+    await expect(page.getByTestId("coach-card-tray")).toBeVisible();
+    await expect(page.getByTestId("coach-recommendations")).toHaveCount(0);
     assertAA("objection prompt label", await measureRenderedContrast(page.getByTestId("coach-objection-prompt-label")));
 
     const palette = await page.getByTestId("coach-live-view").evaluate((element, names) => {

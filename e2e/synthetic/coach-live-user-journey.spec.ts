@@ -427,131 +427,24 @@ test("real session hook replaces the prior call with the next prepared target on
   await expect(script).not.toContainText("123 Main Street");
 });
 
-test("emulated finalized transcript at Sandra's Jitter boundary triggers advice only for meaningful homeowner speech", async ({ page }) => {
-  await mountCoach(page);
-  await emitStimulus(page, "sellerInterim");
-  await page.waitForTimeout(1_650);
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
-  await emitStimulus(page, "sellerFillerFinal");
-  await page.waitForTimeout(1_650);
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
-  await emitStimulus(page, "repFinal");
-  await page.waitForTimeout(1_650);
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 0");
-  await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1", { timeout: 3_000 });
-  await expect(page.getByTestId("automatic-recommendations-loading")).toBeVisible();
-  await expect(page.getByTestId("automatic-recommendations")).toContainText("moving closer to family");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1");
-});
-
-test("follow-up supersedes automatic work, rejects duplicates, and keeps exactly three grounded questions", async ({ page }) => {
-  await mountCoach(page);
-  await emitStimulus(page, "providerDeferred");
-  await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("automatic-recommendations-loading")).toBeVisible({ timeout: 3_000 });
-  await expect(page.getByTestId("follow-up-questions")).toBeEnabled();
-  await page.getByTestId("follow-up-questions").click();
-  await expect(page.getByTestId("follow-up-questions")).toBeDisabled();
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
-  await page.waitForTimeout(100);
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
-
-  await emitStimulus(page, "resolveNewestDelayed");
-  const questions = page.getByTestId("follow-up-question-options").getByRole("listitem");
-  await expect(questions).toHaveCount(3);
-  const text = await questions.allTextContents();
-  expect(new Set(text).size).toBe(3);
-  expect(text.join(" ")).toContain("family");
-  await emitStimulus(page, "resolveDelayed");
-  await expect(questions).toHaveText(text);
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2");
-});
-
-test("late section and call responses cannot overwrite newer visible advice", async ({ page }) => {
-  await mountCoach(page);
-  await emitStimulus(page, "providerDeferred");
-  await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1", { timeout: 3_000 });
-  await expect(page.getByTestId("automatic-recommendations-loading")).toBeVisible();
-  await expect(page.getByTestId("coach-next")).toBeEnabled();
-  await page.getByTestId("coach-next").click();
-  await emitStimulus(page, "sellerSecondMeaningful");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 2", { timeout: 3_000 });
-  await expect(page.getByTestId("automatic-recommendations-loading")).toBeVisible();
-
-  await emitStimulus(page, "resolveNewestDelayed");
-  const advice = page.getByTestId("automatic-recommendations");
-  await expect(advice).toContainText(`Current advice for synthetic-call-1 in ${sections[1].id}.`);
-  const currentSectionAdvice = await advice.allTextContents();
-  await emitStimulus(page, "resolveDelayed");
-  await expect(advice).toHaveText(currentSectionAdvice);
-
-  await emitStimulus(page, "sellerThirdMeaningful");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 3", { timeout: 3_000 });
-  await emitStimulus(page, "newCall");
-  await expect(page.getByTestId("synthetic-active-call")).toHaveText("synthetic-call-2");
-  await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
-  await emitStimulus(page, "providerDeferred");
-  await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 1", { timeout: 3_000 });
-  await emitStimulus(page, "resolveNewestDelayed");
-  await expect(advice).toContainText(`Current advice for synthetic-call-2 in ${sections[0].id}.`);
-  const currentCallAdvice = await advice.allTextContents();
-  await emitStimulus(page, "resolveDelayed");
-  await expect(advice).toHaveText(currentCallAdvice);
-});
-
-test("follow-up request cap is enforced through repeated user clicks without an extra provider call", async ({ page }) => {
-  await mountCoach(page);
-  await emitStimulus(page, "providerFast");
-  await emitStimulus(page, "sellerFillerFinal");
-  const followUp = page.getByTestId("follow-up-questions");
-  await expect(followUp).toBeEnabled();
-
-  for (let count = 1; count <= 20; count += 1) {
-    await followUp.click();
-    await expect(page.getByTestId("synthetic-request-total")).toHaveText(`Requests: ${count}`);
-    await expect(followUp).toBeEnabled();
-  }
-
-  await followUp.click();
-  await expect(page.getByTestId("synthetic-request-total")).toHaveText("Requests: 20");
-  await expect(followUp).toBeDisabled();
-  await expect(page.getByTestId("recommendation-error")).toContainText("limit for this call has been reached");
-  await expect(page.getByTestId("follow-up-question-options").getByRole("listitem")).toHaveCount(3);
-});
-
-test("provider failure preserves prior valid advice and never takes over script, transcript, or navigation", async ({ page }) => {
-  await mountCoach(page);
-  await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("automatic-recommendations")).toContainText("moving closer to family", { timeout: 4_000 });
-  await emitStimulus(page, "providerFailure");
-  await emitStimulus(page, "sellerSecondMeaningful");
-  await expect(page.getByTestId("recommendation-error")).toContainText("temporarily unavailable", { timeout: 4_000 });
-  await expect(page.getByTestId("automatic-recommendations")).toContainText("moving closer to family");
-  await expect(page.getByTestId("current-script-card")).toBeVisible();
-  await expect(page.getByTestId("coach-transcript")).toBeVisible();
-  await expect(page.getByTestId("coach-next")).toBeEnabled();
-});
-
 test("collapse/reopen persists the live session while a new call completely resets it", async ({ page }) => {
   await mountCoach(page);
   await page.getByTestId("coach-next").click();
   await emitStimulus(page, "sellerMeaningful");
-  await expect(page.getByTestId("automatic-recommendations")).toBeVisible({ timeout: 4_000 });
+  await page.evaluate(() => window.coachBehaviorHarness.measureAcceptancePrompt());
+  await expect(page.getByTestId("coach-objection-prompt")).toBeVisible();
   await page.getByTestId("coach-collapse").click();
   await expect(page.getByText("Coach collapsed")).toBeVisible();
   await page.getByTestId("reopen-coach").click();
   await expect(page.getByTestId("current-section-title")).toHaveText(sections[1].title);
-  await expect(page.getByTestId("automatic-recommendations")).toBeVisible();
+  await expect(page.getByTestId("coach-objection-prompt")).toBeVisible();
   await expect(page.getByTestId("transcript-line")).toContainText("carrying costs");
 
   await page.getByTestId("coach-collapse").click();
   await page.getByTestId("collapsed-new-call").click();
   await expect(page.getByTestId("current-section-title")).toHaveText(sections[0].title);
   await expect(page.getByTestId("coach-back")).toBeDisabled();
-  await expect(page.getByTestId("automatic-recommendations")).toHaveCount(0);
+  await expect(page.getByTestId("coach-objection-prompt")).toHaveCount(0);
   await expect(page.getByTestId("transcript-line")).toHaveCount(0);
 });
 
@@ -587,12 +480,14 @@ test("mute, hold, keypad, hangup, and desktop/mobile surface ordering work throu
   await mountCoach(page, { width: 375, height: 812 });
   const transcript = await page.getByLabel("Live transcript").boundingBox();
   const script = await page.getByTestId("coach-script-panel").boundingBox();
-  const recommendations = await page.getByTestId("coach-recommendations").boundingBox();
+  const tray = await page.getByTestId("coach-card-tray").boundingBox();
+  const navigation = await page.getByTestId("section-navigation").boundingBox();
   expect(transcript).not.toBeNull();
   expect(script).not.toBeNull();
-  expect(recommendations).not.toBeNull();
+  expect(tray).not.toBeNull();
+  expect(navigation).not.toBeNull();
   expect(transcript!.y + transcript!.height).toBeLessThanOrEqual(script!.y + 1);
-  expect(script!.y + script!.height).toBeLessThanOrEqual(recommendations!.y + 1);
+  expect(tray!.y + tray!.height).toBeLessThanOrEqual(navigation!.y + 1);
 });
 
 test("preserves the two-part greeting and goes straight to the qualification frame", async ({ page }) => {

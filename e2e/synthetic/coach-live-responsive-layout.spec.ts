@@ -66,7 +66,7 @@ for (const viewport of [
   { width: 1280, height: 900, label: "desktop-breakpoint" },
   { width: 1440, height: 900, label: "desktop" },
 ]) {
-  test(`keeps transcript, manual script, recommendations, and call controls usable at ${viewport.label}`, async ({ page }) => {
+  test(`keeps transcript, manual script, card tray, and call controls usable at ${viewport.label}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await mountFullCoach(page);
 
@@ -76,26 +76,29 @@ for (const viewport of [
     await expect(page.getByTestId("current-script-card")).toBeVisible();
     await expect(page.getByTestId("current-section-title")).toHaveText("Open the call");
     await expect(page.getByTestId("next-section-preview")).toContainText("Set the qualification frame");
-    await expect(page.getByTestId("coach-recommendations")).toBeVisible();
+    await expect(page.getByTestId("coach-recommendations")).toHaveCount(0);
+    await expect(page.getByTestId("coach-card-tray")).toBeVisible();
+    await expect(page.getByTestId("coach-script-scroll")).toHaveCSS("overflow-y", "auto");
     await expect(page.getByTestId("coach-objection-prompt-label")).toHaveText("Price concern");
     await expect(page.getByTestId("coach-call-dock-row")).toBeVisible();
 
     const transcript = await page.getByLabel("Live transcript").boundingBox();
     const script = await page.getByTestId("coach-script-panel").boundingBox();
-    const recommendations = await page.getByTestId("coach-recommendations").boundingBox();
+    const tray = await page.getByTestId("coach-card-tray").boundingBox();
+    const navigation = await page.getByTestId("section-navigation").boundingBox();
     expect(transcript).not.toBeNull();
     expect(script).not.toBeNull();
-    expect(recommendations).not.toBeNull();
+    expect(tray).not.toBeNull();
+    expect(navigation).not.toBeNull();
     if (viewport.width >= 1280) {
       expect(transcript!.width).toBe(380);
-      expect(recommendations!.width).toBe(320);
       const topBar = await page.locator(".coach-top-bar").boundingBox();
       expect(topBar!.height).toBe(60);
       expect(transcript!.x + transcript!.width).toBeLessThanOrEqual(script!.x + 1);
-      expect(script!.x + script!.width).toBeLessThanOrEqual(recommendations!.x + 1);
+      expect(script!.x + script!.width).toBeLessThanOrEqual(viewport.width + 1);
     } else {
       expect(transcript!.y + transcript!.height).toBeLessThanOrEqual(script!.y + 1);
-      expect(script!.y + script!.height).toBeLessThanOrEqual(recommendations!.y + 1);
+      expect(tray!.y + tray!.height).toBeLessThanOrEqual(navigation!.y + 1);
     }
 
     await page.getByTestId("phase-rail-reveal").click();
