@@ -21,7 +21,7 @@ re-enters as existing/uncertain) -> the attempt settles to 'uncertain', the
 transport call count stays at exactly 1, and no double dispatch occurred.
 """
 if not __debug__: raise SystemExit('Optimized Python refused')
-import hashlib, json, os, secrets, subprocess, sys, time, uuid
+import hashlib, json, os, re, secrets, subprocess, sys, time, uuid
 from pathlib import Path
 P = Path(__file__).resolve().parent
 sys.path.insert(0, str(P.parent / 'inbox-projection' / 'fixture'))
@@ -108,6 +108,9 @@ try:
     docker('build', '-t', IMAGE_TAG, '-f', str(P / 'Dockerfile'), str(P), timeout=180)
     image = json.loads(docker('image', 'inspect', IMAGE_TAG))[0]
     need(image['Config']['User'] == 'node', 'Worker image must run as node')
+    image_id = image.get('Id', '')
+    need(re.fullmatch(r'sha256:[a-f0-9]{64}', image_id), 'Worker image must expose a full immutable sha256 ID')
+    registration_path = '/runtime/' + image_id.removeprefix('sha256:')
     print(f'Built {IMAGE_TAG} ({image["Id"][:19]})')
 
     # --- Signed Restate identity keypair (mirrors runtime-control.py) ---
@@ -150,6 +153,7 @@ try:
         'INBOX_ACTION_FIXTURE_PROFILE': 'reply-runtime',
         'INBOX_REPLY_SEND_DATABASE_URL': f'postgres://inbox_reply_send_worker:{password}@sandra-inbox-actions-db-owned:5432/postgres',
         'INBOX_RESTATE_INGRESS_URL': 'http://sandra-inbox-restate-owned:8080/',
+        'INBOX_RESTATE_REGISTRATION_PATH': registration_path,
         'INBOX_RESTATE_IDENTITY_KEYS': json.dumps([public_key]),
         'INBOX_REPLY_SEND_CONNECTIONS': '2',
         'INBOX_REPLY_SEND_TEST_TRANSPORT_MODULE': '/vendor/test-transport.mjs',
@@ -179,7 +183,7 @@ try:
         return json.loads(docker('exec', container, 'node', '--input-type=module', '-e', js))
 
     wait(lambda: http_in(worker_id, '/health', 9070)['status'] == 200, 'Owned Restate admin did not become ready', 30)
-    registration = http_in(worker_id, '/deployments', 9070, method='POST', body={'uri': 'http://127.0.0.1:9081', 'use_http_11': True})
+    registration = http_in(worker_id, '/deployments', 9070, method='POST', body={'uri': 'http://127.0.0.1:9081' + registration_path, 'use_http_11': True})
     need(registration['status'] in (200, 201), f'Signed reply-send worker registration failed: {registration}')
     print('Registered signed InboxReplySend deployment with the owned Restate engine')
 

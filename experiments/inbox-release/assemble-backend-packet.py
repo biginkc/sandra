@@ -29,7 +29,7 @@ from transaction_envelope import normalize
 # different identity and must not be accepted by this packet.
 RELEASE_DATABASE = "postgres"
 RELEASE_MARKER = "sandra-inbox-http-owned-synthetic-20260917"
-SOURCE_COMMIT = "87e0a164294b7740c38b1ca926e3503e3f3ea7eb"  # P3 ECMAScript trim + UTF-16 source snapshot
+SOURCE_COMMIT = "a18092714821f3805923007a885da4327b596a7e"  # runtime routing and generation guard review fixes
 
 SQL_SOURCES = [
     ("operation_foundation", "experiments/inbox-operation-acceptance/setup.sql"),

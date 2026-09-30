@@ -43,7 +43,10 @@ services:
       DATABASE_URL: ${INBOX_ELECTRIC_DATABASE_URL:?set INBOX_ELECTRIC_DATABASE_URL in the ignored runtime env}
       ELECTRIC_INSECURE: "true"
       ELECTRIC_DB_POOL_SIZE: "2"
-      ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
+      # These must match the release packet's manual publication. The
+      # contract source is notes/research-electric-slot-naming.md: stream ID
+      # inbox_<project-ref> derives the Electric slot and publication names.
+      ELECTRIC_MANUAL_TABLE_PUBLISHING: ${ELECTRIC_MANUAL_TABLE_PUBLISHING:?set ELECTRIC_MANUAL_TABLE_PUBLISHING in the ignored runtime env}
       ELECTRIC_REPLICATION_STREAM_ID: inbox_release_20260917
       ELECTRIC_LONG_POLL_TIMEOUT: "8000"
       ELECTRIC_MAX_SHAPES: "16"
@@ -84,6 +87,9 @@ services:
       INBOX_ACTION_FIXTURE_PURPOSE: sandra-inbox-release-http
       INBOX_ACTION_FIXTURE_LABELS_VERIFIED: "true"
       INBOX_RESTATE_INGRESS_URL: http://sandra-inbox-restate-owned:8080/
+      # The env file must provide the exact immutable image-generation path;
+      # root registration would let a later image receive this deployment.
+      INBOX_RESTATE_REGISTRATION_PATH: ${INBOX_RELEASE_OPERATION_REGISTRATION_PATH:?set INBOX_RELEASE_OPERATION_REGISTRATION_PATH to /runtime/<64-lowercase-hex-digest>}
       INBOX_ACTION_CONNECTIONS: "2"
       PORT: "9080"
       INBOX_WORKER_BIND: 127.0.0.1
@@ -122,6 +128,7 @@ services:
       INBOX_REPLY_SEND_FIXTURE_PURPOSE: sandra-inbox-release-http
       INBOX_REPLY_SEND_FIXTURE_LABELS_VERIFIED: "true"
       INBOX_RESTATE_INGRESS_URL: http://sandra-inbox-restate-owned:8080/
+      INBOX_RESTATE_REGISTRATION_PATH: ${INBOX_RELEASE_REPLY_REGISTRATION_PATH:?set INBOX_RELEASE_REPLY_REGISTRATION_PATH to /runtime/<64-lowercase-hex-digest>}
       INBOX_REPLY_SEND_CONNECTIONS: "2"
       INBOX_REPLY_SEND_TEST_TRANSPORT_MODULE: /app/vendor/test-transport.mjs
       PORT: "9081"

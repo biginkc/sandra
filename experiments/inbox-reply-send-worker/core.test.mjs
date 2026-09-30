@@ -46,21 +46,54 @@ test('dispatchBatch rejects a response missing the Accepted/PreviouslyAccepted e
 });
 
 test('workerConfiguration rejects a non-approved ingress host', () => {
-  assert.throws(() => workerConfiguration({ INBOX_RESTATE_INGRESS_URL: 'http://evil.example/', INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]' }), /Unapproved private Restate ingress/);
+  assert.throws(() => workerConfiguration({ INBOX_RESTATE_INGRESS_URL: 'http://evil.example/', INBOX_RESTATE_REGISTRATION_PATH:'/runtime/'+'a'.repeat(64), INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]' }), /Unapproved private Restate ingress/);
 });
 
 test('workerConfiguration accepts the approved production ingress host and validated keys', () => {
-  const config = workerConfiguration({ INBOX_RESTATE_INGRESS_URL: 'http://sandra-inbox-restate-owned:8080/', INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]' });
+  const config = workerConfiguration({ INBOX_RESTATE_INGRESS_URL: 'http://sandra-inbox-restate-owned:8080/', INBOX_RESTATE_REGISTRATION_PATH:'/runtime/'+'a'.repeat(64), INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]' });
   assert.equal(config.ingress.hostname, 'sandra-inbox-restate-owned');
   assert.equal(config.connections, 2);
+  assert.throws(() => workerConfiguration({ INBOX_RESTATE_INGRESS_URL: 'http://sandra-inbox-restate-owned:8080/', INBOX_RESTATE_REGISTRATION_PATH: '/', INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]' }), /Version-specific Restate registration path required/);
+});
+
+test('workerConfiguration rejects a missing versioned registration path', () => {
+  assert.throws(() => workerConfiguration({
+    INBOX_RESTATE_INGRESS_URL: 'http://sandra-inbox-restate-owned:8080/',
+    INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]',
+  }), /Version-specific Restate registration path required/);
 });
 
 test('workerConfiguration rejects a connection budget over two', () => {
-  assert.throws(() => workerConfiguration({ INBOX_RESTATE_INGRESS_URL: 'http://sandra-inbox-restate-owned:8080/', INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]', INBOX_REPLY_SEND_CONNECTIONS: '3' }), /connection budget exceeds two/);
+  assert.throws(() => workerConfiguration({ INBOX_RESTATE_INGRESS_URL: 'http://sandra-inbox-restate-owned:8080/', INBOX_RESTATE_REGISTRATION_PATH:'/runtime/'+'a'.repeat(64), INBOX_RESTATE_IDENTITY_KEYS: '["publickeyv1_' + 'a'.repeat(45) + '"]', INBOX_REPLY_SEND_CONNECTIONS: '3' }), /connection budget exceeds two/);
 });
 
 test('databaseConfiguration rejects a non-plaintext-fixture, non-supabase host', () => {
-  assert.throws(() => databaseConfiguration({ INBOX_REPLY_SEND_DATABASE_URL: 'postgres://u:p@evil.example:5432/db' }), /Unapproved production database host/);
+  assert.throws(() => databaseConfiguration({ INBOX_REPLY_SEND_DATABASE_URL: 'postgres://u:p@evil.example:5432/postgres', INBOX_REPLY_SEND_DATABASE_CA: '-----BEGIN CERTIFICATE-----x-----END CERTIFICATE-----' }), /Unapproved production database host/);
+});
+
+test('databaseConfiguration accepts only known direct/session Supabase targets with pinned TLS', () => {
+  const ca = '-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----';
+  const direct = { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@db.copflsklaefwzipsrjqz.supabase.co:5432/postgres', INBOX_REPLY_SEND_DATABASE_CA: ca };
+  const config = databaseConfiguration(direct);
+  assert.deepEqual(config.ssl, { rejectUnauthorized: true, servername: 'db.copflsklaefwzipsrjqz.supabase.co', minVersion: 'TLSv1.2', ca });
+  const pooler = databaseConfiguration({ ...direct, INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker.ncsngxlcyxylaeskiteu:synthetic@aws-0-us-east-1.pooler.supabase.com:5432/postgres' });
+  assert.equal(pooler.host, 'aws-0-us-east-1.pooler.supabase.com');
+  for (const patch of [
+    { INBOX_REPLY_SEND_DATABASE_URL: direct.INBOX_REPLY_SEND_DATABASE_URL + '?sslmode=require' },
+    { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@db.example.supabase.co:5432/postgres' },
+    { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker.abcdefghijklmnopqrst:synthetic@aws-0-us-east-1.pooler.supabase.com:5432/postgres' },
+    { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@db.copflsklaefwzipsrjqz.supabase.co:6543/postgres' },
+    { INBOX_REPLY_SEND_DATABASE_CA: 'wrong' },
+  ]) assert.throws(() => databaseConfiguration({ ...direct, ...patch }));
+  assert.throws(() => databaseConfiguration({ ...direct, INBOX_ACTION_LOCAL_FIXTURE: '1' }));
+});
+test('production database guard rejects the approved host on a non-production port or database', () => {
+  const ca = '-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----';
+  const direct = { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@db.copflsklaefwzipsrjqz.supabase.co:5432/postgres', INBOX_REPLY_SEND_DATABASE_CA: ca };
+  for (const patch of [
+    { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@db.copflsklaefwzipsrjqz.supabase.co:54322/postgres' },
+    { INBOX_REPLY_SEND_DATABASE_URL: 'postgres://inbox_reply_send_worker:synthetic@db.copflsklaefwzipsrjqz.supabase.co:5432/other' },
+  ]) assert.throws(() => databaseConfiguration({ ...direct, ...patch }), /Unapproved production database target/);
 });
 
 test('databaseConfiguration accepts only the marked release HTTP fixture with the constrained login', () => {

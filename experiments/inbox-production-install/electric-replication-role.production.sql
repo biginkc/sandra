@@ -1,0 +1,227 @@
+\set ON_ERROR_STOP on
+-- Production Electric packet. Run only through
+-- run-electric-replication-role.py. It reads a client-computed
+-- SCRAM-SHA-256 verifier from stdin, writes the psql \set directives to the
+-- same stdin stream, and includes this file with \i. Never pass a role
+-- password in argv, -v, or as plaintext.
+-- Table-ownership assumption: the executor must own inbox_bridge.summaries.
+-- This packet changes that table's replica identity and adds it to a
+-- publication, both of which are ownership operations.
+--
+-- Electric's manual-publication contract requires REPLICATION and SELECT,
+-- not BYPASSRLS: https://electric.ax/docs/sync/guides/postgres-permissions.
+-- Electric's deployment guide says the replication stream ID supplies the
+-- publication/slot suffix: https://electric.ax/docs/sync/guides/deployment.
+-- Naming contract source: notes/research-electric-slot-naming.md (Electric
+-- 1.8.1): stream id inbox_<project_ref>, slot electric_slot_<stream_id>, and
+-- publication electric_publication_<stream_id>. Electric creates one slot.
+-- The Electric replication client uses PostgreSQL's pgoutput plugin; keep the
+-- reviewed upstream implementation reference with this packet:
+-- https://github.com/electric-sql/electric/blob/main/packages/sync-service/lib/electric/replication/postgres/replication_client.ex
+-- This candidate deliberately keeps BYPASSRLS because inbox_bridge.summaries
+-- is RLS-enabled with no policy, so the Electric reader would otherwise see
+-- no rows. Revisit this grant if the table gets a narrowly scoped policy.
+\if :{?project_ref}
+\else
+  \echo 'project_ref is required'
+  \quit 3
+\endif
+\if :{?connection_project_ref}
+\else
+  \echo 'connection_project_ref is required'
+  \quit 3
+\endif
+\if :{?electric_password}
+\else
+  \echo 'electric_password is required'
+  \quit 3
+\endif
+
+SELECT set_config('sandra.inbox_project_ref', :'project_ref', false) AS _set_project_ref \gset
+SELECT set_config('sandra.inbox_connection_project_ref', :'connection_project_ref', false) AS _set_connection_project_ref \gset
+SELECT set_config('sandra.inbox_electric_verifier', :'electric_password', false) AS _set_electric_verifier \gset
+
+DO $$
+DECLARE
+  supplied_ref text := current_setting('sandra.inbox_project_ref');
+  connected_ref text := current_setting('sandra.inbox_connection_project_ref');
+  verifier text := current_setting('sandra.inbox_electric_verifier');
+  electric_stream_id text := 'inbox_' || supplied_ref;
+  expected_slot_name text := 'electric_slot_' || electric_stream_id;
+  electric_publication_name text := 'electric_publication_' || electric_stream_id;
+  table_owner text;
+BEGIN
+  IF current_database() <> 'postgres' THEN
+    RAISE EXCEPTION 'production Electric packet must run in database postgres';
+  END IF;
+  IF current_setting('server_version_num')::int < 170000 THEN
+    RAISE EXCEPTION 'production Electric packet requires PostgreSQL 17 or newer';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_roles
+    WHERE rolname = current_user AND rolreplication AND rolcreaterole AND rolbypassrls
+  ) THEN
+    RAISE EXCEPTION 'Electric packet executor must have REPLICATION, CREATEROLE, and BYPASSRLS';
+  END IF;
+  IF connected_ref NOT IN ('ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz') THEN
+    RAISE EXCEPTION 'connected database has an unapproved project ref';
+  END IF;
+  IF supplied_ref <> connected_ref THEN
+    RAISE EXCEPTION 'operator project ref does not match the connected database';
+  END IF;
+  IF supplied_ref NOT IN ('ncsngxlcyxylaeskiteu', 'copflsklaefwzipsrjqz') THEN
+    RAISE EXCEPTION 'production Electric packet has an unapproved project ref';
+  END IF;
+  IF verifier !~ '^SCRAM-SHA-256\$[1-9][0-9]{0,9}:[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$' THEN
+    RAISE EXCEPTION 'electric_password must be a well-formed SCRAM-SHA-256 verifier';
+  END IF;
+  IF split_part(split_part(verifier, '$', 2), ':', 1)::bigint < 4096 THEN
+    RAISE EXCEPTION 'electric_password SCRAM iteration count is too low';
+  END IF;
+  IF to_regclass('inbox_bridge.summaries') IS NULL THEN
+    RAISE EXCEPTION 'inbox_bridge.summaries is not installed';
+  END IF;
+  SELECT pg_get_userbyid(c.relowner)
+  INTO table_owner
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'inbox_bridge' AND c.relname = 'summaries';
+  IF table_owner IS DISTINCT FROM current_user THEN
+    RAISE EXCEPTION 'Electric packet executor must own inbox_bridge.summaries (owner %, current_user %)', table_owner, current_user;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_roles
+    WHERE rolname = 'inbox_electric_replication'
+      AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolcanlogin
+           OR NOT rolinherit OR rolconnlimit <> 4)
+  ) THEN
+    RAISE EXCEPTION 'existing Electric role has unexpected authority';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_auth_members m
+    JOIN pg_roles r ON r.oid = m.member
+    WHERE r.rolname = 'inbox_electric_replication'
+  ) THEN
+    RAISE EXCEPTION 'Electric role must not inherit a role membership';
+  END IF;
+END $$;
+
+-- Capture this row before the transaction changes replica identity. The
+-- operator keeps it with the deployment receipt and supplies the two identity
+-- fields to the reviewed teardown packet if restoration is later approved.
+SELECT json_build_object(
+  'project_ref', current_setting('sandra.inbox_project_ref'),
+  'database', current_database(),
+  'electric_stream_id', 'inbox_' || current_setting('sandra.inbox_project_ref'),
+  'slot_name', 'electric_slot_inbox_' || current_setting('sandra.inbox_project_ref'),
+  'plugin', 'pgoutput',
+  'table', 'inbox_bridge.summaries',
+  'prior_replica_identity', c.relreplident,
+  'prior_replica_identity_index', identity_index.relname
+)::text AS electric_preflight_receipt
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_index replica_index ON replica_index.indrelid = c.oid AND replica_index.indisreplident
+LEFT JOIN pg_class identity_index ON identity_index.oid = replica_index.indexrelid
+WHERE n.nspname = 'inbox_bridge' AND c.relname = 'summaries';
+
+BEGIN;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'inbox_electric_replication') THEN
+    CREATE ROLE inbox_electric_replication
+      NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
+      NOBYPASSRLS INHERIT CONNECTION LIMIT 4;
+  END IF;
+END $$;
+ALTER ROLE inbox_electric_replication
+  LOGIN REPLICATION BYPASSRLS CONNECTION LIMIT 4;
+
+DO $$
+BEGIN
+  EXECUTE format(
+    'ALTER ROLE inbox_electric_replication PASSWORD %L',
+    current_setting('sandra.inbox_electric_verifier')
+  );
+END $$;
+
+GRANT CONNECT ON DATABASE postgres TO inbox_electric_replication;
+GRANT USAGE ON SCHEMA inbox_bridge TO inbox_electric_replication;
+GRANT SELECT ON TABLE inbox_bridge.summaries TO inbox_electric_replication;
+ALTER TABLE inbox_bridge.summaries REPLICA IDENTITY FULL;
+
+DO $$
+DECLARE
+  electric_publication_name text := 'electric_publication_inbox_' || current_setting('sandra.inbox_project_ref');
+  contract_publication_name text := 'electric_publication_inbox_' || current_setting('sandra.inbox_project_ref');
+  created_publication_name text;
+BEGIN
+  IF electric_publication_name IS DISTINCT FROM contract_publication_name THEN
+    RAISE EXCEPTION 'Electric publication name % does not equal required contract %', electric_publication_name, contract_publication_name;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_publication
+    WHERE pubname = electric_publication_name
+      AND puballtables
+  ) THEN
+    RAISE EXCEPTION 'Electric publication must not publish all tables';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication
+    WHERE pubname = electric_publication_name
+  ) THEN
+    EXECUTE format('CREATE PUBLICATION %I', electric_publication_name);
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_publication_tables
+    WHERE pubname = electric_publication_name
+      AND (schemaname <> 'inbox_bridge' OR tablename <> 'summaries')
+  ) THEN
+    RAISE EXCEPTION 'Electric publication contains a table outside inbox_bridge.summaries';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = electric_publication_name
+      AND schemaname = 'inbox_bridge' AND tablename = 'summaries'
+  ) THEN
+    EXECUTE format('ALTER PUBLICATION %I ADD TABLE inbox_bridge.summaries', electric_publication_name);
+  END IF;
+  SELECT pubname
+  INTO created_publication_name
+  FROM pg_publication
+  WHERE pubname = electric_publication_name;
+  IF created_publication_name IS DISTINCT FROM contract_publication_name THEN
+    RAISE EXCEPTION 'Electric publication created as %, expected %', created_publication_name, contract_publication_name;
+  END IF;
+END $$;
+
+DO $$
+DECLARE
+  electric_publication_name text := 'electric_publication_inbox_' || current_setting('sandra.inbox_project_ref');
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_roles
+    WHERE rolname = 'inbox_electric_replication'
+      AND rolcanlogin AND rolreplication AND rolbypassrls
+      AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole
+      AND rolinherit AND rolconnlimit = 4
+  ) THEN
+    RAISE EXCEPTION 'Electric role final authority does not match the production contract';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = electric_publication_name
+      AND (schemaname <> 'inbox_bridge' OR tablename <> 'summaries')
+  ) OR NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = electric_publication_name
+      AND schemaname = 'inbox_bridge' AND tablename = 'summaries'
+  ) THEN
+    RAISE EXCEPTION 'Electric publication final table set is not exact';
+  END IF;
+END $$;
+COMMIT;
+
+SELECT set_config('sandra.inbox_electric_verifier', '', false) AS _clear_electric_verifier \gset

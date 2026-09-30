@@ -1,6 +1,10 @@
 import {isIP} from 'node:net';
 const fixtures=new Set(['sandra_inbox_install_20260913','sandra_inbox_action_runtime_20260913']);
 const releaseHttpMarker='sandra-inbox-http-owned-synthetic-20260917';
+const projectRefs=new Set(['ncsngxlcyxylaeskiteu','copflsklaefwzipsrjqz']);
+const directHosts=new Set(['db.ncsngxlcyxylaeskiteu.supabase.co','db.copflsklaefwzipsrjqz.supabase.co']);
+const poolerHosts=new Set(['aws-0-us-east-1.pooler.supabase.com','aws-1-us-east-1.pooler.supabase.com']);
+const certificate=/-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----/;
 export function databaseConfig(env){
  let url;try{url=new URL(env.INBOX_PROJECTION_DATABASE_URL);}catch{throw Error('Invalid projection database configuration');}
  if(!['postgres:','postgresql:'].includes(url.protocol)||!url.username||!url.password||url.hash)throw Error('Invalid projection database configuration');
@@ -19,9 +23,20 @@ export function databaseConfig(env){
    env.INBOX_PROJECTION_FIXTURE_OWNER!=='release-infra'||
    env.INBOX_PROJECTION_FIXTURE_PURPOSE!=='sandra-inbox-release-http'||
    env.INBOX_PROJECTION_FIXTURE_LABELS_VERIFIED!=='true'))throw Error('Invalid owned HTTP fixture guard');
- }else if(isIP(url.hostname)||url.hostname.includes(':')||/^[0-9.]+$/.test(url.hostname)||url.hostname==='localhost'||(mode&&mode!=='verify-full'))throw Error('Verified database hostname required');
+ }else{
+  if(url.port!=='5432'||url.pathname!=='/postgres'||mode!=='verify-full')throw Error('Verified database target required');
+  if(directHosts.has(url.hostname)){
+   // The direct host carries the project ref; the login packet is checked
+   // independently after SET ROLE in server.mjs.
+  }else if(poolerHosts.has(url.hostname)){
+   const match=/\.([a-z0-9]{20})$/.exec(decodeURIComponent(url.username));
+   if(!match||!projectRefs.has(match[1]))throw Error('Verified session-pooler project required');
+  }else if(isIP(url.hostname)||url.hostname.includes(':')||/^[0-9.]+$/.test(url.hostname)||url.hostname==='localhost')throw Error('Verified database hostname required');
+  else throw Error('Unapproved production database host');
+  if(typeof env.INBOX_PROJECTION_DATABASE_CA!=='string'||!certificate.test(env.INBOX_PROJECTION_DATABASE_CA))throw Error('Verified database CA required');
+ }
  url.searchParams.delete('sslmode');
- return {connectionString:url.toString(),ssl:fixture?false:{rejectUnauthorized:true,servername:url.hostname}};
+ return {connectionString:url.toString(),ssl:fixture?false:{rejectUnauthorized:true,servername:url.hostname,minVersion:'TLSv1.2',ca:env.INBOX_PROJECTION_DATABASE_CA}};
 }
 export function assertLogin(row){
  if(!row||row.role!=='inbox_projection_worker'||row.login===row.role||row.login_safe!==true||row.only_projection_membership!==true||row.no_direct_data!==true||row.only_expected_definers!==true)throw Error('Projection login authority mismatch');

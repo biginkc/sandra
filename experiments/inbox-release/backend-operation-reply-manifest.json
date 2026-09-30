@@ -2,7 +2,7 @@
   "schema_version": 2,
   "status": "PENDING_REVIEW_NO_INSTALL",
   "source_repository": ".",
-  "source_commit": "87e0a164294b7740c38b1ca926e3503e3f3ea7eb",
+  "source_commit": "a18092714821f3805923007a885da4327b596a7e",
   "source_commit_role": "coordinator integration exact snapshot; read with git show; no branch import",
   "sql_packet": {
     "path": "experiments/inbox-release/generated/backend-operation-reply.sql",
@@ -244,15 +244,15 @@
       "name": "operation_worker_core",
       "kind": "runtime",
       "path": "experiments/inbox-operation-worker/core.mjs",
-      "sha256": "7bbc4c01faa5e82e0ec211b4d396342df02ae7e51f2371a9797153366dd07c03",
-      "bytes": 8290
+      "sha256": "0a1743d94c687d1321ffabaebd53074e5adf1329290835c466fc5b2c6eb4c82a",
+      "bytes": 9345
     },
     {
       "name": "operation_worker_server",
       "kind": "runtime",
       "path": "experiments/inbox-operation-worker/server.mjs",
-      "sha256": "cdde01d18962dec67f68324bce668ea1be326ba17ec69acd658a0bbf4b71343c",
-      "bytes": 3200
+      "sha256": "71e431b96d5306d89837aef0a94dc6775ed455b38363fa0070835daa00cbbbd0",
+      "bytes": 4763
     },
     {
       "name": "reply_worker_Dockerfile",
@@ -279,8 +279,8 @@
       "name": "reply_worker_core",
       "kind": "runtime",
       "path": "experiments/inbox-reply-send-worker/core.mjs",
-      "sha256": "348635dd33ce979d503b8489fc581c071f271bc93f5a5e17bcc3dbd87d5ef4e5",
-      "bytes": 9274
+      "sha256": "d21ac3db09649ea793c1969a53d031698152610dd30159183ea9d286a9265c5e",
+      "bytes": 10374
     },
     {
       "name": "reply_worker_runner",
@@ -293,8 +293,8 @@
       "name": "reply_worker_server",
       "kind": "runtime",
       "path": "experiments/inbox-reply-send-worker/server.mjs",
-      "sha256": "e071daa5b94c70426001955686cb967ac5dc9a42da372534596ff7a45af6ef7b",
-      "bytes": 6872
+      "sha256": "94d909911368e00abed3f2c1aae12a69b4947689848c39243a455cb4044a88ea",
+      "bytes": 7612
     },
     {
       "name": "reply_provider_adapter",

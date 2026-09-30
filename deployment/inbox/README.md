@@ -49,11 +49,36 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   canonical schema baseline and full-stack acceptance tests pass.
 - Pin all images, including the final worker; do not auto-update image tags.
   The relay Node22 image index was resolved from Docker's registry on2026-09-13.
-- Electric settings: storage at /var/lib/electric, manual publication, a dedicated
-  replication stream ID, ELECTRIC_LONG_POLL_TIMEOUT=8000ms, query pool2 initially, telemetry off. Scrape a metrics
-  endpoint if enabled; otherwise leave it disabled. Allowlist only the narrow
-  projection with REPLICA IDENTITY FULL. A fixed maximum shape count requires
-  measured generation churn and cleanup before setting its production value.
+- Electric settings: storage at /var/lib/electric, manual publication, the
+  single project-bound `inbox_<project-ref>` replication stream ID,
+  `ELECTRIC_LONG_POLL_TIMEOUT=8000ms`, query
+  pool2 initially, and telemetry off. When the reviewed database packet creates
+  the publication, the Electric service must use the matching settings:
+
+  ```yaml
+  environment:
+    ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
+    ELECTRIC_REPLICATION_STREAM_ID: inbox_<project-ref>
+  ```
+
+  `ELECTRIC_MANUAL_TABLE_PUBLISHING` makes Electric validate the DBA-created
+  publication instead of trying to manage it. The one naming contract is
+  `stream_id = inbox_<project_ref>`, `slot = electric_slot_<stream_id>`, and
+  `publication = electric_publication_<stream_id>`; the ref is lowercase and
+  contains no hyphens. The exact reviewed values are:
+
+  | Target | Project ref | Stream ID | Slot | Publication |
+  | --- | --- | --- | --- | --- |
+  | TEST | `ncsngxlcyxylaeskiteu` | `inbox_ncsngxlcyxylaeskiteu` | `electric_slot_inbox_ncsngxlcyxylaeskiteu` | `electric_publication_inbox_ncsngxlcyxylaeskiteu` |
+  | PROD | `copflsklaefwzipsrjqz` | `inbox_copflsklaefwzipsrjqz` | `electric_slot_inbox_copflsklaefwzipsrjqz` | `electric_publication_inbox_copflsklaefwzipsrjqz` |
+
+  This follows Electric's
+  [PostgreSQL permissions guide](https://electric.ax/docs/sync/guides/postgres-permissions)
+  and [deployment guide](https://electric.ax/docs/sync/guides/deployment).
+  Scrape a metrics endpoint if enabled; otherwise leave it disabled. Allowlist
+  only the narrow projection with REPLICA IDENTITY FULL. A fixed maximum shape
+  count requires measured generation churn and cleanup before setting its
+  production value.
 - Reserve at most8 new direct database connections initially: up to5 for Electric
   management/query/replication,2 operation workers and1 projection maintenance.
   Verify actual connections under load; defaults are not the budget. Existing
@@ -67,6 +92,46 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
 - Store DB credentials and relay secret only in the named services' secret
   variables. Scope the DB role to the required projection or operation wrappers.
   Require verified TLS to Supabase. No administrator database fallback.
+- The production Electric install and teardown packets require the connecting
+  executor to own `inbox_bridge.summaries`; teardown also requires it to own
+  `electric_publication_inbox_<project-ref>` while that publication exists. This is a
+  deliberate PostgreSQL ownership assumption because the packet changes replica
+  identity and publication membership. A non-owner must fail the preflight
+  before any transaction or slot cleanup begins.
+- The production Electric role packet is `experiments/inbox-production-install/electric-replication-role.production.sql`.
+  Run it only through `run-electric-replication-role.py` with `PGHOST` set to
+  the direct host `db.<project-ref>.supabase.co`; the runner compares that
+  host-derived ref with `--project-ref` before invoking psql. The role password
+  input must be a client-computed `SCRAM-SHA-256$...` verifier on stdin, for
+  example:
+  ```sh
+  printf '%s\n' "$SCRAM_VERIFIER" | python3 experiments/inbox-production-install/run-electric-replication-role.py --packet install --project-ref "$PROJECT_REF"
+  ```
+  Also export `PGSSLMODE=verify-full` and
+  `PGSSLROOTCERT=$PWD/experiments/inbox-production-install/supabase-prod-ca-2021.crt`.
+  The runner rejects `PGHOSTADDR`, `PGSERVICE`, and `PGSERVICEFILE`, and checks
+  the CA file's exact SHA-256 pin before invoking psql. The committed CA is the
+  public Supabase Root 2021 certificate; it is not a credential.
+  The runner emits `\set` directives followed by `\i`, so the verifier is
+  never a process argument and plaintext passwords are refused. Do not use
+  `psql -v electric_password=...` or put a password in a DSN. Keep the
+  preflight receipt's `prior_replica_identity` and
+  `prior_replica_identity_index`; teardown requires those exact values and
+  restores them after the transactional publication/role cleanup and the final
+  inactive replication-slot drop. A rerun accepts and reports an already-absent
+  slot, publication, or role.
+  Stop Electric first, then pass the exact derived slot name from its
+  provenance receipt with `--replication-slot` (`electric_slot_inbox_<project-ref>`).
+  The teardown packet rejects a name that is not derived from the packet's
+  stream ID and project ref, rejects active/wrong-database/wrong-plugin slots,
+  and accepts an absent slot only when no other logical slot matching
+  `electric\_slot\_%` exists in the current database.
+- Every Restate worker deployment must set
+  `INBOX_RESTATE_REGISTRATION_PATH=/runtime/<64-lowercase-hex-image-digest>`.
+  The worker serves that versioned path and the registration helper uses it as
+  the deployment identity. Railway registration also requires
+  `INBOX_RUNTIME_GENERATION=<64-lowercase-hex-image-digest>`; a missing,
+  reused, or first-12-hex collision is rejected before registration.
 - `INBOX_ELECTRIC_RELAY_TOKEN` (Next, read by `src/lib/inbox/sync-upstream-config.ts`)
   and `INBOX_RELAY_TOKEN` (relay, read by `services/inbox-sync-relay/server.mjs`)
   are the SAME secret in two processes' own env vars — not a mismatch to
@@ -88,6 +153,27 @@ A genuinely isolated hard billing cap needs a separately approved billing setup.
   while workers finish/recover accepted operations. Preserve old worker versions,
   receipts and Restate data. Never delete a replication slot while a consumer is
   still using it, or delete accepted-job state as part of a UI rollback.
+
+### Generation rollout and drain procedure
+
+Each Railway operation/reply worker service is generation-specific. For an image
+digest `G`, create the new private services with hostnames
+`inbox-operation-worker-G[:12].railway.internal` and
+`inbox-reply-send-worker-G[:12].railway.internal`, where `G[:12]` is the first
+12 lowercase hex characters of the full 64-character digest. Set each worker's
+`INBOX_RESTATE_REGISTRATION_PATH=/runtime/G`, and set the registration helper's
+`INBOX_RUNTIME_GENERATION=G`. Register the new endpoints only after `/livez` and
+the Restate registry readback pass. The helper rejects any registered generation
+whose short hostname collides with a different full digest and keeps at most two generations per
+Restate service, so the old endpoint remains registered and routable while its
+outbox is drained.
+
+During rollback or replacement, stop new admission, observe the old generation's
+outbox/attempts and readiness until it is drained, then deregister and retire the
+old Railway services. Never repoint the old hostname, delete its service, or
+remove its Restate registration before that drain proof. A second generation may
+be registered and served concurrently; the generation path and hostname are both
+part of the deployment identity.
 
 References: [Electric deployment](https://electric.ax/docs/sync/guides/deployment),
 [Restate memory](https://docs.restate.dev/server/memory),

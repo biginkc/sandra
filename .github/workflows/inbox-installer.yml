@@ -4,23 +4,64 @@ on:
   pull_request:
     paths:
       - 'experiments/inbox-production-install/**'
+      - 'experiments/inbox-release/execution-stack-compose.yml'
+      - 'experiments/inbox-release/test_execution_stack_compose.py'
+      - 'experiments/inbox-operation-worker/server.mjs'
+      - 'experiments/inbox-reply-send-worker/server.mjs'
       - '.github/workflows/inbox-installer.yml'
   push:
     branches: [main]
     paths:
       - 'experiments/inbox-production-install/**'
+      - 'experiments/inbox-release/execution-stack-compose.yml'
+      - 'experiments/inbox-release/test_execution_stack_compose.py'
+      - 'experiments/inbox-operation-worker/server.mjs'
+      - 'experiments/inbox-reply-send-worker/server.mjs'
       - '.github/workflows/inbox-installer.yml'
 permissions:
   contents: read
+  packages: read
 jobs:
   installer:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          # Keep npm 11's lockfile handling aligned with the committed root lockfile.
+          node-version: '24'
+      - name: Install PostgreSQL 17 binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          sudo apt-get update
+          sudo apt-get install --yes ca-certificates curl gnupg
+          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error --location \
+            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          test "$(gpg --batch --show-keys --with-colons /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc | awk -F: '$1 == "fpr" { print toupper($10); exit }')" = \
+            B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+          sudo tee /etc/apt/sources.list.d/pgdg.sources >/dev/null <<EOF
+          Types: deb
+          URIs: https://apt.postgresql.org/pub/repos/apt
+          Suites: ${VERSION_CODENAME}-pgdg
+          Architectures: $(dpkg --print-architecture)
+          Components: main
+          Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          EOF
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-17 postgresql-client-17
+          test -x /usr/lib/postgresql/17/bin/postgres
+          test -x /usr/lib/postgresql/17/bin/initdb
+          test -x /usr/lib/postgresql/17/bin/pg_ctl
+          test -x /usr/lib/postgresql/17/bin/psql
+          echo "PG17_BIN=/usr/lib/postgresql/17/bin" >> "$GITHUB_ENV"
       # DB-less determinism gate. This calls the same verifier entry point as
       # the native installed proof; --source-only stops after its hash-pinned
       # source/AST/compiler/receipt checks and never opens a database. Keeping one
@@ -30,6 +71,21 @@ jobs:
         working-directory: experiments/inbox-production-install
         run: |
           python3 verify.py --source-only
+      - name: Execute Electric packet against PostgreSQL 17
+        env:
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          test -x "$PG17_BIN/postgres"
+          python3 experiments/inbox-production-install/test_electric_replication_role_production.py -v
+      - name: Install Node dependencies for compose proof
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Resolve compose env and start both workers
+        env:
+          LC_ALL: C
+        run: python3 experiments/inbox-release/test_execution_stack_compose.py
       # --- verify.py --installed, verify.py --selftest, and
       # verify-mutation-harness.py --owned-fixture (41 mutation cases plus a
       # clean baseline) are all NOT

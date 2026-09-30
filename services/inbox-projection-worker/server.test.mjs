@@ -33,7 +33,7 @@ test('an idle database connection error stops the service with a retryable nonze
    export default {Pool};`);
  const port=await freePort();
  try{
-  const child=spawn(process.execPath,[join(dir,'server.mjs')],{env:{...process.env,INBOX_PROJECTION_DATABASE_URL:'postgresql://synthetic:unused@db.example.com/postgres',INBOX_PROJECTION_IDLE_MS:'100',INBOX_PROJECTION_BIND:'127.0.0.1',PORT:String(port)},stdio:['ignore','pipe','pipe']});
+  const child=spawn(process.execPath,[join(dir,'server.mjs')],{env:{...process.env,INBOX_PROJECTION_DATABASE_URL:'postgresql://synthetic:unused@db.copflsklaefwzipsrjqz.supabase.co:5432/postgres?sslmode=verify-full',INBOX_PROJECTION_DATABASE_CA:'-----BEGIN CERTIFICATE-----synthetic-----END CERTIFICATE-----',INBOX_PROJECTION_IDLE_MS:'100',INBOX_PROJECTION_BIND:'127.0.0.1',PORT:String(port)},stdio:['ignore','pipe','pipe']});
   let stderr='';child.stderr.on('data',data=>stderr+=data);
   const timer=setTimeout(()=>child.kill('SIGKILL'),5000);
   const [code,signal]=await new Promise(resolve=>child.on('exit',(code,signal)=>resolve([code,signal])));clearTimeout(timer);
@@ -56,7 +56,7 @@ test('a round where every claim is poisoned leaves the process alive with /healt
    }
    export default {Pool};`);
  const port=await freePort();
- const child=spawn(process.execPath,[join(dir,'server.mjs')],{env:{...process.env,INBOX_PROJECTION_DATABASE_URL:'postgresql://synthetic:unused@db.example.com/postgres',INBOX_PROJECTION_IDLE_MS:'100',INBOX_PROJECTION_BIND:'127.0.0.1',PORT:String(port)},stdio:['ignore','pipe','pipe']});
+ const child=spawn(process.execPath,[join(dir,'server.mjs')],{env:{...process.env,INBOX_PROJECTION_DATABASE_URL:'postgresql://synthetic:unused@db.copflsklaefwzipsrjqz.supabase.co:5432/postgres?sslmode=verify-full',INBOX_PROJECTION_DATABASE_CA:'-----BEGIN CERTIFICATE-----synthetic-----END CERTIFICATE-----',INBOX_PROJECTION_IDLE_MS:'100',INBOX_PROJECTION_BIND:'127.0.0.1',PORT:String(port)},stdio:['ignore','pipe','pipe']});
  let stderr='';child.stderr.on('data',data=>stderr+=data);
  try{
   let body=null;
@@ -96,7 +96,7 @@ test('SIGTERM mid-round stops the loop before the remaining claims in that round
    export default {Pool};`);
  const port=await freePort();
  try{
-  const child=spawn(process.execPath,[join(dir,'server.mjs')],{env:{...process.env,INBOX_PROJECTION_DATABASE_URL:'postgresql://synthetic:unused@db.example.com/postgres',INBOX_PROJECTION_IDLE_MS:'100',INBOX_PROJECTION_BIND:'127.0.0.1',PORT:String(port)},stdio:['ignore','pipe','pipe']});
+  const child=spawn(process.execPath,[join(dir,'server.mjs')],{env:{...process.env,INBOX_PROJECTION_DATABASE_URL:'postgresql://synthetic:unused@db.copflsklaefwzipsrjqz.supabase.co:5432/postgres?sslmode=verify-full',INBOX_PROJECTION_DATABASE_CA:'-----BEGIN CERTIFICATE-----synthetic-----END CERTIFICATE-----',INBOX_PROJECTION_IDLE_MS:'100',INBOX_PROJECTION_BIND:'127.0.0.1',PORT:String(port)},stdio:['ignore','pipe','pipe']});
   await delay(100);
   const started=performance.now();
   child.kill('SIGTERM');
