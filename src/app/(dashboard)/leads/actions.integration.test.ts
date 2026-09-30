@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { Client } from "pg";
 
 const authMocks = vi.hoisted(() => ({
   getCallerMembershipsOrThrow: vi.fn(),
@@ -26,6 +28,41 @@ import {
 } from "@/app/(dashboard)/leads/actions";
 import { getMockMessageLog, resetMockState } from "@/lib/messaging/providers/mock";
 
+type CaptureSnapshot = {
+  dirty: Array<Record<string, unknown>>;
+  routeEdges: Array<Record<string, unknown>>;
+  versions: Array<Record<string, unknown>>;
+};
+
+function normalizeCaptureSnapshot(snapshot: CaptureSnapshot): CaptureSnapshot {
+  const normalizeRows = (rows: Array<Record<string, unknown>>) =>
+    rows
+      .map((row) =>
+        Object.fromEntries(
+          Object.entries(row).map(([key, value]) => [
+            key,
+            key === "generation" ||
+            key === "revision"
+              ? "<trigger-sequence>"
+              : key === "org_id" ||
+            key === "target_id" ||
+            key === "message_id" ||
+            key === "conversation_id"
+              ? "<id>"
+              : key.endsWith("_at")
+                ? "<timestamp>"
+                : value,
+          ]),
+        ),
+      )
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return {
+    dirty: normalizeRows(snapshot.dirty),
+    routeEdges: normalizeRows(snapshot.routeEdges),
+    versions: normalizeRows(snapshot.versions),
+  };
+}
+
 describe("updatePropertyStatus (integration)", () => {
   beforeEach(async () => {
     await resetTenantTables(testClient);
@@ -49,10 +86,10 @@ describe("updatePropertyStatus (integration)", () => {
     return data.id;
   }
 
-  async function seedSmsLead(): Promise<{ propertyId: string; contactId: string }> {
+  async function seedSmsLead(phone = "+18165550123"): Promise<{ propertyId: string; contactId: string }> {
     const { data: contact, error: contactError } = await testClient
       .from("contacts")
-      .insert({ first_name: "Parity", phone_1: "+18165550123", phone_1_type: "mobile" })
+      .insert({ first_name: "Parity", phone_1: phone, phone_1_type: "mobile" })
       .select("id")
       .single();
     if (contactError || !contact) throw contactError ?? new Error("contact seed failed");
@@ -72,44 +109,271 @@ describe("updatePropertyStatus (integration)", () => {
   }
 
   it("T23 uses the real sendSmsFromLead path for pending and accepted default-sender stages", async () => {
-    const { propertyId, contactId } = await seedSmsLead();
-    const pending = await sendSmsFromLead(propertyId, "  parity body  ", null, true, null);
-
-    expect(pending.ok).toBe(true);
-    if (!pending.ok || pending.data.outcome.status !== "queued") return;
-    expect(getMockMessageLog()).toHaveLength(0);
-    const { data: queued } = await testClient
-      .from("messages")
-      .select("status, provider, body, contact_id, property_id, from_address, to_address, external_id, metadata")
-      .eq("id", pending.data.outcome.messageId)
-      .single();
-    expect(queued).toMatchObject({
-      status: "queued",
-      provider: "mock",
-      body: "parity body",
-      contact_id: contactId,
-      property_id: propertyId,
-      external_id: null,
+    const { error: accessSeedError } = await testClient.from("memberships").upsert({
+      user_id: "00000000-0000-0000-0000-000000000001",
+      org_id: "00000000-0000-0000-0000-000000000bbb",
+      role: "owner",
+      access_status: "active",
     });
+    if (accessSeedError) throw accessSeedError;
+    const customerPhone = `+1816555${Number.parseInt(randomUUID().replaceAll("-", "").slice(0, 7), 16).toString().padStart(7, "0").slice(-7)}`;
+    const { propertyId, contactId } = await seedSmsLead(customerPhone);
+    const orgId = "00000000-0000-0000-0000-000000000bbb";
+    const businessPhone = `+120255${Number.parseInt(randomUUID().replaceAll("-", "").slice(0, 4), 16).toString().padStart(4, "0")}`;
+    const testInputHash = `t23-integration-${randomUUID()}`;
+    const { error: senderSeedError } = await testClient
+      .from("provider_sender_numbers")
+      .upsert({
+        org_id: orgId,
+        provider: "mock",
+        phone_e164: businessPhone,
+        status: "active",
+        last_synced_at: new Date().toISOString(),
+    }, { onConflict: "org_id,provider,phone_e164" });
+    if (senderSeedError) throw senderSeedError;
+    const dbUrl = process.env.TEST_SUPABASE_DB_URL;
+    if (!dbUrl) throw new Error("TEST_SUPABASE_DB_URL is required for trigger parity");
+    const db = new Client({ connectionString: dbUrl });
+    await db.connect();
+    try {
+      await db.query(`
+        create schema if not exists inbox_reply_test;
+        drop trigger if exists zzzzzzzzzz_t23_capture on public.messages;
+        drop function if exists inbox_reply_test.capture_t23_messages();
+        drop table if exists inbox_reply_test.t23_message_capture;
+        create table inbox_reply_test.t23_message_capture(
+          message_id uuid not null,
+          metadata jsonb not null,
+          status text not null,
+          snapshot jsonb not null,
+          captured_at timestamptz not null default clock_timestamp()
+        );
+        create function inbox_reply_test.capture_t23_messages() returns trigger
+        language plpgsql security definer set search_path = '' as $$
+        begin
+          if new.channel <> 'sms' or new.direction <> 'outbound'
+             or new.status not in ('pending', 'sent') then
+            return new;
+          end if;
+          insert into inbox_reply_test.t23_message_capture(message_id, metadata, status, snapshot)
+          values (
+            new.id,
+            new.metadata,
+            new.status,
+            jsonb_build_object(
+              'dirty', coalesce((select jsonb_agg(to_jsonb(d) order by d.target_kind, d.target_id)
+                from inbox_message_capture.dirty d
+                where d.org_id = new.org_id and d.target_id = new.conversation_id), '[]'::jsonb),
+              'routeEdges', coalesce((select jsonb_agg(to_jsonb(e) order by e.message_id)
+                from inbox_message_capture.route_edges e
+                where e.org_id = new.org_id and e.message_id = new.id), '[]'::jsonb),
+              'versions', coalesce((select jsonb_agg(to_jsonb(v) order by v.namespace, v.target_id)
+                from inbox_message_capture.versions v
+                where v.org_id = new.org_id and v.target_id in (new.id, new.conversation_id)), '[]'::jsonb)
+            )
+          );
+          return new;
+        end;
+        $$;
+        create trigger zzzzzzzzzz_t23_capture after insert or update of status on public.messages
+        for each row execute function inbox_reply_test.capture_t23_messages();
+      `);
+      const sendResult = await sendSmsFromLead(
+        propertyId,
+        "  Hi, this is Mel with BMH — parity body  ",
+        businessPhone,
+        false,
+        null,
+      );
+      expect(sendResult.ok).toBe(true);
+      if (!sendResult.ok || sendResult.data.outcome.status !== "sent") return;
+      expect(getMockMessageLog()).toHaveLength(1);
+      const legacyCaptures = await db.query<{ message_id: string; metadata: Record<string, unknown>; status: string; snapshot: Record<string, unknown> }>(
+        `select message_id, metadata, status, snapshot
+         from inbox_reply_test.t23_message_capture
+         order by captured_at`,
+      );
+      const legacyPending = legacyCaptures.rows.find((row) => row.status === "pending");
+      const legacyAccepted = legacyCaptures.rows.filter((row) => row.status === "sent").at(-1);
+      expect(legacyPending).toBeDefined();
+      expect(legacyAccepted).toBeDefined();
+      expect(Object.keys(legacyPending?.metadata ?? {}).sort()).toEqual([
+        "providerAttempt",
+      ]);
+      const { data: sent } = await testClient
+        .from("messages")
+        .select("id, status, provider, body, contact_id, property_id, conversation_id, from_address, to_address, external_id, sent_at, metadata")
+        .eq("id", legacyAccepted!.message_id)
+        .single();
+      expect(sent).toMatchObject({
+        status: "sent",
+        provider: "mock",
+        body: "Hi, this is Mel with BMH — parity body",
+        contact_id: contactId,
+        property_id: propertyId,
+      });
+      expect(sent?.external_id).toMatch(/^mock_/);
+      expect(Object.keys((sent?.metadata ?? {}) as Record<string, unknown>).sort()).toEqual([
+        "providerStatus",
+        "raw",
+      ]);
+      if (!sent?.id || !sent.conversation_id || !sent.from_address || !sent.to_address) {
+        throw new Error("legacy parity row is missing trigger identity columns");
+      }
+      const replyAttemptId = randomUUID();
+      const replyOperationId = randomUUID();
+      const replyPreparationId = randomUUID();
+      const replyItemId = randomUUID();
+      const replyConversationId = randomUUID();
+      const replyDispatchToken = randomUUID();
+      const replyItem = {
+        id: replyItemId,
+        target: { kind: "conversation", id: replyConversationId },
+        recipient: {
+          contactId,
+          from: sent.from_address,
+          to: sent.to_address,
+          propertyId,
+          renderedBody: sent.body,
+        },
+        validUntil: "2999-01-01T00:00:00Z",
+        state: "MO",
+        dependencies: { head: 1 },
+      };
+      await db.query(
+        `insert into inbox_reply_review.preparations
+          (id, org_id, requester_id, request_key, input_hash, canonical_input, items, expires_at)
+         values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
+        [
+          replyPreparationId,
+          orgId,
+          contactId,
+          randomUUID(),
+          testInputHash,
+          "{}",
+          JSON.stringify([replyItem]),
+          "2999-01-01T00:00:00Z",
+        ],
+      );
+      await db.query(
+        `insert into inbox_reply_send.operations
+          (org_id, id, requester_id, preparation_id, idempotency_key)
+         values ($1, $2, $3, $4, $5)`,
+        [orgId, replyOperationId, contactId, replyPreparationId, randomUUID()],
+      );
+      await db.query(
+        `insert into inbox_reply_send.attempts
+          (org_id, id, operation_id, preparation_id, item_id, attempt_ordinal,
+           contact_id, from_e164, to_e164, body_hash, state)
+         values ($1, $2, $3, $4, $5, 1, $6, $7, $8,
+           inbox_reply_send.body_hash($9, $7, $8), 'approved')`,
+        [
+          orgId,
+          replyAttemptId,
+          replyOperationId,
+          replyPreparationId,
+          replyItemId,
+          contactId,
+          sent.from_address,
+          sent.to_address,
+          sent.body,
+        ],
+      );
+      await db.query(
+        `update inbox_reply_send.attempts
+         set state = 'claimed', generation = 1, lease_until = clock_timestamp() + interval '1 minute'
+         where org_id = $1 and id = $2`,
+        [orgId, replyAttemptId],
+      );
+      await db.query(
+        `update inbox_reply_send.attempts
+         set state = 'dispatch_started', dispatch_started_at = clock_timestamp(),
+             dispatch_token = $3, lease_until = null
+         where org_id = $1 and id = $2`,
+        [orgId, replyAttemptId, replyDispatchToken],
+      );
+      const { data: replyPending, error: replyPendingError } = await testClient
+        .from("messages")
+        .select("id, status, provider, body, contact_id, property_id, conversation_id, from_address, to_address, external_id, metadata")
+        .eq("idempotency_key", replyAttemptId)
+        .single();
+      if (replyPendingError || !replyPending) {
+        throw replyPendingError ?? new Error("reply projection did not create pending row");
+      }
+      expect(replyPending).toMatchObject({
+        status: "pending",
+        body: sent.body,
+        contact_id: sent.contact_id,
+        property_id: sent.property_id,
+        from_address: sent.from_address,
+        to_address: sent.to_address,
+      });
+      expect(Object.keys((replyPending.metadata ?? {}) as Record<string, unknown>).sort()).toEqual([
+        "inboxReply",
+      ]);
 
-    const accepted = await (await import("@/lib/messaging/send")).releaseQueuedMessage(testClient, pending.data.outcome.messageId);
-    expect(accepted.status).toBe("sent");
-    expect(getMockMessageLog()).toHaveLength(1);
-    const { data: sent } = await testClient
-      .from("messages")
-      .select("status, provider, body, contact_id, property_id, from_address, to_address, external_id, metadata")
-      .eq("id", pending.data.outcome.messageId)
-      .single();
-    expect(sent).toMatchObject({
-      status: "sent",
-      provider: "mock",
-      body: queued?.body,
-      contact_id: queued?.contact_id,
-      property_id: queued?.property_id,
-      from_address: queued?.from_address,
-      to_address: queued?.to_address,
-    });
-    expect(sent?.external_id).toMatch(/^mock_/);
+      const replyPendingCapture = await db.query<{ metadata: Record<string, unknown>; snapshot: Record<string, unknown> }>(
+        `select metadata, snapshot
+         from inbox_reply_test.t23_message_capture
+         where message_id = $1 and status = 'pending'
+         order by captured_at desc limit 1`,
+        [replyPending.id],
+      );
+      expect(replyPendingCapture.rows).toHaveLength(1);
+      expect(normalizeCaptureSnapshot(legacyPending!.snapshot as CaptureSnapshot)).toEqual(
+        normalizeCaptureSnapshot(replyPendingCapture.rows[0]!.snapshot as CaptureSnapshot),
+      );
+
+      await db.query(
+        `update inbox_reply_send.attempts
+         set state = 'provider_accepted', provider_reference = $3,
+             provider_status = 'sent', receipt_version = 1
+         where org_id = $1 and id = $2`,
+        [orgId, replyAttemptId, sent!.external_id],
+      );
+      const { data: replyAccepted, error: replyAcceptedError } = await testClient
+        .from("messages")
+        .select("id, status, provider, body, contact_id, property_id, conversation_id, from_address, to_address, external_id, sent_at, metadata")
+        .eq("idempotency_key", replyAttemptId)
+        .single();
+      if (replyAcceptedError || !replyAccepted) {
+        throw replyAcceptedError ?? new Error("reply projection acceptance failed");
+      }
+      expect(replyAccepted).toMatchObject({
+        status: "sent",
+        body: sent.body,
+        contact_id: sent.contact_id,
+        property_id: sent.property_id,
+        from_address: sent.from_address,
+        to_address: sent.to_address,
+        external_id: sent.external_id,
+      });
+      expect(Object.keys((replyAccepted.metadata ?? {}) as Record<string, unknown>).sort()).toEqual([
+        "inboxReply",
+        "providerStatus",
+      ]);
+
+      const replyAcceptedCapture = await db.query<{ snapshot: Record<string, unknown> }>(
+        `select snapshot
+         from inbox_reply_test.t23_message_capture
+         where message_id = $1 and status = 'sent'
+         order by captured_at desc limit 1`,
+        [replyAccepted.id],
+      );
+      expect(replyAcceptedCapture.rows).toHaveLength(1);
+      const legacyAcceptedEffects = legacyAccepted!.snapshot as CaptureSnapshot;
+      const replyAcceptedEffects = replyAcceptedCapture.rows[0]!.snapshot as CaptureSnapshot;
+      expect(normalizeCaptureSnapshot(legacyAcceptedEffects)).toEqual(
+        normalizeCaptureSnapshot(replyAcceptedEffects),
+      );
+    } finally {
+      await db.query(`
+        drop trigger if exists zzzzzzzzzz_t23_capture on public.messages;
+        drop function if exists inbox_reply_test.capture_t23_messages();
+        drop table if exists inbox_reply_test.t23_message_capture;
+      `);
+      await db.end();
+    }
   });
 
   it("updates status for a valid transition", async () => {

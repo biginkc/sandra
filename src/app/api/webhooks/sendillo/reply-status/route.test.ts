@@ -73,6 +73,17 @@ describe("POST /api/webhooks/sendillo/reply-status", () => {
     expect(rpcMock).toHaveBeenCalledWith("inbox_reply_reconcile_callback", expect.objectContaining({ in_terminal: "delivery_failed", in_external_id: "ext-fail-1" }));
   });
 
+  it("T25 forwards an unresolved delivered callback through the reply-status route", async () => {
+    rpcMock.mockResolvedValue({ data: { kind: "stored_unmatched" }, error: null });
+    const payload = buildSyntheticReplyCallback("uncertain-route-25", "delivered");
+    const response = await POST(req(JSON.stringify(payload)));
+    expect(response.status).toBe(200);
+    expect(rpcMock).toHaveBeenCalledWith("inbox_reply_reconcile_callback", expect.objectContaining({
+      in_external_id: "uncertain-route-25",
+      in_terminal: "delivered",
+    }));
+  });
+
   it("is a clean no-op (never calls reconcile) for an unrecognized event name", async () => {
     const response = await POST(req(JSON.stringify({ event: "message.sent", data: { messageId: "ext-2" } })));
     expect(response.status).toBe(200);

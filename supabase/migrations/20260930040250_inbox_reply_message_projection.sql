@@ -81,8 +81,8 @@ BEGIN
  SET status=projected_status,
      external_id=projected_external_id,
      sent_at=CASE WHEN projected_sent_at IS NULL THEN NULL ELSE coalesce(m.sent_at,projected_sent_at) END,
-     delivered_at=projected_delivered_at,
-     failed_at=projected_failed_at,
+     delivered_at=coalesce(m.delivered_at,projected_delivered_at),
+     failed_at=coalesce(m.failed_at,projected_failed_at),
      error_message=projected_error,
      metadata=projected_metadata
  WHERE m.org_id=o

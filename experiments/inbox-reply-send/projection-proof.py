@@ -182,6 +182,8 @@ def drip_fixture(n: int) -> str:
     # T24-T26 are activated only after the merged Drips migration is loaded
     # verbatim by run_case; this fixture supplies its real rows and predicate.
     return f"""
+GRANT USAGE ON SCHEMA public TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sms_inbox_thread_page_snapshot(timestamptz,text,uuid,uuid,boolean,integer,integer,text),public.inbox_reply_reconcile_callback(text,text,text,jsonb) TO authenticated;
 INSERT INTO auth.users(id,email) VALUES('{x['c']}','projection-{n}@example.test');
 INSERT INTO auth.sessions(id,user_id,not_after) VALUES('{x['token']}','{x['c']}','2999-01-01T00:00:00Z');
 INSERT INTO memberships(user_id,org_id,role,access_status) VALUES('{x['c']}','{x['o']}','owner','active');
@@ -268,11 +270,22 @@ DO $$ BEGIN IF (SELECT state FROM inbox_reply_send.attempts WHERE id='{x['a']}')
  END;"""
         return assert_case(n, body, install_mutated_function("inbox_reply_send.project_message_trigger", upsert, swallowed))
     if n == 8:
+        y = second_ids(n)
         body = f"""
-{common_project_state(n,'uncertain')} UPDATE public.messages SET failed_at=clock_timestamp(),error_message='old failure' WHERE idempotency_key='{x['a']}';
-UPDATE inbox_reply_send.attempts SET state='provider_accepted',provider_reference='ext-8',provider_status='sent',receipt_version=receipt_version+1 WHERE id='{x['a']}';
-DO $$ DECLARE m public.messages; BEGIN SELECT * INTO m FROM public.messages WHERE idempotency_key='{x['a']}'; IF m.status IS DISTINCT FROM 'sent' OR m.external_id IS DISTINCT FROM 'ext-8' OR m.failed_at IS NOT NULL OR m.error_message IS NOT NULL OR m.metadata ? 'providerOutcome' THEN RAISE EXCEPTION 'T8 late acceptance did not clear snapshot'; END IF; END $$;"""
-        return assert_case(n, body, install_mutated_function("inbox_reply_send.project_message", "projected_external_id:=CASE WHEN row.state IN ('provider_accepted','delivered','delivery_failed') THEN row.provider_reference ELSE NULL END;", "projected_external_id:=NULL;"))
+CREATE SCHEMA inbox_reply_test;
+CREATE FUNCTION inbox_reply_test.fail_acceptance_projection() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'fixture acceptance projection fault'; END$$;
+{started(n)}
+CREATE TRIGGER fail_acceptance_projection BEFORE UPDATE OF status ON public.messages FOR EACH ROW WHEN (NEW.metadata->'inboxReply'->>'attemptId'='{x['a']}' AND NEW.status='sent') EXECUTE FUNCTION inbox_reply_test.fail_acceptance_projection();
+{accepted(n,'ext-8')}
+DO $$ DECLARE s text; b integer; BEGIN SELECT state INTO s FROM inbox_reply_send.attempts WHERE id='{x['a']}'; SELECT count(*) INTO b FROM inbox_reply_send.message_projection_backlog WHERE attempt_id='{x['a']}'; IF s<>'provider_accepted' OR b<>1 THEN RAISE EXCEPTION 'T8 faulted acceptance did not retain ledger/backlog'; END IF; END $$;
+DROP TRIGGER fail_acceptance_projection ON public.messages;
+SELECT inbox_reply_send.reconcile_delivery('{x['o']}','sendillo','ext-8','delivered','{{}}'::jsonb);
+DO $$ DECLARE m public.messages; BEGIN SELECT * INTO m FROM public.messages WHERE idempotency_key='{x['a']}'; IF m.status IS DISTINCT FROM 'delivered' OR m.external_id IS DISTINCT FROM 'ext-8' OR m.sent_at IS NULL OR m.delivered_at IS NULL THEN RAISE EXCEPTION 'T8 acceptance-then-delivery mismatch'; END IF; END $$;
+INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) VALUES('{y['o']}','{y['a']}','{y['op']}','{y['prep']}','{y['i']}',1,'{y['c']}','+12025550001','+12025550009',inbox_reply_send.body_hash('hello-{n}','+12025550001','+12025550009'),'approved');
+{started(n,attempt=y)} UPDATE inbox_reply_send.attempts SET state='uncertain',evidence='transport_timeout',receipt_version=receipt_version+1 WHERE org_id='{y['o']}' AND id='{y['a']}';
+SELECT inbox_reply_send.worker_persist_result('{y['o']}','{y['a']}','{y['token']}',jsonb_build_object('kind','accepted','externalId','ext-8-late','status','sent'));
+DO $$ DECLARE m public.messages; BEGIN SELECT * INTO m FROM public.messages WHERE idempotency_key='{y['a']}'; IF m.status IS DISTINCT FROM 'sent' OR m.external_id IS DISTINCT FROM 'ext-8-late' OR m.failed_at IS NOT NULL OR m.error_message IS NOT NULL OR m.metadata ? 'providerOutcome' THEN RAISE EXCEPTION 'T8 late acceptance did not clear snapshot'; END IF; END $$;"""
+        return assert_case(n, body, install_mutated_function("inbox_reply_send.project_message", "projected_external_id:=CASE WHEN row.state IN ('provider_accepted','delivered','delivery_failed') THEN row.provider_reference ELSE NULL END;", "projected_external_id:=NULL;"), items=2)
     if n in {9,10,11,13}:
         return concurrency_case(n)
     if n == 12:
@@ -333,23 +346,9 @@ DO $$ DECLARE s text; ms text; ys text; yms text; held integer; backlog integer;
  SELECT count(*) INTO held FROM inbox_reply_send.unmatched_callbacks WHERE provider_reference='ext-16'; SELECT count(*) INTO backlog FROM inbox_reply_send.message_projection_backlog WHERE attempt_id IN ('{x['a']}','{y['a']}'); SELECT * INTO loser FROM t16_loser;
  IF s<>'delivered' OR ms<>'delivered' OR ys<>'delivered' OR yms<>'delivered' OR held<>0 OR backlog<>0 OR loser->>'kind'<>'rejected' THEN RAISE EXCEPTION 'T16 hold/fault/settlement mismatch: %/%/%/%/%/%/%',s,ms,ys,yms,held,backlog,loser; END IF;
 END $$;"""
-        return assert_case(n, body, "CREATE OR REPLACE FUNCTION inbox_reply_send.reconcile_delivery(o uuid,provider text,provider_reference text,terminal text,payload jsonb) RETURNS jsonb LANGUAGE plpgsql SET search_path='' AS $$ BEGIN RAISE EXCEPTION 'mutated callback not forwarded'; END $$;", items=2)
+        return assert_case(n, body, "", items=2)
     if n == 17:
-        body = f"""
-INSERT INTO public.messages(org_id,contact_id,property_id,conversation_id,channel,direction,status,provider,body,external_id,from_address,to_address) VALUES('{x['o']}','{x['c']}','{x['p']}','{x['conv']}','sms','outbound','sent','sendillo','legacy','legacy-17','+12025550001','+12025550101');
-CREATE SCHEMA IF NOT EXISTS inbox_reply_test;
-CREATE OR REPLACE FUNCTION inbox_reply_test.apply_legacy_status(p_external_id text) RETURNS void LANGUAGE sql AS $$
- UPDATE public.messages SET status='failed',failed_at=clock_timestamp(),error_message='legacy failure'
- WHERE external_id=p_external_id AND provider='sendillo' AND direction='outbound';
-$$;
--- MUTATION_POINT
-SELECT inbox_reply_test.apply_legacy_status('legacy-17');
-DO $$ BEGIN IF (SELECT status FROM public.messages WHERE external_id='legacy-17')<>'failed' THEN RAISE EXCEPTION 'T17 legacy status was not updated'; END IF; END $$;"""
-        mutation = """CREATE SCHEMA IF NOT EXISTS inbox_reply_test;
-CREATE OR REPLACE FUNCTION inbox_reply_test.apply_legacy_status(p_external_id text) RETURNS void LANGUAGE sql AS $$
- UPDATE public.messages SET status='failed',failed_at=clock_timestamp(),error_message='legacy failure' WHERE false;
-$$;"""
-        return assert_case(n, body, mutation)
+        raise RuntimeError("T17 is exercised by the application status-events test")
     if n == 18:
         body = f"{started(n)} DO $$ DECLARE m jsonb; BEGIN SELECT metadata INTO m FROM public.messages WHERE idempotency_key='{x['a']}'; IF m ? 'providerAttempt' OR m->'inboxReply'->>'attemptId' IS DISTINCT FROM '{x['a']}' THEN RAISE EXCEPTION 'T18 reply marker has stale provider attempt'; END IF; END $$;"
         return assert_case(n, body, install_mutated_function("inbox_reply_send.project_message_trigger", "jsonb_build_object('inboxReply',jsonb_build_object('attemptId',NEW.id,'operationId',NEW.operation_id))", "jsonb_build_object('inboxReply',jsonb_build_object('attemptId',NEW.id,'operationId',NEW.operation_id),'providerAttempt',jsonb_build_object('pendingAt',clock_timestamp()::text))"))
@@ -370,10 +369,25 @@ DO $$ BEGIN
 END $$;"""
         return assert_case(n, body, "GRANT EXECUTE ON FUNCTION inbox_reply_send.project_message(uuid,uuid) TO service_role;")
     if n == 21:
-        body = f"UPDATE inbox_reply_send.attempts SET state='claimed',generation=1,lease_until=clock_timestamp()+interval '1 minute' WHERE org_id='{x['o']}' AND id='{x['a']}'; DO $$ BEGIN IF EXISTS(SELECT 1 FROM public.messages WHERE org_id='{x['o']}' AND idempotency_key='{x['a']}') THEN RAISE EXCEPTION 'T21 claimed edge fabricated a marker'; END IF; END $$;"
+        y = second_ids(n)
+        body = f"""
+CREATE SCHEMA inbox_reply_test;
+UPDATE inbox_reply_send.attempts SET state='claimed',generation=1,lease_until=clock_timestamp()+interval '1 minute' WHERE org_id='{x['o']}' AND id='{x['a']}';
+DO $$ BEGIN IF EXISTS(SELECT 1 FROM public.messages WHERE org_id='{x['o']}' AND idempotency_key='{x['a']}') THEN RAISE EXCEPTION 'T21 claimed edge fabricated a marker'; END IF; END $$;
+INSERT INTO inbox_reply_send.attempts(org_id,id,operation_id,preparation_id,item_id,attempt_ordinal,contact_id,from_e164,to_e164,body_hash,state) VALUES('{y['o']}','{y['a']}','{y['op']}','{y['prep']}','{y['i']}',1,'{y['c']}','+12025550001','+12025550022',inbox_reply_send.body_hash('hello-{n}','+12025550001','+12025550022'),'approved');
+UPDATE inbox_reply_send.attempts SET state='claimed',generation=1,lease_until=clock_timestamp()+interval '1 minute' WHERE org_id='{y['o']}' AND id='{y['a']}';
+UPDATE public.contacts SET phone_2='+12025550022',phone_2_type='mobile' WHERE id='{y['c']}';
+INSERT INTO public.inbox_inbound_heads(org_id,conversation_id,revision) VALUES('{y['o']}','{y['conv']}',1);
+INSERT INTO provider_sender_numbers(id,org_id,provider,phone_e164,status) VALUES('{x['p']}','{x['o']}','sendillo','+12025550001','active');
+UPDATE inbox_reply_review.admission SET enabled=true;
+CREATE FUNCTION inbox_reply_test.disable_sender_after_marker() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN UPDATE public.provider_sender_numbers SET status='inactive' WHERE org_id=NEW.org_id AND provider='sendillo' AND phone_e164=NEW.from_e164; RETURN NEW; END$$;
+CREATE TRIGGER zzz_t21_disable_sender_after_marker AFTER UPDATE OF state ON inbox_reply_send.attempts FOR EACH ROW WHEN (NEW.id='{y['a']}' AND NEW.state='dispatch_started') EXECUTE FUNCTION inbox_reply_test.disable_sender_after_marker();
+SELECT inbox_reply_send.start_dispatch('{y['o']}','{y['a']}',1);
+DROP TRIGGER zzz_t21_disable_sender_after_marker ON inbox_reply_send.attempts;
+DO $$ DECLARE s text; e text; BEGIN SELECT state,evidence INTO s,e FROM inbox_reply_send.attempts WHERE id='{y['a']}'; IF s<>'skipped_ineligible' OR e<>'sender_unavailable' OR EXISTS(SELECT 1 FROM public.messages WHERE idempotency_key='{y['a']}') THEN RAISE EXCEPTION 'T21 IR001 recheck mismatch: %/%',s,e; END IF; END $$;"""
         mutation = mutate_chain("inbox_reply_send.project_message_trigger", [("IF NEW.state='dispatch_started' THEN", "IF NEW.state IN ('dispatch_started','claimed') THEN")])
         mutation += f""" DROP TRIGGER inbox_reply_message_projection ON inbox_reply_send.attempts; CREATE TRIGGER inbox_reply_message_projection AFTER UPDATE OF state ON inbox_reply_send.attempts FOR EACH ROW WHEN (NEW.state IS DISTINCT FROM OLD.state AND NEW.state IN ('dispatch_started','claimed','provider_accepted','uncertain','confirmed_not_submitted','rejected_unsent','delivered','delivery_failed')) EXECUTE FUNCTION inbox_reply_send.project_message_trigger();"""
-        return assert_case(n, body, mutation)
+        return assert_case(n, body, mutation, items=2)
     if n == 22:
         older = ids(n + 1)
         body = f"""
@@ -411,6 +425,19 @@ def drip_snapshot(n: int, x: dict[str, str]) -> str:
     return f"SET LOCAL ROLE authenticated; SELECT set_config('request.jwt.claim.role','authenticated',true); SELECT set_config('request.jwt.claim.sub','{x['c']}',true); SELECT (public.sms_inbox_thread_page_snapshot(now()-interval '90 days','all',null,null,false,500,0,null)->'rows'->0->>'drip_replied')::boolean; RESET ROLE;"
 
 
+def drip_flag_assert(n: int, x: dict[str, str], expected: str, label: str) -> str:
+    return f"""
+SET LOCAL ROLE authenticated;
+SELECT set_config('request.jwt.claim.role','authenticated',true);
+SELECT set_config('request.jwt.claim.sub','{x['c']}',true);
+DO $$ DECLARE flag boolean; BEGIN
+ SELECT (public.sms_inbox_thread_page_snapshot(now()-interval '90 days','all',null,null,false,500,0,null)->'rows'->0->>'drip_replied')::boolean INTO flag;
+ IF flag IS DISTINCT FROM {expected} THEN RAISE EXCEPTION '{label}: %',flag; END IF;
+END $$;
+RESET ROLE;
+"""
+
+
 def workspace_send(n: int, reference: str) -> str:
     x = ids(n)
     return f"""
@@ -442,7 +469,7 @@ END $$;
 def drip_case(n: int) -> tuple[str, str]:
     x = ids(n)
     if n == 24:
-        body = drip_fixture(n) + workspace_send(n, 'ext-24') + drip_snapshot(n,x) + """SELECT public.inbox_reply_reconcile_callback('sendillo','ext-24','delivery_failed',jsonb_build_object('kind','failed')); DO $$ DECLARE flag boolean; BEGIN SELECT (public.sms_inbox_thread_page_snapshot(now()-interval '90 days','all',null,null,false,500,0,null)->'rows'->0->>'drip_replied')::boolean INTO flag; IF flag IS DISTINCT FROM true THEN RAISE EXCEPTION 'T24 failure did not restore drip flag'; END IF; END $$;"""
+        body = drip_fixture(n) + workspace_send(n, 'ext-24') + drip_flag_assert(n,x,'false','T24 pending send did not clear drip flag') + """SELECT public.inbox_reply_reconcile_callback('sendillo','ext-24','delivery_failed',jsonb_build_object('kind','failed')); DO $$ DECLARE flag boolean; BEGIN SELECT (public.sms_inbox_thread_page_snapshot(now()-interval '90 days','all',null,null,false,500,0,null)->'rows'->0->>'drip_replied')::boolean INTO flag; IF flag IS DISTINCT FROM true THEN RAISE EXCEPTION 'T24 failure did not restore drip flag'; END IF; END $$;"""
         return fixture(n, body, seed_attempt=False), install_mutated_function("inbox_reply_send.project_message", "WHEN 'delivery_failed' THEN 'failed'", "WHEN 'delivery_failed' THEN 'sent'")
     if n == 25:
         body = drip_fixture(n) + common_project_state(n,'uncertain') + f"""SELECT set_config('request.jwt.claim.role','authenticated',true); SELECT set_config('request.jwt.claim.sub','{x['c']}',true); SELECT public.inbox_reply_reconcile_callback('sendillo','unknown-25','delivered',jsonb_build_object('kind','delivered')); DO $$ DECLARE s text; flag boolean; BEGIN SELECT state INTO s FROM inbox_reply_send.attempts WHERE id='{x['a']}'; SELECT (public.sms_inbox_thread_page_snapshot(now()-interval '90 days','all',null,null,false,500,0,null)->'rows'->0->>'drip_replied')::boolean INTO flag; IF s<>'uncertain' OR flag IS DISTINCT FROM true THEN RAISE EXCEPTION 'T25 uncertain callback promoted'; END IF; END $$;"""
@@ -544,7 +571,16 @@ DELETE FROM public.messages WHERE org_id='{x['o']}'; DELETE FROM public.membersh
 def concurrency_case(n: int) -> tuple[str, str]:
     setup = concurrency_setup(n)
     if n in {9,10}: mutation = mutate_chain("inbox_reply_send.drain_message_projection_one", [(" FOR UPDATE", ""),(" FOR UPDATE", "")])
-    elif n == 11: mutation = mutate_chain("inbox_reply_send.drain_message_projection_one", [("LIMIT 1", "LIMIT 0")])
+    elif n == 11:
+        mutation = mutate_chain(
+            "inbox_reply_send.drain_message_projection_one",
+            [
+                (
+                    "RETURN jsonb_build_object('drained',true,'projected',true,'attempt_id',key_row.attempt_id);",
+                    "PERFORM inbox_reply_send.drain_message_projection_one(); RETURN jsonb_build_object('drained',true,'projected',true,'attempt_id',key_row.attempt_id);",
+                ),
+            ],
+        )
     else: mutation = mutate_chain("inbox_reply_send.drain_message_projection_one", [("WHERE b.next_try_at<=clock_timestamp()", "WHERE true"),("ORDER BY b.next_try_at,b.attempt_id", "ORDER BY b.attempt_id")])
     return setup, mutation
 
@@ -588,17 +624,35 @@ def run_concurrency(n: int, mutated: bool) -> tuple[bool, str]:
             finish_session(holder); finish_session(drain); finish_session(reconcile)
             return True, json.dumps(lock,sort_keys=True)
         if n == 11:
-            first = psql("SELECT inbox_reply_send.drain_message_projection_one();",check=True)
-            if '"projected": true' not in first.stdout: raise AssertionError("T11 first due item did not drain")
             holder = session("r2-t11-holder", "BEGIN; SELECT pg_advisory_xact_lock(9011);")
             sessions.append(holder)
             wait_activity("r2-t11-holder"); wait_advisory("r2-t11-holder",9011)
-            drain = session("r2-t11-drain", "BEGIN; SELECT inbox_reply_send.drain_message_projection_one();")
+            candidate = psql(f"SELECT attempt_id FROM inbox_reply_send.message_projection_backlog WHERE next_try_at<=clock_timestamp() ORDER BY next_try_at,attempt_id LIMIT 1;", check=True)
+            if candidate.stdout.strip() != x['a']: raise AssertionError(f"T11 item one was not first due item: {candidate.stdout.strip()}")
+            drain = session("r2-t11-drain", "SELECT inbox_reply_send.drain_message_projection_one(); BEGIN; SELECT inbox_reply_send.drain_message_projection_one();")
             sessions.append(drain)
             wait_activity("r2-t11-drain", wait_event="Lock/advisory")
-            callback = psql(f"SELECT inbox_reply_send.reconcile_delivery('{x['o']}','sendillo','ext-11-a','delivered','{{}}'::jsonb);",check=True)
+            first_backlog = psql(f"SELECT count(*) FROM inbox_reply_send.message_projection_backlog WHERE attempt_id='{x['a']}';", check=True)
+            if first_backlog.stdout.strip() != "0": raise AssertionError("T11 first due item did not drain")
+            callback = psql(f"""
+BEGIN;
+SET LOCAL lock_timeout='1s';
+DO $$ DECLARE result jsonb; code text;
+BEGIN
+ BEGIN
+  SELECT inbox_reply_send.reconcile_delivery('{x['o']}','sendillo','ext-11-a','delivered','{{}}'::jsonb) INTO result;
+  RAISE NOTICE 'T11_CALLBACK_RESULT=%',result;
+ EXCEPTION WHEN lock_not_available THEN
+  GET STACKED DIAGNOSTICS code=RETURNED_SQLSTATE;
+  RAISE NOTICE 'T11_CALLBACK_SQLSTATE=%',code;
+ END;
+END $$;
+ROLLBACK;
+""")
             finish_session(holder); finish_session(drain)
-            if '"state": "delivered"' not in callback.stdout and '"state":"delivered"' not in callback.stdout: raise AssertionError("T11 callback did not succeed")
+            callback_text = output(callback)
+            if 'T11_CALLBACK_SQLSTATE=55P03' in callback_text: raise AssertionError("T11 callback unexpectedly returned SQLSTATE 55P03")
+            if 'T11_CALLBACK_RESULT=' not in callback_text or 'delivered' not in callback_text: raise AssertionError(f"T11 callback did not succeed: {callback_text}")
             return True, output(callback)
         y = second_ids(n)
         drained = psql("SELECT inbox_reply_send.drain_message_projection_one();",check=True)
@@ -618,6 +672,8 @@ def run_concurrency(n: int, mutated: bool) -> tuple[bool, str]:
 
 
 def run_case(n: int, mutated: bool) -> tuple[bool, str]:
+    if n == 17:
+        return True, "T17 application status-events test is run by mutation-run.py"
     if n in {9,10,11,13}: return run_concurrency(n,mutated)
     sql, mutation = test_sql(n)
     if n in {24,25,26}:

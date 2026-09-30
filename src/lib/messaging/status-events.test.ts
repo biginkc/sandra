@@ -156,20 +156,35 @@ describe("applyMessageStatusEvent", () => {
     expect(updates).toEqual([]);
   });
 
-  it("T17 forwards an unmatched terminal event and preserves message-not-found handling", async () => {
-    const rpc = vi.fn(async () => ({ data: { kind: "stored_unmatched" }, error: null }));
+  it("T16 forwards an unmatched delivered event before the reply row exists", async () => {
+    const rpc = vi.fn(async () => ({ data: { kind: "reconciled", result: { state: "delivered" } }, error: null }));
     vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
     const { supabase } = makeSupabase({ messages: [], updatedRows: [] });
 
     await expect(applyMessageStatusEvent(supabase, "sendillo", {
-      kind: "failed", externalId: "legacy-ext-1", timestamp: new Date("2026-06-24T15:01:00.000Z"), errorMessage: "carrier failure",
-    })).resolves.toBe("unknown");
+      kind: "delivered", externalId: "reply-not-found-16", timestamp: new Date("2026-06-24T15:01:00.000Z"),
+    })).resolves.toBe("updated");
     expect(rpc).toHaveBeenCalledWith("inbox_reply_reconcile_callback", {
       in_provider: "sendillo",
-      in_external_id: "legacy-ext-1",
-      in_terminal: "delivery_failed",
-      in_payload: { kind: "failed", timestamp: "2026-06-24T15:01:00.000Z", errorMessage: "carrier failure" },
+      in_external_id: "reply-not-found-16",
+      in_terminal: "delivered",
+      in_payload: { kind: "delivered", timestamp: "2026-06-24T15:01:00.000Z" },
     });
+  });
+
+  it("T25 sends an unresolved delivered callback through the status route", async () => {
+    const rpc = vi.fn(async () => ({ data: { kind: "stored_unmatched" }, error: null }));
+    vi.mocked(createAdminClient).mockReturnValue({ rpc } as unknown as SupabaseClient<Database>);
+    const { supabase, updates } = makeSupabase({ messages: [], updatedRows: [] });
+
+    await expect(applyMessageStatusEvent(supabase, "sendillo", {
+      kind: "delivered", externalId: "uncertain-route-25", timestamp: new Date("2026-06-24T15:05:00.000Z"),
+    })).resolves.toBe("unknown");
+    expect(rpc).toHaveBeenCalledWith("inbox_reply_reconcile_callback", expect.objectContaining({
+      in_external_id: "uncertain-route-25",
+      in_terminal: "delivered",
+    }));
+    expect(updates).toEqual([]);
   });
 
   it("T17 updates a matched non-Inbox legacy row through the provider status path", async () => {
